@@ -166,7 +166,8 @@ not read is absent from the list rather than refused.
 - **A public share link** is a per-map bearer token with an expiry, revocable, handed over once
   and stored only as a hash. A shared map draws the current readings rather than history, and
   **only what the account that made the link can see** — as it stands now, so a link shrinks when
-  its maker loses a grant and goes blank when the maker's account is disabled or deleted.
+  its maker loses a grant, and stops opening at all, as a revoked link does, when the maker's
+  account is disabled or deleted.
 - **Five-star maps surface in the Home menu.** Priority is set on the map itself.
 - **Geographical maps need a tile source, and this installation may not have one.** With none
   configured the widgets are drawn over the background image instead — the designer says so where

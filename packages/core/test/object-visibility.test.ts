@@ -20,6 +20,9 @@ import { HistoryService } from '../src/timeseries/history.js';
 import { DiscoveryService } from '../src/discovery/service.js';
 import { RediscoveryService } from '../src/discovery/rediscovery.js';
 import { DeviceTemplateCatalogue } from '../src/device-templates/catalogue.js';
+import { BUILT_IN_DEVICE_TEMPLATES } from '../src/device-templates/built-in.js';
+import { LookupCatalogue } from '../src/lookups/catalogue.js';
+import { BUILT_IN_LOOKUPS } from '../src/lookups/built-in.js';
 import { ProbeRegistry } from '../src/probes/registry.js';
 import { ProbeQueryService } from '../src/probes/queries.js';
 import { ProbeConfigService } from '../src/probes/config.js';
@@ -30,6 +33,7 @@ import { MapService } from '../src/maps/service.js';
 import { MapResolver } from '../src/maps/resolver.js';
 import { LibraryRepository } from '../src/libraries/repository.js';
 import { LibraryService } from '../src/libraries/service.js';
+import { MetricsExporter } from '../src/metrics/exporter.js';
 import { StateBroadcaster, type SnapshotRead } from '../src/state/stream.js';
 import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
 import type { Database } from '../src/db/pool.js';
@@ -40,6 +44,7 @@ import {
 } from './support/database.js';
 import { actorNamed, buildHarness, silent, testActor, type Harness } from './support/tree.js';
 import { testCatalogue } from './support/sensor-types.js';
+import { connectedLink, fixedCoreHealth, probeHealthOver } from './support/health.js';
 
 /**
  * `A-12`'s exit criterion, as a sweep: **an account granted one branch, with `none` everywhere
@@ -55,6 +60,12 @@ import { testCatalogue } from './support/sensor-types.js';
  * body, since `A-23`. No answer may contain the marker. The stream is swept the same way, over a
  * real WebSocket.
  *
+ * **Not a sweep of refusals, and not a sweep of empty rooms** (`A-31`). Every `GET` route must
+ * answer the branch account at least once or be named in `NEVER_ANSWERS_THE_BRANCH`, and an
+ * administrator swept the same way must be shown the marker on every route that answered the
+ * branch, or the route is named in `NO_MARKER_TO_REACH`. A route whose answer is a count or an id
+ * carries no marker to find, so its bar is asserted by status in a test of its own.
+ *
  * **Outside means the containers above the branch too.** The root and the probe the branch hangs
  * under carry the marker, because their names are exactly what a breadcrumb, an alarm's path or
  * a scrape would hand over if the rule stopped at siblings.
@@ -63,8 +74,9 @@ import { testCatalogue } from './support/sensor-types.js';
  * the hole one level down, a device whose only child is carved out, a trigger defined on the
  * hidden probe and inherited by a visible sensor, a pause inherited from a hidden device, a
  * dependency on a hidden master, a template used by a hidden trigger, a rediscovery schedule and
- * a discovery run in a hidden group, a map naming both sides. Each is a way a hidden object's name
- * has reached a visible one somewhere in this codebase.
+ * a discovery run in a hidden group, a host that run found, a second hidden probe, a map naming
+ * both sides. Each is a way a hidden object's name has reached a visible one somewhere in this
+ * codebase.
  *
  * Reports are the one module not registered, and it is stated rather than forgotten: a report
  * renders through its `runAs` account by design (`administration.md`), so what it shows is that
@@ -87,7 +99,11 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
   let stream: StateBroadcaster;
 
   let teamId = 0;
+  /** A group that reads the root with a hole over `probeId`, when a test grants it that. */
+  let rootReadersId = 0;
   let probeId = 0;
+  /** Beside `probeId`, so a scrape through a hole over one probe has another to show. */
+  let secondProbeId = 0;
   let branchId = 0;
   let deviceId = 0;
   let pingId = 0;
@@ -107,13 +123,12 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
   let libraryId = 0;
   let shareToken = 'none';
   let hiddenLibraryId = 0;
+  let hiddenMapId = 0;
+  let sweptScheduleId = 0;
   let visibleRunId = 0;
   let hiddenRunId = 0;
 
   const cookies = new Map<string, string>();
-
-  /** The visible objects, by name, so an answer can be checked for what it *should* contain. */
-  const VISIBLE = ['Customer A', 'a-web01', 'a-ping', 'a-held', 'a-regranted', 'a-lonely'];
 
   before(async () => {
     scratch = await createScratchDatabase('visibility');
@@ -132,6 +147,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       dispatch: () => ({ kind: 'sent' }),
     });
     const triggers = new TriggerService({ db, audit: new DatabaseAuditSink(), logger: silent });
+    const schedules = new ScheduleService({ db, audit: new DatabaseAuditSink(), logger: silent });
     const rediscovery = new RediscoveryService({
       db,
       audit: new DatabaseAuditSink(),
@@ -164,6 +180,14 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       audit: new DatabaseAuditSink(),
       logger: silent,
     });
+    const coreHealth = fixedCoreHealth(db);
+    const probeHealth = probeHealthOver(db, connectedLink);
+    const metrics = new MetricsExporter({
+      db,
+      logger: silent,
+      coreHealth: () => coreHealth,
+      probeHealth: () => probeHealth,
+    });
 
     server = new ApiServer({
       config: {
@@ -184,7 +208,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       // a route this sweep never calls — the lesson `R07` wrote into the access matrix.
       triggers,
       templates,
-      schedules: new ScheduleService({ db, audit: new DatabaseAuditSink(), logger: silent }),
+      schedules,
       discovery,
       rediscovery,
       provision: () =>
@@ -197,7 +221,18 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
           problems: [],
           devices: [],
         }),
-      deviceTemplates: new DeviceTemplateCatalogue(() => true),
+      // The built-in ones, so `/device-templates/:templateId` and `/lookups/:id` have one to
+      // answer with.
+      deviceTemplates: (() => {
+        const catalogue = new DeviceTemplateCatalogue(() => true);
+        for (const template of BUILT_IN_DEVICE_TEMPLATES) catalogue.register(template, 'built-in');
+        return catalogue.seal();
+      })(),
+      lookups: (() => {
+        const catalogue = new LookupCatalogue();
+        for (const lookup of BUILT_IN_LOOKUPS) catalogue.register(lookup, 'built-in', true);
+        return catalogue.seal();
+      })(),
       probeRegistry: new ProbeRegistry({
         db,
         audit: new DatabaseAuditSink(),
@@ -224,11 +259,12 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       libraries,
       stream,
       deliveryHealth: new DeliveryHealthReader(),
-      // Registered so the routes exist and are swept; an absent service answers 503, which is
-      // after the bar and so still proves the bar.
-      coreHealth: () => undefined,
-      probeHealth: () => undefined,
-      metrics: () => undefined,
+      // **Answering, not 503** (`A-31`). Each was `() => undefined`, which answered 503 whoever
+      // asked, so a route that lost its bar answered exactly what a guarded one did. Their bodies
+      // are numbers and ids, which carry no marker, so the refusals are asserted by status.
+      coreHealth: () => coreHealth,
+      probeHealth: () => probeHealth,
+      metrics: () => metrics,
       auth: {
         accounts,
         sessions: new SessionService({ db, logger: silent }),
@@ -249,6 +285,11 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       (await harness.service.create(testActor, input as never)).id;
 
     probeId = await create({ kind: 'probe', parentId: harness.rootId, name: `${MARK}-probe` });
+    secondProbeId = await create({
+      kind: 'probe',
+      parentId: harness.rootId,
+      name: `${MARK}-second-probe`,
+    });
     branchId = await create({ kind: 'group', parentId: probeId, name: 'Customer A' });
     deviceId = await create({
       kind: 'device',
@@ -357,6 +398,47 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
     hiddenRunId = (
       await discovery.start({ groupId: otherGroupId, probeId, range: '10.9.0.0/30' }, testActor)
     ).id;
+    // A host each run found, identified, a problem provisioning it, and a message on the run —
+    // so each route about a run has something to say, and the hidden run's says the marker,
+    // which no answer to the branch account may carry (`A-31`). A kind the reader knows: an
+    // unknown one reads back as no fingerprint at all, and then nothing is named.
+    const found = (address: string, name: string, vendor: string) =>
+      JSON.stringify({
+        address,
+        reverseName: name,
+        sysName: name,
+        vendor,
+        ports: [],
+        kind: 'linux',
+        confidence: 80,
+        evidence: [`answered as ${name}`],
+      });
+    await db.query(
+      `INSERT INTO discovery_host (run_id, address, fingerprint)
+       VALUES ($1, '10.0.0.2', $2::jsonb), ($3, '10.9.0.2', $4::jsonb)`,
+      [
+        visibleRunId,
+        found('10.0.0.2', 'a-found-host', 'a-found-vendor'),
+        hiddenRunId,
+        found('10.9.0.2', MARK, `${MARK}-vendor`),
+      ],
+    );
+    await db.query(
+      `INSERT INTO discovery_problem (run_id, address, problem)
+       VALUES ($1, '10.0.0.2', 'a-found-problem'), ($2, '10.9.0.2', $3)`,
+      [visibleRunId, hiddenRunId, `${MARK}-problem`],
+    );
+    await db.query(
+      `UPDATE discovery_run SET message = CASE WHEN id = $1 THEN 'a-found-run' ELSE $3 END
+       WHERE id IN ($1, $2)`,
+      [visibleRunId, hiddenRunId, `${MARK}-run`],
+    );
+    sweptScheduleId = (
+      await schedules.create(testActor, {
+        name: 'a-swept schedule',
+        grid: Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => true)),
+      })
+    ).id;
     hiddenRuleId = (
       await rediscovery.create(
         {
@@ -372,6 +454,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
 
     // ── the account, and exactly one branch granted to it ────────────────────────────────────
     teamId = (await groups.create({ name: 'Customer A team' }, testActor)).id;
+    rootReadersId = (await groups.create({ name: 'Root readers' }, testActor)).id;
     for (const [login, role] of [
       ['branch', 'readonly'],
       // The same grants as `branch`, for the tests after the sweep: the limit is per account,
@@ -379,6 +462,11 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       ['watcher', 'readonly'],
       ['operator', 'readwrite'],
       ['admin', 'admin'],
+      // An administrator of its own for the control sweep, which spends a window as `branch`'s
+      // does (`A-31`).
+      ['overseer', 'admin'],
+      // In `Root readers`, which holds nothing until a test grants it the root.
+      ['rooted', 'readonly'],
     ] as const) {
       const account = await accounts.create(
         { login, password: 'correct-horse-battery', role },
@@ -389,7 +477,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         assert.ok(admins);
         await groups.addMember(admins.id, account.id, testActor);
       } else {
-        await groups.addMember(teamId, account.id, testActor);
+        await groups.addMember(login === 'rooted' ? rootReadersId : teamId, account.id, testActor);
       }
       const response = await app.inject({
         method: 'POST',
@@ -466,6 +554,14 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         name: `${MARK}-library`,
         nodes: [{ id: 'theirs', name: `${MARK}-node`, rule: rule([otherGroupId]), children: [] }],
       })
+    ).id;
+    // And a map of an administrator's the team was never granted (`A-14`), marked the same way.
+    hiddenMapId = (
+      await maps.create(
+        { userId: admin.id, role: 'admin' },
+        { name: `${MARK}-map` },
+        actorNamed('admin'),
+      )
     ).id;
   });
 
@@ -588,11 +684,12 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       // A run in the hidden group too: that one has to be refused, and a refusal carries no name.
       if (path.startsWith('/discovery/:id')) return [String(visibleRunId), String(hiddenRunId)];
       if (path.startsWith('/templates/')) return [String(templateId)];
-      if (path.startsWith('/maps/')) return [String(mapId)];
+      // The team's map and an administrator's it was not given, which answers as an unused id.
+      if (path.startsWith('/maps/')) return [String(mapId), String(hiddenMapId)];
       // A library the team was given and one it was not; the second answers 404, and nothing else.
       if (path.startsWith('/libraries/')) return [String(libraryId), String(hiddenLibraryId)];
-      if (path.startsWith('/schedules/')) return ['1'];
-      if (path.startsWith('/lookups/')) return ['ms.sensor.state'];
+      if (path.startsWith('/schedules/')) return [String(sweptScheduleId)];
+      if (path.startsWith('/lookups/')) return ['ms.probe.link'];
       if (path.startsWith('/probes/')) return [String(probeId)];
       return [branchId, deviceId, pingId, heldId, regrantedId, lonelyDeviceId].map(String);
     }
@@ -703,52 +800,94 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         'GET /api/v1/discovery/schedules',
         'GET /api/v1/probes',
         'GET /metrics',
+        // Each is its own option to `ApiServer`, so leaving one out loses its routes without a
+        // sound (`A-31`).
+        'GET /api/v1/objects/:id/triggers',
+        'GET /api/v1/schedules/:id',
+        'GET /api/v1/device-templates',
+        'GET /api/v1/discovery/:id/plan',
+        'GET /api/v1/core-health',
+        'GET /api/v1/probes/:id/health',
+        'GET /api/v1/notification-health',
       ].filter((route) => !swept.has(route));
       assert.deepEqual(missing, [], 'these routes are not being swept — is a module unwired?');
     });
 
-    it('never names an object outside the branch, on any GET route', async () => {
+    /** What one account was answered, across every `GET` route and every URL `urlsFor` builds. */
+    interface Swept {
+      /** Route → every body it answered 200 with, joined. */
+      readonly bodies: ReadonlyMap<string, string>;
+      /** Route → the first answer carrying the marker, with what surrounds it. */
+      readonly marked: ReadonlyMap<string, string>;
+      readonly throttled: readonly string[];
+      readonly calls: number;
+    }
+
+    async function sweepAs(login: string): Promise<Swept> {
       const openapi = app.swagger() as unknown as OpenApi;
-      const leaked: string[] = [];
+      const bodies = new Map<string, string>();
+      const marked = new Map<string, string>();
       const throttled: string[] = [];
-      const answered = new Set<string>();
-      let bodies = '';
       let calls = 0;
       for (const route of server.routes) {
         if (route.method !== 'GET' || route.url.endsWith('/stream')) continue;
         for (const url of urlsFor(route.url, openapi)) {
-          const response = await app.inject({ method: 'GET', url, headers: as('branch') });
+          const response = await app.inject({ method: 'GET', url, headers: as(login) });
           calls += 1;
           if (response.statusCode === 429) throttled.push(url);
           if (response.statusCode === 200) {
-            answered.add(route.url);
-            bodies += response.body;
+            bodies.set(route.url, (bodies.get(route.url) ?? '') + response.body);
           }
           const at = response.body.indexOf(MARK);
           // One per route, with what surrounds the marker: which field carried it is the
           // diagnosis, and forty variants of one URL are not forty findings.
-          if (at >= 0 && !leaked.some((one) => one.startsWith(`${route.url} `))) {
-            leaked.push(
-              `${route.url} (${url}): ${response.body.slice(Math.max(0, at - 120), at + 40)}`,
-            );
+          if (at >= 0 && !marked.has(route.url)) {
+            marked.set(route.url, `${url}: ${response.body.slice(Math.max(0, at - 120), at + 40)}`);
           }
         }
       }
-
-      assert.deepEqual(leaked, [], 'these answers told a branch account about objects outside it');
-      // A throttled request answered nothing, so it proved nothing: the sweep has to fit inside
+      // A throttled request answered nothing, so it proved nothing: a sweep has to fit inside
       // the per-account limit (`hardening.ts`), or it is quietly skipping its own tail.
       assert.deepEqual(
         throttled.slice(0, 5),
         [],
-        `${String(throttled.length)} of ${String(calls)} throttled`,
+        `${login}: ${String(throttled.length)} of ${String(calls)} throttled`,
       );
-      // **Not a sweep of refusals.** The routes that list must have answered, and between them
-      // named every object the account can see — otherwise a build that refused everything, or
-      // filtered everything away, would pass.
-      assert.ok(answered.size > 25, `only ${String(answered.size)} GET routes answered 200`);
-      for (const name of VISIBLE) assert.ok(bodies.includes(name), `nothing ever named ${name}`);
-      assert.ok(bodies.includes('Customer A library'), 'the team’s own library was never listed');
+      return { bodies, marked, throttled, calls };
+    }
+
+    /** Filled by the branch sweep, for the administrator's control below to be judged against. */
+    let branchSwept: Swept | undefined;
+
+    it('never names an object outside the branch, on any GET route', async () => {
+      const swept = await sweepAs('branch');
+      branchSwept = swept;
+      assert.deepEqual(
+        [...swept.marked.entries()].map(([route, at]) => `${route} (${at})`),
+        [],
+        'these answers told a branch account about objects outside it',
+      );
+
+      // **Not a sweep of refusals** (`A-31`). Every `GET` route answers this account at least
+      // once, or is named with the reason it cannot: a floor of "more than 25" passed with
+      // forty routes refusing everything, and would have passed with forty-five.
+      const silent = server.routes
+        .filter((route) => route.method === 'GET' && !route.url.endsWith('/stream'))
+        .map((route) => route.url)
+        .filter((url) => !swept.bodies.has(url))
+        .sort();
+      assert.deepEqual(
+        silent,
+        NEVER_ANSWERS_THE_BRANCH,
+        'a route stopped answering the branch account, or a new one never does; name it in ' +
+          'NEVER_ANSWERS_THE_BRANCH with the reason',
+      );
+
+      // And the routes that list, each naming what the account can see — not every body pooled,
+      // where one route's answer would stand in for another's refusal.
+      for (const [name, route] of NAMED_BY) {
+        assert.ok((swept.bodies.get(route) ?? '').includes(name), `${route} never named ${name}`);
+      }
     });
 
     /**
@@ -763,7 +902,10 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
     function computesBodies(route: string): Record<string, unknown>[] | undefined {
       switch (route) {
         case 'POST /api/v1/device-templates/plan':
-          return [{ fingerprint: {} }];
+          // A fingerprint as a run records one: with templates loaded, an empty one is a 500.
+          return [
+            { fingerprint: { address: '10.0.0.2', kind: 'linux', ports: [], confidence: 80 } },
+          ];
         case 'POST /api/v1/discovery/preview':
           return [{ range: '10.0.0.0/30' }];
         case 'POST /api/v1/objects/:id/as-template':
@@ -929,55 +1071,111 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       assert.ok(saved.body.includes(String(otherSensorId)), 'the stored tile was dropped');
     });
 
+    const runtimeOf = async (sensorId: number) =>
+      (
+        await db.query<{ state: string; simulated: boolean }>(
+          `SELECT state::text AS state, simulated_error AS simulated
+           FROM sensor_runtime WHERE object_id = $1`,
+          [sensorId],
+        )
+      )[0];
+
     it('acknowledges and forces only what the caller can see beneath it (A-24)', async () => {
       // The operator holds `write` on the device, and a sensor beneath it is carved `none`. An
       // acknowledgement or a simulated error on the device used to reach that sensor too: a
       // write into a branch the operator was never shown, and an answer about what is in it.
-      const runtimeOf = async (sensorId: number) =>
-        (
-          await db.query<{ state: string; simulated: boolean }>(
-            `SELECT state::text AS state, simulated_error AS simulated
-             FROM sensor_runtime WHERE object_id = $1`,
-            [sensorId],
-          )
-        )[0];
       assert.equal((await runtimeOf(carvedSensorId))?.state, 'down', 'the fixture’s hole is Down');
       assert.equal((await runtimeOf(pingId))?.state, 'down');
 
-      const device = `/api/v1/objects/${String(deviceId)}`;
-      const acknowledged = await app.inject({
+      // **An administrator's acknowledgement and drill on the hole first** (`A-31`). With nothing
+      // set on it, a clear or a release that walked into the hole changed nothing there, and the
+      // halves below could not fail: now either would undo the administrator's, and name the
+      // sensor in its answer.
+      const hole = `/api/v1/objects/${String(carvedSensorId)}`;
+      const drill = await app.inject({
         method: 'POST',
-        url: `${device}/acknowledge`,
-        headers: as('operator'),
-        payload: { message: 'on it' },
+        url: `${hole}/simulate-error`,
+        headers: as('admin'),
+        payload: { message: 'the administrator’s drill' },
       });
-      assert.equal(acknowledged.statusCode, 200, acknowledged.body);
-      const view = acknowledged.json<{ acknowledged: number[]; refused: number[] }>();
-      assert.deepEqual(view.acknowledged, [pingId]);
-      assert.deepEqual(view.refused, []);
-      assert.equal((await runtimeOf(carvedSensorId))?.state, 'down', 'the hole was acknowledged');
-      const cleared = await app.inject({
-        method: 'DELETE',
-        url: `${device}/acknowledge`,
-        headers: as('operator'),
+      assert.equal(drill.statusCode, 200, drill.body);
+      const theirs = await app.inject({
+        method: 'POST',
+        url: `${hole}/acknowledge`,
+        headers: as('admin'),
+        payload: { message: 'the administrator’s' },
       });
-      assert.equal(cleared.statusCode, 200, cleared.body);
+      assert.equal(theirs.statusCode, 200, theirs.body);
+      const holeAsTheAdministratorLeftIt = async (): Promise<void> => {
+        const runtime = await runtimeOf(carvedSensorId);
+        assert.deepEqual(runtime, { state: 'down_acknowledged', simulated: true });
+      };
+      await holeAsTheAdministratorLeftIt();
 
-      const forced = await app.inject({
-        method: 'POST',
-        url: `${device}/simulate-error`,
-        headers: as('operator'),
-        payload: { message: 'drill' },
-      });
-      assert.equal(forced.statusCode, 200, forced.body);
-      assert.ok(!forced.json<{ sensors: number[] }>().sensors.includes(carvedSensorId));
-      assert.equal((await runtimeOf(carvedSensorId))?.simulated, false, 'the hole was forced');
-      const unforced = await app.inject({
-        method: 'DELETE',
-        url: `${device}/simulate-error`,
-        headers: as('operator'),
-      });
-      assert.equal(unforced.statusCode, 200, unforced.body);
+      try {
+        const device = `/api/v1/objects/${String(deviceId)}`;
+        const acknowledged = await app.inject({
+          method: 'POST',
+          url: `${device}/acknowledge`,
+          headers: as('operator'),
+          payload: { message: 'on it' },
+        });
+        assert.equal(acknowledged.statusCode, 200, acknowledged.body);
+        const view = acknowledged.json<{
+          acknowledged: number[];
+          refused: number[];
+          skipped: number[];
+        }>();
+        assert.deepEqual(view.acknowledged, [pingId]);
+        assert.deepEqual(view.refused, []);
+        // What it left for want of a right names only what the operator can see (`A-31`).
+        assert.deepEqual(view.skipped, [], 'the hole was reported as skipped');
+        const cleared = await app.inject({
+          method: 'DELETE',
+          url: `${device}/acknowledge`,
+          headers: as('operator'),
+        });
+        assert.equal(cleared.statusCode, 200, cleared.body);
+        const clearedView = cleared.json<{ acknowledged: number[]; skipped: number[] }>();
+        assert.deepEqual(clearedView.acknowledged, [pingId]);
+        assert.deepEqual(clearedView.skipped, [], 'the hole was reported as skipped');
+        await holeAsTheAdministratorLeftIt();
+
+        const forced = await app.inject({
+          method: 'POST',
+          url: `${device}/simulate-error`,
+          headers: as('operator'),
+          payload: { message: 'drill' },
+        });
+        assert.equal(forced.statusCode, 200, forced.body);
+        const drilled = forced.json<{ sensors: number[]; skipped: number[] }>();
+        assert.ok(!drilled.sensors.includes(carvedSensorId));
+        assert.deepEqual(drilled.skipped, [], 'the hole was reported as skipped');
+        const unforced = await app.inject({
+          method: 'DELETE',
+          url: `${device}/simulate-error`,
+          headers: as('operator'),
+        });
+        assert.equal(unforced.statusCode, 200, unforced.body);
+        const releasedView = unforced.json<{ sensors: number[]; skipped: number[] }>();
+        const released = releasedView.sensors;
+        assert.ok(released.includes(pingId), 'the release reached nothing it was meant to');
+        assert.ok(!released.includes(carvedSensorId), 'the release named the hidden sensor');
+        assert.deepEqual(releasedView.skipped, [], 'the hole was reported as skipped');
+        await holeAsTheAdministratorLeftIt();
+      } finally {
+        for (const undo of ['acknowledge', 'simulate-error']) {
+          const response = await app.inject({
+            method: 'DELETE',
+            url: `${hole}/${undo}`,
+            headers: as('admin'),
+          });
+          assert.equal(response.statusCode, 200, response.body);
+        }
+        // Down on its own account again, as the fixture had it for the tests after this one.
+        await scan([carvedSensorId], false);
+      }
+      assert.deepEqual(await runtimeOf(carvedSensorId), { state: 'down', simulated: false });
 
       // **The refusal is not an oracle either.** A device whose only Down sensor is hidden reads
       // exactly as one with nothing Down — the operator is given `write` on it for this, so that
@@ -997,27 +1195,95 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       assert.equal((await runtimeOf(lonelySensorId))?.state, 'down');
     });
 
-    it('shows an administrator everything, so the markers are reachable', async () => {
-      // The control: the same routes, as somebody who may see it all, do name the hidden objects.
-      // Without this the sweep above would pass on a fixture whose markers nothing returns.
-      for (const url of [
-        '/api/v1/objects?limit=500',
-        '/api/v1/alarms',
-        '/api/v1/state-log',
-        '/api/v1/notification-requests',
-        `/api/v1/objects/${String(pingId)}/ancestors`,
-        `/api/v1/objects/${String(pingId)}/triggers`,
-        `/api/v1/objects/${String(heldId)}/pause`,
-        `/api/v1/objects/${String(regrantedId)}/pause`,
-        `/api/v1/templates/${String(templateId)}/preview?sensorId=${String(pingId)}`,
-        `/api/v1/templates/${String(templateId)}/used-by`,
-        `/api/v1/maps/${String(mapId)}/view`,
-        '/api/v1/libraries',
-      ]) {
-        const response = await app.inject({ method: 'GET', url, headers: as('admin') });
-        assert.equal(response.statusCode, 200, url);
-        assert.ok(response.body.includes(MARK), `${url} named nothing hidden even to an admin`);
+    it('does nothing through a device that naming the sensor would refuse (A-31)', async () => {
+      // `write` on the device and only `read` on a-ping beneath it. An acknowledgement or a
+      // drill is written onto each sensor it reaches, so `A-35`'s rule holds: through the device
+      // it may not do to a-ping what naming a-ping would not, and it says what it left.
+      await access.grant(pingId, teamId, 'read', actorNamed('visibility'));
+      const device = `/api/v1/objects/${String(deviceId)}`;
+      const post = (url: string, payload: object) =>
+        app.inject({ method: 'POST', url, headers: as('operator'), payload });
+      const remove = (url: string) =>
+        app.inject({ method: 'DELETE', url, headers: as('operator') });
+      type Acted = { acknowledged: number[]; skipped: number[] };
+      type Forced = { sensors: number[]; skipped: number[] };
+
+      try {
+        const byName = await post(`/api/v1/objects/${String(pingId)}/acknowledge`, {});
+        assert.equal(byName.statusCode, 403, 'the control: naming a-ping is refused');
+
+        // a-ping is the only sensor Down here that the operator can see, so nothing is left.
+        const acknowledged = await post(`${device}/acknowledge`, { message: 'on it' });
+        assert.equal(acknowledged.statusCode, 403, acknowledged.body);
+        assert.equal(
+          acknowledged.json<{ error: { message: string } }>().error.message,
+          'this account may not acknowledge any sensor here',
+        );
+        assert.deepEqual(await runtimeOf(pingId), { state: 'down', simulated: false });
+
+        // A drill forces a-held, which the operator may write, and leaves a-ping.
+        const forced = await post(`${device}/simulate-error`, { message: 'drill' });
+        assert.equal(forced.statusCode, 200, forced.body);
+        assert.deepEqual(
+          { sensors: forced.json<Forced>().sensors, skipped: forced.json<Forced>().skipped },
+          { sensors: [heldId], skipped: [pingId] },
+        );
+        assert.deepEqual(await runtimeOf(pingId), { state: 'down', simulated: false });
+        const released = await remove(`${device}/simulate-error`);
+        assert.equal(released.statusCode, 200, released.body);
+        assert.deepEqual(
+          { sensors: released.json<Forced>().sensors, skipped: released.json<Forced>().skipped },
+          { sensors: [heldId], skipped: [pingId] },
+        );
+
+        // With the account's opt-in, `read` is enough to acknowledge (`M-13`): by name, and so
+        // through the device. The opt-in is for acknowledging, and a drill still leaves a-ping.
+        await db.query(`UPDATE user_account SET may_acknowledge = true WHERE login = 'operator'`);
+        const opted = await post(`${device}/acknowledge`, { message: 'on it' });
+        assert.equal(opted.statusCode, 200, opted.body);
+        assert.deepEqual(
+          { acknowledged: opted.json<Acted>().acknowledged, skipped: opted.json<Acted>().skipped },
+          { acknowledged: [pingId], skipped: [] },
+        );
+        assert.equal((await runtimeOf(pingId))?.state, 'down_acknowledged');
+        const cleared = await remove(`${device}/acknowledge`);
+        assert.equal(cleared.statusCode, 200, cleared.body);
+        assert.deepEqual(cleared.json<Acted>().acknowledged, [pingId]);
+        assert.equal((await runtimeOf(pingId))?.state, 'down');
+
+        const drilled = await post(`${device}/simulate-error`, { message: 'drill' });
+        assert.equal(drilled.statusCode, 200, drilled.body);
+        assert.deepEqual(drilled.json<Forced>().skipped, [pingId]);
+        assert.equal((await remove(`${device}/simulate-error`)).statusCode, 200);
+      } finally {
+        // Left as the fixture had it, whichever assertion failed: a drill left standing on a-ping
+        // would change what every later test is streamed.
+        await db.query(`UPDATE user_account SET may_acknowledge = false WHERE login = 'operator'`);
+        for (const undo of ['acknowledge', 'simulate-error']) {
+          await app.inject({ method: 'DELETE', url: `${device}/${undo}`, headers: as('admin') });
+        }
       }
+      assert.deepEqual(await runtimeOf(pingId), { state: 'down', simulated: false });
+    });
+
+    it('shows an administrator the marker on every route that answered the branch', async () => {
+      // **The control, route by route** (`A-31`). A route that answered the branch account
+      // without the marker proves something only if the marker was there to leave out. Twelve
+      // hand-picked URLs said so for twelve routes; this is the same sweep, as an administrator
+      // who sees everything, and every route the branch was answered by has to show the marker
+      // to them or be named with the reason it cannot.
+      assert.ok(branchSwept !== undefined, 'the branch sweep runs first');
+      const swept = await sweepAs('overseer');
+      const unreached = [...branchSwept.bodies.keys()]
+        .filter((route) => !swept.marked.has(route))
+        .sort();
+      assert.deepEqual(
+        unreached,
+        NO_MARKER_TO_REACH,
+        'the marker is not reachable on these routes even for an administrator, so the branch ' +
+          'sweep proves nothing there; plant something they can name, or say why in ' +
+          'NO_MARKER_TO_REACH',
+      );
 
       // The hold really happened, and what it wrote in the dependent's history is the master's id.
       const held = await app.inject({
@@ -1257,7 +1523,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         headers: as('watcher'),
       });
       const page = response.json<{
-        items: { sensorId: number; pathNames: string[] }[];
+        items: { sensorId: number; path: number[]; pathNames: string[] }[];
         total: number;
         counts: Record<string, number>;
       }>();
@@ -1267,12 +1533,15 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       );
       assert.equal(page.total, 2);
       assert.equal(page.counts['down'], 2);
-      // The path starts at the branch: the probe and the root above it are outside.
+      // The path starts at the branch: the probe and the root above it are outside. The ids as
+      // well as the names, since an id is how a client would find the container it may not see.
       const ping = page.items.find((item) => item.sensorId === pingId);
       assert.deepEqual(ping?.pathNames, ['Customer A', 'a-web01', 'a-ping']);
+      assert.deepEqual(ping.path, [branchId, deviceId, pingId]);
       // A hole in the middle of a path: the re-granted sensor's device is hidden, and skipped.
       const regranted = page.items.find((item) => item.sensorId === regrantedId);
       assert.deepEqual(regranted?.pathNames, ['Customer A', 'a-regranted']);
+      assert.deepEqual(regranted.path, [branchId, regrantedId]);
     });
 
     it('counts a schedule’s users among what the editor can see (A-25)', async () => {
@@ -1308,6 +1577,29 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         };
         assert.equal(await usedBy('operator'), 1, 'a-ping, and not the sensor in the other branch');
         assert.equal(await usedBy('admin'), 2, 'the control: both are there to be counted');
+
+        // And read, one schedule and the list, which the sweep calls and cannot judge: a count
+        // carries no marker (`A-31`).
+        const read = async (login: string): Promise<number[]> => {
+          const one = await app.inject({
+            method: 'GET',
+            url: `/api/v1/schedules/${String(scheduleId)}`,
+            headers: as(login),
+          });
+          assert.equal(one.statusCode, 200, one.body);
+          const all = await app.inject({
+            method: 'GET',
+            url: '/api/v1/schedules',
+            headers: as(login),
+          });
+          assert.equal(all.statusCode, 200, all.body);
+          const listed = all
+            .json<{ items: { id: number; usedBy: number }[] }>()
+            .items.find((item) => item.id === scheduleId);
+          return [one.json<{ usedBy: number }>().usedBy, listed?.usedBy ?? -1];
+        };
+        assert.deepEqual(await read('watcher'), [1, 1]);
+        assert.deepEqual(await read('admin'), [2, 2]);
       } finally {
         await db.query(
           `DELETE FROM object_setting WHERE key = 'schedule.id' AND object_id = ANY($1::bigint[])`,
@@ -1389,6 +1681,21 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       assert.notEqual(run[0]?.status, 'cancelled', 'and the run was not stopped');
     });
 
+    it('answers a library the team was not given as an id nobody used (A-31)', async () => {
+      // `A-12` said so, and only the marker's absence was ever asserted.
+      const answers = [];
+      for (const id of [hiddenLibraryId, 999_999]) {
+        const response = await app.inject({
+          method: 'GET',
+          url: `/api/v1/libraries/${String(id)}`,
+          headers: as('watcher'),
+        });
+        answers.push(answerFor(response, id));
+      }
+      assert.equal(answers[0], answers[1]);
+      assert.match(answers[0] ?? '', /^404 /);
+    });
+
     it('refuses a scope naming an object outside the branch', async () => {
       for (const url of [
         `/api/v1/alarms?objectId=${String(probeId)}`,
@@ -1413,6 +1720,43 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         payload: { mode: 'object', masterId: otherSensorId },
       });
       assert.equal(depend.statusCode, 403, depend.body);
+    });
+
+    it('serves the installation’s own health to nobody who cannot read the root (A-31)', async () => {
+      // Numbers and ids, so no marker to find: the refusal is the assertion, and an
+      // administrator's answer is what shows the route would have said something.
+      for (const url of [
+        '/api/v1/core-health',
+        '/api/v1/notification-health',
+        '/api/v1/probes',
+        `/api/v1/probes/${String(probeId)}/health`,
+        '/metrics',
+      ]) {
+        const refused = await app.inject({ method: 'GET', url, headers: as('watcher') });
+        assert.equal(refused.statusCode, 403, `${url}: ${refused.body}`);
+        const control = await app.inject({ method: 'GET', url, headers: as('admin') });
+        assert.equal(control.statusCode, 200, `${url}, as an administrator: ${control.body}`);
+      }
+    });
+
+    it('scrapes without the probes a root reader was carved out of (A-31)', async () => {
+      // `#withoutHiddenProbes` ran in no test: it needs an account that clears the root bar and
+      // still has a probe hidden from it.
+      await access.grant(harness.rootId, rootReadersId, 'read', actorNamed('visibility'));
+      await access.grant(probeId, rootReadersId, 'none', actorNamed('visibility'));
+      const series = (body: string, probe: number): number =>
+        body.split('\n').filter((line) => line.includes(`probe="${String(probe)}"`)).length;
+
+      const all = await app.inject({ method: 'GET', url: '/metrics', headers: as('admin') });
+      assert.equal(all.statusCode, 200, all.body);
+      assert.ok(series(all.body, probeId) > 0, 'the control: the scrape has the hidden probe');
+      assert.ok(series(all.body, secondProbeId) > 0);
+
+      const rooted = await app.inject({ method: 'GET', url: '/metrics', headers: as('rooted') });
+      assert.equal(rooted.statusCode, 200, rooted.body);
+      assert.equal(series(rooted.body, probeId), 0, 'a series of the hidden probe was scraped');
+      assert.equal(series(rooted.body, secondProbeId), series(all.body, secondProbeId));
+      assert.ok(!rooted.body.includes(`${MARK}-probe"`), 'the hidden probe was named');
     });
 
     it('refuses a sensor naming what its writer cannot read, as it refuses one naming nothing (A-29)', async () => {
@@ -2241,6 +2585,112 @@ const UNSWEPT_QUERY_PARAMETERS: readonly string[] = [
   'actorRef',
   'templateId',
   'userId',
+].sort();
+
+/**
+ * Each object the branch account can see, and a listing route that must name it (`A-31`).
+ *
+ * Checked route by route, not across every body at once: pooled, one route's answer stood in for
+ * another's refusal.
+ */
+const NAMED_BY: readonly (readonly [name: string, route: string])[] = [
+  ['Customer A', '/api/v1/objects/tops'],
+  ['a-web01', '/api/v1/objects'],
+  ['a-ping', '/api/v1/objects'],
+  ['a-held', '/api/v1/objects'],
+  ['a-regranted', '/api/v1/objects'],
+  ['a-lonely', '/api/v1/objects'],
+  ['a-found-run', '/api/v1/discovery/:id'],
+  ['a-found-host', '/api/v1/discovery/:id/hosts'],
+  ['a-found-problem', '/api/v1/discovery/:id/problems'],
+  ['a-found-vendor', '/api/v1/discovery/:id/summary'],
+  ['Customer A library', '/api/v1/libraries'],
+  ['Customer A wall', '/api/v1/maps'],
+];
+
+/**
+ * The `GET` routes that answer the branch account nothing but refusals, and why (`A-31`).
+ *
+ * Every other route must answer it at least once, so a route that starts refusing everything is
+ * noticed. It replaces a floor of "more than 25 routes answered", which held with forty refusing.
+ */
+const NEVER_ANSWERS_THE_BRANCH: readonly string[] = [
+  // An administrator's: every account, group, object grant and probe, and the audit log.
+  '/api/v1/accounts',
+  '/api/v1/accounts/:id/groups',
+  '/api/v1/audit',
+  '/api/v1/groups',
+  '/api/v1/groups/:id/members',
+  '/api/v1/objects/:id/access',
+  '/api/v1/probes',
+  // Who else may see a map or a library, and a map's links: `full` on it, and a read-only
+  // account's role caps it below that.
+  '/api/v1/libraries/:id/access',
+  '/api/v1/maps/:id/access',
+  '/api/v1/maps/:id/shares',
+  // The installation's own numbers, behind read on the root, which a branch account does not
+  // hold. Asserted to refuse it, and to answer an administrator, by the health test below.
+  '/api/v1/core-health',
+  '/api/v1/notification-health',
+  '/api/v1/objects/root',
+  '/metrics',
+  // Read on the probe, which is above the branch.
+  '/api/v1/probes/:id/health',
+  // The fixture's map has no background, for anybody. `maps-api.test.ts` covers both routes.
+  '/api/v1/maps/:id/background',
+  '/api/v1/public/maps/:token/background',
+].sort();
+
+/**
+ * The routes that answered the branch account, where not even an administrator's answer carries
+ * the marker, and why (`A-31`). On these the branch sweep's silence proves nothing, so each is
+ * covered, where it is covered, by a test of its own.
+ */
+const NO_MARKER_TO_REACH: readonly string[] = [
+  // A catalogue, or the caller's own session: nothing in them is an object in the tree.
+  '/api/v1/auth/me',
+  '/api/v1/auth/mfa',
+  '/api/v1/auth/session',
+  '/api/v1/auth/tokens',
+  '/api/v1/build',
+  '/api/v1/credential-kinds',
+  '/api/v1/device-templates',
+  '/api/v1/device-templates/:templateId',
+  '/api/v1/lookups',
+  '/api/v1/lookups/:id',
+  '/api/v1/notification-methods',
+  '/api/v1/notification-placeholders',
+  '/api/v1/openapi.json',
+  '/api/v1/sensor-types',
+  '/api/v1/setting-definitions',
+  '/api/v1/summarisation-modes',
+  '/api/v1/templates',
+  '/api/v1/templates/:id',
+  '/api/v1/trigger-kinds',
+  // Counts, which carry no marker. Each is asserted by number: the object counts in `absent,
+  // not counted`, and a schedule's users in the `A-25` test.
+  '/api/v1/objects/counts',
+  '/api/v1/objects/:id/counts',
+  '/api/v1/schedules',
+  '/api/v1/schedules/:id',
+  // About the object asked and nothing beneath it, and the sweep asks about visible objects
+  // only. A hidden id is refused by each route's own `onObject`, which the access matrix
+  // sweeps route by route.
+  '/api/v1/objects/:id/access/effective',
+  '/api/v1/objects/:id/audit',
+  '/api/v1/objects/:id/channels',
+  '/api/v1/objects/:id/credentials',
+  '/api/v1/objects/:id/discovery',
+  '/api/v1/objects/:id/settings',
+  '/api/v1/sensors/:id/history',
+  '/api/v1/sensors/:id/state',
+  '/api/v1/sensors/:id/values',
+  // A host's address and the ids of the templates it matched, never a name. The hidden run's
+  // plan is answered as an unused id by the `A-37` test.
+  '/api/v1/discovery/:id/plan',
+  // Answered as the link's maker, whoever asks, so an administrator is shown the operator's
+  // view. The share tests assert what that view leaves out.
+  '/api/v1/public/maps/:token',
 ].sort();
 
 /** As much of an OpenAPI document as the sweep reads: each path's declared query parameters. */

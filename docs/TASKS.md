@@ -11812,6 +11812,23 @@ because each is a decision rather than a defect:
       password is generated state, not a test value; the rendered vitests are what cover the
       page.
 
+- [ ] **D-12 — A fingerprint the plan route never checked reaches the matcher** · S · D-03 ·
+      Found 2026-09-29 during `A-31`. `POST /device-templates/plan` answers 500 to
+      `{"fingerprint": {}}` on any installation with templates loaded. Its body schema is an object
+      with any properties, and the route hands that straight to `templates.plan()`, whose
+      `matchScore` reads `fingerprint.ports.map(...)` on nothing. It is a `COMPUTES` route, so any
+      account that can read can do it. `object-visibility`'s sweep had always sent that body, but
+      its template catalogue was empty, so nothing was ever matched.
+      **Fix:** run the body through `readFingerprint`, so that a stored fingerprint and a submitted
+      one have one definition, and answer 400 naming the field when it returns null.
+      **Done when:**
+      - the plan route answers `{}` with that 400, and a test drives it;
+      - every other route whose body or parameter schema is `additionalProperties: true`, or an
+        object with no properties, and whose value reaches code that expects a structure, is
+        listed in the outcome with a verdict: validated further in, harmless, or fixed here, each
+        fixed one with a test that sends `{}` and expects 400, not 500. More than a couple of real
+        ones go back to WatchDog to split.
+
 ## Phase 8 — Remote probes
 
 - [x] **R-01 — Probe identity and approval** · L · F-09 · GID generation, access keys,
@@ -12939,6 +12956,18 @@ because each is a decision rather than a defect:
       preview names; the dependency message; exempt routes left out of `server.routes`; and the
       `asChildOf`, `masterId` and alarm-scope guards — each killed by a named A-12 test.
 
+      *Corrected by `A-31`.* Four claims here were larger than the suite behind them:
+      - The refused scopes were nine, not seven.
+      - A hidden library was never asserted to be 404 by id, only to leave no marker.
+      - Of "what the sweep turned up", the schedule usage counts, discovery runs by group and
+        `/metrics` probe lines were fixed, but the sweep could not have detected any of them: a
+        count and a probe line carry no marker, and the runs had no hosts.
+      - The 27 mutations were all killed, but the list leaves out guards the suite could not
+        fail: the run routes, `/probes`, a probe's health, the root bar on the health routes,
+        `/metrics`' probe filter, schedule usage and the alarm path's ids.
+
+      `A-31` gave each of these a test that fails without it, and `A-37` covered the run routes.
+
 - [x] **A-13 — Any account can make a report render through anybody's eyes** · S · E-03 · Found
       2026-09-27 while scoping `V2-04`, by reading the code; not yet reproduced over HTTP, so the
       first commit is the failing test. `POST /reports` accepts `runAs` in its body, and
@@ -13749,7 +13778,7 @@ because each is a decision rather than a defect:
       named, a superseded snapshot sent, a failure detaching the replacement, a held change sent
       before the snapshot, and each of the three bounds removed.
 
-- [ ] **A-31 — `A-12`'s sweep passes routes it cannot fail, and its findings say they are
+- [x] **A-31 — `A-12`'s sweep passes routes it cannot fail, and its findings say they are
       covered** · M · A-12, A-23, A-26 · Filed 2026-09-28 by WatchDog from `A-12`'s triage: 20 of
       27 unverified items survived. The 1.0 claim "absent, not counted" rests on
       `object-visibility.test.ts`, and these are the places where it does not hold:
@@ -13798,6 +13827,93 @@ because each is a decision rather than a defect:
       **Done when** each item is fixed or decided, every new assertion is shown to fail against
       the mutant it names, and the findings and `A-12`'s outcome claim no more than the suite
       proves.
+
+      **A-31 outcome.**
+      - **T2.** The runs' hosts never named anything. Their fingerprint had `kind: 'server'`,
+        which `readFingerprint` does not accept, so both hosts read back as unidentified. Each run
+        now has a host identified as Linux with a vendor, a provisioning problem and a message,
+        and the hidden run's are marked. The run itself, its hosts, its problems and its summary
+        each name the visible run's to the branch account and show the marker to an
+        administrator. The plan carries addresses and template ids only, so it is covered by
+        `A-37`'s hidden-run test.
+      - **T3.** Real Core Health, Probe Health and a `MetricsExporter` replace the stubs. They are
+        shared with `metrics.test.ts` through `test/support/health.ts`, and a second probe gives
+        `/probes` two rows. One test asserts the root bar with 403 for the branch account and 200
+        for an administrator: Core Health, notification health, the probe list, a probe's health
+        and `/metrics`. Another test has a root reader carved out of one probe scrape `/metrics`
+        without that probe's lines.
+      - **T4.** A schedule is used by one visible sensor and one hidden one. Its `usedBy` is 1 to
+        the operator and 2 to an administrator, on the edit, the single read and the list.
+      - **T5.** The alarm path's ids are asserted as well as its names, including the step over a
+        hidden device.
+      - **T6.** The registration guard now names the triggers of an object, a schedule, the device
+        templates, a run's plan, Core Health, a probe's health and notification health.
+      - **T7 and T9: no floor, and nothing pooled.** Every `GET` route must answer the branch
+        account at least once, or be in `NEVER_ANSWERS_THE_BRANCH` with its reason. That list has
+        17: an administrator's lists, the grants and links that need `full`, the root bar, a
+        probe's health, and the backgrounds of a map that has none. Each name the branch account
+        must be shown is checked against its own route. The administrator's control is the same
+        sweep, run as a second administrator. Every route that answered the branch must show them
+        the marker, or be in `NO_MARKER_TO_REACH` with its reason. That list has 34: catalogues
+        and the caller's own session, counts asserted by number elsewhere, routes about the object
+        asked (the sweep asks about visible ones only), the run's plan, and the public map, which
+        answers as its maker. Measuring these found three routes that had only ever answered 404:
+        the ids swept for a lookup and a schedule did not exist, and the template catalogue was
+        empty. The fixture now loads the built-in templates and lookups and makes a schedule.
+        Loading the templates showed `POST /device-templates/plan` answering 500 to an empty
+        fingerprint, filed as `D-12`. A map of an administrator's the team was not given is now
+        swept too.
+      - **T12.** `A-12`'s outcome carries a correction: the refused scopes were nine, the library
+        was never asserted 404, the sweep could not have found the counts or the probe lines, and
+        the mutation list left the guards out. The findings now say that each query value goes
+        only to the routes that declare its parameter. The commit messages stand as written.
+      - **L5 and L3.** The notification log's comment and the findings no longer say rows outlive
+        their sensor, since migration 016 cascades them. `mayBeDeleted` is gone from the
+        notification log's query. A dependent's state rows written before `A-12` keep the master's
+        name. That is accepted and written down, with no scrub migration: no installation predates
+        1.0.
+      - **Decided: a share link with no maker is a revoked link.** It used to serve everything but
+        tile data. Disabling or deleting the maker now gets a stranger the same 404 as an invented
+        token, background included, and re-enabling the maker brings the link back. ADR-002, the
+        findings, `administration.md` and `web-ui.md` say so. `maps-api` drives both cases through
+        the route, the join and the foreign key's `SET NULL`, not a hand-built `maker: null`.
+      - **The clear and release halves of `A-24` can fail now.** An administrator acknowledges and
+        forces the hidden sensor first. The operator's answers must not list it, and its state
+        must still be the administrator's afterwards.
+      - **Decided: acting through a container does to each sensor only what naming it would
+        allow.** WatchDog ruled with `A-35`'s rule rather than pause's precedent. Forcing and
+        releasing need `write` on each sensor. Acknowledging and clearing need `write`, or `read`
+        with the account's opt-in: one `actsWith` in `authorization.ts` serves the route guard
+        and a new per-request `Reach`, so the two cannot disagree. What that leaves is listed in
+        a new `skipped` on both answers, and a container where nothing is left is refused with
+        403. `Reach` runs after `Visibility`, so a hole is never in `skipped`; `A-24`'s test
+        asserts that on all four answers. A pause stays as it is: it is state on the container
+        that the sensors inherit, and nothing is written onto them. `administration.md` says so,
+        so the next reader does not take pause as the precedent. The test: `read` on a-ping
+        under the operator's writable device. The acknowledgement is refused, and the drill
+        forces a-held and skips a-ping. With the opt-in, the acknowledgement and the clear reach
+        a-ping, and the drill still skips it.
+
+      Mutation 20/20, each killed by the test named:
+      - the run routes' shared guard opened to any reader (the sweep, and `A-37`'s hidden run),
+        and the plan's (`A-37`'s hidden run);
+      - Core Health, a probe's health, notification health, the probe list or `/metrics` opened
+        to any reader (the health test, and the list of routes that never answer);
+      - `/metrics` keeping the lines of the probes its reader was carved out of (the scrape test);
+      - a schedule's users counted over every branch (`A-25`);
+      - the alarm path's ids left untrimmed (the alarms test);
+      - a hidden library refused as forbidden rather than absent (the library test);
+      - the share's maker join ignoring a disabled account, or a share served with no maker (the
+        maps-api test);
+      - a clear or a release that sees through a hole (`A-24`, by `skipped` and by the hole's
+        state);
+      - a request that reaches everything, the opt-in ignored, the acknowledgement or the drill
+        not split, or the drill held to the acknowledgement's bar (the partition test).
+
+      The first no-maker mutant did not compile, and was rewritten so it does. The first runs of
+      the unsplit drill also failed eight stream tests. The partition test had stopped at its
+      first assertion and left a-ping forced. It now cleans up in a `finally`, and the rerun
+      fails the partition test alone.
 
 - [ ] **A-32 — An object's ETag does not change when the caller's view does** · S · A-12 · Can
       wait. Filed 2026-09-28 from `A-12`'s triage (M1, low). `GET /objects/:id` answers 304 on a

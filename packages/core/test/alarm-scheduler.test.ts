@@ -16,7 +16,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
-import { Visibility } from '../src/auth/access.js';
+import { Reach, Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 
@@ -406,6 +406,7 @@ describe(
         sensorId,
         { kind: 'indefinite' },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'mine',
       );
       const [held] = await alarmsStanding();

@@ -98,9 +98,10 @@ spelled out, for the reason the map resolver's audience is a discriminated union
 means "no checks" is how the next caller gets an unauthenticated read of everything by forgetting
 an argument.
 
-**A sensor whose object has been deleted is visible to administrators only.** Its history and its
-notification rows outlive it, but nothing records which branch it was in, so there is no grant to
-resolve and the resolver answers `none`, as it does for any id that does not exist.
+**A sensor whose object has been deleted is visible to administrators only.** Its history outlives
+it, but nothing records which branch it was in, so there is no grant to resolve and the resolver
+answers `none`, as it does for any id that does not exist. (*Corrected by `A-31`:* this said its
+notification rows outlive it too. They do not: they cascade with the sensor, by migration 016.)
 
 ## The stream
 
@@ -150,6 +151,11 @@ now; `A-10` sweeps them.
 - **A pause's message.** It is copied into the state of every sensor the pause holds and becomes
   that sensor's history; it was written for the people whose sensors it paused. The *object* it
   was set on is what the pause view leaves unnamed.
+- **A dependent's state history written before `A-12`** still says `master #14 (core-switch) is
+  Down`, to anybody who can read the dependent. The message is stored as written, and only rows
+  written since say `master #14 is Down`. Accepted, not scrubbed (`A-31`): no installation
+  predates 1.0, so no such row exists outside a developer's database, and a migration rewriting
+  every dependent's history to guard against none would be the riskier change.
 - **Inherited settings and tags.** The effective value is the visible object's; the source is an
   id (`SettingSource`), and no route names it.
 - **A probe's own numbers.** `GET /probes/:id/health` asks `read` on the probe, which an account
@@ -249,8 +255,10 @@ a test shown to fail before its fix.
   reasoning is an amendment to `ADR-002`. **Migration 054 records each link's maker as an
   account.** Links made before it carry only a login, which it matches; **a link whose login
   matches nobody — renamed or deleted since — has no maker after the upgrade and publishes
-  nothing**, every tile unavailable. That is deliberate, and it is what an operator who sees a
-  shared wall go blank after upgrading should read: make a new link.
+  nothing**. That is deliberate, and it is what an operator who sees a shared wall go blank after
+  upgrading should read: make a new link. (*`A-31`:* "publishes nothing" was every tile
+  unavailable, with the map's name, titles, layout and background still served. A link with no
+  maker is now answered as a revoked one.)
 - **`A-21` — `seq` counted every change in the installation.** One process-wide counter numbered
   every published state change before any filtering, and every socket was sent it; a branch
   account seeing its sequence jump by 3,000 between two of its own events had learned the size and
@@ -263,11 +271,18 @@ a test shown to fail before its fix.
   found this document's "every query parameter" untrue: the sweep gave values to nine and called
   the rest bare. Three more — a name search, a tag, an address — are now swept with a hidden
   object's own; the nineteen left are named in the test as a limit, each an ordering, a time, a
-  flag or an id of something outside the tree.
+  flag or an id of something outside the tree. (*`A-31`:* and each value goes only to the routes
+  whose schema declares its parameter. The planted tag reaches the routes with a `tag` filter and
+  no others.)
 - **`A-24` — acknowledging or forcing a device reached the sensors in its holes.** A write, not
   only a read: the route checked `write` on the device, and the walk beneath it acknowledged, or
   forced Down and paged the owner of, a sensor carved `none` — and the answer named it, or said
   whether the hole held anything Down. Both walks now carry the condition every listing does.
+  (*Extended by `A-31`:* sight was not enough. A sensor granted only `read` under the device was
+  still reached, although naming it is refused. Each sensor is now held to the bar its own route
+  uses: `write` to force or release, and `write`, or `read` with the account's opt-in, to
+  acknowledge or clear. What that leaves is listed in the answer's `skipped`. A pause stays as it
+  is: it is state on the container that the sensors inherit, and nothing is written onto them.)
 - **`A-25` — two leftovers.** A schedule edit answered with its users counted over every branch,
   which `get` had stopped doing; and the stream re-resolved a socket only when the access epoch had
   *risen* past its own, so a restore that put the counter back left sockets resolved at the higher

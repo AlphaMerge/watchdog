@@ -136,6 +136,7 @@ export const acknowledgementViewSchema = {
     'objectId',
     'acknowledged',
     'refused',
+    'skipped',
     'acknowledgedAt',
     'acknowledgedUntil',
     'message',
@@ -146,6 +147,8 @@ export const acknowledgementViewSchema = {
     acknowledged: { type: 'array', items: { type: 'integer' } },
     /** Sensors that were not Down, and so will still alarm. */
     refused: { type: 'array', items: { type: 'integer' } },
+    /** Sensors beneath it the caller could not acknowledge by name, left as they were. */
+    skipped: { type: 'array', items: { type: 'integer' } },
     acknowledgedAt: { type: ['string', 'null'] },
     /** `null` is indefinite — until it recovers, or somebody clears it. */
     acknowledgedUntil: { type: ['string', 'null'] },
@@ -157,12 +160,14 @@ export const simulatedErrorViewSchema = {
   $id: 'ms:simulatedErrorView',
   type: 'object',
   additionalProperties: false,
-  required: ['objectId', 'simulated', 'sensors', 'message'],
+  required: ['objectId', 'simulated', 'sensors', 'skipped', 'message'],
   properties: {
     objectId: { type: 'integer' },
     simulated: { type: 'boolean' },
     /** On a container, every sensor beneath it — not only the ones that were Down. */
     sensors: { type: 'array', items: { type: 'integer' } },
+    /** Sensors beneath it the caller may not write, left as they were. */
+    skipped: { type: 'array', items: { type: 'integer' } },
     message: { type: 'string' },
   },
 } as const;

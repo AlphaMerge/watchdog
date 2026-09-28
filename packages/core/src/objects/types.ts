@@ -238,6 +238,11 @@ export interface AcknowledgementView {
   readonly objectId: ObjectId;
   readonly acknowledged: readonly ObjectId[];
   readonly refused: readonly ObjectId[];
+  /**
+   * Sensors beneath it the caller can see but could not acknowledge by name, left as they were
+   * (`A-31`). A hole is never among them.
+   */
+  readonly skipped: readonly ObjectId[];
   readonly acknowledgedAt: string | null;
   /** `null` is indefinite: until it recovers, or somebody clears it. */
   readonly acknowledgedUntil: string | null;
@@ -250,6 +255,8 @@ export interface SimulatedErrorView {
   readonly simulated: boolean;
   /** The sensors forced. On a container this is every sensor beneath it, not only the Down ones. */
   readonly sensors: readonly ObjectId[];
+  /** Sensors beneath it the caller can see but may not write, left as they were (`A-31`). */
+  readonly skipped: readonly ObjectId[];
   readonly message: string;
 }
 

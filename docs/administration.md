@@ -72,9 +72,12 @@ A few consequences are worth knowing before somebody reports them as bugs:
 - **A public share link shows what its maker can see, now.** Somebody with the URL needs no
   login, so the link carries the rights of the account that made it: a tile on an object that
   account cannot see is drawn as unavailable, and a map's designer refuses a new tile on one.
-  Revoking the maker's grant, or disabling the account, narrows or blanks every link it made. A
-  link made before this rule existed, by a login that has since been renamed or deleted, is blank
-  after the upgrade for the same reason: nobody is left to see through. Make a new one.
+  Revoking the maker's grant narrows every link it made. Disabling or deleting the account
+  stops every link it made from opening at all: a stranger gets what a revoked link gets, and not
+  the map's name, titles or background either. Re-enabling the account brings its links back, so
+  revoke a link that should stay dead. A link made before this rule existed, by a login that has
+  since been renamed or deleted, stops opening after the upgrade for the same reason: nobody is
+  left to see through. Make a new one.
 - **Deleting or moving an object needs `write` on everything beneath it.** A delete destroys the
   subtree and a move carries it, so `write` on a device is not enough when a sensor beneath it
   was carved `none`, or granted only `read`. The refusal says there is something beneath that
@@ -85,8 +88,20 @@ A few consequences are worth knowing before somebody reports them as bugs:
   else is still a hole in the copy. A clone made in place lands in the source's parent, and needs
   `write` there as a clone into any other parent does.
 - **A pause or a setting on a container still reaches into its holes**, as every inherited value
-  does. It stores nothing on the hidden objects, and acknowledging or forcing an error on the
-  container reaches only the sensors its caller can see.
+  does. It stores nothing on the hidden objects. Acknowledging or forcing an error on the
+  container is not inherited: it is written onto each sensor, and reaches only the sensors its
+  caller can see.
+- **Acknowledging or forcing a drill on a container does to each sensor only what naming that
+  sensor would allow.** Forcing and releasing need `write` on the sensor itself. Acknowledging and
+  clearing need `write`, or `read` on an account allowed to acknowledge. So a sensor granted to
+  you only as `read`, beneath a device you may write, is left as it is. The answer lists it under
+  `skipped`, and a request that would leave everything you can see there is refused. A hidden
+  sensor is never listed. **A pause is no precedent for this.** It is state on the container that
+  everything beneath it inherits, and nothing is written onto the sensors, so pausing that device
+  does pause the `read` sensor with it. A `read` grant under a container somebody may write
+  therefore keeps the sensor from being edited, forced, or deleted or moved with the container.
+  It keeps the sensor from being acknowledged unless the account has the opt-in. It does not keep
+  it from being paused. To keep a sensor out of a writer's hands entirely, carve it `none`.
 - **An object's history leaves out its grant entries** for anybody but an administrator. They say
   which groups may see the object and who decided so, which is what the grants list says, and
   that list is an administrator's. `full` on an object is the right to change it, not to read who

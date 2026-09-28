@@ -145,10 +145,19 @@ without anybody having to find the links. A snapshot would also have to be re-ch
 sensor list shows sensors added under its root after the link was made. The cost is one visibility
 resolution per poll, measured at 1–1.5 ms at the v1 target (`findings/2026-09-28-object-visibility.md`).
 
-**A link whose maker is gone publishes nothing** — every tile unavailable, every list empty. That
-includes links made before this amendment whose maker's login no longer matches an account (the
-migration that records makers can only go by the login it was given), which go dark on upgrade
-rather than keep publishing on nobody's authority.
+**A link whose maker is gone or disabled publishes nothing**: it is answered as a revoked link
+is, with the same 404 and the same words, for the map and its background alike. That includes
+links made before this amendment whose maker's login no longer matches an account (the migration
+that records makers can only go by the login it was given), which go dark on upgrade rather than
+keep publishing on nobody's authority. Re-enabling the account brings its links back; revoking a
+link ends it.
+
+*Corrected by `A-31`.* This paragraph said "every tile unavailable, every list empty", and that is
+what the code did: it withheld the tiles' data and still served the map's name, its description,
+its tile titles, its layout, its HTML tiles, its geographic view and its background image, on the
+authority of an account that no longer had any. The operator documentation promised the link went
+blank, and an operator who believes that does not revoke it. A link with no maker is now not opened
+at all.
 
 **And on save**, since `A-22`, a layout may not *add* a tile on an object its saver cannot read —
 refused in the same words for a hidden id and an id never issued, so the save does not reopen the

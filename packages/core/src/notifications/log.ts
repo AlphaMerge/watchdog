@@ -31,7 +31,8 @@ export interface NotificationLogQuery {
   /**
    * Whose log this is (`A-12`). A notification is about a sensor, and one about a sensor the
    * reader cannot see is absent — its message is that sensor's failure message. A deleted
-   * sensor's notifications are an administrator's alone, as its state log is.
+   * sensor's notifications go with it: the rows cascade with the sensor (migration 016), unlike
+   * its state log (`A-31`).
    */
   readonly visibility: Visibility;
   readonly status?: readonly string[];
@@ -92,7 +93,6 @@ export class NotificationLogReader {
     const visible = query.visibility.where(
       'r.sensor_id',
       (value) => `$${String(values.push(value))}`,
-      { mayBeDeleted: true },
     );
     const rows = await q.query<Row>(
       `

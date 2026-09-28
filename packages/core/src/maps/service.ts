@@ -462,16 +462,22 @@ export class MapService {
    * and that asymmetry is deliberate: the public surface is one function, and it is this one.
    *
    * Expiry and revocation are decided by the query, so a row coming back is a link that works.
-   * It comes back with the link's maker as the maker stands now — `null` when the account is
-   * gone or disabled — because a public view is that account's view (`A-22`).
+   * It comes back with the link's maker as the maker stands now, because a public view is that
+   * account's view (`A-22`).
+   *
+   * **A link whose maker is gone or disabled is not opened at all** (`A-31`): the same answer as
+   * a revoked one, for the map and its background alike. Opened, it served nothing from the tree
+   * but still served the map's name, its tile titles, its layout, its HTML tiles and its floor
+   * plan, on the authority of an account that no longer has any, to somebody told the link had
+   * gone blank. Re-enabling the account brings the link back; revoking it ends it.
    */
   async openShare(
     token: string,
-  ): Promise<{ mapId: number; map: MapRow; maker: MapViewer | null } | undefined> {
+  ): Promise<{ mapId: number; map: MapRow; maker: MapViewer } | undefined> {
     if (token.length < 16 || token.length > 100) return undefined;
     return this.#db.tx(async (tx) => {
       const found = await this.#repository.shareByToken(tx, shareTokenHash(token));
-      if (found === undefined) return undefined;
+      if (found === undefined || found.maker === null) return undefined;
       const map = await this.#repository.find(tx, found.mapId);
       // The map is gone but the row is not: impossible through the foreign key, and cheap to be
       // sure of rather than to reason about.

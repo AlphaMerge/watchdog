@@ -16,7 +16,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
-import { Visibility } from '../src/auth/access.js';
+import { Reach, Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 
@@ -380,6 +380,7 @@ describe(
         sensorId,
         { kind: 'indefinite' },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'looking at it',
       );
 
@@ -412,6 +413,7 @@ describe(
         sensorId,
         { kind: 'indefinite' },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'mine',
       );
       assert.equal(await sweep(at(710)), 0);
@@ -424,7 +426,12 @@ describe(
       // stamp `new Date()` — and the chain resumes from when the acknowledgement was lifted. A
       // sweep at `at(810)` therefore only fired while the wall clock happened to be behind
       // 09:00Z, which is how this passed all morning and failed after lunch.
-      await h.service.clearAcknowledgement(testActor, sensorId, Visibility.EVERYTHING);
+      await h.service.clearAcknowledgement(
+        testActor,
+        sensorId,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+      );
       const lifted = Date.now();
       await sweep(new Date(lifted + 700_000));
       assert.deepEqual(
@@ -452,7 +459,14 @@ describe(
 
       // Against the real clock, not `T0`: `simulateError` and `acknowledge` are the calls that
       // take no timestamp, because production has no synthetic clock and they stamp `new Date()`.
-      await h.service.simulateError(testActor, sensorId, true, Visibility.EVERYTHING, 'rehearsal');
+      await h.service.simulateError(
+        testActor,
+        sensorId,
+        true,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+        'rehearsal',
+      );
       const forcedAt = Date.now();
       const after = (seconds: number): Date => new Date(forcedAt + seconds * 1000);
 
@@ -463,6 +477,7 @@ describe(
         sensorId,
         { kind: 'indefinite' },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'rehearsing',
       );
       const [held] = await standing();
@@ -472,7 +487,13 @@ describe(
       assert.equal(await sweep(after(4_000)), 0, 'nor any repeat');
 
       // Lifting the force is the recovery, the same way a successful scan would be.
-      await h.service.simulateError(testActor, sensorId, false, Visibility.EVERYTHING);
+      await h.service.simulateError(
+        testActor,
+        sensorId,
+        false,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+      );
       assert.deepEqual(
         (await queued()).map((request) => request.reason),
         ['initial', 'recovery'],

@@ -15,7 +15,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
-import { Visibility } from '../src/auth/access.js';
+import { Reach, Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 const NOW = new Date('2026-08-25T12:00:00.000Z');
@@ -209,6 +209,7 @@ describe(
         ping,
         { kind: 'indefinite' },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'engineer on site',
       );
 
@@ -237,6 +238,7 @@ describe(
         ping,
         { kind: 'indefinite' },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'engineer on site',
       );
 
@@ -258,6 +260,7 @@ describe(
         ping,
         { kind: 'indefinite' },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'engineer on site',
       );
 

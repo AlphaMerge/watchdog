@@ -16,7 +16,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
-import { Visibility } from '../src/auth/access.js';
+import { Reach, Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 const NOW = new Date('2026-08-25T12:00:00.000Z');
@@ -148,6 +148,7 @@ describe(
         sensorId,
         true,
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'testing the pager',
       );
       assert.deepEqual(view.sensors, [sensorId]);
@@ -162,7 +163,14 @@ describe(
 
     it('records the transition, so a notification chain has something to fire on', async () => {
       await report([{ sensorId, at: NOW, outcome: 'ok', message: 'reachable' }]);
-      await h.service.simulateError(testActor, sensorId, true, Visibility.EVERYTHING, 'chain test');
+      await h.service.simulateError(
+        testActor,
+        sensorId,
+        true,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+        'chain test',
+      );
 
       const rows = await db.query<{ previous_state: string; state: string; cause: string }>(
         `SELECT previous_state, state, cause FROM sensor_state
@@ -178,7 +186,14 @@ describe(
 
     it('keeps scanning it, so lifting the force needs no round trip to find out the truth', async () => {
       const config = new ProbeConfigService({ db, resolver: h.resolver });
-      await h.service.simulateError(testActor, sensorId, true, Visibility.EVERYTHING, '');
+      await h.service.simulateError(
+        testActor,
+        sensorId,
+        true,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+        '',
+      );
       const scheduled = (await config.assignmentsFor(probeId)).sensors.map((s) => s.sensorId);
       assert.ok(scheduled.includes(sensorId), 'the force changes what readings mean, not whether');
     });
@@ -194,6 +209,7 @@ describe(
         deviceId,
         true,
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'storm test',
       );
       assert.deepEqual(
@@ -211,7 +227,15 @@ describe(
         name: 'empty',
       });
       await assert.rejects(
-        () => h.service.simulateError(testActor, empty.id, true, Visibility.EVERYTHING, ''),
+        () =>
+          h.service.simulateError(
+            testActor,
+            empty.id,
+            true,
+            Visibility.EVERYTHING,
+            Reach.EVERYTHING,
+            '',
+          ),
         (error: unknown) => {
           assert.ok((error as Error).message.includes('no sensors here'));
           return true;
@@ -225,10 +249,23 @@ describe(
 
     it('returns the sensor to what it actually measures, with no scan in between', async () => {
       await report([{ sensorId, at: NOW, outcome: 'ok', message: 'reachable' }]);
-      await h.service.simulateError(testActor, sensorId, true, Visibility.EVERYTHING, 'testing');
+      await h.service.simulateError(
+        testActor,
+        sensorId,
+        true,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+        'testing',
+      );
       assert.equal((await runtimeOf(sensorId)).state, 'down');
 
-      await h.service.simulateError(testActor, sensorId, false, Visibility.EVERYTHING);
+      await h.service.simulateError(
+        testActor,
+        sensorId,
+        false,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+      );
       const current = await runtimeOf(sensorId);
       // Unlike a resume, which yields Unknown: a forced sensor never stopped being scanned, so
       // its last reading is current and there is nothing to wait for.
@@ -238,13 +275,21 @@ describe(
     });
 
     it('does nothing, and records nothing, when the force is already what was asked for', async () => {
-      await h.service.simulateError(testActor, sensorId, true, Visibility.EVERYTHING, 'once');
+      await h.service.simulateError(
+        testActor,
+        sensorId,
+        true,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+        'once',
+      );
       h.audit.recorded.length = 0;
       const view = await h.service.simulateError(
         testActor,
         sensorId,
         true,
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'again',
       );
       assert.deepEqual(view.sensors, []);
@@ -260,7 +305,14 @@ describe(
     // -------------------------------------------------------------------------------------
 
     it('loses to a pause, so a sensor somebody switched off does not start paging people', async () => {
-      await h.service.simulateError(testActor, sensorId, true, Visibility.EVERYTHING, 'testing');
+      await h.service.simulateError(
+        testActor,
+        sensorId,
+        true,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+        'testing',
+      );
       await h.service.pause(testActor, deviceId, { kind: 'indefinite' }, 'maintenance');
 
       const current = await runtimeOf(sensorId);
@@ -270,7 +322,14 @@ describe(
     });
 
     it('comes back when the pause lifts, because the force was never withdrawn', async () => {
-      await h.service.simulateError(testActor, sensorId, true, Visibility.EVERYTHING, 'testing');
+      await h.service.simulateError(
+        testActor,
+        sensorId,
+        true,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+        'testing',
+      );
       await h.service.pause(testActor, sensorId, { kind: 'indefinite' }, 'maintenance');
       await h.service.resume(testActor, sensorId);
 
@@ -280,7 +339,14 @@ describe(
     });
 
     it('beats a real reading: that is the whole point of forcing one', async () => {
-      await h.service.simulateError(testActor, sensorId, true, Visibility.EVERYTHING, 'testing');
+      await h.service.simulateError(
+        testActor,
+        sensorId,
+        true,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+        'testing',
+      );
       await report([
         { sensorId, at: new Date(NOW.getTime() + 60_000), outcome: 'ok', message: 'reachable' },
       ]);
@@ -292,7 +358,14 @@ describe(
 
     it('still triggers a dependency, because §3 asks whether the master is Down', async () => {
       await h.service.setDependency(testActor, siblingId, 'object', sensorId, undefined);
-      await h.service.simulateError(testActor, sensorId, true, Visibility.EVERYTHING, 'chain test');
+      await h.service.simulateError(
+        testActor,
+        sensorId,
+        true,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+        'chain test',
+      );
       await db.tx(async (q) => {
         await h.dependencies?.recompute(q, new Date());
       });
@@ -343,6 +416,7 @@ describe(
         deviceId,
         true,
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'quarterly chain test',
       );
       const recorded = h.audit.recorded.filter((m) => m.action === 'sensor.simulatedError');
@@ -364,6 +438,7 @@ describe(
         sensorId,
         true,
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'testing the chain',
       );
       assert.equal((await runtimeOf(sensorId)).message, 'testing the chain');
@@ -390,9 +465,16 @@ describe(
         sensorId,
         true,
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'testing the chain',
       );
-      await h.service.simulateError(testActor, sensorId, false, Visibility.EVERYTHING);
+      await h.service.simulateError(
+        testActor,
+        sensorId,
+        false,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+      );
       await report([
         {
           sensorId,

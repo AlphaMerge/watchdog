@@ -39,6 +39,7 @@ import {
   onObject,
   onQueryObject,
   onSubtree,
+  reachOf,
   toAcknowledge,
   visibilityOf,
   writerFor,
@@ -1333,7 +1334,8 @@ export async function objectRoutes(
           'for a moment, or neither to acknowledge indefinitely. ' +
           `A UI offers ${ACK_PRESETS.join(', ')} minutes as presets. ` +
           'On a device or a group this acknowledges every sensor beneath it that is Down **at ' +
-          'this moment** — a snapshot, not a rule, so a sensor that fails later is a new alarm. ' +
+          'this moment** — a snapshot, not a rule, so a sensor that fails later is a new alarm — ' +
+          'and that the caller could acknowledge by naming it; the rest are listed in `skipped`. ' +
           'The message becomes the sensor’s last message. It clears on recovery, on expiry, on ' +
           'pause-then-resume, or by DELETE.',
         params: idParams,
@@ -1356,6 +1358,7 @@ export async function objectRoutes(
           request.params.id,
           acknowledgement,
           await visibilityOf(request),
+          reachOf(request, 'acknowledge'),
           message,
         ),
       );
@@ -1383,6 +1386,7 @@ export async function objectRoutes(
           actorFor(request),
           request.params.id,
           await visibilityOf(request),
+          reachOf(request, 'acknowledge'),
         ),
       );
     },
@@ -1402,7 +1406,8 @@ export async function objectRoutes(
           'nobody has seen fire is a chain nobody knows works. The sensor reads Down with cause ' +
           '`simulated`, never `scan`, so a forced outage cannot be mistaken for a real one; the ' +
           'message becomes its last message; the action is audited. On a device or a group this ' +
-          'forces **every** sensor beneath it, whatever state it was in. Pausing still wins, so ' +
+          'forces **every** sensor beneath it, whatever state it was in, that the caller may ' +
+          'write; the rest are listed in `skipped`. Pausing still wins, so ' +
           'a sensor somebody switched off will not start paging anyone.',
         params: idParams,
         body: {
@@ -1420,6 +1425,7 @@ export async function objectRoutes(
           request.params.id,
           true,
           await visibilityOf(request),
+          reachOf(request, 'write'),
           request.body.message,
         ),
       );
@@ -1447,6 +1453,7 @@ export async function objectRoutes(
           request.params.id,
           false,
           await visibilityOf(request),
+          reachOf(request, 'write'),
         ),
       );
     },

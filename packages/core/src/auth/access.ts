@@ -307,9 +307,9 @@ export class Visibility {
    * builds them.
    *
    * `mayBeDeleted` is for a column that can name an object which no longer exists — the state
-   * log and the notification log outlive their sensors. Nothing records which branch a deleted
-   * sensor was in, so its rows are visible to nobody but an administrator, the same answer the
-   * resolver gives for any id that does not exist.
+   * log outlives its sensors. Nothing records which branch a deleted sensor was in, so its rows
+   * are visible to nobody but an administrator, the same answer the resolver gives for any id
+   * that does not exist. (The notification log does not outlive them: its rows cascade.)
    */
   where(
     column: string,
@@ -403,6 +403,46 @@ export class Visibility {
     if (this.#rootSees !== other.#rootSees || mine.size !== theirs.size) return false;
     for (const [id, label] of mine) if (theirs.get(id) !== label) return false;
     return true;
+  }
+}
+
+/**
+ * Which of some objects a caller may act on, each by the right that naming it alone would need
+ * (`A-31`).
+ *
+ * For an action that one call writes onto each child of what it names: an acknowledgement, or a
+ * forced error. `A-35`'s rule is that an action through a parent may not do to a child what the
+ * caller could not do to that child directly, so a sensor granted only `read` under a device
+ * its caller may write is left out and reported rather than reached. A pause is not one of
+ * these. It is state on the parent that the children inherit, and nothing is written onto them.
+ *
+ * Asked after `Visibility`, never instead of it: what is split here has already been cut to
+ * what the caller can see, so what is left out is never a hole.
+ *
+ * As `Visibility` is, "everything" has to be asked for by name.
+ */
+export class Reach {
+  /** An internal caller acting for nobody, or an installation with the layer switched off. */
+  static readonly EVERYTHING = new Reach((_q, objectIds) => Promise.resolve(new Set(objectIds)));
+
+  readonly #reached: (q: Queryable, objectIds: readonly number[]) => Promise<ReadonlySet<number>>;
+
+  constructor(
+    reached: (q: Queryable, objectIds: readonly number[]) => Promise<ReadonlySet<number>>,
+  ) {
+    this.#reached = reached;
+  }
+
+  /** The ids split in the order given: those it may act on, and those it may only see. */
+  async split(
+    q: Queryable,
+    objectIds: readonly number[],
+  ): Promise<{ reached: number[]; skipped: number[] }> {
+    const reached = objectIds.length === 0 ? new Set<number>() : await this.#reached(q, objectIds);
+    return {
+      reached: objectIds.filter((id) => reached.has(id)),
+      skipped: objectIds.filter((id) => !reached.has(id)),
+    };
   }
 }
 

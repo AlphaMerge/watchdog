@@ -21,7 +21,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
-import { Visibility } from '../src/auth/access.js';
+import { Reach, Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 
@@ -292,6 +292,7 @@ describe(
         pingId,
         true,
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'rehearsing the failover',
       );
 
@@ -299,7 +300,13 @@ describe(
       assert.equal((await runtimeOf(snmpId)).cause, 'dependency');
 
       // And lifting it releases them, which is the same defect in the other direction.
-      await h.service.simulateError(testActor, pingId, false, Visibility.EVERYTHING);
+      await h.service.simulateError(
+        testActor,
+        pingId,
+        false,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+      );
       assert.equal((await runtimeOf(httpId)).dependency, false);
     });
 

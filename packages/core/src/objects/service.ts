@@ -1,7 +1,8 @@
 import type { Logger } from '@ms/shared';
 import { changedParamKeys } from '../audit/diff.js';
 import type { Database, Queryable } from '../db/pool.js';
-import type { Visibility } from '../auth/access.js';
+import type { Reach, Visibility } from '../auth/access.js';
+import { AuthError } from '../auth/errors.js';
 import type { InheritanceResolver, ResolvedCredential } from '../settings/inheritance.js';
 import {
   settingRegistry,
@@ -885,6 +886,7 @@ export class ObjectService {
     id: ObjectId,
     simulated: boolean,
     visibility: Visibility,
+    reach: Reach,
     message = '',
   ): Promise<SimulatedErrorView> {
     const now = new Date();
@@ -901,11 +903,22 @@ export class ObjectService {
 
       // What the caller can see beneath it (`A-24`) — and so the "no sensors here" refusal below
       // is the same answer for a hole as for an empty device.
-      const targets = object.kind === 'sensor' ? [id] : await sensorsIn(q, id, visibility);
-      if (targets.length === 0) {
+      const seen = object.kind === 'sensor' ? [id] : await sensorsIn(q, id, visibility);
+      if (seen.length === 0) {
         throw new ObjectError('OBJECT_INVALID', 'there are no sensors here to force', {
           context: { objectId: id, phase: 'simulate' },
         });
+      }
+      // Then only what naming each sensor would allow (`A-31`): `write` on a device is not
+      // `write` on a sensor granted only `read` beneath it, which is left as it is and reported.
+      // A pause reaches that sensor, and is no precedent for this — see `Reach`.
+      const { reached: targets, skipped } = await reach.split(q, seen);
+      if (targets.length === 0) {
+        throw new AuthError(
+          'AUTH_FORBIDDEN',
+          `this account may not ${simulated ? 'force' : 'release'} any sensor here`,
+          { objectId: id, needed: 'write', skipped: skipped.length },
+        );
       }
 
       const result = await states.simulate(q, targets, simulated, message, now);
@@ -937,6 +950,7 @@ export class ObjectService {
         objectId: id,
         simulated,
         sensors: result.changed,
+        skipped,
         message,
       };
     });
@@ -961,6 +975,7 @@ export class ObjectService {
     id: ObjectId,
     request: AcknowledgeRequest,
     visibility: Visibility,
+    reach: Reach,
     message = '',
   ): Promise<AcknowledgementView> {
     const now = new Date();
@@ -971,7 +986,7 @@ export class ObjectService {
         details: { problems: resolved.problems },
       });
     }
-    return this.#applyAcknowledgement(actor, id, resolved.acknowledgement, visibility, now);
+    return this.#applyAcknowledgement(actor, id, resolved.acknowledgement, visibility, reach, now);
   }
 
   /**
@@ -987,8 +1002,9 @@ export class ObjectService {
     actor: Actor,
     id: ObjectId,
     visibility: Visibility,
+    reach: Reach,
   ): Promise<AcknowledgementView> {
-    return this.#applyAcknowledgement(actor, id, null, visibility, new Date());
+    return this.#applyAcknowledgement(actor, id, null, visibility, reach, new Date());
   }
 
   async #applyAcknowledgement(
@@ -996,6 +1012,7 @@ export class ObjectService {
     id: ObjectId,
     acknowledgement: ResolvedAcknowledgement | null,
     visibility: Visibility,
+    reach: Reach,
     now: Date,
   ): Promise<AcknowledgementView> {
     const states = this.#states;
@@ -1011,14 +1028,26 @@ export class ObjectService {
 
       // The Down sensors the caller can see beneath it (`A-24`): an acknowledgement is a write,
       // and it must not reach into a hole — nor may its refusal say whether the hole is Down.
-      const targets = object.kind === 'sensor' ? [id] : await downSensorsIn(q, id, visibility);
-      if (targets.length === 0) {
+      const seen = object.kind === 'sensor' ? [id] : await downSensorsIn(q, id, visibility);
+      if (seen.length === 0) {
         throw new ObjectError(
           'OBJECT_NOT_PAUSED',
           acknowledgement === null
             ? 'nothing here has an acknowledgement to clear'
             : 'nothing here is Down to acknowledge',
           { context: { objectId: id, phase: 'acknowledge' } },
+        );
+      }
+      // Then only those the caller could acknowledge by name (`A-31`): `write` on each, or `read`
+      // with the account's opt-in. The rest are left as they are and reported.
+      const { reached: targets, skipped } = await reach.split(q, seen);
+      if (targets.length === 0) {
+        throw new AuthError(
+          'AUTH_FORBIDDEN',
+          acknowledgement === null
+            ? 'this account may not clear an acknowledgement on any sensor here'
+            : 'this account may not acknowledge any sensor here',
+          { objectId: id, needed: 'write', skipped: skipped.length },
         );
       }
 
@@ -1062,6 +1091,7 @@ export class ObjectService {
         objectId: id,
         acknowledged: result.acknowledged,
         refused: result.refused,
+        skipped,
         acknowledgedAt: acknowledgement?.acknowledgedAt.toISOString() ?? null,
         acknowledgedUntil: acknowledgement?.acknowledgedUntil?.toISOString() ?? null,
         message: acknowledgement?.message ?? '',

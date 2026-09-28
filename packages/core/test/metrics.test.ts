@@ -11,7 +11,7 @@ import { TokenService } from '../src/auth/tokens.js';
 import { TotpService } from '../src/auth/totp.js';
 import { AuditRepository, DatabaseAuditSink } from '../src/audit/store.js';
 import { HistoryService } from '../src/timeseries/history.js';
-import { CoreHealthService } from '../src/health/core-health.js';
+import type { CoreHealthService } from '../src/health/core-health.js';
 import { ProbeHealthService } from '../src/health/probe-health.js';
 import { MetricsExporter } from '../src/metrics/exporter.js';
 import type { ProbeLink } from '../src/transport/probe-endpoint.js';
@@ -23,6 +23,7 @@ import {
 } from './support/database.js';
 import { buildHarness, silent, testActor } from './support/tree.js';
 import { testCatalogue } from './support/sensor-types.js';
+import { connectedLink, fixedCoreHealth, probeHealthOver } from './support/health.js';
 import { everyVoucherHolds } from './support/vouching.js';
 
 /**
@@ -69,97 +70,9 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
     await scratch.drop();
   });
 
-  const coreHealth = (): CoreHealthService =>
-    new CoreHealthService({
-      vouching: everyVoucherHolds,
-      db,
-      logger: silent,
-      sources: {
-        disk: () => null,
-        evictedChunks: () => 0,
-        machineMemory: () => ({
-          availablePercent: 42.5,
-          availableBytes: 3_400 * 1024 * 1024,
-          totalBytes: 8_000 * 1024 * 1024,
-        }),
-        limitMemory: () => null,
-        ingestion: () => ({
-          queuedRows: 41,
-          refusedRows: 7,
-          dependencyPauses: 3,
-          deferredReactions: 0,
-          writeMs: { p95: 12.5 },
-        }),
-        stream: () => ({
-          overflowed: 2,
-          severed: 0,
-          signedOut: { ended: 0, expired: 0, revoked: 0, disabled: 0 },
-          credentialCheckFailures: 0,
-        }),
-        probes: () => ({ probesDown: 1, probesSilent: 2 }),
-        alarms: () => ({ fired: 6, nextWakeAt: null }),
-        reports: () => ({
-          deferred: 5,
-          failed: 3,
-          undelivered: 4,
-          formatsWaiting: 2,
-          formatsRefused: 1,
-        }),
-        queries: () => ({ refused: 2 }),
-        ingestionDiscards: () => ({ discardedFutureTime: 0, discardedPastTime: 0 }),
-        delivery: () => Promise.resolve({ pending: 9, failed: 4, oldestPendingAgeMs: 125_000 }),
-      },
-      ingest: () => Promise.resolve(),
-    });
-
-  const probeHealth = (link: ProbeLink): ProbeHealthService =>
-    new ProbeHealthService({
-      vouching: everyVoucherHolds,
-      db,
-      logger: silent,
-      sources: { link: () => link },
-      ingest: () => Promise.resolve(),
-    });
-
-  // The connected arm rather than the union: spreading a union loses the discriminant, so every
-  // `{ ...connected, health: … }` below would stop type-checking against the other arm.
-  const connected: Extract<ProbeLink, { connected: true }> = {
-    connected: true,
-    gid: 'probe-gid',
-    clockOffsetMs: null,
-    protocolVersion: 7,
-    connectedAt: new Date(),
-    lastHeartbeatAt: new Date(),
-    approved: true,
-    agentVersion: '1.0.0',
-    assignedSensors: 120,
-    cadenceSeconds: 60,
-    connectedForMs: Number.MAX_SAFE_INTEGER,
-    sinceResultsMs: 0,
-    sinceConfigMs: 0,
-    configured: true,
-    configurable: true,
-    lastResultsAt: new Date(),
-    configSentAt: new Date(),
-    health: {
-      scheduled: 120,
-      schedulerLagMs: { p50: 2, p95: 11, p99: 30, max: 90 },
-      poolSize: 48,
-      poolBusy: 12,
-      queued: 3,
-      queueWaitMs: { p50: 1, p95: 40, p99: 90, max: 500 },
-      deferred: 7,
-      refused: 2,
-      timedOut: 0,
-      workerCrashes: 0,
-      spoolPending: 500,
-      spoolBytes: 2 * 1024 * 1024,
-      spoolDropped: 4,
-      clockJumps: 1,
-      memoryMb: 210,
-      uptimeSeconds: 3_600,
-    },
-  };
+  const coreHealth = (): CoreHealthService => fixedCoreHealth(db);
+  const probeHealth = (link: ProbeLink): ProbeHealthService => probeHealthOver(db, link);
+  const connected = connectedLink;
 
   const exporter = (link: ProbeLink = connected): MetricsExporter => {
     const core = coreHealth();

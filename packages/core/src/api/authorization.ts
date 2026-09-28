@@ -3,7 +3,7 @@ import type { AccessRight, AccessService } from '../auth/access.js';
 import type { AccountRole } from '../auth/accounts.js';
 import type { Credential } from '../auth/credentials.js';
 import { AuthError } from '../auth/errors.js';
-import { atLeast, lower, Visibility } from '../auth/access.js';
+import { atLeast, lower, Reach, Visibility } from '../auth/access.js';
 import type { Writer } from '../objects/sensor-reads.js';
 
 /**
@@ -262,8 +262,32 @@ function objectIdFor(
  */
 const sights = new WeakMap<
   FastifyRequest,
-  { once: () => Promise<Visibility>; fresh: Sight; credential: Credential | null }
+  {
+    once: () => Promise<Visibility>;
+    fresh: Sight;
+    credential: Credential | null;
+    reach: (action: ReachedBy) => Reach;
+  }
 >();
+
+/** The two bars an action a container passes on to its sensors is held to (`A-31`). */
+export type ReachedBy = 'write' | 'acknowledge';
+
+/**
+ * Whether a right on one object lets this principal act on it: `write`, or, to acknowledge,
+ * `read` with the account's opt-in (`M-13`).
+ *
+ * One test for the route that names a sensor and for the sensors a container's action reaches
+ * (`A-31`), so that acting through a device can never do to a sensor what naming it would not.
+ */
+function actsWith(
+  principal: { mayAcknowledge: boolean },
+  right: AccessRight,
+  action: ReachedBy,
+): boolean {
+  if (atLeast(right, 'write')) return true;
+  return action === 'acknowledge' && principal.mayAcknowledge && atLeast(right, 'read');
+}
 
 /** Resolves what a principal may see, afresh each time it is called. */
 export interface Sight {
@@ -286,6 +310,18 @@ const EVERYONE: Sight = Object.assign(() => Promise.resolve(Visibility.EVERYTHIN
 export function visibilityOf(request: FastifyRequest): Promise<Visibility> {
   const sight = sights.get(request);
   return sight === undefined ? Promise.resolve(Visibility.EVERYTHING) : sight.once();
+}
+
+/**
+ * Which sensors this request's caller may act on one at a time, by the bar the route that names
+ * a single sensor holds it to (`A-31`).
+ *
+ * For an action on a container that is written onto each sensor beneath it. Everything when the
+ * layer is off, and nothing on a `PUBLIC` route, as `visibilityOf` has it.
+ */
+export function reachOf(request: FastifyRequest, action: ReachedBy): Reach {
+  const sight = sights.get(request);
+  return sight === undefined ? Reach.EVERYTHING : sight.reach(action);
 }
 
 /**
@@ -383,11 +419,24 @@ export function registerAuthorization(app: FastifyInstance, options: Authorizati
           ),
         { key: 'nobody' },
       );
-      sights.set(request, { once: nobody, fresh: nobody, credential: null });
+      const reachesNobody = new Reach(() =>
+        Promise.reject(new AuthError('AUTH_REQUIRED', 'a public route has nobody to act for')),
+      );
+      sights.set(request, {
+        once: nobody,
+        fresh: nobody,
+        credential: null,
+        reach: () => reachesNobody,
+      });
       return;
     }
     if (!options.required) {
-      sights.set(request, { once: EVERYONE, fresh: EVERYONE, credential: null });
+      sights.set(request, {
+        once: EVERYONE,
+        fresh: EVERYONE,
+        credential: null,
+        reach: () => Reach.EVERYTHING,
+      });
       return;
     }
 
@@ -404,7 +453,14 @@ export function registerAuthorization(app: FastifyInstance, options: Authorizati
       principal.tokenId === undefined
         ? { kind: 'session', id: principal.sessionId, userId: principal.userId }
         : { kind: 'token', id: principal.tokenId, userId: principal.userId };
-    sights.set(request, { once: () => (resolved ??= fresh()), fresh, credential });
+    const reach = (action: ReachedBy): Reach =>
+      new Reach(async (q, objectIds) => {
+        const rights = await options.access.resolveManyFor(principal, objectIds, q);
+        return new Set(
+          objectIds.filter((id) => actsWith(principal, rights.get(id) ?? 'none', action)),
+        );
+      });
+    sights.set(request, { once: () => (resolved ??= fresh()), fresh, credential, reach });
 
     await enforce(options.access, request, principal, declared);
   });
@@ -488,8 +544,7 @@ async function enforce(
     // that order so an account that may write is never refused for want of a flag that is
     // meaningless for it.
     const resolved = await access.resolveFor(principal, objectId);
-    if (atLeast(resolved.right, 'write')) return;
-    if (principal.mayAcknowledge && atLeast(resolved.right, 'read')) return;
+    if (actsWith(principal, resolved.right, 'acknowledge')) return;
     throw new AuthError(
       'AUTH_FORBIDDEN',
       'acknowledging needs write on that object, or an account allowed to acknowledge',

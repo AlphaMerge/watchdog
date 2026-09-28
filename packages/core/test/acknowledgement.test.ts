@@ -22,7 +22,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
-import { Visibility } from '../src/auth/access.js';
+import { Reach, Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 const NOW = new Date('2026-08-25T12:00:00.000Z');
@@ -260,6 +260,7 @@ describe(
         sensorId,
         { kind: 'indefinite' },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'ticket 4471, engineer on site',
       );
       assert.deepEqual(view.acknowledged, [sensorId]);
@@ -280,6 +281,7 @@ describe(
         sensorId,
         { kind: 'indefinite' },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         '',
       );
 
@@ -294,6 +296,7 @@ describe(
         sensorId,
         { kind: 'duration', minutes: 60 },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'later',
       );
 
@@ -318,6 +321,7 @@ describe(
             sensorId,
             { kind: 'indefinite' },
             Visibility.EVERYTHING,
+            Reach.EVERYTHING,
             '',
           ),
         (error: unknown) => {
@@ -340,6 +344,7 @@ describe(
         deviceId,
         { kind: 'indefinite' },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'one',
       );
       assert.deepEqual(
@@ -357,6 +362,7 @@ describe(
         deviceId,
         { kind: 'indefinite' },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'known',
       );
 
@@ -375,6 +381,7 @@ describe(
             deviceId,
             { kind: 'indefinite' },
             Visibility.EVERYTHING,
+            Reach.EVERYTHING,
             '',
           ),
         (error: unknown) => {
@@ -395,6 +402,7 @@ describe(
         sensorId,
         { kind: 'indefinite' },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'known',
       );
       await makeUp(sensorId);
@@ -411,6 +419,7 @@ describe(
         sensorId,
         { kind: 'duration', minutes: 5 },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'briefly',
       );
       assert.equal((await runtimeOf(sensorId)).state, 'down_acknowledged');
@@ -441,6 +450,7 @@ describe(
         sensorId,
         { kind: 'indefinite' },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'known',
       );
 
@@ -460,7 +470,14 @@ describe(
       // that never existed. Before this was fixed it stayed — invisibly, because nothing shows
       // an acknowledgement on an Up sensor — and silenced the next genuine failure.
       await makeUp(sensorId, NOW);
-      await h.service.simulateError(testActor, sensorId, true, Visibility.EVERYTHING, 'chain test');
+      await h.service.simulateError(
+        testActor,
+        sensorId,
+        true,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+        'chain test',
+      );
       assert.equal((await runtimeOf(sensorId)).state, 'down');
 
       await h.service.acknowledge(
@@ -468,9 +485,16 @@ describe(
         sensorId,
         { kind: 'indefinite' },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'testing',
       );
-      await h.service.simulateError(testActor, sensorId, false, Visibility.EVERYTHING);
+      await h.service.simulateError(
+        testActor,
+        sensorId,
+        false,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+      );
 
       const recovered = await runtimeOf(sensorId);
       assert.equal(recovered.state, 'up');
@@ -490,10 +514,16 @@ describe(
         sensorId,
         { kind: 'indefinite' },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'wrong one',
       );
 
-      const view = await h.service.clearAcknowledgement(testActor, sensorId, Visibility.EVERYTHING);
+      const view = await h.service.clearAcknowledgement(
+        testActor,
+        sensorId,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+      );
       assert.deepEqual(view.acknowledged, [sensorId]);
       const current = await runtimeOf(sensorId);
       assert.equal(current.state, 'down', 'back to alarming');
@@ -512,6 +542,7 @@ describe(
         sensorId,
         { kind: 'indefinite' },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'known',
       );
       await h.service.pause(testActor, deviceId, { kind: 'indefinite' }, 'planned');
@@ -531,6 +562,7 @@ describe(
         sensorId,
         { kind: 'indefinite' },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'known',
       );
       await db.tx(async (q) => {
@@ -601,6 +633,7 @@ describe(
         sensorId,
         { kind: 'duration', minutes: 60 },
         Visibility.EVERYTHING,
+        Reach.EVERYTHING,
         'ticket 1',
       );
 

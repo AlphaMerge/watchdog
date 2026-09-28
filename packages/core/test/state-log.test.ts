@@ -15,7 +15,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
-import { Visibility } from '../src/auth/access.js';
+import { Reach, Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 const T0 = new Date('2026-08-25T12:00:00.000Z');
@@ -182,8 +182,21 @@ describe(
       // Uptime is computed from these rows, so a Warning that became a *different* Warning has
       // to be here — the operator's question is "why", and the answer changed.
       await report([{ sensorId, at: at(0), outcome: 'error', message: 'no reply' }]);
-      await h.service.simulateError(testActor, sensorId, true, Visibility.EVERYTHING, 'chain test');
-      await h.service.simulateError(testActor, sensorId, false, Visibility.EVERYTHING);
+      await h.service.simulateError(
+        testActor,
+        sensorId,
+        true,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+        'chain test',
+      );
+      await h.service.simulateError(
+        testActor,
+        sensorId,
+        false,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+      );
 
       const { items } = await log.list({
         visibility: Visibility.EVERYTHING,

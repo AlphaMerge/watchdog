@@ -1926,7 +1926,7 @@ Resumes an object, or cancels a maintenance window it has not reached yet. Only 
 
 ### `POST /api/v1/objects/{id}/acknowledge`
 
-Acknowledges a Down alarm: the sensor reads Down (Acknowledged), notifications stop, and monitoring carries on exactly as before. Give `minutes` for a duration, `until` for a moment, or neither to acknowledge indefinitely. A UI offers 5, 15, 60, 180, 1440 minutes as presets. On a device or a group this acknowledges every sensor beneath it that is Down **at this moment** — a snapshot, not a rule, so a sensor that fails later is a new alarm. The message becomes the sensor’s last message. It clears on recovery, on expiry, on pause-then-resume, or by DELETE.
+Acknowledges a Down alarm: the sensor reads Down (Acknowledged), notifications stop, and monitoring carries on exactly as before. Give `minutes` for a duration, `until` for a moment, or neither to acknowledge indefinitely. A UI offers 5, 15, 60, 180, 1440 minutes as presets. On a device or a group this acknowledges every sensor beneath it that is Down **at this moment** — a snapshot, not a rule, so a sensor that fails later is a new alarm — and that the caller could acknowledge by naming it; the rest are listed in `skipped`. The message becomes the sensor’s last message. It clears on recovery, on expiry, on pause-then-resume, or by DELETE.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -1940,7 +1940,7 @@ Acknowledges a Down alarm: the sensor reads Down (Acknowledged), notifications s
 | `until` | string |  |
 | `message` | string |  |
 
-**200** { objectId, acknowledged, refused, acknowledgedAt, acknowledgedUntil, message }
+**200** { objectId, acknowledged, refused, skipped, acknowledgedAt, acknowledgedUntil, message }
 
 ### `DELETE /api/v1/objects/{id}/acknowledge`
 
@@ -1950,11 +1950,11 @@ Withdraws an acknowledgement, so the alarm reads Down again and notifications re
 | --- | --- | --- | --- |
 | `id` | path | integer | **required** |
 
-**200** { objectId, acknowledged, refused, acknowledgedAt, acknowledgedUntil, message }
+**200** { objectId, acknowledged, refused, skipped, acknowledgedAt, acknowledgedUntil, message }
 
 ### `POST /api/v1/objects/{id}/simulate-error`
 
-Forces sensors Down so a notification chain can be tested end to end. **This fires the real chain at real people** — which is the point, since a chain nobody has seen fire is a chain nobody knows works. The sensor reads Down with cause `simulated`, never `scan`, so a forced outage cannot be mistaken for a real one; the message becomes its last message; the action is audited. On a device or a group this forces **every** sensor beneath it, whatever state it was in. Pausing still wins, so a sensor somebody switched off will not start paging anyone.
+Forces sensors Down so a notification chain can be tested end to end. **This fires the real chain at real people** — which is the point, since a chain nobody has seen fire is a chain nobody knows works. The sensor reads Down with cause `simulated`, never `scan`, so a forced outage cannot be mistaken for a real one; the message becomes its last message; the action is audited. On a device or a group this forces **every** sensor beneath it, whatever state it was in, that the caller may write; the rest are listed in `skipped`. Pausing still wins, so a sensor somebody switched off will not start paging anyone.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -1966,7 +1966,7 @@ Forces sensors Down so a notification chain can be tested end to end. **This fir
 | --- | --- | --- |
 | `message` | string |  |
 
-**200** { objectId, simulated, sensors, message }
+**200** { objectId, simulated, sensors, skipped, message }
 
 ### `DELETE /api/v1/objects/{id}/simulate-error`
 
@@ -1976,7 +1976,7 @@ Lifts a simulated error. The sensors return to what they actually measure straig
 | --- | --- | --- | --- |
 | `id` | path | integer | **required** |
 
-**200** { objectId, simulated, sensors, message }
+**200** { objectId, simulated, sensors, skipped, message }
 
 ### `GET /api/v1/state-log`
 

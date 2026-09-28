@@ -52,12 +52,13 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
   /** A sensor that exists and that `author`'s group is explicitly denied (`A-15`). */
   let hiddenId: number;
   let readerGroupId: number;
+  let accounts: AccountService;
 
   before(async () => {
     scratch = await createScratchDatabase('mapsapi');
     db = scratch.db;
     const harness = await buildHarness(db);
-    const accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silent });
+    accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silent });
     const sessions = new SessionService({ db, logger: silent });
     const groups = new GroupService({ audit: new DatabaseAuditSink(), db, logger: silent });
     const access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent });
@@ -718,6 +719,66 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
       });
       assert.equal(revoked.statusCode, 204);
       assert.equal((await open(token)).statusCode, 404);
+    });
+
+    it('goes dark when its maker is disabled or deleted, in the words a revoked link gets (A-31)', async () => {
+      // The link is the maker's view, so with no maker it is nobody's: not a canvas of
+      // unavailable tiles still showing the map's name, its titles and its layout, but the answer
+      // a link that never existed gets. Through the route, because the only thing deciding it is
+      // the join on the maker's account, and a resolver test hands the resolver its null.
+      const id = await makeMap('made-by-somebody-who-left', [
+        { id: 'w1', kind: 'status', objectId: sensorId, title: 'The sensor' },
+      ]);
+      // With a floor plan, which is served on the link's authority as the map is.
+      const png = Buffer.alloc(24);
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(png, 0);
+      png.writeUInt32BE(13, 8);
+      png.write('IHDR', 12, 'latin1');
+      png.writeUInt32BE(300, 16);
+      png.writeUInt32BE(200, 20);
+      const uploaded = await app.inject({
+        method: 'POST',
+        url: `/api/v1/maps/${String(id)}/background`,
+        headers: { ...as(author), 'content-type': 'image/png' },
+        payload: png,
+      });
+      assert.equal(uploaded.statusCode, 200, uploaded.body);
+      const token = (await makeShare(id, 'wall')).json<{ token: string }>().token;
+      const plan = () =>
+        app.inject({ method: 'GET', url: `/api/v1/public/maps/${token}/background` });
+      assert.equal((await open(token)).statusCode, 200);
+      assert.equal((await plan()).statusCode, 200);
+      const said = (response: { body: string }): string =>
+        (JSON.parse(response.body) as { error: { message: string } }).error.message;
+      const nobody = said(await open('this-token-was-never-issued-and-is-long-enough'));
+      const refused = async (): Promise<void> => {
+        const response = await open(token);
+        assert.equal(response.statusCode, 404, response.body);
+        assert.equal(said(response), nobody);
+      };
+
+      await db.query(`UPDATE user_account SET disabled = true WHERE login = 'author'`);
+      try {
+        await refused();
+        assert.equal((await plan()).statusCode, 404, 'the floor plan was still served');
+      } finally {
+        await db.query(`UPDATE user_account SET disabled = false WHERE login = 'author'`);
+      }
+      // Not revoked: the account came back, and so did the link.
+      assert.equal((await open(token)).statusCode, 200);
+
+      // A maker deleted since: the link's `created_by_user` goes null with it.
+      const departed = await accounts.create(
+        { login: 'departed', password: 'correct-horse-battery', role: 'readwrite' },
+        testActor,
+      );
+      await db.query(`UPDATE map_share SET created_by_user = $1 WHERE map_id = $2`, [
+        departed.id,
+        id,
+      ]);
+      await accounts.delete(departed.id, testActor);
+      await refused();
+      assert.equal((await plan()).statusCode, 404, 'the floor plan was still served');
     });
 
     it('refuses an expired link, in the same words as one that never existed', async () => {
