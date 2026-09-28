@@ -2,14 +2,19 @@ import { strict as assert } from 'node:assert';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { after, before, beforeEach, describe, it } from 'node:test';
+import { ConfigError, EX_CONFIG, startFailure } from '@ms/shared';
 import type { Database, Queryable } from '../src/db/pool.js';
 import { Migrator } from '../src/db/migrator.js';
 import { MIGRATIONS } from '../src/db/migrations/index.js';
 import {
+  atLeast,
+  EngineError,
+  MINIMUM_TIMESCALEDB,
   TimescaleEngine,
   type EngineCapabilities,
   type StorageEngine,
 } from '../src/timeseries/engine.js';
+import { engineOrRefuse } from '../src/main.js';
 import { alignDown } from '../src/timeseries/housekeeper.js';
 import { SqlTimeSeriesStore } from '../src/timeseries/store.js';
 import { ROLLUP_TIERS, tierById } from '../src/timeseries/tiers.js';
@@ -42,6 +47,11 @@ class DateBinEngine implements StorageEngine {
 
   check(): Promise<EngineCapabilities> {
     return Promise.resolve({ engine: this.name, version: null, compaction: false });
+  }
+
+  // Plain PostgreSQL has no compressed storage, so there is no limit on unpacking it to lift.
+  allowDecompression(): Promise<void> {
+    return Promise.resolve();
   }
 
   compactableChunks(): Promise<string[]> {
@@ -80,6 +90,80 @@ const ENGINE_TOKENS = [
   'hypertable_size',
   'timescaledb',
 ];
+
+/**
+ * The oldest TimescaleDB this build starts against (`P-226`).
+ *
+ * **Refused by its error code, against a stubbed database.** No second server version is run:
+ * the dev image carries one, 2.29, and the refusal is a comparison of the version it reports.
+ */
+describe('the TimescaleDB floor', () => {
+  /** A database that reports `extversion` as `version` and the Community licence. */
+  function reporting(version: string): Queryable {
+    return {
+      query: (sql: string) =>
+        Promise.resolve(
+          sql.includes('pg_extension') ? [{ extversion: version }] : [{ granted: 'timescale' }],
+        ),
+    } as unknown as Queryable;
+  }
+
+  it('compares versions as numbers, and refuses one it cannot read', () => {
+    const cases: [string, boolean][] = [
+      ['2.14.0', true],
+      ['2.14.1', true],
+      ['2.29.2', true],
+      ['3.0.0', true],
+      ['10.0.0', true],
+      ['2.14.0-dev', true],
+      ['2.13.1', false],
+      // As strings, "2.9.3" sorts after "2.14.0".
+      ['2.9.3', false],
+      ['1.99.99', false],
+      ['2.14', false],
+      ['nightly', false],
+      ['', false],
+    ];
+    for (const [found, supported] of cases) {
+      assert.equal(atLeast(found, MINIMUM_TIMESCALEDB), supported, found);
+    }
+  });
+
+  it('refuses an older engine at start-up, saying what it found and what to do', async () => {
+    const refused = await new TimescaleEngine().check(reporting('2.13.1')).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    assert.ok(refused instanceof EngineError);
+    assert.equal(refused.code, 'STORAGE_ENGINE_UNAVAILABLE');
+    assert.deepEqual(refused.context, { found: '2.13.1', minimum: '2.14.0' });
+    assert.match(refused.message, /2\.13\.1 is older than 2\.14\.0/u);
+    assert.match(refused.message, /ALTER EXTENSION timescaledb UPDATE/u);
+
+    const accepted = await new TimescaleEngine().check(reporting('2.14.0'));
+    assert.equal(accepted.version, '2.14.0');
+    assert.equal(accepted.compaction, true);
+  });
+
+  it('stops the service rather than restarting it into the same refusal', async () => {
+    const throwing = (error: Error) => ({ capabilities: () => Promise.reject(error) });
+    const q = {} as Queryable;
+
+    const refused = await engineOrRefuse(
+      throwing(new EngineError('TimescaleDB 2.13.1 is older than 2.14.0')),
+      q,
+    ).catch((error: unknown) => error);
+    assert.ok(refused instanceof ConfigError, 'a refusal, which exits 78');
+    assert.equal(startFailure(refused).status, EX_CONFIG);
+    assert.match(startFailure(refused).line, /2\.13\.1 is older than 2\.14\.0/u);
+
+    const other = await engineOrRefuse(throwing(new Error('connection reset')), q).catch(
+      (error: unknown) => error,
+    );
+    assert.ok(!(other instanceof ConfigError), 'anything else keeps exit 1');
+    assert.equal(startFailure(other).status, 1);
+  });
+});
 
 describe('storage engine boundary', () => {
   it('names an engine-specific function in no file but the engine and its migrations', async () => {
@@ -144,6 +228,13 @@ describe('storage engine boundary', () => {
     'timescaledb.compress_orderby',
     // Read to fail a migration with an explanation rather than a bare permission error.
     'timescaledb.license',
+    // `P-226`, and both part of compression rather than a further feature. The limit on how much
+    // one write may unpack, lifted per transaction by a backfill, a reap and a replay; and the
+    // chunk status that says a compressed chunk has been written to since. Both are in the
+    // 2.14.0 source, `MINIMUM_TIMESCALEDB`; the Windows finding predates them and did not check
+    // either by name.
+    'timescaledb.max_tuples_decompressed_per_dml_transaction',
+    '_timescaledb_functions.chunk_status',
   ];
 
   /**

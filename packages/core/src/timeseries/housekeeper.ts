@@ -3,8 +3,14 @@ import { AuditRepository } from '../audit/store.js';
 import type { Database, Queryable } from '../db/pool.js';
 import type { DiskReading, DiskWatcher } from './disk.js';
 import type { EngineCapabilities } from './engine.js';
-import { SqlTimeSeriesStore, type TimeSeriesStore } from './store.js';
-import { ROLLUP_TIERS, type RollupTier, type RollupTierId } from './tiers.js';
+import {
+  SqlTimeSeriesStore,
+  type BackfillClaim,
+  type BackfillRetry,
+  type TimeSeriesStore,
+  type WrittenReadings,
+} from './store.js';
+import { ROLLUP_TIERS, tierById, type RollupTier, type RollupTierId } from './tiers.js';
 import { ReportOutputRepository } from '../reports/delivery.js';
 import { ReportRunRepository } from '../reports/runs.js';
 
@@ -20,6 +26,56 @@ export const MAX_SLICES_PER_TIER = 8;
 
 /** Backfill entries collapsed into one window per pass. */
 export const MAX_BACKFILL_ENTRIES = 256;
+
+/**
+ * Channels one backfill transaction re-rolls (`P-226`).
+ *
+ * With a day per slice, this is what bounds a backfill transaction: at most this many channels'
+ * day of readings read, and this many times 288 five-minute buckets written. It is also what
+ * bounds the decompression that `allowDecompression` stops TimescaleDB refusing.
+ */
+export const BACKFILL_CHANNEL_BATCH = 250;
+
+/**
+ * The unit a backfill works in: one day of one batch of channels, in every tier (`P-226`).
+ *
+ * Days end on a day boundary, and a batch finishes a day in every tier before the next one
+ * starts, so however a pass ends, every tier has reached the same midnight and the continuation
+ * starts exactly there.
+ */
+export const BACKFILL_DAY_SECONDS = 86_400;
+
+/**
+ * The most batch-days one pass takes, however fast the machine (`P-226`).
+ *
+ * The pass is bounded by time first: it takes days until half the housekeeping interval has
+ * gone (see `#reroll`). This is the ceiling on a machine fast enough that time never binds, so a
+ * pass stays a bounded amount of work there too.
+ */
+export const MAX_BACKFILL_DAYS_PER_PASS = 64;
+
+/**
+ * When a backfill that failed is tried again (`P-226`).
+ *
+ * The next pass, twice; then it is parked, stops holding retention back, and is tried an hour
+ * later and daily after that. Not given up on: a failure that is the database's, such as a full
+ * disk, is one an operator fixes, and the entry should then just work.
+ */
+export const BACKFILL_RETRY: BackfillRetry = {
+  parkAfter: 3,
+  firstRetrySeconds: 3_600,
+  laterRetrySeconds: 86_400,
+};
+
+/**
+ * How old a write's oldest reading must be before ingestion lifts the decompression limit.
+ *
+ * No raw chunk younger than a day is ever compressed: `compression.rawAfterDays` is at least
+ * one, and a chunk is only compressed once its whole span is past that. Half a day leaves room
+ * for this process's clock to disagree with the database's, and a write that lifts the limit
+ * without needing to costs nothing.
+ */
+const COMPRESSED_WRITE_AGE_MS = 12 * 3_600_000;
 
 /** Chunks compressed per table per pass. Compression rewrites a chunk; it is not free. */
 const MAX_CHUNKS_PER_PASS = 4;
@@ -129,6 +185,11 @@ export interface HousekeeperOptions {
   reports?: boolean;
   /** Injectable so an eviction test does not have to wait out a real clock. */
   now?: () => Date;
+  /**
+   * A monotonic clock in milliseconds, which bounds how long a backfill pass runs (`P-226`).
+   * Injectable so a test can make a pass run out of time after a chosen number of days.
+   */
+  monotonicMs?: () => number;
 }
 
 /**
@@ -159,6 +220,7 @@ export class Housekeeper {
   readonly #disk: DiskWatcher | undefined;
   readonly #pruneReportsEnabled: boolean;
   readonly #now: () => Date;
+  readonly #monotonicMs: () => number;
   #lastDisk: DiskReading | null = null;
   #evictedChunks = 0;
   readonly #store: TimeSeriesStore;
@@ -187,38 +249,54 @@ export class Housekeeper {
     this.#disk = options.disk;
     this.#pruneReportsEnabled = options.reports ?? true;
     this.#now = options.now ?? (() => new Date());
+    this.#monotonicMs = options.monotonicMs ?? (() => Number(process.hrtime.bigint() / 1_000_000n));
   }
 
   /**
    * Records that samples landed in `[from, to)` behind a watermark, so the affected buckets are
    * rolled up again.
    *
-   * Ingestion (S-07) calls this when a probe replays its spool. Cheap enough to call for any
-   * batch whose oldest sample precedes the watermark; a no-op window is one row and one pass.
+   * For a caller that knows the window and not the channels, which re-rolls every channel in it.
+   * Ingestion knows both, and goes through `noteWritten`.
    */
-  async noteLateSamples(from: Date, to: Date, reason: string): Promise<void> {
-    await this.#db.tx((q) => this.#store.enqueueBackfill(q, from, to, reason));
+  async noteLateSamples(
+    from: Date,
+    to: Date,
+    reason: string,
+    channels: readonly number[] | null = null,
+  ): Promise<void> {
+    await this.#db.tx((q) => this.#store.enqueueBackfill(q, from, to, reason, channels));
     this.#logger.debug(
-      { from: from.toISOString(), to: to.toISOString(), reason },
+      { from: from.toISOString(), to: to.toISOString(), reason, channels: channels?.length },
       'backfill queued',
     );
   }
 
   /**
-   * Told by ingestion about every range of readings it writes; enqueues a backfill only when
-   * that range precedes a bucket already materialised.
+   * Readies ingestion's transaction for a write reaching back to `oldest` (`P-226`).
    *
-   * This is `LateDataSink`. One statement against `rollup_watermark`, run inside ingestion's own
-   * write transaction, so a replayed spool cannot leave the rollups quietly wrong: the readings
-   * and the promise to re-roll them commit or fail together.
+   * This is half of `LateDataSink`. A replayed spool can write into raw chunks that were
+   * compressed while the probe was away, and TimescaleDB refuses a write that unpacks more than
+   * its limit. Ingestion bounds the write by its batch, so the limit is lifted for this
+   * transaction, and only when the readings are old enough to be in a compressed chunk at all.
    */
-  async noteWrittenRange(q: Queryable, from: Date, to: Date): Promise<boolean> {
+  async prepareWrite(q: Queryable, oldest: Date): Promise<void> {
+    if (this.#now().getTime() - oldest.getTime() < COMPRESSED_WRITE_AGE_MS) return;
+    await this.#store.allowDecompression(q);
+  }
+
+  /**
+   * Told by ingestion about every reading it wrote; enqueues a backfill for the ones behind a
+   * bucket already materialised, naming their channels.
+   *
+   * The other half of `LateDataSink`, run inside ingestion's own write transaction, so a replayed
+   * spool cannot leave the rollups quietly wrong: the readings and the promise to re-roll them
+   * commit or fail together.
+   */
+  async noteWritten(q: Queryable, written: WrittenReadings): Promise<boolean> {
     return this.#store.enqueueBackfillIfLate(
       q,
-      from,
-      // Inclusive of the newest reading's own bucket: the range is [from, to] as ingestion sees
-      // it and [from, to) on the queue, so the last bucket has to be brought inside it.
-      new Date(to.getTime() + 1),
+      written,
       'readings written behind the rollup watermark',
     );
   }
@@ -384,57 +462,251 @@ export class Housekeeper {
     }
   }
 
-  /** Re-rolls windows where late data landed behind a watermark. */
+  /**
+   * Re-rolls windows where late data landed behind a watermark.
+   *
+   * **A failure is counted against the entries rather than left at the head of the queue**
+   * (`P-226`). An entry that failed every pass used to stay first in line for ever, and since
+   * compression and retention stop at the oldest pending backfill, it stopped them too. Now it is
+   * tried twice more and then parked: it stops holding them back, Core Health counts it, and it
+   * is tried again an hour later and daily after that.
+   */
   async #backfill(report: HousekeepingReport): Promise<void> {
     const claimed = await this.#db.tx((q) => this.#store.claimBackfill(q, MAX_BACKFILL_ENTRIES));
     if (claimed === null) return;
-
     report.backfillWindows = claimed.ids.length;
-    const watermarks = await this.#db.tx((q) => this.#store.watermarks(q));
 
-    // A window can be wider than one pass is allowed to re-roll — a probe that spooled for a
-    // fortnight, or a queue drained after a long stop. Deleting the queue entry once the slice
-    // budget ran out would abandon the rest of it silently, so what was not reached goes back
-    // on the queue before the claim is cleared.
-    let unfinishedFrom: number | null = null;
+    try {
+      await this.#reroll(claimed, report);
+    } catch (error: unknown) {
+      const described = describeError(error);
+      const { parked } = await this.#db.tx((q) =>
+        this.#store.failBackfill(q, claimed.ids, described.message, BACKFILL_RETRY),
+      );
+      this.#logger.error(
+        {
+          err: described,
+          from: claimed.from.toISOString(),
+          to: claimed.to.toISOString(),
+          entries: claimed.ids.length,
+          channels: claimed.entries.some((entry) => entry.channels === null)
+            ? 'all'
+            : new Set(claimed.entries.flatMap((entry) => entry.channels ?? [])).size,
+          parked,
+        },
+        parked > 0
+          ? 'backfill failed and is parked; it will be tried again later'
+          : 'backfill failed; it will be tried again on the next pass',
+      );
+      // Recorded by the step as well, so the pass reports it.
+      throw error;
+    }
+  }
 
-    for (const tier of ROLLUP_TIERS) {
-      const watermark = watermarks.get(tier.id);
-      // A tier that has never run has nothing to correct: its first forward pass will read this
-      // window from scratch.
-      if (watermark === undefined) continue;
+  /**
+   * Re-rolls one claim, a batch of channels at a time, and requeues whatever the pass did not
+   * reach.
+   *
+   * **Only the channels that arrived late** (`P-226`). The whole window used to be recomputed for
+   * every channel, which was right only while the source held every channel's readings for it. A
+   * replay into days past the raw retention wrote one channel into days that held nothing else,
+   * and the re-roll rebuilt every channel's buckets for those days from that one.
+   *
+   * **And beyond the source's retention, only buckets that do not exist yet.** There the source
+   * may hold nothing but the late readings, so recomputing even the late channel's own bucket
+   * would replace what it summarised with the few readings that are left. See `#backfillDay`.
+   *
+   * **Bounded by time, not by a count** (`P-226`). The pass takes batch-days, one day of one batch
+   * in every tier, until half the housekeeping interval has gone, then stops at the next day
+   * boundary. A slow or starved machine does fewer and a fast one catches up sooner, where a fixed
+   * count would overrun the interval on the first and idle on the second. **The price is that a
+   * pass's reach is not reproducible**: two runs over the same queue stop on different days. What
+   * is reproducible is that each stops on a boundary and continues from exactly there. The first
+   * batch-day is always taken, however long the claim took, so no machine is too slow to finish.
+   *
+   * **Each channel keeps its own window**, and batches are formed in channel order, so the same
+   * channels batch together from one pass to the next. A continuation is requeued for each
+   * channel from where its batch stopped or where its own window starts, whichever is later, so
+   * it never falls back to where another entry for other channels started.
+   */
+  async #reroll(claimed: BackfillClaim, report: HousekeepingReport): Promise<void> {
+    const started = this.#monotonicMs();
+    const budgetMs = (this.#config.intervalSeconds * 1_000) / 2;
 
-      const from = alignDown(claimed.from, tier.bucketSeconds);
-      const end = alignDown(claimed.to, tier.bucketSeconds).getTime() + tier.bucketSeconds * 1_000;
-      // Never past the watermark: beyond it is the forward roll's ground, not a correction.
-      const to = new Date(Math.min(end, watermark.getTime()));
-      if (to <= from) continue;
-
-      const progress = await this.#rollRange(tier, from, to, { replace: true, advance: false });
-      report.backfillBucketsWritten += progress.written;
-      if (progress.reached < to) {
-        const reached = progress.reached.getTime();
-        unfinishedFrom = unfinishedFrom === null ? reached : Math.min(unfinishedFrom, reached);
+    const windows = new Map<number, { from: number; to: number }>();
+    let every: readonly number[] | undefined;
+    for (const entry of claimed.entries) {
+      every ??=
+        entry.channels === null ? await this.#db.tx((q) => this.#store.allChannels(q)) : undefined;
+      for (const id of entry.channels ?? every ?? []) {
+        const held = windows.get(id);
+        windows.set(id, {
+          from: Math.min(held?.from ?? Infinity, entry.from.getTime()),
+          to: Math.max(held?.to ?? -Infinity, entry.to.getTime()),
+        });
       }
+    }
+    const channels = [...windows.keys()].sort((a, b) => a - b);
+
+    const watermarks = await this.#db.tx((q) => this.#store.watermarks(q));
+    const retention = this.#config.retention;
+    const keepBefore = new Map<RollupTierId, Date>();
+    // And where each tier's own retention ends. A bucket older than that would be dropped by the
+    // next pass, so writing it is work for nothing, and a probe whose clock is years behind would
+    // otherwise send the backfill back day by day to its first reading, holding retention back
+    // while it went.
+    const keptFrom = new Map<RollupTierId, number>();
+    for (const tier of ROLLUP_TIERS) {
+      const days =
+        tier.source.kind === 'raw'
+          ? retention.rawDays
+          : retention[tierById(tier.source.tier).retentionKey];
+      const horizon = await this.#db.tx((q) => this.#store.horizon(q, days));
+      keepBefore.set(tier.id, alignUp(horizon, tier.bucketSeconds));
+      const own = await this.#db.tx((q) => this.#store.horizon(q, retention[tier.retentionKey]));
+      keptFrom.set(tier.id, alignUp(own, tier.bucketSeconds).getTime());
+    }
+
+    // A window can be wider than one pass may re-roll — a probe that spooled for a fortnight, or
+    // a queue drained after a long stop. Deleting the queue entry once the pass was over would
+    // abandon the rest of it silently, so what was not reached goes back on the queue before the
+    // claim is cleared.
+    const requeue: { from: Date; to: Date; channels: number[] }[] = [];
+    const dayMs = BACKFILL_DAY_SECONDS * 1_000;
+    let days = 0;
+
+    for (let at = 0; at < channels.length; at += BACKFILL_CHANNEL_BATCH) {
+      const batch = channels.slice(at, at + BACKFILL_CHANNEL_BATCH);
+      let spanFrom = Infinity;
+      let spanTo = -Infinity;
+      for (const id of batch) {
+        const window = windows.get(id);
+        if (window === undefined) continue;
+        spanFrom = Math.min(spanFrom, window.from);
+        spanTo = Math.max(spanTo, window.to);
+      }
+
+      // Each tier's share of the span, aligned to its buckets, never older than its own
+      // retention and never past its watermark: beyond that is the forward roll's ground, not a
+      // correction. A tier that has never run has nothing to correct; its first forward pass will
+      // read this window from scratch.
+      const ranges: { tier: RollupTier; from: number; to: number }[] = [];
+      for (const tier of ROLLUP_TIERS) {
+        const watermark = watermarks.get(tier.id);
+        if (watermark === undefined) continue;
+        const bucketMs = tier.bucketSeconds * 1_000;
+        const from = Math.max(
+          alignDown(new Date(spanFrom), tier.bucketSeconds).getTime(),
+          keptFrom.get(tier.id) ?? -Infinity,
+        );
+        const to = Math.min(
+          alignDown(new Date(spanTo), tier.bucketSeconds).getTime() + bucketMs,
+          watermark.getTime(),
+        );
+        if (to > from) ranges.push({ tier, from, to });
+      }
+      const end = Math.max(...ranges.map((range) => range.to));
+
+      let cursor = alignDown(
+        new Date(Math.min(...ranges.map((range) => range.from))),
+        BACKFILL_DAY_SECONDS,
+      ).getTime();
+      while (cursor < end) {
+        // **Time-boxed, and never to nothing**: the first day of the pass is always taken.
+        if (
+          days > 0 &&
+          (this.#aborted() ||
+            days >= MAX_BACKFILL_DAYS_PER_PASS ||
+            this.#monotonicMs() - started >= budgetMs)
+        ) {
+          break;
+        }
+        const dayEnd = cursor + dayMs;
+        for (const range of ranges) {
+          const from = Math.max(cursor, range.from);
+          const to = Math.min(dayEnd, range.to);
+          if (to <= from) continue;
+          report.backfillBucketsWritten += await this.#backfillDay(
+            range.tier,
+            new Date(from),
+            new Date(to),
+            batch,
+            keepBefore.get(range.tier.id) ?? new Date(from),
+          );
+        }
+        days += 1;
+        cursor = dayEnd;
+      }
+      if (cursor < end) requeue.push(...continuations(batch, windows, cursor));
     }
 
     await this.#db.tx(async (q) => {
-      if (unfinishedFrom !== null) {
+      for (const rest of requeue) {
         await this.#store.enqueueBackfill(
           q,
-          new Date(unfinishedFrom),
-          claimed.to,
+          rest.from,
+          rest.to,
           'continuation of an unfinished backfill',
+          rest.channels,
         );
       }
       await this.#store.clearBackfill(q, claimed.ids);
     });
-    if (unfinishedFrom !== null) {
+    if (requeue.length > 0) {
       this.#logger.info(
-        { from: new Date(unfinishedFrom).toISOString(), to: claimed.to.toISOString() },
-        'backfill window requeued for the next pass',
+        {
+          days,
+          entries: requeue.length,
+          channels: requeue.reduce((sum, rest) => sum + rest.channels.length, 0),
+          from: new Date(Math.min(...requeue.map((rest) => rest.from.getTime()))).toISOString(),
+        },
+        'backfill requeued for the next pass',
       );
     }
+  }
+
+  /**
+   * Re-rolls `[from, to)`, at most a day, of one tier for a batch of channels.
+   *
+   * One transaction, or two where the day crosses `keepBefore`, the first bucket wholly inside the
+   * source's configured retention (`P-226`):
+   * - **From `keepBefore` on, `recompute`.** Retention never drops a chunk it has not wholly
+   *   passed, so the source holds everything each of these buckets was built from.
+   * - **Before it, `keep`**: only buckets that do not exist yet are written. The source there may
+   *   hold only the late readings.
+   *
+   * **What the split does not cover**: it is the configured retention, not what the source
+   * actually holds. Disk eviction (`S-17`) drops raw data younger than that, and so does a
+   * retention that was shortened and then lengthened again. A late reading into such a window is
+   * recomputed for its own channel from what is left.
+   *
+   * Every transaction lifts the decompression limit, because the tiers it writes are compressed
+   * after a day or more and a backfill is, by definition, old ground.
+   */
+  async #backfillDay(
+    tier: RollupTier,
+    from: Date,
+    to: Date,
+    channels: readonly number[],
+    keepBefore: Date,
+  ): Promise<number> {
+    const parts: [Date, Date, 'keep' | 'recompute'][] =
+      keepBefore <= from
+        ? [[from, to, 'recompute']]
+        : keepBefore >= to
+          ? [[from, to, 'keep']]
+          : [
+              [from, keepBefore, 'keep'],
+              [keepBefore, to, 'recompute'],
+            ];
+    let written = 0;
+    for (const [start, boundary, conflict] of parts) {
+      written += await this.#db.tx(async (q) => {
+        await this.#store.allowDecompression(q);
+        return this.#store.rollUp(q, tier, start, boundary, { channels, conflict });
+      });
+    }
+    return written;
   }
 
   /** Materialises each tier up to the newest bucket it is allowed to complete. */
@@ -472,10 +744,7 @@ export class Housekeeper {
         continue;
       }
 
-      const progress = await this.#rollRange(tier, watermark, target, {
-        replace: false,
-        advance: true,
-      });
+      const progress = await this.#rollRange(tier, watermark, target);
       tierReport.bucketsWritten = progress.written;
       const reached = await this.#db.tx((q) => this.#store.watermarks(q));
       const now = reached.get(tier.id) ?? watermark;
@@ -486,18 +755,17 @@ export class Housekeeper {
   }
 
   /**
-   * Rolls `[from, to)` in bounded slices, reporting the buckets written and how far it got.
+   * Rolls `[from, to)` forward in bounded slices, reporting the buckets written and how far it
+   * got.
    *
    * Each slice commits with its own watermark advance, so a crash halfway through leaves the
    * watermark pointing at the last slice that actually landed — never past it. The slice budget
-   * means `reached` can fall short of `to`; every caller has to decide what to do about that,
-   * which is the point of returning it.
+   * means `reached` can fall short of `to`; the caller reports it as behind.
    */
   async #rollRange(
     tier: RollupTier,
     from: Date,
     to: Date,
-    options: { replace: boolean; advance: boolean },
   ): Promise<{ written: number; reached: Date }> {
     const sliceMs = tier.sliceBuckets * tier.bucketSeconds * 1_000;
     let cursor = from;
@@ -509,10 +777,8 @@ export class Housekeeper {
       const boundary = end;
       const start = cursor;
       written += await this.#db.tx(async (q) => {
-        const count = await this.#store.rollUp(q, tier, start, boundary, {
-          replace: options.replace,
-        });
-        if (options.advance) await this.#store.advanceWatermark(q, tier, boundary);
+        const count = await this.#store.rollUp(q, tier, start, boundary);
+        await this.#store.advanceWatermark(q, tier, boundary);
         return count;
       });
       cursor = end;
@@ -901,10 +1167,45 @@ export class Housekeeper {
   }
 }
 
+/**
+ * What is left of each channel's window once its batch has reached `reached`.
+ *
+ * Grouped by window, so channels that share one share an entry. A channel whose own window
+ * starts later than `reached` keeps its own start rather than falling back to its batch's.
+ */
+function continuations(
+  batch: readonly number[],
+  windows: ReadonlyMap<number, { from: number; to: number }>,
+  reached: number,
+): { from: Date; to: Date; channels: number[] }[] {
+  const grouped = new Map<string, { from: Date; to: Date; channels: number[] }>();
+  for (const id of batch) {
+    const window = windows.get(id);
+    if (window === undefined) continue;
+    const from = Math.max(reached, window.from);
+    if (window.to <= from) continue;
+    const key = `${String(from)}:${String(window.to)}`;
+    const group = grouped.get(key) ?? {
+      from: new Date(from),
+      to: new Date(window.to),
+      channels: [],
+    };
+    group.channels.push(id);
+    grouped.set(key, group);
+  }
+  return [...grouped.values()];
+}
+
 /** Floors an instant to a bucket boundary, matching the engine's Unix-epoch alignment. */
 export function alignDown(at: Date, bucketSeconds: number): Date {
   const size = bucketSeconds * 1_000;
   return new Date(Math.floor(at.getTime() / size) * size);
+}
+
+/** The first bucket boundary at or after an instant. */
+export function alignUp(at: Date, bucketSeconds: number): Date {
+  const size = bucketSeconds * 1_000;
+  return new Date(Math.ceil(at.getTime() / size) * size);
 }
 
 function emptyReport(): HousekeepingReport {

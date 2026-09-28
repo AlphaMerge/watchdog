@@ -979,6 +979,7 @@ cost: **light** · evaluated by the core, never by a probe
 | `uptime` | Uptime | s | — |
 | `rollupLag` | Rollup lag (worst tier) | s | default limits: warn above 3600, error above 86400 |
 | `backfillQueue` | Rollup backfill queue | windows | — |
+| `backfillParked` | Rollup backfills parked | windows | default limits: warn above 0 |
 | `diskFree` | Free disk space | % | default limits: error below 10, warn below 20 |
 | `diskFreeBytes` | Free disk space | MB | — |
 | `databaseSize` | Database size | MB | — |

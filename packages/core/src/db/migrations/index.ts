@@ -55,6 +55,7 @@ import { migration054 } from './054-map-share-maker.js';
 import { migration055 } from './055-rediscovery-problem.js';
 import { migration056 } from './056-skipped-recipients.js';
 import { migration057 } from './057-rediscovery-version.js';
+import { migration058 } from './058-backfill-channels.js';
 import { migration043 } from './043-request-settled-at.js';
 
 /**
@@ -121,6 +122,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration055,
   migration056,
   migration057,
+  migration058,
 ];
 
 export type { Migration } from './types.js';

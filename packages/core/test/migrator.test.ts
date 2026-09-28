@@ -327,6 +327,61 @@ describe(
       }
     });
 
+    it('adds and takes back a backfill’s channels and failures (058)', async () => {
+      // `P-226`. An entry queued before 058 knows no channels, so it must come through as NULL,
+      // which re-rolls every channel as before. The rollback is checked on its own: rolling back
+      // the whole list drops the table at 004 and would hide a column 058 left behind.
+      const fresh = await createScratchDatabase('backfillcols');
+      try {
+        const shape = async (): Promise<string[]> => {
+          const rows = await fresh.db.query<{ item: string }>(
+            `SELECT 'column ' || column_name AS item FROM information_schema.columns
+             WHERE table_name = 'rollup_backfill'
+             UNION ALL
+             SELECT 'constraint ' || conname FROM pg_constraint
+             WHERE conrelid = 'rollup_backfill'::regclass
+             ORDER BY 1`,
+          );
+          return rows.map((row) => row.item);
+        };
+        await migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 57),
+        ).up();
+        const before = await shape();
+        await fresh.db.query(
+          `INSERT INTO rollup_backfill (from_time, to_time, reason)
+           VALUES (now() - interval '1 day', now(), 'queued before 058')`,
+        );
+
+        const through = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 58),
+        );
+        await through.up();
+        const old = await fresh.db.query<{ channel_ids: number[] | null; attempts: number }>(
+          'SELECT channel_ids, attempts FROM rollup_backfill',
+        );
+        assert.deepEqual(old, [{ channel_ids: null, attempts: 0 }]);
+        await fresh.db.query(
+          `INSERT INTO rollup_backfill
+             (from_time, to_time, reason, channel_ids, attempts, last_error, failed_at, retry_at)
+           VALUES (now() - interval '1 day', now(), 'parked', '{7}', 3, 'full', now(),
+                   now() + interval '1 hour')`,
+        );
+
+        await through.down(1);
+        assert.deepEqual(await shape(), before, 'exactly the table 057 left');
+        const kept = await fresh.db.query<{ n: number }>(
+          'SELECT count(*)::int AS n FROM rollup_backfill',
+        );
+        assert.equal(kept[0]?.n, 2, 'and every entry, which the previous build re-rolls whole');
+        await through.up();
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('adds and takes back a rule’s last problem and a message’s missed recipients (055, 056)', async () => {
       // `A-28` keeps why a rediscovery firing was refused on the rule; `M-19` keeps who a sent
       // message did not reach on the request. Both are text with an empty default, so a row

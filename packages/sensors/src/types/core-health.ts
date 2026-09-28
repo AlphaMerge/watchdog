@@ -138,6 +138,21 @@ const CHANNELS: readonly ChannelDef[] = [
     },
   },
   { key: 'backfillQueue', name: 'Rollup backfill queue', unit: 'windows' },
+  // `P-226`. Of the queue above, the entries that have failed three times and are parked: they no
+  // longer hold compression and retention back, and are tried again an hour later and daily after
+  // that. Until one succeeds, the summarised graphs for its window leave out the readings that
+  // arrived late. **Any is the warning**, because nothing parks on a healthy installation. The
+  // entry's own error is in the sensor's message; a limit's message cannot carry it.
+  {
+    key: 'backfillParked',
+    name: 'Rollup backfills parked',
+    unit: 'windows',
+    limits: {
+      upperWarning: 0,
+      warningMessage:
+        'a rollup backfill keeps failing; summarised graphs are missing readings that arrived late',
+    },
+  },
   // **The disk the readings are on** (`S-17`), which until that ticket nothing in this system
   // knew anything about. A percentage rather than bytes for the alarm, because a threshold in
   // gigabytes is wrong on every installation but the one it was written for; the bytes are here

@@ -4,12 +4,7 @@ import type { HousekeepingConfig } from '@ms/shared';
 import { Migrator } from '../src/db/migrator.js';
 import { MIGRATIONS } from '../src/db/migrations/index.js';
 import type { Database } from '../src/db/pool.js';
-import {
-  Housekeeper,
-  alignDown,
-  MAX_BACKFILL_ENTRIES,
-  MAX_SLICES_PER_TIER,
-} from '../src/timeseries/housekeeper.js';
+import { Housekeeper, alignDown, MAX_BACKFILL_ENTRIES } from '../src/timeseries/housekeeper.js';
 import { SqlTimeSeriesStore } from '../src/timeseries/store.js';
 import { ROLLUP_TIERS, SAMPLE_TABLES } from '../src/timeseries/tiers.js';
 import {
@@ -323,7 +318,9 @@ describe(
       // A probe reconnects and replays its spool (R-03): a reading lands inside a bucket that
       // was summarised while the probe was away.
       await insertSamples(db, CHANNEL, [[new Date(base.getTime() + 180_000), 50]]);
-      await keeper.noteLateSamples(base, new Date(base.getTime() + 5 * MINUTE_MS), 'probe replay');
+      await keeper.noteLateSamples(base, new Date(base.getTime() + 5 * MINUTE_MS), 'probe replay', [
+        CHANNEL,
+      ]);
       const report = await keeper.runOnce();
 
       assert.equal(report.backfillWindows, 1);
@@ -352,7 +349,7 @@ describe(
       assert.equal(remaining[0]?.count, '0', 'the queue entry is consumed');
     });
 
-    it('removes a bucket whose readings have all gone', async () => {
+    it('keeps a bucket whose raw readings have gone', async () => {
       const base = baseInstant();
       await seed(db, base);
       const keeper = housekeeper();
@@ -361,21 +358,29 @@ describe(
       const gapStart = new Date(base.getTime() + 10 * MINUTE_MS);
       assert.ok(at(await readTier(db, 'sample_5m', CHANNEL), gapStart), 'present to begin with');
 
+      // Raw readings go in two ways. Retention drops them, and the five-minute bucket is then the
+      // only record of them, which is what a coarser tier is for. A reap takes them, and takes the
+      // buckets in the same statement. Neither needs a backfill to remove the bucket, and this
+      // test used to require that it did: a backfill cleared its window for every channel before
+      // rebuilding it, and after a replay past the raw retention it rebuilt one (`P-226`).
       await db.query('DELETE FROM sample WHERE channel_id = $1 AND time >= $2 AND time < $3', [
         CHANNEL,
         gapStart,
         new Date(gapStart.getTime() + 5 * MINUTE_MS),
       ]);
-      await keeper.noteLateSamples(gapStart, new Date(gapStart.getTime() + 5 * MINUTE_MS), 'test');
+      await keeper.noteLateSamples(gapStart, new Date(gapStart.getTime() + 5 * MINUTE_MS), 'test', [
+        CHANNEL,
+      ]);
       await keeper.runOnce();
 
-      // ON CONFLICT alone would have left this bucket standing for ever, updated by nothing —
-      // which is why a backfill clears its window before rebuilding it.
-      assert.equal(at(await readTier(db, 'sample_5m', CHANNEL), gapStart), undefined);
+      const bucket = at(await readTier(db, 'sample_5m', CHANNEL), gapStart);
+      assert.ok(bucket, 'a backfill never deletes');
+      assert.equal(bucket.sample_count, 1);
+      assert.equal(bucket.value_sum, 100);
       const hour = at(await readTier(db, 'sample_1h', CHANNEL), base);
       assert.ok(hour);
-      assert.equal(hour.sample_count, 3, 'and the hour above it shrank to match');
-      assert.equal(hour.value_sum, 60);
+      assert.equal(hour.sample_count, 4, 'and the hour above it still counts it');
+      assert.equal(hour.value_sum, 160);
     });
 
     it('never moves a watermark backwards', async () => {
@@ -385,7 +390,9 @@ describe(
       await keeper.runOnce();
 
       const before = await db.tx((q) => repo.watermarks(q));
-      await keeper.noteLateSamples(base, new Date(base.getTime() + 5 * MINUTE_MS), 'test');
+      await keeper.noteLateSamples(base, new Date(base.getTime() + 5 * MINUTE_MS), 'test', [
+        CHANNEL,
+      ]);
       await keeper.runOnce();
       const afterwards = await db.tx((q) => repo.watermarks(q));
 
@@ -517,8 +524,10 @@ describe(
     });
 
     it('re-queues a backfill window it could not finish in one pass', async () => {
-      // Thirty days of correction, and the five-minute tier is allowed eight one-day slices per
-      // pass. The queue entry must not be deleted with twenty-two days of it unread.
+      // Thirty days of correction, and a pass that runs out of time after eight of them. The
+      // queue entry must not be deleted with twenty-two days of it unread. The pass is bounded
+      // by time (`P-226`), so the clock is one that has spent an eighth of the budget, half the
+      // interval, every time it is read.
       const to = new Date(alignDown(new Date(), 300).getTime());
       const from = new Date(to.getTime() - 30 * DAY_MS);
       for (const tier of ROLLUP_TIERS) {
@@ -526,22 +535,36 @@ describe(
           tier.id,
         ]);
       }
-      await housekeeper().noteLateSamples(from, to, 'long outage');
+      await housekeeper().noteLateSamples(from, to, 'long outage', [CHANNEL]);
 
-      const report = await housekeeper().runOnce();
+      const step = (housekeeping().intervalSeconds * 1_000) / 2 / 8;
+      let clock = -step;
+      const keeper = new Housekeeper({
+        db,
+        logger: silent,
+        config: housekeeping(),
+        monotonicMs: () => (clock += step),
+      });
+      const report = await keeper.runOnce();
       assert.equal(report.backfillWindows, 1);
 
-      const queued = await db.query<{ from_time: Date; to_time: Date; reason: string }>(
-        'SELECT from_time, to_time, reason FROM rollup_backfill',
-      );
+      const queued = await db.query<{
+        from_time: Date;
+        to_time: Date;
+        reason: string;
+        channel_ids: number[] | null;
+      }>('SELECT from_time, to_time, reason, channel_ids FROM rollup_backfill');
       assert.equal(queued.length, 1, 'the remainder went back on the queue');
       const remainder = queued[0];
       assert.ok(remainder);
-      const expected = alignDown(from, 300).getTime() + MAX_SLICES_PER_TIER * DAY_MS;
+      assert.deepEqual(remainder.channel_ids, [CHANNEL], 'for the same channels');
+      // A backfill day ends on a day boundary in every tier (`P-226`), so the first is the
+      // part-day from `from` to midnight and the pass ends on a midnight all tiers share.
+      const expected = alignDown(from, 86_400).getTime() + 8 * DAY_MS;
       assert.equal(
         remainder.from_time.getTime(),
         expected,
-        'starting exactly where the slice budget ran out',
+        'starting exactly where the pass ran out of time',
       );
       assert.equal(remainder.to_time.getTime(), to.getTime());
     });

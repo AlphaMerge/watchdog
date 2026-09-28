@@ -80,7 +80,7 @@ import { DeliveryLoop } from './notifications/delivery/loop.js';
 import { TemplateService } from './notifications/templates.js';
 import { TriggerService } from './triggers/service.js';
 import { InheritanceResolver } from './settings/inheritance.js';
-import { Database } from './db/pool.js';
+import { Database, type Queryable } from './db/pool.js';
 import { MigrationError, Migrator } from './db/migrator.js';
 import { MIGRATIONS } from './db/migrations/index.js';
 import { refuseSchema } from './db/schema-gate.js';
@@ -92,7 +92,8 @@ import { ResultCacheInvalidator } from './ingestion/invalidation.js';
 import { Ingestor } from './ingestion/ingestor.js';
 import { IngestionService } from './ingestion/service.js';
 import { HistoryService } from './timeseries/history.js';
-import { SqlTimeSeriesStore } from './timeseries/store.js';
+import { EngineError, type EngineCapabilities } from './timeseries/engine.js';
+import { SqlTimeSeriesStore, type TimeSeriesStore } from './timeseries/store.js';
 import { Housekeeper } from './timeseries/housekeeper.js';
 import { ProbeEndpoint } from './transport/probe-endpoint.js';
 import { DiscoveryService } from './discovery/service.js';
@@ -280,7 +281,7 @@ async function serve(): Promise<void> {
   // Which engine, and what it can do. Reported rather than assumed: a database started under
   // the Apache licence has no compaction, and the housekeeping loop needs to know that before
   // it spends every pass asking for it.
-  const engine = await store.capabilities(db);
+  const engine = await engineOrRefuse(store, db);
   logger.info(
     {
       postgres: serverVersion.split(' ').slice(0, 2).join(' '),
@@ -1371,6 +1372,27 @@ async function main(): Promise<void> {
   }
 
   await serve();
+}
+
+/**
+ * Which engine the database has, and what it can do, or a refusal to start.
+ *
+ * **A database this build cannot use is a `ConfigError`** (`P-226`): no TimescaleDB extension, or
+ * one older than `MINIMUM_TIMESCALEDB`. Restarting finds the same database and refuses again, so
+ * it exits 78 and the unit's `RestartPreventExitStatus=` stops it at once, with the reason at the
+ * top of `systemctl status` and the start limit left for the operator's restart (`P-222`).
+ * Anything else the check throws keeps exit 1.
+ */
+export async function engineOrRefuse(
+  store: Pick<TimeSeriesStore, 'capabilities'>,
+  q: Queryable,
+): Promise<EngineCapabilities> {
+  try {
+    return await store.capabilities(q);
+  } catch (error) {
+    if (error instanceof EngineError) throw new ConfigError(error.message, { cause: error });
+    throw error;
+  }
 }
 
 // Only run when executed as a program, so tests can import the parser.

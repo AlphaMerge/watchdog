@@ -347,6 +347,61 @@ describe(
         'SELECT count(*) AS count FROM rollup_backfill',
       );
       assert.equal(still[0]?.count, '1');
+
+      // **Only the channels that were late, and only readings that were written** (`P-226`). A
+      // backfill re-rolls exactly the channels an entry names, so one that named a channel whose
+      // readings were current, or a duplicate that changed nothing, would re-roll for nothing.
+      await db.query('DELETE FROM rollup_backfill');
+      const twoHours = new Date(Date.now() - 2 * 3_600_000);
+      const threeHours = new Date(Date.now() - 3 * 3_600_000);
+      await it0.submit({
+        source: 'a',
+        samples: [
+          { channelId: 2001, at: twoHours, value: 1 },
+          { channelId: 2002, at: new Date(), value: 1 },
+          { channelId: 2003, at: threeHours, value: 1 },
+          { channelId: 2003, at: twoHours, value: 1 },
+        ],
+      });
+      const named = await db.query<{ from_time: Date; to_time: Date; channel_ids: number[] }>(
+        'SELECT from_time, to_time, channel_ids FROM rollup_backfill',
+      );
+      assert.equal(named.length, 1);
+      assert.deepEqual(named[0]?.channel_ids, [2001, 2003]);
+      assert.equal(named[0].from_time.getTime(), threeHours.getTime());
+      assert.equal(
+        named[0].to_time.getTime(),
+        twoHours.getTime() + 1,
+        'the newest late one, inclusive',
+      );
+
+      await db.query('DELETE FROM rollup_backfill');
+      await it0.submit({ source: 'a', samples: [{ channelId: 2001, at: twoHours, value: 1 }] });
+      const duplicate = await db.query<{ count: string }>(
+        'SELECT count(*) AS count FROM rollup_backfill',
+      );
+      assert.equal(
+        duplicate[0]?.count,
+        '0',
+        'a duplicate wrote nothing, so there is nothing to re-roll',
+      );
+
+      // A write that mixes a new late reading with a duplicate one names only the new one's
+      // channel: the duplicate's buckets already count it.
+      await it0.submit({
+        source: 'a',
+        samples: [
+          { channelId: 2001, at: twoHours, value: 1 },
+          { channelId: 2004, at: twoHours, value: 1 },
+        ],
+      });
+      const mixed = await db.query<{ channel_ids: number[] }>(
+        'SELECT channel_ids FROM rollup_backfill',
+      );
+      assert.deepEqual(
+        mixed.map((row) => row.channel_ids),
+        [[2004]],
+      );
       await it0.stop();
     });
 

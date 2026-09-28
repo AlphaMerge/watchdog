@@ -91,6 +91,11 @@ const CORE_METRICS: readonly Metric[] = [
     name: 'ms_core_rollup_backfill_windows',
     help: 'Windows waiting to be rolled up again after late data arrived.',
   },
+  {
+    key: 'backfillParked',
+    name: 'ms_core_rollup_backfill_parked_windows',
+    help: 'Of those, windows parked after failing repeatedly; retried hourly, then daily.',
+  },
   // The machine's memory, not the process's (`P-208`) — which is why these are exported when the
   // core's own resident memory is not: `prom-client`'s defaults describe the process, and nothing
   // standard in them says what the machine has left. Both the lowest of the last thirty seconds.

@@ -212,10 +212,18 @@ export class CoreHealthService {
      * of zeros is what a perfectly idle, perfectly healthy core looks like. `GET /core-health` is
      * the other case: an operator asking how the core is, at the moment it is least well, was
      * answered 500 — losing the CPU, the memory and the ingest queue too, none of which need a
-     * database at all. There the four database-backed channels become gaps and the rest answers.
+     * database at all. There the database-backed channels become gaps and the rest answers.
      */
     degradeOnDatabaseError = false,
   ): Promise<CoreHealthReading> {
+    return (await this.#read(meter, degradeOnDatabaseError)).reading;
+  }
+
+  /** The reading, and the parked backfill's error, which is words and not a channel. */
+  async #read(
+    meter: CpuMeter,
+    degradeOnDatabaseError: boolean,
+  ): Promise<{ reading: CoreHealthReading; parkedError: string | null }> {
     const now = this.#now();
     const ingestion = this.#sources.ingestion();
     const stream = this.#sources.stream();
@@ -230,7 +238,7 @@ export class CoreHealthService {
     const memory = this.#process.memoryUsage();
     const queues = await this.#queues(now, degradeOnDatabaseError);
 
-    return {
+    const reading: CoreHealthReading = {
       ingestQueue: ingestion.queuedRows,
       writeLatency: ingestion.writeMs.p95,
       ingestRefused: ingestion.refusedRows,
@@ -246,6 +254,7 @@ export class CoreHealthService {
       uptime: Math.round(this.#process.uptime()),
       rollupLag: queues.rollup,
       backfillQueue: queues.backfill,
+      backfillParked: queues.parked.count,
       // Gaps, not zeros, when this core has no disk it can speak for. `CLAUDE.md`: a Down sensor
       // records no channel values, and a channel that cannot be measured is the same case.
       diskFree: disk === null ? null : disk.freePercent,
@@ -285,6 +294,7 @@ export class CoreHealthService {
       resultsFutureDated: this.#sources.ingestionDiscards().discardedFutureTime,
       reactionsDeferred: ingestion.deferredReactions,
     };
+    return { reading, parkedError: queues.parked.lastError };
   }
 
   /**
@@ -306,8 +316,9 @@ export class CoreHealthService {
     // `acceptResults` unchanged, and a second shape would be a second code path.
     const at = this.#now().toISOString();
     let reading: CoreHealthReading;
+    let parkedError: string | null;
     try {
-      reading = await this.read(this.#sweepCpu);
+      ({ reading, parkedError } = await this.#read(this.#sweepCpu, false));
     } catch (error: unknown) {
       // **The sensor fails rather than the sweep**, and it fails with a message. A Core Health
       // sensor that silently stopped reporting is the failure this whole ticket exists to make
@@ -337,7 +348,7 @@ export class CoreHealthService {
       outcome: 'ok' as const,
       durationMs: 0,
       channels,
-      message: describe(reading),
+      message: describe(reading, parkedError),
     }));
     this.#evaluated += results.length;
     await this.#ingest(results);
@@ -380,6 +391,7 @@ export class CoreHealthService {
     delivery: { pending: number | null; oldestPendingAgeMs: number | null; failed: number | null };
     rollup: number | null;
     backfill: number | null;
+    parked: { count: number | null; lastError: string | null };
     reap: number | null;
   }> {
     try {
@@ -387,6 +399,7 @@ export class CoreHealthService {
         delivery: await this.#sources.delivery(q),
         rollup: await this.#rollupLag(q, now),
         backfill: await count(q, 'SELECT count(*)::int AS n FROM rollup_backfill'),
+        parked: await parkedBackfill(q),
         reap: await count(q, 'SELECT count(*)::int AS n FROM channel_reap'),
       }));
     } catch (error: unknown) {
@@ -399,6 +412,7 @@ export class CoreHealthService {
         delivery: { pending: null, oldestPendingAgeMs: null, failed: null },
         rollup: null,
         backfill: null,
+        parked: { count: null, lastError: null },
         reap: null,
       };
     }
@@ -446,7 +460,7 @@ export function readingsFrom(reading: CoreHealthReading): ChannelReading[] {
 }
 
 /** The one line an operator reads in a list, naming what is not zero. */
-function describe(reading: CoreHealthReading): string {
+function describe(reading: CoreHealthReading, parkedError: string | null = null): string {
   const parts: string[] = [];
   const queue = reading['ingestQueue'];
   parts.push(queue === null || queue === undefined ? 'queue unknown' : `${String(queue)} queued`);
@@ -470,7 +484,25 @@ function describe(reading: CoreHealthReading): string {
   if (silent !== null && silent !== undefined && silent > 0) {
     parts.push(`${String(silent)} connected but not delivering`);
   }
+  // Last, because it carries a sentence of its own: the parked entry's error, which is what an
+  // operator needs and what the channel's limit cannot say (`P-226`).
+  const parked = reading['backfillParked'];
+  if (parked !== null && parked !== undefined && parked > 0) {
+    const what = `${String(parked)} rollup backfill${parked === 1 ? '' : 's'} parked`;
+    parts.push(parkedError === null ? what : `${what}, the last failing with: ${parkedError}`);
+  }
   return parts.join(', ');
+}
+
+/** How many backfills are parked, and the error of the one that failed last (`P-226`). */
+async function parkedBackfill(q: Queryable): Promise<{ count: number; lastError: string | null }> {
+  const rows = await q.query<{ n: number; last_error: string | null }>(
+    `SELECT count(*)::int AS n,
+            (array_agg(last_error ORDER BY failed_at DESC, id DESC))[1] AS last_error
+     FROM rollup_backfill
+     WHERE retry_at IS NOT NULL`,
+  );
+  return { count: rows[0]?.n ?? 0, lastError: rows[0]?.last_error ?? null };
 }
 
 async function count(q: Queryable, sql: string): Promise<number> {

@@ -42,6 +42,61 @@ export interface ChannelRef {
   decimals: number | null;
 }
 
+/**
+ * How a roll treats a bucket that already exists (`P-226`).
+ *
+ * - `recompute` replaces it with what the source holds now. Right wherever the source still holds
+ *   everything that bucket was built from.
+ * - `keep` leaves it alone and writes only buckets that do not exist yet. Right beyond the
+ *   source's retention, where the source may hold only the readings that arrived late: rebuilding
+ *   from those would replace a complete bucket with a bucket of a few readings.
+ */
+export type RollConflict = 'recompute' | 'keep';
+
+export interface RollOptions {
+  /** The channels to roll, or every channel when absent. Never empty: that would roll nothing. */
+  readonly channels?: readonly number[];
+  readonly conflict?: RollConflict;
+}
+
+/** Readings as they were written, in two parallel arrays, as ingestion already holds them. */
+export interface WrittenReadings {
+  readonly channelIds: readonly number[];
+  readonly times: readonly Date[];
+}
+
+/** One queue entry: a window, and the channels whose readings in it arrived late. */
+export interface BackfillEntry {
+  readonly from: Date;
+  readonly to: Date;
+  /** Null for an entry that does not know, which re-rolls every channel. */
+  readonly channels: readonly number[] | null;
+}
+
+/** The entries one pass re-rolls (`P-226`). */
+export interface BackfillClaim {
+  readonly ids: readonly string[];
+  readonly entries: readonly BackfillEntry[];
+  /** The span of all of them, for the log. */
+  readonly from: Date;
+  readonly to: Date;
+  /** Whether this is a parked entry, claimed on its own because it is due a retry. */
+  readonly parked: boolean;
+}
+
+/** When an entry that failed is tried again. */
+export interface BackfillRetry {
+  /** Failures after which an entry is parked, and stops holding retention back. */
+  readonly parkAfter: number;
+  /** How long after the failure that parks it. */
+  readonly firstRetrySeconds: number;
+  /** How long after every failure after that. */
+  readonly laterRetrySeconds: number;
+}
+
+/** The longest error a queue entry keeps: one line for Core Health, as the column requires. */
+export const BACKFILL_ERROR_LENGTH = 500;
+
 /** The newest reading one channel has, inside a bounded lookback. */
 export interface LatestValue {
   channelId: number;
@@ -77,17 +132,30 @@ export interface TimeSeriesStore {
     tier: RollupTier,
     from: Date,
     to: Date,
-    options?: { replace: boolean },
+    options?: RollOptions,
   ): Promise<number>;
   advanceWatermark(q: Queryable, tier: RollupTier, to: Date): Promise<void>;
-  enqueueBackfill(q: Queryable, from: Date, to: Date, reason: string): Promise<void>;
-  enqueueBackfillIfLate(q: Queryable, from: Date, to: Date, reason: string): Promise<boolean>;
-  claimBackfill(
+  enqueueBackfill(
     q: Queryable,
-    limit: number,
-  ): Promise<{ ids: string[]; from: Date; to: Date } | null>;
+    from: Date,
+    to: Date,
+    reason: string,
+    channels?: readonly number[] | null,
+  ): Promise<void>;
+  enqueueBackfillIfLate(q: Queryable, written: WrittenReadings, reason: string): Promise<boolean>;
+  claimBackfill(q: Queryable, limit: number): Promise<BackfillClaim | null>;
   clearBackfill(q: Queryable, ids: readonly string[]): Promise<void>;
+  failBackfill(
+    q: Queryable,
+    ids: readonly string[],
+    error: string,
+    retry: BackfillRetry,
+  ): Promise<{ parked: number }>;
   earliestPendingBackfill(q: Queryable): Promise<Date | null>;
+  /** Every channel there is, ascending, for an entry that does not say which it needs. */
+  allChannels(q: Queryable): Promise<number[]>;
+  /** See `StorageEngine.allowDecompression`: the caller bounds the transaction. */
+  allowDecompression(q: Queryable): Promise<void>;
   compactableChunks(q: Queryable, table: string, before: Date, limit: number): Promise<string[]>;
   compact(q: Queryable, chunk: string): Promise<void>;
   dropOlderThan(q: Queryable, table: string, olderThan: Date): Promise<string[]>;
@@ -217,23 +285,25 @@ export class SqlTimeSeriesStore implements TimeSeriesStore {
    * running this twice over the same window converges instead of double-counting. That is what
    * makes a crash mid-pass, and a replayed backfill, both safe.
    *
-   * `replace` additionally clears the window first. A forward roll never needs it — the window
-   * is new — but a backfill does: if the source lost rows since the window was last rolled
-   * (retention dropped a chunk, or a channel was reaped), the buckets they produced would
-   * otherwise linger for ever, updated by nothing.
+   * **It never deletes** (`P-226`). A backfill used to clear its window first, so that a bucket
+   * whose readings had all gone would not linger. Nothing needs that: a reaped channel's buckets
+   * go with its readings, in `reapChannels`, and a bucket whose raw readings retention dropped is
+   * the whole point of keeping a coarser tier. What the clearing did do was take every channel's
+   * buckets for the window and rebuild only the ones the source still held, which after a replay
+   * into a window past the raw retention was one channel's.
    */
   async rollUp(
     q: Queryable,
     tier: RollupTier,
     from: Date,
     to: Date,
-    options: { replace: boolean } = { replace: false },
+    options: RollOptions = {},
   ): Promise<number> {
     assertKnownTable(tier.table);
     assertKnownTable(tier.source.table);
-
-    if (options.replace) {
-      await q.query(`DELETE FROM ${tier.table} WHERE bucket >= $1 AND bucket < $2`, [from, to]);
+    const { channels, conflict = 'recompute' } = options;
+    if (channels?.length === 0) {
+      throw new Error(`refusing to roll ${tier.id} for an empty set of channels`);
     }
 
     // Raw carries one reading per row; a rollup carries a summary that has to be re-summed.
@@ -244,22 +314,30 @@ export class SqlTimeSeriesStore implements TimeSeriesStore {
         ? 'count(*)::int, sum(value), min(value), max(value)'
         : 'sum(sample_count)::int, sum(value_sum), min(value_min), max(value_max)';
 
+    const onConflict =
+      conflict === 'keep'
+        ? 'DO NOTHING'
+        : `DO UPDATE SET
+           sample_count = EXCLUDED.sample_count,
+           value_sum    = EXCLUDED.value_sum,
+           value_min    = EXCLUDED.value_min,
+           value_max    = EXCLUDED.value_max`;
+    const parameters: unknown[] = [tier.bucket, from, to];
+    if (channels !== undefined) parameters.push(channels);
+
     const rows = await q.query<{ written: string }>(
       `WITH rolled AS (
          INSERT INTO ${tier.table} (bucket, channel_id, sample_count, value_sum, value_min, value_max)
          SELECT ${this.#engine.bucket('$1', tier.source.timeColumn)}, channel_id, ${aggregate}
          FROM ${tier.source.table}
          WHERE ${tier.source.timeColumn} >= $2 AND ${tier.source.timeColumn} < $3
+           ${channels === undefined ? '' : 'AND channel_id = ANY($4::int[])'}
          GROUP BY 1, 2
-         ON CONFLICT (channel_id, bucket) DO UPDATE SET
-           sample_count = EXCLUDED.sample_count,
-           value_sum    = EXCLUDED.value_sum,
-           value_min    = EXCLUDED.value_min,
-           value_max    = EXCLUDED.value_max
+         ON CONFLICT (channel_id, bucket) ${onConflict}
          RETURNING 1
        )
        SELECT count(*) AS written FROM rolled`,
-      [tier.bucket, from, to],
+      parameters,
     );
     return Number(rows[0]?.written ?? 0);
   }
@@ -282,28 +360,51 @@ export class SqlTimeSeriesStore implements TimeSeriesStore {
    * watermark — inside buckets that were summarised while the probe was away. Without this the
    * readings would sit in raw, correct and invisible, until retention dropped them.
    */
-  async enqueueBackfill(q: Queryable, from: Date, to: Date, reason: string): Promise<void> {
-    await q.query('INSERT INTO rollup_backfill (from_time, to_time, reason) VALUES ($1, $2, $3)', [
-      from,
-      to,
-      reason,
-    ]);
+  async enqueueBackfill(
+    q: Queryable,
+    from: Date,
+    to: Date,
+    reason: string,
+    channels: readonly number[] | null = null,
+  ): Promise<void> {
+    await q.query(
+      `INSERT INTO rollup_backfill (from_time, to_time, reason, channel_ids)
+       VALUES ($1, $2, $3, $4)`,
+      [from, to, reason, channels],
+    );
   }
 
   /**
-   * Takes the pending backfill entries and collapses them into one window.
+   * Takes pending entries.
    *
    * Only the ids it saw are returned, so entries arriving while the re-roll runs survive to the
-   * next pass instead of being deleted unprocessed.
+   * next pass instead of being deleted unprocessed. They are returned as entries rather than
+   * collapsed into one window, because what each channel still needs is its own: collapsing a
+   * continuation that has got as far as the tenth day with an entry that starts on the first
+   * would start the continuation's channels again from the first (`P-226`).
+   *
+   * **Entries that have not been parked come first, and a parked one is claimed only when there
+   * are none, and on its own** (`P-226`). A parked entry has already failed three times. Claimed
+   * together with fresh ones, its next failure would count against all of them, and in three
+   * passes it would have parked them too.
    */
-  async claimBackfill(
-    q: Queryable,
-    limit: number,
-  ): Promise<{ ids: string[]; from: Date; to: Date } | null> {
-    const rows = await q.query<{ id: string; from_time: Date; to_time: Date }>(
-      'SELECT id, from_time, to_time FROM rollup_backfill ORDER BY id LIMIT $1',
+  async claimBackfill(q: Queryable, limit: number): Promise<BackfillClaim | null> {
+    type Row = { id: string; from_time: Date; to_time: Date; channel_ids: number[] | null };
+    let parked = false;
+    let rows = await q.query<Row>(
+      `SELECT id, from_time, to_time, channel_ids FROM rollup_backfill
+       WHERE retry_at IS NULL
+       ORDER BY id LIMIT $1`,
       [limit],
     );
+    if (rows.length === 0) {
+      parked = true;
+      rows = await q.query<Row>(
+        `SELECT id, from_time, to_time, channel_ids FROM rollup_backfill
+         WHERE retry_at <= now()
+         ORDER BY retry_at, id LIMIT 1`,
+      );
+    }
     const first = rows[0];
     if (first === undefined) return null;
 
@@ -313,7 +414,17 @@ export class SqlTimeSeriesStore implements TimeSeriesStore {
       if (row.from_time < from) from = row.from_time;
       if (row.to_time > to) to = row.to_time;
     }
-    return { ids: rows.map((row) => row.id), from, to };
+    return {
+      ids: rows.map((row) => row.id),
+      entries: rows.map((row) => ({
+        from: row.from_time,
+        to: row.to_time,
+        channels: row.channel_ids,
+      })),
+      from,
+      to,
+      parked,
+    };
   }
 
   async clearBackfill(q: Queryable, ids: readonly string[]): Promise<void> {
@@ -321,39 +432,103 @@ export class SqlTimeSeriesStore implements TimeSeriesStore {
   }
 
   /**
-   * Enqueues a backfill window, but only if it precedes what the five-minute tier has already
-   * materialised. Returns whether it did.
+   * Counts a failure against each entry, and parks those that have failed often enough.
    *
-   * One statement on purpose. Ingestion calls this after every write, so reading the watermark
-   * and deciding in this process would be both an extra round trip and a race: the housekeeping
-   * pass could advance the watermark between the two.
+   * The retry is decided per entry, because entries claimed together can have failed a different
+   * number of times before. Returns how many are parked now.
+   */
+  async failBackfill(
+    q: Queryable,
+    ids: readonly string[],
+    error: string,
+    retry: BackfillRetry,
+  ): Promise<{ parked: number }> {
+    const rows = await q.query<{ parked: boolean }>(
+      `UPDATE rollup_backfill
+       SET attempts   = attempts + 1,
+           last_error = $2,
+           failed_at  = now(),
+           retry_at   = CASE
+             WHEN attempts + 1 < $3 THEN NULL
+             WHEN attempts + 1 = $3 THEN now() + make_interval(secs => $4::double precision)
+             ELSE now() + make_interval(secs => $5::double precision)
+           END
+       WHERE id = ANY($1::bigint[])
+       RETURNING retry_at IS NOT NULL AS parked`,
+      [ids, oneLine(error), retry.parkAfter, retry.firstRetrySeconds, retry.laterRetrySeconds],
+    );
+    return { parked: rows.filter((row) => row.parked).length };
+  }
+
+  /**
+   * Enqueues the written readings that precede what the five-minute tier has already
+   * materialised, as one entry naming their channels. Returns whether it did.
+   *
+   * **Two statements, and the second only when something is late** (`P-226`). The first compares
+   * the oldest reading with the watermark, which is what this was before it needed the channels:
+   * one row, on every write. Only a write with something late sends its readings back to find
+   * which ones, and that is a replay, not the steady state. The second reads the watermark again
+   * rather than trusting the first, so a watermark that moved in between widens the entry and
+   * never narrows it.
+   *
+   * `time < watermark` is exactly "the bucket this reading belongs to has been rolled up
+   * already": the watermark is always on a bucket boundary, so bucket(time) < watermark and
+   * time < watermark say the same thing. The entry ends a millisecond after the newest late
+   * reading, because the queue's windows are half-open.
    */
   async enqueueBackfillIfLate(
     q: Queryable,
-    from: Date,
-    to: Date,
+    written: WrittenReadings,
     reason: string,
   ): Promise<boolean> {
-    // watermark > from is exactly "the bucket this reading belongs to has been rolled up
-    // already": the watermark is always on a bucket boundary, so bucket(from) < watermark
-    // and from < watermark say the same thing.
+    let oldest: Date | undefined;
+    for (const at of written.times) if (oldest === undefined || at < oldest) oldest = at;
+    if (oldest === undefined) return false;
+
+    const behind = await q.query<{ late: boolean }>(
+      `SELECT true AS late FROM rollup_watermark
+       WHERE tier = 'sample_5m' AND watermark > $1::timestamptz`,
+      [oldest],
+    );
+    if (behind.length === 0) return false;
+
     const rows = await q.query<{ id: string }>(
-      `INSERT INTO rollup_backfill (from_time, to_time, reason)
-       SELECT $1::timestamptz, $2::timestamptz, $3
-       FROM rollup_watermark
-       WHERE tier = 'sample_5m' AND watermark > $1::timestamptz
+      `INSERT INTO rollup_backfill (from_time, to_time, reason, channel_ids)
+       SELECT min(w.time), max(w.time) + interval '1 millisecond', $3,
+              array_agg(DISTINCT w.channel_id ORDER BY w.channel_id)
+       FROM rollup_watermark m
+       CROSS JOIN unnest($1::int[], $2::timestamptz[]) AS w(channel_id, time)
+       WHERE m.tier = 'sample_5m' AND w.time < m.watermark
+       HAVING count(*) > 0
        RETURNING id`,
-      [from, to, reason],
+      [written.channelIds, written.times, reason],
     );
     return rows.length > 0;
   }
 
-  /** The oldest instant any pending backfill still needs, or null when the queue is empty. */
+  /**
+   * The oldest instant a pending backfill still needs, or null when there is none.
+   *
+   * **A parked entry does not count** (`P-226`). Compression and retention stop here, so an entry
+   * that fails every time would otherwise hold both back for good, and the disk would fill behind
+   * one bad window. Once parked, it gives up that claim: if retention drops its source before a
+   * retry succeeds, the retry keeps the buckets it finds rather than rebuilding them from what is
+   * left.
+   */
   async earliestPendingBackfill(q: Queryable): Promise<Date | null> {
     const rows = await q.query<{ from_time: Date | null }>(
-      'SELECT min(from_time) AS from_time FROM rollup_backfill',
+      'SELECT min(from_time) AS from_time FROM rollup_backfill WHERE retry_at IS NULL',
     );
     return rows[0]?.from_time ?? null;
+  }
+
+  async allChannels(q: Queryable): Promise<number[]> {
+    const rows = await q.query<{ id: number }>('SELECT id FROM channel ORDER BY id');
+    return rows.map((row) => row.id);
+  }
+
+  async allowDecompression(q: Queryable): Promise<void> {
+    await this.#engine.allowDecompression(q);
   }
 
   /** Aged chunks the engine can still compact. The table check stays on this side. */
@@ -648,6 +823,12 @@ export class SqlTimeSeriesStore implements TimeSeriesStore {
    * orphan them for ever, since nothing else remembers the channel existed.
    */
   async reapChannels(q: Queryable, channelIds: readonly number[]): Promise<number> {
+    // A reaped channel's old readings are in compressed chunks, and deleting them unpacks every
+    // one: a channel kept forty days at a minute is 57,600 rows before its rollups. From 2.17.0
+    // (`#6882`) a delete by the segmenting column alone drops whole segments instead, but not
+    // one with a RETURNING clause, which this has for its count, so the lift is needed on every
+    // release. Bounded by the channels the caller passes (`P-226`).
+    await this.#engine.allowDecompression(q);
     let deleted = 0;
     for (const table of SAMPLE_TABLES) {
       assertKnownTable(table);
@@ -666,6 +847,14 @@ export class SqlTimeSeriesStore implements TimeSeriesStore {
 // `sensor_state` joins the sample tables here because `S-15` drops its chunks too — it is
 // the one non-sample hypertable retention touches, and it is a constant like the rest.
 const KNOWN_TABLES = new Set([...SAMPLE_TABLES, 'sensor_state']);
+
+/** The first line of an error, trimmed to what a queue entry keeps. */
+function oneLine(error: string): string {
+  const first = error.split('\n', 1)[0] ?? '';
+  return first.length <= BACKFILL_ERROR_LENGTH
+    ? first
+    : `${first.slice(0, BACKFILL_ERROR_LENGTH - 1)}…`;
+}
 
 /**
  * The only defence an interpolated identifier gets, and the reason it is enough: every caller

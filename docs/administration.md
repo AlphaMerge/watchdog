@@ -237,6 +237,7 @@ alarm.
 | --- | --- |
 | `ingestQueue` | Readings arriving faster than they are written. Warns at 40,000, errors at 100,000 |
 | `rollupLag` | Rollups falling behind. An hour is a warning; a day means graphs at wide ranges are wrong |
+| `backfillParked` | **Any value above zero is a warning.** A backfill failed three times and is parked; the sensor's message says why. See [a backfill that keeps failing](#a-backfill-that-keeps-failing) |
 | `diskFree` | Errors below 10%. See below — a full disk costs retention |
 | `memoryAvailable` | What the core's *machine* has left — `MemAvailable` on Linux, the lowest of the last 30 s. Warns below 20%, errors below 10%: `P-206` watched a machine go from 8.5% to a kernel kill in six seconds. On the default installation the local probe's copy reads the same machine; this is the one that matters when every probe is remote and nothing else is watching the database host |
 | `memoryLimitUsage` | The core's working set against its own ceiling — `MemoryMax=8G` in `ms-core.service`. Warns above 80%, and the warning is the one to act on: at 100% the kernel kills the core. See [a service at its memory ceiling](#a-service-at-its-memory-ceiling). A gap where there is no limit, on cgroup v1 and on Windows |
@@ -485,6 +486,38 @@ one that has forgotten last month. Treat any eviction as "add disk", not as norm
 
 If the configured data path is on a remote database host, the core cannot measure it and reports
 nothing rather than guessing — a wrong number here would be worse than no number.
+
+### A backfill that keeps failing
+
+Readings that arrive behind the rollups, such as a probe draining its spool after an outage, are
+queued for a **backfill**: the housekeeper rebuilds the buckets they fall in, for the channels
+that were late and no others, a day and 250 channels per transaction. Inside the source's
+retention a bucket is recomputed; past it, where raw data may hold only the late readings, only
+buckets that do not exist yet are written.
+
+A backfill that fails is tried again on the next two passes. After the third failure it is
+**parked**: `backfillParked` on Core Health goes to Warning, the sensor's message carries the
+error, and the entry is tried again an hour later and then once a day. A parked backfill no
+longer holds compression and retention back, so one window that cannot be written does not fill
+the disk. The price is that if retention reaches its window before a retry succeeds, the retry
+only fills buckets that are missing.
+
+Fix what the message names, which is most often the disk or the database refusing writes. Then
+wait for the next retry, or bring every parked one forward to the next pass:
+
+```sql
+UPDATE rollup_backfill SET retry_at = now() WHERE retry_at IS NOT NULL;
+```
+
+To give one up instead, find it and delete it. The summarised graphs for its window then leave
+out the late readings, which stay in raw data until retention drops them:
+
+```sql
+SELECT id, from_time, to_time, channel_ids, attempts, last_error
+FROM rollup_backfill WHERE retry_at IS NOT NULL;
+
+DELETE FROM rollup_backfill WHERE id = 42;
+```
 
 ### Stored reports have their own two horizons
 

@@ -47,6 +47,7 @@ A start limit on the probe costs nothing that waiting would have recovered.
 | Configuration invalid | `bootstrap` → `process.exit(78)` | No |
 | **PostgreSQL not accepting connections** | `db.check()` (`main.ts:216`) | **Yes** — a database in crash recovery, or started a moment later |
 | PostgreSQL rejects the credentials, or the database does not exist | `db.check()` | No |
+| TimescaleDB missing, or older than 2.14.0 — added by `P-226` | `engineOrRefuse` → `ConfigError` | No — **exits 78**, which the unit does not restart |
 | Migration fails, or the schema is refused | `migrateOnStart` / `refuseSchema` (`main.ts:233–239`) | No |
 | **Migration outlasts `TimeoutStartSec`** — not an exit: systemd kills it | `migrateOnStart` | **Yes** — it only needed longer |
 | Lookups, device templates, declared limits or schedules will not load | `main.ts:271–446` | No — files and rows that were wrong are still wrong |

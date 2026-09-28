@@ -1,5 +1,6 @@
 import { describeError, type IngestionConfig, type Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
+import type { WrittenReadings } from '../timeseries/store.js';
 import { CounterStore } from './counter-store.js';
 import type { CounterSample } from './counters.js';
 import { writeRuntimes, writeStateHistory } from '../state/runtime.js';
@@ -79,19 +80,25 @@ export type IngestOutcome =
     };
 
 /**
- * Told about every range of readings that lands, so the rollup can correct itself.
+ * Told about every reading that lands, so the rollup can correct itself.
  *
- * The `Housekeeper` implements this: it enqueues a backfill window when — and only when — the
- * readings precede a bucket it has already materialised, which is what a probe replaying its
- * disk spool looks like (R-03). Without it those readings sit in raw, correct and invisible,
- * until retention drops them.
+ * The `Housekeeper` implements this: it enqueues a backfill for the readings that precede a
+ * bucket it has already materialised, which is what a probe replaying its disk spool looks like
+ * (R-03), and names their channels so that only those are re-rolled (`P-226`). Without it those
+ * readings sit in raw, correct and invisible, until retention drops them.
  *
  * It takes the `Queryable` so it joins the write's own transaction. That is the difference
  * between a guarantee and a hope: the readings and the promise to re-roll them commit together,
  * and a crash in between cannot leave one without the other.
  */
 export interface LateDataSink {
-  noteWrittenRange(q: Queryable, from: Date, to: Date): Promise<boolean>;
+  /**
+   * Called before the readings are written, with the oldest of them. A write that old may land
+   * in compressed chunks, and the sink knows what that needs (`P-226`).
+   */
+  prepareWrite(q: Queryable, oldest: Date): Promise<void>;
+  /** Called with the readings that were written, not the duplicates that were not. */
+  noteWritten(q: Queryable, written: WrittenReadings): Promise<boolean>;
 }
 
 /** Just enough of `Database` to run one transaction — the whole of what ingestion needs. */
@@ -608,6 +615,11 @@ export class Ingestor {
         // Guarded rather than relying on `unnest` of empty arrays: with no readings at all the
         // range below is (+Infinity, -Infinity), and an Invalid Date reaching the backfill
         // queue would corrupt the rollup's idea of what needs re-rolling.
+        // Before the write, in its transaction: a replay old enough to reach compressed chunks
+        // must not be refused for unpacking them, and the batch size is what bounds it.
+        if (this.#lateData !== undefined && times.length > 0) {
+          await this.#lateData.prepareWrite(q, new Date(oldest));
+        }
         const written =
           times.length === 0
             ? []
@@ -622,10 +634,15 @@ export class Ingestor {
         // which is the right way round: the probe still holds the batch and will offer it again,
         // whereas committed readings with no backfill queued would leave the rollup silently
         // wrong with nothing left to notice it.
+        // The rows written rather than the rows offered: a duplicate changed nothing, so it has
+        // nothing to re-roll (`P-226`).
         const noted =
-          this.#lateData === undefined || times.length === 0
+          this.#lateData === undefined || written.length === 0
             ? false
-            : await this.#lateData.noteWrittenRange(q, new Date(oldest), new Date(newest));
+            : await this.#lateData.noteWritten(q, {
+                channelIds: written.map((row) => row.channel_id),
+                times: written.map((row) => row.time),
+              });
         // Same transaction, same reason: the readings and the state they decided commit
         // together or not at all (M-02).
         // **At the instants the probe measured them** (`P-145`). A spool replay is an hour of

@@ -5013,6 +5013,76 @@ because each is a decision rather than a defect:
       heartbeat records a squeeze placed in today's gap. The administration guide says a low can
       arrive one record late, by up to a heartbeat's age, so nobody reads the lag as a fault.
 
+- [x] **P-226 — a backfill after a long replay rebuilt every channel's history from one channel's** ·
+      M · S-06, R-03 · Found in the round-3 review. A backfill cleared its window **for every
+      channel** and rebuilt it from raw. A probe replaying twenty days into a core keeping seven
+      days of raw wrote its readings into days whose raw chunks had been dropped, so the rebuild
+      found one channel there and every other channel's five-minute and hourly history for those
+      days went. Three more faults sat beside it. A backfill that failed stayed at the head of the
+      queue, failing every pass and holding compression and retention back for good. Writes into
+      compressed chunks were refused past TimescaleDB's decompression limit, 100,000 rows by
+      default, so a big enough replay or reap failed every time. And a compressed chunk written to
+      afterwards was never compressed again.
+
+      **Done:**
+      - **A backfill never deletes, and re-rolls only the channels that were late.** Migration
+        058 gives `rollup_backfill` `channel_ids`, filled by ingestion from the rows it actually
+        wrote behind the watermark (a duplicate is not late). Inside the source tier's configured
+        retention a bucket is recomputed. Past it, where the source may hold only the late
+        readings, only missing buckets are written (`ON CONFLICT DO NOTHING`). No tier goes back
+        further than its own retention, so the review's second case, a probe whose clock is years
+        behind, is a month of work and not years of it. An entry naming no channels, such as one
+        queued before 058, re-rolls every channel in the channel table.
+      - **In batch-days, bounded by time.** One day of 250 channels in every tier, one
+        transaction a tier, day-major so every tier stops on the same midnight. A pass takes
+        batch-days until half the housekeeping interval has gone, always takes the first, and
+        stops at 64 on a machine where time never binds. Each channel keeps its own window
+        through a claim, so a continuation never falls back to where another entry started.
+        **Trade-off:** a pass's reach is not reproducible, only that it stops on a boundary and
+        continues from there.
+      - **A failing backfill is parked.** It is tried on the next two passes, then parked (with
+        `attempts`, `last_error`, `failed_at` and `retry_at`) and retried an hour later and daily
+        after that. A parked entry no longer counts in `earliestPendingBackfill`, so it stops
+        holding compression and retention back, and it is claimed alone, never with fresh ones.
+        Core Health's new `backfillParked` channel warns above zero, and the sensor's message
+        carries the newest error, one line of at most 500 characters. `administration.md` says how
+        to bring a retry forward or give one up.
+      - **The decompression limit is lifted per transaction** by the backfill, the reap, and
+        ingestion when its oldest reading is more than twelve hours old, each bounded by its own
+        unit.
+      - **Written-to compressed chunks are compressed again**: `compactableChunks` also takes
+        those whose `_timescaledb_functions.chunk_status` has the partial or unordered bit.
+      - **TimescaleDB 2.14.0 is the floor**, refused at start-up with exit 78. The changelog items
+        are `#6566` (the decompression limit and the parameter that lifts it), `#6579` and `#6609`
+        (`compress_chunk` recompresses a partially compressed chunk), and `#6575` (upserts into
+        compressed chunks). `installation.md` cites them, and `start-exits.md` has the new row.
+
+      **What the dev image cannot show.** Everything ran against TimescaleDB 2.29 only, and no
+      second version was run. From 2.16.0 (`#7108`) an upsert unpacks a compressed batch only
+      where it has a row to update, so on 2.29 a replay never meets the limit, and its lift is
+      tested as a decision, not an effect. The backfill's recompute and the reap do meet it (the
+      reap counts its deletes with `RETURNING`, which turns off 2.17.0's whole-segment delete,
+      `#6882`), and both are tested with the limit set to ten on the scratch database. The floor's
+      refusal is tested by its error code against a stubbed version.
+
+      **Not built, and why.** Ingestion still bounds only the future, so a probe with a clock
+      years behind still stores readings that far back. They no longer touch any other channel's
+      history, and retention drops them. The lower bound is `P-231`. The retention split is the
+      *configured* retention, not what the source holds. Disk eviction (`S-17`) drops raw data younger than that, and so does a
+      retention that was shortened and lengthened again. A late reading into such a window is
+      recomputed for its own channel from what is left.
+
+      **Measured** (`docs/findings/2026-09-28-backfill-batch-day.md`): a batch-day of 250 channels
+      whose day is compressed, with a second reading a minute on top, is **4.5 s** (five-minute
+      4,015 ms, hourly 476 ms, daily 28 ms). So a 150 s pass takes about 34 batch-days, and the one it
+      always takes is 3% of it. An upper bound: the VM delivered 1.86× the reference machine's CPU
+      time for a fixed loop, at a load of 1.65 per CPU. The first run failed a bound that divided the
+      interval by slices as if each cost a five-minute one, and that is why a pass is now bounded by
+      time.
+
+      Mutations caught: 21 of 21. Each was applied alone, built, and run against its own tests, and
+      the build was checked against the source after every restore.
+
 - [x] **P-209 — ms-server stayed Up for ten hours with no core in it** · S · — · On 2026-09-15
       the UI on :5173 answered `502 Bad Gateway`. The dev PostgreSQL had stopped cleanly the day
       before and has no restart policy, so it stayed down when Docker restarted at 01:02 UTC;

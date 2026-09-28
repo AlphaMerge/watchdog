@@ -18,10 +18,19 @@ procedure below is a tarball and a shell script.
 | OS | Linux with systemd. **1.0 does not run on Windows** — the Windows service (WinSW), its MSI and the four `windows.*` sensor types are release 1.1 (`TASKS.md`, *Release 1.1 — Windows*) |
 | Node.js | 22 or newer, on `PATH` |
 | PostgreSQL | with the TimescaleDB extension available — 17 is what everything here is measured and tested on |
+| TimescaleDB | **2.14.0 or newer.** `ms-core` refuses to start against an older one, names the version it found, and stops rather than restarting (exit 78). Tested on 2.29; see below for why 2.14 |
 | `openssl` | on `PATH` — the installer issues the probe-channel certificates with it |
 | Privileges | `root`, to create the service users and the units |
 
 The installer refuses rather than half-installing when any of those is missing, and says which.
+
+**Why 2.14.0.** That release limited how many rows one write may decompress, and made
+`compress_chunk` recompress a chunk that was written to after it was compressed (TimescaleDB
+changelog, 2.14.0: `#6566`, `#6579`, `#6609`, and `#6575` for upserts into compressed chunks).
+A probe replaying its spool writes into compressed chunks, and the core relies on both: it lifts
+the limit for the writes it has bounded, and recompresses what they leave behind. An older
+TimescaleDB would need a second way of doing each, so it is refused at start-up rather than at
+the first replay.
 
 **The database is not installed for you.** TimescaleDB's licence permits free self-hosted use but
 attaches to whoever ships its binaries, so this project tells you to install it rather than

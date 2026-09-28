@@ -748,6 +748,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(channels['notifyOldest'], null);
       assert.equal(channels['notifyFailed'], null);
       assert.equal(channels['backfillQueue'], null);
+      assert.equal(channels['backfillParked'], null);
     });
 
     it('still throws for the sweep, which must not write a row of zeros', async () => {
@@ -792,6 +793,35 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       );
       await service.sweep();
       assert.match(batches[0]?.[0]?.message ?? '', /alarm sweep 90 s overdue/);
+    });
+
+    it('names a parked backfill, and the error it keeps failing with (`P-226`)', async () => {
+      // A parked backfill has failed three times and is retried hourly, then daily. The channel's
+      // limit makes it a warning, but a limit's message is fixed; what failed is in the entry,
+      // and the sensor's own message is where it can be read.
+      await db.query(
+        `INSERT INTO rollup_backfill
+           (from_time, to_time, reason, attempts, last_error, failed_at, retry_at)
+         VALUES (now() - interval '3 hours', now() - interval '2 hours', 'test', 4,
+                 'an older failure', now() - interval '2 hours', now() + interval '22 hours'),
+                (now() - interval '3 hours', now() - interval '2 hours', 'test', 3,
+                 'could not extend file: No space left on device', now(), now() + interval '1 hour'),
+                (now() - interval '2 hours', now() - interval '1 hour', 'test', 0, NULL, NULL, NULL)`,
+      );
+      const batches: CheckResult[][] = [];
+      const service = build({}, { cpuUs: [], elapsedNs: [] }, (results) => {
+        batches.push([...results]);
+        return Promise.resolve();
+      });
+      const reading = await service.read();
+      assert.equal(reading['backfillQueue'], 3, 'the queue counts them');
+      assert.equal(reading['backfillParked'], 2, 'and this counts only them');
+
+      await service.sweep();
+      assert.match(
+        batches[0]?.[0]?.message ?? '',
+        /2 rollup backfills parked, the last failing with: could not extend file: No space left/,
+      );
     });
 
     it('counts its sweeps whether or not there was anything to report', async () => {
