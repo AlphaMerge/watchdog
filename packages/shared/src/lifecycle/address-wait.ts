@@ -1,4 +1,5 @@
 import { isIP } from 'node:net';
+import { describeError } from '../errors/app-error.js';
 import { networkInterfaces } from 'node:os';
 import type { Logger } from '../logging/logger.js';
 
@@ -36,6 +37,11 @@ function hostAddresses(): string[] {
     .map((entry) => entry.address);
 }
 
+/** `127.0.0.0/8` and `::1`: a host without them has no loopback, and waiting will not give it one. */
+function isLoopback(address: string): boolean {
+  return address === '::1' || /^127\./.test(address);
+}
+
 /**
  * Waits until this host has `address`, when it is a specific IP address it does not have yet
  * (`P-222`).
@@ -48,17 +54,32 @@ function hostAddresses(): string[] {
  * seconds left the unit `failed` for good. `EADDRINUSE` and `EACCES` are not waited for: another
  * process and a missing capability are still there five minutes later.
  *
- * Returns at once for a wildcard, a host name or an address the host already has, which is every
- * default. Throws past the bound, and the process exits so that systemd starts it again.
+ * Returns at once for a wildcard, a host name, a loopback address or an address the host already
+ * has, which is every default. Returns too when the host's addresses cannot be read at all —
+ * `uv_interface_addresses` fails with `EAFNOSUPPORT` in some containers — because then waiting
+ * knows nothing the bind does not, and the bind's own error is the diagnosis. Throws past the
+ * bound, and the process exits so that systemd starts it again.
  */
 export async function waitForLocalAddress(options: AddressWaitOptions): Promise<void> {
   const { address } = options;
   if (isIP(address) === 0) return;
-  if (address === '0.0.0.0' || address === '::') return;
+  if (address === '0.0.0.0' || address === '::' || isLoopback(address)) return;
 
+  const logger = options.logger.child({ component: 'address-wait', address, for: options.what });
   const addresses = options.addresses ?? hostAddresses;
-  const has = (): boolean => addresses().includes(address);
-  if (has()) return;
+  /** Whether the host has the address, or `undefined` when its addresses cannot be read. */
+  const has = (): boolean | undefined => {
+    try {
+      return addresses().includes(address);
+    } catch (error) {
+      logger.warn(
+        { err: describeError(error) },
+        `cannot read this host's addresses; not waiting for ${address}, the listener's bind will say whether it is there`,
+      );
+      return undefined;
+    }
+  };
+  if (has() !== false) return;
 
   const maxWaitMs = options.maxWaitMs ?? ADDRESS_WAIT_MS;
   const sleep =
@@ -68,7 +89,6 @@ export async function waitForLocalAddress(options: AddressWaitOptions): Promise<
         setTimeout(resolve, ms);
       }));
   const now = options.now ?? ((): number => Number(process.hrtime.bigint() / 1_000_000n));
-  const logger = options.logger.child({ component: 'address-wait', address, for: options.what });
 
   const started = now();
   let reported = -Infinity;
@@ -90,7 +110,9 @@ export async function waitForLocalAddress(options: AddressWaitOptions): Promise<
       options.starting?.(status, REPORT_EVERY_MS + EXTEND_MARGIN_MS);
     }
     await sleep(POLL_MS);
-    if (has()) {
+    const present = has();
+    if (present === undefined) return;
+    if (present) {
       logger.info({ waitedMs: now() - started }, `${address} is assigned; continuing start-up`);
       return;
     }

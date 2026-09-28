@@ -49,17 +49,38 @@ describe('waitForLocalAddress (P-222)', () => {
     return { lines, extended, result, clock: () => clock };
   }
 
-  for (const address of ['0.0.0.0', '::', 'localhost', '127.0.0.1']) {
+  for (const address of ['0.0.0.0', '::', 'localhost', '127.0.0.1', '127.0.1.1', '::1']) {
     it(`returns at once for ${address}`, async () => {
       await waitForLocalAddress({
         address,
         what: 'API',
         logger: pino({ level: 'silent' }),
-        addresses: () => ['127.0.0.1'],
+        addresses: () => [],
         sleep: () => Promise.reject(new Error('should not wait')),
       });
     });
   }
+
+  // The smoke box: `os.networkInterfaces()` throws `uv_interface_addresses returned Unknown system
+  // error 97` there, and the core's API on 127.0.0.1 exited 1 before it bound anything.
+  it('does not wait, or fail the start, when the host cannot say what addresses it has', async () => {
+    const lines: Record<string, unknown>[] = [];
+    await waitForLocalAddress({
+      address: '10.1.2.3',
+      what: 'syslog listener',
+      logger: pino(
+        { level: 'info' },
+        { write: (line: string) => lines.push(JSON.parse(line) as Record<string, unknown>) },
+      ),
+      addresses: () => {
+        throw new Error(
+          'A system error occurred: uv_interface_addresses returned Unknown system error 97',
+        );
+      },
+      sleep: () => Promise.reject(new Error('should not wait')),
+    });
+    assert.ok(lines.some((line) => /cannot read this host's addresses/.test(String(line['msg']))));
+  });
 
   it('waits for an address assigned late at boot, keeping systemd waiting and saying why', async () => {
     const h = harness(40_000);

@@ -359,3 +359,18 @@ failure and what the service does with it, in `administration.md`, *What a start
 - **`migrate down` reverted by number, not by when a migration was applied.** On a database that
   applied 052 after 053, "the most recent" meant 053, and its tables were dropped. It now follows
   `applied_at`, and `up` warns when it applies a migration numbered below one already applied.
+
+### The address wait's own regression
+
+The first smoke install after `P-222` failed at `systemctl start ms-core`. In that container,
+`os.networkInterfaces()` throws `uv_interface_addresses returned Unknown system error 97`
+(`EAFNOSUPPORT`). The address wait asked it about the API on `127.0.0.1` and the core exited 1
+before binding anything. On a host where the address list cannot be read, every restart would
+fail the same way, so the fix is in the wait, not the smoke:
+
+- A loopback address (`127.0.0.0/8`, `::1`) returns at once. A host without loopback will not
+  gain it by waiting.
+- A host whose addresses cannot be read logs a warning and does not wait. The listener's bind is
+  then the judge, and its error is the diagnosis.
+
+`start-failure.test.ts` covers both.
