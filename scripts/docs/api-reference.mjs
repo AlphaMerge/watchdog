@@ -309,6 +309,8 @@ say(
   '- **Credentials are never returned.** Parameters a sensor type marks `writeOnly` are stripped ' +
     'from every response in one place; reads carry `redactedParams` instead.',
   '- **Concurrent edits** use `If-Match` with the object\'s `version`; a stale one is `409`.',
+  '- **A body whose schema requires nothing may be left out.** It is read as `{}`, defaults and ' +
+    'all. A body that is present has to be JSON: an empty one sent as `application/json` is a `400`.',
   '',
 );
 say('---', '');

@@ -4826,6 +4826,47 @@ because each is a decision rather than a defect:
       `probe-restart-scenario.test.ts` reads its limit from `ms-probe.service`.
       `docs/findings/2026-09-28-start-exits.md`, *What this audit missed*.
 
+- [x] **P-230 — a request with no body was refused where the route asks nothing of one** · S · — ·
+      Found 2026-09-28 while landing `A-35`. `POST /objects/:id/clone` with no body answered 400
+      "body must be object", although the route's own comment calls a clone with no options
+      legitimate. Fastify validates an absent body as `undefined`, and no object schema accepts
+      that, so every route whose body is all optional refused the request its schema describes
+      as complete. The sweep found eleven:
+      - clone;
+      - forcing an error with no message;
+      - check-now;
+      - a probe revoked with no note;
+      - a template's test send with no sensor;
+      - a group member added with no `primary`;
+      - a group `PUT`;
+      - the map, report and library `PATCH`es;
+      - a channel `PATCH`.
+
+      **Done when** an absent body is read as `{}` wherever the body's schema requires nothing, a
+      body that does require something is still refused without one, and a sweep over every
+      registered route holds it.
+
+      **P-230 outcome.** One `preValidation` hook in `ApiServer`'s constructor sets the body to `{}`
+      when it is absent and `requiresNothing` says the route's schema is an object that asks for
+      nothing. It is registered before the authorisation hook, so the guards see the same `{}`.
+      - Only a literal object schema qualifies. A `$ref` or a combinator could require something
+        the check cannot see, so those routes are unchanged.
+      - The schema then fills its defaults, exactly as if the client had sent `{}`. A `PATCH` whose
+        schema has `minProperties: 1` now says so, instead of "body must be object".
+      - An empty body declared `application/json` is still Fastify's 400: that is a malformed
+        document, not an absent one.
+      - The API reference's conventions say both.
+
+      Tests:
+      - 1 new in `api-routes.test.ts`: a bodiless clone lands in place, a bodiless move is still
+        a 400, and an empty JSON body is a 400.
+      - 1 new sweep in `access-matrix.test.ts`, the file that registers every module. Every route
+        whose schema requires nothing is called as an administrator with no body and with ids that
+        do not exist. None may answer "body must be object", nor fail on a parameter before the
+        body is reached. The clone and the probe revoke must be among them.
+
+      Mutation 1/1: without the assignment, both fail, and the sweep names all eleven routes.
+
 - [x] **P-217 — one frame on the state stream stopped the core** · S · — · Found reviewing
       `A-12`. The stream's `message` handler cast whatever `JSON.parse` returned and read
       `frame.subscribe.objectId` off it, so `null` or `{"subscribe":null}` — valid JSON — threw a

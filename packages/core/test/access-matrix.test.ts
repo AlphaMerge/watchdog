@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
-import { ApiServer } from '../src/api/server.js';
+import { ApiServer, requiresNothing } from '../src/api/server.js';
 import { AccessService, type AccessRight } from '../src/auth/access.js';
 import { AccountService, type AccountRole } from '../src/auth/accounts.js';
 import { GroupService } from '../src/auth/groups.js';
@@ -90,6 +90,8 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
 
   /** login → cookie, for each account in the matrix. */
   const cookies = new Map<string, string>();
+  /** Every route's body schema, as registered: `server.routes` records the bar and not the body. */
+  const bodies: { method: string; url: string; body: unknown }[] = [];
   const userIds = new Map<string, number>();
 
   before(async () => {
@@ -255,6 +257,11 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
         totp: new TotpService({ audit: new DatabaseAuditSink(), db, logger: silent }),
         required: true,
       },
+    });
+    server.app.addHook('onRoute', (route) => {
+      for (const method of [route.method].flat()) {
+        bodies.push({ method, url: route.url, body: route.schema?.body });
+      }
     });
     await server.build('9.9.9', harness.service);
     app = server.app;
@@ -972,6 +979,46 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
         }
       }
       assert.deepEqual(allowed, [], 'a read-scoped token was not refused by these');
+    });
+  });
+
+  describe('a route that asks nothing of its body', () => {
+    it('takes a request with no body at all, on every route that says so (P-230)', async () => {
+      // Fastify validated an absent body as `undefined`, so every one of these answered 400 "body
+      // must be object" to the request their own schemas describe as complete. Here rather than
+      // beside the fix because this is the file that registers every module.
+      //
+      // **Ids that do not exist**, so nothing is cloned, revoked or forced: the answer is the
+      // handler's 404 once the body is through. A parameter that fails validation would answer
+      // before the body is looked at, so that is a failure too, not a pass.
+      const fillMissing = (url: string): string =>
+        url
+          .replace(/:(id|sensorId|objectId|groupId|userId|templateId)\b/g, '2147480000')
+          .replaceAll(':gid', 'no-such-probe')
+          .replaceAll(':kind', 'snmp')
+          .replaceAll(':key', 'scan.intervalSeconds');
+      const optional = bodies.filter((route) => requiresNothing(route.body));
+      const names = optional.map((route) => `${route.method} ${route.url}`);
+      for (const found of ['POST /api/v1/objects/:id/clone', 'POST /api/v1/probes/:gid/revoke']) {
+        assert.ok(names.includes(found), `${found} was not swept; swept ${names.join(', ')}`);
+      }
+
+      const refused: string[] = [];
+      for (const route of optional) {
+        const response = await app.inject({
+          method: route.method as 'POST',
+          url: fillMissing(route.url),
+          headers: asRole('admin'),
+        });
+        const message =
+          response.statusCode === 400
+            ? (response.json<{ error?: { message?: string } }>().error?.message ?? '')
+            : '';
+        if (/^body must be object|^params|^querystring/.test(message)) {
+          refused.push(`${route.method} ${route.url} -> ${message}`);
+        }
+      }
+      assert.deepEqual(refused, [], 'refused a request with no body, or never reached the body');
     });
   });
 

@@ -411,6 +411,21 @@ export class ApiServer {
       genReqId: () => newCorrelationId(),
     });
 
+    // **A body a route requires nothing of may be left out** (`P-230`). Fastify validates an
+    // absent body as `undefined`, which no object schema accepts, so a clone with no options, a
+    // probe revoked with no note and an error forced with no message were each answered 400 "body
+    // must be object" — the clone route's own comment called that request legitimate. It is read
+    // as `{}`, which the schema then fills with its defaults exactly as if the client had sent
+    // it. A route whose body does require something is still refused without one, and a body
+    // declared JSON that is empty is still Fastify's 400: that is a malformed document, not an
+    // absent one. Registered here, before the authorisation hook, so the guards see `{}` too.
+    this.#app.addHook('preValidation', (request, _reply, done) => {
+      if (request.body === undefined && requiresNothing(request.routeOptions.schema?.body)) {
+        request.body = {};
+      }
+      done();
+    });
+
     // Installed in the constructor, not in build(), so it sees *every* route — including any
     // registered by a plugin before our own. A guard with a blind spot is not a guard.
     this.#app.addHook('onRoute', (route) => {
@@ -1116,6 +1131,24 @@ export async function sensorsOfDevice(
     params: catalogue.has(row.type) ? catalogue.redact(row.type, row.params).params : {},
     isMaster: row.is_master,
   }));
+}
+
+/**
+ * Whether a body schema is an object that asks for nothing, so `{}` is the whole of an absent
+ * body (`P-230`).
+ *
+ * Only a literal object schema: a `$ref` or a combinator could require something this cannot
+ * see, and answering no leaves such a route exactly as it was.
+ */
+export function requiresNothing(schema: unknown): boolean {
+  if (typeof schema !== 'object' || schema === null) return false;
+  const body = schema as Record<string, unknown>;
+  if (body['type'] !== 'object') return false;
+  if (['$ref', 'oneOf', 'anyOf', 'allOf', 'if'].some((key) => body[key] !== undefined)) {
+    return false;
+  }
+  const required = body['required'];
+  return required === undefined || (Array.isArray(required) && required.length === 0);
 }
 
 /**

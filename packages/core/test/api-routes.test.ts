@@ -1039,5 +1039,27 @@ describe(
       });
       assert.equal(del.statusCode, 200);
     });
+
+    it('takes no body at all where the route asks nothing of one (P-230)', async () => {
+      // A clone with no options is a clone in place, and the route always said so; Fastify
+      // validated the absent body as `undefined` and answered 400 "body must be object".
+      const g = await createGroup(probeId, 'Berlin DC');
+      const bare = await app.inject({ method: 'POST', url: `/api/v1/objects/${String(g)}/clone` });
+      assert.equal(bare.statusCode, 201, bare.body);
+      const copy = bare.json<{ object: { parentId: number; name: string } }>().object;
+      assert.deepEqual([copy.parentId, copy.name], [probeId, 'Clone of Berlin DC']);
+
+      // The controls: a route whose body requires something is still refused without one, and an
+      // empty document declared JSON is malformed rather than absent.
+      const move = await app.inject({ method: 'POST', url: `/api/v1/objects/${String(g)}/move` });
+      assert.equal(move.statusCode, 400, move.body);
+      const empty = await app.inject({
+        method: 'POST',
+        url: `/api/v1/objects/${String(g)}/clone`,
+        headers: { 'content-type': 'application/json' },
+        payload: '',
+      });
+      assert.equal(empty.statusCode, 400, empty.body);
+    });
   },
 );
