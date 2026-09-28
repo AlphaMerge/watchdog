@@ -1025,7 +1025,7 @@ Entry 9 was written *inside the guard built to prevent this family*. The panel w
 worked from the code rather than from the intent, and had to defeat three skeptics to report
 anything — and that structure, not more care, is what found them.
 
-## Twenty-one rules this produced
+## Twenty-two rules this produced
 
 1. **Assert on `dist`, not on `src`.** Verify the compiled output after a mutation sweep, and
    before trusting a suite that certifies a fix. Twice in one day an incremental build did not pick
@@ -1098,6 +1098,14 @@ anything — and that structure, not more care, is what found them.
     Entry 33: a lens verified that the version gate reads a value set before it. Nobody asked
     whether a peer that needs the gate ever gets that far. Correct-given-a-connection is not the
     same as connected.
+22. **A test's `timeout` fails it and does not stop it.** `node:test` marks a test that overruns
+    as failed and moves on, but the test's function is still suspended on whatever it was waiting
+    for, so its `finally` never runs — and the server, socket or pool that `finally` would have
+    closed keeps the file's process alive. The run then never ends, which is worse than a red
+    test: nothing reports anything. Two drafts of `A-30`'s socket-bound test waited, unbounded,
+    for the far end to close, and each held a VM container for hours. Every wait on the far end of
+    a socket or a process gets a bound of its own, shorter than the test's — `within` in
+    `state-stream.test.ts` — so a misbehaving peer fails the test *and* reaches the cleanup.
 
 ## What is still not covered, and is said so on purpose
 

@@ -666,14 +666,18 @@ describe(
       });
 
       try {
-        await new Promise<void>((resolve, reject) => {
-          socket.addEventListener('open', () => {
-            resolve();
-          });
-          socket.addEventListener('error', () => {
-            reject(new Error('the socket would not open'));
-          });
-        });
+        await within(
+          10_000,
+          'the socket to open',
+          new Promise<void>((resolve, reject) => {
+            socket.addEventListener('open', () => {
+              resolve();
+            });
+            socket.addEventListener('error', () => {
+              reject(new Error('the socket would not open'));
+            });
+          }),
+        );
         await arrived('hello');
 
         socket.send(JSON.stringify({ subscribe: { objectId: deviceId } }));
@@ -765,14 +769,18 @@ describe(
           clearTimeout(timer);
         }
       };
-      await new Promise<void>((resolve, reject) => {
-        socket.addEventListener('open', () => {
-          resolve();
-        });
-        socket.addEventListener('error', () => {
-          reject(new Error('the socket would not open'));
-        });
-      });
+      await within(
+        10_000,
+        'the socket to open',
+        new Promise<void>((resolve, reject) => {
+          socket.addEventListener('open', () => {
+            resolve();
+          });
+          socket.addEventListener('error', () => {
+            reject(new Error('the socket would not open'));
+          });
+        }),
+      );
       const count = async (type: string, n: number): Promise<Record<string, unknown>[]> => {
         const deadline = Date.now() + 10_000;
         for (;;) {
@@ -935,20 +943,28 @@ describe(
         const { port } = new URL(url);
         const client = connect({ host: '127.0.0.1', port: Number(port) });
         try {
-          await new Promise<void>((resolve, reject) => {
-            client.once('connect', resolve);
-            client.once('error', reject);
-          });
+          await within(
+            10_000,
+            'the connection',
+            new Promise<void>((resolve, reject) => {
+              client.once('connect', resolve);
+              client.once('error', reject);
+            }),
+          );
           client.write(
             'GET /api/v1/stream HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n' +
               'Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n' +
               'Sec-WebSocket-Version: 13\r\n\r\n',
           );
-          await new Promise<void>((resolve) => {
-            client.once('data', () => {
-              resolve();
-            });
-          });
+          await within(
+            10_000,
+            'the upgrade to be answered',
+            new Promise<void>((resolve) => {
+              client.once('data', () => {
+                resolve();
+              });
+            }),
+          );
           // Nothing read from here on.
           client.pause();
 
@@ -974,7 +990,7 @@ describe(
             });
           });
           client.resume();
-          await ended;
+          await within(10_000, 'the core to close the socket it severed', ended);
           assert.ok(
             received < (junk * 150) / 2,
             `${String(received)} bytes reached a client that read none of them`,
@@ -1021,3 +1037,25 @@ describe(
     });
   },
 );
+
+/**
+ * `promise`, or a failure naming `what` once `ms` have passed.
+ *
+ * **For every wait on the far end of a socket.** A test's own `timeout` fails the test and does
+ * not cancel it, so an `await` that never settles never reaches the `finally` that stops the
+ * server — and the server's open handles then keep the whole file's process alive, which is a
+ * suite that never finishes rather than a test that fails.
+ */
+async function within<T>(ms: number, what: string, promise: Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`timed out after ${String(ms)} ms waiting for ${what}`));
+    }, ms);
+  });
+  try {
+    return await Promise.race([promise, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
