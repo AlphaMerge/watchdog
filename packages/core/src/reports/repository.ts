@@ -1,5 +1,5 @@
 import type { Queryable } from '../db/pool.js';
-import type { AccessRight } from '../auth/access.js';
+import { grantedTo, type FlatGrant, type GrantTable } from '../auth/flat-access.js';
 import type { AccountRole } from '../auth/accounts.js';
 import type { ReportSpan } from './span.js';
 import type { ReportSchedule } from './cadence.js';
@@ -9,10 +9,10 @@ import type { ReportOutputs } from './outputs.js';
  * Every statement a report needs, and nothing that decides anything (`E-01`).
  *
  * The same split `maps/repository.ts` keeps: SQL here, rights and audit in the service. The
- * idioms are deliberately identical where the question is identical — `EXISTS` rather than a
- * join for the visible-list, the version in the `WHERE` clause rather than checked first,
- * `access_rank` from migration 033 for "highest right held" — because two tables answering the
- * same question two ways is how one of them ends up wrong.
+ * idioms are deliberately identical where the question is identical — the version in the `WHERE`
+ * clause rather than checked first — because two tables answering the same question two ways is
+ * how one of them ends up wrong. The grants are not here at all any more: `auth/flat-access.ts`
+ * holds them for every entity that has them (`L-01`).
  */
 
 /** The seven templates `CAPABILITIES.MD §6` lists, as migration 047's enum spells them. */
@@ -85,13 +85,10 @@ export interface ReportRow {
   readonly updatedAt: Date;
 }
 
-export interface ReportGrant {
-  readonly groupId: number;
-  readonly groupName: string;
-  readonly right: AccessRight;
-  readonly grantedAt: Date;
-  readonly grantedBy: string;
-}
+export type ReportGrant = FlatGrant;
+
+/** Where a report's grants live, for `FlatAccess` (`L-01`). */
+export const REPORT_GRANTS: GrantTable = { table: 'report_access', key: 'report_id' };
 
 interface RawReport {
   id: string;
@@ -172,20 +169,13 @@ export class ReportRepository {
   }
 
   /**
-   * The reports a set of groups may see.
-   *
-   * `EXISTS` rather than a join with `DISTINCT`, for the reason the map repository gives: a report
-   * granted to two of the viewer's groups joins twice, and de-duplicating forces every ordering
-   * expression into the select list.
+   * The reports a set of groups may see — through `grantedTo`, which says why it is an `EXISTS`.
    */
   async listFor(q: Queryable, groupIds: readonly number[]): Promise<ReportRow[]> {
     if (groupIds.length === 0) return [];
     const rows = await q.query<RawReport>(
       `SELECT ${RETURNING} FROM report r
-       WHERE EXISTS (
-         SELECT 1 FROM report_access a
-         WHERE a.report_id = r.id AND a.group_id = ANY($1::bigint[]) AND a.right_ <> 'none'
-       )
+       WHERE ${grantedTo(REPORT_GRANTS, 'r.id', '$1')}
        ORDER BY lower(r.name)`,
       [groupIds],
     );
@@ -300,75 +290,6 @@ export class ReportRepository {
       id,
     ]);
     return rows.length > 0;
-  }
-
-  async grants(q: Queryable, reportId: number): Promise<ReportGrant[]> {
-    const rows = await q.query<{
-      group_id: string;
-      name: string;
-      right_: AccessRight;
-      granted_at: Date;
-      granted_by: string;
-    }>(
-      `SELECT a.group_id, g.name, a.right_, a.granted_at, a.granted_by
-       FROM report_access a JOIN user_group g ON g.id = a.group_id
-       WHERE a.report_id = $1 ORDER BY lower(g.name)`,
-      [reportId],
-    );
-    return rows.map((row) => ({
-      groupId: Number(row.group_id),
-      groupName: row.name,
-      right: row.right_,
-      grantedAt: row.granted_at,
-      grantedBy: row.granted_by,
-    }));
-  }
-
-  /** Upsert, because granting twice is a correction rather than an error. */
-  async grant(
-    q: Queryable,
-    reportId: number,
-    groupId: number,
-    right: AccessRight,
-    grantedBy: string,
-  ): Promise<void> {
-    await q.query(
-      `INSERT INTO report_access (report_id, group_id, right_, granted_by)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (report_id, group_id)
-       DO UPDATE SET right_ = EXCLUDED.right_, granted_at = now(), granted_by = EXCLUDED.granted_by`,
-      [reportId, groupId, right, grantedBy],
-    );
-  }
-
-  async revoke(q: Queryable, reportId: number, groupId: number): Promise<boolean> {
-    const rows = await q.query<{ report_id: string }>(
-      `DELETE FROM report_access WHERE report_id = $1 AND group_id = $2 RETURNING report_id`,
-      [reportId, groupId],
-    );
-    return rows.length > 0;
-  }
-
-  /**
-   * The highest right any of these groups holds on this report.
-   *
-   * Flat, because reports do not nest. `access_rank` comes from migration 033 so the ordering is
-   * the one `object_access` already uses — `max()` over the text would sort alphabetically, which
-   * is wrong in every position.
-   */
-  async rightFor(
-    q: Queryable,
-    reportId: number,
-    groupIds: readonly number[],
-  ): Promise<AccessRight> {
-    if (groupIds.length === 0) return 'none';
-    const rows = await q.query<{ right_: AccessRight | null }>(
-      `SELECT right_ FROM report_access
-       WHERE report_id = $1 AND group_id = ANY($2::bigint[])
-       ORDER BY access_rank(right_) DESC LIMIT 1`,
-      [reportId, groupIds],
-    );
-    return rows[0]?.right_ ?? 'none';
   }
 
   /**

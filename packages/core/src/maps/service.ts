@@ -1,18 +1,19 @@
 import type { Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
-import { atLeast, cappedBy, type AccessRight } from '../auth/access.js';
-import type { AccountRole } from '../auth/accounts.js';
+import { atLeast, type AccessRight } from '../auth/access.js';
+import { FlatAccess, ceilingOf, verdict, type FlatViewer } from '../auth/flat-access.js';
 import { MapError, changedUnderneath, invisible, mapNotFound } from './errors.js';
 import { createHash } from 'node:crypto';
 import { readImage } from './images.js';
 import { mintShareToken, shareTokenHash } from './shares.js';
-import type {
-  MapBackground,
-  MapGrant,
-  MapLayout,
-  MapRepository,
-  MapRow,
-  MapShare,
+import {
+  MAP_GRANTS,
+  type MapBackground,
+  type MapGrant,
+  type MapLayout,
+  type MapRepository,
+  type MapRow,
+  type MapShare,
 } from './repository.js';
 
 /**
@@ -24,13 +25,11 @@ import type {
  * says what a viewer may do.
  */
 
-/** Who is asking. `undefined` is `G-06`'s public viewer, which holds a link and nothing else. */
-export interface MapViewer {
-  readonly userId: number;
-  readonly role: AccountRole;
-  /** A token's ceiling, where the request presented one (`A-06`). */
-  readonly scope?: AccessRight;
-}
+/**
+ * Who is asking. `G-06`'s public viewer is not one of these: it holds a link and nothing else, and
+ * reaches the one method here that takes a token instead.
+ */
+export type MapViewer = FlatViewer;
 
 export interface MapServiceOptions {
   readonly db: Database;
@@ -47,6 +46,7 @@ const MAX_SHARE_MS = 365 * 24 * 60 * 60 * 1000;
 export class MapService {
   readonly #db: Database;
   readonly #repository: MapRepository;
+  readonly #access = new FlatAccess(MAP_GRANTS);
   readonly #logger: Logger;
 
   constructor(options: MapServiceOptions) {
@@ -55,32 +55,9 @@ export class MapService {
     this.#logger = options.logger.child({ component: 'maps' });
   }
 
-  /**
-   * What this viewer may do with this map.
-   *
-   * **A member of any administrator group short-circuits the lookup**, exactly as `AccessService`
-   * does for objects: "may do anything, including to things that do not exist yet" is not a grant
-   * and must not depend on a row, or an installation locks itself out by deleting one.
-   *
-   * **Two ceilings after that, and both only lower.** The account's role caps what its groups
-   * granted (`A-04`), and a token's scope caps its owner (`A-06`). A read-only account in a group
-   * holding `full` on a map still holds `read`.
-   */
+  /** What this viewer may do with this map. The rules are `FlatAccess`'s, shared with reports. */
   async rightFor(viewer: MapViewer, mapId: number, q: Queryable = this.#db): Promise<AccessRight> {
-    const admin = await q.query<{ total: string }>(
-      `SELECT count(*)::text AS total
-       FROM user_group_member m JOIN user_group g ON g.id = m.group_id
-       WHERE m.user_id = $1 AND g.is_admin`,
-      [viewer.userId],
-    );
-
-    const granted =
-      Number(admin[0]?.total ?? 0) > 0
-        ? 'full'
-        : await this.#repository.rightFor(q, mapId, await this.#groupsOf(viewer.userId, q));
-
-    const afterRole = cappedBy(viewer.role, granted);
-    return viewer.scope === undefined ? afterRole : lowerOf(afterRole, viewer.scope);
+    return this.#access.rightFor(viewer, mapId, q);
   }
 
   /** Throws unless the viewer holds at least this right; an unreadable map reads as absent. */
@@ -111,28 +88,27 @@ export class MapService {
     if (map === undefined) throw mapNotFound(mapId);
 
     const held = await this.rightFor(viewer, mapId, q);
-    // Absent rather than forbidden: see `invisible`. A caller who cannot read it learns nothing
-    // about whether it exists.
-    if (!atLeast(held, 'read')) throw invisible(mapId);
-    if (!atLeast(held, needed)) {
-      throw new MapError('MAP_FORBIDDEN', `this account may not ${needed} map ${String(mapId)}`, {
-        context: { mapId, phase: 'authorize' },
-        details: { held, needed },
-      });
+    switch (verdict(held, needed)) {
+      case 'ok':
+        return { map, right: held };
+      case 'invisible':
+        // Absent rather than forbidden: see `invisible`. A caller who cannot read it learns
+        // nothing about whether it exists.
+        throw invisible(mapId);
+      case 'forbidden':
+        throw new MapError('MAP_FORBIDDEN', `this account may not ${needed} map ${String(mapId)}`, {
+          context: { mapId, phase: 'authorize' },
+          details: { held, needed },
+        });
     }
-    return { map, right: held };
   }
 
   /** The maps this viewer may see. Administrators see all of them. */
   async list(viewer: MapViewer): Promise<MapRow[]> {
-    const admin = await this.#db.query<{ total: string }>(
-      `SELECT count(*)::text AS total
-       FROM user_group_member m JOIN user_group g ON g.id = m.group_id
-       WHERE m.user_id = $1 AND g.is_admin`,
-      [viewer.userId],
-    );
-    if (Number(admin[0]?.total ?? 0) > 0) return this.#repository.list(this.#db);
-    return this.#repository.listFor(this.#db, await this.#groupsOf(viewer.userId, this.#db));
+    const scope = await this.#access.listScope(viewer, this.#db);
+    return scope.all
+      ? this.#repository.list(this.#db)
+      : this.#repository.listFor(this.#db, scope.groupIds);
   }
 
   async get(viewer: MapViewer, id: number): Promise<MapRow> {
@@ -184,16 +160,7 @@ export class MapService {
       }
 
       const map = await this.#repository.create(tx, { name, description, priority, layout });
-
-      const primary = await tx.query<{ group_id: string }>(
-        `SELECT group_id FROM user_group_member
-         WHERE user_id = $1 ORDER BY is_primary DESC, group_id LIMIT 1`,
-        [viewer.userId],
-      );
-      const groupId = primary[0]?.group_id;
-      if (groupId !== undefined) {
-        await this.#repository.grant(tx, map.id, Number(groupId), 'full', actor);
-      }
+      await this.#access.grantCreator(tx, map.id, viewer, actor);
 
       this.#logger.info({ mapId: map.id, name, actor }, 'map created');
       return map;
@@ -480,7 +447,7 @@ export class MapService {
 
   async grants(viewer: MapViewer, id: number): Promise<MapGrant[]> {
     await this.require(viewer, id, 'full');
-    return this.#repository.grants(this.#db, id);
+    return this.#access.grants(this.#db, id);
   }
 
   /** Granting needs `full`: a `write` holder may edit the canvas, not decide who else sees it. */
@@ -493,16 +460,12 @@ export class MapService {
   ): Promise<void> {
     await this.#db.tx(async (tx) => {
       await this.require(viewer, id, 'full', tx);
-      const group = await tx.query<{ id: string }>(`SELECT id FROM user_group WHERE id = $1`, [
-        groupId,
-      ]);
-      if (group.length === 0) {
+      if ((await this.#access.grant(tx, id, groupId, right, actor)) === 'no-such-group') {
         throw new MapError('MAP_GROUP_NOT_FOUND', `group ${String(groupId)} does not exist`, {
           context: { mapId: id, phase: 'grant' },
           details: { groupId },
         });
       }
-      await this.#repository.grant(tx, id, groupId, right, actor);
       this.#logger.info({ mapId: id, groupId, right, actor }, 'map access granted');
     });
   }
@@ -510,30 +473,10 @@ export class MapService {
   async revoke(viewer: MapViewer, id: number, groupId: number, actor: string): Promise<void> {
     await this.#db.tx(async (tx) => {
       await this.require(viewer, id, 'full', tx);
-      await this.#repository.revoke(tx, id, groupId);
+      await this.#access.revoke(tx, id, groupId);
       this.#logger.info({ mapId: id, groupId, actor }, 'map access revoked');
     });
   }
-
-  async #groupsOf(userId: number, q: Queryable): Promise<number[]> {
-    const rows = await q.query<{ group_id: string }>(
-      `SELECT group_id FROM user_group_member WHERE user_id = $1`,
-      [userId],
-    );
-    return rows.map((row) => Number(row.group_id));
-  }
-}
-
-const ORDER: Readonly<Record<AccessRight, number>> = { none: 0, read: 1, write: 2, full: 3 };
-
-function lowerOf(a: AccessRight, b: AccessRight): AccessRight {
-  return ORDER[a] <= ORDER[b] ? a : b;
-}
-
-/** The most this viewer could hold on any map: the role's ceiling, lowered by a token's scope. */
-function ceilingOf(viewer: MapViewer): AccessRight {
-  const role = cappedBy(viewer.role, 'full');
-  return viewer.scope === undefined ? role : lowerOf(role, viewer.scope);
 }
 
 function validName(raw: string): string {

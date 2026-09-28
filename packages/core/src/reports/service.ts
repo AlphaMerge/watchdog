@@ -1,9 +1,10 @@
 import type { Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
-import { atLeast, cappedBy, type AccessRight } from '../auth/access.js';
-import type { AccountRole } from '../auth/accounts.js';
+import { atLeast, type AccessRight } from '../auth/access.js';
+import { FlatAccess, ceilingOf, verdict, type FlatViewer } from '../auth/flat-access.js';
 import { ReportError, changedUnderneath, invisible, reportNotFound } from './errors.js';
 import {
+  REPORT_GRANTS,
   isReportKind,
   type ReportGrant,
   type ReportKind,
@@ -29,12 +30,7 @@ import { validateOutputs, DEFAULT_OUTPUTS, type ReportOutputs } from './outputs.
  * nonsense.
  */
 
-export interface ReportViewer {
-  readonly userId: number;
-  readonly role: AccountRole;
-  /** A token's ceiling, where the request presented one (`A-06`). */
-  readonly scope?: AccessRight;
-}
+export type ReportViewer = FlatViewer;
 
 export interface ReportServiceOptions {
   readonly db: Database;
@@ -86,6 +82,7 @@ export interface ReportInput {
 export class ReportService {
   readonly #db: Database;
   readonly #repository: ReportRepository;
+  readonly #access = new FlatAccess(REPORT_GRANTS);
   readonly #logger: Logger;
 
   constructor(options: ReportServiceOptions) {
@@ -94,25 +91,13 @@ export class ReportService {
     this.#logger = options.logger.child({ component: 'reports' });
   }
 
-  /**
-   * What this viewer may do with this report.
-   *
-   * A member of any administrator group short-circuits the lookup, as `AccessService` does for
-   * objects: "may do anything" must not depend on a row, or an installation locks itself out by
-   * deleting one. Two ceilings after that and both only lower — the account's role caps what its
-   * groups granted (`A-04`), and a token's scope caps its owner (`A-06`).
-   */
+  /** What this viewer may do with this report. The rules are `FlatAccess`'s, shared with maps. */
   async rightFor(
     viewer: ReportViewer,
     reportId: number,
     q: Queryable = this.#db,
   ): Promise<AccessRight> {
-    const granted = (await this.#isAdmin(viewer.userId, q))
-      ? 'full'
-      : await this.#repository.rightFor(q, reportId, await this.#groupsOf(viewer.userId, q));
-
-    const afterRole = cappedBy(viewer.role, granted);
-    return viewer.scope === undefined ? afterRole : lowerOf(afterRole, viewer.scope);
+    return this.#access.rightFor(viewer, reportId, q);
   }
 
   /** Throws unless the viewer holds at least this right; an unreadable report reads as absent. */
@@ -136,22 +121,27 @@ export class ReportService {
     if (report === undefined) throw reportNotFound(reportId);
 
     const held = await this.rightFor(viewer, reportId, q);
-    // Absent rather than forbidden: see `invisible`.
-    if (!atLeast(held, 'read')) throw invisible(reportId);
-    if (!atLeast(held, needed)) {
-      throw new ReportError(
-        'REPORT_FORBIDDEN',
-        `this account may not ${needed} report ${String(reportId)}`,
-        { context: { reportId, phase: 'authorize' }, details: { held, needed } },
-      );
+    switch (verdict(held, needed)) {
+      case 'ok':
+        return { report, right: held };
+      case 'invisible':
+        // Absent rather than forbidden: see `invisible`.
+        throw invisible(reportId);
+      case 'forbidden':
+        throw new ReportError(
+          'REPORT_FORBIDDEN',
+          `this account may not ${needed} report ${String(reportId)}`,
+          { context: { reportId, phase: 'authorize' }, details: { held, needed } },
+        );
     }
-    return { report, right: held };
   }
 
   /** The reports this viewer may see. Administrators see all of them. */
   async list(viewer: ReportViewer): Promise<ReportRow[]> {
-    if (await this.#isAdmin(viewer.userId, this.#db)) return this.#repository.list(this.#db);
-    return this.#repository.listFor(this.#db, await this.#groupsOf(viewer.userId, this.#db));
+    const scope = await this.#access.listScope(viewer, this.#db);
+    return scope.all
+      ? this.#repository.list(this.#db)
+      : this.#repository.listFor(this.#db, scope.groupIds);
   }
 
   async get(viewer: ReportViewer, id: number): Promise<ReportRow> {
@@ -206,15 +196,7 @@ export class ReportService {
         runAsLogin: runAs.login,
       });
 
-      const primary = await tx.query<{ group_id: string }>(
-        `SELECT group_id FROM user_group_member
-         WHERE user_id = $1 ORDER BY is_primary DESC, group_id LIMIT 1`,
-        [viewer.userId],
-      );
-      const groupId = primary[0]?.group_id;
-      if (groupId !== undefined) {
-        await this.#repository.grant(tx, report.id, Number(groupId), 'full', actor);
-      }
+      await this.#access.grantCreator(tx, report.id, viewer, actor);
 
       this.#logger.info(
         { reportId: report.id, name, kind, runAs: runAs.login, actor },
@@ -292,7 +274,7 @@ export class ReportService {
 
   async grants(viewer: ReportViewer, id: number): Promise<ReportGrant[]> {
     await this.require(viewer, id, 'full');
-    return this.#repository.grants(this.#db, id);
+    return this.#access.grants(this.#db, id);
   }
 
   async grant(
@@ -304,16 +286,12 @@ export class ReportService {
   ): Promise<void> {
     await this.#db.tx(async (tx) => {
       await this.require(viewer, id, 'full', tx);
-      const group = await tx.query<{ id: string }>(`SELECT id FROM user_group WHERE id = $1`, [
-        groupId,
-      ]);
-      if (group.length === 0) {
+      if ((await this.#access.grant(tx, id, groupId, right, actor)) === 'no-such-group') {
         throw new ReportError('REPORT_GROUP_NOT_FOUND', `there is no group ${String(groupId)}`, {
           context: { reportId: id, phase: 'grant' },
           details: { groupId },
         });
       }
-      await this.#repository.grant(tx, id, groupId, right, actor);
       this.#logger.info({ reportId: id, groupId, right, actor }, 'report access granted');
     });
   }
@@ -321,7 +299,7 @@ export class ReportService {
   async revoke(viewer: ReportViewer, id: number, groupId: number, actor: string): Promise<void> {
     await this.#db.tx(async (tx) => {
       await this.require(viewer, id, 'full', tx);
-      await this.#repository.revoke(tx, id, groupId);
+      await this.#access.revoke(tx, id, groupId);
       this.#logger.info({ reportId: id, groupId, actor }, 'report access revoked');
     });
   }
@@ -361,7 +339,7 @@ export class ReportService {
       });
     }
     const account = await this.#repository.findAccount(q, trimmed);
-    if (account?.id !== viewer.userId && !(await this.#administers(viewer, q))) {
+    if (account?.id !== viewer.userId && !(await this.#access.administers(viewer, q))) {
       throw new ReportError(
         'REPORT_FORBIDDEN',
         'only an administrator may make a report render through an account other than their own',
@@ -391,50 +369,6 @@ export class ReportService {
       });
     }
   }
-
-  /**
-   * Whether this viewer is acting as an administrator (`A-13`).
-   *
-   * **Asked of the groups, as `rightFor` asks it**, not of the role: removing somebody from the
-   * administrators group has to end this along with everything else it confers (`GroupService.
-   * administers`). The role needs no check of its own, because migration 034 refuses a read-only
-   * account in an administrator group at the database. The token does: one below `full` is not
-   * an administrator's authority, whoever holds it, which is the bar `ADMIN` sets for a route.
-   */
-  async #administers(viewer: ReportViewer, q: Queryable): Promise<boolean> {
-    if (viewer.scope !== undefined && viewer.scope !== 'full') return false;
-    return this.#isAdmin(viewer.userId, q);
-  }
-
-  async #isAdmin(userId: number, q: Queryable): Promise<boolean> {
-    const rows = await q.query<{ total: string }>(
-      `SELECT count(*)::text AS total
-       FROM user_group_member m JOIN user_group g ON g.id = m.group_id
-       WHERE m.user_id = $1 AND g.is_admin`,
-      [userId],
-    );
-    return Number(rows[0]?.total ?? 0) > 0;
-  }
-
-  async #groupsOf(userId: number, q: Queryable): Promise<number[]> {
-    const rows = await q.query<{ group_id: string }>(
-      `SELECT group_id FROM user_group_member WHERE user_id = $1`,
-      [userId],
-    );
-    return rows.map((row) => Number(row.group_id));
-  }
-}
-
-const ORDER: Readonly<Record<AccessRight, number>> = { none: 0, read: 1, write: 2, full: 3 };
-
-function lowerOf(a: AccessRight, b: AccessRight): AccessRight {
-  return ORDER[a] <= ORDER[b] ? a : b;
-}
-
-/** The most this viewer could hold on any report: the role's ceiling, lowered by a token's scope. */
-function ceilingOf(viewer: ReportViewer): AccessRight {
-  const role = cappedBy(viewer.role, 'full');
-  return viewer.scope === undefined ? role : lowerOf(role, viewer.scope);
 }
 
 function validName(raw: string): string {

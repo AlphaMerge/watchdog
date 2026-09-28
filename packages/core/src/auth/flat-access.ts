@@ -1,0 +1,286 @@
+import type { Queryable } from '../db/pool.js';
+import type { AccountRole } from './accounts.js';
+import { atLeast, cappedBy, lower, type AccessRight } from './access.js';
+
+/**
+ * Who may do what to a thing that is not in the object tree: a map, a report, a library (`L-01`).
+ *
+ * **Access to these is flat.** `object_access` walks ancestors because objects nest; a map, a
+ * report and a library do not, so a grant on one is a grant on it and nothing else. `§9` grants
+ * access to "tree, libraries, maps and reports" per group, and every one of the three answers the
+ * same questions the same way — which is why they are answered here once.
+ *
+ * **Extracted at the third copy, and not before.** `MapService` and `ReportService` each carried
+ * these rules line for line: the administrator short-circuit, the two ceilings, the creator's
+ * grant, the grant SQL. `V2-17` records why two copies were left alone — the third instance is
+ * the one that says which half varies — and libraries are that instance. What varies turned out
+ * to be the error each entity throws and nothing else, so the rules live here and each service
+ * keeps its own error class.
+ *
+ * The ceilings (`A-04`, `A-06`) and the ranking come from `auth/access.ts`, and so does the
+ * `access_right` enum the grant tables share (migration 033). Nothing here decides what a right
+ * *means*; it decides who holds one.
+ */
+
+/** Who is asking. Every flat entity's viewer is this, under its own name. */
+export interface FlatViewer {
+  readonly userId: number;
+  readonly role: AccountRole;
+  /** A token's ceiling, where the request presented one (`A-06`). */
+  readonly scope?: AccessRight;
+}
+
+/** One group's grant, as the access routes answer it. */
+export interface FlatGrant {
+  groupId: number;
+  groupName: string;
+  right: AccessRight;
+  grantedAt: Date;
+  grantedBy: string;
+}
+
+/**
+ * Where one kind of entity keeps its grants.
+ *
+ * **A closed set of literals, never a string from anywhere else.** These are interpolated into
+ * SQL as identifiers, which is safe only because the type admits exactly the tables that exist; a
+ * `string` here would be one refactor away from an injection.
+ */
+export type GrantTable =
+  | { readonly table: 'map_access'; readonly key: 'map_id' }
+  | { readonly table: 'report_access'; readonly key: 'report_id' }
+  | { readonly table: 'library_access'; readonly key: 'library_id' };
+
+/** Which rows of an entity a viewer may list: all of them, or those granted to these groups. */
+export type ListScope =
+  { readonly all: true } | { readonly all: false; readonly groupIds: number[] };
+
+/**
+ * What a held right means for a request needing another.
+ *
+ * **`invisible` before `forbidden`, always.** A caller who cannot read the thing must learn
+ * nothing about it — not even that it exists — so every entity answers that case as it answers a
+ * missing row. Only a caller who *can* see it is told they may not change it.
+ */
+export type Verdict = 'ok' | 'invisible' | 'forbidden';
+
+export function verdict(held: AccessRight, needed: AccessRight): Verdict {
+  if (!atLeast(held, 'read')) return 'invisible';
+  return atLeast(held, needed) ? 'ok' : 'forbidden';
+}
+
+/**
+ * The most this viewer could hold on anything: the role's ceiling, lowered by a token's scope.
+ *
+ * What `A-14` checks before creating one — a new entity has no grant to cap, so the ceilings are
+ * the whole of the check.
+ */
+export function ceilingOf(viewer: FlatViewer): AccessRight {
+  const role = cappedBy(viewer.role, 'full');
+  return viewer.scope === undefined ? role : lower(role, viewer.scope);
+}
+
+/**
+ * The condition a listing puts on each row: some group of the viewer's grants it anything.
+ *
+ * A function rather than a method so a repository can write its own listing with it, and the rule
+ * about what makes a row visible still lives here.
+ *
+ * **`EXISTS` rather than a join with `DISTINCT`.** A row granted to two of the viewer's groups
+ * joins twice, and de-duplicating afterwards forces every ordering expression into the select
+ * list — which is how `ORDER BY lower(name)` became a syntax error in `G-01` and then an ordering
+ * nobody meant.
+ *
+ * @param idColumn the listed row's id, qualified — `m.id`. Written by the caller's own SQL.
+ * @param groupsParam the placeholder holding the group ids — `$1`.
+ */
+export function grantedTo(grants: GrantTable, idColumn: string, groupsParam: string): string {
+  return `EXISTS (
+      SELECT 1 FROM ${grants.table} a
+      WHERE a.${grants.key} = ${idColumn} AND a.group_id = ANY(${groupsParam}::bigint[])
+        AND a.right_ <> 'none'
+    )`;
+}
+
+export class FlatAccess {
+  readonly #grants: GrantTable;
+
+  constructor(grants: GrantTable) {
+    this.#grants = grants;
+  }
+
+  /**
+   * What this viewer holds on this one.
+   *
+   * **A member of any administrator group short-circuits the lookup**, exactly as `AccessService`
+   * does for objects: "may do anything, including to things that do not exist yet" is not a grant
+   * and must not depend on a row, or an installation locks itself out by deleting one.
+   *
+   * **Two ceilings after that, and both only lower.** The account's role caps what its groups
+   * granted (`A-04`), and a token's scope caps its owner (`A-06`). A read-only account in a group
+   * holding `full` still holds `read`.
+   */
+  async rightFor(viewer: FlatViewer, id: number, q: Queryable): Promise<AccessRight> {
+    const granted = (await this.#isAdmin(viewer.userId, q))
+      ? 'full'
+      : await this.#granted(q, id, await this.#groupsOf(viewer.userId, q));
+    const afterRole = cappedBy(viewer.role, granted);
+    return viewer.scope === undefined ? afterRole : lower(afterRole, viewer.scope);
+  }
+
+  /** Which rows this viewer may list. Administrators list every one. */
+  async listScope(viewer: FlatViewer, q: Queryable): Promise<ListScope> {
+    if (await this.#isAdmin(viewer.userId, q)) return { all: true };
+    return { all: false, groupIds: await this.#groupsOf(viewer.userId, q) };
+  }
+
+  /**
+   * Whether this viewer is acting as an administrator (`A-13`).
+   *
+   * **Asked of the groups, as `rightFor` asks it**, not of the role: removing somebody from the
+   * administrators group has to end this along with everything else it confers. The role needs no
+   * check of its own, because migration 034 refuses a read-only account in an administrator group
+   * at the database. The token does: one below `full` is not an administrator's authority,
+   * whoever holds it, which is the bar `ADMIN` sets for a route.
+   */
+  async administers(viewer: FlatViewer, q: Queryable): Promise<boolean> {
+    if (viewer.scope !== undefined && viewer.scope !== 'full') return false;
+    return this.#isAdmin(viewer.userId, q);
+  }
+
+  /**
+   * Grants a new one's creator `full` through their primary group, in the caller's transaction.
+   *
+   * **Otherwise the creator cannot see what they just made.** Access is per group and a new one
+   * has no grants, so a non-administrator would create it and immediately lose it — the kind of
+   * thing a user finds rather than a test. An account in no group gets no grant, and what it made
+   * is visible to administrators alone.
+   *
+   * @returns the group granted, when there was one.
+   */
+  async grantCreator(
+    q: Queryable,
+    id: number,
+    viewer: FlatViewer,
+    actor: string,
+  ): Promise<number | undefined> {
+    const primary = await q.query<{ group_id: string }>(
+      `SELECT group_id FROM user_group_member
+       WHERE user_id = $1 ORDER BY is_primary DESC, group_id LIMIT 1`,
+      [viewer.userId],
+    );
+    const raw = primary[0]?.group_id;
+    if (raw === undefined) return undefined;
+    const groupId = Number(raw);
+    await this.#upsert(q, id, groupId, 'full', actor);
+    return groupId;
+  }
+
+  async grants(q: Queryable, id: number): Promise<FlatGrant[]> {
+    const { table, key } = this.#grants;
+    const rows = await q.query<{
+      group_id: string;
+      name: string;
+      right_: AccessRight;
+      granted_at: Date;
+      granted_by: string;
+    }>(
+      `SELECT a.group_id, g.name, a.right_, a.granted_at, a.granted_by
+       FROM ${table} a JOIN user_group g ON g.id = a.group_id
+       WHERE a.${key} = $1 ORDER BY lower(g.name)`,
+      [id],
+    );
+    return rows.map((row) => ({
+      groupId: Number(row.group_id),
+      groupName: row.name,
+      right: row.right_,
+      grantedAt: row.granted_at,
+      grantedBy: row.granted_by,
+    }));
+  }
+
+  /**
+   * Grants a group a right, replacing any it held: granting twice is a correction, not a clash.
+   *
+   * **The group is checked rather than the foreign key caught**: a violation inside a transaction
+   * aborts it, and every statement after that fails for the wrong reason.
+   */
+  async grant(
+    q: Queryable,
+    id: number,
+    groupId: number,
+    right: AccessRight,
+    actor: string,
+  ): Promise<'granted' | 'no-such-group'> {
+    const group = await q.query<{ id: string }>(`SELECT id FROM user_group WHERE id = $1`, [
+      groupId,
+    ]);
+    if (group.length === 0) return 'no-such-group';
+    await this.#upsert(q, id, groupId, right, actor);
+    return 'granted';
+  }
+
+  /** Takes a group's grant away. False when it held none, which is not an error. */
+  async revoke(q: Queryable, id: number, groupId: number): Promise<boolean> {
+    const { table, key } = this.#grants;
+    const rows = await q.query<{ id: string }>(
+      `DELETE FROM ${table} WHERE ${key} = $1 AND group_id = $2 RETURNING ${key} AS id`,
+      [id, groupId],
+    );
+    return rows.length > 0;
+  }
+
+  async #upsert(
+    q: Queryable,
+    id: number,
+    groupId: number,
+    right: AccessRight,
+    actor: string,
+  ): Promise<void> {
+    const { table, key } = this.#grants;
+    await q.query(
+      `INSERT INTO ${table} (${key}, group_id, right_, granted_by)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (${key}, group_id)
+       DO UPDATE SET right_ = EXCLUDED.right_, granted_at = now(), granted_by = EXCLUDED.granted_by`,
+      [id, groupId, right, actor],
+    );
+  }
+
+  /**
+   * The highest right any of these groups holds here, or `none`.
+   *
+   * `access_rank` comes from migration 033 so the ordering is the one `object_access` already
+   * uses — `max()` over the text would sort the rights alphabetically, which is wrong in every
+   * position.
+   */
+  async #granted(q: Queryable, id: number, groupIds: readonly number[]): Promise<AccessRight> {
+    if (groupIds.length === 0) return 'none';
+    const { table, key } = this.#grants;
+    const rows = await q.query<{ right_: AccessRight | null }>(
+      `SELECT right_ FROM ${table}
+       WHERE ${key} = $1 AND group_id = ANY($2::bigint[])
+       ORDER BY access_rank(right_) DESC LIMIT 1`,
+      [id, groupIds],
+    );
+    return rows[0]?.right_ ?? 'none';
+  }
+
+  async #isAdmin(userId: number, q: Queryable): Promise<boolean> {
+    const rows = await q.query<{ total: string }>(
+      `SELECT count(*)::text AS total
+       FROM user_group_member m JOIN user_group g ON g.id = m.group_id
+       WHERE m.user_id = $1 AND g.is_admin`,
+      [userId],
+    );
+    return Number(rows[0]?.total ?? 0) > 0;
+  }
+
+  async #groupsOf(userId: number, q: Queryable): Promise<number[]> {
+    const rows = await q.query<{ group_id: string }>(
+      `SELECT group_id FROM user_group_member WHERE user_id = $1`,
+      [userId],
+    );
+    return rows.map((row) => Number(row.group_id));
+  }
+}
