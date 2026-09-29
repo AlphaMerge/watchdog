@@ -16080,7 +16080,7 @@ because each is a decision rather than a defect:
         `@ms/shared`, before it is logged or classified.
       Tests per the findings doc, one per path. Mutants as usual.
 
-- [ ] **A-45 — `A-29`'s vouching: auth off still records account vouchers, a sight is cached
+- [x] **A-45 — `A-29`'s vouching: auth off still records account vouchers, a sight is cached
       under the wrong epoch, and a failed settle never retries** · M · A-29 · Found in review
       round four (`findings/2026-09-29-review-round-4.md`, `A-45`).
       - **Medium** (`authorization.ts:372`). With `requireAuthentication` off, `writerFor` treats
@@ -16106,8 +16106,8 @@ because each is a decision rather than a defect:
       - the `principal === undefined` sweep is listed in the outcome, each site fixed or argued.
       Tests per the findings doc. Mutants as usual.
 
-      **A-45 part 1 outcome.** Everything but the settle rollback. That part waits for `A-41a`,
-      which changes `settle`'s contract, and is built on it.
+      **A-45 part 1 outcome.** Everything but the settle rollback, which waited for `A-41a`'s
+      change to `settle`'s contract and is built on it (part 2).
       - **Layer off, the installation vouches.** `writerFor` asks whether the layer is off, not
         whether there is a principal: the everyone sight, or no sight at all, the test `clears`
         already made, now one function `layerOff`. A logged-in account's write vouches as the
@@ -16162,6 +16162,23 @@ because each is a decision rather than a defect:
       Mutation 3/3: `writerFor` without the layer test, `refusals` without it, and the sight
       cached at any epoch. The `main.ts` line that passes `requireAuthentication` is covered by
       no unit test.
+
+      **A-45 part 2 outcome: the settle rollback**, on `A-41a`'s per-owner contract.
+      - **What happens.** A failed re-decision puts the owner's answer back: the entry it had, or
+        none if it had none. It then recounts the live fact for each sensor that crossed.
+      - **Why that retries.** The next settle sees the same crossings and makes the same write,
+        both ways: a withheld sensor is re-decided to Unknown, and a released one back to its
+        reading.
+      - **Why recount rather than copy back.** Another owner that settled while this write was
+        out keeps what it did, where copying the old values back would undo it. No test races
+        two owners against a failed write.
+
+      **Tests (part 2).** `sensor-vouching.test.ts` 1: a real factory, Up, and a reevaluator
+      whose first write each way fails. The withholding and the release each leave the stored
+      state behind (the control), and the next settle writes it. There are four calls in all,
+      and nothing is withheld at the end.
+
+      Mutation 2/2: the owner's answer not put back, and the live fact not recounted.
 
 - [ ] **A-46 — three places still show or count what the reader cannot see** · S · A-26, A-31,
       A-35 · Found in review round four (`findings/2026-09-29-review-round-4.md`, `A-46`). All

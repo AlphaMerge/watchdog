@@ -686,6 +686,52 @@ describe(
       assert.equal(vouching?.withheld().size, 0);
     });
 
+    it('tries a failed re-decision again at the next sweep, both ways (A-45)', async () => {
+      // The live fact moved before the write, and a write that failed left it moved: the next
+      // sweep saw nothing to do, and the sensor kept its stored Up while nothing evaluated it.
+      const [sum] = await makeFactories(await as(analyst), 1);
+      assert.ok(sum !== undefined);
+      await factory.sweep();
+      assert.equal((await runtimeOf(sum)).state, 'up');
+
+      const states = h.states;
+      assert.ok(states !== undefined);
+      const calls: number[][] = [];
+      vouching = new SensorVouching({
+        db,
+        logger: silent,
+        sensorTypes: gate,
+        sight,
+        states: {
+          reevaluate: (q, ids, at, cause) => {
+            calls.push([...ids]);
+            // The first write each way fails, as a serialisation failure or a dropped
+            // connection would.
+            if (calls.length % 2 === 1) return Promise.reject(new Error('could not serialize'));
+            return states.reevaluate(q, ids, at, cause);
+          },
+        },
+        ...(h.dependencies === undefined ? {} : { dependencies: h.dependencies }),
+      });
+      const refused = new Map([[sum, WITHHELD.lostRead]]);
+
+      assert.equal(await vouching.settle('factory', refused), 0);
+      assert.equal((await runtimeOf(sum)).state, 'up', 'the control: the write failed');
+      await vouching.settle('factory', refused);
+      assert.deepEqual(await runtimeOf(sum), {
+        state: 'unknown',
+        cause: 'access',
+        message: WITHHELD.lostRead,
+      });
+
+      assert.equal(await vouching.settle('factory', NONE_WITHHELD), 0);
+      assert.equal((await runtimeOf(sum)).state, 'unknown', 'the control: the release failed');
+      await vouching.settle('factory', NONE_WITHHELD);
+      assert.equal((await runtimeOf(sum)).state, 'up');
+      assert.deepEqual(calls, [[sum], [sum], [sum], [sum]], 'each crossing written twice');
+      assert.equal(vouching.withheld().size, 0);
+    });
+
     it('lets an account that can read it vouch again by saving it', async () => {
       const [sum] = await makeFactories(await as(analyst), 1);
       assert.ok(sum !== undefined);

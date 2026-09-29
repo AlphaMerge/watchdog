@@ -289,7 +289,8 @@ export class SensorVouching implements VoucherCheck {
    * look at now — deleted, paused — is let go, and the set cannot grow stale.
    */
   async settle(owner: string, refused: ReadonlyMap<number, string>): Promise<number> {
-    const before = this.#byOwner.get(owner) ?? new Map<number, string>();
+    const had = this.#byOwner.get(owner);
+    const before = had ?? new Map<number, string>();
     this.#byOwner.set(owner, new Map(refused));
 
     const entered: number[] = [];
@@ -297,9 +298,7 @@ export class SensorVouching implements VoucherCheck {
     const changed: number[] = [];
     for (const id of new Set([...before.keys(), ...refused.keys()])) {
       const was = this.#withheld.get(id);
-      const now = this.#heldBy(id);
-      if (now === undefined) this.#withheld.delete(id);
-      else this.#withheld.set(id, now);
+      const now = this.#recount(id);
       if (was === now) continue;
       changed.push(id);
       if (was === undefined) entered.push(id);
@@ -328,14 +327,29 @@ export class SensorVouching implements VoucherCheck {
       }
       return moved;
     } catch (error) {
-      // The set is already right; only the stored states are behind, and the next sweep's
-      // settle or any re-decision of these sensors reads the set again.
+      // **Put back, so that the next sweep tries again** (`A-45`). The set moved before the write,
+      // and kept after a write that failed, the next sweep found nothing had changed and never
+      // re-decided these sensors: a withheld one kept its stored state, Up and counted as
+      // monitored, or Down with its alarm still paging. Restored, the next settle sees the same
+      // crossings and makes the same write. Recounted rather than copied back, so another owner
+      // that settled while this write was out keeps what it did.
+      if (had === undefined) this.#byOwner.delete(owner);
+      else this.#byOwner.set(owner, had);
+      for (const id of changed) this.#recount(id);
       this.#logger.error(
         { owner, sensors: changed.length, err: describeError(error) },
-        'could not re-decide sensors after a voucher check; the live fact is correct',
+        'could not re-decide sensors after a voucher check; the next sweep tries again',
       );
       return 0;
     }
+  }
+
+  /** Sets the live fact for one sensor from what the owners hold, and returns it. */
+  #recount(sensorId: number): string | undefined {
+    const now = this.#heldBy(sensorId);
+    if (now === undefined) this.#withheld.delete(sensorId);
+    else this.#withheld.set(sensorId, now);
+    return now;
   }
 
   /** The words of the first sweep still withholding this sensor, or undefined if none is. */
