@@ -1,6 +1,6 @@
 // Side-effect import: @fastify/swagger augments FastifySchema with `description`.
 import '@fastify/swagger';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { actorFor } from '../authentication.js';
 import { notificationMethods } from '../../notifications/methods.js';
 import { describePlaceholders } from '../../notifications/placeholders.js';
@@ -11,17 +11,30 @@ import {
   describeSummarisationModes,
   SUMMARISATION_MODES,
 } from '../../notifications/summarisation.js';
-import type { TemplateInput, TemplateService } from '../../notifications/templates.js';
+import type {
+  TemplateInput,
+  TemplateService,
+  TemplateWriter,
+} from '../../notifications/templates.js';
 import {
   READS,
   WRITES,
   computesOn,
+  clears,
   every,
   onBodyObject,
   onQueryObject,
   visibilityOf,
   notAudited,
 } from '../authorization.js';
+
+/**
+ * What this caller may write into a template (`A-44`): an account or a group only as an
+ * administrator, the one caller `M-20` lets list them.
+ */
+function writerOf(request: FastifyRequest): TemplateWriter {
+  return { namesAccounts: clears(request, 'admin') };
+}
 
 export interface TemplateRouteOptions {
   templates: TemplateService;
@@ -511,7 +524,11 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
             'minutes and find out". `notes` reports what a real notification would have run ' +
             'into instead, so a green test on a template that is switched off cannot be ' +
             'mistaken for a working alarm. Without `sensorId` the message is rendered against ' +
-            'an example sensor, which is what an installation with no sensors yet needs.',
+            'an example sensor, which is what an installation with no sensors yet needs. ' +
+            'Anybody the template names and the send missed is named in `detail` or `error` ' +
+            'for an administrator, and counted by reason for anybody else — ' +
+            '`not sent to 2 recipients (1 disabled, 1 no email address)` — because the names ' +
+            'are the account and group lists, which are an administrator’s (`A-44`).',
           params: idParams,
           body: {
             type: 'object',
@@ -524,6 +541,8 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
       async (request) =>
         tester.send(actorFor(request), {
           templateId: request.params.id,
+          // Who the test missed, by name, only for whoever may list the accounts (`A-44`).
+          namesAccounts: clears(request, 'admin'),
           ...(request.body.sensorId === undefined ? {} : { sensorId: request.body.sensorId }),
         }),
     );
@@ -536,12 +555,15 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
       schema: {
         tags: ['templates'],
         summary: 'Create a template',
+        description:
+          'Only an administrator may name an account or a group as a recipient (`M-20`); ' +
+          'anybody else gets 403 `AUTH_FORBIDDEN` for one, and may name addresses (`A-44`).',
         body: { $ref: 'ms:templateInput' },
         response: { 201: { $ref: 'ms:template' } },
       },
     },
     async (request, reply) => {
-      const created = await templates.create(actorFor(request), request.body);
+      const created = await templates.create(actorFor(request), request.body, writerOf(request));
       await reply.status(201).send(created);
     },
   );
@@ -561,13 +583,16 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
           'secrets sent there unless it carries them again, so re-pointing a template never ' +
           'sends a token somebody else set to a new destination. A field left out counts as ' +
           'its default: a program with no `args` keeps its `secretArgs` through an edit that ' +
-          'sends none.',
+          'sends none. **Only an administrator may add an account or a group recipient** ' +
+          '(`M-20`, `A-44`): anybody else may keep or remove the ones the template has, and ' +
+          'gets 403 `AUTH_FORBIDDEN` for one it did not have.',
         params: idParams,
         body: { $ref: 'ms:templateInput' },
         response: { 200: { $ref: 'ms:template' } },
       },
     },
-    async (request) => templates.update(actorFor(request), request.params.id, request.body),
+    async (request) =>
+      templates.update(actorFor(request), request.params.id, request.body, writerOf(request)),
   );
 
   app.delete<{ Params: { id: number } }>(

@@ -3,6 +3,7 @@ import { recipientId } from './recipients.js';
 import type { Database, Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 import { Visibility } from '../auth/access.js';
+import { AuthError } from '../auth/errors.js';
 import type { Actor, AuditSink } from '../objects/audit.js';
 import { ObjectError } from '../objects/errors.js';
 import type { ObjectId } from '../objects/types.js';
@@ -35,6 +36,18 @@ export interface Recipient {
   readonly kind: 'address' | 'user' | 'userGroup';
   readonly value: string;
 }
+
+/** Who is writing a template, where that changes what they may write (`A-44`). */
+export interface TemplateWriter {
+  /**
+   * Whether this caller may name an account or a group as a recipient: an administrator, who may
+   * list both (`M-20`). Anybody else keeps or removes the ones a template has, and adds none.
+   */
+  readonly namesAccounts: boolean;
+}
+
+/** A writer who may add no account and no group: the default, so a caller that forgets is refused. */
+export const NAMES_NOBODY: TemplateWriter = { namesAccounts: false };
 
 /** A template as it is stored. `settings` still holds the secrets. */
 export interface StoredTemplate {
@@ -507,8 +520,13 @@ export class TemplateService {
     };
   }
 
-  async create(actor: Actor, input: TemplateInput): Promise<TemplateView> {
+  async create(
+    actor: Actor,
+    input: TemplateInput,
+    writer: TemplateWriter = NAMES_NOBODY,
+  ): Promise<TemplateView> {
     const write = this.#parse(input, null);
+    refuseNewAccounts(write.recipients, [], writer);
     const now = new Date();
     return this.#db.tx(async (q) => {
       await this.#requireSchedule(q, write.scheduleId);
@@ -545,13 +563,19 @@ export class TemplateService {
    * unless it sends them again, so editing a template is not a way to send somebody else's token
    * to a host of one's own. A field left out counts as its default, as the save will store it.
    */
-  async update(actor: Actor, id: number, input: TemplateInput): Promise<TemplateView> {
+  async update(
+    actor: Actor,
+    id: number,
+    input: TemplateInput,
+    writer: TemplateWriter = NAMES_NOBODY,
+  ): Promise<TemplateView> {
     const now = new Date();
     return this.#db.tx(async (q) => {
       const before = await this.#repo.get(q, id);
       if (before === null) throw notFound(id);
 
       const write = this.#parse(input, before);
+      refuseNewAccounts(write.recipients, before.recipients, writer);
       // What this edit left behind by moving where it was sent (`A-40`). Named in the audit
       // entry and the log — the paths, never the values — so a webhook that stops authenticating
       // after somebody changed its URL says why, and who.
@@ -808,6 +832,40 @@ export class TemplateService {
       updatedAt: stored.updatedAt.toISOString(),
     };
   }
+}
+
+/**
+ * Refuses an account or a group recipient this writer added (`A-44`).
+ *
+ * **`M-20` was the web editor's rule, and only the web editor's.** It offers users and groups to
+ * an administrator alone, because the list of logins is a list of what to try passwords against;
+ * the API took any id from any writer. A writer could save a template naming ids 1 to 200 and send
+ * a test, and the report named every one that was skipped — which ids are accounts, their logins,
+ * the groups and who is in them. Now the server holds the rule: a row already on the template may
+ * stay or go, because the writer did not choose it and removing it discloses nothing, and a row it
+ * did not have is refused.
+ */
+function refuseNewAccounts(
+  recipients: readonly Recipient[],
+  had: readonly Recipient[],
+  writer: TemplateWriter,
+): void {
+  if (writer.namesAccounts) return;
+  const kept = new Set(had.map(recipientKey));
+  const added = recipients.filter(
+    (recipient) => recipient.kind !== 'address' && !kept.has(recipientKey(recipient)),
+  );
+  if (added.length === 0) return;
+  throw new AuthError(
+    'AUTH_FORBIDDEN',
+    'only an administrator may add an account or a group as a recipient; keep or remove the ' +
+      'ones this template has, or add an address',
+    { added: added.length },
+  );
+}
+
+function recipientKey(recipient: Recipient): string {
+  return `${recipient.kind}\u0000${recipient.value}`;
 }
 
 function notFound(id: number): ObjectError {

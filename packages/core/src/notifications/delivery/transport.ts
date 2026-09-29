@@ -1,4 +1,5 @@
 import type { Escaping, MessageContext } from '../placeholders.js';
+import type { SkippedRecipient } from '../recipients.js';
 import type { Recipient } from '../templates.js';
 
 /** A message, rendered and ready to send. */
@@ -45,10 +46,20 @@ export type DeliveryResult =
        * Who the message names and did not reach, and why, when that is anybody (`M-19`). Only a
        * method that sends to people has any; it is kept on the request, because "sent" has to be
        * able to say "but not to Bob".
+       *
+       * **Structured, and never in `detail` or `error`** (`A-44`). Who may read the names is the
+       * reader's question — an administrator sees them, anybody else a count by reason — so the
+       * text a result carries is the same for everybody, and the names travel beside it.
        */
-      readonly skipped?: string;
+      readonly skipped?: readonly SkippedRecipient[];
     }
-  | { readonly ok: false; readonly error: string; readonly retryable: boolean };
+  | {
+      readonly ok: false;
+      readonly error: string;
+      readonly retryable: boolean;
+      /** Who it did not reach, when that is why it failed: "nobody to send to". As above. */
+      readonly skipped?: readonly SkippedRecipient[];
+    };
 
 /**
  * How one delivery method sends (`N-07` onwards).

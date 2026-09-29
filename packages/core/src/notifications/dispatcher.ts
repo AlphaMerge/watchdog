@@ -6,6 +6,7 @@ import type { NotificationReason } from './chain.js';
 import type { MessageContextLoader, PendingNotification } from './context.js';
 import { notificationMethods } from './methods.js';
 import { render, substitute, type MessageContext } from './placeholders.js';
+import { describeSkipped, skippedCounts, type SkippedRecipient } from './recipients.js';
 import { DEFAULT_RETRY, exhausted, retryDelayMs, type RetryPolicy } from './retry.js';
 import { SummaryRepository } from './summaries.js';
 import {
@@ -559,21 +560,24 @@ export class NotificationDispatcher {
      */
     sharedDelayMs?: number,
   ): Promise<void> {
+    // Who it did not reach twice over (`A-44`): by name, for an administrator, and by count and
+    // reason, for everybody else who reads the log. Written on a failure too, since "nobody to
+    // send to" is a failure and the names are why.
+    const skipped = result.skipped ?? [];
+    const names = describeSkipped(skipped);
+    const counts = JSON.stringify(skippedCounts(skipped));
+
     if (result.ok) {
       this.#stats.sent += 1;
       await this.#db.query(
         `UPDATE notification_request
          SET status = 'sent', delivered_at = $2, settled_at = $2, next_attempt_at = NULL,
-             last_error = NULL, skipped_recipients = $3
+             last_error = NULL, skipped_recipients = $3, skipped_counts = $4::jsonb
          WHERE id = $1`,
-        [requestId, now, (result.skipped ?? '').slice(0, 2_000)],
+        [requestId, now, names.slice(0, 2_000), counts],
       );
       this.#logger.info(
-        {
-          requestId,
-          detail: result.detail,
-          ...(result.skipped === undefined ? {} : { skipped: result.skipped }),
-        },
+        { requestId, detail: result.detail, ...journalled(skipped) },
         'notification delivered',
       );
       return;
@@ -594,7 +598,8 @@ export class NotificationDispatcher {
        SET status = $3, last_error = $2, next_attempt_at = $4,
            -- When it stopped being owed, which is not when it fell due (P-124). Null while it is
            -- still pending: a row waiting for its next attempt has not settled.
-           settled_at = CASE WHEN $3 = 'pending' THEN NULL ELSE $5::timestamptz END
+           settled_at = CASE WHEN $3 = 'pending' THEN NULL ELSE $5::timestamptz END,
+           skipped_recipients = $6, skipped_counts = $7::jsonb
        WHERE id = $1`,
       [
         requestId,
@@ -602,6 +607,8 @@ export class NotificationDispatcher {
         givingUp ? 'failed' : 'pending',
         givingUp ? null : new Date(now.getTime() + delayMs),
         now,
+        names.slice(0, 2_000),
+        counts,
       ],
     );
 
@@ -609,7 +616,13 @@ export class NotificationDispatcher {
     // that says so, with everything an operator needs to act without opening the database.
     if (givingUp) {
       this.#logger.error(
-        { requestId, attempts, retryable: result.retryable, err: result.error },
+        {
+          requestId,
+          attempts,
+          retryable: result.retryable,
+          err: result.error,
+          ...journalled(skipped),
+        },
         'notification could not be delivered and will not be tried again',
       );
       return;
@@ -642,4 +655,12 @@ function toPending(row: ClaimRow): PendingNotification {
     message: row.message,
     observed: row.observed,
   };
+}
+
+/**
+ * Who a delivery missed, by name, for the journal. An operator reads the journal, and a failure
+ * that says "nobody to send to" is not a diagnosis without who and why.
+ */
+function journalled(skipped: readonly SkippedRecipient[]): { skipped?: string } {
+  return skipped.length === 0 ? {} : { skipped: describeSkipped(skipped) };
 }

@@ -16705,7 +16705,7 @@ because each is a decision rather than a defect:
       The audit summary's own filter is belt and braces behind the check, and no test can tell
       it apart while the check stands.
 
-- [ ] **A-44 — notification rows name accounts, and carry program output, to callers who may see
+- [x] **A-44 — notification rows name accounts, and carry program output, to callers who may see
       neither** · M · M-19, M-20 · Found in review round four
       (`findings/2026-09-29-review-round-4.md`, `A-44`).
       - **Medium.** `POST /templates/:id/test` (`recipients.ts:164`). A non-admin writer adds a
@@ -16728,6 +16728,71 @@ because each is a decision rather than a defect:
       - program output passes one scrub of the substituted `secretArgs`, moved to
         `@ms/shared`, before it is logged or classified.
       Tests per the findings doc, one per path. Mutants as usual.
+
+      **Outcome.** All three findings. The second, verified first by reading the route and then
+      by mutant M8 below, which puts it back: the route served `skippedRecipients` and
+      `lastError` to any reader of the sensor, and a failure's names were in `lastError` itself
+      (`nobody to send to: user "alice" (disabled)`).
+      - **`M-20` on the server.** `TemplateService.create`/`update` take a `TemplateWriter`. The
+        routes pass `clears(request, 'admin')`, and the default refuses. A non-admin may keep or
+        remove a `user` or `userGroup` row the stored template has, and gets 403
+        `AUTH_FORBIDDEN` for any other one. A row is its kind and its value, so user 7 is not
+        group 7. An id that is nothing is refused the same way, or the refusal would be the
+        oracle.
+      - **Names beside the error, not in it.** `DeliveryResult.skipped` is now the structured
+        list, on a failure as well as a success, and email's error is plain `nobody to send to`.
+        The reader decides how it is described:
+        - the test-send report names them for an administrator, and says
+          `not sent to 2 recipients (1 disabled, 1 no email address)` to anybody else. The request
+          field is `namesAccounts`, absent is false;
+        - the log keeps names in `skipped_recipients` and counts in the new `skipped_counts`. The
+          dispatcher writes both, on a failure too. `NotificationLogQuery.namesAccounts` is
+          required, so a new reader of the log decides;
+        - the journal keeps the names: whoever reads it runs the service.
+      - **Migration 065.** Adds `skipped_counts` (a jsonb object). Moves the names out of every
+        `nobody to send to: <names>` error into `skipped_recipients` and backfills the counts
+        from the text. The way back puts the names back after `nobody to send to: ` and drops the
+        counts. It cannot restore names past the column's 2,000 characters. The error had no
+        limit, the column has, so up keeps the first 2,000 and down returns those. The migration
+        says so, and so does its test. Counts read back from old text are the best the text
+        allows: a clause the column cut short is not counted.
+      - **One scrub, in `@ms/shared`.** `scrubSecrets`, `SCRUBBED` and `MIN_SCRUBBED_LENGTH`
+        moved to `packages/shared/src/logging/scrub.ts`. `@ms/sensors` re-exports the same
+        functions, so its call sites are unchanged. `ProgramTransport.send` scrubs the run
+        (stdout, stderr, and a spawn failure's message) of the secret arguments as substituted,
+        before `#log` and `classify` read it. The visible arguments are left alone.
+
+      **Tests.**
+      - `recipient-oracle.test.ts` (new), over HTTP with admin, readwrite and read-only accounts:
+        - the recipient rule on create and on edit: keep, remove, re-add, re-point and re-kind;
+        - a test send, delivered and nobody-to-send-to, named for the administrator and counted
+          for the writer;
+        - the log, named for the administrator and counted for a writer and a reader.
+      - `migrator.test.ts` 065: a round trip over a failure with names (restored whole), one past
+        2,000 characters (restored as clipped), a partial send, another failure and a nameless
+        one. A group name with brackets in it, or with a reason in brackets inside it, does not
+        miscount.
+      - `email-delivery.test.ts`: the transport's plain error and structured `skipped`; the
+        dispatcher's counts on a send and on a failure.
+      - `test-send.test.ts`: the default counts; a program's refusal comes back scrubbed.
+      - `program-delivery.test.ts`: the error and the journal scrubbed of the substituted secret;
+        a visible argument left as it was.
+      - `scrub.test.ts` in `@ms/shared`, and `secrets.test.ts` checks that `@ms/sensors` hands
+        out the shared functions. `exe-script` and `windows-transport` pass unchanged.
+
+      Mutation 26/26, every one caught:
+      - the server rule: refusing nobody, every route caller an administrator, an edit keeping
+        nothing, a row as its value alone, update comparing with nothing, create unchecked;
+      - who is told: the test send and the log naming to everyone (M8 is the second finding as
+        it was), the tester naming by default, the log always naming, email's error naming again;
+      - the dispatcher: a failure keeping no names or no counts, a send keeping no counts;
+      - the counts: a miscount, a wrong total;
+      - 065: up leaving the names in the error, moving a nameless error, dropping a character;
+        down not restoring the names, restoring sent rows too; the backfill counting any bracket.
+        That last one survived the first run and is why the test has a reason inside a group's
+        name;
+      - the program: no scrub, scrubbing the visible arguments, scrubbing the raw secret instead
+        of the substituted one, scrubbing stderr only.
 
 - [x] **A-45 — `A-29`'s vouching: auth off still records account vouchers, a sight is cached
       under the wrong epoch, and a failed settle never retries** · M · A-29 · Found in review

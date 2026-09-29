@@ -249,3 +249,51 @@ function accountOf(row: AccountRow): Account {
 export function describeSkipped(skipped: readonly SkippedRecipient[]): string {
   return skipped.map((one) => `${one.who} (${one.reason})`).join(', ');
 }
+
+/**
+ * The error of a message nobody it names could be sent. Who, and why, travels beside it as
+ * `skipped` (`A-44`). Migration 065 wrote it into the rows that held the names in the error.
+ */
+export const NOBODY_TO_SEND_TO = 'nobody to send to';
+
+/** Every reason, in the order a count of them is written. */
+export const SKIP_REASONS: readonly SkipReason[] = [
+  'no such account',
+  'no such group',
+  'no members',
+  'disabled',
+  'no email address',
+  'may not see this sensor',
+];
+
+/** How many were skipped for each reason. Only the reasons that happened are present. */
+export type SkipCounts = Readonly<Partial<Record<SkipReason, number>>>;
+
+export function skippedCounts(skipped: readonly SkippedRecipient[]): SkipCounts {
+  const counts: Partial<Record<SkipReason, number>> = {};
+  for (const one of skipped) counts[one.reason] = (counts[one.reason] ?? 0) + 1;
+  return counts;
+}
+
+/**
+ * The skipped by count and reason, and nothing about who (`A-44`): `2 recipients (1 disabled,
+ * 1 may not see this sensor)`. Empty when nobody was.
+ *
+ * **What a caller who may not list accounts is told.** A template's users and groups are named by
+ * id and resolved when it is sent, so naming the skipped handed whoever tested a template, or read
+ * the notification log, the logins, group names and memberships `M-20` made an administrator's —
+ * and whether a given account may read a given sensor. A writer could save a template naming ids
+ * 1 to 200 and read the account list back.
+ */
+export function describeCounts(counts: SkipCounts): string {
+  let total = 0;
+  const parts: string[] = [];
+  for (const reason of SKIP_REASONS) {
+    const count = counts[reason] ?? 0;
+    if (count === 0) continue;
+    total += count;
+    parts.push(`${String(count)} ${reason}`);
+  }
+  if (total === 0) return '';
+  return `${String(total)} recipient${total === 1 ? '' : 's'} (${parts.join(', ')})`;
+}

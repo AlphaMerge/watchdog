@@ -3,6 +3,7 @@ import { isAbsolute, join, resolve, sep } from 'node:path';
 import {
   describeError,
   runProgram,
+  scrubSecrets,
   type Logger,
   type ProgramConfig,
   type ProgramRun,
@@ -69,15 +70,18 @@ export class ProgramTransport implements DeliveryTransport {
     const resolved = await this.#resolve(name);
     if (!resolved.ok) return { ok: false, retryable: false, error: resolved.reason };
 
+    const visible = readArgs(settings['args']);
     const args = [
-      ...readArgs(settings['args']),
+      ...visible,
       // After the visible ones, which is what the schema promises.
       ...readArgs(settings['secretArgs']),
     ]
       .slice(0, MAX_ARGS)
       .map((argument) => substitute(argument, message.context, 'none').text);
+    // The secret ones as the program was handed them, placeholders filled in (`A-44`).
+    const secrets = args.slice(Math.min(visible.length, MAX_ARGS));
 
-    const run = await runProgram({
+    const ran = await runProgram({
       file: resolved.file,
       args,
       // The programs directory, so a script can find whatever sits beside it without knowing
@@ -93,6 +97,11 @@ export class ProgramTransport implements DeliveryTransport {
       ...(this.#config.gid < 0 ? {} : { gid: this.#config.gid }),
     });
 
+    // **Scrubbed once, before anything reads it** (`A-44`). A script that fails often says why
+    // with the arguments it was given — `curl` echoes a URL, a CLI prints its rejected token — and
+    // the last line becomes the delivery error, which the notification log shows every reader of
+    // the sensor and a test send shows its caller. The journal is scrubbed by the same pass.
+    const run = scrubbed(ran, secrets);
     this.#log(message.requestId, name, run);
     return classify(name, run);
   }
@@ -297,6 +306,20 @@ function classify(name: string, run: ProgramRun): DeliveryResult {
 }
 
 const TRANSIENT_SPAWN_ERRORS = new Set(['EAGAIN', 'EMFILE', 'ENFILE', 'ENOMEM']);
+
+/**
+ * A run with every secret argument replaced by the marker, in all it said: both streams and a
+ * spawn failure's message. With the limits `scrubSecrets` states — an exact value of four
+ * characters or more, not one the script encoded first.
+ */
+function scrubbed(run: ProgramRun, secrets: readonly string[]): ProgramRun {
+  if (secrets.length === 0) return run;
+  const scrub = (text: string): string => scrubSecrets(text, secrets);
+  const said = { stdout: scrub(run.stdout), stderr: scrub(run.stderr) };
+  return run.outcome === 'failed'
+    ? { ...run, ...said, message: scrub(run.message) }
+    : { ...run, ...said };
+}
 
 /** The last thing the program said, which is usually why it failed. */
 function excerpt(run: ProgramRun): string {

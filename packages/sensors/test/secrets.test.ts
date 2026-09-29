@@ -10,6 +10,7 @@ import {
   secretsOfCheck,
 } from '../src/support/secrets.js';
 import { snmpType } from './support/example-types.js';
+import * as shared from '@ms/shared';
 
 /**
  * `S-19`: a check's message leaves the probe without the secrets the check held.
@@ -114,6 +115,14 @@ describe('what a check may say', () => {
       /^Error: this device's host "-c100000" begins with "-", which no address or name does/,
     );
     assert.equal(ran, false);
+  });
+
+  it('scrubs with the one scrubber, which lives in @ms/shared since A-44', () => {
+    // Re-exported rather than copied, so every type that imports it from here scrubs exactly as
+    // a notification program's output is scrubbed in the core.
+    assert.equal(scrubSecrets, shared.scrubSecrets);
+    assert.equal(SCRUBBED, shared.SCRUBBED);
+    assert.equal(MIN_SCRUBBED_LENGTH, shared.MIN_SCRUBBED_LENGTH);
   });
 
   it('replaces the values it is given and nothing else — the limits it states', () => {

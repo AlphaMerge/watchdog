@@ -2,6 +2,7 @@ import type { Queryable } from '../db/pool.js';
 import type { Visibility } from '../auth/access.js';
 import type { SensorState } from '../state/tables.js';
 import type { NotificationReason } from './chain.js';
+import { describeCounts, type SkipCounts } from './recipients.js';
 
 /** One notification, and everything that happened to it (`N-13`). */
 export interface NotificationLogEntry {
@@ -23,7 +24,10 @@ export interface NotificationLogEntry {
   readonly deliveredAt: Date | null;
   readonly nextAttemptAt: Date | null;
   readonly lastError: string | null;
-  /** Who a sent message named and did not reach, and why; empty when it reached everybody. */
+  /**
+   * Who a message named and did not reach, and why; empty when it reached everybody. By name, or
+   * by count and reason, as `namesAccounts` asked.
+   */
   readonly skippedRecipients: string;
 }
 
@@ -35,6 +39,14 @@ export interface NotificationLogQuery {
    * its state log (`A-31`).
    */
   readonly visibility: Visibility;
+  /**
+   * Whether the reader may see who a message missed by name (`A-44`): an administrator, who may
+   * list the accounts and groups anyway. Everybody else who can read the sensor is told how many
+   * were missed and why — a name, a group's membership and whether an account may read this
+   * sensor are `M-20`'s to give, and reading a sensor is not enough. Required, so a new reader of
+   * the log decides rather than inherits.
+   */
+  readonly namesAccounts: boolean;
   readonly status?: readonly string[];
   readonly sensorId?: number;
   readonly templateId?: number;
@@ -62,6 +74,7 @@ interface Row {
   next_attempt_at: Date | null;
   last_error: string | null;
   skipped_recipients: string;
+  skipped_counts: SkipCounts;
 }
 
 const DEFAULT_LIMIT = 50;
@@ -99,7 +112,8 @@ export class NotificationLogReader {
       SELECT r.id::text AS id, r.at, r.sensor_id::text AS sensor_id, o.name AS sensor_name,
              r.template_id::text AS template_id, t.name AS template_name, t.method,
              r.trigger_kind, r.reason, r.state, r.message, r.status, r.disposition, r.attempts,
-             r.delivered_at, r.next_attempt_at, r.last_error, r.skipped_recipients
+             r.delivered_at, r.next_attempt_at, r.last_error, r.skipped_recipients,
+             r.skipped_counts
       FROM notification_request r
       LEFT JOIN object o ON o.id = r.sensor_id
       LEFT JOIN notification_template t ON t.id = r.template_id
@@ -113,11 +127,11 @@ export class NotificationLogReader {
       `,
       values,
     );
-    return rows.map(toEntry);
+    return rows.map((row) => toEntry(row, query.namesAccounts));
   }
 }
 
-function toEntry(row: Row): NotificationLogEntry {
+function toEntry(row: Row, namesAccounts: boolean): NotificationLogEntry {
   return {
     id: Number(row.id),
     at: row.at,
@@ -136,6 +150,6 @@ function toEntry(row: Row): NotificationLogEntry {
     deliveredAt: row.delivered_at,
     nextAttemptAt: row.next_attempt_at,
     lastError: row.last_error,
-    skippedRecipients: row.skipped_recipients,
+    skippedRecipients: namesAccounts ? row.skipped_recipients : describeCounts(row.skipped_counts),
   };
 }

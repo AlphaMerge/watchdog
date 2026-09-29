@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { pino } from 'pino';
-import type { Logger, ProgramConfig } from '@ms/shared';
+import { SCRUBBED, type Logger, type ProgramConfig } from '@ms/shared';
 import { ProgramTransport } from '../src/notifications/delivery/program.js';
 import { MAX_SECRET_ARGS, MAX_VISIBLE_ARGS } from '../src/notifications/methods.js';
 import type { OutgoingMessage } from '../src/notifications/delivery/transport.js';
@@ -314,6 +314,38 @@ describe('execute-program delivery', { skip: posix ? false : 'POSIX only' }, () 
       assert.equal(line['stderr'], 'slow\n');
       assert.equal(line['program'], 'chatty.sh');
       assert.ok(!JSON.stringify(line).includes('hunter2'), 'the secret argument was logged');
+    });
+
+    it('never says a secret argument back, in its error or in the journal (A-44)', async () => {
+      // A script that fails often says why with what it was given, and the last line of that is
+      // the delivery error the notification log shows every reader of the sensor. The secret as
+      // the program received it, placeholder filled in, is the one that has to go.
+      const { logger, lines } = capturing();
+      await script('echo.sh', 'echo "sent with $2"; echo "key $2 was refused" >&2; exit 1');
+      const result = await new ProgramTransport({ config: config(), logger }).send(
+        message({
+          settings: { path: 'echo.sh', args: ['--key'], secretArgs: ['hunter2-%sensor'] },
+        }),
+      );
+
+      assert.ok(!result.ok);
+      assert.equal(result.error, `echo.sh exited 1 — key ${SCRUBBED} was refused`);
+      const [line] = lines;
+      assert.ok(line !== undefined, 'nothing was logged');
+      assert.equal(line['stdout'], `sent with ${SCRUBBED}\n`);
+      assert.equal(line['stderr'], `key ${SCRUBBED} was refused\n`);
+      assert.ok(!JSON.stringify(line).includes('hunter2'), 'the secret argument was logged');
+    });
+
+    it('leaves what a visible argument said alone', async () => {
+      // Only the secret ones are scrubbed: the visible arguments are on the template for any
+      // editor to read, and a scrubbed diagnosis is a worse one.
+      await script('visible.sh', 'echo "user $1 was refused" >&2; exit 1');
+      const result = await transport().send(
+        message({ settings: { path: 'visible.sh', args: ['operator'], secretArgs: ['hunter2'] } }),
+      );
+      assert.ok(!result.ok);
+      assert.equal(result.error, 'visible.sh exited 1 — user operator was refused');
     });
 
     it('logs a program that did not succeed at a level that says so', async () => {

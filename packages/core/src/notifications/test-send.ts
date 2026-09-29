@@ -8,6 +8,7 @@ import type { MessageContextLoader } from './context.js';
 import type { DeliveryTransport } from './delivery/transport.js';
 import { notificationMethods } from './methods.js';
 import { render, type MessageContext } from './placeholders.js';
+import { describeCounts, describeSkipped, skippedCounts } from './recipients.js';
 import { summarises } from './summarisation.js';
 import { TemplateRepository, type Recipient, type StoredTemplate } from './templates.js';
 
@@ -57,6 +58,12 @@ export interface TestSendRequest {
   readonly templateId: number;
   /** Render against this sensor. Absent uses an example one, so a relay can be tested first. */
   readonly sensorId?: ObjectId;
+  /**
+   * Whether the report names who the send missed, or counts them by reason (`A-44`). Only an
+   * administrator may list the accounts and groups (`M-20`), and a test send is the one place a
+   * writer could ask about any id they liked. Absent is false: a caller that forgets tells nobody.
+   */
+  readonly namesAccounts?: boolean;
 }
 
 /**
@@ -135,6 +142,11 @@ export class NotificationTester {
             context,
           });
     const durationMs = Number((process.hrtime.bigint() - started) / 1_000_000n);
+    const skipped = result.skipped ?? [];
+    const missed =
+      request.namesAccounts === true
+        ? describeSkipped(skipped)
+        : describeCounts(skippedCounts(skipped));
 
     const report: TestSendReport = {
       templateId: template.id,
@@ -150,11 +162,11 @@ export class NotificationTester {
       delivered: result.ok,
       // Who it would have missed, in the one place somebody testing a template is looking.
       detail: result.ok
-        ? result.skipped === undefined
+        ? missed === ''
           ? result.detail
-          : `${result.detail}; not sent to ${result.skipped}`
+          : `${result.detail}; not sent to ${missed}`
         : null,
-      error: result.ok ? null : result.error,
+      error: result.ok ? null : missed === '' ? result.error : `${result.error}: ${missed}`,
       retryable: result.ok ? null : result.retryable,
       durationMs,
       notes,

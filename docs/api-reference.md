@@ -2061,6 +2061,8 @@ Every notification template
 
 Create a template
 
+Only an administrator may name an account or a group as a recipient (`M-20`); anybody else gets 403 `AUTH_FORBIDDEN` for one, and may name addresses (`A-44`).
+
 **Body**
 
 | Field | Type | |
@@ -2095,7 +2097,7 @@ One template
 
 Replace a template
 
-Whole-document, with one exception: a secret the request does not carry is **kept**, because the form it came from was rendered without it. Send an explicit `null` to clear one. **A secret is kept only while it goes where it went:** a request that changes a webhook's `url`, or a program's `path` or any of its `args`, clears the secrets sent there unless it carries them again, so re-pointing a template never sends a token somebody else set to a new destination. A field left out counts as its default: a program with no `args` keeps its `secretArgs` through an edit that sends none.
+Whole-document, with one exception: a secret the request does not carry is **kept**, because the form it came from was rendered without it. Send an explicit `null` to clear one. **A secret is kept only while it goes where it went:** a request that changes a webhook's `url`, or a program's `path` or any of its `args`, clears the secrets sent there unless it carries them again, so re-pointing a template never sends a token somebody else set to a new destination. A field left out counts as its default: a program with no `args` keeps its `secretArgs` through an edit that sends none. **Only an administrator may add an account or a group recipient** (`M-20`, `A-44`): anybody else may keep or remove the ones the template has, and gets 403 `AUTH_FORBIDDEN` for one it did not have.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -2177,7 +2179,7 @@ The same rendering as the saved preview, against a template that does not exist 
 
 Send a test notification through this template
 
-**This really sends.** The same rendering, the same transport, the same settings and the same recipients — testing an on-call template at three in the morning pages whoever is on call, which is why it is written to the audit log. What it skips is the queue: nothing is retried, summarised or suppressed by an activation schedule, because those would each turn "did my relay work" into "wait fifteen minutes and find out". `notes` reports what a real notification would have run into instead, so a green test on a template that is switched off cannot be mistaken for a working alarm. Without `sensorId` the message is rendered against an example sensor, which is what an installation with no sensors yet needs.
+**This really sends.** The same rendering, the same transport, the same settings and the same recipients — testing an on-call template at three in the morning pages whoever is on call, which is why it is written to the audit log. What it skips is the queue: nothing is retried, summarised or suppressed by an activation schedule, because those would each turn "did my relay work" into "wait fifteen minutes and find out". `notes` reports what a real notification would have run into instead, so a green test on a template that is switched off cannot be mistaken for a working alarm. Without `sensorId` the message is rendered against an example sensor, which is what an installation with no sensors yet needs. Anybody the template names and the send missed is named in `detail` or `error` for an administrator, and counted by reason for anybody else — `not sent to 2 recipients (1 disabled, 1 no email address)` — because the names are the account and group lists, which are an administrator’s (`A-44`).
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |

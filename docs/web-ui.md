@@ -149,6 +149,11 @@ Notification templates — what a message says, who receives it, and when it is 
   message to either reaches nobody. Only an administrator can pick them, since only an
   administrator may list who is in the installation. Anyone else who edits a template sees the
   users and groups already on it by number, keeps them as they are, and can still remove them.
+  The server holds the same rule, so a request that adds one is refused however it was sent.
+- **Who a message missed is named only to an administrator.** A test send's result and the
+  notification log name the people a message did not reach, and why, for an administrator.
+  Anyone else sees how many and why — "not sent to 2 recipients (1 disabled, 1 no email
+  address)" — because the names are the list of accounts and groups.
 - **A secret stays with where it is sent.** Secret headers and secret arguments are never shown,
   and saving a form that leaves them blank keeps them. Changing an HTTP action's URL, or a
   program's name or any of its arguments, clears the secrets that went there, unless you enter

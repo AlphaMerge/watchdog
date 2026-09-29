@@ -540,6 +540,7 @@ describe(
 
       const entries = await new NotificationLogReader().list(db, {
         visibility: Visibility.EVERYTHING,
+        namesAccounts: true,
         status: ['failed'],
       });
       assert.equal(entries.length, 1);
@@ -560,13 +561,17 @@ describe(
       await dispatcherWith(recorder().transport).dispatch();
 
       const log = new NotificationLogReader();
-      const all = await log.list(db, { visibility: Visibility.EVERYTHING });
+      const all = await log.list(db, { visibility: Visibility.EVERYTHING, namesAccounts: true });
       assert.deepEqual(
         all.map((entry) => entry.id),
         [second, second - 1],
         'newest first',
       );
-      const one = await log.list(db, { visibility: Visibility.EVERYTHING, sensorId: sensorAt(1) });
+      const one = await log.list(db, {
+        visibility: Visibility.EVERYTHING,
+        namesAccounts: true,
+        sensorId: sensorAt(1),
+      });
       assert.deepEqual(
         one.map((entry) => entry.sensorName),
         ['HTTP'],
@@ -579,13 +584,18 @@ describe(
       for (let index = 0; index < 5; index += 1) ids.push(await queue(templateId));
 
       const log = new NotificationLogReader();
-      const first = await log.list(db, { visibility: Visibility.EVERYTHING, limit: 2 });
+      const first = await log.list(db, {
+        visibility: Visibility.EVERYTHING,
+        namesAccounts: true,
+        limit: 2,
+      });
       assert.deepEqual(
         first.map((entry) => entry.id),
         [ids[4], ids[3]],
       );
       const next = await log.list(db, {
         visibility: Visibility.EVERYTHING,
+        namesAccounts: true,
         limit: 2,
         before: first[1]?.id ?? 0,
       });

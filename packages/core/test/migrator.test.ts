@@ -1052,6 +1052,140 @@ describe(
       }
     });
 
+    it('counts who a message missed, and takes the names out of its error and back (065)', async () => {
+      // `A-44`: the log shows a reader who may not list accounts how many were missed and why,
+      // and never who. A failure's names move from the error to the column that holds them, and
+      // the way back returns them to the error, as the build before wrote them. What it cannot
+      // return is the part of a list that ran past the column's 2,000 characters.
+      const fresh = await createScratchDatabase('skipped_counts');
+      try {
+        const all = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 65),
+        );
+        await all.up();
+        await all.down(1);
+        const q = fresh.db;
+        const [root] = await q.query<{ id: string }>(`SELECT id FROM object WHERE kind = 'root'`);
+        const insert = async (kind: string, name: string, parent: string): Promise<string> => {
+          const [row] = await q.query<{ id: string }>(
+            'INSERT INTO object (parent_id, kind, name) VALUES ($1, $2, $3) RETURNING id::text',
+            [parent, kind, name],
+          );
+          return row?.id ?? assert.fail('no row');
+        };
+        const probe = await insert('probe', 'probe', root?.id ?? '');
+        const sensor = await insert('sensor', 'sensor', await insert('device', 'device', probe));
+        const request = async (
+          status: string,
+          lastError: string | null,
+          skipped = '',
+        ): Promise<string> => {
+          const [row] = await q.query<{ id: string }>(
+            `INSERT INTO notification_request
+               (at, sensor_id, trigger_kind, reason, state, status, last_error, skipped_recipients)
+             VALUES (now(), $1, 'state', 'initial', 'down', $2, $3, $4) RETURNING id::text`,
+            [sensor, status, lastError, skipped],
+          );
+          return row?.id ?? assert.fail('no request');
+        };
+
+        // Brackets in a group's name, and a reason in brackets inside one: counted only where a
+        // clause ends, so neither is taken for a reason.
+        const names =
+          '"bob" in group "NOC (east)" (disabled), user "carol" (may not see this sensor), ' +
+          '"dan" in group "NOC (east)" (disabled), ' +
+          '"eve" in group "Old (disabled) staff" (no email address)';
+        const clauses = Array.from(
+          { length: 60 },
+          (_, i) => `"member-${String(i)}" in group "Everyone" (no email address)`,
+        );
+        const everyone = clauses.join(', ');
+        assert.ok(everyone.length > 2_000, 'the long list runs past the column');
+        // The clauses that end inside the first 2,000 characters: those the old rows' counts see.
+        let whole = 0;
+        let end = 0;
+        for (const clause of clauses) {
+          end += (whole === 0 ? 0 : 2) + clause.length;
+          if (end > 2_000) break;
+          whole += 1;
+        }
+
+        const failed = await request('failed', `nobody to send to: ${names}`);
+        const tooMany = await request('failed', `nobody to send to: ${everyone}`);
+        const partial = await request('sent', null, 'user "erin" (no email address)');
+        const refused = await request('failed', 'relay refused the message: 550 no such mailbox');
+        const nameless = await request('failed', 'nobody to send to: ');
+
+        await all.up();
+        const rows = async (): Promise<Map<string, unknown[]>> =>
+          new Map(
+            (
+              await q.query<{
+                id: string;
+                last_error: string | null;
+                skipped_recipients: string;
+                skipped_counts?: unknown;
+              }>(`SELECT * FROM notification_request ORDER BY id`)
+            ).map((row) => [
+              row.id,
+              [
+                row.last_error,
+                row.skipped_recipients,
+                ...('skipped_counts' in row ? [row.skipped_counts] : []),
+              ],
+            ]),
+          );
+        const upgraded = await rows();
+        assert.deepEqual(upgraded.get(failed), [
+          'nobody to send to',
+          names,
+          { disabled: 2, 'may not see this sensor': 1, 'no email address': 1 },
+        ]);
+        assert.deepEqual(upgraded.get(tooMany), [
+          'nobody to send to',
+          everyone.slice(0, 2_000),
+          { 'no email address': whole },
+        ]);
+        assert.deepEqual(upgraded.get(partial), [
+          null,
+          'user "erin" (no email address)',
+          { 'no email address': 1 },
+        ]);
+        assert.deepEqual(upgraded.get(refused), [
+          'relay refused the message: 550 no such mailbox',
+          '',
+          {},
+        ]);
+        assert.deepEqual(upgraded.get(nameless), ['nobody to send to: ', '', {}]);
+        await assert.rejects(
+          q.query(`UPDATE notification_request SET skipped_counts = '[]'::jsonb`),
+          /check/i,
+        );
+
+        await all.down(1);
+        const restored = await rows();
+        assert.deepEqual(
+          restored.get(failed),
+          [`nobody to send to: ${names}`, ''],
+          'the names are back in the error, whole',
+        );
+        assert.deepEqual(
+          restored.get(tooMany),
+          [`nobody to send to: ${everyone.slice(0, 2_000)}`, ''],
+          'and a list past the column comes back as far as the column held it, and no further',
+        );
+        assert.deepEqual(restored.get(partial), [null, 'user "erin" (no email address)']);
+        assert.deepEqual(restored.get(refused), [
+          'relay refused the message: 550 no such mailbox',
+          '',
+        ]);
+        assert.deepEqual(restored.get(nameless), ['nobody to send to: ', '']);
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('applies the real migration set forward and all the way back', async () => {
       const fresh = await createScratchDatabase('roundtrip');
       try {

@@ -215,7 +215,9 @@ describe('the email transport', () => {
       message({ recipients: [{ kind: 'user', value: 'alice' }] }),
     );
     assert.ok(!result.ok);
-    assert.equal(result.error, 'nobody to send to: user "alice" (no such account)');
+    // The error names nobody (`A-44`): who, and why, travel beside it for whoever may read them.
+    assert.equal(result.error, 'nobody to send to');
+    assert.deepEqual(result.skipped, [{ who: 'user "alice"', reason: 'no such account' }]);
     assert.equal(result.retryable, false, 'waiting gives nobody an address');
     assert.equal(sent.length, 0);
   });
@@ -239,7 +241,8 @@ describe('the email transport', () => {
       }),
     );
     assert.ok(result.ok);
-    assert.equal(result.skipped, 'group "noc" (no such group)');
+    assert.deepEqual(result.skipped, [{ who: 'group "noc"', reason: 'no such group' }]);
+    assert.ok(!result.detail.includes('noc'), 'and the detail does not name them');
     assert.equal(sent.length, 1);
   });
 
@@ -555,15 +558,20 @@ describe(
     });
 
     async function emailTemplate(overrides: Record<string, unknown> = {}): Promise<number> {
-      const created = await templates.create(testActor, {
-        name: `On-call-${String(process.hrtime.bigint())}`,
-        method: 'email',
-        settings: {},
-        subject: '%sitename: %sensor on %device is %status',
-        body: '%lastmessage — %linksensor',
-        recipients: [{ kind: 'address', value: 'ops@example.test' }],
-        ...overrides,
-      });
+      const created = await templates.create(
+        testActor,
+        {
+          name: `On-call-${String(process.hrtime.bigint())}`,
+          method: 'email',
+          settings: {},
+          subject: '%sitename: %sensor on %device is %status',
+          body: '%lastmessage — %linksensor',
+          recipients: [{ kind: 'address', value: 'ops@example.test' }],
+          ...overrides,
+          // Written as an administrator, who alone may name a group (`A-44`).
+        },
+        { namesAccounts: true },
+      );
       return created.id;
     }
 
@@ -728,6 +736,46 @@ describe(
       const after = await statusOf(requestId);
       assert.equal(after.status, 'failed');
       assert.ok(after.error?.includes('no transport'), after.error ?? '');
+    });
+
+    it('records who a message reached nobody among, by name and by count, and not in the error (A-44)', async () => {
+      // "Nobody to send to" fails for good, and who and why are what make it a diagnosis. They
+      // go where the log can give each reader what they may read: names to an administrator,
+      // counts to everybody else. The error names nobody, for every reader alike.
+      const templateId = await emailTemplate();
+      const requestId = await queue(templateId);
+      const nobody = {
+        method: 'email',
+        send: () =>
+          Promise.resolve({
+            ok: false,
+            retryable: false,
+            error: 'nobody to send to',
+            skipped: [
+              { who: 'user "alice"', reason: 'disabled' },
+              { who: 'user 57', reason: 'no such account' },
+              { who: '"bob" in group "NOC"', reason: 'disabled' },
+            ],
+          } as const),
+      };
+      await dispatcherWith(nobody).dispatch();
+      const [row] = await db.query<{
+        status: string;
+        last_error: string | null;
+        skipped_recipients: string;
+        skipped_counts: Record<string, number>;
+      }>(
+        `SELECT status, last_error, skipped_recipients, skipped_counts
+         FROM notification_request WHERE id = $1`,
+        [requestId],
+      );
+      assert.deepEqual(row, {
+        status: 'failed',
+        last_error: 'nobody to send to',
+        skipped_recipients:
+          'user "alice" (disabled), user 57 (no such account), "bob" in group "NOC" (disabled)',
+        skipped_counts: { disabled: 2, 'no such account': 1 },
+      });
     });
 
     it('leaves a request queued when its method has no transport yet', async () => {
@@ -974,15 +1022,19 @@ describe(
           assert.ok(response.ok);
           assert.equal(((await response.json()) as { total: number }).total, 1);
 
-          const [row] = await db.query<{ skipped_recipients: string }>(
-            `SELECT skipped_recipients FROM notification_request WHERE id = $1`,
-            [requestId],
-          );
+          const [row] = await db.query<{
+            skipped_recipients: string;
+            skipped_counts: Record<string, number>;
+          }>(`SELECT skipped_recipients, skipped_counts FROM notification_request WHERE id = $1`, [
+            requestId,
+          ]);
           assert.equal(
             row?.skipped_recipients,
             `"leaver-${mark}" in group "NOC ${mark}" (disabled), ` +
               `"noaddress-${mark}" in group "NOC ${mark}" (no email address)`,
           );
+          // And by count, which is what a reader who may not list accounts is shown (`A-44`).
+          assert.deepEqual(row.skipped_counts, { disabled: 1, 'no email address': 1 });
         } finally {
           await transport.close();
         }

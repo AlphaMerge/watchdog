@@ -8,7 +8,7 @@ import {
   type OutgoingMessage,
 } from './transport.js';
 import type { Escaping } from '../placeholders.js';
-import { describeSkipped, type RecipientSource } from '../recipients.js';
+import { NOBODY_TO_SEND_TO, type RecipientSource } from '../recipients.js';
 
 export interface EmailTransportOptions {
   config: SmtpConfig;
@@ -123,11 +123,16 @@ export class EmailTransport implements DeliveryTransport {
       return { ok: false, retryable: false, error: 'the template has no recipients' };
     }
     const resolved = await this.#recipients.resolve(message.recipients, message.about);
-    const skipped = describeSkipped(resolved.skipped);
     if (resolved.addresses.length === 0) {
-      // Permanent: waiting does not give anybody an address or a right. Every name is in the
-      // error, because "nobody to send to" is only actionable once it says who and why.
-      return { ok: false, retryable: false, error: `nobody to send to: ${skipped}` };
+      // Permanent: waiting does not give anybody an address or a right. "Nobody to send to" is
+      // actionable only once it says who and why, so who travels with it — beside the error, not
+      // in it, because who may read the names depends on who is asking (`A-44`).
+      return {
+        ok: false,
+        retryable: false,
+        error: NOBODY_TO_SEND_TO,
+        skipped: resolved.skipped,
+      };
     }
 
     const override = message.settings['senderOverride'];
@@ -149,7 +154,7 @@ export class EmailTransport implements DeliveryTransport {
     // **Sent, and who was not** — a partial send is still a send, and the people it missed are
     // named where the delivery is recorded rather than dropped without a word (`M-19`).
     if (!result.ok || resolved.skipped.length === 0) return result;
-    return { ok: true, detail: result.detail, skipped };
+    return { ok: true, detail: result.detail, skipped: resolved.skipped };
   }
 
   /**

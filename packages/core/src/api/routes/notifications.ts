@@ -4,7 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Database } from '../../db/pool.js';
 import type { DeliveryHealthReader } from '../../notifications/health.js';
 import { NotificationLogReader } from '../../notifications/log.js';
-import { INSTALLATION, onQueryObject, visibilityOf } from '../authorization.js';
+import { INSTALLATION, clears, onQueryObject, visibilityOf } from '../authorization.js';
 
 export interface NotificationRoutesOptions {
   db: Database;
@@ -143,8 +143,11 @@ const entrySchema = {
     skippedRecipients: {
       type: 'string',
       description:
-        'Who a sent message named and did not reach, and why — a disabled account, one with no ' +
-        'address, one that may not see the sensor. Empty when it reached everybody (`M-19`).',
+        'Who a message named and did not reach, and why — a disabled account, one with no ' +
+        'address, one that may not see the sensor. Empty when it reached everybody (`M-19`). ' +
+        'By name for an administrator; for anybody else, by count and reason only — ' +
+        '`2 recipients (1 disabled, 1 may not see this sensor)` — because the names are the ' +
+        'account and group lists, which are an administrator’s (`A-44`).',
     },
   },
 } as const;
@@ -249,6 +252,8 @@ export function notificationRoutes(app: FastifyInstance, options: NotificationRo
       const status = query.status === undefined ? [] : [query.status].flat();
       const entries = await log.list(db, {
         visibility: await visibilityOf(request),
+        // Who a message missed, by name, only for whoever may list the accounts (`A-44`).
+        namesAccounts: clears(request, 'admin'),
         status,
         ...(query.sensorId === undefined ? {} : { sensorId: query.sensorId }),
         ...(query.templateId === undefined ? {} : { templateId: query.templateId }),

@@ -2,6 +2,11 @@ import { strict as assert } from 'node:assert';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, before, beforeEach, describe, it } from 'node:test';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { SCRUBBED } from '@ms/shared';
+import { ProgramTransport } from '../src/notifications/delivery/program.js';
 import { WebhookTransport } from '../src/notifications/delivery/webhook.js';
 import { MessageContextLoader } from '../src/notifications/context.js';
 import type { OutgoingMessage } from '../src/notifications/delivery/transport.js';
@@ -203,6 +208,79 @@ describe(
       assert.equal(report.error, 'the relay refused it');
       assert.equal(report.retryable, false);
       assert.equal(report.detail, null);
+    });
+
+    it('counts who it missed unless the caller may be told who (A-44)', async () => {
+      // The restrictive answer is the default, so a caller that forgets to ask tells nobody.
+      const skipped = [
+        { who: 'user "alice"', reason: 'disabled' },
+        { who: '"bob" in group "NOC"', reason: 'may not see this sensor' },
+      ] as const;
+      const partly = {
+        method: 'email',
+        send: () => Promise.resolve({ ok: true, detail: 'accepted', skipped } as const),
+      };
+      const templateId = await template();
+      const counted = await testerWith(partly).send(testActor, { templateId, sensorId });
+      assert.equal(
+        counted.detail,
+        'accepted; not sent to 2 recipients (1 disabled, 1 may not see this sensor)',
+      );
+      const named = await testerWith(partly).send(testActor, {
+        templateId,
+        sensorId,
+        namesAccounts: true,
+      });
+      assert.equal(
+        named.detail,
+        'accepted; not sent to user "alice" (disabled), "bob" in group "NOC" (may not see this sensor)',
+      );
+
+      const nobody = {
+        method: 'email',
+        send: () =>
+          Promise.resolve({
+            ok: false,
+            retryable: false,
+            error: 'nobody to send to',
+            skipped,
+          } as const),
+      };
+      const failed = await testerWith(nobody).send(testActor, { templateId, sensorId });
+      assert.equal(
+        failed.error,
+        'nobody to send to: 2 recipients (1 disabled, 1 may not see this sensor)',
+      );
+      assert.equal(failed.detail, null);
+    });
+
+    it('reports a program’s refusal without the secret argument it was given (A-44)', async () => {
+      // The report goes to whoever pressed Test, who may edit the template and never reads its
+      // secret arguments. The error is the transport's, so this is the same scrub the log gets.
+      const root = await mkdtemp(join(tmpdir(), 'ms-testsend-'));
+      try {
+        await writeFile(
+          join(root, 'refuse.sh'),
+          '#!/bin/sh\necho "token $1 refused" >&2\nexit 1\n',
+          'utf8',
+        );
+        await chmod(join(root, 'refuse.sh'), 0o755);
+        const program = new ProgramTransport({
+          config: { directory: root, maxOutputBytes: 4096, killGraceMs: 500, uid: -1, gid: -1 },
+          logger: silent,
+        });
+        const templateId = await template({
+          method: 'program',
+          settings: { path: 'refuse.sh', secretArgs: ['hunter2-%sensor'] },
+          recipients: [],
+        });
+        const report = await testerWith(program).send(testActor, { templateId, sensorId });
+        assert.equal(report.delivered, false);
+        assert.equal(report.error, `refuse.sh exited 1 — token ${SCRUBBED} refused`);
+        assert.ok(!JSON.stringify(report).includes('hunter2'), 'the report carried the secret');
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     });
 
     it('reports a transport that throws, because a 500 explains nothing', async () => {

@@ -1,5 +1,10 @@
+import { MIN_SCRUBBED_LENGTH, SCRUBBED, scrubSecrets } from '@ms/shared';
 import { credentialKind, secretFields } from '../credentials/index.js';
 import { authorizationFor } from './http/auth.js';
+
+// The scrubber itself lives in `@ms/shared` since `A-44`, where a notification program's output
+// is scrubbed by the same code. Re-exported, so every type that imports it from here is unchanged.
+export { MIN_SCRUBBED_LENGTH, SCRUBBED, scrubSecrets };
 
 /**
  * Keeping a check's secrets out of what it says (`S-19`).
@@ -27,11 +32,6 @@ import { authorizationFor } from './http/auth.js';
  * that was never much of one.
  */
 
-/** Values shorter than this are left in the text; see above. */
-export const MIN_SCRUBBED_LENGTH = 4;
-
-export const SCRUBBED = '••••••';
-
 /**
  * What a type scrubs somebody else's words with before it clips them (`S-21`): the catalogue's,
  * or nothing where a test called the type directly.
@@ -40,16 +40,6 @@ export function scrubberOf(context: {
   readonly scrub?: ((text: string) => string) | undefined;
 }): (text: string) => string {
   return context.scrub ?? ((text: string): string => text);
-}
-
-/** Replaces every secret with the marker. Longest first, so one secret inside another goes too. */
-export function scrubSecrets(text: string, secrets: readonly string[]): string {
-  let out = text;
-  for (const secret of [...secrets].sort((a, b) => b.length - a.length)) {
-    if (secret.length < MIN_SCRUBBED_LENGTH) continue;
-    out = out.split(secret).join(SCRUBBED);
-  }
-  return out;
 }
 
 /**
