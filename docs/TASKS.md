@@ -4962,7 +4962,7 @@ because each is a decision rather than a defect:
       that ignores memory, no giving back while saturated, exiting workers counted against
       shrinking, and a log line per attempt all fail them. `P-216c` is the acceptance.
 
-- [ ] **P-220 — under host load systemd's watchdog kills idle services, and each kill now counts
+- [x] **P-220 — under host load systemd's watchdog kills idle services, and each kill now counts
       toward `P-215`'s start limit** · M · P-215 · Seen in `P-215`'s rerun, at load 24.67 on 8 CPUs
       with other sessions' suites beside it: the probe, scheduling no sensors, killed at *Watchdog
       timeout (limit 30s)!* with SIGABRT, which took 34 s to finish; the core killed twice in
@@ -4992,6 +4992,22 @@ because each is a decision rather than a defect:
       stayed 0, where the incident had 18% and no swap left. So memory is the prime suspect. Its
       stage runs in `P-216`'s window with this harness's watchdog readings, sized to the box's
       cgroup so it cannot take the shared PostgreSQL down.
+
+      **Closed without reproducing a watchdog kill** (2026-09-29). Memory ran in `P-216`'s two
+      windows (`docs/findings/2026-09-29-probe-starvation.md`, `…-probe-starvation-b.md`), with
+      this harness's readings beside it. No watchdog kill in either. Every kill `P-216b` saw was the
+      kernel's OOM killer taking a probe that had grown its own pool past its box, which is
+      `P-236`, landed. The core, alive throughout, kept its ping gaps at 14.8–15.3 s with no restart
+      through a balloon that held the box at 4,087 of 4,096 MiB. The kill `P-213` measured under
+      `MemoryHigh` throttling was the watchdog's, and the stock units have set no `MemoryHigh` since.
+
+      **What was never reached**: the incident's memory `full` of 18% with swap exhausted and the
+      services alive. The box peaked at 9% `full`, and that while the probe was dying. So this is
+      closed on what was measured, not on a proof that memory pressure cannot starve a ping. If a
+      watchdog kill is seen again, the journal names it (*Watchdog timeout*, not *oom-kill*), and
+      the harness now keeps PID 1's journal whatever happens to the run. **The start-limit half**
+      — whether a kill should count toward five in ten minutes — **is `H-23`**, which covers every
+      crash loop and not only the watchdog's.
 
 - [x] **P-221 — a plain `AppError` reached the client as a masked 500** · S · — · Found by
       1a470a in `A-23`. `toHttpError` has a branch for each error class that carries a status of
