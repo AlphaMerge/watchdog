@@ -21,6 +21,11 @@ export interface SensorStanding {
    * which is history rather than the channel's current value.
    */
   readonly consecutiveFailures: number;
+  /**
+   * The sensor's type, whose recovery hold applies where the trigger sets none (`M-18`). Null for
+   * a sensor with no configuration row, which no check writes and nothing holds.
+   */
+  readonly type: string | null;
 }
 
 /** What armed an alarm: a sensor state, or a channel over a threshold. */
@@ -43,6 +48,8 @@ export interface AlarmRow {
   readonly nextDueAt: Date | null;
   readonly repeats: number;
   readonly suppressed: boolean;
+  /** When the sensor returned, while the return is held (`M-18`). Null otherwise. */
+  readonly recoveringSince: Date | null;
 }
 
 /** An alarm that has fallen due, with everything deciding what to send needs. */
@@ -51,7 +58,11 @@ export interface DueAlarm extends AlarmRow {
   /** The sensor's state *now* — which may no longer be the one that armed the alarm. */
   readonly currentState: SensorState;
   readonly currentCause: SensorStateCause | null;
+  /** When it entered that state. */
+  readonly currentSince: Date;
   readonly message: string;
+  /** The sensor's type, for its recovery hold (`M-18`). */
+  readonly sensorType: string | null;
 }
 
 export interface AlarmInsert {
@@ -71,6 +82,12 @@ export interface AlarmAdvance {
   readonly nextDueAt: Date | null;
   readonly repeats: number;
   readonly suppressed: boolean;
+  /**
+   * When a held return began, or null (`M-18`). Written on every advance, never left as it was:
+   * every decision but `recovering` ends a hold, and a stale one would confirm a return that a
+   * relapse has already taken back.
+   */
+  readonly recoveringSince: Date | null;
   /**
    * The value the channel last read, on a threshold alarm.
    *
@@ -109,6 +126,7 @@ interface AlarmRowShape {
   next_due_at: Date | null;
   repeats: number;
   suppressed: boolean;
+  recovering_since: Date | null;
 }
 
 function toAlarm(row: AlarmRowShape): AlarmRow {
@@ -125,13 +143,14 @@ function toAlarm(row: AlarmRowShape): AlarmRow {
     nextDueAt: row.next_due_at,
     repeats: row.repeats,
     suppressed: row.suppressed,
+    recoveringSince: row.recovering_since,
   };
 }
 
 const ALARM_COLUMNS = `
   a.id::text AS id, a.sensor_id::text AS sensor_id, a.trigger_id::text AS trigger_id,
   a.kind, a.state, a.channel_key, a.observed,
-  a.since, a.phase, a.next_due_at, a.repeats, a.suppressed
+  a.since, a.phase, a.next_due_at, a.repeats, a.suppressed, a.recovering_since
 `;
 
 /**
@@ -196,10 +215,12 @@ export class AlarmRepository {
       since: Date;
       message: string;
       consecutive_failures: number;
+      type: string | null;
     }>(
       `SELECT r.object_id::text AS object_id, r.state, r.cause, r.since, r.message,
-              r.consecutive_failures
+              r.consecutive_failures, c.type
        FROM sensor_runtime r
+       LEFT JOIN sensor_config c ON c.object_id = r.object_id
        WHERE r.object_id = ANY($1::bigint[])`,
       [sensorIds],
     );
@@ -212,6 +233,7 @@ export class AlarmRepository {
         since: row.since,
         message: row.message,
         consecutiveFailures: row.consecutive_failures,
+        type: row.type,
       });
     }
     return out;
@@ -258,14 +280,17 @@ export class AlarmRepository {
         settings: Record<string, unknown>;
         current_state: SensorState;
         current_cause: SensorStateCause | null;
+        current_since: Date;
         message: string;
+        sensor_type: string | null;
       }
     >(
       `SELECT ${ALARM_COLUMNS}, t.settings, r.state AS current_state, r.cause AS current_cause,
-              r.message
+              r.since AS current_since, r.message, c.type AS sensor_type
        FROM notification_alarm a
        JOIN notification_trigger t ON t.id = a.trigger_id AND t.enabled
        JOIN sensor_runtime r ON r.object_id = a.sensor_id
+       LEFT JOIN sensor_config c ON c.object_id = a.sensor_id
        WHERE a.next_due_at IS NOT NULL AND a.next_due_at <= $1
        ORDER BY a.next_due_at, a.id
        LIMIT $2
@@ -283,7 +308,9 @@ export class AlarmRepository {
       triggerSettings: row.settings,
       currentState: row.current_state,
       currentCause: row.current_cause,
+      currentSince: row.current_since,
       message: row.message,
+      sensorType: row.sensor_type,
     }));
   }
 
@@ -379,15 +406,15 @@ export class AlarmRepository {
     const rows = await q.query<{ id: string }>(
       `UPDATE notification_alarm a
        SET phase = w.phase, next_due_at = w.next_due_at, repeats = w.repeats,
-           suppressed = w.suppressed,
+           suppressed = w.suppressed, recovering_since = w.recovering_since,
            -- Only on a threshold alarm: the shape constraint forbids a value on a state one,
            -- and COALESCE would be the wrong fix because NULL is a real reading (no reading).
            observed = CASE WHEN a.kind = 'threshold' THEN w.observed ELSE a.observed END
        FROM (
          SELECT * FROM unnest(
            $1::bigint[], $2::text[], $3::timestamptz[], $4::integer[], $5::boolean[],
-           $6::double precision[]
-         ) AS t(id, phase, next_due_at, repeats, suppressed, observed)
+           $6::double precision[], $7::timestamptz[]
+         ) AS t(id, phase, next_due_at, repeats, suppressed, observed, recovering_since)
        ) AS w
        WHERE a.id = w.id
        RETURNING a.id::text AS id`,
@@ -398,6 +425,7 @@ export class AlarmRepository {
         advances.map((row) => row.repeats),
         advances.map((row) => row.suppressed),
         advances.map((row) => row.observed ?? null),
+        advances.map((row) => row.recoveringSince),
       ],
     );
     return rows.length;

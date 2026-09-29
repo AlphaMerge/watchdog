@@ -675,6 +675,15 @@ Two further notes for whoever picks those up:
   delete's own transaction re-decides what it held, while the episode index still maps it to
   its probe, and the triggers it alone covered stop holding. A sensor another live Probe Health
   covers stays held behind that one.
+- **A return is held before an alarm is over, and a relapse inside the hold is the same alarm**
+  (`M-18`). This is the alarm engine's, not the state machine's: the sensor reads Up at the
+  return, in `sensor_state` and everywhere else, and only the alarm waits. How long comes from
+  the sensor's type, five minutes for Probe Health and none for any other type, or from the
+  trigger's own `recoveryHoldSeconds`. An episode that ends because its probe came back is a
+  return like any other. A loss inside the hold is the same episode alarm, resumed, even though
+  it is a new episode, so a probe killed and restarted every few seconds is one alarm on a
+  trigger on Unknown as on one on Down. An **emptied** episode recovers at once: its probe has
+  not come back, and nothing flaps.
 - **State never bumps `object.version`.** `sensor_runtime` has no `object_touch_owner` trigger,
   and state is deliberately absent from `GET /objects/:id`, whose ETag is built from
   configuration versions. A scan is not a configuration change, and if it were, `R-04` would

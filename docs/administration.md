@@ -687,15 +687,17 @@ after the crossing. At 80% there is still room for one such surge; past about 86
   there in about a minute, and any loop under two minutes a round gets there.
   `systemctl show -p NRestarts ms-probe` counts the rounds it took. The core shows the probe Down
   with "Link to the core is 0", and `memoryLimitUsage` as a gap, not as 100%.
-- **One or two alarms, not one.** The core sweeps Probe Health every thirty seconds, and a probe
-  that connects for a few seconds each round can be seen Up between two outages. Five rounds are
-  enough for that to happen once, so expect one alarm or two; before the start limit it was one
-  every round, 36–45 an hour. Bringing it to one is `M-18`.
+- **One alarm for the loop** (`M-18`). The core sweeps Probe Health every thirty seconds, and a
+  probe that connects for a few seconds each round can be seen Up between two outages. A return
+  to Up on Probe Health is held for five minutes before its alarm is over, and a Down inside that
+  is the same alarm, so the loop is one. A trigger on Unknown hears the same loop through the
+  probe's held sensors (`M-22`), once per kill without the hold, and once with it. One shape is
+  left: a probe that stays connected about a minute a round can still raise two, at about one
+  timing in ten. Before the start limit it was one alarm every round, 36–45 an hour.
 - **Then it is started again after a cool-down** (`H-23`): 10 minutes, doubling on each retry that
   crashes again, to 4 hours. A probe whose cause has gone, a burst of work that has passed, comes
   back by itself; before `H-23` it stayed `failed` until somebody reset it, which for a remote
-  probe meant a visit. See [When a service keeps crashing](#when-a-service-keeps-crashing),
-  including what it costs in alarms until `M-18`.
+  probe meant a visit. See [When a service keeps crashing](#when-a-service-keeps-crashing).
 - **Raising the ceiling, then starting it again, ends it.** If the unit is already `failed`:
 
   ```
@@ -964,15 +966,19 @@ sudo systemctl stop ms-recover-ms-probe-retry.timer    # this retry only
 sudo systemctl disable ms-probe                        # no more until you enable it
 ```
 
-**Until `M-18`, a service that keeps crashing re-alarms at each retry.** Each retry is a new loop
-of up to five starts, and a probe that connects for a few seconds each round can be seen Up
-between two outages, which is an alarm or two a loop. A probe that never stops crashing therefore
-raises 4–11 alarms on its first day, over ten loops, and up to 6 on each day after, over six
-(`probe-restart-scenario.test.ts`, over every phase), where the start limit alone raised one or
-two in total. That breaks *one outage, one alarm*, and it is accepted for now because the
-alternative is worse: a remote probe that stays down until somebody travels to it. Each pair at
-least says something true, that it came back and died again. `M-18`'s flap suppression is what
-makes it one.
+**A probe that keeps crashing is one alarm, however many retries** (`M-18`). Each retry is a new
+loop of up to five starts, and a probe that connects for a few seconds each round can be seen Up
+between two outages. Probe Health holds a return to Up for five minutes before its alarm is over,
+and the link is down between retries, so every loop relapses into the outage it never left. A
+probe that never stops crashing raises one alarm on a trigger on Down, and one on a trigger on
+Unknown, for as long as it goes on (`probe-restart-scenario.test.ts`, over every phase). Without
+the hold it was 4–11 on the first day and up to 6 on each day after on Down, and one per kill on
+Unknown, 51 on the first day.
+
+**What the hold costs: the recovery notification waits five minutes.** A probe that comes back
+is told as back once it has stayed connected for five minutes, and a second outage after that is
+a second alarm. A trigger can set its own `recoveryHoldSeconds`, zero included, which applies to
+every sensor it covers.
 
 **Why not `RestartSteps=`.** systemd 254 can back off by itself, but Debian 12 and RHEL 9 ship
 252, and it backs off only while the start limit is not hit, which would mean giving up the limit

@@ -507,6 +507,23 @@ export const probeHealth: SensorType = {
   evaluatedBy: 'core',
 
   /**
+   * **A probe that comes back has to stay back five minutes before its outage is over** (`M-18`).
+   *
+   * A probe killed at its memory ceiling and restarted connects for a few seconds a round, and its
+   * link reads Up to the sweep between kills (`P-215`). Each kill also ends the episode that holds
+   * its sensors and opens a new one (`M-22`). Ended at each return, that was an alarm per kill on
+   * a trigger on Unknown, and one or two per loop on a trigger on Down under each of `H-23`'s
+   * retries. Held, every loop and every retry of it is one outage.
+   *
+   * **Five minutes was chosen on 2026-09-29, over ten or fifteen**, for the cost:
+   * every probe's recovery notification comes this much after it is back. It leaves one shape
+   * short. A probe that stays connected a minute a round can still raise two at some phases,
+   * because the sweep can miss all five of its short Down gaps and read a loop of about five
+   * minutes as one return. `probe-restart-scenario.test.ts` asserts that bound.
+   */
+  recoveryHoldSeconds: 300,
+
+  /**
    * The probe it reports on (`A-29`): the one `probeId` names, or the one it sits under.
    *
    * The second is a reference too. Rights can be granted on a device under a probe without any on

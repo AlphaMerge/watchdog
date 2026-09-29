@@ -1,3 +1,4 @@
+import type { SensorCatalogue } from '@ms/sensors';
 import type { Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
 import type { SensorState, SensorStateCause } from '../state/tables.js';
@@ -7,6 +8,7 @@ import { TriggerRepository } from '../triggers/repository.js';
 import {
   fire,
   reconcile,
+  recoveryConfirmAt,
   stillStanding,
   type Alarm,
   type Reconciliation,
@@ -89,6 +91,13 @@ export interface AlarmEngineOptions {
    * Absent, a lost or frozen probe's sensors notify one by one, as they did before it existed.
    */
   episodes?: ProbeEpisodes;
+  /**
+   * How long a sensor type holds a return to Up before its alarm is over, in seconds (`M-18`).
+   * The catalogue's `recoveryHoldSeconds` in production. A trigger's own setting overrides it.
+   *
+   * Absent, no type holds one, and every alarm ends at its return as it did before.
+   */
+  recoveryHolds?: (sensorType: string) => number;
 }
 
 /** A sensor as the hold reads it: its id, and its state and why. */
@@ -128,10 +137,19 @@ export interface AlarmReaction {
   cleared: number;
   suppressed: number;
   resumed: number;
+  /** Returns held rather than recovered (`M-18`). */
+  recovering: number;
   queued: number;
 }
 
-const EMPTY: AlarmReaction = { armed: 0, cleared: 0, suppressed: 0, resumed: 0, queued: 0 };
+const EMPTY: AlarmReaction = {
+  armed: 0,
+  cleared: 0,
+  suppressed: 0,
+  resumed: 0,
+  recovering: 0,
+  queued: 0,
+};
 
 const DEFAULT_MAX_PER_SWEEP = 500;
 const DEFAULT_MAX_RECONCILED = 20_000;
@@ -180,6 +198,7 @@ export class AlarmEngine {
   readonly #onArmed: (() => void) | undefined;
   readonly #onQueued: (() => void) | undefined;
   readonly #episodes: ProbeEpisodes | undefined;
+  readonly #recoveryHolds: ((sensorType: string) => number) | undefined;
   #queued = 0;
   #fired = 0;
   /**
@@ -202,6 +221,7 @@ export class AlarmEngine {
     this.#onArmed = options.onArmed;
     this.#onQueued = options.onQueued;
     this.#episodes = options.episodes;
+    this.#recoveryHolds = options.recoveryHolds;
   }
 
   get stats(): { queued: number; fired: number; untemplated: number } {
@@ -316,12 +336,13 @@ export class AlarmEngine {
           // build — logs a warning and changes nothing, rather than silently cancelling the
           // standing alarm for an outage that is still happening.
           alarms.delete(trigger.id);
-          const settings = readSettings(trigger, this.#logger);
-          if (settings === null) continue;
+          const stored = readSettings(trigger, this.#logger);
+          if (stored === null) continue;
           const seen: Seen =
             covering === undefined && episode === undefined && ended === undefined
               ? PLAIN
               : { held: covering?.has(trigger.id) === true, episode, ended, names };
+          const settings = this.#forSensor(stored, sensor.type);
           this.#apply(sensor, trigger, alarm, settings, now, out, options, seen);
           continue;
         }
@@ -382,7 +403,8 @@ export class AlarmEngine {
     // state after a probe blip, gives an alarm a due time that can be sooner than anything the
     // scheduler is currently sleeping for — and it would then sleep straight past it, delaying an
     // escalation by however long the next unrelated event happened to be away.
-    if (arm.length > 0 || result.resumed > 0) this.#onArmed?.();
+    // And a held return (`M-18`), whose confirmation is a due time like any other.
+    if (arm.length > 0 || result.resumed > 0 || result.recovering > 0) this.#onArmed?.();
     if (result.queued > 0) this.#onQueued?.();
     return result;
   }
@@ -458,6 +480,9 @@ export class AlarmEngine {
       nextDueAt: null,
       repeats: alarm.repeats,
       suppressed: true,
+      // A parked return is no longer being timed. Re-decided when it is un-parked, it is held
+      // again from the sensor's return, or over if that return has already lasted.
+      recoveringSince: null,
       observed: alarm.observed,
     });
   }
@@ -482,6 +507,8 @@ export class AlarmEngine {
 
     const advance: AlarmAdvance[] = [];
     const parked: AlarmAdvance[] = [];
+    // Held returns decided without a firing (`M-18`): written back, never counted as fired.
+    const settled: AlarmAdvance[] = [];
     const requests: RequestInsert[] = [];
     const clear: number[] = [];
 
@@ -518,19 +545,21 @@ export class AlarmEngine {
           nextDueAt: firing.nextDueAt,
           repeats: alarm.repeats,
           suppressed: alarm.suppressed,
+          recoveringSince: null,
           observed: alarm.observed,
         });
         continue;
       }
 
-      const settings = readSettings(
+      const stored = readSettings(
         { id: alarm.triggerId, kind: STATE_TRIGGER.id, settings: alarm.triggerSettings },
         this.#logger,
       );
-      if (settings === null) {
+      if (stored === null) {
         this.#park(alarm, parked);
         continue;
       }
+      const settings = this.#forSensor(stored, alarm.sensorType);
 
       // **Held: parked, not fired** (`M-22`). The reaction suspends a carried sensor's alarm under
       // a trigger that hears about its probe from the probe's own alarm; this checks rather than
@@ -552,6 +581,79 @@ export class AlarmEngine {
         continue;
       }
       const current = seenBy(settings.state, alarm.currentState, episode !== undefined);
+
+      // **A held return falling due is its confirmation, not a firing** (`M-18`). Decided by
+      // `reconcile`, as the reaction decides it, and ahead of the staleness check below: that
+      // check reads a sensor that has left the armed state and stands the alarm down in silence,
+      // and the recovery its recipients are owed would never go out.
+      if (alarm.recoveringSince !== null && alarm.state !== null) {
+        // An episode alarm whose episode has ended is timed as `#episodeDecision` times it.
+        const ended =
+          episode === undefined && alarm.currentState !== 'paused'
+            ? this.#episodes?.endedEpisodeOf(alarm.sensorId)
+            : undefined;
+        const closed = ended !== undefined && closes(alarm, ended) ? ended : undefined;
+        const decided =
+          closed === undefined
+            ? reconcile(
+                { ...alarm, state: alarm.state },
+                current,
+                alarm.currentSince,
+                settings,
+                now,
+              )
+            : heldEpisodeReturn(
+                { ...alarm, recoveringSince: alarm.recoveringSince },
+                settings,
+                now,
+              );
+        switch (decided.kind) {
+          case 'recover':
+            requests.push({
+              at: now,
+              sensorId: alarm.sensorId,
+              triggerId: alarm.triggerId,
+              triggerKind: STATE_TRIGGER.id,
+              templateId: settings.recoveryTemplateId,
+              reason: 'recovery',
+              state: alarm.currentState,
+              message:
+                closed === undefined
+                  ? alarm.message
+                  : episodeEndedMessage(closed, probeName(names, closed.probeObjectId)),
+            });
+            clear.push(alarm.id);
+            break;
+          case 'resume':
+          case 'suppress':
+          case 'hold':
+            // A relapse the reaction has not seen yet, or a hold that was lengthened.
+            settled.push({
+              id: alarm.id,
+              phase: alarm.phase,
+              nextDueAt:
+                decided.kind === 'resume'
+                  ? decided.nextDueAt
+                  : decided.kind === 'hold'
+                    ? recoveryConfirmAt(alarm.recoveringSince, settings)
+                    : null,
+              repeats: alarm.repeats,
+              suppressed: decided.kind === 'suppress',
+              recoveringSince: decided.kind === 'hold' ? alarm.recoveringSince : null,
+            });
+            break;
+          case 'cancel':
+          case 'retarget':
+          case 'idle':
+          case 'arm':
+          case 'recovering':
+            // Nobody was told, or the trigger now watches another state. A retarget's new chain
+            // is the reaction's to arm, as the staleness check below leaves it.
+            clear.push(alarm.id);
+            break;
+        }
+        continue;
+      }
 
       // The alarm fell due for a state the sensor is no longer in. `react` should have stood it
       // down already, and does in every path that goes through a transaction — but the sweep is
@@ -608,23 +710,25 @@ export class AlarmEngine {
         nextDueAt: firing.nextDueAt,
         repeats: firing.repeats,
         suppressed: alarm.suppressed,
+        recoveringSince: null,
       });
     }
 
     const queued = await this.#alarms.queue(q, requests);
     if (queued > 0) this.#onQueued?.();
-    await this.#alarms.advance(q, [...advance, ...parked]);
+    await this.#alarms.advance(q, [...advance, ...parked, ...settled]);
     const stale = await this.#alarms.clear(q, clear);
     this.#fired += advance.length;
     this.#queued += queued;
     this.#untemplated += requests.length - queued;
-    if (advance.length > 0 || stale > 0 || parked.length > 0) {
+    if (advance.length > 0 || stale > 0 || parked.length > 0 || settled.length > 0) {
       this.#logger.info(
         {
           fired: advance.length,
           queued,
           stale,
           ...(parked.length === 0 ? {} : { parked: parked.length }),
+          ...(settled.length === 0 ? {} : { held: settled.length }),
         },
         'notification chain advanced',
       );
@@ -693,6 +797,7 @@ export class AlarmEngine {
             nextDueAt: alarm.nextDueAt,
             repeats: alarm.repeats,
             suppressed: alarm.suppressed,
+            recoveringSince: alarm.recoveringSince,
           };
     // **A row of the other kind under this trigger is cleared here** (`P-115`). `PUT /triggers/:id`
     // is whole-document and does not refuse a change of `kind`, so a standing threshold alarm can
@@ -728,12 +833,27 @@ export class AlarmEngine {
     const since = onEpisode ? seen.episode.since : sensor.since;
     const armFrom = options.armFrom === 'now' ? now : since;
     const decision =
-      this.#episodeDecision(alarm, view, sensor, settings, seen) ??
+      this.#episodeDecision(alarm, view, sensor, settings, seen, now) ??
       reconcile(view, current, armFrom, settings, now, seen.held);
 
     switch (decision.kind) {
       case 'idle':
       case 'hold':
+        return;
+
+      case 'recovering':
+        if (alarm === null) return;
+        // The chain stops and nothing is sent. The due time is the return's confirmation, which
+        // the sweep reads as such (`M-18`).
+        out.advance.push({
+          id: alarm.id,
+          phase: alarm.phase,
+          nextDueAt: decision.confirmAt,
+          repeats: alarm.repeats,
+          suppressed: false,
+          recoveringSince: decision.since,
+        });
+        out.result.recovering += 1;
         return;
 
       case 'arm':
@@ -759,6 +879,7 @@ export class AlarmEngine {
           nextDueAt: null,
           repeats: alarm.repeats,
           suppressed: true,
+          recoveringSince: null,
         });
         out.result.suppressed += 1;
         return;
@@ -771,6 +892,7 @@ export class AlarmEngine {
           nextDueAt: decision.nextDueAt,
           repeats: alarm.repeats,
           suppressed: false,
+          recoveringSince: null,
         });
         out.result.resumed += 1;
         return;
@@ -819,6 +941,16 @@ export class AlarmEngine {
     }
   }
 
+  /** The settings as one sensor's alarm reads them (`M-18`): the trigger's hold, or its type's. */
+  #forSensor(stored: StoredStateSettings, sensorType: string | null): StateTriggerSettings {
+    return {
+      ...stored,
+      recoveryHoldSeconds:
+        stored.recoveryHoldSeconds ??
+        (sensorType === null ? 0 : (this.#recoveryHolds?.(sensorType) ?? 0)),
+    };
+  }
+
   /**
    * What an episode alarm owes that `reconcile` cannot see through the view (`M-24`), or undefined
    * to let `reconcile` decide.
@@ -833,6 +965,13 @@ export class AlarmEngine {
    * **An acknowledged Probe Health stops the episode alarm's chain.** The view reads it as Unknown
    * for this trigger, which would hide the acknowledgement from `reconcile`; stopping here is what
    * an acknowledgement does to any chain, and its lapse takes `reconcile`'s `resume` branch.
+   *
+   * **A probe that came back is a return, and held like one** (`M-18`). A probe killed and
+   * restarted every few seconds ends an episode at each reconnect and opens one at each kill, and
+   * without the hold a trigger on Unknown paged at every kill. Held, a loss inside the hold is a
+   * new episode and the same alarm: the view reads it as Unknown and `reconcile` resumes the
+   * chain. An **emptied** episode is not a return, its probe is still at fault and nothing
+   * flaps, so it recovers at once, as before.
    */
   #episodeDecision(
     alarm: AlarmRow | null,
@@ -840,12 +979,32 @@ export class AlarmEngine {
     sensor: SensorStanding,
     settings: StateTriggerSettings,
     seen: Seen,
+    now: Date,
   ): Reconciliation | undefined {
     if (settings.state !== 'unknown') return undefined;
     if (seen.episode === undefined) {
       const ended = seen.ended;
       if (alarm === null || ended === undefined || sensor.state === 'paused') return undefined;
       if (!closes(alarm, ended)) return undefined;
+      if (alarm.recoveringSince !== null) {
+        return heldEpisodeReturn(
+          { ...alarm, recoveringSince: alarm.recoveringSince },
+          settings,
+          now,
+        );
+      }
+      // **Standing on Probe Health's own state, it is not the episode's to close** (`M-18`). An
+      // episode alarm whose episode has ended faces Probe Health Down, still at fault, or Up or
+      // Warning, back, and never Unknown. An alarm that still stands is Probe Health's own, armed
+      // before the episode began, which `closes` now accepts by its earlier `since`. Left to
+      // `reconcile`, as the sweep leaves it, since the sweep reaches this only from its staleness
+      // check. Not asked of a held return above, where Probe Health resumed and awaiting its
+      // first reading would read as a relapse, and only a new episode is one.
+      if (alarm.state !== null && stillStanding(alarm.state, sensor.state)) return undefined;
+      if (!ended.emptied && settings.recoveryHoldSeconds > 0) {
+        // No end time is kept for an episode, and this runs in the transaction that ended it.
+        return { kind: 'recovering', since: now, confirmAt: recoveryConfirmAt(now, settings) };
+      }
       return alarm.phase === 'pending' ? { kind: 'cancel' } : { kind: 'recover' };
     }
     if (!acknowledgedEpisode(settings.state, sensor.state, true)) return undefined;
@@ -998,6 +1157,7 @@ export class AlarmEngine {
           nextDueAt: parked ? thresholdDueAt(alarm.since, settings) : alarm.nextDueAt,
           repeats: alarm.repeats,
           suppressed: parked ? false : alarm.suppressed,
+          recoveringSince: null,
           observed: reading,
         });
         return;
@@ -1051,6 +1211,26 @@ export class AlarmEngine {
 }
 
 /**
+ * The engine's `recoveryHolds` from a sensor catalogue (`M-18`): each type's declared hold, and
+ * none for a type the catalogue does not have. One function, so `main.ts` and the scenarios that
+ * stand in for it read the holds the same way.
+ */
+export function holdsFrom(
+  catalogue: Pick<SensorCatalogue, 'has' | 'declaration'>,
+): (sensorType: string) => number {
+  return (type) =>
+    catalogue.has(type) ? (catalogue.declaration(type).recoveryHoldSeconds ?? 0) : 0;
+}
+
+/**
+ * A state trigger's settings as stored (`M-18`): the hold is the trigger's own, or null where it
+ * sets none and the sensor's type decides.
+ */
+type StoredStateSettings = Omit<StateTriggerSettings, 'recoveryHoldSeconds'> & {
+  readonly recoveryHoldSeconds: number | null;
+};
+
+/**
  * A stored trigger's settings as the chain needs them.
  *
  * Re-validated on the way out rather than trusted. The row was validated on the way in, but a
@@ -1061,7 +1241,7 @@ export class AlarmEngine {
 function readSettings(
   trigger: Pick<EffectiveTrigger, 'id' | 'kind' | 'settings'>,
   logger: Logger,
-): StateTriggerSettings | null {
+): StoredStateSettings | null {
   try {
     const settings = triggerKinds.validate(trigger.kind, trigger.settings);
     return {
@@ -1072,6 +1252,10 @@ function readSettings(
       escalationTemplateId: idOrNull(settings['escalationTemplateId']),
       repeatMinutes: Number(settings['repeatMinutes'] ?? 0),
       recoveryTemplateId: idOrNull(settings['recoveryTemplateId']),
+      recoveryHoldSeconds:
+        typeof settings['recoveryHoldSeconds'] === 'number'
+          ? settings['recoveryHoldSeconds']
+          : null,
     };
   } catch {
     logger.warn(
@@ -1121,13 +1305,31 @@ function probeName(names: ReadonlyMap<number, string>, probeObjectId: number): s
  * Whether this alarm is the one that stood for an episode that has ended (`M-22`).
  *
  * Known by its `since`: an episode alarm is armed from the episode's start, so an alarm on
- * Unknown armed at exactly that instant is the one that stood for it.
+ * Unknown armed at that instant is the one that stood for it. **Or earlier** (`M-18`): a loss
+ * inside a held return resumes the alarm the last episode armed, and its `since` stays that
+ * episode's start, which is what keeps the outage's escalation clock. The episode this alarm
+ * went on to stand for began after it, and its end is the alarm's to close. The index keeps only
+ * the last episode each probe-alarm sensor stood for, so an earlier one cannot match.
  */
 function closes(
   alarm: { readonly state: SensorState | null; readonly since: Date },
   ended: ProbeEpisode,
 ): boolean {
-  return alarm.state === 'unknown' && alarm.since.getTime() === ended.since.getTime();
+  return alarm.state === 'unknown' && alarm.since.getTime() <= ended.since.getTime();
+}
+
+/**
+ * A held return of an episode alarm whose episode has ended (`M-18`): over once it has lasted,
+ * whatever Probe Health reads. Only a new episode is a relapse, and that reaches `reconcile`
+ * through the view, never through here.
+ */
+function heldEpisodeReturn(
+  alarm: { readonly phase: AlarmRow['phase']; readonly recoveringSince: Date },
+  settings: StateTriggerSettings,
+  now: Date,
+): Reconciliation {
+  if (now < recoveryConfirmAt(alarm.recoveringSince, settings)) return { kind: 'hold' };
+  return alarm.phase === 'pending' ? { kind: 'cancel' } : { kind: 'recover' };
 }
 
 /** The words of a recovery that closes an episode alarm, or undefined for any other (`M-22`). */

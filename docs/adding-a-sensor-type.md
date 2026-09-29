@@ -185,6 +185,16 @@ than anything in it. `'installation'` is read on the root — the bar `/core-hea
 Prometheus scrape already have — and `ms.core.health` declares it. Checked where `references`
 is.
 
+### `recoveryHoldSeconds` (optional)
+
+How long a return to Up must last before a state trigger's alarm over this sensor is over
+(`M-18`). A Down inside the hold is the same outage, and resumes the alarm rather than paging
+again. Absent means none, and the alarm ends at the return, which is right for almost every type:
+their own two-step Down already confirms an outage. Set it only for a type whose outages come in
+bursts the core samples between. `ms.probe.health` is the one that does, at 300: a probe killed
+and restarted connects for seconds a round. A trigger can override it with its own
+`recoveryHoldSeconds`. Whole seconds, up to a day.
+
 ### `costHint`
 
 `light` | `medium` | `heavy`. Not a duration — a `heavy` check is heavy because of what it
@@ -367,6 +377,7 @@ All of these fail at startup, loudly, rather than at runtime:
 | no repeated channel key                        | `(sensor_id, key)` is unique                                    |
 | the schema validates its own declared defaults | a `default` a `pattern` rejects is a field nobody can fill in   |
 | `evaluatedBy: 'core'` declares `references` or `requires` | its readings are the core's own data, republished (`A-29`) |
+| `recoveryHoldSeconds` is whole seconds, 0 to 86,400 | a typo would be an alarm that never ends, or ends at the return it was meant to hold (`M-18`) |
 
 ---
 

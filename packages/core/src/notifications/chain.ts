@@ -12,7 +12,9 @@ import type { SensorState } from '../state/tables.js';
  *
  * - a 30-second blip under a 5-minute latency produces no notification at all;
  * - acknowledgement stops the chain, and the recovery notification still fires;
- * - a repeat keeps saying the same thing while the state holds.
+ * - a repeat keeps saying the same thing while the state holds;
+ * - a return to Up is held for the sensor type's hold, and a relapse inside it is the same alarm
+ *   (`M-18`).
  */
 
 /** How far along the chain an alarm is. */
@@ -40,6 +42,12 @@ export interface StateTriggerSettings {
   readonly escalationTemplateId: number | null;
   readonly repeatMinutes: number;
   readonly recoveryTemplateId: number | null;
+  /**
+   * How long a return to Up must last before the alarm is over, in seconds (`M-18`). Resolved
+   * for the sensor: the trigger's own when it sets one, the sensor type's otherwise. Zero ends the
+   * alarm at the return, which is every type but Probe Health.
+   */
+  readonly recoveryHoldSeconds: number;
 }
 
 /** The alarm standing for one (sensor, trigger), as the decisions here read it. */
@@ -51,6 +59,11 @@ export interface Alarm {
   readonly nextDueAt: Date | null;
   readonly repeats: number;
   readonly suppressed: boolean;
+  /**
+   * When the sensor returned, while that return is held (`M-18`), or null. The alarm is not over
+   * until the return has lasted the hold, and a relapse before then is the same outage.
+   */
+  readonly recoveringSince: Date | null;
 }
 
 /** What a reconciliation decided to do with the alarm row. */
@@ -67,6 +80,11 @@ export type Reconciliation =
   | { readonly kind: 'resume'; readonly nextDueAt: Date | null }
   /** Returned to Up: the alarm is over, and somebody who was told should be told that. */
   | { readonly kind: 'recover' }
+  /**
+   * Returned to Up, and held (`M-18`): the chain stops and nothing is sent. The alarm is over at
+   * `confirmAt` if the return lasts, and a relapse before then resumes it.
+   */
+  | { readonly kind: 'recovering'; readonly since: Date; readonly confirmAt: Date }
   /** The alarm is over and nobody is owed a word about it. */
   | { readonly kind: 'cancel' }
   /**
@@ -183,6 +201,30 @@ export function escalationDueAt(since: Date, settings: StateTriggerSettings): Da
 }
 
 /**
+ * When a return that began at `returnedAt` has lasted the hold, and the alarm is over (`M-18`).
+ *
+ * **Why a return is held at all.** A probe killed at its memory ceiling and restarted connects
+ * for a few seconds a round, and the thirty-second Probe Health sweep sees it Up between outages
+ * (`P-215`). Ended at the return, every Down after it armed a fresh chain, and with the default
+ * latency of zero, a fresh page: 36–45 an hour for the measured loop, and one or two per loop
+ * under the start limit and each of `H-23`'s retries. Held, a relapse is the outage it always
+ * was. **A return is genuine when it lasts the hold**, and only then is the next Down a new one.
+ */
+export function recoveryConfirmAt(returnedAt: Date, settings: StateTriggerSettings): Date {
+  return new Date(returnedAt.getTime() + settings.recoveryHoldSeconds * SECOND);
+}
+
+/**
+ * Where a stopped chain picks up (`P-105`, `M-18`): at its original initial time if nothing was
+ * sent, otherwise where it would have gone next, all measured from the outage's own beginning.
+ */
+function resumeAt(alarm: Alarm, settings: StateTriggerSettings, now: Date): Date | null {
+  return alarm.phase === 'pending'
+    ? initialDueAt(alarm.since, settings)
+    : nextDueAfter(alarm.phase, alarm.since, now, settings);
+}
+
+/**
  * Where the chain goes after something has just been sent at `at`.
  *
  * Escalation first if one is configured and has not happened; then repeats; then nothing. A
@@ -288,6 +330,24 @@ export function reconcile(
       : { kind: 'cancel' };
   }
 
+  // **A return being held** (`M-18`). Back in the armed state before it was confirmed: a relapse,
+  // and the same outage, so the chain picks up where it stopped. No second initial page, and the
+  // escalation still measured from the outage's beginning, so a probe that flaps for longer than
+  // the escalation latency escalates. Anything else leaves the hold running. Warning and Unknown
+  // do not undo a return, and a return is not taken back by leaving Up, as it never was before
+  // the hold. The alarm is over once the return has lasted the hold, or at once if an operator
+  // pauses the sensor. The pause ends the watch, and the return it had made is still owed.
+  if (alarm.recoveringSince !== null) {
+    if (stillStanding(alarm.state, current)) {
+      return chainStopped(current)
+        ? { kind: 'suppress' }
+        : { kind: 'resume', nextDueAt: resumeAt(alarm, settings, now) };
+    }
+    const over = current === 'paused' || now >= recoveryConfirmAt(alarm.recoveringSince, settings);
+    if (!over) return { kind: 'hold' };
+    return alarm.phase === 'pending' ? { kind: 'cancel' } : { kind: 'recover' };
+  }
+
   if (!stillStanding(alarm.state, current)) {
     // An operator switched monitoring off, or the alarm was about being Up and it no longer is.
     // Nothing to escalate, nothing to announce.
@@ -303,6 +363,15 @@ export function reconcile(
       // behind a link that flaps every three minutes never reached its five-minute latency and
       // never produced a single notification. The comment above justifies sending nothing; it
       // never justified re-reading `since`. P-105 fixed the same shape for `notified` only.
+      //
+      // **Both wait out the hold first** (`M-18`), where the type has one. A pending alarm waits
+      // too. A return that lapses into a relapse must resume from the original `since`, or a
+      // target flapping behind a restarting probe never reaches its latency, the hole P-112
+      // closed for Unknown and Warning, here for Up.
+      const confirmAt = recoveryConfirmAt(since, settings);
+      if (settings.recoveryHoldSeconds > 0 && confirmAt > now) {
+        return { kind: 'recovering', since, confirmAt };
+      }
       return alarm.phase === 'pending' ? { kind: 'cancel' } : { kind: 'recover' };
     }
     // **Neither recovered nor stood down, so the obligation survives** (`P-105`). The sensor has
@@ -324,13 +393,7 @@ export function reconcile(
     // chain up where it stopped rather than starting it again: the outage did not restart, and
     // an operator whose acknowledgement expired should get the escalation they were putting off,
     // not a second initial notification about something they already know.
-    return {
-      kind: 'resume',
-      nextDueAt:
-        alarm.phase === 'pending'
-          ? initialDueAt(alarm.since, settings)
-          : nextDueAfter(alarm.phase, alarm.since, now, settings),
-    };
+    return { kind: 'resume', nextDueAt: resumeAt(alarm, settings, now) };
   }
 
   return { kind: 'hold' };
@@ -340,9 +403,14 @@ export function reconcile(
  * What an alarm that has fallen due owes, and where it goes next.
  *
  * Called only for alarms whose `nextDueAt` has passed, which is what makes the sweep cheap: the
- * decision is a handful of arithmetic on a row the index already found.
+ * decision is a handful of arithmetic on a row the index already found. Never for a held return
+ * (`M-18`), whose due time is its confirmation, which `reconcile` decides.
  */
-export function fire(alarm: Alarm, at: Date, settings: StateTriggerSettings): Firing {
+export function fire(
+  alarm: Pick<Alarm, 'state' | 'phase' | 'since' | 'repeats'>,
+  at: Date,
+  settings: StateTriggerSettings,
+): Firing {
   if (alarm.phase === 'pending') {
     return {
       reason: 'initial',

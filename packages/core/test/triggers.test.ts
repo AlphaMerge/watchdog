@@ -119,6 +119,31 @@ describe('trigger kinds', () => {
       }),
       'when down, notify immediately; escalate after 900s; repeat every 60m',
     );
+    assert.equal(
+      STATE_TRIGGER.describe({ state: 'down', recoveryHoldSeconds: 600 }),
+      'when down, notify immediately; recovered once up for 600s',
+    );
+  });
+
+  it('takes a recovery hold of whole seconds up to a day, and writes none by default (M-18)', () => {
+    // No default: an absent hold is the sensor type's, and a default filled in here would be
+    // written into every trigger and override Probe Health's five minutes.
+    assert.equal('recoveryHoldSeconds' in triggerKinds.validate('state', { state: 'down' }), false);
+    for (const recoveryHoldSeconds of [0, 300, 86_400]) {
+      assert.equal(
+        triggerKinds.validate('state', { state: 'down', recoveryHoldSeconds })[
+          'recoveryHoldSeconds'
+        ],
+        recoveryHoldSeconds,
+      );
+    }
+    for (const recoveryHoldSeconds of [-1, 1.5, 86_401, '300', null]) {
+      assert.throws(
+        () => triggerKinds.validate('state', { state: 'down', recoveryHoldSeconds }),
+        TriggerError,
+        String(recoveryHoldSeconds),
+      );
+    }
   });
 
   it('describes a threshold trigger with the comparison in it', () => {

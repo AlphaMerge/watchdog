@@ -1,5 +1,6 @@
 import { Ajv, type ValidateFunction } from 'ajv';
 import { AppError } from '@ms/shared';
+import { MAX_RECOVERY_HOLD_SECONDS } from '@ms/sensors';
 import type { SensorState } from '../state/tables.js';
 
 /**
@@ -82,10 +83,11 @@ export const TRIGGERABLE_STATES = [
 /**
  * The state trigger (`CAPABILITIES.MD §5.1`).
  *
- * Six settings, and the shape of a whole escalation chain: notify after the state has held for
+ * Seven settings, and the shape of a whole escalation chain: notify after the state has held for
  * the initial latency, escalate if it is still holding later, repeat while it holds, and say so
- * when it recovers. `WORKFLOW.MD §6`'s "a 30-second blip on a five-minute latency produces no
- * notification at all" is a statement about `initialLatencySeconds` and nothing else.
+ * when it recovers, once the recovery has held. `WORKFLOW.MD §6`'s "a 30-second blip on a
+ * five-minute latency produces no notification at all" is a statement about
+ * `initialLatencySeconds` and nothing else.
  */
 export const STATE_TRIGGER: TriggerKind = {
   id: 'state',
@@ -107,6 +109,19 @@ export const STATE_TRIGGER: TriggerKind = {
       /** Minutes between repeats while the state holds. Zero means send once. */
       repeatMinutes: { type: 'integer', minimum: 0, maximum: 10_080, default: 0 },
       recoveryTemplateId: templateRef,
+      /**
+       * How long a return to Up must last before the alarm is over (`M-18`). Absent means the
+       * sensor type's, which is five minutes for Probe Health and none for everything else, so
+       * no default here: a default would be written into every trigger and override the type.
+       */
+      recoveryHoldSeconds: {
+        type: 'integer',
+        minimum: 0,
+        maximum: MAX_RECOVERY_HOLD_SECONDS,
+        description:
+          'Seconds a return to Up must last before the alarm is over. Empty uses the sensor ' +
+          "type's own hold, which most types do not have.",
+      },
     },
   },
   describe(settings) {
@@ -115,10 +130,12 @@ export const STATE_TRIGGER: TriggerKind = {
     const held = latency === 0 ? 'immediately' : `after ${String(latency)}s`;
     const escalation = Number(settings['escalationLatencySeconds'] ?? 0);
     const repeat = Number(settings['repeatMinutes'] ?? 0);
+    const hold = settings['recoveryHoldSeconds'];
     return [
       `when ${state}, notify ${held}`,
       escalation > 0 ? `escalate after ${String(escalation)}s` : null,
       repeat > 0 ? `repeat every ${String(repeat)}m` : null,
+      typeof hold === 'number' ? `recovered once up for ${String(hold)}s` : null,
     ]
       .filter((part): part is string => part !== null)
       .join('; ');

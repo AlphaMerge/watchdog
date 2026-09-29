@@ -903,6 +903,84 @@ describe(
       }
     });
 
+    it('adds when a held return began, and drops what it is holding on the way back (063)', async () => {
+      // `M-18` holds a return to Up before a state alarm is over. The column is a state alarm's
+      // alone, and the rollback deletes the rows being held: a build without it would stand them
+      // down silently at the end of the hold anyway, and says nothing either way.
+      const fresh = await createScratchDatabase('alarm_recovering');
+      try {
+        const all = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 63),
+        );
+        await all.up();
+        const q = fresh.db;
+        const [root] = await q.query<{ id: string }>(`SELECT id FROM object WHERE kind = 'root'`);
+        const insert = async (kind: string, name: string, parent: string): Promise<string> => {
+          const [row] = await q.query<{ id: string }>(
+            'INSERT INTO object (parent_id, kind, name) VALUES ($1, $2, $3) RETURNING id::text',
+            [parent, kind, name],
+          );
+          return row?.id ?? assert.fail('no row');
+        };
+        const probe = await insert('probe', 'probe', root?.id ?? '');
+        const sensor = await insert('sensor', 'sensor', await insert('device', 'device', probe));
+        const trigger = async (): Promise<string> => {
+          const [row] = await q.query<{ id: string }>(
+            `INSERT INTO notification_trigger (object_id, kind, settings)
+             VALUES ($1, 'state', '{"state":"down"}'::jsonb) RETURNING id::text`,
+            [sensor],
+          );
+          return row?.id ?? assert.fail('no trigger');
+        };
+        const [held, standing, threshold] = [await trigger(), await trigger(), await trigger()];
+        for (const [id, returnedAt] of [
+          [held, new Date()],
+          [standing, null],
+        ] as const) {
+          await q.query(
+            `INSERT INTO notification_alarm
+               (sensor_id, trigger_id, state, since, phase, next_due_at, recovering_since)
+             VALUES ($1, $2, 'down', now() - interval '1 hour', 'notified',
+                     now() + interval '5 minutes', $3)`,
+            [sensor, id, returnedAt],
+          );
+        }
+        await assert.rejects(
+          q.query(
+            `INSERT INTO notification_alarm
+               (sensor_id, trigger_id, kind, state, channel_key, observed, since, phase,
+                recovering_since)
+             VALUES ($1, $2, 'threshold', NULL, 'latency', 42, now(), 'notified', now())`,
+            [sensor, threshold],
+          ),
+          /notification_alarm_recovering_is_a_state_alarm/,
+        );
+
+        await all.down(1);
+        const left = await q.query<{ trigger: string }>(
+          'SELECT trigger_id::text AS trigger FROM notification_alarm ORDER BY 1',
+        );
+        assert.deepEqual(
+          left.map((one) => one.trigger),
+          [standing],
+        );
+        const columns = await q.query<{ name: string }>(
+          `SELECT column_name AS name FROM information_schema.columns
+           WHERE table_name = 'notification_alarm' AND column_name = 'recovering_since'`,
+        );
+        assert.deepEqual(columns, []);
+
+        const again = await all.up();
+        assert.deepEqual(
+          again.applied.map((one) => one.id),
+          [63],
+        );
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('applies the real migration set forward and all the way back', async () => {
       const fresh = await createScratchDatabase('roundtrip');
       try {

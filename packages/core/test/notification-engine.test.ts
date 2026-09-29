@@ -912,14 +912,28 @@ describe(
         acknowledging.push(
           db.tx((other) =>
             alarms.advance(other, [
-              { id: row.id, phase: 'notified', nextDueAt: null, repeats: 0, suppressed: true },
+              {
+                id: row.id,
+                phase: 'notified',
+                nextDueAt: null,
+                repeats: 0,
+                suppressed: true,
+                recoveringSince: null,
+              },
             ]),
           ),
         );
         await new Promise((resolve) => setTimeout(resolve, 50));
 
         await alarms.advance(sweeping, [
-          { id: row.id, phase: 'escalated', nextDueAt: at(700), repeats: 0, suppressed: false },
+          {
+            id: row.id,
+            phase: 'escalated',
+            nextDueAt: at(700),
+            repeats: 0,
+            suppressed: false,
+            recoveringSince: null,
+          },
         ]);
       });
       await Promise.all(acknowledging);

@@ -395,6 +395,18 @@ export interface SensorType {
    * `/core-health` and the Prometheus scrape already have — checked where `references` is.
    */
   readonly requires?: 'installation';
+  /**
+   * How long a return to Up must last before a state trigger's alarm over this sensor is over, in
+   * seconds (`M-18`). Absent means none: the alarm ends at the return, as it does for every type
+   * whose own two-step Down already confirms an outage.
+   *
+   * **For a type whose outages arrive in bursts the core samples between.** A relapse inside the
+   * hold is the same outage, and resumes its alarm rather than arming a second. Probe Health is
+   * the case: a probe killed and restarted connects for seconds a round, and its link reads Up
+   * between kills. Declared rather than matched on the id, for the reason `listener` is. A
+   * trigger that sets its own `recoveryHoldSeconds` overrides it, either way.
+   */
+  readonly recoveryHoldSeconds?: number;
   /** Called with already-validated params. Must be pure — it runs in the core, not the probe. */
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[];
   execute(context: CheckContext): Promise<CheckExecution>;

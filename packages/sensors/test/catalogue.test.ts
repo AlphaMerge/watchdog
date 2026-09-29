@@ -72,6 +72,33 @@ describe('registration', () => {
     new SensorCatalogue().register(variant({}));
   });
 
+  it('refuses a recovery hold that is not whole seconds up to a day (M-18)', () => {
+    for (const recoveryHoldSeconds of [-1, 1.5, 86_401, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.throws(
+        () => new SensorCatalogue().register(variant({ recoveryHoldSeconds })),
+        (error: unknown) =>
+          error instanceof SensorTypeError &&
+          error.code === 'BAD_SENSOR_TYPE' &&
+          /recovery hold/.test(error.message),
+        String(recoveryHoldSeconds),
+      );
+    }
+    for (const recoveryHoldSeconds of [0, 300, 86_400]) {
+      new SensorCatalogue().register(variant({ recoveryHoldSeconds }));
+    }
+  });
+
+  it('holds a return for Probe Health alone among the shipped types (M-18)', () => {
+    // Every other type ends its alarm at the return, as before: the hold is for outages that
+    // come in bursts the core samples between, and today that is a restarting probe.
+    const shipped = standardCatalogue();
+    const holding = shipped
+      .ids()
+      .map((id) => [id, shipped.type(id).recoveryHoldSeconds ?? 0] as const)
+      .filter(([, hold]) => hold > 0);
+    assert.deepEqual(holding, [['ms.probe.health', 300]]);
+  });
+
   it('has every shipped type the core evaluates say what it reads (A-29)', () => {
     const catalogue = standardCatalogue();
     const declared = catalogue

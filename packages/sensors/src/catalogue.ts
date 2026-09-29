@@ -22,6 +22,12 @@ import { scrubSecrets, secretsOfCheck } from './support/secrets.js';
  */
 export const SENSOR_TYPE_ID = /^[a-z0-9]+(\.[a-z0-9-]+)+$/;
 
+/**
+ * The longest recovery hold a type may declare, in seconds (`M-18`): a day. Exported so a trigger
+ * that sets its own is held to the same bound.
+ */
+export const MAX_RECOVERY_HOLD_SECONDS = 86_400;
+
 /** Subschema keywords the redactor cannot follow. See `assertWriteOnlyIsReachable`. */
 const COMBINATORS = ['oneOf', 'anyOf', 'allOf', 'not', 'if', 'then', 'else', 'items'] as const;
 
@@ -129,6 +135,7 @@ export class SensorCatalogue {
     assertSecretsSayWhereTheyGo(type, writeOnly);
     assertOnePrimaryChannel(type);
     assertSaysWhatItReads(type);
+    assertHoldIsADuration(type);
 
     this.#types.set(type.id, type);
     this.#validators.set(type.id, validate);
@@ -429,6 +436,21 @@ function scrubbedError(error: unknown, secrets: readonly string[]): Error {
  * writer against that. A type with neither would be a way to read anything the core holds from
  * wherever one could be put, which is `A-29`'s whole finding.
  */
+/**
+ * A recovery hold that is a whole number of seconds up to a day (`M-18`). Anything else is a typo
+ * that would surface as an alarm that never ends, or ends at the return it was meant to hold.
+ */
+function assertHoldIsADuration(type: SensorType): void {
+  const hold = type.recoveryHoldSeconds;
+  if (hold === undefined) return;
+  if (Number.isInteger(hold) && hold >= 0 && hold <= MAX_RECOVERY_HOLD_SECONDS) return;
+  throw new SensorTypeError(
+    'BAD_SENSOR_TYPE',
+    `sensor type "${type.id}" declares a recovery hold of ${String(hold)} s; it must be a whole ` +
+      `number of seconds from 0 to ${String(MAX_RECOVERY_HOLD_SECONDS)}`,
+  );
+}
+
 function assertSaysWhatItReads(type: SensorType): void {
   if (type.evaluatedBy !== 'core') return;
   if (type.references !== undefined || type.requires !== undefined) return;

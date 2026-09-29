@@ -60,7 +60,7 @@ import { ScheduleSweep } from './schedules/sweep.js';
 import { FactoryService } from './factory/service.js';
 import { FactorySweep } from './factory/sweep.js';
 import { ScheduleSync } from './schedules/sync.js';
-import { AlarmEngine } from './notifications/engine.js';
+import { AlarmEngine, holdsFrom } from './notifications/engine.js';
 import { AlarmScheduler } from './notifications/scheduler.js';
 import { TriggerSync } from './notifications/sync.js';
 import { MessageContextLoader } from './notifications/context.js';
@@ -412,6 +412,8 @@ async function serve(): Promise<void> {
       wakeDelivery.poke();
     },
     episodes,
+    // Probe Health's five minutes, and nothing for any other type (`M-18`).
+    recoveryHolds: holdsFrom(catalogue),
   });
   // Live state changes for the UI (U-02). Published after the commit, from `writeStateHistory`
   // — the one function every state change in the system goes through — so ingestion, a pause,

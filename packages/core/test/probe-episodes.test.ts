@@ -17,7 +17,7 @@ import type {
   AlarmRow,
   RequestInsert,
 } from '../src/notifications/repository.js';
-import { V1_STATES, type SensorState } from '../src/state/tables.js';
+import { V1_STATES, type SensorState, type SensorStateCause } from '../src/state/tables.js';
 import type { TriggerRepository } from '../src/triggers/repository.js';
 import { silent } from './support/tree.js';
 
@@ -287,6 +287,10 @@ describe('an episode alarm the view cannot decide (`M-24`)', () => {
     readonly suppressed?: boolean;
     /** The episode ended while its probe stayed lost: its sensors were moved off it. */
     readonly emptied: boolean;
+    /** When the alarm was armed, the episode's start unless said. */
+    readonly since?: Date;
+    /** Why Probe Health reads its state, `lookup` unless said (paused: none). */
+    readonly cause?: SensorStateCause | null;
   }
 
   function over(fixture: Fixture): {
@@ -301,7 +305,7 @@ describe('an episode alarm the view cannot decide (`M-24`)', () => {
     index.episodeOf(HEALTH);
     // Emptied by a tree change whose re-evaluation of Probe Health never landed.
     if (fixture.emptied) lost.set(PROBE, { sensorIds: [], reason: 'link', since: T1 });
-    const cause = fixture.state === 'paused' ? null : 'lookup';
+    const cause = fixture.cause ?? (fixture.state === 'paused' ? null : 'lookup');
     const suppressed = fixture.suppressed ?? false;
     const row: AlarmRow | null =
       fixture.phase === null
@@ -314,11 +318,12 @@ describe('an episode alarm the view cannot decide (`M-24`)', () => {
             state: 'unknown',
             channelKey: null,
             observed: null,
-            since: T1,
+            since: fixture.since ?? T1,
             phase: fixture.phase,
             nextDueAt: suppressed ? null : T3,
             repeats: 0,
             suppressed,
+            recoveringSince: null,
           };
     const requests: RequestInsert[] = [];
     const cleared: number[] = [];
@@ -439,6 +444,27 @@ describe('an episode alarm the view cannot decide (`M-24`)', () => {
         }
       });
     }
+  });
+
+  describe('that is Probe Health’s own, armed before the episode (`M-18`)', () => {
+    it('is left to its own state by the reaction, emptied or not', async () => {
+      // `closes` takes an alarm armed at or before the episode's start, so that one resumed across
+      // episodes inside a held return is still closed by the last. One armed before the episode
+      // on Probe Health's own Unknown, a sensor awaiting its first reading, still stands on that,
+      // and is not the episode's to recover.
+      for (const emptied of [true, false]) {
+        const { engine, requests, cleared } = over({
+          state: 'unknown',
+          cause: 'scan',
+          phase: 'notified',
+          emptied,
+          since: new Date(T1.getTime() - 60_000),
+        });
+        await react(engine);
+        assert.deepEqual(requests, [], `emptied: ${String(emptied)}`);
+        assert.deepEqual(cleared, [], `emptied: ${String(emptied)}`);
+      }
+    });
   });
 
   describe('on an acknowledged Probe Health, while the episode goes on', () => {

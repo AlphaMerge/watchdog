@@ -32,8 +32,9 @@
 #
 # **The cool-down doubles**, from 10 minutes to a cap of 4 hours, and starts again once the service
 # has stayed up for an hour. Ten minutes is the units' StartLimitIntervalSec, so a retry never
-# lands in the window that just filled. Each retry is a new loop of up to five starts, and until
-# M-18 each such loop can raise an alarm or two: the cap is what bounds that, at about six a day.
+# lands in the window that just filled. Each retry is a new loop of up to five starts. Without a
+# recovery hold each loop could raise an alarm or two, which the cap bounded at about six a day;
+# Probe Health's five-minute hold (M-18) makes every retry of it one outage and one alarm.
 #
 # **Why not RestartSteps= and RestartMaxDelaySec=.** They need systemd 254, and Debian 12 and
 # RHEL 9 ship 252, which warns about them on every reload. They also back off only while the start

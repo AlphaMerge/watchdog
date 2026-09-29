@@ -74,6 +74,7 @@ export {
 } from './support/syslog/parse.js';
 
 export {
+  MAX_RECOVERY_HOLD_SECONDS,
   SENSOR_TYPE_ID,
   SensorCatalogue,
   SensorTypeError,

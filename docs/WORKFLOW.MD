@@ -244,7 +244,8 @@ sequenceDiagram
         N->>D: Repeat escalation while still Down
     end
     S->>T: State change (Down -> Up)
-    T->>N: Recovery notification
+    Note over T,L: Held for the type's recovery hold (Probe Health: 5 min). Down again inside it resumes this chain
+    T->>N: Recovery notification, once the return has lasted the hold
     T->>L: Cancel all pending timers for this sensor
 ```
 
@@ -254,6 +255,12 @@ Behaviours that must be right:
   latency produces no notification at all.
 - **Acknowledgement stops the chain.** Acknowledging a Down alarm cancels pending escalations
   and repeats; the recovery notification still fires when it comes back.
+- **A relapse is the same outage** (`M-18`). A return to Up is held for the sensor type's
+  recovery hold before the alarm is over, and a Down inside the hold resumes the chain where it
+  stopped: no second initial notification, and the escalation still measured from the outage's
+  start. Only Probe Health has a hold, five minutes, because a probe killed and restarted
+  connects for seconds a round and would otherwise page at every kill. A trigger can set its own
+  `recoveryHoldSeconds`. The cost is that the recovery notification waits out the hold.
 - **Trigger inheritance.** A state trigger set on the root applies to every sensor. A sensor's
   trigger tab shows own + inherited triggers, with the source object named.
 - **Summarisation** batches storms. Default policy is _first down and up immediately, then

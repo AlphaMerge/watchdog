@@ -8,6 +8,7 @@ import {
   isRecovery,
   nextDueAfter,
   reconcile,
+  recoveryConfirmAt,
   stillStanding,
   templateFor,
   type Alarm,
@@ -27,6 +28,7 @@ function settings(overrides: Partial<StateTriggerSettings> = {}): StateTriggerSe
     escalationTemplateId: null,
     repeatMinutes: 0,
     recoveryTemplateId: null,
+    recoveryHoldSeconds: 0,
     ...overrides,
   };
 }
@@ -39,6 +41,7 @@ function alarm(overrides: Partial<Alarm> = {}): Alarm {
     nextDueAt: T0,
     repeats: 0,
     suppressed: false,
+    recoveringSince: null,
     ...overrides,
   };
 }
@@ -615,5 +618,195 @@ describe('a sensor held behind its probe’s own alarm (`M-22`)', () => {
         );
       }
     }
+  });
+});
+
+// -------------------------------------------------------------------------------------------
+// A return held before the alarm is over (`M-18`).
+// -------------------------------------------------------------------------------------------
+
+describe('a return to Up held before the alarm is over (`M-18`)', () => {
+  const HOLD = 300;
+  const held = settings({ recoveryHoldSeconds: HOLD, escalationLatencySeconds: 1800 });
+  const phases = ['pending', 'notified', 'escalated'] as const;
+
+  it('confirms a return once it has lasted the hold, measured from the return', () => {
+    assert.deepEqual(recoveryConfirmAt(at(600), held), at(900));
+    assert.deepEqual(recoveryConfirmAt(at(600), settings()), at(600), 'no hold is no wait');
+  });
+
+  for (const phase of phases) {
+    it(`holds a ${phase} alarm's return, from when the sensor came back, and sends nothing`, () => {
+      const standing = alarm({ phase, nextDueAt: at(1800) });
+      // The reaction runs ten seconds after the return: the hold is the return's, not the
+      // reaction's.
+      assert.deepEqual(reconcile(standing, 'up', at(600), held, at(610)), {
+        kind: 'recovering',
+        since: at(600),
+        confirmAt: at(900),
+      });
+    });
+
+    it(`ends a ${phase} alarm whose return is already older than the hold`, () => {
+      // A reaction that comes late, after a release from a probe's hold or at boot, finds a return
+      // that has lasted: it is over, as it would have been at the sweep.
+      const standing = alarm({ phase, nextDueAt: at(1800) });
+      assert.deepEqual(
+        reconcile(standing, 'up', at(600), held, at(900)),
+        phase === 'pending' ? { kind: 'cancel' } : { kind: 'recover' },
+      );
+    });
+  }
+
+  it('ends the alarm at the return when the type has no hold, as before', () => {
+    const notified = alarm({ phase: 'notified', nextDueAt: null });
+    assert.deepEqual(reconcile(notified, 'up', at(600), settings(), at(600)), {
+      kind: 'recover',
+    });
+    const pending = alarm({ phase: 'pending', nextDueAt: at(300) });
+    assert.deepEqual(reconcile(pending, 'up', at(30), settings(), at(30)), { kind: 'cancel' });
+  });
+
+  /**
+   * Every state a sensor can read while a return is held, before and after the hold ends, for a
+   * trigger on Down. Written out rather than derived: a table computed by the rule it tests
+   * checks the rule against itself.
+   */
+  const table: readonly {
+    readonly current: (typeof V1_STATES)[number];
+    readonly before: 'resume' | 'suppress' | 'hold' | 'over';
+    readonly after: 'resume' | 'suppress' | 'over';
+  }[] = [
+    // A relapse, before or after: the same outage. After the hold the sweep would have ended it,
+    // and a reaction that gets there first still reads the relapse as what it is.
+    { current: 'down', before: 'resume', after: 'resume' },
+    { current: 'down_acknowledged', before: 'suppress', after: 'suppress' },
+    // Neither a relapse nor an ending: the hold runs on, and the return is owed at its end.
+    { current: 'up', before: 'hold', after: 'over' },
+    { current: 'warning', before: 'hold', after: 'over' },
+    { current: 'unknown', before: 'hold', after: 'over' },
+    // A pause ends the watch, and the return it had made is owed now rather than never.
+    { current: 'paused', before: 'over', after: 'over' },
+  ];
+  it('covers every state a sensor can read', () => {
+    assert.deepEqual(table.map((row) => row.current).sort(), [...V1_STATES].sort());
+  });
+
+  for (const { current, before, after } of table) {
+    for (const phase of phases) {
+      for (const [when, now, expected] of [
+        ['before', at(899), before],
+        ['after', at(900), after],
+      ] as const) {
+        it(`reads ${current} ${when} a ${phase} alarm's hold ends as ${expected}`, () => {
+          const recovering = alarm({ phase, nextDueAt: at(900), recoveringSince: at(600) });
+          const decided = reconcile(recovering, current, at(600), held, now);
+          switch (expected) {
+            case 'resume':
+              assert.deepEqual(decided, {
+                kind: 'resume',
+                // From the outage's beginning, never from the relapse: a pending alarm keeps its
+                // initial time and a notified one its escalation.
+                nextDueAt: phase === 'pending' ? T0 : phase === 'notified' ? at(1800) : null,
+              });
+              break;
+            case 'over':
+              assert.deepEqual(
+                decided,
+                phase === 'pending' ? { kind: 'cancel' } : { kind: 'recover' },
+              );
+              break;
+            default:
+              assert.deepEqual(decided, { kind: expected });
+          }
+        });
+      }
+    }
+  }
+
+  it('ends a held return at once when the hold is edited away', () => {
+    const recovering = alarm({ phase: 'notified', nextDueAt: at(900), recoveringSince: at(600) });
+    assert.deepEqual(reconcile(recovering, 'up', at(600), settings(), at(601)), {
+      kind: 'recover',
+    });
+  });
+
+  it('holds no return for an alarm about Up, which ends when the sensor leaves Up', () => {
+    // `P-113`: every return to Up is its own event for a trigger on Up, and a hold on it would
+    // swallow the next one.
+    const up = settings({ state: 'up', recoveryHoldSeconds: HOLD });
+    const standing = alarm({ state: 'up', phase: 'notified', nextDueAt: null });
+    assert.deepEqual(reconcile(standing, 'down', at(60), up, at(60)), { kind: 'cancel' });
+  });
+
+  it('lets a probe’s hold win over a held return (`M-22`)', () => {
+    const recovering = alarm({ phase: 'notified', nextDueAt: at(900), recoveringSince: at(600) });
+    assert.deepEqual(reconcile(recovering, 'unknown', at(650), held, at(650), true), {
+      kind: 'suppress',
+    });
+  });
+
+  it('stands a held return down with the rest when the trigger is retargeted', () => {
+    const recovering = alarm({ phase: 'notified', nextDueAt: at(900), recoveringSince: at(600) });
+    assert.deepEqual(reconcile(recovering, 'up', at(600), { ...held, state: 'warning' }, at(650)), {
+      kind: 'cancel',
+    });
+  });
+
+  it('turns a probe that flaps for five minutes into one alarm and one recovery', () => {
+    // `P-215`'s loop as the chain sees it: Down, a few seconds of Up, Down again, and so on, then
+    // Up for good. Walked as a sequence, the rows written back as the engine writes them: the
+    // point is that production reaches each state, not that each can be started from.
+    const config = settings({ recoveryHoldSeconds: HOLD, recoveryTemplateId: 9 });
+    let standing: Alarm | null = null;
+    const kinds: string[] = [];
+    const react = (current: SensorState, since: number, now: number): void => {
+      const decided = reconcile(standing, current, at(since), config, at(now));
+      kinds.push(decided.kind);
+      switch (decided.kind) {
+        case 'arm':
+          standing = alarm({ since: at(since), nextDueAt: decided.nextDueAt });
+          // Latency zero: the scheduler fires the initial notification straight away.
+          standing = { ...standing, phase: 'notified', nextDueAt: null };
+          break;
+        case 'recovering':
+          standing = alarm({
+            ...(standing ?? assert.fail('no alarm')),
+            nextDueAt: decided.confirmAt,
+            recoveringSince: decided.since,
+          });
+          break;
+        case 'resume':
+          standing = alarm({
+            ...(standing ?? assert.fail('no alarm')),
+            nextDueAt: decided.nextDueAt,
+            recoveringSince: null,
+          });
+          break;
+        case 'recover':
+        case 'cancel':
+          standing = null;
+          break;
+        default:
+          break;
+      }
+    };
+    react('down', 0, 0);
+    for (let round = 1; round <= 5; round += 1) {
+      react('up', round * 60 - 50, round * 60 - 50);
+      react('down', round * 60, round * 60);
+    }
+    react('up', 310, 310);
+    // The sweep at the end of the hold: nothing changed, and the return has lasted.
+    react('up', 310, 610);
+
+    assert.equal(kinds.filter((kind) => kind === 'arm').length, 1, kinds.join(', '));
+    assert.equal(kinds.filter((kind) => kind === 'resume').length, 5, kinds.join(', '));
+    assert.deepEqual(kinds.at(-1), 'recover');
+    assert.equal(standing, null);
+
+    // And the next Down after a return that lasted is a new outage: a new alarm.
+    react('down', 4_000, 4_000);
+    assert.deepEqual(kinds.at(-1), 'arm');
   });
 });

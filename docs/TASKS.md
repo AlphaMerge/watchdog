@@ -4949,6 +4949,103 @@ because each is a decision rather than a defect:
       until then (`H-23`'s 10-minute-to-4-hour retries give about 12–24 Down/Up pairs on the first
       day of a permanent crash loop, accepted as interim); and `alarm-storm.test.ts` still passes.
 
+      **M-18 part 1 outcome: a return to Up is held before the alarm is over.**
+      - **The line for "genuine" is time back, as the core sees it.**
+        - A state alarm whose sensor returns enters a new verdict, `recovering`. The chain stops,
+          nothing is sent, and `next_due_at` is the moment the return has lasted the hold.
+        - A relapse inside the hold resumes the same alarm from its original `since`: no second
+          initial, and the escalation still counts from the outage's start.
+        - A return that lasts the hold is genuine. The sweep then sends the recovery, and the next
+          Down is a new alarm.
+        - Returns that are pending wait too, so a flapping sensor now reaches its latency. That
+          closes, for Up, the hole `P-112` closed for Unknown and Warning.
+        - A pause inside the hold sends the owed recovery at once.
+      - **The hold is the sensor type's, and a trigger can override it.**
+        - `SensorType.recoveryHoldSeconds` is new and optional, and registration refuses anything
+          but whole seconds up to a day. `ms.probe.health` declares 300. Every other type has
+          none and behaves as before.
+        - A state trigger's `recoveryHoldSeconds` (no schema default) overrides the type's, zero
+          included.
+        - `holdsFrom(catalogue)` is the one lookup, used by `main.ts` and by the scenarios that
+          stand in for it.
+        - Migration 063 adds `notification_alarm.recovering_since`, for state alarms only. Its
+          rollback deletes the rows being held, which a build without the column would have
+          stood down silently at the end of the hold anyway.
+      - **The length was the user's decision, 2026-09-29: five minutes, Probe Health only.** It
+        was chosen over ten or fifteen for the delay it adds to every probe's recovery
+        notification.
+        - **This departs from the done-when for one shape.** A probe connected about a minute a
+          round still raises two at about 10% of phases. The sweep can miss all five of its 6.5 s
+          Down gaps, read the loop as one return of about five minutes, and confirm it just
+          before the loop stops. Ten minutes would make it one.
+        - The floor is exact. The start limit refuses the sixth start only if five fell inside
+          600 s, so any loop it stops lasts under ten minutes.
+      - **Found and folded in: episode alarms flapped too.** A running core marks a probe lost at
+        the socket close, so every kill opened an `M-22` episode and every reconnect ended it. A
+        trigger on Unknown over Probe Health therefore paged on every kill: 6 per loop, and under
+        `H-23` 51 on the first day and 81 over two. `P-215` and `H-23` had counted the Down trigger
+        only.
+        - A probe coming back is now a return like any other. A loss inside the hold is a new
+          episode and the same alarm.
+        - `closes()` matches an alarm armed at or before the ended episode's start, because a
+          resumed alarm keeps the first episode's start.
+        - A guard leaves an alarm that still stands on Probe Health's own state to `reconcile`
+          (a35d8f's review). An emptied episode (`M-24`) recovers at once, since it is not a
+          return.
+        - Accepted residue: Probe Health's own Unknown alarm, armed before an episode, recovers
+          later in the episode's words.
+      - **Numbers, worst case over phase** (`probe-restart-scenario.test.ts`):
+        - `P-215`'s loop shapes under the start limit: 1 each, except connected 60 s at 1–2.
+        - The measured loop with nothing stopping it: 1.
+        - On Unknown: 1 for every shape, where it was 6.
+        - `H-23`'s endless crash loop, on Down and on Unknown: 1 on the first day and 1 over two,
+          where it was 4–11 and 51, and 10–16 and 81.
+        - A crash-looping core is not in this arithmetic. Its restarts page nobody for probes that
+          redial inside `M-22`'s boot grace, so it adds nothing for the hold to collapse.
+      - **Tests.**
+        - `notification-chain.test.ts`:
+          - every state a sensor can read, before and at the hold's end, for all three phases,
+            written out rather than derived;
+          - late reactions, a hold edited away, and an Up alarm never held;
+          - `M-22`'s hold winning, and a retarget;
+          - a five-minute flap walked as one alarm and one recovery, then a new outage armed
+            fresh.
+        - `probe-restart-scenario.test.ts`:
+          - the arithmetic is checked against `observedOutages` at no hold;
+          - every shape, the unbounded loop, the Unknown trigger and `H-23` over one and two days;
+          - through the real pipeline, the measured loop gives 1 at two phases, limited and not;
+            the minute-a-round loop gives 2 at the phase the arithmetic names; and Down, an hour
+            back, then Down again gives 2 (what "genuine" means).
+        - `probe-episode-scenario.test.ts`:
+          - six kills give one Down and one Unknown initial, nothing inside the hold, and both
+            recoveries after it, the Unknown one still in the episode's words;
+          - a loss after that is a second alarm on each;
+          - an emptied episode with the hold on recovers at the move.
+        - `probe-episodes.test.ts`: Probe Health's own earlier alarm is left alone.
+        - `migrator.test.ts` covers 063 forward, back (the held row goes, the other stays) and
+          forward. `triggers.test.ts` covers the setting's bounds, that no default is written,
+          and its summary line. `catalogue.test.ts` covers the registration check, and that
+          Probe Health alone holds.
+        - The alarm, probe and trigger suites pass: 990 before the last cases, and
+          `alarm-storm.test.ts` among them.
+      - **Mutation: 18/18.** The mutants were:
+        - a relapse inside the hold arming fresh;
+        - no hold, or a hold that never ends;
+        - a pause not ending the hold;
+        - the sweep's confirm skipped;
+        - a held return not written, or its column not saved;
+        - a resume leaving the hold set;
+        - `closes()` matching only the first episode;
+        - an emptied episode held;
+        - the type's hold not looked up;
+        - 063's constraint dropped;
+        - the registration check and the trigger's maximum loosened;
+        - Probe Health declaring no hold;
+        - a35d8f's guard removed.
+      - **Part 2 follows:** the alarm list and `GET /alarms` show a held return as recovering,
+        with when it confirms. The list asks again at that moment on the core's clock, because
+        the end of a hold is the one change it sees with no state frame behind it.
+
 - [x] **M-19 — A template's user and group recipients have never been delivered to** · M · A-01,
       A-12, N-07 · Found 2026-09-28 by bc8184 while scoping `V2-05`. `CAPABILITIES.MD` marks
       "recipients as users, user groups, or raw addresses" `[V1]`, and the template API has

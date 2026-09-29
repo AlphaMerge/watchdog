@@ -1,11 +1,12 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
+import { probeHealth, standardCatalogue } from '@ms/sensors';
 import { PROTOCOL_VERSION, type CheckResult } from '@ms/shared';
 import { CompositeAuditSink, DatabaseAuditSink } from '../src/audit/store.js';
 import type { Database } from '../src/db/pool.js';
 import { ProbeHealthService } from '../src/health/probe-health.js';
 import { BUILT_IN_LOOKUPS } from '../src/lookups/built-in.js';
-import { AlarmEngine } from '../src/notifications/engine.js';
+import { AlarmEngine, holdsFrom } from '../src/notifications/engine.js';
 import { AlarmRepository } from '../src/notifications/repository.js';
 import { AlarmScheduler } from '../src/notifications/scheduler.js';
 import { TriggerSync } from '../src/notifications/sync.js';
@@ -178,8 +179,9 @@ function everyPhase(
  * bound is only asserted by looking at all of them.
  *
  * **What it shows, and does not.** A start limit turns an unbounded storm into a bounded one. It
- * does **not** give one alarm: `CLAUDE.md`'s *one outage, one alarm* is not met at the unit level,
- * and `M-18` — flap suppression in the alarm engine — is where it is to be met.
+ * does **not** give one alarm: `CLAUDE.md`'s *one outage, one alarm* is not met at the unit level.
+ * `M-18`'s hold in the alarm engine is where it is met, in the suite after `H-23`'s. The counts
+ * here are the engine without it, which is every sensor type but Probe Health.
  */
 describe('how many alarms a restart loop can raise, over every phase', () => {
   it('raises dozens an hour when nothing stops it', () => {
@@ -193,7 +195,7 @@ describe('how many alarms a restart loop can raise, over every phase', () => {
     assert.equal(least, 1);
     assert.equal(most, 2);
     // Pinned so that nobody reads the bound as "one" and tightens an assertion to match a lucky
-    // run. `M-18` is what would make this zero.
+    // run. `M-18`'s hold is what makes it one, below.
     assert.ok(twoOrMore > 0.3, `two alarms at ${(twoOrMore * 100).toFixed(0)}% of phases`);
   });
 
@@ -335,11 +337,11 @@ function cooldownMs(retry: number): number {
  * **What it buys.** A probe whose cause goes away comes back by itself. Before `H-23` it stayed
  * `failed` until somebody reset it, which for a remote probe means a visit.
  *
- * **What it costs, for now.** Each retry is a new loop of up to five starts, and `P-215`'s
+ * **What it cost without a hold.** Each retry is a new loop of up to five starts, and `P-215`'s
  * arithmetic above gives each loop one or two alarms. So a probe that never stops crashing
- * re-alarms at every retry: the bounds below are asserted as **today's**, and they break
- * `CLAUDE.md`'s *one outage, one alarm*. **Interim, until `M-18`**, whose flap suppression is to
- * make each of these outages one alarm, and whose done-when extends this scenario to say so.
+ * re-alarmed at every retry, which broke `CLAUDE.md`'s *one outage, one alarm*. The bounds below
+ * are that cost, still true of any type with no hold. `M-18`'s hold makes the whole crash loop
+ * one alarm on Probe Health, asserted in the suite that follows.
  */
 describe('a crash loop that `ms-recover` retries (`H-23`)', () => {
   it('comes back by itself once the cause has gone, where the start limit alone never did', () => {
@@ -361,7 +363,7 @@ describe('a crash loop that `ms-recover` retries (`H-23`)', () => {
     assert.equal(linkUpAt(loop, starts, DAY), false);
   });
 
-  it('re-alarms at each retry of a loop that never ends: today’s bound, interim until M-18', () => {
+  it('re-alarms at each retry of a loop that never ends when a return is not held', () => {
     const loop = { ...MEASURED, limit: SHIPPED_LIMIT };
     // The first day: the first loop and every retry the doubling cool-down fits into it.
     const dayOneLoops = loopsBetween(loop, 0, DAY);
@@ -382,8 +384,270 @@ describe('a crash loop that `ms-recover` retries (`H-23`)', () => {
     // One or two a loop, as P-215 measured each loop: never more.
     assert.ok(dayOne.most <= 2 * dayOneLoops, `day one: ${notifications(dayOne.most)}`);
     assert.ok(later.most <= 2 * laterLoops, `a later day: ${notifications(later.most)}`);
-    // And not one outage, one alarm: pinned so that nobody reads this as fixed before M-18 is.
+    // And not one outage, one alarm, which is what `M-18`'s hold is for.
     assert.ok(dayOne.least > 1, `day one at least ${notifications(dayOne.least)}`);
+  });
+});
+
+/** Read from the Probe Health type, so changing its hold re-runs this arithmetic (`M-18`). */
+const SHIPPED_HOLD_MS = (probeHealth.recoveryHoldSeconds ?? 0) * 1_000;
+
+/** Up or not, at the moment the core learnt it. */
+type Observation = readonly [ms: number, up: boolean];
+
+/**
+ * How many alarms a run of observations raises when a return must last `holdMs` (`M-18`).
+ *
+ * A Down after a return that has lasted the hold is a new alarm, and one inside the hold is a
+ * relapse: the same alarm. **A Down at the very moment the hold ends is a relapse.** The sweep's
+ * reaction reaches the engine before the scheduler's pass that would have confirmed the return,
+ * which is the order `play` below runs them in, and the engine reads a relapse before the time.
+ * A hold of zero is the engine before `M-18`: every Down after an Up is an alarm.
+ */
+function alarmsUnderHold(observations: readonly Observation[], holdMs: number): number {
+  let alarms = 0;
+  let open = false;
+  let returnedAt: number | null = null;
+  let wasUp = true;
+  for (const [ms, up] of observations) {
+    if (returnedAt !== null && ms > returnedAt + holdMs) {
+      // The return lasted, and the recovery went out.
+      returnedAt = null;
+      open = false;
+    }
+    if (wasUp && !up) {
+      if (returnedAt !== null) returnedAt = null;
+      else if (!open) {
+        alarms += 1;
+        open = true;
+      }
+    } else if (!wasUp && up && open) {
+      returnedAt = ms;
+    }
+    wasUp = up;
+  }
+  return alarms;
+}
+
+/** What the thirty-second sweep reads of the link, which is what a trigger on Down hears. */
+function sweepObservations(
+  rounds: readonly Round[],
+  upFromMs: number,
+  times: readonly number[],
+): Observation[] {
+  return times.map((ms): Observation => [ms, linkUpInRounds(rounds, upFromMs, ms)]);
+}
+
+/**
+ * What a trigger on Unknown hears of the same loop, through `M-22`'s episode.
+ *
+ * **Every kill, not every sweep.** A running core marks a probe lost when its socket closes and
+ * found when it reconnects, so the episode that holds its sensors opens at each kill and ends at
+ * each reconnect, and its alarm follows the loop itself. `P-215` and `H-23` counted the link's
+ * Down trigger only, and this one went uncounted until `M-18`.
+ */
+function episodeObservations(rounds: readonly Round[], upFromMs: number): Observation[] {
+  const observed: Observation[] = [];
+  let up = true;
+  for (const { start, lengthMs } of rounds) {
+    if (up) observed.push([start, false]);
+    up = lengthMs > upFromMs;
+    if (!up) continue;
+    observed.push([start + upFromMs, true]);
+    if (Number.isFinite(lengthMs)) {
+      observed.push([start + lengthMs, false]);
+      up = false;
+    }
+  }
+  return observed;
+}
+
+/** The rounds of a loop the start limit alone stops, as `roundsWithRecovery` gives them. */
+function roundsOf(loop: RestartLoop, horizonMs: number): Round[] {
+  return startsOf(loop, horizonMs).map((start, index) => ({
+    start,
+    lengthMs: loop.roundsMs[index % loop.roundsMs.length] ?? 1,
+  }));
+}
+
+/**
+ * Every phase of a loop, and the alarms each kind of trigger hears under `holdMs`: the loop begun
+ * at each of its rounds, and the sweep at every second of its thirty.
+ */
+function everyPhaseHeld(
+  loop: RestartLoop,
+  rounds: (rotated: RestartLoop) => Round[],
+  durationMs: number,
+  holdMs: number,
+): { down: { least: number; most: number; twoOrMore: number }; unknown: number[] } {
+  const down: number[] = [];
+  const unknown: number[] = [];
+  for (let first = 0; first < loop.roundsMs.length; first += 1) {
+    const rotated = {
+      ...loop,
+      roundsMs: [...loop.roundsMs.slice(first), ...loop.roundsMs.slice(0, first)],
+    };
+    const played = rounds(rotated).filter((round) => round.start < durationMs);
+    unknown.push(alarmsUnderHold(episodeObservations(played, loop.upFromMs), holdMs));
+    for (let offset = 0; offset < SWEEP_MS; offset += 1_000) {
+      const times = sweepTimes(durationMs, offset);
+      down.push(alarmsUnderHold(sweepObservations(played, loop.upFromMs, times), holdMs));
+    }
+  }
+  return {
+    down: {
+      least: Math.min(...down),
+      most: Math.max(...down),
+      twoOrMore: down.filter((count) => count >= 2).length / down.length,
+    },
+    unknown,
+  };
+}
+
+/**
+ * `M-18`: a return to Up held for Probe Health's five minutes before the alarm is over.
+ *
+ * **What "genuine" means here.** A return that lasts the hold is genuine, and the next Down after
+ * it is a second outage and a second alarm (the pipeline suite below walks one). Anything shorter
+ * is a relapse. Five minutes was chosen over ten or fifteen for the delay it puts on every
+ * probe's recovery notification, and it leaves one shape short: a probe connected about a minute
+ * a round can still raise two at some phases, pinned below so nobody reads the bound as one.
+ */
+describe('one alarm per outage once a return must last Probe Health’s hold (`M-18`)', () => {
+  it('reads a five-minute hold from Probe Health', () => {
+    // Pinned, so the counts below are known to be about the hold that ships.
+    assert.equal(SHIPPED_HOLD_MS, 300_000);
+  });
+
+  it('agrees with the arithmetic above when there is no hold', () => {
+    // The two models of a sweep's outages have to be one model, or the counts below are about
+    // something else.
+    for (const loop of [MEASURED, { ...MEASURED, limit: SHIPPED_LIMIT }]) {
+      for (let offset = 0; offset < SWEEP_MS; offset += 1_000) {
+        const times = sweepTimes(HOUR, offset);
+        assert.equal(
+          alarmsUnderHold(sweepObservations(roundsOf(loop, HOUR + 60_000), DOWN_MS, times), 0),
+          observedOutages(loop, HOUR, offset),
+          `sweep at +${String(offset / 1000)} s`,
+        );
+      }
+    }
+  });
+
+  it('raises one alarm for every loop shape the start limit stops, but for one at some phases', () => {
+    const shapes: readonly [string, RestartLoop][] = [
+      ['the measured loop', MEASURED],
+      ...[5_000, 15_000, 30_000].map((ms): [string, RestartLoop] => [
+        `connected ${String(ms / 1000)} s`,
+        connectedFor(ms),
+      ]),
+    ];
+    for (const [name, shape] of shapes) {
+      const loop = { ...shape, limit: SHIPPED_LIMIT };
+      const held = everyPhaseHeld(
+        loop,
+        (rotated) => roundsOf(rotated, 2 * HOUR),
+        HOUR,
+        SHIPPED_HOLD_MS,
+      );
+      assert.deepEqual([held.down.least, held.down.most], [1, 1], name);
+    }
+    // The shape the five minutes leave short, and why: its five Down gaps of 6.5 s can all fall
+    // between sweeps, so the sweep reads about five minutes of loop as one return, and the Down
+    // that ends it comes just after the hold confirmed it. Ten minutes would have made it one.
+    const minute = { ...connectedFor(60_000), limit: SHIPPED_LIMIT };
+    const short = everyPhaseHeld(
+      minute,
+      (rotated) => roundsOf(rotated, 2 * HOUR),
+      HOUR,
+      SHIPPED_HOLD_MS,
+    );
+    assert.deepEqual([short.down.least, short.down.most], [1, 2]);
+    assert.ok(
+      short.down.twoOrMore > 0.05 && short.down.twoOrMore < 0.2,
+      `two at ${(short.down.twoOrMore * 100).toFixed(0)}% of phases`,
+    );
+    const ten = everyPhaseHeld(minute, (rotated) => roundsOf(rotated, 2 * HOUR), HOUR, 600_000);
+    assert.equal(ten.down.most, 1, 'ten minutes, for the record');
+  });
+
+  it('raises one alarm for the measured loop even with nothing to stop it', () => {
+    const held = everyPhaseHeld(
+      MEASURED,
+      (rotated) => roundsOf(rotated, 2 * HOUR),
+      HOUR,
+      SHIPPED_HOLD_MS,
+    );
+    assert.deepEqual([held.down.least, held.down.most], [1, 1]);
+    assert.ok(
+      held.unknown.every((count) => count === 1),
+      held.unknown.join(', '),
+    );
+  });
+
+  it('raises one alarm on a trigger on Unknown, where without the hold it raised one per kill', () => {
+    for (const shape of [MEASURED, ...[5_000, 15_000, 30_000, 60_000].map(connectedFor)]) {
+      const loop = { ...shape, limit: SHIPPED_LIMIT };
+      const rounds = (rotated: RestartLoop): Round[] => roundsOf(rotated, 2 * HOUR);
+      // The first kill and the five rounds' own: six episodes, six alarms, at every phase.
+      const unheld = everyPhaseHeld(loop, rounds, HOUR, 0);
+      assert.ok(
+        unheld.unknown.every((count) => count === SHIPPED_LIMIT.burst + 1),
+        unheld.unknown.join(', '),
+      );
+      const held = everyPhaseHeld(loop, rounds, HOUR, SHIPPED_HOLD_MS);
+      assert.ok(
+        held.unknown.every((count) => count === 1),
+        held.unknown.join(', '),
+      );
+    }
+  });
+
+  it('raises one alarm per outage under `ms-recover`’s retries, on a trigger on Down and on Unknown', () => {
+    // `H-23`'s scenario, extended as `M-18` asked: a crash loop that never ends, retried at 10,
+    // 20, 40, 80 and 160 minutes and then every four hours. The link is down between retries, so
+    // each retry's loop relapses into the outage it never left.
+    const loop = { ...MEASURED, limit: SHIPPED_LIMIT };
+    const rounds = (rotated: RestartLoop): Round[] =>
+      roundsWithRecovery(rotated, SHIPPED_LIMIT, SHIPPED_RECOVERY, 3 * DAY).rounds;
+    for (const days of [1, 2]) {
+      const unheld = everyPhaseHeld(loop, rounds, days * DAY, 0);
+      const held = everyPhaseHeld(loop, rounds, days * DAY, SHIPPED_HOLD_MS);
+      process.stdout.write(
+        `\n    ${String(days)} day(s) of a crash loop that never ends, retried by ms-recover:\n` +
+          `      on Down    ${String(unheld.down.least)}–${String(unheld.down.most)} without the hold, ` +
+          `${String(held.down.least)}–${String(held.down.most)} with it\n` +
+          `      on Unknown ${String(Math.max(...unheld.unknown))} without the hold, ` +
+          `${String(Math.max(...held.unknown))} with it\n`,
+      );
+      assert.deepEqual(
+        [held.down.least, held.down.most],
+        [1, 1],
+        `${String(days)} day(s), on Down`,
+      );
+      assert.ok(
+        held.unknown.every((count) => count === 1),
+        `${String(days)} day(s), on Unknown`,
+      );
+    }
+  });
+
+  it('alarms again for a second outage after a return that lasted the hold', () => {
+    // Genuine, in arithmetic: back and connected for an hour, then gone for good. The pipeline
+    // suite walks the same through the engine.
+    const observed: Observation[] = [
+      [0, false],
+      [60_000, true],
+      [60_000 + HOUR, false],
+    ];
+    assert.equal(alarmsUnderHold(observed, SHIPPED_HOLD_MS), 2);
+    // And a return one sweep short of the hold is the same outage.
+    const short: Observation[] = [
+      [0, false],
+      [60_000, true],
+      [60_000 + SHIPPED_HOLD_MS, false],
+    ];
+    assert.equal(alarmsUnderHold(short, SHIPPED_HOLD_MS), 1);
   });
 });
 
@@ -416,12 +680,22 @@ describe(
     let triggers: TriggerService;
     let probeId: number;
     let sensorId: number;
+    /**
+     * Whether the engine reads the types' holds (`M-18`). The cases that count the loop's outages
+     * run without, and `M-18`'s run with the catalogue, as `main.ts` wires it.
+     */
+    let holding = false;
+    const holds = holdsFrom(standardCatalogue());
 
     before(async () => {
       assert.ok(PROBE_LINK !== undefined, 'the built-in ms.probe.link lookup is missing');
       scratch = await createScratchDatabase('proberestart');
       db = scratch.db;
-      engine = new AlarmEngine({ logger: silent, alarms: new AlarmRepository() });
+      engine = new AlarmEngine({
+        logger: silent,
+        alarms: new AlarmRepository(),
+        recoveryHolds: (type) => (holding ? holds(type) : 0),
+      });
       h = await buildHarness(db, { states: true, alarms: engine });
       const sync = new TriggerSync({ engine, logger: silent });
       h.audit.also = sync;
@@ -596,5 +870,55 @@ describe(
         t.diagnostic(`the same loop, stopped by the start limit: ${notifications(notified)}`);
       });
     }
+
+    // **`M-18`, through the pipeline.** The arithmetic above says what the hold gives over every
+    // phase; this says the engine gives exactly that at a few, one of them the phase where the
+    // five minutes leave a minute-a-round loop at two.
+    const held = (t: { after: (fn: () => void) => void }): void => {
+      holding = true;
+      t.after(() => {
+        holding = false;
+      });
+    };
+    const expected = (loop: RestartLoop, offsetMs: number): number =>
+      alarmsUnderHold(
+        sweepObservations(roundsOf(loop, HOUR + 60_000), loop.upFromMs, sweepTimes(HOUR, offsetMs)),
+        SHIPPED_HOLD_MS,
+      );
+
+    for (const offsetMs of [15_000, 3_000]) {
+      it(`raises one notification for the whole loop when a return must last the hold (sweep at +${String(offsetMs / 1000)} s)`, async (t) => {
+        held(t);
+        const notified = await play(MEASURED, HOUR, offsetMs);
+        assert.equal(notified, expected(MEASURED, offsetMs));
+        assert.equal(notified, 1);
+      });
+
+      it(`raises one notification for the loop the start limit stops when a return must last the hold (sweep at +${String(offsetMs / 1000)} s)`, async (t) => {
+        held(t);
+        const limited: RestartLoop = { ...MEASURED, limit: SHIPPED_LIMIT };
+        const notified = await play(limited, HOUR, offsetMs);
+        assert.equal(notified, expected(limited, offsetMs));
+        assert.equal(notified, 1);
+      });
+    }
+
+    it('raises two for a minute-a-round loop at a phase where the sweep reads the loop as one return', async (t) => {
+      // The shape five minutes leaves short, at a phase the arithmetic says gives two: every Down
+      // gap falls between sweeps, and the hold confirms the return just before the loop stops.
+      held(t);
+      const minute: RestartLoop = { ...connectedFor(60_000), limit: SHIPPED_LIMIT };
+      const notified = await play(minute, HOUR, 2_000);
+      assert.equal(expected(minute, 2_000), 2, 'the arithmetic’s phase');
+      assert.equal(notified, 2);
+    });
+
+    it('raises a second notification for an outage after a return that lasted the hold', async (t) => {
+      // What "genuine" means, through the engine: Down for a minute, back for an hour, gone again.
+      held(t);
+      const genuine: RestartLoop = { roundsMs: [HOUR], upFromMs: 60_000 };
+      const notified = await play(genuine, HOUR + 5 * 60_000, 15_000);
+      assert.equal(notified, 2);
+    });
   },
 );

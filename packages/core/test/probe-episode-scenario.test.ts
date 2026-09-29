@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
+import { standardCatalogue } from '@ms/sensors';
 import { PROTOCOL_VERSION, type CheckResult, type IngestionConfig } from '@ms/shared';
 import { CompositeAuditSink, DatabaseAuditSink } from '../src/audit/store.js';
 import { Reach, Visibility } from '../src/auth/access.js';
@@ -11,7 +12,7 @@ import { IngestionService } from '../src/ingestion/service.js';
 import { IN_PROCESS_SOURCE } from '../src/ingestion/sources.js';
 import { loadLookups } from '../src/lookups/loader.js';
 import { MessageContextLoader } from '../src/notifications/context.js';
-import { AlarmEngine } from '../src/notifications/engine.js';
+import { AlarmEngine, holdsFrom } from '../src/notifications/engine.js';
 import type { ProbeEpisodes } from '../src/notifications/episodes.js';
 import { AlarmScheduler } from '../src/notifications/scheduler.js';
 import { TriggerSync } from '../src/notifications/sync.js';
@@ -89,6 +90,13 @@ describe(
     let scheduler: AlarmScheduler;
     let channels: ChannelResolver;
     let triggerSync: TriggerSync;
+    /**
+     * Whether Probe Health holds a return (`M-18`). The cases written before the hold run
+     * without one, which is what a trigger with `recoveryHoldSeconds: 0` gets, and `M-18`'s run
+     * with the hold Probe Health ships with.
+     */
+    let holding = false;
+    const holds = holdsFrom(standardCatalogue());
 
     /** The world: each probe's link, which outlives a core restart. */
     const links = new Map<number, { connected: boolean; offsetMs: number | null }>();
@@ -470,7 +478,11 @@ describe(
     before(async () => {
       scratch = await createScratchDatabase('episodes');
       db = scratch.db;
-      engine = new AlarmEngine({ logger: silent, episodes });
+      engine = new AlarmEngine({
+        logger: silent,
+        episodes,
+        recoveryHolds: (type) => (holding ? holds(type) : 0),
+      });
       h = await buildHarness(db, {
         states: true,
         alarms: engine,
@@ -1151,6 +1163,83 @@ describe(
       assert.deepEqual(await alarmsOn(made.pings), [], 'still held, behind the other');
       assert.deepEqual(await queued(deleted, made.pings), {});
       assert.equal((await alarmsOn([second])).length, 1, 'which still stands for them');
+    });
+
+    it('a probe killed and restarted every few seconds: one alarm on Down and one on Unknown, and one recovery each once it stays back (`M-18`)', async (t) => {
+      // `P-215`'s loop as the core lives it: every kill closes the socket and opens an episode,
+      // every reconnect ends it, and the sweep reads the link Down and Up in turn. Without the
+      // hold that was an alarm per kill on Unknown and one per observed outage on Down.
+      holding = true;
+      t.after(() => {
+        holding = false;
+      });
+      const made = await probeWith('restarting', { health: true });
+      await trigger(made.probe, 'down', 'email');
+      await trigger(made.probe, 'unknown', 'webhook');
+      await settle(made);
+      const health = healthOf(made);
+
+      const step = await mark();
+      for (let kill = 0; kill < 6; kill += 1) {
+        await lose(made);
+        await find(made);
+      }
+      assert.deepEqual(await queued(step, made.pings), {});
+      assert.deepEqual(await queued(step, [health]), {
+        'email:down:initial': 1,
+        'webhook:unknown:initial': 1,
+      });
+
+      // Back, and held: nothing inside the hold, and both recoveries once it has lasted.
+      const back = await mark();
+      await scheduler.sweep(new Date(Date.now() + 4 * MINUTE));
+      assert.deepEqual(await queued(back, [health]), {}, 'inside the hold');
+      await scheduler.sweep(new Date(Date.now() + 6 * MINUTE));
+      assert.deepEqual(await queued(back, [health]), {
+        'email:down:recovery': 1,
+        'webhook:unknown:recovery': 1,
+      });
+      assert.ok(
+        (await messages(back, health)).includes(
+          'probe restarting is answering again: its sensors are no longer held',
+        ),
+        'the episode recovery keeps its words across six episodes',
+      );
+      assert.deepEqual(await alarmsOn([health]), []);
+
+      // Genuine: a loss after a return that lasted is a second outage, and a second alarm.
+      const second = await mark();
+      await lose(made);
+      assert.deepEqual(await queued(second, [health]), {
+        'email:down:initial': 1,
+        'webhook:unknown:initial': 1,
+      });
+    });
+
+    it('a lost probe whose sensors are all moved away recovers at once, hold or not (`M-18`)', async (t) => {
+      // An emptied episode is not a return: the probe is still lost and nothing flaps, so its
+      // recipients are told at the move, as `M-24` has it.
+      holding = true;
+      t.after(() => {
+        holding = false;
+      });
+      const made = await probeWith('emptied-held', { health: true });
+      await trigger(made.probe, 'unknown', 'email');
+      await settle(made);
+      const health = healthOf(made);
+      await lose(made);
+      const live = (
+        await h.service.create(testActor, {
+          kind: 'probe',
+          parentId: h.rootId,
+          name: 'emptied-held-to',
+        })
+      ).id;
+      links.set(live, { connected: true, offsetMs: 0 });
+      const moved = await mark();
+      await withTreeSync(() => h.service.move(testActor, made.site, live, { kind: 'none' }));
+      assert.deepEqual(await alarmsOn([health]), [], 'recovered by the move, not held');
+      assert.deepEqual(await queued(moved, [health]), { 'email:unknown:recovery': 1 });
     });
   },
 );
