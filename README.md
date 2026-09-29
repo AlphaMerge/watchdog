@@ -146,7 +146,43 @@ For a long-running pair instead — the API published on loopback so a browser c
 npm run dev:services
 ```
 
-`stop`, `restart` and `logs` are the other arguments to `scripts/dev-services.sh`.
+`stop`, `restart`, `logs` and `build` are the other arguments to `scripts/dev-services.sh`.
+
+**`ms-server` runs its own build of `origin/main`, never your checkout's** (`H-24`). Its core
+migrates the shared development database every time it starts, and it used to run the checkout's
+`dist`. So a migration one session had built and not yet landed was applied to everybody's
+database, and once that file was edited before landing, every later start refused (`P-238`).
+`start` builds `origin/main`, as this clone last fetched it, into the `ms-server-build` Docker
+volume whenever it has moved, and runs that build. It keeps the checkout's `dev/` for its data,
+certificates and vault key. The first start after a change to `package-lock.json` reinstalls the
+modules and takes a few minutes; otherwise it rebuilds only what changed, or nothing.
+
+`dev/core.json` has `autoMigrate` off, and `ms-server` turns it back on for itself. A core you
+start from the checkout, as above, therefore refuses to run against a migration it has not
+landed, rather than applying it. **Do not answer that refusal with `ms-core migrate up` against
+the shared database.** Try the migration on a database of its own instead.
+
+### Trying a migration before it lands
+
+The suites already do: `migrator.test.ts` applies the whole set forward, all the way back and
+forward again on a throwaway `ms_test_*` database, and any test that migrates its own scratch
+database runs the draft with it. By hand, make a database of your own, migrate it, and drop it:
+
+```bash
+docker compose -f docker-compose.dev.yml exec postgres createdb -U monitoring ms_draft
+```
+
+```bash
+scripts/dev.sh "MS_DATABASE__DATABASE=ms_draft node packages/core/dist/src/main.js migrate up --config dev/core.json"
+```
+
+`migrate down` and `migrate status` take the same variable. To run the whole core against it, set
+`MS_SERVICE__DATA_DIR` to a directory of its own as well, so it does not write over the shared
+first-admin password. When you are done:
+
+```bash
+docker compose -f docker-compose.dev.yml exec postgres dropdb -U monitoring ms_draft
+```
 
 ### The web UI
 

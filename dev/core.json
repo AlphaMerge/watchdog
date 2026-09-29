@@ -22,7 +22,7 @@
     "ssl": false,
     "poolSize": 10,
     "connectTimeoutMs": 10000,
-    "autoMigrate": true
+    "autoMigrate": false
   },
   "probeEndpoint": {
     "host": "127.0.0.1",

@@ -17631,6 +17631,60 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
         A mutant setting a millisecond threshold was left out, because every measured case
         agrees with it and with a second: pinning it would have meant inventing a record.
 
+- [x] **H-24 — the dev core migrates the shared database from a checkout where drafts are
+      built** · S · P-238, P-222 · Found 2026-09-29, when `ms-server` had restarted about 470
+      times refusing an edited migration. It ran the main checkout's `dist` with `autoMigrate`
+      on, so the first restart after a session built a migration it had not landed applied it
+      to the database every session shares. That was the `A-29` draft of 059, applied at
+      20:37Z and landed at 21:12Z with its text changed. Every start after that refused, and a
+      migrator that refuses drift in both directions has no way back short of editing its
+      record, which is the user's call and was put to them.
+
+      **Done when** `ms-server` runs only landed code, so only a landed migration reaches the
+      shared database; `autoMigrate` stays on for it; and the docs say how a session tries a
+      migration before it lands.
+
+      **H-24 outcome.** `ms-server` builds its own copy of origin/main and runs that.
+      - **`scripts/dev-services.sh build`**, which `start` runs first, exports origin/main as
+        this clone last fetched it (`git archive`, so nothing uncommitted reaches it) into a
+        Docker volume, `ms-server-build`. `scripts/lib/ms-server-build.sh` builds it in the
+        toolchain container, with the modules reinstalled only when the lock file changes.
+        It stamps `build.json` with the commit, so the start line names it.
+      - **Measured:** 44 s from an empty volume, about 30 s after a new commit, and 2 s when
+        origin/main has not moved. A build that fails leaves the old one unmarked and starts
+        nothing.
+      - **A volume, not a worktree.** Nothing that sweeps the repository finds a second copy:
+        `eslint .`, `prettier --check .`, shellcheck and Docker build contexts. No session's
+        `git worktree list` gains an entry either.
+      - **What runs is the build's, and where it keeps state is the checkout's.** The
+        supervisor takes the build from `MS_SERVER_BUILD` and its config from the build's
+        `dev/`. The paths in the config are relative to the working directory, so data, spool,
+        certificates and the vault key stay the checkout's `dev/`.
+      - **`dev/core.json` has `autoMigrate` off**, and `ms-server` turns it on for itself
+        (`MS_DATABASE__AUTO_MIGRATE=true`). A core run by hand from a checkout, as the README
+        and `dev-e2e.sh` do, refuses a migration it has not landed rather than applying it.
+      - `MS_SERVER_REF` builds another ref, for trying a change to these scripts, and the
+        script says never for an unlanded migration.
+      - **The README** says what `ms-server` runs, not to answer a checkout core's refusal
+        with `migrate up` on the shared database, and how to try a migration on a database of
+        your own: `createdb`, then `migrate up` with `MS_DATABASE__DATABASE`, then `dropdb`.
+
+      **Verified.**
+      - A clean build, then rebuilds at two other commits with the modules kept, each
+        compiling. The first attempt at that failed: the cleanup took the workspaces' own
+        `node_modules`, where `shared` keeps ajv 8 under the root's hoisted ajv 6. Cleanup now
+        keeps `node_modules` at any depth.
+      - A trial start against the shared database, whose 059 is still unrecorded. The core
+        named commit `33173ef`, `uncommittedChanges: false`, config `/ms-server/dev/core.json`,
+        and `MS_DATABASE__AUTO_MIGRATE` among its overrides. It refused with `P-238`'s message
+        naming 059 and both checksums, logged the structured list, and exited 78. It was then
+        stopped.
+      - A checkout core with `autoMigrate` off refused with exit 78 rather than migrating.
+      - The README's scratch-database steps, exactly as written: 59 applied, 0 pending, and
+        the database dropped.
+      - The supervisor's own cases pass under both run modes
+        (`scripts/test-ms-server-supervisor.sh`), and shellcheck is clean.
+
 ---
 
 ## Release 1.1 — Windows

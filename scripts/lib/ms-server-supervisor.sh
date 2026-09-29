@@ -18,6 +18,13 @@
 #
 # SIGTERM is passed on to both so `docker stop` and a Docker shutdown let them close cleanly. Every
 # sleep runs in the background and is waited for, so a stop during one is not held for its length.
+#
+# **What runs is `MS_SERVER_BUILD`'s, and where it keeps its state is the working directory's**
+# (`H-24`). `dev-services.sh` points it at ms-server's own build of origin/main, so only a landed
+# migration ever reaches the shared development database, while the data directory, the
+# certificates and the vault key stay the checkout's `dev/` — the paths in the config file are
+# relative to the working directory. Unset, it is the working directory, as it was.
+build="${MS_SERVER_BUILD:-.}"
 
 core=""
 probe=""
@@ -31,7 +38,7 @@ trap 'stop_both; exit 143' TERM INT
 
 alive() { [ -n "$1" ] && kill -0 "$1" 2>/dev/null; }
 
-node packages/core/dist/src/main.js --config dev/core.json &
+node "${build}/packages/core/dist/src/main.js" --config "${build}/dev/core.json" &
 core=$!
 
 # The core first, so the probe's first dial usually finds it listening — and no probe at all for a
@@ -39,7 +46,7 @@ core=$!
 sleep 3 &
 wait $!
 if alive "${core}"; then
-  node packages/probe/dist/src/main.js --config dev/probe.json &
+  node "${build}/packages/probe/dist/src/main.js" --config "${build}/dev/probe.json" &
   probe=$!
 fi
 

@@ -11,8 +11,17 @@
 #   scripts/dev-services.sh stop
 #   scripts/dev-services.sh logs [-f]
 #   scripts/dev-services.sh restart
+#   scripts/dev-services.sh build    # what start does first
 #
-# Prerequisites: npm run dev (for PostgreSQL), scripts/dev.sh npm run build, scripts/dev-certs.sh
+# Prerequisites: npm run dev (for PostgreSQL), scripts/dev-certs.sh
+#
+# **It runs its own build of origin/main, never the checkout's** (`H-24`). The core migrates the
+# shared development database on every start, and run from the checkout's `dist` it applied
+# whatever migration a session had built and not yet landed. One such draft, edited before it
+# landed, left every later start refusing (`P-238`). `start` builds origin/main, as this clone
+# last fetched it, into the `ms-server-build` volume when it has moved, and runs that. Its data,
+# certificates and vault key are still the checkout's `dev/`. `MS_SERVER_REF` builds another ref
+# — for trying a change to these scripts, and never for a migration that has not landed.
 #
 # The container restarts with Docker (`unless-stopped`), so after a Docker Desktop restart or a
 # reboot the UI on :5173 has a core behind it again. `stop` removes the container, so a stopped
@@ -27,6 +36,7 @@ name="ms-server"
 # `scripts/lib/ms-server-supervisor.sh`, which says why it is shaped the way it is. `exec`, so the
 # supervisor is the process `docker stop` signals rather than a shell in front of it.
 supervisor='exec bash scripts/lib/ms-server-supervisor.sh'
+build_volume="ms-server-build"
 
 case "${1:-start}" in
   stop)
@@ -44,15 +54,21 @@ case "${1:-start}" in
     "${BASH_SOURCE[0]}" start
     ;;
 
+  build)
+    ref="${MS_SERVER_REF:-origin/main}"
+    commit="$(git -C "${repo_root}" rev-parse --verify "${ref}^{commit}")"
+    # The tree as committed, so nothing uncommitted in the checkout reaches it.
+    git -C "${repo_root}" archive --format=tar "${commit}" |
+      docker compose -f "${compose_file}" run --rm -T -v "${build_volume}:/ms-server" toolchain \
+        'exec bash scripts/lib/ms-server-build.sh "$1"' ms-server-build "${commit}"
+    ;;
+
   start)
     if [ ! -f "${repo_root}/dev/tls/core.crt" ]; then
       echo "no development certificates; run scripts/dev-certs.sh first" >&2
       exit 1
     fi
-    if [ ! -f "${repo_root}/packages/core/dist/src/main.js" ]; then
-      echo "nothing built; run scripts/dev.sh 'npm run build' first" >&2
-      exit 1
-    fi
+    "${BASH_SOURCE[0]}" build
 
     docker rm -f "${name}" >/dev/null 2>&1 || true
 
@@ -64,7 +80,12 @@ case "${1:-start}" in
     # published so a sender on the host or in another compose service can reach them — 162 and
     # 514 themselves need privilege the dev probe has not got. Syslog is published twice because
     # it listens on both transports on the same port, which is what a syslog receiver is.
+    # MS_DATABASE__AUTO_MIGRATE because `dev/core.json` turns it off, for every core run by hand
+    # from a checkout: one of those refuses a migration it has not landed rather than applying it.
     docker compose -f "${compose_file}" run -d --name "${name}" \
+      -v "${build_volume}:/ms-server" \
+      -e MS_SERVER_BUILD=/ms-server \
+      -e MS_DATABASE__AUTO_MIGRATE=true \
       -e MS_API__HOST=0.0.0.0 \
       -e "MS_SERVICE__LOG_LEVEL=${MS_LOG_LEVEL:-info}" \
       -p 127.0.0.1:8080:8080 \
@@ -84,7 +105,7 @@ case "${1:-start}" in
     ;;
 
   *)
-    echo "usage: $(basename "${BASH_SOURCE[0]}") [start|stop|restart|logs]" >&2
+    echo "usage: $(basename "${BASH_SOURCE[0]}") [start|stop|restart|logs|build]" >&2
     exit 2
     ;;
 esac
