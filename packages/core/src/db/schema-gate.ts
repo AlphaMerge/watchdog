@@ -23,11 +23,22 @@ import { describeDrift, type MigrationStatus } from './migrator.js';
  * against every shape without standing up a server, and so the caller decides how loud to be.
  */
 export function refuseSchema(status: MigrationStatus): string | null {
-  // **Ahead is reported before behind, and the order is a decision.** A build can be both — some
-  // migrations shared with the database and some not, which is a mismatched pair mid-upgrade.
-  // "Run migrate up" is the first thing anybody would try and is the wrong advice there;
-  // `migrate up` would refuse it anyway, so the operator would end up here twice. The diagnosis
-  // goes first.
+  // **The order is `Migrator.up()`'s — drift, then ahead, then behind — and it is a decision**
+  // (`P-248`). A schema can be wrong in more than one way at once, and only the pending message
+  // gives an instruction to run something. It comes last so that it is given only where it would
+  // work: `migrate up` refuses drift and a newer schema before it applies anything, so an operator
+  // sent there from either would only come back here, told something different the second time.
+  // Drift goes first because neither applying nor rolling back is safe, whatever else is true.
+  if (status.drifted.length > 0) {
+    return (
+      `${String(status.drifted.length)} applied migration(s) no longer match this build: ` +
+      describeDrift(status.drifted) +
+      '. The schema and the record of it disagree, so neither applying nor rolling back is safe'
+    );
+  }
+
+  // Ahead before behind: a build can share some migrations with the database and lack others,
+  // which is a mismatched pair mid-upgrade, and "run migrate up" is wrong advice there too.
   if (status.unknown.length > 0) {
     const newest = status.unknown[status.unknown.length - 1];
     return (
@@ -44,14 +55,6 @@ export function refuseSchema(status: MigrationStatus): string | null {
       `${String(status.pending.length)} schema migration(s) are pending and autoMigrate is off; ` +
       `run "ms-core migrate up"` +
       (next === undefined ? '' : ` (next: ${String(next.id)} ${next.name})`)
-    );
-  }
-
-  if (status.drifted.length > 0) {
-    return (
-      `${String(status.drifted.length)} applied migration(s) no longer match this build: ` +
-      describeDrift(status.drifted) +
-      '. The schema and the record of it disagree, so neither applying nor rolling back is safe'
     );
   }
 

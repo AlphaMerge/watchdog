@@ -6,6 +6,7 @@ import type { Logger } from '@ms/shared';
 import { runMigrateCommand } from '../src/commands/migrate.js';
 import { MIGRATION_LOCK_KEY, Migrator, MigrationError, type LockWait } from '../src/db/migrator.js';
 import { MIGRATIONS } from '../src/db/migrations/index.js';
+import { refuseSchema } from '../src/db/schema-gate.js';
 import type { Migration } from '../src/db/migrations/types.js';
 import type { Database } from '../src/db/pool.js';
 import {
@@ -152,6 +153,34 @@ describe(
           currentChecksum: drift.currentChecksum,
         },
       ]);
+    });
+
+    it('refuses drift before applying anything pending, so the gate diagnoses it first (P-248)', async () => {
+      // `refuseSchema` used to answer this shape with "run migrate up", and here is migrate up.
+      const edited: Migration = { ...trivial, up: 'CREATE TABLE trivial_thing (id bigint)' };
+      const third: Migration = {
+        id: 9004,
+        name: 'third',
+        up: 'CREATE TABLE third_thing (id int PRIMARY KEY)',
+        down: 'DROP TABLE third_thing',
+      };
+      const m = migrator(scratch.db, [edited, second, third]);
+      const status = await m.status();
+      assert.deepEqual(
+        [status.drifted.map((d) => d.id), status.pending.map((p) => p.id)],
+        [[9001], [9004]],
+        'the control: both at once',
+      );
+
+      await assert.rejects(
+        () => m.up(),
+        (error: unknown) =>
+          error instanceof MigrationError && /has been edited/u.test(error.message),
+      );
+      assert.equal(await tableExists(scratch.db, 'third_thing'), false, 'nothing applied');
+      const refusal = refuseSchema(status) ?? '';
+      assert.match(refusal, /9001 trivial \(applied /u);
+      assert.doesNotMatch(refusal, /migrate up/u);
     });
 
     it('refuses to migrate a database that is newer than this build', async () => {

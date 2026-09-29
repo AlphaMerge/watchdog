@@ -6494,6 +6494,38 @@ because each is a decision rather than a defect:
       Owner: after `P-229`, which is changing `db/pool.ts` now. `P-239`'s `ClockFreezeSync`
       rethrows already.
 
+- [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
+      P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
+      pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
+      schema, before it applies anything. A database with drift and a pending migration was
+      therefore told `run "ms-core migrate up"`, and `migrate up` refused on the drift. That is
+      the shape a draft applied and edited before landing leaves once the next migration is
+      written: 059 on the development database, with 060 behind it.
+
+      **Done when** `refuseSchema` gives a drift diagnosis whenever there is drift, and says
+      `migrate up` only where `migrate up` would apply something.
+
+      **P-248 outcome.** `refuseSchema` checks in `up()`'s order: drift, then a newer schema, then
+      pending. So a refused start and `ms-core migrate up` diagnose the same thing, and the
+      pending message, the only one that tells the operator to run something, comes out only
+      when nothing else is wrong. `troubleshooting.md` says drift is reported ahead of anything
+      else.
+
+      **Tests.**
+      - `schema-gate.test.ts` 3:
+        - drift with a pending migration;
+        - drift with a newer schema;
+        - all eight combinations of the three, each giving the expected refusal and naming
+          `migrate up` for pending alone.
+      - `migrator.test.ts` 1: on a scratch database with a drifted record and a pending
+        migration, `up()` refuses on the drift and applies nothing, and `refuseSchema` gives the
+        same diagnosis for the same status.
+
+      Mutation 3/3, each order the three checks could take:
+      - the old order (4 tests, including the scratch database with the old advice verbatim);
+      - a newer schema ahead of drift (2 tests);
+      - pending ahead of a newer schema (2 tests).
+
 - [x] **P-223 — the core's unlabelled metrics export a gap as zero** · S · P-14, H-12 · Found
       2026-09-28 in the round-2 review of `H-12`. The exporter's rule is that a gap is an absent
       series, never a zero, and its tests covered only the probe's series. Those are labelled, and

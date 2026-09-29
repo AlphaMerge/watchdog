@@ -94,4 +94,56 @@ describe('the schema gate', () => {
     assert.match(refusal ?? '', /newer ms-core/);
     assert.doesNotMatch(refusal ?? '', /migrate up/, 'which would send them round the loop');
   });
+
+  it('diagnoses drift ahead of a pending migration (P-248)', () => {
+    // A draft migration applied to a development database and edited before it landed, and the
+    // next one pending: the gate said "run migrate up", and `migrate up` refused on the drift.
+    const refusal = refuseSchema(
+      status({
+        pending: [migration(60, 'next')],
+        drifted: [{ id: 59, name: 'sensor-voucher', appliedChecksum: 'a', currentChecksum: 'b' }],
+      }),
+    );
+    assert.match(refusal ?? '', /^1 applied migration\(s\) no longer match this build: 59 /u);
+    assert.doesNotMatch(refusal ?? '', /migrate up/u);
+  });
+
+  it('diagnoses drift ahead of a newer schema, as migrate up does (P-248)', () => {
+    const refusal = refuseSchema(
+      status({
+        drifted: [{ id: 59, name: 'sensor-voucher', appliedChecksum: 'a', currentChecksum: 'b' }],
+        unknown: [applied(61, 'from-the-future')],
+      }),
+    );
+    assert.match(refusal ?? '', /no longer match this build/u);
+    assert.doesNotMatch(refusal ?? '', /newer ms-core/u);
+  });
+
+  it('says "migrate up" in exactly the one case where migrate up would apply something', () => {
+    // Every combination of the three ways to be wrong. `Migrator.up()` refuses drift, then a
+    // newer schema, and only then applies, so the advice is right only for pending alone.
+    const drift = { id: 7, name: 'probe-identity', appliedChecksum: 'a', currentChecksum: 'b' };
+    for (const mask of [0, 1, 2, 3, 4, 5, 6, 7]) {
+      const shape = {
+        drifted: mask & 1 ? [drift] : [],
+        unknown: mask & 2 ? [applied(99, 'from-the-future')] : [],
+        pending: mask & 4 ? [migration(38, 'channel-limit-source')] : [],
+      };
+      const refusal = refuseSchema(status(shape));
+      const expected =
+        mask === 0
+          ? null
+          : mask & 1
+            ? /no longer match this build/u
+            : mask & 2
+              ? /newer ms-core/u
+              : /run "ms-core migrate up"/u;
+      if (expected === null) {
+        assert.equal(refusal, null, 'nothing wrong');
+        continue;
+      }
+      assert.match(refusal ?? '', expected, `for ${JSON.stringify(shape)}`);
+      assert.equal(/migrate up/u.test(refusal ?? ''), mask === 4, `for ${JSON.stringify(shape)}`);
+    }
+  });
 });

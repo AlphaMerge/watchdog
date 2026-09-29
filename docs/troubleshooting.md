@@ -59,7 +59,9 @@ already-applied migration has been edited"** — the schema and the record of it
 neither applying nor rolling back is safe. This means a migration file changed after it was
 applied, or two builds were mixed. The message names each migration with two checksums, the one
 recorded when it was applied and this build's, and `ms-core migrate status` lists the same
-(`P-238`). Restore from a backup rather than guessing.
+(`P-238`). Restore from a backup rather than guessing. Drift is reported ahead of anything else
+wrong with the schema, as `migrate up` reports it, so no other message here stands in for it
+(`P-248`).
 
 **A configuration error** — `config check` reports *every* problem in the file, not the first, so
 one pass gives the whole list. If the service started before the last upgrade and does not now,
