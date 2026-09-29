@@ -4,6 +4,7 @@ import type { AccountRole } from '../auth/accounts.js';
 import type { Credential } from '../auth/credentials.js';
 import { AuthError } from '../auth/errors.js';
 import { atLeast, lower, Reach, Visibility } from '../auth/access.js';
+import type { Queryable } from '../db/pool.js';
 import type { Writer } from '../objects/sensor-reads.js';
 
 /**
@@ -264,6 +265,8 @@ const sights = new WeakMap<
   FastifyRequest,
   {
     once: () => Promise<Visibility>;
+    /** `once`, resolved on the caller's connection if nothing has resolved it yet (`P-235`). */
+    within: (q: Queryable) => Promise<Visibility>;
     fresh: Sight;
     credential: Credential | null;
     reach: (action: ReachedBy) => Reach;
@@ -347,8 +350,9 @@ export function clears(request: FastifyRequest, bar: 'read' | 'write' | 'admin')
  * The request as a writer of objects (`A-29`): who, for the audit, as `actorFor` has it, and what
  * they can read, for what a sensor's parameters may name.
  *
- * The account vouches as itself, with the sight this request already resolved. With the
- * authorisation layer off there is nobody to hide anything from, and the installation vouches.
+ * The account vouches as itself, with this request's sight, resolved only when a write first
+ * needs it and then on that write's connection (`P-235`). With the authorisation layer off there
+ * is nobody to hide anything from, and the installation vouches.
  */
 export async function writerFor(request: FastifyRequest): Promise<Writer> {
   const principal = request.principal;
@@ -358,11 +362,20 @@ export async function writerFor(request: FastifyRequest): Promise<Writer> {
     await visibilityOf(request);
     return { kind: 'anonymous', remoteAddress: request.ip };
   }
+  // What it can see is resolved only if the write names something, and then inside the write's
+  // transaction (`P-235`): most writes name nothing, and this was a query on every one of them.
   return {
     kind: 'user',
     userId: principal.userId,
     login: principal.login,
-    voucher: { kind: 'account', userId: principal.userId, sees: await visibilityOf(request) },
+    voucher: {
+      kind: 'account',
+      userId: principal.userId,
+      sees: (q) => {
+        const sight = sights.get(request);
+        return sight === undefined ? Promise.resolve(Visibility.EVERYTHING) : sight.within(q);
+      },
+    },
   };
 }
 
@@ -424,6 +437,7 @@ export function registerAuthorization(app: FastifyInstance, options: Authorizati
       );
       sights.set(request, {
         once: nobody,
+        within: nobody,
         fresh: nobody,
         credential: null,
         reach: () => reachesNobody,
@@ -433,6 +447,7 @@ export function registerAuthorization(app: FastifyInstance, options: Authorizati
     if (!options.required) {
       sights.set(request, {
         once: EVERYONE,
+        within: EVERYONE,
         fresh: EVERYONE,
         credential: null,
         reach: () => Reach.EVERYTHING,
@@ -460,7 +475,13 @@ export function registerAuthorization(app: FastifyInstance, options: Authorizati
           objectIds.filter((id) => actsWith(principal, rights.get(id) ?? 'none', action)),
         );
       });
-    sights.set(request, { once: () => (resolved ??= fresh()), fresh, credential, reach });
+    sights.set(request, {
+      once: () => (resolved ??= fresh()),
+      within: (q) => (resolved ??= options.access.visibilityFor(principal, q)),
+      fresh,
+      credential,
+      reach,
+    });
 
     await enforce(options.access, request, principal, declared);
   });

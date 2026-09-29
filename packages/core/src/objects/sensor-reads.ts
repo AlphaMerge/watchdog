@@ -19,8 +19,21 @@ import type { ObjectId, ObjectKind } from './types.js';
  * is off, where there is nobody to hide anything from.
  */
 export type Voucher =
-  | { readonly kind: 'account'; readonly userId: number; readonly sees: Visibility }
+  | { readonly kind: 'account'; readonly userId: number; readonly sees: Sees }
   | { readonly kind: 'installation' };
+
+/**
+ * What an account can see: already resolved, or resolved on the connection of the write that
+ * first needs it (`P-235`).
+ *
+ * **Most writes never need it.** Only a sensor of a type that reads another object's data asks,
+ * and a request resolving it up front paid a query on every authenticated write for the few that
+ * do: a group, a device or a ping create never looked at the answer. Deferred, it costs nothing
+ * where nothing is named, and where something is, it runs inside the write's own transaction, on
+ * the connection that transaction already holds. The request's own memo still stands behind it, so
+ * a request that resolved its sight for another reason does not resolve it twice.
+ */
+export type Sees = Visibility | ((q: Queryable) => Promise<Visibility>);
 
 export const INSTALLATION_VOUCHES: Voucher = { kind: 'installation' };
 
@@ -196,7 +209,8 @@ export async function assertMayName(
   let rootReadable = false;
   if (voucher.kind === 'account') {
     const existing = rootId === undefined ? [...kinds.keys()] : [...kinds.keys(), rootId];
-    const seen = await voucher.sees.visibleAmong(q, existing);
+    const sees = typeof voucher.sees === 'function' ? await voucher.sees(q) : voucher.sees;
+    const seen = await sees.visibleAmong(q, existing);
     readable = seen;
     rootReadable = rootId !== undefined && seen.has(rootId);
   }

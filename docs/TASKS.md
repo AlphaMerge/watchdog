@@ -4744,8 +4744,11 @@ because each is a decision rather than a defect:
       those sits, and whether it is time connected, results delivered or something else, is the
       design. **Done when** every loop shape in `P-215`'s table produces exactly one alarm, asserted
       as the worst case over phase in `probe-restart-scenario.test.ts`; a second outage after a
-      genuine recovery still alarms, with the test that says what "genuine" means; and
-      `alarm-storm.test.ts` still passes.
+      genuine recovery still alarms, with the test that says what "genuine" means; a
+      crash-looping probe or core under `H-23`'s retries raises one alarm per outage, asserted by
+      extending `H-23`'s scenario in `probe-restart-scenario.test.ts`, which is labelled interim
+      until then (`H-23`'s 10-minute-to-4-hour retries give about 12–24 Down/Up pairs on the first
+      day of a permanent crash loop, accepted as interim); and `alarm-storm.test.ts` still passes.
 
 - [x] **M-19 — A template's user and group recipients have never been delivered to** · M · A-01,
       A-12, N-07 · Found 2026-09-28 by bc8184 while scoping `V2-05`. `CAPABILITIES.MD` marks
@@ -5701,7 +5704,7 @@ because each is a decision rather than a defect:
       statement; the most expensive part is the writer's sight, which nearly every write resolves
       and never reads (`P-235`). `docs/findings/2026-09-29-tree-build-with-authentication.md`.
 
-- [ ] **P-235 — `writerFor` resolves the writer's sight on every write; only sensor types that
+- [x] **P-235 — `writerFor` resolves the writer's sight on every write; only sensor types that
       read other objects need it (A-29)** · S · A-29, P-225 · Found 2026-09-29 profiling
       `P-225`'s per-create cost. Authentication adds three queries to a create for an administrator
       and four for anyone else. The most expensive of them is `visibilityFor`, the writer's sight:
@@ -5734,6 +5737,38 @@ because each is a decision rather than a defect:
       reads other objects still has its writer's sight checked, inside the write's transaction,
       with `A-29`'s tests unchanged and passing; and the next quiet `P-225` run records the
       difference.
+
+      **P-235 outcome.** `Voucher.sees` is a `Sees`: either a `Visibility`, as before, or a
+      function of a `Queryable` that resolves one. `writerFor` hands over the function, and
+      `assertMayName` calls it with the write's own transaction, only after it has found
+      something named.
+      - Behind the function is the request's own memo: a `within(q)` beside `once()` in the
+        per-request sight, sharing its `resolved`. A request that resolved its sight for another
+        reason does not resolve it twice. One that resolves it here does so on the connection the
+        transaction holds, against the same snapshot as the write.
+      - A group, device or Ping create never resolves it.
+      - A `PUBLIC` route's sight refuses when asked, as before. No `PUBLIC` route writes objects,
+        so nothing there ever asks.
+      - `A-29`'s tests build vouchers from a resolved `Visibility`, which is still a `Sees`, so
+        none changed.
+
+      **Tests.**
+      - `object-visibility.test.ts` 1, through the API with authentication wired, spying on the
+        server's `AccessService.visibilityFor`. An operator's group, device and Ping creates never
+        call it. A factory naming a readable sensor calls it once, and not on the pool.
+      - `sensor-reads.test.ts` 1, through the service: a deferred sight is not asked for a Ping.
+        It is asked once each for a factory that is allowed and one that is refused, and neither
+        time on the pool.
+
+      The statement counts in the done-when are this removal exactly: the one statement gone is
+      `visibilityFor`. They are left to `P-225`'s next quiet run, which wraps the driver. The
+      affected suites pass, 255 tests across `sensor-reads`, `object-visibility`,
+      `sensor-vouching`, `objects-service`, `api-routes`, `access-matrix`, `factory-service`,
+      `audit-sweep`, `auth-api` and `discovery-scope`.
+
+      Mutation 2/2, against the API test:
+      - `writerFor` resolving eagerly again;
+      - `within` resolving on the pool instead of the connection it is given.
 
 - [ ] **P-237 — the batch-size sweep's relative check is narrower than the case's run-to-run
       spread** · S · S-07, P-233 · Found in `P-233`'s window. `ingestion-performance.test.ts`

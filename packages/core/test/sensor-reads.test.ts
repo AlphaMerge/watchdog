@@ -4,7 +4,7 @@ import { DatabaseAuditSink } from '../src/audit/store.js';
 import { AccessService, Visibility } from '../src/auth/access.js';
 import { AccountService } from '../src/auth/accounts.js';
 import { GroupService } from '../src/auth/groups.js';
-import type { Database } from '../src/db/pool.js';
+import type { Database, Queryable } from '../src/db/pool.js';
 import {
   INSTALLATION_VOUCHES,
   refusal,
@@ -234,6 +234,10 @@ describe(
     /** What the operator can see, for a clone, which copies only that (`A-35`). */
     let operatorSees: Visibility;
     let admin: Writer;
+    /** The operator again, with the sight a request hands over: resolved when asked (`P-235`). */
+    let deferred: Writer;
+    /** The connection each resolution of `deferred`'s sight was asked on. */
+    const deferredOn: Queryable[] = [];
 
     const NEVER_ISSUED = 9_000_000;
 
@@ -323,6 +327,17 @@ describe(
           sees: operatorSees,
         },
       };
+      deferred = {
+        ...branch,
+        voucher: {
+          kind: 'account',
+          userId: operator.id,
+          sees: (q) => {
+            deferredOn.push(q);
+            return access.visibilityFor({ userId: operator.id, role: 'readwrite' }, q);
+          },
+        },
+      };
 
       const root = await accounts.create(
         {
@@ -385,6 +400,23 @@ describe(
     it('lets a formula name what its writer can read', async () => {
       const made = await sensor(branch, mineDevice, 'core.factory', sum(minePing));
       assert.equal(made.kind, 'sensor');
+    });
+
+    it('asks a deferred sight only when something is named, on the write’s connection (P-235)', async () => {
+      deferredOn.length = 0;
+      await sensor(deferred, mineDevice, 'icmp.ping', {});
+      assert.equal(deferredOn.length, 0, 'a ping names nothing, and its create never asked');
+      await sensor(deferred, mineDevice, 'core.factory', sum(minePing));
+      await refused(
+        () => sensor(deferred, mineDevice, 'core.factory', sum(theirsPing)),
+        403,
+        /which does not exist or which you cannot read$/,
+      );
+      assert.equal(deferredOn.length, 2, 'the two that named something asked, once each');
+      assert.ok(
+        deferredOn.every((q) => q !== db),
+        'inside the write’s transaction, not on a connection of its own',
+      );
     });
 
     it('refuses a formula naming a hidden sensor, and writes nothing', async () => {

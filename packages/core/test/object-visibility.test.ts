@@ -1812,6 +1812,67 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       );
     });
 
+    it('asks what a writer can see only for a write that names something, on its own connection (P-235)', async (t) => {
+      // Resolving the sight up front cost a query on every authenticated write, and only a
+      // sensor of a type that reads another object's data ever looked at the answer.
+      const asked: { onThePool: boolean }[] = [];
+      const visibilityFor = access.visibilityFor.bind(access);
+      access.visibilityFor = (principal, q) => {
+        asked.push({ onThePool: q === undefined || q === db });
+        return visibilityFor(principal, q);
+      };
+      t.after(() => {
+        Reflect.deleteProperty(access, 'visibilityFor');
+      });
+      // Write on the branch for this test, so the operator can put a group and a device in it;
+      // `beforeEach` puts read back.
+      await access.grant(branchId, teamId, 'write', actorNamed('visibility'));
+      const create = (payload: Record<string, unknown>) =>
+        app.inject({
+          method: 'POST',
+          url: '/api/v1/objects',
+          headers: { ...as('operator'), 'content-type': 'application/json' },
+          payload,
+        });
+
+      const group = await create({ kind: 'group', parentId: branchId, name: 'p235-group' });
+      assert.equal(group.statusCode, 201, group.body);
+      const device = await create({
+        kind: 'device',
+        parentId: branchId,
+        name: 'p235-device',
+        host: '192.0.2.235',
+      });
+      assert.equal(device.statusCode, 201, device.body);
+      const ping = await create({
+        kind: 'sensor',
+        parentId: deviceId,
+        name: 'p235-ping',
+        sensorType: 'icmp.ping',
+      });
+      assert.equal(ping.statusCode, 201, ping.body);
+      assert.deepEqual(asked, [], 'a write that names nothing never asked');
+
+      const factory = await create({
+        kind: 'sensor',
+        parentId: deviceId,
+        name: 'p235-sum',
+        sensorType: 'core.factory',
+        params: { channels: [{ key: 'x', formula: `channel(${String(pingId)}, 'rtt')` }] },
+      });
+      assert.equal(factory.statusCode, 201, factory.body);
+      assert.deepEqual(asked, [{ onThePool: false }], 'once, inside the write’s transaction');
+
+      for (const made of [factory, ping, device, group]) {
+        await harness.service.delete(
+          testActor,
+          made.json<{ id: number }>().id,
+          { kind: 'leafOnly' },
+          { kind: 'none' },
+        );
+      }
+    });
+
     it('starts the account’s tree at the branch', async () => {
       const response = await app.inject({
         method: 'GET',
