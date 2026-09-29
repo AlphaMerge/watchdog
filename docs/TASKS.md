@@ -6290,7 +6290,8 @@ because each is a decision rather than a defect:
         fifty times the arm's measured spread, where this check had 0.3 ms, and a stall that
         large is what the case is for.
       - **The soak's quiet maximum does loosen the check.** Moving that arm to its median would
-        change `R-08`'s recorded statistic. That is a criterion decision, left open.
+        change `R-08`'s recorded statistic. Decided: it stays as it is, because the check exists
+        to catch the stall a maximum catches (WatchDog, 2026-09-29).
       - **Real percentiles.** `P-204`'s report-render p95 (184 and 161 samples) and the
         scheduler's p95 jitter (every dispatch) are genuine percentiles.
 
@@ -6684,6 +6685,22 @@ because each is a decision rather than a defect:
       - unparseable timestamps are counted on Core Health;
       - every duration listed runs on a monotonic clock, or says why it can't.
       Mutants as usual.
+
+- [ ] **P-251 — the batch-size sweep's p99 budget is its slowest write** · S · P-237, S-07 ·
+      Found by `P-237` (`findings/2026-09-29-batch-sweep-median-under-load.md`). Low.
+      - **The p99 is the last index.** The sweep writes 100,000 readings at each size, which is
+        100 writes at the shipped 1,000 rows. `Ingestor.stats()` takes the p99 at index
+        `floor(0.99 × n)`, the last of the 100. So the phase's "p99 write inside 100 ms" is a
+        budget on the maximum.
+      - **Under load it failed three of five.** At 0.61 per CPU, with `ms-core` connected, the
+        sweep went over at 121.4, 135.8 and 113.3 ms. The median never went above 39.7 ms, and
+        `P-233`'s quiet reruns held three of three.
+
+      **Done when** the budget is one of two things, whichever costs the default `test:perf`
+      less wall time:
+      - a real percentile, with at least 200 writes per size so the p99 is not the last index;
+      - reported as "max" and budgeted as a maximum.
+      The entry says which, and why.
 
 - [x] **P-250 — a log baseline taken only at a record counts a stall long over** · S · P-216,
       P-245 · Found 2026-09-29 by bc8184 while landing `P-245`, in `P-216` part 3. Probe Health

@@ -87,4 +87,7 @@ A stall that large is the thing the case exists to catch.
 The quiet arm's maximum does make the check more lenient: a stall in the control raises the bar
 for the replay. Taking the quiet arm's median would remove that, but it changes the statistic
 `R-08` recorded in `PLAN.md` (live p99 274.6 → 279.2 ms). That is a decision about the criterion,
-not a robustness fix, so it is left for whoever next owns the soak.
+not a robustness fix. It was decided the same day: the soak stays as it is, because the check
+exists to catch the stall a maximum catches.
+
+The absolute budget's own fix, a real percentile or a budget that says it is a maximum, is `P-251`.
