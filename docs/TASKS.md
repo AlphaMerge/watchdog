@@ -6169,6 +6169,53 @@ because each is a decision rather than a defect:
       Test with a configured script directory: the answer carries the script's reading.
       Mutants as usual.
 
+- [ ] **P-243 — under CPU starvation at the memory limit, a 15 s ping misses a 30 s watchdog** ·
+      M · P-220, P-215 · Found by `P-216c` (`docs/findings/2026-09-29-probe-starvation-c.md`).
+      With load 72 on 8 CPUs and the box at 4,096 of 4,096 MiB, both services' main threads were
+      held for 7–15 s at a time: sampler gaps up to 15.0 s, single blocks of 7.4 s, and GC up to
+      3.7 s on a 30 MiB heap. The probe's interval timer then fired 30.4 s after its last ping,
+      against `WatchdogSec=30`, and systemd killed it. The core, whose stdout was never stalled,
+      reached 25.6 s in the same stage. Every ping that did start reached PID 1 in 48–700 ms, so
+      the loss is in the timer, not in `systemd-notify`. A 15 s ping against 30 s leaves room for
+      one late ping, and blocks that long use it up.
+
+      Three answers, and the entry has to choose one and say why:
+      - **The ping moves off the main thread.** Nearly free, and wrong on its face: a worker thread
+        that pings while the main loop is hung is a watchdog that cannot see what it exists for.
+        It would need the worker to ping only on proof of main-loop progress, which is the main
+        thread again.
+      - **The margin changes.** Ping at `WatchdogSec`/6, every 5 s, and the longest gap becomes the
+        longest block plus 5 s: 20 s against these blocks. That keeps `WatchdogSec=30`, and so how
+        soon a hung service is caught, and costs four more `systemd-notify` spawns a minute.
+      - **Starvation that deep is correctly a kill.** Seven-to-fifteen-second stalls are a
+        service not serving, but the restart lands on the same host, under the same load, and
+        counts toward `P-215`'s start limit (`H-23`). So this answer needs showing that the
+        restart helps.
+
+      **Done when** the choice is made and measured in the `P-216` harness's starvation stages,
+      under the same conditions: no watchdog kill of either service across three runs, and the
+      pings sent against those received in the findings. If the answer is the kill, the findings
+      show the restart helped. The core's 25.6 s is part of the acceptance, not only the probe's.
+
+- [ ] **P-244 — the memory cap holds a saturated probe over `memoryLimitUsage`'s warning** · S ·
+      P-236, M-21 · Found by `P-216c`. The cap keeps back 10% of the limit, so a saturated probe
+      settles at about 90% of it: 89.9–94.7% in every stage of that run, the baseline included.
+      Probe Health warns on `memoryLimitUsage` above 80%. Whether that is a problem depends on
+      what it looks like to an operator:
+      - **One warning per saturation episode**, beside `poolUsage`'s, clearing when the pool
+        does, is one condition read two ways. It may be acceptable if the two are the same
+        episode and one is suppressed.
+      - **A standing warning** for as long as the workload keeps the pool saturated, which on a
+        probe whose targets are down can be days, is an alarm-volume problem. It is also a
+        warning that has stopped meaning "about to be killed", which is the only thing it was
+        for.
+
+      Candidate fixes: a reserve of the larger of 256 MiB and 25% of the limit, so the cap stops
+      under the warning; or the limit channel's warning set relative to the cap. **Done when** a
+      scenario test drives a saturated, capped probe through Probe Health's sweep and ingestion,
+      the entry says which of the two it is and which fix, and the test shows one alarm for one
+      saturation.
+
 - [x] **P-223 — the core's unlabelled metrics export a gap as zero** · S · P-14, H-12 · Found
       2026-09-28 in the round-2 review of `H-12`. The exporter's rule is that a gap is an absent
       series, never a zero, and its tests covered only the probe's series. Those are labelled, and
