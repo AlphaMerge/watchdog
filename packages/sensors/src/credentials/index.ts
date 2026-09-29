@@ -1,3 +1,4 @@
+import { MAX_ALLOWED_TARGETS, parseAllowedTarget } from '@ms/shared';
 import type { JsonSchema } from '../contract.js';
 // Straight to the schema module, never through `support/snmp/index.js`.
 //
@@ -10,6 +11,7 @@ import { SSH_CREDENTIAL_SCHEMA } from '../support/ssh/schema.js';
 import { HTTP_CREDENTIAL_SCHEMA } from '../support/http/schema.js';
 import { MAIL_CREDENTIAL_SCHEMA } from '../support/mail/schema.js';
 import { DATABASE_CREDENTIAL_SCHEMA } from '../support/db/schema.js';
+import { acceptedHostKeys } from '../support/ssh/credentials.js';
 
 /**
  * The credential kinds an installation can store (`A-05`).
@@ -33,7 +35,42 @@ export interface CredentialKindDefinition {
   readonly description: string;
   /** `writeOnly` properties are the secret half. Plain properties only — see below. */
   readonly schema: JsonSchema;
+  /**
+   * The public fields that bound where each secret may go (`A-41b`), by secret. Every secret is
+   * bound to `allowedTargets` at least, and `assertSplittable` refuses a kind that leaves one out.
+   * When a write widens what one of these fields allows, the secrets bound to it are cleared
+   * unless the same write sends them again: whoever may edit a set without knowing its password
+   * may narrow where it goes, and may not widen it (`widenedFields`).
+   */
+  readonly secretDestinations: Readonly<Record<string, readonly string[]>>;
 }
+
+/**
+ * Where a set may be sent, on every kind (`A-41b`). The entries are `@ms/shared`'s
+ * `parseAllowedTarget`; the vault refuses a write holding one that does not parse.
+ */
+const ALLOWED_TARGETS: JsonSchema = {
+  type: 'array',
+  maxItems: MAX_ALLOWED_TARGETS,
+  items: { type: 'string', minLength: 1, maxLength: 255 },
+  title: 'Allowed targets',
+  description:
+    'The devices this set may be sent to: host names, *.domain patterns, addresses and CIDR ' +
+    'ranges. A device inside them receives it whoever created the device, and one outside does ' +
+    'not, whoever created it. Leave it empty and the set goes wherever somebody with write on ' +
+    'this object vouches for. A device named by host name is inside only a name or a *.domain: ' +
+    'addresses and ranges match devices given as addresses. Adding an entry, or emptying the ' +
+    'list, needs the password again.',
+};
+
+/** What every kind's secrets are bound to, and SSH's, which a server key bounds as well. */
+const TO_TARGETS = ['allowedTargets'] as const;
+const TO_TARGETS_AND_KEYS = [
+  'allowedTargets',
+  'hostKeys',
+  'hostKeyFingerprint',
+  'hostKeyPolicy',
+] as const;
 
 export const CREDENTIAL_KINDS: readonly CredentialKindDefinition[] = [
   {
@@ -45,8 +82,9 @@ export const CREDENTIAL_KINDS: readonly CredentialKindDefinition[] = [
     schema: {
       type: 'object',
       additionalProperties: false,
-      properties: { ...SNMP_CREDENTIAL_SCHEMA },
+      properties: { ...SNMP_CREDENTIAL_SCHEMA, allowedTargets: ALLOWED_TARGETS },
     },
+    secretDestinations: { community: TO_TARGETS, authKey: TO_TARGETS, privKey: TO_TARGETS },
   },
   {
     id: 'ssh',
@@ -58,7 +96,12 @@ export const CREDENTIAL_KINDS: readonly CredentialKindDefinition[] = [
     schema: {
       type: 'object',
       additionalProperties: false,
-      properties: { ...SSH_CREDENTIAL_SCHEMA },
+      properties: { ...SSH_CREDENTIAL_SCHEMA, allowedTargets: ALLOWED_TARGETS },
+    },
+    secretDestinations: {
+      password: TO_TARGETS_AND_KEYS,
+      privateKey: TO_TARGETS_AND_KEYS,
+      passphrase: TO_TARGETS_AND_KEYS,
     },
   },
   {
@@ -71,8 +114,9 @@ export const CREDENTIAL_KINDS: readonly CredentialKindDefinition[] = [
     schema: {
       type: 'object',
       additionalProperties: false,
-      properties: { ...HTTP_CREDENTIAL_SCHEMA },
+      properties: { ...HTTP_CREDENTIAL_SCHEMA, allowedTargets: ALLOWED_TARGETS },
     },
+    secretDestinations: { password: TO_TARGETS, token: TO_TARGETS },
   },
   {
     id: 'mail',
@@ -85,8 +129,9 @@ export const CREDENTIAL_KINDS: readonly CredentialKindDefinition[] = [
     schema: {
       type: 'object',
       additionalProperties: false,
-      properties: { ...MAIL_CREDENTIAL_SCHEMA },
+      properties: { ...MAIL_CREDENTIAL_SCHEMA, allowedTargets: ALLOWED_TARGETS },
     },
+    secretDestinations: { password: TO_TARGETS },
   },
   {
     id: 'database',
@@ -99,8 +144,9 @@ export const CREDENTIAL_KINDS: readonly CredentialKindDefinition[] = [
     schema: {
       type: 'object',
       additionalProperties: false,
-      properties: { ...DATABASE_CREDENTIAL_SCHEMA },
+      properties: { ...DATABASE_CREDENTIAL_SCHEMA, allowedTargets: ALLOWED_TARGETS },
     },
+    secretDestinations: { password: TO_TARGETS },
   },
 ];
 
@@ -165,6 +211,34 @@ export function assertSplittable(definition: CredentialKindDefinition): void {
       `credential kind "${definition.id}" marks nothing write-only, so it would store no secret ` +
         'at all — that is a kind with no reason to be encrypted',
     );
+  }
+  // Every secret says what bounds where it goes, and that is `allowedTargets` at least (`A-41b`):
+  // a secret bound to nothing would survive a write that sent the set anywhere.
+  const secrets = secretFields(definition);
+  const declared = new Set(publicFields(definition));
+  for (const secret of secrets) {
+    const bound = definition.secretDestinations[secret];
+    if (bound === undefined || !bound.includes('allowedTargets')) {
+      throw new Error(
+        `credential kind "${definition.id}" does not bind its secret "${secret}" to ` +
+          'allowedTargets in secretDestinations, so widening where the set may go would keep it',
+      );
+    }
+    const unknown = bound.filter((field) => !declared.has(field));
+    if (unknown.length > 0) {
+      throw new Error(
+        `credential kind "${definition.id}" binds "${secret}" to ${unknown.join(', ')}, which it ` +
+          'does not declare as a public field',
+      );
+    }
+  }
+  for (const listed of Object.keys(definition.secretDestinations)) {
+    if (!secrets.includes(listed)) {
+      throw new Error(
+        `credential kind "${definition.id}" binds "${listed}" in secretDestinations, which is ` +
+          'not one of its secrets',
+      );
+    }
   }
 }
 
@@ -252,4 +326,101 @@ export function splitCredential(
     else publicParams[key] = value;
   }
   return { publicParams, secret };
+}
+
+/**
+ * What bounds where a set may go (`A-41b`), read from its public half.
+ *
+ * `targets` is `allowedTargets` as written, empty when it names none. `hostKeys` is the server
+ * keys an SSH set may be used with, and only when it lists some in `hostKeys` and checks them
+ * strictly; null otherwise, and always for every other kind. **The one `hostKeyFingerprint` a
+ * set held before `A-41b` is checked by the probe, and bounds nothing here**: counting it would
+ * have handed every existing strict SSH set to anyone who can write a device beneath it, on the
+ * day of the upgrade, with nobody having chosen that.
+ */
+export interface CredentialRestriction {
+  readonly targets: readonly string[];
+  readonly hostKeys: readonly string[] | null;
+}
+
+function strings(value: unknown): string[] {
+  return Array.isArray(value)
+    ? (value as unknown[]).filter((item): item is string => typeof item === 'string')
+    : [];
+}
+
+export function restrictionOf(
+  kind: string,
+  values: Readonly<Record<string, unknown>>,
+): CredentialRestriction {
+  const targets = strings(values['allowedTargets'])
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '');
+  const listed = strings(values['hostKeys']).some((key) => key.trim() !== '');
+  const strict = values['hostKeyPolicy'] !== 'accept-any';
+  return {
+    targets,
+    hostKeys: kind === 'ssh' && listed && strict ? acceptedHostKeys(values) : null,
+  };
+}
+
+/**
+ * Whether a set is bound at all. A restricted set goes to whatever is inside its bounds, whoever
+ * asks, and nowhere else; an unrestricted one goes where `A-41`'s voucher says.
+ */
+export function isRestricted(restriction: CredentialRestriction): boolean {
+  return restriction.targets.length > 0 || restriction.hostKeys !== null;
+}
+
+/** An entry as it is compared: the parsed form, or the text itself when it does not parse. */
+function canonical(entry: string): string {
+  const parsed = parseAllowedTarget(entry);
+  if (typeof parsed === 'string') return entry.trim();
+  switch (parsed.kind) {
+    case 'name':
+      return parsed.name;
+    case 'suffix':
+      return `*.${parsed.suffix}`;
+    case 'address':
+      return parsed.address;
+    case 'range':
+      return `${parsed.network}/${String(parsed.prefix)}`;
+  }
+}
+
+/** Whether every entry of `narrower` is already in `wider`. */
+function covers(wider: readonly string[], narrower: readonly string[]): boolean {
+  return narrower.every((entry) => wider.includes(entry));
+}
+
+/**
+ * The public fields whose bound a write widened (`A-41b`): the secrets bound to them are cleared
+ * unless the write sends them again.
+ *
+ * **Only a bound that was there can widen.** Adding targets to a set with none, or removing some
+ * from a set that has them, narrows it, and the secret stays. Adding an entry that was not there,
+ * or emptying the list, widens it, even when the new entry sits inside an old range: telling that
+ * apart would be a comparison of ranges to save somebody typing a password, and getting it wrong
+ * would send one somewhere new. SSH's key bound widens the same way, and when strict checking is
+ * turned off.
+ */
+export function widenedFields(
+  kind: string,
+  before: Readonly<Record<string, unknown>>,
+  after: Readonly<Record<string, unknown>>,
+): string[] {
+  const was = restrictionOf(kind, before);
+  const now = restrictionOf(kind, after);
+  const widened: string[] = [];
+  const wasTargets = was.targets.map(canonical);
+  if (
+    wasTargets.length > 0 &&
+    (now.targets.length === 0 || !covers(wasTargets, now.targets.map(canonical)))
+  ) {
+    widened.push('allowedTargets');
+  }
+  if (was.hostKeys !== null && (now.hostKeys === null || !covers(was.hostKeys, now.hostKeys))) {
+    widened.push('hostKeys', 'hostKeyFingerprint', 'hostKeyPolicy');
+  }
+  return widened;
 }

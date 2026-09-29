@@ -62,7 +62,20 @@ export const SSH_CREDENTIAL_SCHEMA: Readonly<Record<string, JsonSchema>> = {
       'The server’s key, as `ssh-keygen -lf` prints it — SHA256: followed by base64. Leave it ' +
       'empty and the first check will fail *telling you the fingerprint it saw*; compare that ' +
       'against the machine and paste it here to accept it. That is deliberate: it is the ' +
-      'comparison that makes trusting a key on first sight worth anything.',
+      'comparison that makes trusting a key on first sight worth anything. One key, for a set ' +
+      'on one device; list them under host keys for a set that several servers share.',
+  },
+  hostKeys: {
+    type: 'array',
+    maxItems: 64,
+    items: { type: 'string', minLength: 1, maxLength: 128 },
+    title: 'Host keys',
+    description:
+      'Every server this set may log in to, by its key, as `ssh-keygen -lf` prints it (`A-41b`). ' +
+      'The fingerprint above is accepted as well. With any listed and checking strict, the set ' +
+      'goes to a device whoever created it, if the device is inside the allowed targets or there ' +
+      'are none, because a server whose key is not here is never sent the password. Adding a ' +
+      'key needs the password again.',
   },
 };
 

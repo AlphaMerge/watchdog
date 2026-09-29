@@ -325,6 +325,34 @@ export const credentialViewSchema = {
   },
 } as const;
 
+/**
+ * What storing a set answers (`A-41b`): the set as a read shows it, and what the write did to where
+ * it goes. Still no field a secret could occupy — `secretsCleared` is names.
+ */
+export const credentialWriteSchema = {
+  $id: 'ms:credentialWrite',
+  type: 'object',
+  additionalProperties: false,
+  required: [...credentialViewSchema.required, 'withholds', 'secretsCleared'],
+  properties: {
+    ...credentialViewSchema.properties,
+    withholds: {
+      type: 'integer',
+      minimum: 0,
+      description:
+        'How many sensors beneath this set are outside its allowed targets now, and are not sent ' +
+        'it. Zero for a set with none.',
+    },
+    secretsCleared: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'The secrets this write cleared because it widened where the set may go and did not ' +
+        'send them again.',
+    },
+  },
+} as const;
+
 const objectFields = {
   name: { type: 'string', minLength: 1, maxLength: 500 },
   tags: {
@@ -670,6 +698,7 @@ export const SHARED_SCHEMAS = [
   channelLimitsSchema,
   channelRecordSchema,
   credentialViewSchema,
+  credentialWriteSchema,
   objectSummarySchema,
   objectDetailSchema,
   moveResultSchema,

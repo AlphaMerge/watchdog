@@ -16653,7 +16653,7 @@ because each is a decision rather than a defect:
         that failed meanwhile, which only a race reaches, and `main.ts`'s wiring. For the
         adoption sinks that wiring is pinned by `audit-composition.test.ts`.
 
-- [ ] **A-41b — A credential set says where it may go** · M · A-41, P-219, P-216 · Split from
+- [x] **A-41b — A credential set says where it may go** · M · A-41, P-219, P-216 · Split from
       `A-41` (WatchDog, 2026-09-29). With `A-41` alone, whoever may write the object a set is
       stored on may send it anywhere they can put a device. This lets an administrator bound that,
       and delegate within the bound.
@@ -16675,6 +16675,121 @@ because each is a decision rather than a defect:
       **Done when** a device inside the targets receives the set whoever wrote it, one outside
       does not whoever wrote it, a probe that has not upgraded is not sent a set it cannot check,
       and a probe that has refuses one whose resolved address or host key is outside.
+
+      Decided (WatchDog, 2026-09-29), on a design note:
+      - **A name host facing only address or CIDR targets is withheld by the core; the probe
+        does not resolve it.** "Resolve, check, connect" is DNS rebinding for exactly the
+        attacker this is about: the device writer picks the name and can run its DNS. Pinned
+        probe resolution is `A-41c`.
+      - **`hostKeys` sits beside the existing `hostKeyFingerprint`, with no migration.** The
+        accepted keys are the union, put together in one function (`acceptedHostKeys`).
+      - **The one `hostKeyFingerprint` bounds nothing.** Counting it would have handed every
+        existing strict SSH set to anyone who can write a device beneath it, on the upgrade.
+      - **A widened bound clears the secret; a narrowed one keeps it**, refining `A-40`'s
+        any-change rule.
+      - **A narrowing write says how many sensors it withholds**, and a scenario test counts the
+        alarms that follows.
+
+      **Outcome.** A set with `allowedTargets`, or an SSH set with `hostKeys` and strict checking,
+      is *bounded*: its bounds decide where it goes, and nothing else does.
+      - **Delivery.** Inside the bounds, every sensor gets the set, whoever wrote it. Outside, or
+        undecided, none does, whoever wrote it. `vouch()` skips bounded pairs, so no write is
+        refused for them and no voucher is recorded. `CredentialVouching.refusals` asks
+        `boundRefusal` instead, at every configuration, and holds the sensor Unknown with one of
+        three sentences: outside, undecided, probe too old. "Check now" answers 409 with the same
+        words, asking about the probe's version as last registered.
+      - **Matching** (`@ms/shared` `allowed-targets.ts`, a table test).
+        - Entries are a name, a `*.domain` (strictly below), an address, or a CIDR range, v4 or v6.
+          Case, a trailing dot, an IPv6 zone and an IPv4-mapped address are normalised.
+        - A host is matched only with entries of its own sort, so an address never matches a name.
+        - A name facing only address entries is `undecided`.
+        - The vault refuses an entry that parses as none of the four, naming it and its index.
+      - **SSH.** `hostKeys` is a list. The transport accepts a key in the list or equal to
+        `hostKeyFingerprint` (`acceptedHostKeys`, the one union).
+        - The pool key carries the accepted keys, so taking one off opens a new connection.
+        - Listing keys while accepting any key is refused at write.
+        - Protocol 22's `credentialHostKeys` capability gates it: a set that lists keys is withheld
+          from an older probe, which would read the one fingerprint only.
+        - **The legacy fingerprint alone is not a bound**, so every set in use before stays under
+          `A-41`'s voucher rule, and a test pins that.
+      - **Secrets.** Every kind declares `secretDestinations`, and `assertSplittable` refuses a
+        kind that leaves a secret unbound to `allowedTargets`.
+        - A write that widens a bound clears the secrets bound to it unless the write sends them
+          again. Widening means an entry added (even inside an old range), the list emptied, a key
+          added, or strict checking turned off.
+        - Narrowing keeps them. `secretsCleared` is on the response and the audit entry.
+      - **Alarm volume.** The credential write answers `withholds`, the count of sensors beneath
+        now outside the bounds, and so does the `credential.set` audit entry.
+        - `credential-targets-scenario.test.ts`: narrowing a group's set past 6 devices raised 6
+          Unknown pages, the Unknown rules' one per sensor, delivered as 1 digest when the
+          window closed, and nothing for the pings beside them.
+        - The same narrowing behind a Down master raised 0: the dependents are paused, so they are
+          not configured, and the switch's Down stayed the one message.
+      - **Core Health** counts sets with no bounds (`credentialsUnbounded`, no limit). **There is
+        no credential view in the UI**, so that channel is where they are flagged; `U-21` is the
+        view.
+      - **Docs:** `administration.md` gets the trust sentence, targets, host keys, delegation,
+        the per-probe caveat, and an upgrade note that no upgrade changes who receives a secret.
+        `api-reference.md` and `web-ui.md` are updated too.
+      - **Tests:** every unit suite on `82e59b1`, in the orchestrator's heavy slot: shared 353,
+        simulators 24, sensors 1,065 (10 skipped), core 3,896, probe 387 of 388, web 616.
+        - The one was `pool-memory-cap.test.ts` timing out waiting for eight workers at a Mac load
+          of 32. The file passed 30/30 whole at a toolchain count of 0.
+        - Rebased onto `cd7ab60` (`A-39`, `P-242`): the touched suites and theirs 585/585, tsc,
+          prettier and eslint clean, the regenerated references unchanged.
+      - **Mutation:** 25 mutants, 25 killed, two of them after a fix.
+        - `m3` (`unmapped` made the identity) survived: `BlockList` matches an IPv4-mapped
+          address against IPv4 rules either way, so no verdict depended on it. Unmapping range
+          networks was wrong besides: `::ffff:10.0.0.0/104` became a refused entry. Ranges now
+          stay as written. Addresses are still unmapped, which is what makes `10.0.0.1` and
+          `::ffff:10.0.0.1` one entry when a write is compared with the last. Tests pin both,
+          and `m25` puts the range unmapping back.
+        - `m16` (`unboundedSets` counting the bounded sets) survived a test storing two of
+          each. It is now three against two.
+
+- [ ] **A-41c — A named device checked against a set's address targets, on the probe** · M ·
+      A-41b · Split from `A-41b` (WatchDog, 2026-09-29). A device named by host name, whose
+      set's `allowedTargets` name only addresses and ranges, is withheld today. The core does not
+      resolve names. The probe cannot simply resolve, check and connect, because the device's
+      writer picks the name, can run its DNS, and can answer the check with an inside address
+      and the connection with their own. The probe has to connect to the address it checked,
+      which is work in each transport:
+
+      | Transport | Pinned how |
+      | --- | --- |
+      | SNMP (`net-snmp`) | Connect to the checked address. UDP, no name involved. |
+      | SSH (`ssh2`) | Connect to the checked address. The host key is the server's identity. |
+      | HTTP (`http`/`https`) | A `lookup` answering with the checked address. SNI, `Host` and the certificate stay on the name. |
+      | Mail (`net`/`tls`) | A `lookup` on the connect, as for HTTP. |
+      | PostgreSQL (`pg`) | Driver work: no `lookup` option. A pre-connected `stream` may do. |
+      | MySQL (`mysql2`) | Driver work, likewise (`stream`). |
+      | SQL Server (`tedious`) | Driver work: neither option. |
+      | Windows (PowerShell/CIM) | Not pinnable from here. Kerberos wants the name. |
+
+      Every address the name resolves to for the device's address family must be inside, as
+      `A-09`'s guard reads all of them. A transport that cannot pin stays withheld, as now.
+
+      **Done when** a named device whose every resolved address is inside the targets receives
+      the set on the transports above that can pin, the check connects to one of those addresses
+      and no other, and a name that resolves outside, or differently between the check and the
+      connection, is refused with a sentence saying so.
+
+- [ ] **U-21 — A credential view: each object's sets, where they may go, and which have no
+      bounds** · M · A-05, A-41b · Found 2026-09-29 by `A-41b`. The web UI has no credential view
+      at all: sets are written and read only through `/objects/:id/credentials`, and an operator
+      learns which sets have no targets only from Core Health's `credentialsUnbounded` count.
+      - A **Credentials** tab on a probe, group and device: the sets stored there and those
+        inherited, each with its kind, its public fields and where it comes from. Forms are
+        generated from each kind's schema, which already carries `allowedTargets` and SSH
+        `hostKeys`. Secrets are write-only, with the form's usual keep, replace and clear.
+      - **A set with no bounds is flagged** on the tab and in a list Core Health's count links
+        to: the sentence that `write` on its owner is trust with it.
+      - A write shows what the response says: `withholds` before it is confirmed, where the core
+        can say, and `secretsCleared` after.
+
+      **Done when** an operator can store, edit and remove a set without the API, sees which
+      sets have no bounds and why that matters, and is told how many sensors a narrowing takes
+      to Unknown.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

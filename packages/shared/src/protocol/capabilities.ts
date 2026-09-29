@@ -101,6 +101,12 @@ export interface ProbeCapabilities {
    * pool's memory fields.
    */
   logOutput: boolean;
+  /**
+   * Checks an SSH server's key against a credential set's `hostKeys` list, not only its one
+   * `hostKeyFingerprint` (`A-41b`). No field on the wire: below this the core does not send such
+   * a set at all, because a probe that ignored the list would log in to a server it does not name.
+   */
+  credentialHostKeys: boolean;
 }
 
 /**
@@ -124,6 +130,7 @@ const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
   ['poolMemory', 19],
   ['memorySinceLastReport', 20],
   ['logOutput', 21],
+  ['credentialHostKeys', 22],
 ];
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -141,6 +148,7 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   poolMemory: 'report how far memory lets its check pool grow',
   memorySinceLastReport: 'report each memory low once, rather than the last thirty seconds',
   logOutput: 'report the log lines it could not write',
+  credentialHostKeys: 'check an SSH server against more than one host key',
 };
 
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
@@ -159,6 +167,7 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     poolMemory: has(19),
     memorySinceLastReport: has(20),
     logOutput: has(21),
+    credentialHostKeys: has(22),
   };
 }
 

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import type { Logger } from '@ms/shared';
+import { isRestricted, restrictionOf, type CredentialRestriction } from '@ms/sensors';
+import { capabilitiesFor, PROTOCOL_VERSION, targetVerdict, type Logger } from '@ms/shared';
 import { atLeast, type AccessPrincipal, type AccessRight } from '../auth/access.js';
 import type { AccountRole } from '../auth/accounts.js';
 import { AuthError } from '../auth/errors.js';
@@ -140,6 +141,8 @@ export interface CredentialRoute {
   readonly formerDestination: string | null;
   /** What is recorded for this pair, or null when nothing is. */
   readonly vouched: VouchedFor | null;
+  /** What bounds where the set may go (`A-41b`). A restricted set is decided by that alone. */
+  readonly restriction: CredentialRestriction;
 }
 
 /** One row of `sensor_credential_voucher`. */
@@ -223,6 +226,7 @@ export async function routesAtOrUnder(
     owner_id: string;
     owner_kind: string;
     owner_name: string;
+    public_params: Record<string, unknown> | null;
     vouched_owner: string | null;
     vouched_destination: string | null;
     vouched_by: string | null;
@@ -261,7 +265,7 @@ export async function routesAtOrUnder(
     ),
     owners AS (
       SELECT DISTINCT ON (up.sensor_id, cs.kind)
-             up.sensor_id, cs.kind::text AS kind, cs.object_id AS owner_id
+             up.sensor_id, cs.kind::text AS kind, cs.object_id AS owner_id, cs.public_params
       FROM up
       JOIN credential_set cs ON cs.object_id = up.id AND cs.kind::text = ANY($3::text[])
       ORDER BY up.sensor_id, cs.kind, up.depth
@@ -283,6 +287,7 @@ export async function routesAtOrUnder(
            ow.owner_id::text   AS owner_id,
            o.kind::text        AS owner_kind,
            o.name              AS owner_name,
+           ow.public_params    AS public_params,
            v.owner_id::text    AS vouched_owner,
            v.destination       AS vouched_destination,
            v.vouched_by        AS vouched_by,
@@ -339,6 +344,7 @@ export async function routesAtOrUnder(
               destination: row.vouched_destination,
               voucher: storedVoucher(row.vouched_by, row.vouched_by_user),
             },
+      restriction: restrictionOf(row.kind, row.public_params ?? {}),
     });
   }
   return routes;
@@ -381,7 +387,12 @@ export async function vouch(
   under: readonly ObjectId[],
   options: { sayWhich: boolean; types?: readonly string[]; kinds?: readonly string[] },
 ): Promise<void> {
-  const routes = await routesAtOrUnder(q, types, under, options);
+  // A set bounded by its targets or its keys goes wherever they allow, whoever writes, and
+  // nowhere else, whoever writes (`A-41b`): nobody vouches for it, and no write is refused for it.
+  // The probe configuration asks its bounds instead, every time.
+  const routes = (await routesAtOrUnder(q, types, under, options)).filter(
+    (route) => !isRestricted(route.restriction),
+  );
   if (routes.length === 0) return;
 
   const voucher = credentialVoucherOf(writer);
@@ -479,7 +490,70 @@ export const WITHHELD_CREDENTIALS = {
     'Not scanned: the account that vouched for sending this sensor its credentials no longer has ' +
     'write on where they are stored. Saving the sensor again, as an account that has, vouches ' +
     'for it.',
+  outside:
+    'Not scanned: this device is outside the allowed targets of the credentials it would use, ' +
+    'so they are not sent to it. Adding the device to the targets where the credentials are ' +
+    'stored, or pointing it back inside them, sends them again.',
+  undecided:
+    'Not scanned: this device is named by host name, and the allowed targets of the credentials ' +
+    'it would use name only addresses and ranges, which a name is not checked against without ' +
+    'resolving it. Giving the device its address, or adding its name or *.domain to the ' +
+    'targets, sends them again.',
+  probeTooOld:
+    'Not scanned: the SSH credentials it would use list host keys, and its probe is too old to ' +
+    'check a server against more than one. Upgrading the probe to protocol 22 sends them again.',
 } as const;
+
+/**
+ * Why a restricted set is not sent where a sensor sends it, or null when it is (`A-41b`).
+ *
+ * **Its bounds decide it, and nothing else does**: not who vouched, and not who wrote the sensor.
+ * Inside the targets, every sensor gets it; outside them, none does. A device named by host name
+ * against targets that name only addresses is refused too — the core does not resolve names, and
+ * a probe that did would have to connect to the address it checked (`A-41c`). And a set bounded
+ * by its SSH keys goes only to a probe that checks the whole list: an older one reads the one
+ * fingerprint and would log in to a server the list does not name.
+ */
+export function boundRefusal(
+  restriction: CredentialRestriction,
+  host: string,
+  peerVersion: number,
+): string | null {
+  if (restriction.targets.length > 0) {
+    const verdict = targetVerdict(host, restriction.targets);
+    if (verdict === 'outside') return WITHHELD_CREDENTIALS.outside;
+    if (verdict === 'undecided') return WITHHELD_CREDENTIALS.undecided;
+  }
+  if (restriction.hostKeys !== null && !capabilitiesFor(peerVersion).credentialHostKeys) {
+    return WITHHELD_CREDENTIALS.probeTooOld;
+  }
+  return null;
+}
+
+/**
+ * How many sensors a set's bounds keep it from, after a write (`A-41b`): the sensors that resolve
+ * to it and are outside its targets or undecided against them. Zero for an unrestricted set.
+ *
+ * Counted in the write's transaction, for the response and the audit entry, so that narrowing a
+ * set's targets says how many sensors it is about to take to Unknown before anybody finds out
+ * from the sensors. The probe's version is not the write's business and is not counted.
+ */
+export async function withheldByBounds(
+  q: Queryable,
+  types: CredentialTypes,
+  ownerId: ObjectId,
+  kind: string,
+): Promise<number> {
+  const routes = await routesAtOrUnder(q, types, [ownerId], { kinds: [kind] });
+  const sensors = new Set<ObjectId>();
+  for (const route of routes) {
+    if (route.ownerId !== ownerId || !isRestricted(route.restriction)) continue;
+    if (boundRefusal(route.restriction, route.host, PROTOCOL_VERSION) !== null) {
+      sensors.add(route.sensorId);
+    }
+  }
+  return sensors.size;
+}
 
 /** One sensor a probe's configuration is about to send credentials to. */
 export interface SensorBeingSent {
@@ -490,6 +564,11 @@ export interface SensorBeingSent {
   readonly ipVersion: string;
   /** The object each kind's set in force is stored on, as the vault resolved it. */
   readonly owners: ReadonlyMap<string, number>;
+  /**
+   * What bounds each kind's set (`A-41b`), read from its public half. A kind absent here is
+   * unbounded, and `A-41`'s voucher decides it.
+   */
+  readonly restrictions?: ReadonlyMap<string, CredentialRestriction>;
 }
 
 export interface CredentialVouchingOptions {
@@ -590,6 +669,8 @@ export class CredentialVouching {
   async refusals(
     probeId: number,
     sensors: readonly SensorBeingSent[],
+    /** What the probe speaks, which decides whether it may be sent a set bounded by its keys. */
+    peerVersion: number = PROTOCOL_VERSION,
   ): Promise<Map<number, string>> {
     const refused = new Map<number, string>();
     const sent = sensors.filter((sensor) => sensor.owners.size > 0);
@@ -625,6 +706,12 @@ export class CredentialVouching {
     const pending: { sensorId: number; userId: number | null; ownerId: number }[] = [];
     for (const sensor of sent) {
       for (const [kind, ownerId] of sensor.owners) {
+        const restriction = sensor.restrictions?.get(kind);
+        if (restriction !== undefined && isRestricted(restriction)) {
+          const refusal = boundRefusal(restriction, sensor.host, peerVersion);
+          if (refusal !== null) refused.set(sensor.sensorId, refusal);
+          continue;
+        }
         const vouched = recorded.get(`${String(sensor.sensorId)}:${kind}`);
         const destination = destinationOf({
           probeId,
@@ -679,8 +766,9 @@ export class CredentialVouching {
   async withhold(
     probeId: number,
     sensors: readonly SensorBeingSent[],
+    peerVersion: number = PROTOCOL_VERSION,
   ): Promise<Map<number, string>> {
-    const refused = await this.refusals(probeId, sensors);
+    const refused = await this.refusals(probeId, sensors, peerVersion);
     const before = this.#withheldByProbe.get(probeId) ?? 0;
     this.#withheldByProbe.set(probeId, refused.size);
     if (refused.size !== before) {

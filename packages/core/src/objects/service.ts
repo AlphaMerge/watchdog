@@ -1,3 +1,4 @@
+import { isRestricted, restrictionOf } from '@ms/sensors';
 import type { Logger } from '@ms/shared';
 import { changedParamKeys } from '../audit/diff.js';
 import type { Database, Queryable } from '../db/pool.js';
@@ -31,7 +32,7 @@ import { versionConflict } from './repository.js';
 import type { ObjectRepository } from './repository.js';
 import type { CredentialVault } from '../vault/service.js';
 import type { ChannelDraft, SensorTypeGate } from './sensor-type-gate.js';
-import { vouch as vouchForCredentials } from './credential-vouching.js';
+import { vouch as vouchForCredentials, withheldByBounds } from './credential-vouching.js';
 import {
   actorOf,
   assertMayName,
@@ -1368,7 +1369,7 @@ export class ObjectService {
     kind: string,
     values: Readonly<Record<string, unknown>>,
     pre: Precondition = { kind: 'none' },
-  ): Promise<CredentialView> {
+  ): Promise<CredentialView & { withholds: number; secretsCleared: readonly string[] }> {
     const vault = this.#requireVault();
     const actor = actorOf(writer);
     return this.#db.tx(async (q) => {
@@ -1382,6 +1383,11 @@ export class ObjectService {
       // Whoever may write where a set is stored vouches for everything beneath that it now
       // reaches (`A-41`): the sensors that inherited another set of this kind until now.
       await this.#checkCredentials(q, writer, [id], { sayWhich: true, kinds: [kind] });
+      // How many sensors beneath its bounds now keep the set from (`A-41b`). Narrowing a set's
+      // targets can take a whole group to Unknown at once, so the write says so, and so does the
+      // audit entry, rather than leaving it to be found from the sensors.
+      const withholds = await withheldByBounds(q, this.#sensorTypes, id, kind);
+      const bounded = isRestricted(restrictionOf(kind, summary.publicParams));
       await this.#audit.record(
         q,
         actor,
@@ -1393,6 +1399,10 @@ export class ObjectService {
             created: summary.created,
             secretsSet: summary.secretsSet,
             secretsKept: summary.secretsKept,
+            ...(summary.secretsCleared.length === 0
+              ? {}
+              : { secretsCleared: summary.secretsCleared }),
+            ...(bounded ? { withholds } : {}),
             publicParams: summary.publicParams,
           },
         ],
@@ -1412,6 +1422,8 @@ export class ObjectService {
         publicParams: view.publicParams,
         source: view.source,
         updatedAt: view.updatedAt,
+        withholds,
+        secretsCleared: summary.secretsCleared,
       };
     });
   }

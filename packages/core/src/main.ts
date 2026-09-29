@@ -1327,6 +1327,7 @@ async function serve(): Promise<void> {
         return deliveryHealth.read(q, now, suppressed.templateIds);
       },
       credentialsToReenter: async (q) => (await vault.setsWithUndeclaredKeys(q)).length,
+      unboundedCredentials: (q) => vault.unboundedSets(q),
       alarms: () => alarmScheduler.stats,
       disk: () => housekeeper.stats.disk,
       evictedChunks: () => housekeeper.stats.evictedChunks,

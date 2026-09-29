@@ -4,14 +4,17 @@ import {
   credentialKind,
   credentialKindIds,
   declaredPublic,
+  isRestricted,
   publicFields,
+  restrictionOf,
   secretFields,
   splitCredential,
+  widenedFields,
   writeSchema,
   CREDENTIAL_KINDS,
   type CredentialKindDefinition,
 } from '@ms/sensors';
-import { AppError, type Logger } from '@ms/shared';
+import { allowedTargetProblems, AppError, type Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
 import type {
   CredentialKind,
@@ -73,6 +76,11 @@ export interface CredentialWriteSummary {
   readonly secretsSet: readonly string[];
   /** Names of the secret fields it deliberately left as they were. */
   readonly secretsKept: readonly string[];
+  /**
+   * Names of the secret fields it cleared because it widened where the set may go and did not
+   * send them again (`A-41b`). Never their values.
+   */
+  readonly secretsCleared: readonly string[];
   readonly publicParams: Readonly<Record<string, unknown>>;
 }
 
@@ -142,8 +150,12 @@ export class CredentialVault {
     values: Readonly<Record<string, unknown>>,
   ): Promise<CredentialWriteSummary> {
     const definition = this.definition(kind);
-    const [existing] = await q.query<{ secret: Buffer; key_id: string }>(
-      'SELECT secret, key_id FROM credential_set WHERE object_id = $1 AND kind = $2',
+    const [existing] = await q.query<{
+      secret: Buffer;
+      key_id: string;
+      public_params: Record<string, unknown>;
+    }>(
+      'SELECT secret, key_id, public_params FROM credential_set WHERE object_id = $1 AND kind = $2',
       [objectId, kind],
     );
 
@@ -156,6 +168,7 @@ export class CredentialVault {
     if (checks === undefined) throw new Error(`no write check for credential kind ${kind}`);
     const check = existing === undefined ? checks.created : checks.existing;
     if (!check(values)) throw invalidValues(definition, check.errors ?? []);
+    boundProblems(definition, values);
     const { publicParams, secret } = splitCredential(definition, values);
 
     const held =
@@ -178,6 +191,21 @@ export class CredentialVault {
       }
       merged[field] = value;
       secretsSet.push(field);
+    }
+    // **A write that widens where the set may go takes the secrets bound there with it** unless
+    // it sends them again (`A-41b`, `A-40`'s rule). Whoever may edit a set may not know its
+    // password; narrowing the set is theirs to do, and widening it is not.
+    const widened =
+      existing === undefined
+        ? []
+        : widenedFields(definition.id, existing.public_params, publicParams);
+    const secretsCleared: string[] = [];
+    for (const field of secretFields(definition)) {
+      if (field in secret || !(field in merged)) continue;
+      const bound = definition.secretDestinations[field] ?? [];
+      if (!bound.some((destination) => widened.includes(destination))) continue;
+      Reflect.deleteProperty(merged, field);
+      secretsCleared.push(field);
     }
     const secretsKept = Object.keys(merged).filter((field) => !secretsSet.includes(field));
 
@@ -203,6 +231,7 @@ export class CredentialVault {
         // Field names, never values — this line goes to a log file.
         secretsSet,
         secretsRemoved: removed,
+        secretsCleared,
       },
       'credential set written',
     );
@@ -212,6 +241,7 @@ export class CredentialVault {
       created: existing === undefined,
       secretsSet,
       secretsKept,
+      secretsCleared,
       // Only what the kind declares public, though the check above already made it so: this goes
       // to the audit log, and a key that reached it could never be taken back (`A-43`).
       publicParams: declaredPublic(definition, publicParams),
@@ -243,6 +273,17 @@ export class CredentialVault {
       [JSON.stringify(declared)],
     );
     return rows.map((row) => ({ objectId: Number(row.object_id), kind: row.kind, keys: row.keys }));
+  }
+
+  /**
+   * How many credential sets have no allowed targets and no SSH host keys (`A-41b`), for Core
+   * Health. Each goes wherever somebody with `write` on its owner vouches for.
+   */
+  async unboundedSets(q: Queryable): Promise<number> {
+    const rows = await q.query<{ kind: string; public_params: Record<string, unknown> }>(
+      'SELECT kind::text AS kind, public_params FROM credential_set',
+    );
+    return rows.filter((row) => !isRestricted(restrictionOf(row.kind, row.public_params))).length;
   }
 
   /**
@@ -350,6 +391,42 @@ export class CredentialVault {
 }
 
 export { VaultSealer };
+
+/**
+ * Refuses what the schema cannot say about where a set may go (`A-41b`): an allowed target that
+ * is none of the four things one may be, and an SSH set that lists server keys while checking
+ * none of them. A target is not a secret, so the message may quote it.
+ */
+function boundProblems(
+  definition: CredentialKindDefinition,
+  values: Readonly<Record<string, unknown>>,
+): void {
+  const targets = values['allowedTargets'];
+  if (Array.isArray(targets)) {
+    const [problem] = allowedTargetProblems(
+      (targets as unknown[]).filter((entry): entry is string => typeof entry === 'string'),
+    );
+    if (problem !== undefined) {
+      throw new VaultError(
+        'CREDENTIAL_INVALID',
+        `allowed target ${String(problem.index + 1)}: ${problem.message}`,
+        { kind: definition.id, field: `allowedTargets/${String(problem.index)}` },
+      );
+    }
+  }
+  const keys = values['hostKeys'];
+  const listed =
+    Array.isArray(keys) &&
+    (keys as unknown[]).some((key) => typeof key === 'string' && key.trim() !== '');
+  if (listed && values['hostKeyPolicy'] === 'accept-any') {
+    throw new VaultError(
+      'CREDENTIAL_INVALID',
+      `${definition.name} credentials that list host keys cannot also accept any key, which ` +
+        'checks none of them: set host key checking to strict, or empty the list',
+      { kind: definition.id, field: 'hostKeyPolicy' },
+    );
+  }
+}
 
 /**
  * The refusal of a write its kind does not accept, naming the field (`A-43`).

@@ -142,6 +142,13 @@ export {
   schemeAllowed,
 } from './net/target-policy.js';
 export type { TargetPolicy, TargetRefusal } from './net/target-policy.js';
+export {
+  allowedTargetProblems,
+  MAX_ALLOWED_TARGETS,
+  parseAllowedTarget,
+  targetVerdict,
+} from './net/allowed-targets.js';
+export type { AllowedTarget, TargetVerdict } from './net/allowed-targets.js';
 export { loadTlsMaterial } from './protocol/tls-files.js';
 export type { LoadedTlsMaterial } from './protocol/tls-files.js';
 

@@ -356,6 +356,129 @@ describe(
       });
     });
 
+    describe('where a set may go (A-41b)', () => {
+      const communityOf = async (): Promise<unknown> =>
+        (await h.vault.resolveFor([sensorId], ['snmp'])).get(sensorId)?.get('snmp')?.values[
+          'community'
+        ];
+
+      it('refuses a target that is none of the four things one may be, storing nothing', async () => {
+        await assert.rejects(
+          h.service.setCredential(testActor, groupId, 'snmp', {
+            community: COMMUNITY,
+            allowedTargets: ['10.0.0.0/8', 'db*.example.com'],
+          }),
+          (error: unknown) =>
+            error instanceof VaultError &&
+            error.code === 'CREDENTIAL_INVALID' &&
+            /allowed target 2: "db\*\.example\.com" puts \*/.test(error.message) &&
+            error.context['field'] === 'allowedTargets/1',
+        );
+        assert.equal(await communityOf(), undefined);
+        assert.deepEqual(
+          h.audit.recorded.filter((entry) => entry.action === 'credential.set'),
+          [],
+        );
+      });
+
+      it('refuses an SSH set that lists host keys and checks none of them', async () => {
+        await assert.rejects(
+          h.service.setCredential(testActor, groupId, 'ssh', {
+            username: 'monitor',
+            password: 'a-long-enough-password',
+            hostKeys: ['SHA256:abc'],
+            hostKeyPolicy: 'accept-any',
+          }),
+          /list host keys cannot also accept any key/,
+        );
+        await h.service.setCredential(testActor, groupId, 'ssh', {
+          username: 'monitor',
+          password: 'a-long-enough-password',
+          hostKeys: ['SHA256:abc'],
+        });
+      });
+
+      it('keeps the secret through a write that narrows the targets, and clears it through one that widens them', async () => {
+        await h.service.setCredential(testActor, groupId, 'snmp', {
+          community: COMMUNITY,
+          allowedTargets: ['10.0.0.0/8', 'router.example.test'],
+        });
+        // Narrowed: an entry taken away.
+        let view = await h.service.setCredential(testActor, groupId, 'snmp', {
+          allowedTargets: ['10.0.0.0/8'],
+        });
+        assert.deepEqual(view.secretsCleared, []);
+        assert.equal(await communityOf(), COMMUNITY);
+
+        // Widened: an entry that was not there, without the community.
+        view = await h.service.setCredential(testActor, groupId, 'snmp', {
+          allowedTargets: ['10.0.0.0/8', '192.168.0.0/16'],
+        });
+        assert.deepEqual(view.secretsCleared, ['community']);
+        assert.equal(await communityOf(), undefined);
+        const entry = h.audit.recorded.at(-1);
+        assert.ok(entry?.action === 'credential.set');
+        assert.deepEqual(entry.secretsCleared, ['community']);
+        assert.equal(JSON.stringify(h.audit.recorded).includes(COMMUNITY), false);
+
+        // Widened again, with the community sent: nothing cleared.
+        view = await h.service.setCredential(testActor, groupId, 'snmp', {
+          community: COMMUNITY,
+        });
+        assert.deepEqual(view.secretsCleared, []);
+        assert.equal(await communityOf(), COMMUNITY);
+      });
+
+      it('says how many sensors beneath its targets now keep it from, in the response and the audit entry', async () => {
+        // The device is 10.0.0.1.
+        let view = await h.service.setCredential(testActor, groupId, 'snmp', {
+          community: COMMUNITY,
+          allowedTargets: ['10.9.0.0/16'],
+        });
+        assert.equal(view.withholds, 1);
+        const entry = h.audit.recorded.at(-1);
+        assert.equal(entry?.action === 'credential.set' ? entry.withholds : null, 1);
+
+        view = await h.service.setCredential(testActor, groupId, 'snmp', {
+          community: COMMUNITY,
+          allowedTargets: ['10.0.0.0/24'],
+        });
+        assert.equal(view.withholds, 0);
+
+        // A set with no targets withholds nothing, and its audit entry does not pretend to count.
+        view = await h.service.setCredential(testActor, deviceId, 'snmp', { community: COMMUNITY });
+        assert.equal(view.withholds, 0);
+        const unbounded = h.audit.recorded.at(-1);
+        assert.equal(
+          unbounded?.action === 'credential.set' ? 'withholds' in unbounded : null,
+          false,
+        );
+      });
+
+      it('counts the sets with no bounds, for Core Health', async () => {
+        assert.equal(await h.vault.unboundedSets(scratch.db), 0);
+        await h.service.setCredential(testActor, deviceId, 'snmp', { community: COMMUNITY });
+        await h.service.setCredential(testActor, groupId, 'snmp', {
+          community: COMMUNITY,
+          allowedTargets: ['10.0.0.0/8'],
+        });
+        await h.service.setCredential(testActor, groupId, 'ssh', {
+          username: 'monitor',
+          password: 'a-long-enough-password',
+          hostKeyFingerprint: 'SHA256:abc',
+        });
+        await h.service.setCredential(testActor, probeId, 'ssh', {
+          username: 'monitor',
+          password: 'a-long-enough-password',
+          hostKeys: ['SHA256:abc'],
+        });
+        await h.service.setCredential(testActor, probeId, 'snmp', { community: COMMUNITY });
+        // Two sets are bounded. The three that are not: the device's SNMP set, the probe's, and
+        // the group's SSH set, whose one fingerprint bounds nothing.
+        assert.equal(await h.vault.unboundedSets(scratch.db), 3);
+      });
+    });
+
     describe('a rotated vault key', () => {
       it('still reads what an older key sealed', async () => {
         await h.service.setCredential(testActor, deviceId, 'snmp', { community: COMMUNITY });

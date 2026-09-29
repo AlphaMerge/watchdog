@@ -116,7 +116,7 @@ describe('the host key', () => {
   });
 
   it('reports an unknown key rather than trusting it', () => {
-    const verdict = verifyHostKey('strict', '', Buffer.from('k'));
+    const verdict = verifyHostKey('strict', [], Buffer.from('k'));
     assert.equal(verdict.kind, 'unknown');
   });
 
@@ -136,6 +136,31 @@ describe('the host key', () => {
         error.phase === 'host-key' &&
         /presented host key SHA256:.*has no expected fingerprint/s.test(error.message),
     );
+  });
+
+  it('connects to a server whose key is any of the set’s host keys (A-41b)', async () => {
+    const session = await SshSession.open(
+      target(),
+      credentials({
+        hostKeyFingerprint: 'SHA256:another',
+        hostKeys: ['SHA256:third', hostKeyFingerprint],
+      }),
+    );
+    assert.equal(session.hostKey.kind, 'trusted');
+    session.close();
+  });
+
+  it('refuses a server whose key is none of them, naming every one it would accept (A-41b)', async () => {
+    server.behave({ password: 'monitor' });
+    await assert.rejects(
+      () =>
+        SshSession.open(
+          target(),
+          credentials({ hostKeyFingerprint: 'SHA256:another', hostKeys: ['SHA256:third', ' '] }),
+        ),
+      /presented host key SHA256:.*expects one of SHA256:another, SHA256:third\. /s,
+    );
+    assert.deepEqual(server.seen, []);
   });
 
   it('refuses a key that is not the one recorded, and names both', async () => {

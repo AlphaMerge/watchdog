@@ -292,6 +292,16 @@ export type Mutation =
       created: boolean;
       secretsSet: readonly string[];
       secretsKept: readonly string[];
+      /**
+       * Names of the secrets this write cleared because it widened where the set may go and did
+       * not send them again (`A-41b`). Absent when there were none.
+       */
+      secretsCleared?: readonly string[];
+      /**
+       * How many sensors beneath the set its targets now keep it from (`A-41b`), counted after
+       * the write. Absent for a set with no targets, which keeps it from none.
+       */
+      withholds?: number;
       /** The half stored in the clear — an SNMP version, a user name. Never a key. */
       publicParams: Readonly<Record<string, unknown>>;
     }
@@ -1062,6 +1072,10 @@ function summarise(mutation: Mutation): Record<string, unknown> {
         created: mutation.created,
         secretsSet: [...mutation.secretsSet],
         secretsKept: [...mutation.secretsKept],
+        ...(mutation.secretsCleared === undefined
+          ? {}
+          : { secretsCleared: [...mutation.secretsCleared] }),
+        ...(mutation.withholds === undefined ? {} : { withholds: mutation.withholds }),
         publicParams: mutation.publicParams,
       };
     case 'credential.deleted':

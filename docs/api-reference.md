@@ -311,7 +311,7 @@ The credential kinds this build can use, with the JSON Schema a form is generate
 
 ### `PUT /api/v1/objects/{id}/credentials/{kind}`
 
-Stores the credential set of this kind on this object, where everything below it inherits it (`CAPABILITIES.MD §10`). **A secret this omits is kept**, exactly as a sensor's `writeOnly` parameter is: a read never returns the value, so a client cannot send it back, and replacing the whole record would delete the community string every time somebody corrected the SNMP version beside it. Send the field with a value to rotate it, or `null` to remove it. **`values` is checked against the kind**, and a field it does not declare is refused with 400 naming it: a secret sent under a mistyped name would otherwise be stored as a public field. The response carries no secret. **Storing a set here vouches for sending it** wherever the sensors beneath that now inherit it send it (`A-41`).
+Stores the credential set of this kind on this object, where everything below it inherits it (`CAPABILITIES.MD §10`). **A secret this omits is kept**, exactly as a sensor's `writeOnly` parameter is: a read never returns the value, so a client cannot send it back, and replacing the whole record would delete the community string every time somebody corrected the SNMP version beside it. Send the field with a value to rotate it, or `null` to remove it. **`values` is checked against the kind**, and a field it does not declare is refused with 400 naming it: a secret sent under a mistyped name would otherwise be stored as a public field. The response carries no secret. **Storing a set here vouches for sending it** wherever the sensors beneath that now inherit it send it (`A-41`). **Unless it has `allowedTargets`, or an SSH set `hostKeys`** (`A-41b`): then it goes to every sensor inside them whoever wrote the sensor, and to none outside, and `withholds` says how many sensors beneath are outside now. A write that widens them (an entry added, the list emptied, strict key checking turned off) clears the secrets it does not send again, and `secretsCleared` names them.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -324,7 +324,7 @@ Stores the credential set of this kind on this object, where everything below it
 | --- | --- | --- |
 | `values` | object | **required** |
 
-**200** { kind, publicParams, source, updatedAt }
+**200** { kind, publicParams, source, updatedAt, withholds, secretsCleared }
 
 ### `DELETE /api/v1/objects/{id}/credentials/{kind}`
 

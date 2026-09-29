@@ -16,8 +16,11 @@ export type SshAuthMethod = 'password' | 'key';
 interface SshCredentialsBase {
   readonly username: string;
   readonly hostKeyPolicy: HostKeyPolicy;
-  /** `SHA256:…`, or empty when nothing has been recorded yet. Public, not a secret. */
-  readonly hostKeyFingerprint: string;
+  /**
+   * Every server key this set may be used with, `SHA256:…` each (`acceptedHostKeys`). Empty when
+   * nothing has been recorded yet. Public, not a secret.
+   */
+  readonly hostKeys: readonly string[];
 }
 
 export interface SshPasswordCredentials extends SshCredentialsBase {
@@ -53,6 +56,23 @@ const block = (values: Readonly<Record<string, unknown>>, key: string): string =
 };
 
 /**
+ * The server keys a set may be used with (`A-41b`): its one `hostKeyFingerprint` and every entry
+ * of `hostKeys`, trimmed, without the empty ones, each once.
+ *
+ * **The only place the two are put together.** The transport checks a server against this, and
+ * the vault and the probe configuration read the same list to decide whether a set is bound by
+ * its keys (`restrictionOf`), so what a set is sent on and what the probe accepts cannot drift.
+ */
+export function acceptedHostKeys(values: Readonly<Record<string, unknown>>): string[] {
+  const listed = Array.isArray(values['hostKeys']) ? (values['hostKeys'] as unknown[]) : [];
+  const keys = [values['hostKeyFingerprint'], ...listed]
+    .filter((key): key is string => typeof key === 'string')
+    .map((key) => key.trim())
+    .filter((key) => key !== '');
+  return [...new Set(keys)];
+}
+
+/**
  * Reads a stored credential set, or says what is missing.
  *
  * **A key beats a password when both are set**, rather than being an error. An operator moving a
@@ -68,7 +88,7 @@ export function readCredentials(values: Readonly<Record<string, unknown>>): SshC
 
   const policyRaw = text(values, 'hostKeyPolicy');
   const hostKeyPolicy: HostKeyPolicy = policyRaw === 'accept-any' ? 'accept-any' : 'strict';
-  const hostKeyFingerprint = text(values, 'hostKeyFingerprint');
+  const hostKeys = acceptedHostKeys(values);
 
   const privateKey = block(values, 'privateKey');
   if (privateKey.trim() !== '') {
@@ -79,7 +99,7 @@ export function readCredentials(values: Readonly<Record<string, unknown>>): SshC
       privateKey,
       passphrase: passphrase === '' ? undefined : passphrase,
       hostKeyPolicy,
-      hostKeyFingerprint,
+      hostKeys,
     };
   }
 
@@ -89,7 +109,7 @@ export function readCredentials(values: Readonly<Record<string, unknown>>): SshC
       `the SSH credential for "${username}" has neither a password nor a private key`,
     );
   }
-  return { method: 'password', username, password, hostKeyPolicy, hostKeyFingerprint };
+  return { method: 'password', username, password, hostKeyPolicy, hostKeys };
 }
 
 // Written as an escape, not as a literal byte. A raw NUL in a source file is invisible in

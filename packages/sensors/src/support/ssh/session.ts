@@ -209,7 +209,7 @@ export class SshSession {
          * does not receive the password anyway.
          */
         hostVerifier: (key: Buffer): boolean => {
-          verdict = verifyHostKey(credentials.hostKeyPolicy, credentials.hostKeyFingerprint, key);
+          verdict = verifyHostKey(credentials.hostKeyPolicy, credentials.hostKeys, key);
           if (verdict.kind === 'trusted' || verdict.kind === 'unchecked') return true;
           fail(
             new SshError(describeVerdict(host, verdict) ?? 'the host key was rejected', {

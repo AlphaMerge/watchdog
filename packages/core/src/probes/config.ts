@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import type { SensorAssignment } from '@ms/shared';
+import { restrictionOf, type CredentialRestriction } from '@ms/sensors';
+import { PROTOCOL_VERSION, type SensorAssignment } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
 import type { CredentialVouching, SensorBeingSent } from '../objects/credential-vouching.js';
 import { ObjectError } from '../objects/errors.js';
@@ -106,7 +107,15 @@ export class ProbeConfigService {
     ]);
   }
 
-  async assignmentsFor(probeObjectId: number): Promise<ProbeAssignments> {
+  async assignmentsFor(
+    probeObjectId: number,
+    /**
+     * What the probe speaks (`A-41b`). A set bounded by its SSH keys goes only to a probe that
+     * checks the whole list, so the endpoint passes the session's version; this build's own is
+     * only the default for a caller that has no probe on the line.
+     */
+    peerVersion: number = PROTOCOL_VERSION,
+  ): Promise<ProbeAssignments> {
     const rows = await this.#db.query<{
       sensor_id: string;
       sensor_type: string;
@@ -161,7 +170,8 @@ export class ProbeConfigService {
     const withheld =
       (await this.#credentialCheck?.withhold(
         probeObjectId,
-        beingSent(evaluatedHere, resolved.owners),
+        beingSent(evaluatedHere, resolved),
+        peerVersion,
       )) ?? new Map<number, string>();
     const assignable = evaluatedHere.filter((row) => !withheld.has(Number(row.sensor_id)));
     if (assignable.length === 0) return EMPTY_ASSIGNMENTS;
@@ -253,10 +263,21 @@ export class ProbeConfigService {
       this.#resolver.resolveForObjects<number>([sensorId], 'scan.timeoutMs'),
       this.#credentialsFor([{ sensor_id: String(sensorId), sensor_type: row.sensor_type }]),
     ]);
-    // Asked, and not held: pressing the button changes nothing about the sensor (`A-41`).
+    // Asked, and not held: pressing the button changes nothing about the sensor (`A-41`). The
+    // probe's version is the one it last said hello with; a probe never seen is asked as the
+    // oldest, which sends it nothing it might not check (`A-41b`).
+    // Through the GID the probe object holds now: a revoked registration can still name it.
+    const [registered] = await this.#db.query<{ protocol_version: number }>(
+      `SELECT r.protocol_version
+       FROM probe_config c
+       JOIN probe_registration r ON r.gid = c.gid
+       WHERE c.object_id = $1`,
+      [Number(row.probe_id)],
+    );
     const refused = await this.#credentialCheck?.refusals(
       Number(row.probe_id),
-      beingSent([{ sensor_id: String(sensorId), ...row }], credentials.owners),
+      beingSent([{ sensor_id: String(sensorId), ...row }], credentials),
+      registered?.protocol_version ?? 0,
     );
     const withheld = refused?.get(sensorId);
     if (withheld !== undefined) {
@@ -295,7 +316,8 @@ export class ProbeConfigService {
   ): Promise<ResolvedCredentials> {
     const stamps = new Map<number, string>();
     const owners = new Map<number, Map<string, number>>();
-    if (this.#vault === undefined) return { values: new Map(), stamps, owners };
+    const restrictions = new Map<number, Map<string, CredentialRestriction>>();
+    if (this.#vault === undefined) return { values: new Map(), stamps, owners, restrictions };
 
     const byKindSet = new Map<string, { kinds: string[]; sensorIds: number[] }>();
     for (const row of rows) {
@@ -306,7 +328,7 @@ export class ProbeConfigService {
       bucket.sensorIds.push(Number(row.sensor_id));
       byKindSet.set(key, bucket);
     }
-    if (byKindSet.size === 0) return { values: new Map(), stamps, owners };
+    if (byKindSet.size === 0) return { values: new Map(), stamps, owners, restrictions };
 
     const out = new Map<number, Record<string, Record<string, unknown>>>();
     for (const { kinds, sensorIds } of byKindSet.values()) {
@@ -315,6 +337,7 @@ export class ProbeConfigService {
         const values: Record<string, Record<string, unknown>> = {};
         const marks: string[] = [];
         const ownedBy = new Map<string, number>();
+        const bounds = new Map<string, CredentialRestriction>();
         // Sorted, so the same credentials in a different map order fingerprint the same.
         for (const kind of [...byKind.keys()].sort()) {
           const entry = byKind.get(kind);
@@ -323,13 +346,15 @@ export class ProbeConfigService {
           values[kind] = entry.values;
           marks.push(`${kind}=${entry.stamp}`);
           ownedBy.set(kind, entry.ownerId);
+          bounds.set(kind, restrictionOf(kind, entry.values));
         }
         out.set(sensorId, values);
         stamps.set(sensorId, marks.join('|'));
         owners.set(sensorId, ownedBy);
+        restrictions.set(sensorId, bounds);
       }
     }
-    return { values: out, stamps, owners };
+    return { values: out, stamps, owners, restrictions };
   }
 }
 
@@ -358,6 +383,8 @@ interface ResolvedCredentials {
   stamps: Map<number, string>;
   /** The object each sensor's set of each kind is stored on (`A-41`). */
   owners: Map<number, Map<string, number>>;
+  /** What bounds each sensor's set of each kind (`A-41b`). */
+  restrictions: Map<number, Map<string, CredentialRestriction>>;
 }
 
 /** The sensors being sent a set, as the credential check asks about them (`A-41`). */
@@ -369,12 +396,13 @@ function beingSent(
     host: string | null;
     ip_version: string | null;
   }[],
-  owners: ReadonlyMap<number, ReadonlyMap<string, number>>,
+  resolved: Pick<ResolvedCredentials, 'owners' | 'restrictions'>,
 ): SensorBeingSent[] {
   const sent: SensorBeingSent[] = [];
   for (const row of rows) {
     const sensorId = Number(row.sensor_id);
-    const ownedBy = owners.get(sensorId);
+    const ownedBy = resolved.owners.get(sensorId);
+    const bounds = resolved.restrictions.get(sensorId);
     if (ownedBy === undefined || ownedBy.size === 0) continue;
     sent.push({
       sensorId,
@@ -383,6 +411,7 @@ function beingSent(
       host: row.host ?? '',
       ipVersion: row.ip_version ?? 'auto',
       owners: ownedBy,
+      ...(bounds === undefined ? {} : { restrictions: bounds }),
     });
   }
   return sent;

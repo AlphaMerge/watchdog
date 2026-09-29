@@ -72,7 +72,7 @@ export interface ResultReceiver {
 export interface ProbeConfigSource {
   /** The probe object this GID owns, or null while it is unclaimed. */
   probeObjectFor(gid: string): Promise<number | null>;
-  assignmentsFor(probeObjectId: number): Promise<ProbeAssignments>;
+  assignmentsFor(probeObjectId: number, peerVersion?: number): Promise<ProbeAssignments>;
   touch(objectId: number): Promise<void>;
 }
 
@@ -1388,7 +1388,7 @@ export class ProbeEndpoint {
         const assignments =
           session.probeObjectId === null
             ? EMPTY_ASSIGNMENTS
-            : await source.assignmentsFor(session.probeObjectId);
+            : await source.assignmentsFor(session.probeObjectId, session.protocolVersion);
         // **Gone while its configuration was read** (`A-50`). What was read carries every sensor's
         // decrypted credentials, and a connection that has closed has nowhere to send them; the
         // next session asks again.

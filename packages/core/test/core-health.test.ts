@@ -65,6 +65,7 @@ function sources(
     resultsFutureDated: number;
     resultsPastDated: number;
     credentialsToReenter: number;
+    unboundedCredentials: number;
     disk: { freePercent: number; freeBytes: number; databaseBytes: number } | null;
     evictedChunks: number;
     machineMemory: AvailableMemoryLow | null;
@@ -114,6 +115,9 @@ function sources(
       probesSilent: overrides.probesSilent ?? 0,
     }),
     credentialsToReenter: () => Promise.resolve(overrides.credentialsToReenter ?? 0),
+    ...(overrides.unboundedCredentials === undefined
+      ? {}
+      : { unboundedCredentials: () => Promise.resolve(overrides.unboundedCredentials ?? 0) }),
     delivery: () => {
       if (overrides.deliveryThrows === true) {
         return Promise.reject(new Error('the notification queue would not answer'));
@@ -486,6 +490,12 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       // name, in the clear. The vault counts them; this is where an operator sees the number.
       const reading = await build({ credentialsToReenter: 2 }).read();
       assert.equal(reading['credentialsToReenter'], 2);
+    });
+
+    it('counts the credential sets with no targets, and gaps without a source to ask (A-41b)', async () => {
+      assert.equal((await build({ unboundedCredentials: 3 }).read())['credentialsUnbounded'], 3);
+      assert.equal((await build({ unboundedCredentials: 0 }).read())['credentialsUnbounded'], 0);
+      assert.equal((await build({}).read())['credentialsUnbounded'], null);
     });
 
     it('counts what is actually queued in the housekeeping tables', async () => {
@@ -985,6 +995,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(channels['backfillQueue'], null);
       assert.equal(channels['backfillParked'], null);
       assert.equal(channels['credentialsToReenter'], null);
+      assert.equal(channels['credentialsUnbounded'], null);
     });
 
     it('still throws for the sweep, which must not write a row of zeros', async () => {

@@ -413,6 +413,15 @@ const CHANNELS: readonly ChannelDef[] = [
         'a credential set holds keys its kind does not declare; re-enter it (the core log says which)',
     },
   },
+  // `A-41b`. Credential sets with no allowed targets and no SSH host keys: each goes wherever
+  // somebody with `write` on the object it is stored on vouches for, which is trust in every one of
+  // them with it. A number to read and bring down, with no limit: most installations start with
+  // every set here, and a warning from the first reading would teach everyone to ignore it.
+  {
+    key: 'credentialsUnbounded',
+    name: 'Credential sets without targets',
+    unit: 'sets',
+  },
   // **Log lines the core could not write since the last reading** (`P-216` part 3): refused at its
   // output's eight-megabyte bound while the journal was not reading, or lost to an output that
   // closed. A count per reading, not a running total and not a counter's rate: a total would warn

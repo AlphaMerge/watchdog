@@ -1825,7 +1825,12 @@ export async function objectRoutes(
           'kind**, and a field it does not declare is refused with 400 naming it: a secret ' +
           'sent under a mistyped name would otherwise be stored as a public field. The ' +
           'response carries no secret. **Storing a set here vouches for sending it** wherever ' +
-          'the sensors beneath that now inherit it send it (`A-41`).',
+          'the sensors beneath that now inherit it send it (`A-41`). **Unless it has ' +
+          '`allowedTargets`, or an SSH set `hostKeys`** (`A-41b`): then it goes to every sensor ' +
+          'inside them whoever wrote the sensor, and to none outside, and `withholds` says how ' +
+          'many sensors beneath are outside now. A write that widens them (an entry added, the ' +
+          'list emptied, strict key checking turned off) clears the secrets it does not send ' +
+          'again, and `secretsCleared` names them.',
         params: credentialKindParams,
         body: {
           type: 'object',
@@ -1833,7 +1838,7 @@ export async function objectRoutes(
           required: ['values'],
           properties: { values: { type: 'object', additionalProperties: true } },
         },
-        response: { 200: { $ref: 'ms:credentialView' } },
+        response: { 200: { $ref: 'ms:credentialWrite' } },
       },
     },
     async (request, reply) => {

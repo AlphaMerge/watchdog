@@ -46,6 +46,7 @@ describe('what a protocol version can do', () => {
       poolMemory: false,
       memorySinceLastReport: false,
       logOutput: false,
+      credentialHostKeys: false,
     });
   });
 
@@ -308,6 +309,7 @@ describe('the health a peer can be sent', () => {
     );
     assert.equal(capabilitiesFor(20).memorySinceLastReport, true);
     assert.equal(versionFor('logOutput'), 21);
+    assert.equal(versionFor('credentialHostKeys'), 22);
     assert.ok(missingCapabilities(20).includes('report the log lines it could not write'));
   });
 });

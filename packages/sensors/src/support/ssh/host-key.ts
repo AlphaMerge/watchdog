@@ -58,7 +58,11 @@ export type HostKeyVerdict =
   | { readonly kind: 'trusted' }
   /** No fingerprint recorded yet. The message carries the one to paste in. */
   | { readonly kind: 'unknown'; readonly presented: string }
-  | { readonly kind: 'mismatch'; readonly expected: string; readonly presented: string }
+  | {
+      readonly kind: 'mismatch';
+      readonly expected: readonly string[];
+      readonly presented: string;
+    }
   /** Accepted without checking, because the operator asked for that. Still said out loud. */
   | { readonly kind: 'unchecked'; readonly presented: string };
 
@@ -70,14 +74,15 @@ export type HostKeyVerdict =
  */
 export function verifyHostKey(
   policy: HostKeyPolicy,
-  expected: string,
+  accepted: readonly string[],
   hostKey: Buffer,
 ): HostKeyVerdict {
   const presented = fingerprintOf(hostKey);
   if (policy === 'accept-any') return { kind: 'unchecked', presented };
-  if (expected.trim() === '') return { kind: 'unknown', presented };
-  if (matchesFingerprint(expected, presented)) return { kind: 'trusted' };
-  return { kind: 'mismatch', expected: expected.trim(), presented };
+  const expected = accepted.map((key) => key.trim()).filter((key) => key !== '');
+  if (expected.length === 0) return { kind: 'unknown', presented };
+  if (expected.some((key) => matchesFingerprint(key, presented))) return { kind: 'trusted' };
+  return { kind: 'mismatch', expected, presented };
 }
 
 /**
@@ -102,7 +107,7 @@ export function describeVerdict(host: string, verdict: HostKeyVerdict): string |
     case 'mismatch':
       return (
         `${host} presented host key ${verdict.presented}, and this credential expects ` +
-        `${verdict.expected}. Either the host was rebuilt and its key is new, or something is ` +
+        `${verdict.expected.length === 1 ? '' : 'one of '}${verdict.expected.join(', ')}. Either the host was rebuilt and its key is new, or something is ` +
         'answering on its address that is not it — telling those apart is exactly what this ' +
         'check is for, so confirm which before changing the fingerprint'
       );

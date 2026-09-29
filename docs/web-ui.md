@@ -262,6 +262,14 @@ sensor's port, a device moved under the group — needs `write` on the group, an
 refused with a message naming the kind and the group (`A-41`). A sensor whose credentials nobody
 still vouches for reads **Unknown** on its **Overview**, with a sentence saying what to do.
 
+A set with **allowed targets**, or an SSH set with **host keys**, is not vouched for by anybody
+(`A-41b`). A device inside its bounds gets it whoever saved the device, and those saves are not
+refused. A device outside them does not get it, whoever saved it. Its sensors read **Unknown** on
+their **Overview** with the reason: outside the targets, a device named by host name where the
+targets name only addresses, or a probe too old to check more than one host key. There is no
+credential view yet (`U-21`): sets are written through the API, and Core Health's **Credential
+sets without targets** is where the sets with no bounds are counted.
+
 On the **Settings** tab, each row is a toggle rather than a plain input, because the source is the
 half that matters: "60 seconds" is not the same fact as "60 seconds, because the group two levels
 up says so". Overriding to the same value the parent already has is a real state and is kept

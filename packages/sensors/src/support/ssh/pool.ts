@@ -265,6 +265,10 @@ function keyOf(target: SshTarget, credentials: SshCredentials, options: SshSessi
     target.host,
     String(target.port ?? 22),
     credentialFingerprint(credentials),
+    // A connection was checked against the keys accepted when it opened. Accepting fewer has to
+    // open a new one, or a key taken off the list would go on being trusted until it idled out.
+    credentials.hostKeyPolicy,
+    credentials.hostKeys.join(','),
     String(options.connectTimeoutMs ?? ''),
   ].join('|');
 }

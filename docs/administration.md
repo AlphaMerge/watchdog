@@ -372,10 +372,59 @@ point it at a machine of their own and be sent the group's community at the next
   `credential.adopted` entry per kind, with how many were carried and how many were left
   withheld.
 
-**`write` on the object a set is stored on is trust with that set.** Anyone with it may send the
-set to any address they can put a device at, as they always could. Store a set as low in the
-tree as its devices allow, and grant `write` there with that in mind. `A-41b` will let a set name
-the addresses it may go to.
+**`write` on the object a set is stored on is trust with that set, unless the set has targets.**
+Without them, anyone with that `write` may send the set to any address they can put a device at.
+Store a set as low in the tree as its devices allow, and grant `write` there with that in mind.
+Core Health's **Credential sets without targets** counts the sets this is still true of.
+
+**A set with `allowedTargets` goes to every device inside them, and to none outside, whoever
+wrote the device** (`A-41b`). An entry is a host name (`db1.example.com`), a `*.domain` pattern
+(every name *below* the domain), an address, or a CIDR range; the write refuses anything else,
+naming the entry. Nobody vouches for a bounded set, so `A-41`'s refusals above do not apply to it:
+a device writer may create, re-point or move devices inside the targets and they receive it, and
+nobody, not even an administrator, can bring it outside.
+
+- **The targets delegate the set's use.** Inside them, anybody who may create a sensor may run
+  what that sensor runs with it, whether a script over SSH or a query on a database. Bound a set
+  to the devices it is for, and no wider.
+- **A device is matched with entries of its own sort.** A device given as an address is inside
+  an address or a range that covers it. A device given as a name is inside a name or a
+  `*.domain` that covers it. **A device named by host name, facing targets that name only
+  addresses and ranges, is refused**, since the core does not resolve names. A probe that did
+  would have to connect to the very address it checked, or whoever picks the name could answer
+  the check with one address and the connection with another (`A-41c`). Give the device its
+  address, or add its name to the targets.
+- **Outside the targets, a sensor reads Unknown** with a sentence saying why and what sends the
+  set again, and "check now" answers 409 `OBJECT_CREDENTIALS_WITHHELD`. The write that moved it
+  there is not refused: targets decide delivery, at every configuration a probe is sent, whoever
+  made the change.
+- **Narrowing the targets says how many sensors it takes out.** The response's `withholds`, and
+  the `credential.set` audit entry, count the sensors beneath that are outside them after the
+  write. Restricting a set to ranges when the devices under it are named by host name takes every
+  one of them to Unknown, and the count is how you find that out before the pages do. Unknown
+  pages as it always has: once per sensor, collected into the template's digest, and nothing for a
+  sensor a Down dependency already holds.
+- **Widening the targets needs the secret again.** A write that adds an entry, or empties the
+  list, clears the set's secrets unless the same write sends them. The response's
+  `secretsCleared` and the audit entry name what went. Removing entries, or adding targets to a
+  set that had none, keeps them: whoever may edit a set without knowing its password may narrow
+  where it goes, and may not widen it. An added entry widens even when it sits inside an old
+  range.
+- **A set stored above the probes reaches its targets behind every probe.** `10.0.0.0/8` on the
+  root is every probe's 10.0.0.0/8, and those are different machines. To keep a set to one site,
+  store it on that probe or a group under it.
+
+**An SSH set can be bounded by its server keys** (`hostKeys`). List the key of every server it may
+log in to, as `ssh-keygen -lf` prints them. With keys listed and host key checking `strict`, a
+server whose key is not in the list, or is not the one `hostKeyFingerprint`, is never sent the
+password, so the set goes to any device inside its targets (all of them, when it has none)
+whoever wrote the device. A set that lists keys cannot also accept any key: the write is refused.
+**The one `hostKeyFingerprint` on its own bounds nothing.** The probe still checks it, as before,
+but it does not delegate the set. Counting it would have handed every existing strict SSH set to
+anyone who can write a device under it, on the day of the upgrade. Adding a key, or turning strict
+checking off, needs the password again. **A probe older than protocol 22 is not sent a set that
+lists keys**: it would check only the one fingerprint. Its sensors read Unknown until the probe is
+upgraded.
 
 **Secrets in a sensor's own parameters stay with its device** (`A-41`, by `A-40`'s rule). An SNMP
 community or key, or a script's secret, set on the sensor rather than inherited, is cleared when
@@ -1168,6 +1217,10 @@ Covered in [`docs/installation.md`](installation.md#upgrading). The two things w
   `systemctl edit`, `systemctl set-property` — which no upgrade touches.
 - **A build refuses to start against a schema migrated by a newer build.** That refusal is
   correct. Install the matching release rather than migrating backwards.
+- **An upgrade never changes who receives a secret without anyone choosing it.** A credential
+  set is bounded by `allowedTargets` or SSH `hostKeys` only when somebody writes them (`A-41b`).
+  So every set in use before stays under `A-41`'s voucher rule, a strict SSH set with only its
+  one `hostKeyFingerprint` included, and is sent exactly where it was sent the day before.
 
 ---
 

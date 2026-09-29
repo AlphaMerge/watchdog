@@ -41,6 +41,12 @@ import { AppError } from '../errors/app-error.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
+ * Version 22 adds `credentialHostKeys` (`A-41b`): an SSH credential set's `hostKeys`, the list
+ * of server keys it may be used with, beside the one `hostKeyFingerprint`. Nothing on the wire
+ * changes shape, since a set's values were always free-form; what changes is what a probe does
+ * with them. An older probe reads the one fingerprint and would ignore the list, so the core
+ * sends a set that has one only to a probe at 22, and holds the sensor Unknown on an older one.
+ *
  * Version 21 adds `logDropped` and `logBacklogBytes` (`P-216` part 3): the lines the probe's log
  * output has dropped since it started, a running total the core turns into a count per reading,
  * and what the output holds that its reader has not taken. Gated and stripped like 19's.
@@ -93,7 +99,7 @@ import { AppError } from '../errors/app-error.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 21;
+export const PROTOCOL_VERSION = 22;
 
 /**
  * The oldest peer version this build still understands.

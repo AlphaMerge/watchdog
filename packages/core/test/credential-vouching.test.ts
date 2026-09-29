@@ -9,6 +9,7 @@ import type { Database } from '../src/db/pool.js';
 import {
   CredentialVouching,
   WITHHELD_CREDENTIALS,
+  boundRefusal,
   declarationsOf,
   destinationOf,
   recipeOf,
@@ -108,6 +109,55 @@ describe('what a write does about one sensor and kind (A-41)', () => {
       assert.equal(verdictFor(route(vouched), mayVouch), expected);
     });
   }
+});
+
+describe('whether a bounded set goes where a sensor sends it (A-41b)', () => {
+  const targets = (...entries: string[]) => ({ targets: entries, hostKeys: null });
+  const keys = { targets: [], hostKeys: ['SHA256:a'] };
+  const table: [string, Parameters<typeof boundRefusal>[0], string, number, string | null][] = [
+    ['an address inside a range', targets('10.0.0.0/8'), '10.1.2.3', 22, null],
+    ['an address outside it', targets('10.0.0.0/8'), '192.0.2.1', 22, WITHHELD_CREDENTIALS.outside],
+    ['a name under a pattern', targets('*.example.test'), 'db.example.test', 22, null],
+    [
+      'a name facing only ranges',
+      targets('10.0.0.0/8'),
+      'db.example.test',
+      22,
+      WITHHELD_CREDENTIALS.undecided,
+    ],
+    ['a set bounded by its keys, to a probe that checks them', keys, '192.0.2.1', 22, null],
+    [
+      'a set bounded by its keys, to one that cannot',
+      keys,
+      '192.0.2.1',
+      21,
+      WITHHELD_CREDENTIALS.probeTooOld,
+    ],
+    ['a probe never heard from', keys, '192.0.2.1', 0, WITHHELD_CREDENTIALS.probeTooOld],
+    [
+      'both bounds, and the targets refuse first',
+      { targets: ['10.0.0.0/8'], hostKeys: ['SHA256:a'] },
+      '192.0.2.1',
+      21,
+      WITHHELD_CREDENTIALS.outside,
+    ],
+    ['targets alone, to an old probe', targets('10.0.0.0/8'), '10.1.2.3', 21, null],
+  ];
+  for (const [name, restriction, host, version, expected] of table) {
+    it(name, () => {
+      assert.equal(boundRefusal(restriction, host, version), expected);
+    });
+  }
+
+  it('names no owner, and says in each what sends the set again', () => {
+    for (const reason of [
+      WITHHELD_CREDENTIALS.outside,
+      WITHHELD_CREDENTIALS.undecided,
+      WITHHELD_CREDENTIALS.probeTooOld,
+    ]) {
+      assert.match(reason, /^Not scanned: .* sends them again\.$/);
+    }
+  });
 });
 
 describe('where a set is sent, as a fingerprint (A-41)', () => {
@@ -731,6 +781,95 @@ describe(
       assert.equal(vouching.withheld().get(edgeTraffic), 'held elsewhere');
       await vouching.settle('credentials:elsewhere', new Map());
       assert.equal(vouching.withheld().has(edgeTraffic), false);
+    });
+
+    // ── a set that says where it may go (`A-41b`) ─────────────────────────────────────────
+
+    it('sends a bounded set inside its targets whoever wrote the sensor, and nowhere outside, whoever wrote it (A-41b)', async () => {
+      // The operator writes `racks`, not `datacentre`, where the set is stored. Under `A-41`
+      // alone every one of these writes was refused.
+      const bounded = { version: 'v2c', community: 'dc-secret' };
+      await h.service.setCredential(testActor, datacentre, 'snmp', {
+        ...bounded,
+        allowedTargets: ['192.0.2.0/28', '*.inside.test'],
+      });
+      try {
+        const operatorWrites = await as(operator);
+        await up(rackTraffic);
+        assert.equal(await sent(rackTraffic), 'with');
+
+        // Inside: re-pointed, and a new device by name, each by a writer who could not vouch.
+        await h.service.update(
+          operatorWrites,
+          rackSwitch,
+          { kind: 'device', host: '192.0.2.11' },
+          { kind: 'none' },
+        );
+        assert.equal(await sent(rackTraffic), 'with');
+        const named = await device(
+          racks,
+          `named-${String(process.hrtime.bigint())}`,
+          'db.inside.test',
+        );
+        const namedTraffic = await create(operatorWrites, {
+          kind: 'sensor',
+          parentId: named,
+          name: 'named',
+          sensorType: 'snmp.traffic',
+          params: { port: 161 },
+        });
+        assert.equal(await sent(namedTraffic), 'with');
+        assert.equal(await recorded(namedTraffic), null, 'nobody vouches for a bounded set');
+
+        // Outside: the write is taken, the set is not sent, and the sensor says why.
+        await h.service.update(
+          operatorWrites,
+          rackSwitch,
+          { kind: 'device', host: '203.0.113.66' },
+          { kind: 'none' },
+        );
+        assert.equal(await sent(rackTraffic), 'absent');
+        assert.deepEqual(await runtimeOf(rackTraffic), {
+          state: 'unknown',
+          message: WITHHELD_CREDENTIALS.outside,
+        });
+        await assert.rejects(
+          config.assignmentFor(rackTraffic),
+          (error: unknown) =>
+            error instanceof ObjectError && error.message === WITHHELD_CREDENTIALS.outside,
+        );
+
+        // Whoever wrote it: the administrator, who could vouch for anything under `A-41`.
+        await h.service.update(
+          await as(admin),
+          rackSwitch,
+          { kind: 'device', host: '203.0.113.67' },
+          { kind: 'none' },
+        );
+        assert.equal(await sent(rackTraffic), 'absent');
+
+        // A name the targets can only decide by resolving it is refused, not guessed at.
+        await h.service.update(
+          operatorWrites,
+          rackSwitch,
+          { kind: 'device', host: 'switch.elsewhere.test' },
+          { kind: 'none' },
+        );
+        assert.equal(await sent(rackTraffic), 'absent');
+        assert.equal(vouching.withheld().get(rackTraffic), WITHHELD_CREDENTIALS.undecided);
+
+        // And back inside, it is sent again with nobody vouching.
+        await h.service.update(
+          operatorWrites,
+          rackSwitch,
+          { kind: 'device', host: '192.0.2.12' },
+          { kind: 'none' },
+        );
+        assert.equal(await sent(rackTraffic), 'with');
+        assert.equal(vouching.withheld().has(rackTraffic), false);
+      } finally {
+        await h.service.setCredential(testActor, datacentre, 'snmp', bounded);
+      }
     });
 
     // ── the secrets in a sensor's own parameters ───────────────────────────────────────────

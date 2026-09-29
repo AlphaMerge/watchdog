@@ -47,7 +47,7 @@ operator to guess whether that was the target, a threshold someone edited, or a 
 | `dependency` | A master object went Down                                       |
 | `parent`     | An ancestor was paused, cascading down                          |
 | `probe`      | The probe owning this sensor is unreachable                     |
-| `access`     | The account that vouched for this sensor can no longer read what it names (`A-29`), or write where its credentials are stored (`A-41`) |
+| `access`     | The account that vouched for this sensor can no longer read what it names (`A-29`), or write where its credentials are stored (`A-41`); or the sensor is outside its credentials' bounds (`A-41b`) |
 | `simulated`  | An operator forced an error to test a notification chain        |
 
 ---
@@ -63,7 +63,7 @@ eye. Evaluated **in this order**, first match wins:
 | 1 | Any pause source active               | `paused`            | the first active source (§3)     |
 | 2 | Simulated error set (`M-14`)          | `down` → §2.4       | `simulated`                      |
 | 3 | Owning probe unreachable *or* connected and not delivering | `unknown` | `probe`               |
-| 3a | Its voucher may no longer read what it names (`A-29`), or write where its credentials are stored (`A-41`) | `unknown` | `access` |
+| 3a | Its voucher may no longer read what it names (`A-29`), or write where its credentials are stored (`A-41`); or it is outside its credentials' bounds (`A-41b`) | `unknown` | `access` |
 | 4 | No reading since creation or resume   | `unknown`           | `scan`                           |
 | 5 | Otherwise                             | worst of §2.1, §2.2 | whichever produced the worst     |
 
@@ -148,6 +148,14 @@ failed login, notified only through a trigger on Unknown, and re-derived, here a
 configuration a probe is built — which a grant, group or account change now pushes. The two
 checks share one set of withheld sensors, each under its own name (the credential check under
 one per probe), so one releasing a sensor never releases what another still holds.
+
+**And a sensor outside its credentials' bounds** (`A-41b`). A set with allowed targets, or an SSH
+set with host keys, is sent by its bounds alone: nobody vouches for it. A sensor outside them, one
+named by host name when the targets name only addresses, or one whose probe is too old to check
+a list of host keys, is left out of the configuration the same way, under the same per-probe
+name, and reads `unknown`/`access` with the reason. Narrowing a set's targets can do that to a
+group at once, and pages as Unknown does: once per sensor, into the digest, and not at all for a
+sensor a Down dependency already holds, since a paused sensor is not configured.
 
 ### 2.1 Query state — did the check run?
 
@@ -469,7 +477,7 @@ can check the model against `WORKFLOW.MD §4`'s diagram.
 | any                 | `paused`            | Any pause source becomes active                    | first active (§3)      |
 | `paused`            | `unknown`           | Last pause source cleared                          | `scan`                 |
 | any                 | `unknown`           | Owning probe became unreachable                    | `probe`                |
-| any but `paused`, or `down` (`simulated`) | `unknown` | The sensor's voucher lost read on what it names (`A-29`) or write where its credentials are stored (`A-41`), or was deleted or disabled | `access` |
+| any but `paused`, or `down` (`simulated`) | `unknown` | The sensor's voucher lost read on what it names (`A-29`) or write where its credentials are stored (`A-41`), or was deleted or disabled; or the sensor is outside its credentials' bounds (`A-41b`) | `access` |
 | `unknown` (`access`) | `up` / `warning` / `down` / `unknown` | Vouched for again: its last reading decides, as when a probe returns, until the next one | `scan` / `limit` / `lookup` |
 | any but `paused`    | `down`              | Simulated error set                                | `simulated`            |
 | `up`/`warning`/`down` | itself            | The reason changed, not the state                  | `scan` / `limit` / `lookup` |

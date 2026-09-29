@@ -24,12 +24,16 @@ export {
   credentialKindIds,
   CREDENTIAL_KINDS,
   declaredPublic,
+  isRestricted,
   publicFields,
+  restrictionOf,
   secretFields,
   splitCredential,
   undeclaredKeys,
+  widenedFields,
   writeSchema,
   type CredentialKindDefinition,
+  type CredentialRestriction,
 } from './credentials/index.js';
 
 // The trap domain module, and only it: pure functions over plain data with no protocol import,

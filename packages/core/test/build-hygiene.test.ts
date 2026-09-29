@@ -184,6 +184,10 @@ describe('credential-shaped response fields', () => {
     ],
     ['mustChangePassword', 'A boolean on the session and user routes.'],
     ['cappedByToken', "A boolean saying an API token's ceiling limited the right."],
+    [
+      'secretsCleared',
+      'The names of the secret fields a credential write cleared because it widened where the set may go (A-41b), never their values.',
+    ],
   ]);
 
   const SHAPE =

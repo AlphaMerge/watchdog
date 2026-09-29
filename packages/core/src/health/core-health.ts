@@ -150,6 +150,13 @@ export interface CoreHealthSources {
    * reading rather than once at start-up, so it falls as the sets are re-entered.
    */
   credentialsToReenter: (q: Queryable) => Promise<number>;
+  /**
+   * `CredentialVault.unboundedSets` — the credential sets with no allowed targets and no SSH host
+   * keys, which go wherever somebody with `write` on their owner vouches for (`A-41b`). A count to
+   * read, not a warning: most installations start with every set unbounded, and a channel that
+   * warned from the first reading would be one nobody looks at.
+   */
+  unboundedCredentials?: (q: Queryable) => Promise<number>;
   /** `DeliveryHealthReader.read()` — undelivered alarms, and how old the oldest one is. */
   delivery: (q: Queryable) => Promise<{
     pending: number;
@@ -375,6 +382,7 @@ export class CoreHealthService {
       resultsPastDated: discards.discardedPastTime,
       reactionsDeferred: ingestion.deferredReactions,
       credentialsToReenter: queues.credentials,
+      credentialsUnbounded: queues.unbounded,
       logDropped: dropped,
       logBacklog: log === undefined ? null : round(log.backlogBytes / MB, 2),
       // Since the last reading, and the whole count on the first: the total started with this
@@ -526,6 +534,7 @@ export class CoreHealthService {
     parked: { count: number | null; lastError: string | null };
     reap: number | null;
     credentials: number | null;
+    unbounded: number | null;
   }> {
     try {
       return await this.#db.tx(async (q) => ({
@@ -535,6 +544,10 @@ export class CoreHealthService {
         parked: await parkedBackfill(q),
         reap: await count(q, 'SELECT count(*)::int AS n FROM channel_reap'),
         credentials: await this.#sources.credentialsToReenter(q),
+        unbounded:
+          this.#sources.unboundedCredentials === undefined
+            ? null
+            : await this.#sources.unboundedCredentials(q),
       }));
     } catch (error: unknown) {
       if (!degrade) throw error;
@@ -549,6 +562,7 @@ export class CoreHealthService {
         parked: { count: null, lastError: null },
         reap: null,
         credentials: null,
+        unbounded: null,
       };
     }
   }
