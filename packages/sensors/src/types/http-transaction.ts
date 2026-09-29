@@ -7,6 +7,7 @@ import type {
 } from '../contract.js';
 import { authorizationFor, scrub, secretsOf } from '../support/http/auth.js';
 import { extract, MAX_PATTERN, PatternError } from '../support/pattern.js';
+import { scrubberOf } from '../support/secrets.js';
 import { HTTP_COMMON_SCHEMA } from './http-shared.js';
 
 /**
@@ -35,6 +36,11 @@ import { HTTP_COMMON_SCHEMA } from './http-shared.js';
  * device's `http` credential rather than from the parameters, and **every secret is scrubbed out
  * of the message before it leaves this function**: a failure message is stored on the state log
  * and returned by the API, so a password in one is a password the API hands out.
+ *
+ * **A credential goes in the `Authorization` header or the body, and nowhere else** (`A-42`). See
+ * `misplacedCredentials`. And every response is scrubbed of the check's secrets as it arrives,
+ * before a content check, a capture or a message reads it: a server that echoes what it was sent
+ * would otherwise hand the credential to the next step, or answer a `mustContain` guess.
  */
 
 const MAX_STEPS = 10;
@@ -140,6 +146,63 @@ export function substitute(
   });
 }
 
+/** `{{credential.…}}`, read as `substitute` reads a name. */
+const CREDENTIAL_REFERENCE = /\{\{\s*(credential\.[A-Za-z0-9_.]+)\s*\}\}/;
+
+/**
+ * Every place a step names a credential that is not its `Authorization` header or its body
+ * (`A-42`), as the JSON Pointer of the value and a sentence saying which step and which field.
+ *
+ * **Why those two and no others.** `{{credential.password}}` substitutes into whatever text
+ * names it, and the sensor's writer chooses that text without being able to read the device's
+ * `http` credential. A path is a query string that servers and proxies log, and a custom header
+ * is one a server may send straight back. Either puts a password the writer was never shown
+ * somewhere they can read it. The header a server treats as a credential, and the body a login
+ * form posts, are the two places a transaction needs one.
+ *
+ * Read twice. `paramProblems` refuses a sensor that does this when it is written. `execute`
+ * refuses to run one written before the rule, before it sends anything, in the same words.
+ * Exported for its own tests.
+ */
+export function misplacedCredentials(
+  params: Readonly<Record<string, unknown>>,
+): { path: string; message: string }[] {
+  const raw = params['steps'];
+  if (!Array.isArray(raw)) return [];
+  const out: { path: string; message: string }[] = [];
+  for (const [at, entry] of raw.entries()) {
+    if (!isRecord(entry)) continue;
+    const path = text(entry, 'path', '/');
+    const name = text(entry, 'name').trim();
+    const where = `step ${String(at + 1)} (${name === '' ? path : name})`;
+    const refused = (pointer: string, field: string, value: string): void => {
+      const found = CREDENTIAL_REFERENCE.exec(value);
+      if (found === null) return;
+      out.push({
+        path: pointer,
+        message:
+          `${where} puts {{${found[1] ?? 'credential'}}} in its ${field}, and a credential may go ` +
+          'only in the Authorization header or the body — a server or a proxy logs the rest, and ' +
+          'may send it back',
+      });
+    };
+    refused(`/steps/${String(at)}/path`, 'path', path);
+    if (Array.isArray(entry['headers'])) {
+      for (const [index, header] of entry['headers'].entries()) {
+        if (!isRecord(header)) continue;
+        const headerName = text(header, 'name').trim();
+        if (headerName.toLowerCase() === 'authorization') continue;
+        refused(
+          `/steps/${String(at)}/headers/${String(index)}/value`,
+          `${headerName === '' ? 'unnamed' : headerName} header`,
+          text(header, 'value'),
+        );
+      }
+    }
+  }
+  return out;
+}
+
 const STEP_SCHEMA: JsonSchema = {
   // The singular, for `U-12`'s repeating control: the fieldset is named for the parameter
   // ("Steps") and an entry inside it wants this.
@@ -162,7 +225,14 @@ const STEP_SCHEMA: JsonSchema = {
       default: 'GET',
       title: 'Method',
     },
-    path: { type: 'string', maxLength: 2_048, title: 'Path' },
+    path: {
+      type: 'string',
+      maxLength: 2_048,
+      title: 'Path',
+      description:
+        'After {{substitution}}. Never a credential: servers and proxies log a path, query ' +
+        'string and all, so {{credential.*}} here is refused.',
+    },
     body: {
       type: 'string',
       maxLength: 16_384,
@@ -187,7 +257,15 @@ const STEP_SCHEMA: JsonSchema = {
         required: ['name'],
         properties: {
           name: { type: 'string', minLength: 1, maxLength: 200, title: 'Header' },
-          value: { type: 'string', maxLength: 2_048, default: '', title: 'Value' },
+          value: {
+            type: 'string',
+            maxLength: 2_048,
+            default: '',
+            title: 'Value',
+            description:
+              'After {{substitution}}. {{credential.*}} is accepted only in an Authorization ' +
+              'header: a server may log any other, or send it back.',
+          },
         },
       },
     },
@@ -303,6 +381,8 @@ export const httpTransaction: SensorType = {
     },
   },
 
+  paramProblems: misplacedCredentials,
+
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[] {
     const steps = readSteps(params);
     return [
@@ -325,6 +405,18 @@ export const httpTransaction: SensorType = {
 
     const steps = readSteps(context.params);
     if (steps.length === 0) throw new Error('this sensor has no steps to run');
+    // Saved before the rule (`A-42`): refused before anything is sent, never quietly repaired.
+    const misplaced = misplacedCredentials(context.params);
+    const first = misplaced[0];
+    if (first !== undefined) {
+      throw new Error(
+        `${first.message}${misplaced.length > 1 ? ` (and ${String(misplaced.length - 1)} more)` : ''}` +
+          '. This sensor was saved before that was refused: edit it to move the credential, ' +
+          'and it runs again',
+      );
+    }
+    // S-19's scrub, as the catalogue hands it over: every response passes through it (`A-42`).
+    const scrubbed = scrubberOf(context);
 
     const common = readCommon(context.params, host);
     const agent = context.params['userAgent'];
@@ -383,6 +475,10 @@ export const httpTransaction: SensorType = {
 
       total += response.totalMs;
       timings.push({ key: `step${String(at + 1)}`, value: response.totalMs });
+      // Before anything reads it (`A-42`). A server that echoes the credential it was sent would
+      // otherwise hand it to a capture, and from there to a later step's path. And a writer could
+      // learn it by `mustContain` guesses, one character at a time, from the sensor going Down.
+      const answer = scrubbed(response.body);
 
       if (!statusAccepted(response.status, step.expectStatus, common.followRedirects)) {
         fail(
@@ -401,7 +497,7 @@ export const httpTransaction: SensorType = {
       }
       if (
         step.mustContain !== '' &&
-        !response.body.toLowerCase().includes(step.mustContain.toLowerCase())
+        !answer.toLowerCase().includes(step.mustContain.toLowerCase())
       ) {
         // The step every login transaction needs: a rejected sign-in returns the sign-in form,
         // with a 200 on it and a session cookie and everything else looking perfect.
@@ -409,13 +505,13 @@ export const httpTransaction: SensorType = {
       }
       if (
         step.mustNotContain !== '' &&
-        response.body.toLowerCase().includes(step.mustNotContain.toLowerCase())
+        answer.toLowerCase().includes(step.mustNotContain.toLowerCase())
       ) {
         fail(`answered ${String(response.status)} but contains "${step.mustNotContain}"`);
       }
 
       for (const capture of step.capture) {
-        const found = captureOne(response.body, capture, maxBodyBytes);
+        const found = captureOne(answer, capture, maxBodyBytes);
         if (found === null) {
           fail(
             `did not match /${capture.pattern}/, so {{${capture.name}}} has nothing to give the ` +

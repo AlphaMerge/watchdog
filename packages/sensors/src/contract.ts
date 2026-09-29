@@ -407,6 +407,22 @@ export interface SensorType {
    * trigger that sets its own `recoveryHoldSeconds` overrides it, either way.
    */
   readonly recoveryHoldSeconds?: number;
+  /**
+   * What the schema cannot say about these parameters (`A-42`): each problem as the JSON Pointer
+   * of the value at fault and a sentence an operator can act on. Empty, or absent, when there is
+   * nothing to refuse.
+   *
+   * `SensorCatalogue.validate` calls it once the schema has passed, with the defaults filled in.
+   * Every write goes through that call: a create, an edit, a clone, a device template, a
+   * discovery. So a refusal here is a refusal everywhere, in the same shape as a schema's.
+   * Must be pure: it runs in the core.
+   *
+   * **A row written before the rule never passed it.** A rule that makes a stored sensor unsafe
+   * to run belongs in `execute` too, refusing by the same words, never quietly repairing.
+   */
+  paramProblems?(
+    params: Readonly<Record<string, unknown>>,
+  ): readonly { readonly path: string; readonly message: string }[];
   /** Called with already-validated params. Must be pure — it runs in the core, not the probe. */
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[];
   execute(context: CheckContext): Promise<CheckExecution>;

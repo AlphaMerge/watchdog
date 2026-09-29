@@ -1,4 +1,5 @@
 import { credentialKind, secretFields } from '../credentials/index.js';
+import { authorizationFor } from './http/auth.js';
 
 /**
  * Keeping a check's secrets out of what it says (`S-19`).
@@ -10,13 +11,20 @@ import { credentialKind, secretFields } from '../credentials/index.js';
  * check just used. So every message leaves the probe with each secret the check held replaced by a
  * marker, whatever type produced it.
  *
- * **What it is, exactly, and no more:** every *exact* value of a `writeOnly` parameter of the
- * sensor's type, and of a `writeOnly` field of a credential the check was given, replaced wherever
- * it appears in the message. It does not catch a secret that was encoded, split, hashed, or quoted
- * with escapes; a script that prints its key base64-encoded prints it. And it skips values shorter
- * than `MIN_SCRUBBED_LENGTH`: a three-character community string would otherwise turn every
- * occurrence of those three letters in every message into a marker, and a message nobody can read
- * is a diagnosis lost for a secret that was never much of one.
+ * **What it is, and no more:** every value of a `writeOnly` parameter of the sensor's type, and
+ * of a `writeOnly` field of a credential the check was given, replaced wherever it appears in the
+ * message. Each value also in the forms a server echoes a request back in (`A-42`, `encodedForms`):
+ * percent-encoded (upper- and lower-case hex, and as a form encodes a space), base64 (padded,
+ * unpadded and URL-safe), HTML-escaped and JSON-escaped. An `http` credential adds the
+ * base64 of `username:password` that basic authentication sends.
+ *
+ * It does not catch a secret split, truncated, hashed, re-cased or encoded twice, base64 of a
+ * secret inside a longer encoded string (other than basic authentication's), hex, or an HTML or
+ * JSON escape spelled another way (`&#x27;` for `&#39;`, `\u0022` for `\"`). A script that prints
+ * its key reversed prints it. And it skips values shorter than `MIN_SCRUBBED_LENGTH`: a
+ * three-character community string would otherwise turn every occurrence of those three letters
+ * in every message into a marker, and a message nobody can read is a diagnosis lost for a secret
+ * that was never much of one.
  */
 
 /** Values shorter than this are left in the text; see above. */
@@ -57,20 +65,64 @@ export function secretsOfCheck(
   params: Readonly<Record<string, unknown>>,
   credentials: Readonly<Record<string, Readonly<Record<string, unknown>>>>,
 ): string[] {
-  const out = new Set<string>();
+  const exact = new Set<string>();
   for (const path of writeOnlyPaths) {
-    stringsIn(valueAt(params, path.split('.')), out);
+    stringsIn(valueAt(params, path.split('.')), exact);
   }
   for (const [kind, values] of Object.entries(credentials)) {
     const definition = credentialKind(kind);
     if (definition === undefined) {
-      stringsIn(values, out);
+      stringsIn(values, exact);
       continue;
     }
-    for (const field of secretFields(definition)) stringsIn(values[field], out);
+    for (const field of secretFields(definition)) stringsIn(values[field], exact);
+    // The one secret the check itself encodes before sending: basic authentication's pair,
+    // which a server echoing its request headers echoes as it arrived.
+    if (kind === 'http') {
+      const basic = /^Basic (.+)$/.exec(authorizationFor(values) ?? '');
+      if (basic?.[1] !== undefined) exact.add(basic[1]);
+    }
   }
-  out.delete('');
+  exact.delete('');
+  const out = new Set<string>();
+  for (const secret of exact) {
+    for (const form of secret.length < MIN_SCRUBBED_LENGTH ? [secret] : encodedForms(secret)) {
+      out.add(form);
+    }
+  }
   return [...out];
+}
+
+/**
+ * A secret, and the forms a server echoes a request back in (`A-42`).
+ *
+ * A server that logs or reflects what it was sent does so encoded as the request carried it: a
+ * query string percent-encoded, a form body with `+` for a space, a header in base64, a page
+ * HTML-escaped, a JSON reply with its quotes escaped. Each is the secret, as readable to anybody
+ * who decodes it as the secret is to anybody at all. The forms that are the secret unchanged
+ * collapse into it.
+ */
+export function encodedForms(secret: string): string[] {
+  const uri = encodeURIComponent(secret);
+  const base64 = Buffer.from(secret, 'utf8').toString('base64');
+  return [
+    ...new Set([
+      secret,
+      uri,
+      uri.replace(/%[0-9A-F]{2}/g, (hex) => hex.toLowerCase()),
+      uri.replace(/%20/g, '+'),
+      base64,
+      base64.replace(/=+$/, ''),
+      Buffer.from(secret, 'utf8').toString('base64url'),
+      secret
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;'),
+      JSON.stringify(secret).slice(1, -1),
+    ]),
+  ];
 }
 
 function valueAt(source: Readonly<Record<string, unknown>>, segments: readonly string[]): unknown {

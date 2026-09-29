@@ -462,6 +462,79 @@ describe(
       );
     });
 
+    it('refuses a transaction that sends a credential outside its Authorization header and body, naming the step and the field (A-42)', async () => {
+      const transaction = BUILT_IN_SENSOR_TYPES.find((type) => type.id === 'http.transaction');
+      assert.ok(transaction !== undefined);
+      const web = await buildHarness(db, { types: [transaction] });
+      const signIn = {
+        name: 'sign in',
+        method: 'POST',
+        path: '/login',
+        body: 'pass={{credential.password}}',
+      };
+
+      const error = await rejects(() =>
+        web.service.create(testActor, {
+          kind: 'sensor',
+          parentId: deviceId,
+          name: 'portal',
+          sensorType: 'http.transaction',
+          params: {
+            steps: [signIn, { name: 'call the api', path: '/api?key={{credential.token}}' }],
+          },
+        }),
+      );
+      assert.equal(error.code, 'OBJECT_INVALID');
+      const problems = error.details['problems'] as { path: string; message: string }[];
+      assert.deepEqual(
+        problems.map((problem) => problem.path),
+        ['/steps/1/path'],
+      );
+      assert.match(
+        problems[0]?.message ?? '',
+        /^step 2 \(call the api\) puts \{\{credential\.token\}\} in its path/,
+      );
+
+      // One saved before the rule stays readable and renamable, and is refused only when its
+      // steps are written. The probe refuses to run it meanwhile; `http-transaction.test.ts`
+      // has that half.
+      const made = await web.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name: 'portal',
+        sensorType: 'http.transaction',
+        params: { steps: [signIn] },
+      });
+      const stored = [
+        signIn,
+        { path: '/api', headers: [{ name: 'X-Key', value: '{{credential.token}}' }] },
+      ];
+      await db.query(
+        `UPDATE sensor_config SET params = jsonb_set(params, '{steps}', $2::jsonb)
+         WHERE object_id = $1`,
+        [made.id, JSON.stringify(stored)],
+      );
+      const renamed = await web.service.update(
+        testActor,
+        made.id,
+        { kind: 'sensor', name: 'customer portal' },
+        { kind: 'none' },
+      );
+      assert.equal(renamed.name, 'customer portal');
+      const refused = await rejects(() =>
+        web.service.update(
+          testActor,
+          made.id,
+          { kind: 'sensor', params: { steps: stored } },
+          { kind: 'none' },
+        ),
+      );
+      assert.deepEqual(
+        (refused.details['problems'] as { path: string }[]).map((problem) => problem.path),
+        ['/steps/1/headers/0/value'],
+      );
+    });
+
     // ── the registry over HTTP ──────────────────────────────────────────────────────────────
 
     it('publishes the catalogue the add-sensor form is generated from', async () => {

@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import { SensorCatalogue } from '../src/catalogue.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
 import {
+  encodedForms,
   MIN_SCRUBBED_LENGTH,
   SCRUBBED,
   scrubSecrets,
@@ -115,7 +116,7 @@ describe('what a check may say', () => {
     assert.equal(ran, false);
   });
 
-  it('replaces exact values and nothing else — the limits it states', () => {
+  it('replaces the values it is given and nothing else — the limits it states', () => {
     const secrets = ['abc', 'hunter2-long'];
     // Shorter than the floor: left, so ordinary text is not mangled.
     assert.equal(MIN_SCRUBBED_LENGTH, 4);
@@ -135,14 +136,83 @@ describe('what a check may say', () => {
       ssh: SSH,
       'from-a-newer-build': { anything: 'unknown-kind-value' },
     }).sort();
-    assert.deepEqual(found, [
+    const exact = [
       'KEY-MATERIAL',
       'c0mmunity-s3cret',
       'hunter2-long',
       'priv-key-value',
       // A kind this build does not know is one nobody said was safe to print.
       'unknown-kind-value',
-    ]);
-    assert.ok(!found.includes('monitor'), 'a username is not a secret field');
+    ];
+    // Each, and the forms a server echoes it in (`A-42`), and nothing besides.
+    assert.deepEqual(found, [...new Set(exact.flatMap(encodedForms))].sort());
+    assert.ok(!found.some((one) => one.includes('monitor')), 'a username is not a secret field');
+  });
+});
+
+describe('an echo the check did not write (`A-42`)', () => {
+  // A server reflects what it was sent as the request carried it. Each form below is the secret
+  // to anybody who decodes it, so each is scrubbed as the secret is.
+  const SECRET = 'hunter 2&"x/y';
+  const forms = (text: string): string =>
+    scrubSecrets(
+      text,
+      secretsOfCheck(
+        [],
+        {},
+        {
+          ssh: { password: SECRET },
+        },
+      ),
+    );
+
+  it('scrubs a secret percent-encoded, form-encoded, in base64, HTML-escaped and JSON-escaped', () => {
+    const echoes = {
+      percent: encodeURIComponent(SECRET),
+      lowerHex: encodeURIComponent(SECRET).replace(/%[0-9A-F]{2}/g, (hex) => hex.toLowerCase()),
+      form: new URLSearchParams({ p: SECRET }).toString().slice(2),
+      base64: Buffer.from(SECRET).toString('base64'),
+      unpadded: Buffer.from(SECRET).toString('base64').replace(/=+$/, ''),
+      base64url: Buffer.from(SECRET).toString('base64url'),
+      html: SECRET.replace(/&/g, '&amp;').replace(/"/g, '&quot;'),
+      json: JSON.stringify({ p: SECRET }).slice(6, -2),
+    };
+    for (const [how, echo] of Object.entries(echoes)) {
+      assert.equal(forms(`a server said ${echo} back`), `a server said ${SCRUBBED} back`, how);
+    }
+  });
+
+  it('scrubs the pair basic authentication sends, which is no one field', () => {
+    const basic = Buffer.from('ops:hunter2-long').toString('base64');
+    const found = secretsOfCheck([], {}, { http: { username: 'ops', password: 'hunter2-long' } });
+    assert.ok(found.includes(basic), 'the pair as the header carries it');
+    assert.equal(
+      scrubSecrets(`authorization: Basic ${basic}`, found),
+      `authorization: Basic ${SCRUBBED}`,
+    );
+    // A token is sent as itself, and needs nothing more.
+    assert.ok(
+      !secretsOfCheck([], {}, { http: { token: 'tok-long-enough' } }).some((one) =>
+        one.startsWith('Bearer'),
+      ),
+    );
+  });
+
+  it('does not catch what it does not claim to: hex, twice-encoded, shifted base64, a part', () => {
+    const missed = {
+      hex: Buffer.from(SECRET).toString('hex'),
+      twice: encodeURIComponent(encodeURIComponent(SECRET)),
+      // The secret base64-encoded after one other byte: its bytes land across different sextets.
+      shifted: Buffer.from(`!${SECRET}`).toString('base64'),
+      part: SECRET.slice(0, 6),
+      numericEntity: SECRET.replace(/"/g, '&#x22;'),
+    };
+    for (const [how, echo] of Object.entries(missed)) {
+      assert.equal(forms(echo), echo, how);
+    }
+  });
+
+  it('adds no forms for a value too short to scrub at all', () => {
+    assert.deepEqual(secretsOfCheck([], {}, { ssh: { password: 'abc' } }), ['abc']);
   });
 });

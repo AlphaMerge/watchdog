@@ -387,10 +387,29 @@ holding whatever was mistyped.
 words — a script's last lines of output, a driver's error, a server's banner — and it reaches the
 state log, notifications and reports. So before any result leaves the probe, every exact value of
 a write-only parameter of the sensor and of a secret credential field (a password, a private key,
-a community) is replaced by `••••••` in it, for every sensor type. Know its limits: it matches
-**exact** values only, so a secret the script printed base64-encoded, split, or partly is not
-caught; and it skips values **shorter than four characters**, which would otherwise turn ordinary
-words into markers. A secret that short is not much of one.
+a community) is replaced by `••••••` in it, for every sensor type. It is replaced in the forms a
+server echoes a request back in too (`A-42`): percent-encoded, form-encoded, base64,
+HTML-escaped and JSON-escaped, and an HTTP credential's basic-authentication pair.
+
+Know its limits. It does not catch a secret printed split, partly, hashed, reversed, in hex,
+encoded twice, or base64-encoded inside a longer string. And it skips values **shorter than four
+characters**, which would otherwise turn ordinary words into markers. A secret that short is not
+much of one.
+
+**An HTTP transaction sends a credential only in its `Authorization` header or its body**
+(`A-42`). `{{credential.*}}` anywhere else — a step's path, which servers and proxies log, or any
+other header, which a server may send back — is refused when the sensor is saved, naming the
+step and the field. Every response is scrubbed of the credential as it arrives, before a capture
+or a content check reads it.
+
+The rule covers `{{credential.username}}` too, so a user name in a path has to be typed as it
+is. An API that takes its key in a custom header cannot be given the device's stored credential.
+Type the key into the header as it is, and it is part of the sensor, readable by anybody who can
+read the sensor.
+
+**On upgrade**, a transaction sensor already saved with a credential in its path or another header
+is not rewritten, and not silently stripped. It goes **Down** before sending anything, with a
+message naming the step and the field. Edit it to move the credential, and it runs again.
 
 ## Script sensors
 

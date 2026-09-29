@@ -195,6 +195,20 @@ bursts the core samples between. `ms.probe.health` is the one that does, at 300:
 and restarted connects for seconds a round. A trigger can override it with its own
 `recoveryHoldSeconds`. Whole seconds, up to a day.
 
+### `paramProblems(params)` (optional)
+
+What the schema cannot say (`A-42`). Return each problem as the JSON Pointer of the value at
+fault and a sentence an operator can act on, or nothing. `SensorCatalogue.validate` calls it
+once the schema passes, with defaults filled in, and every write goes through that call: a
+create, an edit, a clone, a device template, a discovery. So a refusal here is a refusal
+everywhere, and it reaches the API in the same shape as a schema's. It runs in the core, so keep
+it pure.
+
+A row written before your rule never passed it. If the rule is what makes a sensor safe to run,
+enforce it in `execute` too, and refuse there in the same words, rather than quietly repairing
+the parameters. `http.transaction` does both for a credential outside its `Authorization` header
+and body.
+
 ### `costHint`
 
 `light` | `medium` | `heavy`. Not a duration — a `heavy` check is heavy because of what it
@@ -339,13 +353,22 @@ The form (`U-08`) follows from the same annotation: a `writeOnly` parameter rend
 unless somebody deliberately changed it.
 
 **The same annotation keeps a secret out of your messages** (`S-19`). A probe runs every check
-through `SensorCatalogue.execute`, which replaces each exact value of a `writeOnly` parameter,
-and of each secret field of the credentials the check was handed, with `••••••` in the message
-you return and in the message of anything you throw — so quoting a driver's error or a script's
-output verbatim is safe. It is exact matching and nothing more: values under four characters are
-left alone, and a secret you encode (a Basic `Authorization` header, a URL-encoded query string)
-is not recognised. If your type builds one of those, scrub it yourself before it reaches a
-message, as `http.transaction` does.
+through `SensorCatalogue.execute`, which replaces each value of a `writeOnly` parameter, and
+of each secret field of the credentials the check was handed, with `••••••` in the message you
+return and in the message of anything you throw — so quoting a driver's error or a script's
+output verbatim is safe. Each value is also matched in the forms a server echoes a request back
+in (`A-42`): percent-encoded, form-encoded, base64 (padded, unpadded and URL-safe), HTML-escaped
+and JSON-escaped. An `http` credential adds basic authentication's `username:password` pair in
+base64.
+
+It does not catch a secret that was split, truncated, hashed, re-cased, encoded twice or in hex,
+or base64-encoded inside a longer string. Values under four characters are left alone. If your
+type builds one of those, scrub it yourself before it reaches a message.
+
+**Scrub what a server sends back before your type reads it**, not only what it reports. A
+capture carried into a later request, or a content check whose pass or fail the sensor's state
+reveals, can carry an echoed secret as surely as a message can. `http.transaction` passes every
+response through `scrubberOf(context)` as it arrives.
 
 **Scrub before you clip** (`S-21`). The catalogue's scrub looks for whole values, so a secret your
 type cuts in two is two strings it no longer finds, and the half before the cut stays in the

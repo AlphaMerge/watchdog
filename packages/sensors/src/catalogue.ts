@@ -234,7 +234,13 @@ export class SensorCatalogue {
 
     // Ajv's useDefaults mutates what it validates; the caller's object is not ours to change.
     const candidate: Record<string, unknown> = structuredClone(params);
-    if (validate(candidate)) return { valid: true, params: candidate };
+    if (validate(candidate)) {
+      // What the schema cannot say, asked of the type once the schema holds (`A-42`).
+      const problems = this.#require(id).paramProblems?.(candidate) ?? [];
+      return problems.length === 0
+        ? { valid: true, params: candidate }
+        : { valid: false, problems: [...problems] };
+    }
 
     return {
       valid: false,

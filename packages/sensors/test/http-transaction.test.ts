@@ -1,8 +1,15 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { createServer, type Server } from 'node:http';
-import { httpTransaction, readSteps, substitute } from '../src/types/http-transaction.js';
+import {
+  httpTransaction,
+  misplacedCredentials,
+  readSteps,
+  substitute,
+} from '../src/types/http-transaction.js';
+import { SensorCatalogue } from '../src/catalogue.js';
 import type { CheckContext, CheckExecution } from '../src/contract.js';
+import { SCRUBBED } from '../src/support/secrets.js';
 
 /**
  * A real login flow, against a server that behaves like the ones this sensor exists for.
@@ -16,6 +23,8 @@ let server: Server;
 let port = 0;
 /** Every path the server was asked for, so "the steps after a failure did not run" is assertable. */
 let visited: string[] = [];
+/** Every body the server was sent, by path, so what a step carried is assertable (`A-42`). */
+let received: string[] = [];
 const TOKEN = 'tok-9f3a';
 
 before(async () => {
@@ -33,6 +42,7 @@ before(async () => {
       body += chunk.toString('utf8');
     });
     req.on('end', () => {
+      received.push(`${url} ${body}`);
       if (url === '/login' && req.method === 'GET') {
         res.writeHead(200, {
           'content-type': 'text/html',
@@ -101,6 +111,24 @@ before(async () => {
       if (url === '/echo') {
         res.writeHead(200, { 'content-type': 'text/plain' });
         res.end(`method=${req.method ?? ''} body=${body}`);
+        return;
+      }
+      if (url === '/reflect') {
+        // A server that says back what it was sent, the way debug endpoints and error pages do:
+        // the header as it arrived, and the body raw, percent-encoded and in base64.
+        res.writeHead(200, { 'content-type': 'text/plain' });
+        res.end(
+          `auth=${req.headers.authorization ?? 'none'} raw=${body} ` +
+            `url=${encodeURIComponent(body)} b64=${Buffer.from(body).toString('base64')}`,
+        );
+        return;
+      }
+      if (url === '/relocate') {
+        res.writeHead(302, {
+          location:
+            `/landing?k=${encodeURIComponent(body)}` + `&b=${Buffer.from(body).toString('base64')}`,
+        });
+        res.end();
         return;
       }
       if (url === '/bounce') {
@@ -260,24 +288,34 @@ describe('http.transaction', () => {
     );
   });
 
-  it('never puts a credential in the message, even when the transport puts the path in it', async () => {
-    // The message is stored on the state log and returned by the API, so a secret in one is a
-    // secret the API hands to anybody who can read a sensor. An API key in a query string is how
-    // that actually happens: the connection failure names the URL it was requesting, and the URL
-    // is where the substitution went.
-    const error = await run(
+  it('refuses to run one saved with a credential in its path or a header, and sends nothing (A-42)', async () => {
+    // Saved before the rule, so it never passed `paramProblems`. It says why, in the words the
+    // write would have used, and no step runs — not even the ones before it.
+    for (const misplaced of [
+      { name: 'call the api', path: '/v1/things?key={{credential.token}}' },
       {
-        port: 1,
-        steps: [{ name: 'call the api', path: '/v1/things?key={{credential.token}}' }],
+        name: 'call the api',
+        path: '/whoami',
+        headers: [{ name: 'X-Api-Key', value: '{{ credential.token }}' }],
       },
-      { credentials: { http: { token: 'sk-live-DO-NOT-LOG-ME' } } },
-    ).then(
-      () => null,
-      (caught: unknown) => (caught instanceof Error ? caught.message : String(caught)),
-    );
-    assert.ok(error !== null, 'the request to port 1 was supposed to fail');
-    assert.ok(!error.includes('sk-live-DO-NOT-LOG-ME'), error);
-    assert.match(error, /step 1 of 1 \(call the api\) failed:.*key=••••••/s);
+    ]) {
+      visited = [];
+      const error = await run(
+        { steps: [{ name: 'first', path: '/whoami' }, misplaced] },
+        { credentials: { http: { token: 'sk-live-DO-NOT-LOG-ME' } } },
+      ).then(
+        () => null,
+        (caught: unknown) => (caught instanceof Error ? caught.message : String(caught)),
+      );
+      assert.ok(error !== null, 'it was supposed to refuse');
+      assert.match(
+        error,
+        /^step 2 \(call the api\) puts \{\{credential\.token\}\} in its (path|X-Api-Key header), and a credential may go only in the Authorization header or the body/,
+      );
+      assert.match(error, /saved before that was refused: edit it to move the credential/);
+      assert.ok(!error.includes('sk-live-DO-NOT-LOG-ME'), error);
+      assert.deepEqual(visited, [], 'nothing was sent');
+    }
   });
 
   it('stops at the first failure instead of running the rest', async () => {
@@ -377,5 +415,159 @@ describe('http.transaction', () => {
       ],
     });
     assert.equal(execution.channels.length, 2);
+  });
+});
+
+describe('where a credential may go (`A-42`)', () => {
+  const catalogue = new SensorCatalogue().register(httpTransaction).seal();
+  const PASSWORD = 'hunter2&x';
+  const SENT = { http: { username: 'ops', password: PASSWORD } };
+  /** Through the catalogue, which is what hands the type S-19's scrub. */
+  const through = (steps: unknown[]): Promise<CheckExecution> =>
+    catalogue.execute('http.transaction', {
+      sensorId: 1,
+      target: { host: '127.0.0.1', ipVersion: 'v4' },
+      params: { scheme: 'http', port, timeoutMs: 5_000, followRedirects: false, steps },
+      credentials: SENT,
+      signal: new AbortController().signal,
+    });
+  /** The password as a server echoes it: raw, percent-encoded, in base64, and in basic auth's pair. */
+  const echoes = [
+    PASSWORD,
+    encodeURIComponent(PASSWORD),
+    Buffer.from(PASSWORD).toString('base64'),
+    Buffer.from(`ops:${PASSWORD}`).toString('base64'),
+  ];
+
+  it('refuses a credential anywhere but the Authorization header and the body, naming the step and the field', () => {
+    const outcome = catalogue.validate('http.transaction', {
+      steps: [
+        {
+          name: 'sign in',
+          method: 'POST',
+          path: '/login',
+          body: 'pass={{credential.password}}',
+          headers: [
+            { name: 'Authorization', value: 'Token {{credential.token}}' },
+            { name: ' authorization ', value: '{{ credential.password }}' },
+          ],
+        },
+        {
+          name: 'call the api',
+          path: '/v1/things?key={{ credential.token }}',
+          headers: [
+            { name: 'Accept', value: 'text/plain' },
+            { name: 'X-Api-Key', value: '{{credential.token}}' },
+          ],
+        },
+      ],
+    });
+    assert.ok(!outcome.valid);
+    assert.deepEqual(
+      outcome.problems.map((problem) => problem.path),
+      ['/steps/1/path', '/steps/1/headers/1/value'],
+    );
+    assert.match(
+      outcome.problems[0]?.message ?? '',
+      /^step 2 \(call the api\) puts \{\{credential\.token\}\} in its path, and a credential may go only in the Authorization header or the body/,
+    );
+    assert.match(
+      outcome.problems[1]?.message ?? '',
+      /^step 2 \(call the api\) puts \{\{credential\.token\}\} in its X-Api-Key header/,
+    );
+    // The flow the sensor exists for is still one it takes.
+    assert.ok(catalogue.validate('http.transaction', { steps: LOGIN_FLOW }).valid);
+    // A capture is named for a later step, and cannot be named for a credential.
+    assert.ok(
+      !catalogue.validate('http.transaction', {
+        steps: [{ path: '/', capture: [{ name: 'credential.password', pattern: '(x)' }] }],
+      }).valid,
+    );
+  });
+
+  it('names a step by its path when it has no name, and finds nothing where there is nothing', () => {
+    assert.deepEqual(misplacedCredentials({ steps: [{ path: '/a' }, 'not a step'] }), []);
+    assert.deepEqual(misplacedCredentials({}), []);
+    assert.match(
+      misplacedCredentials({ steps: [{ path: '/x?u={{credential.username}}' }] })[0]?.message ?? '',
+      /^step 1 \(\/x\?u=\{\{credential\.username\}\}\) puts \{\{credential\.username\}\} in its path/,
+    );
+  });
+
+  it('scrubs an echo before a capture carries it into the next step', async () => {
+    // Allowed where it went — the body, and basic auth's header — and echoed straight back. A
+    // capture of the echo, put in a later step's path, would be the path rule undone. Carried on
+    // in a body here, because a path or a header refuses the marker's characters outright.
+    received = [];
+    await through([
+      {
+        name: 'post it',
+        method: 'POST',
+        path: '/reflect',
+        body: '{{credential.password}}',
+        capture: [
+          { name: 'raw', pattern: 'raw=(\\S+)' },
+          { name: 'url', pattern: 'url=(\\S+)' },
+          { name: 'b64', pattern: 'b64=(\\S+)' },
+          { name: 'basic', pattern: 'auth=Basic (\\S+)' },
+        ],
+      },
+      {
+        name: 'carry it on',
+        method: 'POST',
+        path: '/whoami',
+        body: 'r={{raw}}&u={{url}}&b={{b64}}&a={{basic}}',
+      },
+    ]);
+    const carried = received.find((one) => one.startsWith('/whoami ')) ?? '';
+    for (const echo of echoes) assert.ok(!carried.includes(echo), `${echo} in ${carried}`);
+    assert.equal(
+      carried,
+      `/whoami r=${SCRUBBED}&u=${SCRUBBED}&b=${SCRUBBED}&a=${SCRUBBED}`,
+      'each capture carried the marker, not the secret',
+    );
+  });
+
+  it('cannot be asked whether a response holds the password', async () => {
+    // Without the scrub, `mustContain` over an echo is a question with a yes or no answer — the
+    // sensor's state — and a writer could spell the password out one guess at a time.
+    for (const guess of [PASSWORD, 'hunter', encodeURIComponent(PASSWORD)]) {
+      await assert.rejects(
+        () =>
+          through([
+            {
+              name: 'guess',
+              method: 'POST',
+              path: '/reflect',
+              body: '{{credential.password}}',
+              mustContain: guess,
+            },
+          ]),
+        /step 1 of 1 \(guess\) answered 200 but does not contain/,
+        guess,
+      );
+    }
+  });
+
+  it('says nothing of an echo in a redirect it reports, raw or encoded', async () => {
+    const error = await through([
+      {
+        name: 'post it',
+        method: 'POST',
+        path: '/relocate',
+        body: '{{credential.password}}',
+        expectStatus: '200',
+      },
+    ]).then(
+      () => null,
+      (caught: unknown) => (caught instanceof Error ? caught.message : String(caught)),
+    );
+    assert.ok(error !== null, 'a 302 was supposed to fail a step expecting 200');
+    assert.match(
+      error,
+      /step 1 of 1 \(post it\) answered 302, and expects 200 pointing at \/landing/,
+    );
+    for (const echo of echoes) assert.ok(!error.includes(echo), `${echo} in ${error}`);
+    assert.ok(error.includes(`k=${SCRUBBED}&b=${SCRUBBED}`), error);
   });
 });

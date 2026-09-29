@@ -16481,7 +16481,7 @@ because each is a decision rather than a defect:
       does not whoever wrote it, a probe that has not upgraded is not sent a set it cannot check,
       and a probe that has refuses one whose resolved address or host key is outside.
 
-- [ ] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
+- [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
       siblings are substituted into any text a step sends: the path, every header and the body.
       The sensor's writer chooses that text, and need not be able to read the device's `http`
@@ -16496,6 +16496,100 @@ because each is a decision rather than a defect:
       **Done when** a sensor whose path or other header names a credential is refused, with the
       step and the field in the message, and a test shows an echoed credential absent from what
       the sensor reports.
+
+      **A-42 outcome.**
+      - **Refused when written, by a new optional member of the contract.**
+        - `SensorType.paramProblems(params)` returns what the schema cannot say, as JSON
+          Pointer and sentence. `SensorCatalogue.validate` asks it once the schema passes, so
+          every write refuses alike: create, edit, clone, device template, discovery. It
+          reaches the API as `OBJECT_INVALID` with the usual `problems`.
+        - `http.transaction`'s `misplacedCredentials` finds `{{credential.*}}`, spacing
+          tolerated, in a step's path or in any header not named `Authorization` (any case,
+          trimmed). The message reads, for example: "step 2 (call the api) puts
+          {{credential.token}} in its X-Api-Key header, and a credential may go only in the
+          Authorization header or the body — a server or a proxy logs the rest, and may send it
+          back", at `/steps/1/headers/1/value`.
+        - A capture cannot be named `credential.*`; its schema already refuses the dot.
+      - **Stored sensors refuse to run, and are not repaired.**
+        - One saved before the rule stays readable and renamable, and a write of its steps is
+          refused.
+        - On the probe, `execute` refuses before any step is sent, not even the steps before
+          the misplaced one. It goes Down with the same sentence, plus "This sensor was saved
+          before that was refused: edit it to move the credential, and it runs again".
+        - This is `S-19`'s `MS_VAR_` precedent. `administration.md` says it under "On
+          upgrade".
+      - **An echo is scrubbed as it arrives**, through `S-19`'s scrub point (`scrubberOf(context)`),
+        before the content checks and the captures read the response.
+        - That closes the capture route: the credential sent in `Authorization` or the body,
+          echoed back, captured, and put in a later step's path. The capture now carries the
+          marker. A marker in a path or header makes that step fail, because Node refuses the
+          characters, so the step fails rather than sending anything.
+        - It also closes a quieter oracle, found while doing this. `mustContain` over an echo is
+          a yes-or-no question answered by the sensor's state, so a writer could spell the
+          password out one guess at a time.
+        - Messages carry an echo only through a reported redirect target or a transport error,
+          and the catalogue scrubs both.
+      - **`S-19` now catches re-encoded copies.** `secretsOfCheck` adds each secret's
+        `encodedForms`:
+        - percent-encoded, in upper- and lower-case hex, and form-encoded with `+`;
+        - base64 padded, unpadded and URL-safe;
+        - HTML-escaped and JSON-escaped.
+        An `http` credential adds basic authentication's base64 `username:password`, the one
+        secret the check itself encodes before sending. It applies to every type, not only this
+        one. Values under four characters still get no forms at all.
+      - **Not caught, and pinned by a test as not caught:**
+        - hex;
+        - a secret encoded twice;
+        - base64 of a secret shifted inside a longer string;
+        - a part of the secret;
+        - a numeric HTML entity.
+        Nor are these, untested:
+        - a split, re-cased, reversed or hashed copy;
+        - base64 of a longer string that contains the secret, other than basic authentication's
+          pair.
+        Response headers are not scrubbed except where a message reports one, since captures
+        read only the body.
+      - **What the rule costs.**
+        - An API that takes its key in a custom header cannot be given the device's stored
+          credential. The key has to be typed into the header, where anyone who can read the
+          sensor reads it.
+        - `{{credential.username}}` is refused in a path too, by the rule's letter.
+        - Both are said in `administration.md`.
+      - **Docs:**
+        - `adding-a-sensor-type.md` gains `paramProblems`, and "scrub what a server sends back
+          before your type reads it";
+        - the S-19 paragraphs in it and in `administration.md` now state the forms and the
+          limits;
+        - the step schema's path and header descriptions say it.
+      - **Tests:**
+        - `http-transaction.test.ts`:
+          - refusal at validate, with the pointers and messages;
+          - `Authorization` in any case, and the body, allowed;
+          - the login flow still valid, and a capture named `credential.password` refused;
+          - a stored path and a stored custom header refused at run, with nothing sent;
+          - captures of a raw, percent-encoded, base64 and basic-pair echo carry only the marker;
+          - `mustContain` guesses fail;
+          - a redirect echo is absent from the message.
+        - `secrets.test.ts` covers every form caught, the basic pair, the named misses, and no
+          forms under four characters.
+        - Core `sensor-types.test.ts`:
+          - a create refused through `ObjectService`, with the pointer and message;
+          - a stored row that stays readable and renamable but is refused on a steps write.
+        - Passing: 133 in the sensors and hygiene suites, 101 in the other suites that assert the
+          marker, and 77 in the core sensor-type and device-template suites.
+      - **Mutations 11/11.** Each was applied alone and run against the sensors and core tests
+        above. Killed:
+        - the catalogue not asking `paramProblems`;
+        - `Authorization` misspelt, so it is no longer exempt;
+        - the path not checked;
+        - a stored row run anyway;
+        - the response not scrubbed;
+        - base64 dropped;
+        - percent-encoding dropped;
+        - the basic pair not added;
+        - forms made for a value too short to scrub;
+        - `{{ credential.x }}` with spaces not recognised;
+        - the step index used as the header index in the pointer.
 
 - [x] **A-43 — A mistyped credential key is stored in plaintext and returned** · S · A-05 ·
       Security. Found 2026-09-29 by `D-12`'s sweep of open request schemas, and split out by
