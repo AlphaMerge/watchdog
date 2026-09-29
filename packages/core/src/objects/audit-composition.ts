@@ -21,8 +21,8 @@ import type { AuditSink } from './audit.js';
  *   them can act on.
  * - The **schedule library** gets no cache invalidator and no trigger sync: a schedule edit moves
  *   pause flags, and neither the result cache nor an alarm chain reads a schedule.
- * - Only the **object service** gets `reachabilitySync`, because only object mutations move
- *   sensors between probes.
+ * - Only the **object service** gets `reachabilitySync` and `clockFreezeSync`, because only
+ *   object mutations move sensors between probes.
  */
 export interface AuditSinkSet {
   readonly database: AuditSink;
@@ -32,6 +32,7 @@ export interface AuditSinkSet {
   readonly scheduleSync: AuditSink;
   readonly dependencySync: AuditSink;
   readonly reachabilitySync: AuditSink;
+  readonly clockFreezeSync: AuditSink;
   readonly triggerSync: AuditSink;
 }
 
@@ -47,6 +48,9 @@ export function objectAuditSinks(all: AuditSinkSet): AuditSink[] {
     // Only here: a move, a create, a clone or a delete is what changes which probe carries a
     // sensor, and a stale unreachable overlay outlives the tree it was taken from (`P-103`).
     all.reachabilitySync,
+    // And the clock-freeze overlay, for the same reason: a sensor moved off a frozen probe that
+    // has gone away is never swept by it again (`P-239`).
+    all.clockFreezeSync,
     all.triggerSync,
   ];
 }

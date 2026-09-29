@@ -571,6 +571,12 @@ Two further notes for whoever picks those up:
   answer, and the overlay is re-derived inside the same transaction. Without it a sensor moved
   off a dead probe onto a live one stayed `unknown`/`probe` for as long as the dead probe was
   away — no transition, because the state never changed, and no alarm, because it never moved.
+  The clock-freeze overlay is kept in step the same way, on the same mutations and in the same
+  transaction (`P-239`). A sensor moved off a frozen probe is thawed at once, whether or not
+  that probe is still connected, and a sensor that arrives under one is left to its sweep.
+  Freezing needs the probe's clock, and a probe that has gone away has none to offer. A failure
+  here fails the mutation rather than being logged, because its transaction is aborted by then
+  (`P-249`).
 
 - **A resume is a floor on staleness, not an erasure of it** (`P-97`). `last_result_at` is the
   high-water mark that makes the at-least-once protocol safe; `resumed_at` is what says nothing
@@ -600,6 +606,8 @@ Two further notes for whoever picks those up:
   sent again cannot be told from one measured after, and applying it would put the watermark
   back and freeze the sensor again. Kept across a disconnect, and decided only once the new
   session's offset is known, so a probe that returns still behind never shows a stale reading.
+  A sensor stays frozen while any probe's set holds it (`P-239`), so a probe letting one go that
+  another has frozen too is not a thaw.
 - **A trigger on Unknown sees a probe's live Probe Health as Unknown while the probe is lost or
   frozen; nothing else does** (`M-22`). A lost, silent or frozen probe's sensors are Unknown with
   cause `probe`, and the one alarm for that is the probe's Probe Health, which reads Down in all

@@ -64,7 +64,11 @@ export class ReachabilitySync implements AuditSink {
   }
 }
 
-function movesSensors(mutation: Mutation): boolean {
+/**
+ * Whether a mutation can change which probe carries a sensor. Asked by `ClockFreezeSync` too, so
+ * the two overlays are kept in step with the tree on exactly the same changes (`P-239`).
+ */
+export function movesSensors(mutation: Mutation): boolean {
   switch (mutation.action) {
     // A subtree arriving under, or leaving, a probe that is currently away.
     case 'object.moved':

@@ -115,6 +115,7 @@ import { SessionService } from './auth/sessions.js';
 import { LoginThrottle } from './auth/throttle.js';
 import { ProbeReachability } from './probes/reachability.js';
 import { ClockFreeze } from './probes/clock-freeze.js';
+import { ClockFreezeSync } from './probes/clock-freeze-sync.js';
 import { ProbeEpisodeIndex } from './probes/episodes.js';
 import { RediscoverySweep } from './discovery/rediscovery-sweep.js';
 import type { Actor } from './objects/audit.js';
@@ -493,6 +494,8 @@ async function serve(): Promise<void> {
     reachability: () => reachabilityRef,
     logger,
   });
+  // The clock-freeze overlay has the same defect for the same reason (`P-239`).
+  const clockFreezeSync = new ClockFreezeSync({ clockFreeze: () => clockFreezeRef });
 
   const auditSinks: AuditSinkSet = {
     database: new DatabaseAuditSink(),
@@ -502,6 +505,7 @@ async function serve(): Promise<void> {
     scheduleSync,
     dependencySync,
     reachabilitySync,
+    clockFreezeSync,
     triggerSync,
   };
 

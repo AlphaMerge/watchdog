@@ -2,19 +2,21 @@ import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { PROTOCOL_VERSION } from '@ms/shared';
 import { CompositeAuditSink, DatabaseAuditSink } from '../src/audit/store.js';
-import type { Database } from '../src/db/pool.js';
+import type { Database, Queryable } from '../src/db/pool.js';
 import { RecentMinimum } from '../src/health/recent-count.js';
 import { MessageContextLoader } from '../src/notifications/context.js';
 import { AlarmEngine } from '../src/notifications/engine.js';
 import { AlarmScheduler } from '../src/notifications/scheduler.js';
 import { TriggerSync } from '../src/notifications/sync.js';
 import { TemplateService } from '../src/notifications/templates.js';
+import type { Mutation } from '../src/objects/audit.js';
 import {
   CLOCK_FREEZE_TOLERANCE_MS,
   ClockFreeze,
   FROZEN_MESSAGE,
   type ClockFreezeOptions,
 } from '../src/probes/clock-freeze.js';
+import { ClockFreezeSync } from '../src/probes/clock-freeze-sync.js';
 import { ProbeReachability } from '../src/probes/reachability.js';
 import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
 import type { SensorResult } from '../src/state/service.js';
@@ -428,6 +430,69 @@ describe(
       });
     });
 
+    describe('kept in step with the tree (`P-239`)', () => {
+      it('thaws a sensor moved off a frozen probe that has gone away, and only that one', async () => {
+        // A probe decides its sensors only on its own sweep, and one that has gone away is never
+        // swept, so the moved sensor stayed Unknown with cause `probe` on its new, healthy probe
+        // for as long as the old one was away: `P-103`'s defect, in this overlay.
+        const from = await probeWith('moved-from', 2);
+        const to = await probeWith('moved-to', 0);
+        const [moved, stays] = from.pings;
+        assert.ok(moved !== undefined && stays !== undefined);
+        const now = new Date();
+        await ingest(
+          [moved, stays].map((sensorId) => ({
+            sensorId,
+            at: new Date(now.getTime() - MINUTE),
+            outcome: 'ok' as const,
+            message: 'up',
+          })),
+        );
+        offsets.set(from.probe, HOUR);
+        freeze = newFreeze(() => now);
+        await freeze.sweep();
+        assert.equal(freeze.frozenOn(from.probe), 2);
+        assert.equal((await runtimeOf(moved)).cause, 'probe');
+        offsets.delete(from.probe); // gone, and never swept again
+
+        const parentOf = async (id: number): Promise<number> => {
+          const [row] = await db.query<{ id: string }>(
+            'SELECT parent_id::text AS id FROM object WHERE id = $1',
+            [id],
+          );
+          assert.ok(row !== undefined);
+          return Number(row.id);
+        };
+        const previous = h.audit.also;
+        const sync = new ClockFreezeSync({ clockFreeze: () => freeze });
+        h.audit.also = new CompositeAuditSink(previous === undefined ? [sync] : [previous, sync]);
+        try {
+          // A tree change that leaves both where they are keeps both frozen.
+          await h.service.create(testActor, {
+            kind: 'sensor',
+            parentId: await parentOf(moved),
+            name: 'moved-from-arrival',
+            sensorType: 'icmp.ping',
+          });
+          assert.equal(freeze.frozenOn(from.probe), 2, 'nothing left the frozen probe');
+
+          await h.service.move(testActor, moved, await parentOf(to.health), { kind: 'none' });
+        } finally {
+          h.audit.also = previous;
+        }
+        assert.equal(freeze.frozenSensors().has(moved), false);
+        assert.equal(freeze.carrierOf(moved), undefined);
+        const runtime = await runtimeOf(moved);
+        assert.equal(runtime.state, 'up', 'back to what its last reading said');
+        assert.notEqual(runtime.cause, 'probe');
+
+        // The one still under the frozen probe is still frozen, by it.
+        assert.deepEqual(freeze.frozenBy(from.probe)?.sensorIds, new Set([stays]));
+        assert.equal(freeze.carrierOf(stays), from.probe);
+        assert.equal((await runtimeOf(stays)).cause, 'probe');
+      });
+    });
+
     describe('what it costs in notifications', () => {
       it('queues exactly what a lost probe queues, on the step and on the lift', async () => {
         // **One path, so one answer** (`CLAUDE.md`: one outage, one alarm). Two probes of the
@@ -584,6 +649,137 @@ describe('a freeze whose write does not land (`P-232`)', () => {
     assert.equal(rejected.frozenOn(9), 0);
     assert.equal(rejected.frozenBy(9), undefined, 'nor an episode for the alarm engine (`M-22`)');
     assert.equal(rejected.carrierOf(5), undefined);
+  });
+});
+
+/** A `ClockFreeze` over a stand-in database, deciding the sensors `under` lists per probe. */
+function standIn(
+  under: ReadonlyMap<number, readonly string[]>,
+  reevaluated: { ids: number[]; message: string }[],
+  reject?: (message: string) => boolean,
+): ClockFreeze {
+  return new ClockFreeze({
+    db: {
+      query: (_sql: string, values: readonly unknown[]) =>
+        Promise.resolve((under.get(Number(values[0])) ?? []).map((id) => ({ id }))),
+      tx: <T>(fn: (q: unknown) => Promise<T>) => fn({}),
+    } as unknown as ClockFreezeOptions['db'],
+    logger: silent,
+    states: {
+      reevaluate: (_q, ids, _at, cause) => {
+        if (reject?.(cause.message) === true) {
+          return Promise.reject(new Error('the transaction is aborted'));
+        }
+        reevaluated.push({ ids: [...ids], message: cause.message });
+        return Promise.resolve(ids.length);
+      },
+    },
+    dependencies: { recompute: () => Promise.resolve({ moved: 0 }) },
+    links: { connectedProbeIds: () => [...under.keys()], linkFor: () => link(HOUR) },
+  });
+}
+
+describe('one sensor in two probes’ sets (`P-239`)', () => {
+  it('stays frozen while either holds it, and settling one issues no thaw', async () => {
+    // Moved off a probe whose set was never brought up to date, and frozen again by the one it
+    // went to. The global set is the union: one probe letting it go is not a thaw.
+    // Sensor 7 is in the second probe's set alone, so letting both go thaws 7 and not 5.
+    const under = new Map<number, readonly string[]>([
+      [9, ['5']],
+      [10, ['5', '7']],
+    ]);
+    const reevaluated: { ids: number[]; message: string }[] = [];
+    const freeze = standIn(under, reevaluated);
+    await freeze.sweep();
+    assert.deepEqual([freeze.frozenOn(9), freeze.frozenOn(10)], [1, 2]);
+    assert.equal(freeze.carrierOf(5), 10, 'carried by the one that froze it last');
+
+    reevaluated.length = 0;
+    under.set(10, []);
+    await freeze.sweep();
+    assert.equal(freeze.frozenSensors().has(5), true);
+    assert.equal(freeze.frozenSensors().has(7), false);
+    assert.deepEqual([freeze.frozenOn(9), freeze.frozenOn(10)], [1, 0]);
+    assert.equal(freeze.carrierOf(5), 9, 'carried by the one that still holds it');
+    assert.deepEqual(
+      reevaluated.filter((call) => call.message !== FROZEN_MESSAGE && call.ids.includes(5)),
+      [],
+      'no thaw issued for 5',
+    );
+    assert.deepEqual(
+      reevaluated.map((call) => call.ids),
+      [[7]],
+      'the thaw is 7 alone',
+    );
+
+    under.set(9, []);
+    await freeze.sweep();
+    assert.equal(freeze.frozenSensors().has(5), false);
+    assert.equal(freeze.carrierOf(5), undefined);
+    assert.deepEqual(
+      reevaluated.filter((call) => call.ids.includes(5)).map((call) => call.message),
+      ["the probe's clock has passed the last result this sensor accepted"],
+      'thawed once, when the last set let it go',
+    );
+  });
+});
+
+describe('a resync (`P-239`)', () => {
+  it('reads nothing when nothing is frozen', async () => {
+    const freeze = standIn(new Map(), []);
+    const q = { query: () => Promise.reject(new Error('read')) } as unknown as Queryable;
+    assert.equal(await freeze.resync(q), 0);
+  });
+
+  it('takes its sets back, and fails the mutation, when the thaw cannot be written', async () => {
+    // The transaction is aborted by then, and a COMMIT on it rolls back without an error, so a
+    // caught failure would tell the caller that a mutation nobody wrote had succeeded.
+    const freeze = standIn(new Map([[9, ['5', '6']]]), [], (message) => message !== FROZEN_MESSAGE);
+    await freeze.sweep();
+    const since = freeze.frozenBy(9)?.since;
+    const q = { query: () => Promise.resolve([{ id: '6' }]) } as unknown as Queryable;
+    await assert.rejects(freeze.resync(q), /the transaction is aborted/u);
+    assert.deepEqual(freeze.frozenBy(9), { sensorIds: new Set([5, 6]), since });
+    assert.equal(freeze.carrierOf(5), 9);
+    assert.equal(freeze.frozenSensors().has(5), true);
+  });
+});
+
+describe('the sink that runs it (`P-239`)', () => {
+  function counting(fail = false): { sink: ClockFreezeSync; calls: () => number } {
+    let calls = 0;
+    const freeze = {
+      resync: (): Promise<number> => {
+        calls += 1;
+        return fail ? Promise.reject(new Error('the transaction is aborted')) : Promise.resolve(0);
+      },
+    } as unknown as ClockFreeze;
+    return { sink: new ClockFreezeSync({ clockFreeze: () => freeze }), calls: () => calls };
+  }
+  const q = {} as Queryable;
+  const one = (action: string): Mutation[] => [{ action, objectId: 1 } as unknown as Mutation];
+
+  it('resyncs on every mutation that can move a sensor, and on nothing else', async () => {
+    const { sink, calls } = counting();
+    await sink.record(q, testActor, one('object.updated'), new Date());
+    assert.equal(calls(), 0);
+    for (const action of ['object.moved', 'object.created', 'object.cloned', 'object.deleted']) {
+      await sink.record(q, testActor, one(action), new Date());
+    }
+    assert.equal(calls(), 4);
+  });
+
+  it('lets a failure through, so the mutation fails with it', async () => {
+    const { sink } = counting(true);
+    await assert.rejects(
+      sink.record(q, testActor, one('object.moved'), new Date()),
+      /the transaction is aborted/u,
+    );
+  });
+
+  it('does nothing before the clock freeze exists', async () => {
+    const sink = new ClockFreezeSync({ clockFreeze: () => undefined });
+    await sink.record(q, testActor, one('object.moved'), new Date());
   });
 });
 

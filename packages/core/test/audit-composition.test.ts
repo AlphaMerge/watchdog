@@ -45,13 +45,14 @@ function sinks(): AuditSinkSet & { named: (sink: AuditSink) => string } {
     scheduleSync: make('scheduleSync'),
     dependencySync: make('dependencySync'),
     reachabilitySync: make('reachabilitySync'),
+    clockFreezeSync: make('clockFreezeSync'),
     triggerSync: make('triggerSync'),
     named: (sink) => made.get(sink) ?? 'unknown',
   };
 }
 
 describe('what each audited service tells', () => {
-  it('gives every tree mutation to all eight sinks', () => {
+  it('gives every tree mutation to all nine sinks', () => {
     // A create, a move, a clone or a delete can change what a probe scans, who a sensor depends
     // on, which schedule holds it, which probe carries it and which alarms stand — so this is the
     // one list with nothing left out.
@@ -64,24 +65,33 @@ describe('what each audited service tells', () => {
       'scheduleSync',
       'dependencySync',
       'reachabilitySync',
+      'clockFreezeSync',
       'triggerSync',
     ]);
   });
 
-  it('keeps reachability on the object service alone', () => {
-    // **The one that was deleted with nothing failing.** Only an object mutation moves a sensor
-    // between probes, so this is the only list that needs it — and being the only one is exactly
-    // why nothing else would have noticed its absence.
+  it('keeps reachability and the clock freeze on the object service alone', () => {
+    // **The one that was deleted with nothing failing**, and the overlay with the same defect
+    // (`P-239`). Only an object mutation moves a sensor between probes, so this is the only list
+    // that needs them — and being the only one is exactly why nothing else would have noticed
+    // either's absence.
     const all = sinks();
-    assert.ok(objectAuditSinks(all).includes(all.reachabilitySync));
-    assert.ok(!scheduleAuditSinks(all).includes(all.reachabilitySync));
-    assert.ok(!triggerAuditSinks(all).includes(all.reachabilitySync));
-    assert.ok(!reportAuditSinks(all).includes(all.reachabilitySync));
-    assert.ok(!libraryAuditSinks(all).includes(all.reachabilitySync));
-    assert.ok(!mapAuditSinks(all).includes(all.reachabilitySync));
-    assert.ok(!grantAuditSinks(all).includes(all.reachabilitySync));
-    assert.ok(!probeAuditSinks(all).includes(all.reachabilitySync));
-    assert.ok(!discoveryAuditSinks(all).includes(all.reachabilitySync));
+    for (const sink of [all.reachabilitySync, all.clockFreezeSync]) {
+      const name = all.named(sink);
+      assert.ok(objectAuditSinks(all).includes(sink), name);
+      for (const others of [
+        scheduleAuditSinks,
+        triggerAuditSinks,
+        reportAuditSinks,
+        libraryAuditSinks,
+        mapAuditSinks,
+        grantAuditSinks,
+        probeAuditSinks,
+        discoveryAuditSinks,
+      ]) {
+        assert.ok(!others(all).includes(sink), `${name} is not in ${others.name}`);
+      }
+    }
   });
 
   it('leaves the result cache and the alarm chain out of a schedule edit', () => {

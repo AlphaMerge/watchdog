@@ -6230,7 +6230,7 @@ because each is a decision rather than a defect:
       margin taken from the measured spread and stated in the test, or it is dropped because the
       absolute budgets already carry the claim. The entry says which, and why.
 
-- [ ] **P-239 — the clock-freeze set is never re-derived after a tree change** · S · P-232,
+- [x] **P-239 — the clock-freeze set is never re-derived after a tree change** · S · P-232,
       P-103 · Found in review round four (`findings/2026-09-29-review-round-4.md`, `P-239`),
       by two areas independently.
       - **Medium.** ClockFreeze holds the frozen sensors per probe and re-derives them only on
@@ -6249,6 +6249,44 @@ because each is a decision rather than a defect:
       - freeze under A, disconnect A, move the device under B: the sensor is no longer frozen;
       - two probes' sets holding one sensor: settling one leaves it frozen, with no thaw issued.
       Mutants as usual.
+
+      **Done.** A `ClockFreezeSync` audit sink sits beside `reachabilitySync`, on the object
+      service's list alone. It runs `ClockFreeze.resync` inside every mutation that can move a
+      sensor, using the predicate `ReachabilitySync` uses, now shared: `object.moved`, `created`,
+      `cloned` and `deleted`.
+      - **From the stored sets, whether the probe is connected or not.** Each probe's set keeps
+        only the sensors still under it, read through the mutation's transaction. The ones that
+        left are thawed along the sweep's own path: the thawed message, the probe's alarm (`M-22`)
+        and the dependency recompute.
+      - **It only ever removes.** Freezing a sensor that arrives under a frozen probe needs that
+        probe's clock, which only its sweep has.
+      - **A failure fails the mutation.** The sets go back first (`P-80`), and the error is thrown,
+        not logged. The reason was measured on the way here: a COMMIT on a transaction that a
+        caught error aborted resolves with tag `ROLLBACK` and no error. `ReachabilitySync`'s catch
+        can therefore answer success for a mutation that wrote nothing. Filed as `P-249`.
+      - **The global set is the union of the per-probe sets.** A sensor that another probe's set
+        still holds stays frozen and is not thawed. It is carried by that probe, and when two
+        sets hold it, by whichever froze it last.
+      - It is free when nothing is frozen: no query at all.
+
+      Tests, in `clock-freeze.test.ts`:
+      - **Against the database.** Two sensors are frozen under A, and A is disconnected. A sensor
+        created under A's device leaves both frozen. One is then moved to B's device: it is thawed
+        and back to Up, and the other is still frozen, by A.
+      - **Two probes' sets holding one sensor.** When one probe lets it go, it stays frozen with no
+        thaw issued, and passes to the other probe. A second sensor that only the first probe held
+        is thawed on its own.
+      - **A resync that cannot write its thaw** takes its sets back and rejects.
+      - **With nothing frozen**, a resync reads nothing.
+      - **The sink** resyncs on every sensor-moving action and nothing else, passes a failure
+        through, and does nothing before the freeze exists.
+
+      `audit-composition.test.ts` asserts the sink is on the object service's list and no other.
+      `state-machine.md` says it beside `P-103`.
+
+      Mutations caught: 12 of 12. Two survived the first run, thawing all of a probe's set and
+      thawing what another probe holds. Each passed because a test never had the sensor that tells
+      them apart. Both tests now have it, and the rerun caught both.
 
 - [x] **P-240 — the ownership cache can keep a moved sensor's old probe** · S · P-228 · Found in
       review round four (`findings/2026-09-29-review-round-4.md`, `P-240`). Medium.

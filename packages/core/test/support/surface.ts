@@ -77,6 +77,7 @@ const noAudit: AuditSinkSet = {
   scheduleSync: nothing,
   dependencySync: nothing,
   reachabilitySync: nothing,
+  clockFreezeSync: nothing,
   triggerSync: nothing,
 };
 

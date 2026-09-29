@@ -44,6 +44,21 @@ export const FROZEN_UNDER_SQL = `WITH RECURSIVE below AS (
     AND NOT (sensor_config.type = ANY($2::text[]))
     AND sensor_runtime.last_result_at > $3`;
 
+/**
+ * Which of the sensors `$2` are still under the probe `$1`: `FROZEN_UNDER_SQL`'s walk, kept to
+ * the sensors a probe froze, for `ClockFreeze.resync` (`P-239`).
+ */
+const STILL_UNDER_SQL = `WITH RECURSIVE below AS (
+    SELECT id, kind, 0 AS depth FROM object WHERE id = $1
+    UNION ALL
+    SELECT child.id, child.kind, below.depth + 1
+    FROM object child JOIN below ON child.parent_id = below.id
+    WHERE below.depth < ${String(MAX_WALK_DEPTH)}
+  )
+  SELECT below.id::text AS id
+  FROM below
+  WHERE below.kind = 'sensor' AND below.id = ANY($2::bigint[])`;
+
 interface Db extends Queryable {
   tx<T>(fn: (q: Queryable) => Promise<T>): Promise<T>;
 }
@@ -98,7 +113,13 @@ export interface ClockFreezeStats {
  *
  * Kept across a disconnect, so a probe that comes back with its clock still behind does not
  * show its sensors' last readings for a sweep before they freeze again. Decided only while the
- * probe's offset is known: a session that has sent no `sentAt` yet changes nothing.
+ * probe's offset is known: a session that has sent no `sentAt` yet changes nothing. **Kept in
+ * step with the tree**, though, whether the probe is connected or not: `resync` drops a sensor
+ * from a probe's set once it is no longer under that probe (`P-239`).
+ *
+ * **The global set is the union of the per-probe sets** (`P-239`). One sensor can be in two:
+ * moved off a probe whose set was never brought up to date, and frozen again by the one it went
+ * to. It stays frozen while any probe's set holds it.
  */
 export class ClockFreeze {
   readonly #db: Db;
@@ -110,13 +131,13 @@ export class ClockFreeze {
   readonly #probeAlarms: (probeObjectId: number) => readonly number[];
   readonly #now: () => Date;
 
-  /** Every frozen sensor. What the state service lays over the facts. */
+  /** Every frozen sensor: the union of `#byProbe`. What the state service lays over the facts. */
   readonly #frozen = new Set<number>();
   /** Which probe froze which sensors, so one probe's answer never clears another's. */
   readonly #byProbe = new Map<number, ReadonlySet<number>>();
   /** When each probe's clock first froze something, while it still does (`M-22`). */
   readonly #since = new Map<number, Date>();
-  /** Which probe froze each sensor. */
+  /** Which probe froze each sensor; the one that froze it last, when two sets hold it. */
   readonly #carrier = new Map<number, number>();
   #sweeps = 0;
 
@@ -174,78 +195,168 @@ export class ClockFreeze {
   }
 
   /**
-   * Replaces what one probe freezes, and moves the sensors that crossed.
+   * Brings what each probe freezes into step with the tree, through the transaction of a
+   * mutation that may have moved sensors (`P-239`). Returns the sensors that moved.
+   *
+   * **From the stored sets, whether the probe is connected or not.** A probe decides its sensors
+   * only on its own sweep, and a sweep reaches only a connected probe. A sensor moved off a
+   * frozen probe that had since gone away was never decided again, and stayed Unknown with cause
+   * `probe` on its new, healthy probe for as long as the old one stayed away: `P-103`'s defect,
+   * in this overlay. Here each set keeps only the sensors still under its probe, and the ones
+   * that left are thawed as a sweep thaws them, with the probe's alarm and the dependency
+   * recompute.
+   *
+   * **Only ever removes.** Freezing a sensor that arrived under a frozen probe needs that probe's
+   * clock, which only its sweep has; until then a lost probe's arrivals are Unknown through
+   * `ProbeReachability`'s own resync.
+   *
+   * **A failure is the mutation's.** The sets go back first (`P-80`), and the error is thrown
+   * rather than logged: the transaction is aborted by then, and PostgreSQL answers a COMMIT on an
+   * aborted transaction by rolling back, without an error, so a caught error would leave the
+   * caller told that a mutation succeeded when nothing of it was written.
+   *
+   * Free when nothing is frozen, which is the normal state of an installation.
+   */
+  async resync(q: Queryable): Promise<number> {
+    let moved = 0;
+    for (const [probeObjectId, held] of [...this.#byProbe]) {
+      const still = await this.#stillUnder(q, probeObjectId, held);
+      const gone = new Set([...held].filter((id) => !still.has(id)));
+      if (gone.size === 0) continue;
+      // Taken from the set as it is now, not as it was read: a sweep may have changed it while
+      // the tree was being read, and only what the tree says left is this method's to remove.
+      const current = this.#byProbe.get(probeObjectId) ?? new Set<number>();
+      const next = new Set([...current].filter((id) => !gone.has(id)));
+      moved += await this.#settle(probeObjectId, next, null, q);
+    }
+    return moved;
+  }
+
+  /**
+   * Replaces what one probe freezes, and moves the sensors that crossed. In a transaction of its
+   * own, unless it is handed the caller's.
    *
    * **The set changes before the re-evaluation runs, and back if the write does not land**, for
    * the reason `ProbeReachability.lost` gives (`P-80`): the state service reads the set, so it
    * has to be right first, and a set left changed after a rejected transaction claims a state
    * that was never written.
+   *
+   * **Thawed only when no probe's set still holds it** (`P-239`). A sensor that leaves this
+   * probe's set and is in another's stays frozen, carried by the other, and is not re-evaluated.
    */
   async #settle(
     probeObjectId: number,
     next: ReadonlySet<number>,
-    offsetMs: number,
+    offsetMs: number | null,
+    caller?: Queryable,
   ): Promise<number> {
     const before = this.#byProbe.get(probeObjectId) ?? new Set<number>();
     const entered = [...next].filter((id) => !before.has(id));
     const left = [...before].filter((id) => !next.has(id));
     if (entered.length === 0 && left.length === 0) return 0;
 
-    const since = this.#since.get(probeObjectId);
-    const apply = (frozen: ReadonlySet<number>, thawed: readonly number[], at?: Date): void => {
-      for (const id of thawed) {
+    const since = this.#since.get(probeObjectId) ?? this.#now();
+    // Who carried each sensor this touches, so a failure puts every one of them back.
+    const carriers = new Map([...entered, ...left].map((id) => [id, this.#carrier.get(id)]));
+    this.#place(probeObjectId, next, since);
+    for (const id of entered) {
+      this.#frozen.add(id);
+      this.#carrier.set(id, probeObjectId);
+    }
+    const thawed: number[] = [];
+    for (const id of left) {
+      const other = this.#holderOf(id);
+      if (other === undefined) {
         this.#frozen.delete(id);
         this.#carrier.delete(id);
+        thawed.push(id);
+      } else if (this.#carrier.get(id) === probeObjectId) {
+        this.#carrier.set(id, other);
       }
-      for (const id of frozen) {
-        this.#frozen.add(id);
-        this.#carrier.set(id, probeObjectId);
-      }
-      if (frozen.size === 0) {
-        this.#byProbe.delete(probeObjectId);
-        this.#since.delete(probeObjectId);
-      } else {
-        this.#byProbe.set(probeObjectId, frozen);
-        this.#since.set(probeObjectId, at ?? since ?? this.#now());
+    }
+    const restore = (): void => {
+      this.#place(probeObjectId, before, since);
+      for (const [id, carrier] of carriers) {
+        if (carrier === undefined) {
+          this.#frozen.delete(id);
+          this.#carrier.delete(id);
+        } else {
+          this.#frozen.add(id);
+          this.#carrier.set(id, carrier);
+        }
       }
     };
-    apply(next, left, since);
 
+    const move = async (q: Queryable): Promise<number> => {
+      const at = this.#now();
+      let count = 0;
+      if (entered.length > 0) {
+        count += await this.#states.reevaluate(q, entered, at, { message: FROZEN_MESSAGE });
+      }
+      if (thawed.length > 0) {
+        count += await this.#states.reevaluate(q, thawed, at, { message: THAWED_MESSAGE });
+      }
+      // The probe's own alarm, so what a trigger sees on it moves with them (`M-22`).
+      const alarms = this.#probeAlarms(probeObjectId);
+      if (alarms.length > 0) {
+        await this.#states.reevaluate(q, alarms, at, { message: THAWED_MESSAGE });
+      }
+      // As for a lost probe (`P-135`): a master that is Unknown is not Down, so whatever it
+      // held is released, and one that is thawed may hold them again.
+      await this.#dependencies.recompute(q, at);
+      return count;
+    };
     try {
-      const moved = await this.#db.tx(async (q) => {
-        const at = this.#now();
-        let count = 0;
-        if (entered.length > 0) {
-          count += await this.#states.reevaluate(q, entered, at, { message: FROZEN_MESSAGE });
-        }
-        if (left.length > 0) {
-          count += await this.#states.reevaluate(q, left, at, { message: THAWED_MESSAGE });
-        }
-        // The probe's own alarm, so what a trigger sees on it moves with them (`M-22`).
-        const alarms = this.#probeAlarms(probeObjectId);
-        if (alarms.length > 0) {
-          await this.#states.reevaluate(q, alarms, at, { message: THAWED_MESSAGE });
-        }
-        // As for a lost probe (`P-135`): a master that is Unknown is not Down, so whatever it
-        // held is released, and one that is thawed may hold them again.
-        await this.#dependencies.recompute(q, at);
-        return count;
-      });
+      const moved = caller === undefined ? await this.#db.tx(move) : await move(caller);
       this.#logger.warn(
-        { probeObjectId, frozen: entered.length, thawed: left.length, offsetMs, moved },
+        { probeObjectId, frozen: entered.length, thawed: thawed.length, offsetMs, moved },
         entered.length > 0
           ? "sensors frozen: the probe's clock reads earlier than their last results"
-          : "sensors thawed: the probe's clock has passed their last results",
+          : caller === undefined
+            ? "sensors thawed: the probe's clock has passed their last results"
+            : 'sensors thawed: the tree moved them off the probe whose clock froze them',
       );
       return moved;
     } catch (error) {
-      apply(before, entered, since);
+      restore();
       this.#logger.error(
         { probeObjectId, sensors: entered.length + left.length, err: describeError(error) },
-        'could not move the sensors a probe clock froze or thawed; the next sweep tries again',
+        caller === undefined
+          ? 'could not move the sensors a probe clock froze or thawed; the next sweep tries again'
+          : 'could not thaw the sensors a tree change moved off a frozen probe; the change fails',
       );
+      if (caller !== undefined) throw error;
       return 0;
     }
+  }
+
+  /** Sets one probe's set, and when it began, or clears both when the set is empty. */
+  #place(probeObjectId: number, sensors: ReadonlySet<number>, since: Date): void {
+    if (sensors.size === 0) {
+      this.#byProbe.delete(probeObjectId);
+      this.#since.delete(probeObjectId);
+    } else {
+      this.#byProbe.set(probeObjectId, sensors);
+      this.#since.set(probeObjectId, since);
+    }
+  }
+
+  /** A probe whose set holds this sensor, if any does. */
+  #holderOf(sensorId: number): number | undefined {
+    for (const [probeObjectId, sensors] of this.#byProbe) {
+      if (sensors.has(sensorId)) return probeObjectId;
+    }
+    return undefined;
+  }
+
+  /** Which of `held` are still under the probe, read through the caller's transaction. */
+  async #stillUnder(
+    q: Queryable,
+    probeObjectId: number,
+    held: ReadonlySet<number>,
+  ): Promise<ReadonlySet<number>> {
+    const rows = await q.query<{ id: string }>(STILL_UNDER_SQL, [probeObjectId, [...held]]);
+    return new Set(rows.map((row) => Number(row.id)));
   }
 
   /** The sensors under a probe whose last result is later than `threshold`. */
