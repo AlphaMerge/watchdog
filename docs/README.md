@@ -121,6 +121,7 @@ measurement is not a claim.
 - [Time-series storage sizing](findings/2026-08-25-timeseries-sizing.md) (`S-05`)
 - [Rollup, compression and retention](findings/2026-08-25-rollup-measurements.md) (`S-06`)
 - [Ingestion pipeline](findings/2026-08-25-ingestion-measurements.md) (`S-07`)
+- [The batch-size sweep's p99 is its slowest write; the sizes are compared on medians](findings/2026-09-29-batch-sweep-median-under-load.md) (`P-237`)
 - [Historic data queries](findings/2026-08-25-historic-query-measurements.md) (`S-08`)
 - [What the TimescaleDB dependency actually is](findings/2026-08-25-storage-engine-boundary.md) (`S-12`)
 - [Most TimescaleDB features we planned on are not Apache-2.0](findings/2026-08-25-timescaledb-licensing.md)

@@ -6241,7 +6241,7 @@ because each is a decision rather than a defect:
       - `writerFor` resolving eagerly again;
       - `within` resolving on the pool instead of the connection it is given.
 
-- [ ] **P-237 — the batch-size sweep's relative check is narrower than the case's run-to-run
+- [x] **P-237 — the batch-size sweep's relative check is narrower than the case's run-to-run
       spread** · S · S-07, P-233 · Found in `P-233`'s window. `ingestion-performance.test.ts`
       asserts that the shipped 1,000-row batch writes with a lower p99 than the 5,000-row one, in
       the same run. Five sweeps of one commit, within four minutes, measured the shipped size's p99
@@ -6253,6 +6253,46 @@ because each is a decision rather than a defect:
       **Done when** the comparison is robust, for example the median of several sweeps, or a
       margin taken from the measured spread and stated in the test, or it is dropped because the
       absolute budgets already carry the claim. The entry says which, and why.
+
+      **Done: made robust, by comparing medians.** The check now asserts
+      `shipped.p50 < largest.p50`, and the test states the measured margin beside it.
+      - **Why the old one failed at random.** The sweep makes 100 writes at 1,000 rows and 20
+        at 5,000. `stats()` takes index `floor(0.99 × n)`, which is the last index at both
+        sizes, so each p99 was the single slowest write. The check compared two stalls.
+      - **Why medians.** A median is taken over half the writes, which one stall does not move,
+        and it is the latency a larger batch actually adds. That cost is the decision the check
+        exists to guard.
+      - **Why not drop it.** The absolute budgets do not carry that claim. They say the shipped
+        size is fast enough, not that the default is not simply as large as it will go.
+
+      **Measured deliberately under load**: five sweeps back to back, at 0.61 per CPU, with
+      `ms-core` on the database. `perf-conditions` is recorded in
+      `findings/2026-09-29-batch-sweep-median-under-load.md`.
+      - **The medians separate.** The shipped size's median ran from 18.4 to 39.7 ms, the
+        5,000-row size's from 102.1 to 160.5 ms, and the narrowest gap was 2.8×.
+      - **The maxima do not.** In one sweep the 2,000-row size beat the shipped one at p99.
+      - **The absolute budget failed three times and is not moved.** The shipped size's p99,
+        the slowest of its 100 writes, went over 100 ms in three of the five sweeps (113.3 to
+        135.8 ms). That is the phase criterion, which is measured on a quiet machine, and it
+        held three of three in `P-233`'s quiet reruns. So a busy machine breaks a budget taken
+        on a maximum. It is not a regression.
+
+      **The same shape elsewhere**, as asked: every percentile in `packages/*/test/perf` taken
+      over too few samples to be anything but the maximum. The full table is in the findings
+      file.
+      - **Absolute budgets on a maximum, noted.**
+        - The sweep's own p99 budget.
+        - The state machine's steady and flapping p99s: at most about 100 writes, and about 20.
+        - The gate's worst batch, which already says it is a maximum.
+      - **The replay soak: relative, compares maxima, left as it is.** Its quiet arm is 40
+        batches, and a default run's replay arm is 15. But every live batch sits on the flush
+        timer's ~263 ms floor, and failing its 3× budget needs a ~560 ms stall. That margin is
+        fifty times the arm's measured spread, where this check had 0.3 ms, and a stall that
+        large is what the case is for.
+      - **The soak's quiet maximum does loosen the check.** Moving that arm to its median would
+        change `R-08`'s recorded statistic. That is a criterion decision, left open.
+      - **Real percentiles.** `P-204`'s report-render p95 (184 and 161 samples) and the
+        scheduler's p95 jitter (every dispatch) are genuine percentiles.
 
 - [x] **P-239 — the clock-freeze set is never re-derived after a tree change** · S · P-232,
       P-103 · Found in review round four (`findings/2026-09-29-review-round-4.md`, `P-239`),

@@ -135,7 +135,13 @@ describe(
       // both. Sweeping it here is what makes the shipped default a measured choice rather than a
       // round number — and it is why the default is not simply as large as it will go.
       const sizes = [1_000, 2_000, 5_000];
-      const measured: { size: number; perMinute: number; p99: number; writes: number }[] = [];
+      const measured: {
+        size: number;
+        perMinute: number;
+        p50: number;
+        p99: number;
+        writes: number;
+      }[] = [];
 
       for (const [index, batchMaxRows] of sizes.entries()) {
         const ingestor = new Ingestor({
@@ -169,6 +175,7 @@ describe(
         measured.push({
           size: batchMaxRows,
           perMinute: (total / elapsedMs) * 60_000,
+          p50: stats.writeMs.p50,
           p99: stats.writeMs.p99,
           writes: stats.writes,
         });
@@ -186,6 +193,7 @@ describe(
           (row) =>
             `      ${String(row.size).padStart(5)} rows/write  ` +
             `${Math.round(row.perMinute).toLocaleString('en-GB').padStart(11)} samples/min  ` +
+            `p50 ${row.p50.toFixed(1).padStart(6)} ms  ` +
             `p99 ${row.p99.toFixed(1).padStart(6)} ms  ${String(row.writes).padStart(3)} writes` +
             (row.size === SHIPPED.batchMaxRows ? '   <- shipped default' : ''),
         )
@@ -208,14 +216,23 @@ describe(
         `p99 write was ${shipped.p99.toFixed(1)} ms, budget ${String(P99_BUDGET_MS)} ms`,
       );
       // And the decision behind the default: it exists because the largest batch size spends
-      // latency to buy throughput it does not need. Comparing the two measurements from the
-      // same run is stable in a way an absolute threshold is not — a busy machine moves both.
+      // latency on every write to buy throughput it does not need. **Compared on the median
+      // write, not the p99** (`P-237`). At these sizes the p99 is the single slowest write: 100
+      // writes at 1,000 rows and 20 at 5,000, and `floor(0.99 × n)` is the last index of either.
+      // Two p99s are two stalls, and a stall is added to whichever write it lands on — one sweep
+      // failed by 0.3 ms, 73.8 against 73.5, while the shipped size's p99 ran from 22.9 to
+      // 285.6 ms across five (`findings/2026-09-29-probe-gate-ingestion.md`). The median is
+      // over half the writes, which one stall does not move, and it is the cost a larger batch
+      // actually adds. Measured on a deliberately busy machine, five sweeps back to back: the
+      // median 5,000-row write took 2.8 to 8.7 times the shipped size's, so this holds with a
+      // factor of nearly three to spare where the p99 comparison had none
+      // (`findings/2026-09-29-batch-sweep-median-under-load.md`).
       const largest = measured.at(-1);
       assert.ok(largest);
       assert.ok(
-        shipped.p99 < largest.p99,
-        `the shipped batch size should write faster than ${String(largest.size)} rows: ` +
-          `${shipped.p99.toFixed(1)} ms against ${largest.p99.toFixed(1)} ms`,
+        shipped.p50 < largest.p50,
+        `the shipped batch size should write faster than ${String(largest.size)} rows: a median ` +
+          `write of ${shipped.p50.toFixed(1)} ms against ${largest.p50.toFixed(1)} ms`,
       );
     });
 
