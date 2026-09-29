@@ -46,6 +46,8 @@ export class AvailableMemoryWatch {
   readonly #read: () => AvailableMemory | null;
   readonly #now: () => number;
   #samples: { readonly at: number; readonly memory: AvailableMemory }[] = [];
+  /** The lowest reading since `takeLow` was last called (`P-219`). */
+  #sinceTaken: AvailableMemory | null = null;
 
   constructor(options: AvailableMemoryWatchOptions) {
     this.#read = options.read;
@@ -58,7 +60,28 @@ export class AvailableMemoryWatch {
     const memory = this.#read();
     const at = this.#now();
     this.#prune(at);
-    if (memory !== null) this.#samples.push({ at, memory });
+    if (memory === null) return;
+    this.#samples.push({ at, memory });
+    if (this.#sinceTaken === null || memory.availableBytes < this.#sinceTaken.availableBytes) {
+      this.#sinceTaken = memory;
+    }
+  }
+
+  /**
+   * The lowest reading since this was last called, and start again: `null` when there was none
+   * (`P-219`).
+   *
+   * **The probe's report at protocol 20**, where each heartbeat covers exactly the time since the
+   * one before, so that every low is in one report and the core, folding the reports between two
+   * records, puts it in one record. A window cannot do that: the core records every thirty seconds
+   * from whichever report it has, and a window either misses the time between the reports two
+   * records read or covers some of it twice. This covers each reading once, however far apart the
+   * calls are, including across an outage, when the first report after it takes all of it.
+   */
+  takeLow(): AvailableMemoryLow | null {
+    const low = this.#sinceTaken;
+    this.#sinceTaken = null;
+    return low === null ? null : withPercent(low);
   }
 
   /** The lowest reading still inside the window, or `null` — a gap — when there is none. */
@@ -68,16 +91,19 @@ export class AvailableMemoryWatch {
     for (const { memory } of this.#samples) {
       if (low === null || memory.availableBytes < low.availableBytes) low = memory;
     }
-    if (low === null) return null;
-    return {
-      availablePercent: Math.round((low.availableBytes / low.totalBytes) * 1_000) / 10,
-      availableBytes: low.availableBytes,
-      totalBytes: low.totalBytes,
-    };
+    return low === null ? null : withPercent(low);
   }
 
   #prune(now: number): void {
     const since = now - this.#windowMs;
     this.#samples = this.#samples.filter((sample) => sample.at >= since);
   }
+}
+
+function withPercent(low: AvailableMemory): AvailableMemoryLow {
+  return {
+    availablePercent: Math.round((low.availableBytes / low.totalBytes) * 1_000) / 10,
+    availableBytes: low.availableBytes,
+    totalBytes: low.totalBytes,
+  };
 }

@@ -327,6 +327,86 @@ describe(
   },
 );
 
+describe(
+  'the probe’s core client, at the heartbeat',
+  { skip: opensslAvailable ? false : 'openssl is not available' },
+  () => {
+    let dir: string;
+
+    before(() => {
+      dir = mkdtempSync(join(tmpdir(), 'ms-probe-tls-'));
+      generateCerts(dir);
+    });
+
+    /** A client whose health report records what it was asked with, welcomed at `version`. */
+    async function heartbeating(
+      version: number,
+      body: (
+        core: TestCore,
+        asked: { seq: number; peerVersion: number }[],
+        acked: number[],
+      ) => Promise<void>,
+    ): Promise<void> {
+      const { core, port } = await TestCore.start(dir);
+      const asked: { seq: number; peerVersion: number }[] = [];
+      const acked: number[] = [];
+      const client = new CoreClient({
+        config: probeConfig(dir, port),
+        logger: silentLogger,
+        agentVersion: '0.1.0',
+        onConfig: () => 0,
+        health: {
+          report: (heartbeat) => {
+            asked.push(heartbeat);
+            return { memoryMb: 1 };
+          },
+          acknowledged: (seq) => {
+            acked.push(seq);
+          },
+        },
+      });
+      try {
+        client.start();
+        await core.waitFor((m) => m.type === 'hello');
+        core.send({
+          type: 'welcome',
+          protocolVersion: version,
+          coreVersion: '9.9.9',
+          gid: 'probe-live',
+          heartbeatIntervalMs: 1_000,
+          approved: true,
+        });
+        await body(core, asked, acked);
+      } finally {
+        await client.stop();
+        await core.stop();
+      }
+    }
+
+    it('tells the report which heartbeat it is for, and when the core has it (P-219)', async () => {
+      // From protocol 20 a report covers exactly the time since the last heartbeat the core
+      // acknowledged, so the reporter has to know both.
+      await heartbeating(PROTOCOL_VERSION, async (core, asked, acked) => {
+        const beat = await core.waitFor((m) => m.type === 'heartbeat');
+        assert.ok(beat.type === 'heartbeat');
+        assert.deepEqual(beat.health, { memoryMb: 1 });
+        assert.deepEqual(asked[0], { seq: beat.seq, peerVersion: PROTOCOL_VERSION });
+        assert.deepEqual(acked, [], 'nothing is delivered until the core says so');
+        core.send({ type: 'heartbeat-ack', seq: beat.seq });
+        await waitUntil(() => acked.length === 1, 'the acknowledgement was not passed on');
+        assert.deepEqual(acked, [beat.seq]);
+      });
+    });
+
+    it('reports at the version the two ends speak, so a 19 core gets what it records (P-219)', async () => {
+      await heartbeating(19, async (core, asked) => {
+        await core.waitFor((m) => m.type === 'heartbeat');
+        assert.equal(asked[0]?.peerVersion, 19);
+      });
+    });
+  },
+);
+
 /** Polls a condition, because the client acts on a message without answering it. */
 async function waitUntil(
   condition: () => boolean,

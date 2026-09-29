@@ -1,6 +1,11 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
-import type { CheckResult, IngestionConfig, ProbeHealthReport } from '@ms/shared';
+import {
+  PROTOCOL_VERSION,
+  type CheckResult,
+  type IngestionConfig,
+  type ProbeHealthReport,
+} from '@ms/shared';
 import type { Database } from '../src/db/pool.js';
 import { CoreHealthService, type CoreHealthSources } from '../src/health/core-health.js';
 import { ProbeHealthService } from '../src/health/probe-health.js';
@@ -162,7 +167,7 @@ describe(
       connected: true,
       gid: 'probe-gid',
       clockOffsetMs: null,
-      protocolVersion: 19,
+      protocolVersion: PROTOCOL_VERSION,
       connectedAt: new Date(at.getTime() - 3_600_000),
       lastHeartbeatAt: at,
       approved: true,

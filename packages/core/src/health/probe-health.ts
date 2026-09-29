@@ -1,5 +1,6 @@
 import { PROBE_HEALTH_CHANNELS, PROBE_HEALTH_COUNTERS } from '@ms/sensors';
 import {
+  capabilitiesFor,
   describeError,
   describeSkew,
   explainSkew,
@@ -11,7 +12,7 @@ import type { Database, Queryable } from '../db/pool.js';
 import { storedVoucher, type VoucherCheck } from '../objects/vouching.js';
 import type { TimeRefusals } from '../ingestion/service.js';
 import type { DeliveryVerdict } from '../probes/delivery.js';
-import type { ProbeLink } from '../transport/probe-endpoint.js';
+import type { MemoryFold, ProbeLink } from '../transport/probe-endpoint.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 
 /**
@@ -48,6 +49,12 @@ export interface ProbeHealthSources {
    * the sweep, and then the channel gaps.
    */
   frozenSensors?: (probeObjectId: number) => number;
+  /**
+   * The memory lows a probe at protocol 20 reported since the last call, from the endpoint's
+   * `takeMemory` (`P-219`). Taken by the sweep and by nothing else. Absent on a build without it,
+   * and then every probe is recorded by its latest report, as below 20.
+   */
+  takeMemory?: (probeObjectId: number) => MemoryFold | undefined;
 }
 
 export interface ProbeHealthServiceOptions {
@@ -423,6 +430,9 @@ export class ProbeHealthService {
 
     const at = this.#now().toISOString();
     const results: CheckResult[] = [];
+    // Taken once per probe per sweep, and shared: two sensors reporting on one probe record the
+    // same lows, and the second must not find the fold already emptied by the first (`P-219`).
+    const folds = new Map<number, MemoryFold | undefined>();
     for (const row of sensors) {
       const sensorId = Number(row.id);
       // Not read and nothing recorded: a gap, and Unknown laid over it by the check (`A-29`).
@@ -463,7 +473,7 @@ export class ProbeHealthService {
           at,
           outcome: 'ok',
           durationMs: 0,
-          channels: readingsFrom(reading),
+          channels: readingsFrom(this.#recorded(probeId, reading, folds, local.has(probeId))),
           message,
         });
         this.#evaluated += 1;
@@ -487,6 +497,51 @@ export class ProbeHealthService {
     this.#targets.publish(reportsOn);
     await this.#ingest(results);
     return results.length;
+  }
+
+  /**
+   * The reading as it is recorded: for a probe at protocol 20, its memory channels are every low
+   * it reported since the last record, folded, and a gap when it reported none (`P-219`).
+   *
+   * **`read` gives the latest report, which is right for a scrape or the API and wrong for a
+   * record.** Below 20 the latest report is the lowest of the last thirty seconds, and recording
+   * it is what the core always did. From 20 a report covers only the time since the one before,
+   * so the latest alone would drop the lows of every report between two records, and the fold is
+   * what puts each in exactly one. A gap, not the last report again, when nothing arrived since:
+   * at a heartbeat longer than thirty seconds every other record has no report of its own, and
+   * repeating one would be a reading presented as new that nobody took.
+   *
+   * A probe that dropped since its last reports is still owed them, so a fold is recorded when
+   * there is one, connected or not.
+   */
+  #recorded(
+    probeId: number,
+    reading: ProbeHealthReading,
+    folds: Map<number, MemoryFold | undefined>,
+    local: boolean,
+  ): ProbeHealthReading {
+    const take = this.#sources.takeMemory;
+    if (take === undefined) return reading;
+    if (!folds.has(probeId)) folds.set(probeId, take(probeId));
+    const fold = folds.get(probeId);
+    const link = this.#sources.link(probeId);
+    const folded = link.connected
+      ? capabilitiesFor(link.protocolVersion).memorySinceLastReport
+      : fold !== undefined;
+    if (!folded) return reading;
+    return {
+      ...reading,
+      // The local probe's machine is Core Health's, folded or not (`M-21`): `read` gapped the
+      // pair, and a fold laid over it would be the second alarm for one squeeze.
+      ...(local
+        ? {}
+        : {
+            memoryAvailable: fold?.memoryAvailablePercent ?? null,
+            memoryAvailableBytes: fold?.memoryAvailableMb ?? null,
+          }),
+      memoryLimitUsage: fold?.memoryLimitUsagePercent ?? null,
+      memoryLimit: fold?.memoryLimitMb ?? null,
+    };
   }
 }
 

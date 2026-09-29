@@ -511,19 +511,19 @@ const PROBE_METRICS: readonly Metric[] = [
   {
     key: 'memoryAvailable',
     name: 'ms_probe_machine_memory_available_ratio',
-    help: "Memory the operating system says is available on the probe's machine, as a fraction of its total; the lowest in the last 30 s.",
+    help: "Memory the operating system says is available on the probe's machine, as a fraction of its total; the lowest its latest heartbeat reported: since the heartbeat before it, or over the last 30 s from a probe older than protocol 20.",
     scale: PERCENT,
   },
   {
     key: 'memoryAvailableBytes',
     name: 'ms_probe_machine_memory_available_bytes',
-    help: "Memory the operating system says is available on the probe's machine; the lowest in the last 30 s.",
+    help: "Memory the operating system says is available on the probe's machine; the lowest its latest heartbeat reported, as ms_probe_machine_memory_available_ratio.",
     scale: MB,
   },
   {
     key: 'memoryLimitUsage',
     name: 'ms_probe_memory_limit_usage_ratio',
-    help: "The probe's working set as a fraction of the lower of its cgroup's memory.high and memory.max; the highest in the last 30 s. Above 1 while throttled.",
+    help: "The probe's working set as a fraction of the lower of its cgroup's memory.high and memory.max; the highest its latest heartbeat reported, as ms_probe_machine_memory_available_ratio. Above 1 while throttled.",
     scale: PERCENT,
   },
   {

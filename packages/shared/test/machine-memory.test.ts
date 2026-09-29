@@ -160,6 +160,31 @@ describe('the lowest reading in the window', () => {
     assert.equal(w.lowest()?.availableBytes, 2_230 * MIB);
   });
 
+  it('takes the lowest since it was last taken, each reading once, however long ago (P-219)', () => {
+    // The probe's report at protocol 20: each heartbeat takes what was read since the one before,
+    // so that the core, folding the reports between two records, puts each low in one record.
+    const { watch: w, advance } = watch([at(675), at(30), at(2_230), at(1_000), null]);
+    assert.equal(w.takeLow(), null, 'nothing read yet');
+    w.sample();
+    advance(2_000);
+    w.sample();
+    advance(2_000);
+    w.sample();
+    assert.equal(w.takeLow()?.availableBytes, 30 * MIB);
+    assert.equal(w.takeLow(), null, 'taken, so not taken twice');
+    // Longer than the window ago, as across an outage: still taken, because nothing took it.
+    advance(60_000);
+    w.sample();
+    advance(60_000);
+    w.sample();
+    assert.equal(w.lowest(), null, 'the window has nothing: the last reading was a gap');
+    assert.deepEqual(w.takeLow(), {
+      availablePercent: 12.6,
+      availableBytes: 1_000 * MIB,
+      totalBytes: total,
+    });
+  });
+
   it('is a gap before the first reading, and when the platform cannot say', () => {
     const { watch: w } = watch([null, null]);
     assert.equal(w.lowest(), null, 'nothing sampled yet');

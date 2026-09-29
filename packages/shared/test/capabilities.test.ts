@@ -44,6 +44,7 @@ describe('what a protocol version can do', () => {
       machineMemory: false,
       memoryLimit: false,
       poolMemory: false,
+      memorySinceLastReport: false,
     });
   });
 
@@ -285,5 +286,13 @@ describe('the health a peer can be sent', () => {
     assert.equal(versionFor('memoryLimit'), 18);
     assert.ok(missingCapabilities(18).includes('report how far memory lets its check pool grow'));
     assert.equal(versionFor('poolMemory'), 19);
+    // `P-219`: a meaning rather than a field, so nothing is stripped and the version says it.
+    assert.equal(versionFor('memorySinceLastReport'), 20);
+    assert.ok(
+      missingCapabilities(19).includes(
+        'report each memory low once, rather than the last thirty seconds',
+      ),
+    );
+    assert.equal(capabilitiesFor(20).memorySinceLastReport, true);
   });
 });

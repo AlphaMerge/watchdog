@@ -305,6 +305,20 @@ export type ProbeLink =
       health?: ProbeHealthReport;
     };
 
+/**
+ * A probe's memory lows over every heartbeat since Probe Health last recorded it (`P-219`).
+ *
+ * The lowest available and the highest limit usage the reports carried, and the ceiling as last
+ * reported, which is a size rather than a low. Each field is absent when no report carried it, and
+ * the channel gaps.
+ */
+export interface MemoryFold {
+  readonly memoryAvailablePercent?: number;
+  readonly memoryAvailableMb?: number;
+  readonly memoryLimitUsagePercent?: number;
+  readonly memoryLimitMb?: number;
+}
+
 interface ProbeSession {
   connection: MessageConnection<ProbeToCoreMessage, CoreToProbeMessage>;
   info: ConnectedProbe;
@@ -478,6 +492,14 @@ export class ProbeEndpoint {
   readonly #options: ProbeEndpointOptions;
   readonly #logger: Logger;
   readonly #sessions = new Map<string, ProbeSession>();
+  /**
+   * Memory lows since Probe Health last recorded each probe, by probe object (`P-219`).
+   *
+   * **Beside the session, not in it**, because a link that drops between two records has already
+   * had its last reports acknowledged: the probe has let go of those lows, and a fold that died
+   * with the session would lose them. The first record after the drop takes them instead.
+   */
+  readonly #memoryFolds = new Map<number, MemoryFold>();
   /**
    * Every accepted socket, so shutdown cannot be held open by one that will not answer (`P-67`).
    *
@@ -681,7 +703,10 @@ export class ProbeEndpoint {
           // beside the link, never persisted: this is a live fact about a process that is
           // currently running, and a value read back from a table after a restart would be a
           // claim about a probe this core has not spoken to yet.
-          if (message.health !== undefined) session.health = message.health;
+          if (message.health !== undefined) {
+            session.health = message.health;
+            this.#foldMemory(session, message.health);
+          }
           connection.send({ type: 'heartbeat-ack', seq: message.seq });
           // **The heartbeat is where an interrupted push is actually caught** (`P-153`).
           // `P-149` compares the count carried by a `config-ack`, which only arrives on a live
@@ -1525,6 +1550,35 @@ export class ProbeEndpoint {
     return ids;
   }
 
+  /**
+   * The memory lows this probe reported since the last call, and start again (`P-219`).
+   *
+   * **Probe Health's sweep calls this, and nothing else may.** A scrape or an API read takes the
+   * latest report from `linkFor`; one that took this would empty the fold and leave the record a
+   * gap where the low belonged. Undefined when nothing was folded: a probe below protocol 20,
+   * which reports a window and is recorded by its latest report, or one that sent nothing since.
+   */
+  takeMemory(probeObjectId: number): MemoryFold | undefined {
+    const fold = this.#memoryFolds.get(probeObjectId);
+    this.#memoryFolds.delete(probeObjectId);
+    return fold;
+  }
+
+  #foldMemory(session: ProbeSession, health: ProbeHealthReport): void {
+    // Below 20 a report is the lowest of the last thirty seconds, and folding those would count
+    // the overlap between consecutive reports twice. Before the probe's object is known there is
+    // no Probe Health sensor to record it, and nothing to key the fold by.
+    if (!capabilitiesFor(session.protocolVersion).memorySinceLastReport) return;
+    if (session.probeObjectId === null) return;
+    const was = this.#memoryFolds.get(session.probeObjectId) ?? {};
+    this.#memoryFolds.set(session.probeObjectId, {
+      ...pick('memoryAvailablePercent', Math.min, was, health),
+      ...pick('memoryAvailableMb', Math.min, was, health),
+      ...pick('memoryLimitUsagePercent', Math.max, was, health),
+      ...pick('memoryLimitMb', (_before, now) => now, was, health),
+    });
+  }
+
   linkFor(probeObjectId: number): ProbeLink {
     const nowNs = process.hrtime.bigint();
     for (const session of this.#sessions.values()) {
@@ -1634,4 +1688,18 @@ function wireFor(message: SweepMessage): CoreToProbeMessage {
     case 'identify-cancel':
       return { type: 'identify-cancel', runId: message.runId };
   }
+}
+
+/** One field of a memory fold: the two combined, either one alone, or absent when neither has it. */
+function pick<K extends keyof MemoryFold>(
+  key: K,
+  combine: (before: number, now: number) => number,
+  was: MemoryFold,
+  health: ProbeHealthReport,
+): Partial<Pick<MemoryFold, K>> {
+  const before = was[key];
+  const now = health[key];
+  if (now === undefined)
+    return before === undefined ? {} : ({ [key]: before } as Pick<MemoryFold, K>);
+  return { [key]: before === undefined ? now : combine(before, now) } as Pick<MemoryFold, K>;
 }

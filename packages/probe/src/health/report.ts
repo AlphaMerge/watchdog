@@ -1,4 +1,5 @@
 import {
+  capabilitiesFor,
   CpuMeter,
   MemorySampler,
   type AvailableMemoryLow,
@@ -89,11 +90,38 @@ export interface ProbeHealthSources {
 
 /** What the reporter needs of a `MemorySampler`. */
 interface MemoryReadings {
-  readonly machine: { lowest: () => AvailableMemoryLow | null };
-  readonly limit: { lowest: () => AvailableMemoryLow | null };
+  readonly machine: MemoryLows;
+  readonly limit: MemoryLows;
   start: () => void;
   stop: () => void;
 }
+
+/** What the reporter needs of one `AvailableMemoryWatch`. */
+interface MemoryLows {
+  lowest: () => AvailableMemoryLow | null;
+  takeLow: () => AvailableMemoryLow | null;
+}
+
+/** The heartbeat a report is for, from `CoreClient` (`P-219`). */
+export interface HeartbeatContext {
+  readonly seq: number;
+  /** The version the two ends speak, which decides what the memory channels cover. */
+  readonly peerVersion: number;
+}
+
+/** The memory lows of heartbeats the core has not acknowledged, oldest first (`P-219`). */
+interface Unacknowledged {
+  readonly seq: number;
+  readonly machine: AvailableMemoryLow | null;
+  readonly limit: AvailableMemoryLow | null;
+}
+
+/**
+ * How many unacknowledged heartbeats are kept apart before the oldest two are merged. Merging
+ * keeps their low and loses only which heartbeat it belonged to, which matters only to a core
+ * that acknowledges some of them and not others — and a core acknowledges in order or not at all.
+ */
+const MAX_UNACKNOWLEDGED = 64;
 
 const MB = 1024 * 1024;
 
@@ -102,6 +130,7 @@ export class ProbeHealthReporter {
   readonly #cpu = new CpuMeter();
   readonly #process: NonNullable<ProbeHealthSources['process']>;
   readonly #memory: MemoryReadings;
+  #unacknowledged: Unacknowledged[] = [];
 
   constructor(sources: ProbeHealthSources) {
     this.#sources = sources;
@@ -123,7 +152,23 @@ export class ProbeHealthReporter {
     this.#memory.stop();
   }
 
-  report(): ProbeHealthReport {
+  /**
+   * The report for one heartbeat, or, without one, the latest thirty seconds (`P-218`).
+   *
+   * **At protocol 20 the memory channels cover exactly the time since the last heartbeat the core
+   * acknowledged** (`P-219`), and the core folds every report between two of its records into the
+   * second. So each low is in one report and one record: never missed between the reports two
+   * records happen to read, and never in two. Each heartbeat takes what the watches read since the
+   * one before and keeps it until the core acknowledges that heartbeat, so a report the core never
+   * got — sent as the link dropped — is carried by the next, and an outage by the first report
+   * after it. The lag is at most a heartbeat.
+   *
+   * **Below 20 the core records whichever report it has**, and folding would lose what fell in the
+   * reports it did not read, so an older core gets the lowest of the last thirty seconds, as
+   * before. Every heartbeat takes its share either way, so a core that changes version between
+   * connections starts from a clean cut.
+   */
+  report(heartbeat?: HeartbeatContext): ProbeHealthReport {
     const scheduler = this.#sources.scheduler();
     const pool = this.#sources.pool();
     const children = this.#sources.children?.();
@@ -135,9 +180,8 @@ export class ProbeHealthReporter {
     const spool = this.#sources.spool?.();
     const drain = this.#sources.drain?.();
     const cpu = this.#cpu.percent(this.#process.cpuUsage(), this.#process.hrtime());
-    const machine = this.#memory.machine.lowest();
-    // The lowest headroom is the highest usage: the worst of the last thirty seconds either way.
-    const limit = this.#memory.limit.lowest();
+    // The lowest headroom is the highest usage, so both are the lowest of what they cover.
+    const { machine, limit } = this.#memoryFor(heartbeat);
 
     return {
       scheduled: scheduler.tasks,
@@ -251,4 +295,55 @@ export class ProbeHealthReporter {
           }),
     };
   }
+
+  /** The core has this heartbeat, and every one before it: what they covered is delivered. */
+  acknowledged(seq: number): void {
+    this.#unacknowledged = this.#unacknowledged.filter((entry) => entry.seq > seq);
+  }
+
+  #memoryFor(heartbeat: HeartbeatContext | undefined): {
+    machine: AvailableMemoryLow | null;
+    limit: AvailableMemoryLow | null;
+  } {
+    if (heartbeat === undefined) {
+      return { machine: this.#memory.machine.lowest(), limit: this.#memory.limit.lowest() };
+    }
+    this.#unacknowledged.push({
+      seq: heartbeat.seq,
+      machine: this.#memory.machine.takeLow(),
+      limit: this.#memory.limit.takeLow(),
+    });
+    while (this.#unacknowledged.length > MAX_UNACKNOWLEDGED) {
+      const [oldest, next, ...rest] = this.#unacknowledged;
+      if (oldest === undefined || next === undefined) break;
+      this.#unacknowledged = [
+        {
+          seq: next.seq,
+          machine: lower(oldest.machine, next.machine),
+          limit: lower(oldest.limit, next.limit),
+        },
+        ...rest,
+      ];
+    }
+    if (!capabilitiesFor(heartbeat.peerVersion).memorySinceLastReport) {
+      return { machine: this.#memory.machine.lowest(), limit: this.#memory.limit.lowest() };
+    }
+    let machine: AvailableMemoryLow | null = null;
+    let limit: AvailableMemoryLow | null = null;
+    for (const entry of this.#unacknowledged) {
+      machine = lower(machine, entry.machine);
+      limit = lower(limit, entry.limit);
+    }
+    return { machine, limit };
+  }
+}
+
+/** The lower of two readings, where either may be a gap. */
+function lower(
+  a: AvailableMemoryLow | null,
+  b: AvailableMemoryLow | null,
+): AvailableMemoryLow | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return b.availableBytes < a.availableBytes ? b : a;
 }

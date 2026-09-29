@@ -83,6 +83,19 @@ export interface ProbeCapabilities {
    * like the two before it.
    */
   poolMemory: boolean;
+  /**
+   * Reports each memory low once: its machine-memory and limit channels cover exactly the time
+   * since the last heartbeat the core acknowledged, and the core folds every report between two
+   * records into the second (`P-219`).
+   *
+   * **No new field, a new meaning**, which is why it is a version rather than a strip. Below this
+   * a report is the lowest of the last thirty seconds and the core records the latest one it has.
+   * At a heartbeat that does not divide thirty that misses the time between the two reports
+   * consecutive records read, and a longer window counts some of it twice. Folding an older
+   * probe's thirty-second windows would count the overlap twice, so the core folds only at this
+   * version, and a newer probe speaking to an older core sends the window.
+   */
+  memorySinceLastReport: boolean;
 }
 
 /**
@@ -104,6 +117,7 @@ const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
   ['machineMemory', 17],
   ['memoryLimit', 18],
   ['poolMemory', 19],
+  ['memorySinceLastReport', 20],
 ];
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -119,6 +133,7 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   machineMemory: 'report how much memory its machine has left',
   memoryLimit: 'report how close it is to its own memory limit',
   poolMemory: 'report how far memory lets its check pool grow',
+  memorySinceLastReport: 'report each memory low once, rather than the last thirty seconds',
 };
 
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
@@ -135,6 +150,7 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     machineMemory: has(17),
     memoryLimit: has(18),
     poolMemory: has(19),
+    memorySinceLastReport: has(20),
   };
 }
 

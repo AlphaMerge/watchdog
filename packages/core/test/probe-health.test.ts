@@ -20,7 +20,7 @@ import { IngestionService } from '../src/ingestion/service.js';
 import { loadLookups } from '../src/lookups/loader.js';
 import { PauseRepository } from '../src/objects/pause-repository.js';
 import { SensorStateService } from '../src/state/service.js';
-import type { ProbeLink } from '../src/transport/probe-endpoint.js';
+import type { MemoryFold, ProbeLink } from '../src/transport/probe-endpoint.js';
 import type { Database } from '../src/db/pool.js';
 import {
   createScratchDatabase,
@@ -587,6 +587,124 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
     it('gaps a heartbeat that has never arrived rather than calling it zero seconds old', () => {
       const { reading } = build(() => connected({ lastHeartbeatAt: null })).read(probeId);
       assert.equal(reading['heartbeatAge'], null);
+    });
+  });
+
+  describe('the memory a sweep records (P-219)', () => {
+    const MEMORY = ['memoryAvailable', 'memoryAvailableBytes', 'memoryLimitUsage', 'memoryLimit'];
+    const FOLD: MemoryFold = {
+      memoryAvailablePercent: 8.5,
+      memoryAvailableMb: 700,
+      memoryLimitUsagePercent: 91,
+      memoryLimitMb: 4_096,
+    };
+
+    /** One sweep; what it recorded of memory for each sensor, and what it took from the fold. */
+    async function swept(
+      link: ProbeLink,
+      takeMemory?: (probeObjectId: number) => MemoryFold | undefined,
+    ): Promise<{ memory: Map<number, Record<string, number>>; taken: number[] }> {
+      const results: CheckResult[] = [];
+      const taken: number[] = [];
+      await new ProbeHealthService({
+        vouching: everyVoucherHolds,
+        db,
+        logger: silent,
+        sources: {
+          link: () => link,
+          ...(takeMemory === undefined
+            ? {}
+            : {
+                takeMemory: (probeObjectId: number) => {
+                  taken.push(probeObjectId);
+                  return takeMemory(probeObjectId);
+                },
+              }),
+        },
+        ingest: (batch) => {
+          results.push(...batch);
+          return Promise.resolve();
+        },
+        now: () => new Date('2026-08-28T00:00:25Z'),
+      }).sweep();
+      const memory = new Map(
+        results.map((result) => [
+          result.sensorId,
+          Object.fromEntries(
+            result.channels
+              .filter((channel) => MEMORY.includes(channel.key))
+              .map((channel) => [channel.key, channel.value]),
+          ),
+        ]),
+      );
+      return { memory, taken };
+    }
+
+    it('records a protocol-20 probe’s lows since the last record, taken once for all its sensors', async () => {
+      // Two sensors report on this probe. The second must not find the fold already emptied.
+      const { memory, taken } = await swept(connected(), () => FOLD);
+      const expected = {
+        memoryAvailable: 8.5,
+        memoryAvailableBytes: 700,
+        memoryLimitUsage: 91,
+        memoryLimit: 4_096,
+      };
+      assert.deepEqual(memory.get(sensorId), expected);
+      assert.deepEqual(memory.get(orphanId), expected, 'the sensor naming it records the same');
+      assert.deepEqual(
+        taken.filter((id) => id === probeId),
+        [probeId],
+        'taken once in the sweep',
+      );
+      // What a scrape or the API reads is still the latest report.
+      const { reading } = build(() => connected()).read(probeId);
+      assert.equal(reading['memoryAvailable'], 23.4);
+    });
+
+    it('gaps them when a protocol-20 probe reported nothing since the last record', async () => {
+      // At a heartbeat longer than thirty seconds, every other record has no report of its own;
+      // repeating the last one would be a reading presented as new that nobody took.
+      const { memory } = await swept(connected(), () => undefined);
+      assert.deepEqual(memory.get(sensorId), {});
+    });
+
+    it('records a probe below 20 by its latest report, its last thirty seconds, as before', async () => {
+      const { memory } = await swept(connected({ protocolVersion: 19 }), () => undefined);
+      assert.deepEqual(memory.get(sensorId), {
+        memoryAvailable: 23.4,
+        memoryAvailableBytes: 1_860,
+        memoryLimitUsage: 55.2,
+        memoryLimit: 4_096,
+      });
+    });
+
+    it('records what a dropped probe reported before it dropped, once', async () => {
+      const { memory } = await swept({ connected: false }, () => ({ memoryAvailablePercent: 8.5 }));
+      assert.deepEqual(memory.get(sensorId), { memoryAvailable: 8.5 });
+      const after = await swept({ connected: false }, () => undefined);
+      assert.deepEqual(after.memory.get(sensorId), {}, 'and a gap once it has been recorded');
+    });
+
+    it('records the latest report on a core wired without the fold', async () => {
+      const { memory } = await swept(connected());
+      assert.equal(memory.get(sensorId)?.['memoryAvailable'], 23.4);
+    });
+
+    it('leaves the local probe’s machine to Core Health, folded or not (M-21)', async () => {
+      // `read` gaps the local probe's machine pair; a fold laid over it would give the second
+      // alarm for one squeeze back. Its own limit is not the machine's and is folded as anywhere.
+      await db.query('UPDATE probe_config SET is_local = true WHERE object_id = $1', [probeId]);
+      try {
+        const own = { memoryLimitUsage: 91, memoryLimit: 4_096 };
+        const { memory } = await swept(connected(), () => FOLD);
+        assert.deepEqual(memory.get(sensorId), own);
+        const dropped = await swept({ connected: false }, () => FOLD);
+        assert.deepEqual(dropped.memory.get(sensorId), own, 'and once it has dropped');
+      } finally {
+        await db.query('UPDATE probe_config SET is_local = false WHERE object_id = $1', [probeId]);
+      }
+      const remote = await swept(connected(), () => FOLD);
+      assert.equal(remote.memory.get(sensorId)?.['memoryAvailable'], 8.5, 'the control');
     });
   });
 

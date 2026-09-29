@@ -400,7 +400,7 @@ alarm.
 | `sessionsEvicted` | Sessions closed for being idle. Climbing in step with the sessions opened means `idleMs` is shorter than your scan interval, so every check pays a handshake it need not — expensive on SSH |
 | `spoolStalled` | **Any value above zero is an error.** The link is up and the spool is not moving — results are accumulating for a reason nothing else reports |
 | `spoolDropped` | **Any value above zero is an error.** Results were lost because the spool filled |
-| `memoryAvailable` | What the probe's *machine* has left, which `memory` — the probe's own share — cannot tell you. The probe `P-206` lost was the largest process on its VM, and was killed because a lint run and PostgreSQL had taken the rest. Warns below 20%, errors below 10%; the lowest of the last 30 s, read every 2 s on the probe's own timer, because the fall from 8.5% to a kill took six. A gap for a probe older than protocol 17, on any platform but Linux and Windows, and where the machine claims more available than it has in total — a container whose `/proc/meminfo` is virtualised (`lxcfs`, OpenVZ) can (`P-224`). The machine's figure, not the probe's own ceiling — that is the next row. **A gap on the local probe** (`M-21`): its machine is the core's, and Core Health's `memoryAvailable` above carries the same reading with the same limits, so one squeeze on a single-host install is one alarm, on Core Health. The local probe's message still names the figure when it is below 20%. Only a probe flagged local at approval is treated this way; one on the core's host that is not flagged still reports both |
+| `memoryAvailable` | What the probe's *machine* has left, which `memory` — the probe's own share — cannot tell you. The probe `P-206` lost was the largest process on its VM, and was killed because a lint run and PostgreSQL had taken the rest. Warns below 20%, errors below 10%. Read every 2 s on the probe's own timer, because the fall from 8.5% to a kill took six, and each record is the lowest since the record before — see [what a record's memory channels cover](#what-a-records-memory-channels-cover). A gap for a probe older than protocol 17, on any platform but Linux and Windows, and where the machine claims more available than it has in total — a container whose `/proc/meminfo` is virtualised (`lxcfs`, OpenVZ) can (`P-224`). The machine's figure, not the probe's own ceiling — that is the next row. **A gap on the local probe** (`M-21`): its machine is the core's, and Core Health's `memoryAvailable` above carries the same reading with the same limits, so one squeeze on a single-host install is one alarm, on Core Health. The local probe's message still names the figure when it is below 20%. Only a probe flagged local at approval is treated this way; one on the core's host that is not flagged still reports both |
 | `memoryLimitUsage` | The probe's working set against the ceiling its own unit sets — `MemoryMax=6G` in `ms-probe.service`, whatever the machine has left. Warns above 80%. **Act on the warning**: at 100% the kernel kills the probe, and what follows is a link that drops, not a reading — see [a service at its memory ceiling](#a-service-at-its-memory-ceiling). Measured against the working set, not `memory.current`, because page cache fills a cgroup to its ceiling harmlessly. A gap where there is no limit, on cgroup v1 (RHEL 8 by default) and on Windows. `memoryLimit` beside it is the ceiling in MB |
 | `clockJumps` | The host's clock moved. Scheduling is monotonic, but data is wall-clock |
 | `clockOffset` | How far the probe's clock is behind the core's, in seconds; negative is ahead. Measured by the core from the send time on every heartbeat and batch, the smallest of five minutes, so a delayed message cannot make a probe look behind. **Warns beyond a minute either way.** A gap until the session has sent one. See [a probe whose clock is wrong](#a-probe-whose-clock-is-wrong) |
@@ -408,6 +408,31 @@ alarm.
 | `resultsFutureDated`, `resultsPastDated` | **Any value above zero is a warning.** The core refused this probe's results in the last five minutes because no clock could have stamped them: more than 15 minutes ahead of the core, or older than anything is kept. Counted on the core, per probe, so the warning clears five minutes after the clock is put right. See [a probe whose clock is wrong](#a-probe-whose-clock-is-wrong) |
 | `reportsRefused` | Everything the core refused from this probe because it was not the probe's to report: a result for a sensor not under it, an answer to a query put to another probe, a message about another probe's discovery run. A counter with no limit, because most refusals are ordinary — a probe whose spool still holds results for sensors that were moved away from it or deleted. See [a probe reporting on work it was not given](#a-probe-reporting-on-work-it-was-not-given) |
 | `reportsForeign` | **Any value above zero is a warning.** The part of the above no correct probe sends: work that was never this probe's. A count over the last five minutes, so it sees the first report after a restart or a reconnect and clears five minutes after the last one |
+
+### What a record's memory channels cover
+
+`memoryAvailable`, `memoryAvailableBytes` and `memoryLimitUsage` are the worst the probe read in
+the span a record stands for (`P-219`). The core records Probe Health every 30 s, and from
+protocol 20 the probe's heartbeats split time between them exactly:
+
+- **Each heartbeat reports the lowest since the last one the core acknowledged.** A heartbeat
+  lost as the link dropped is carried by the next, and an outage by the first after it.
+- **Each record takes every heartbeat since the record before.** So every reading lands in exactly
+  one record, whatever the heartbeat interval. A squeeze is never missed between records and never
+  counted twice. It does show in two records when it lasted across the moment between them,
+  because it was low in both.
+- **A low arrives up to one heartbeat late**, in the record after the heartbeat that carried it.
+  This is not a fault.
+- **At a heartbeat longer than 30 s, every other record has no heartbeat of its own**, and those
+  three channels are a gap in it: the line breaks. Repeating the previous heartbeat would present
+  a reading nobody took as new. Keep the heartbeat at 30 s or less (the default is 10 s) if you
+  want an unbroken line.
+- **A probe older than protocol 20** sends the lowest of its last 30 s, and the core records the
+  latest one it has, as before. At a heartbeat that does not divide 30 s, such as 20 s, a squeeze
+  can fall between the two heartbeats consecutive records read, and be in neither. Upgrade the
+  probe.
+
+A scrape of `/metrics` shows the latest heartbeat, not the record.
 
 **A health reading the core cannot use is a gap on its channel, and the link stays up**
 (`P-224`). A probe's numbers arrive on its heartbeat, and the core checks each against the

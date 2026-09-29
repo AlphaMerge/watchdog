@@ -5355,8 +5355,8 @@ because each is a decision rather than a defect:
         with no report, and nothing is read before `start()`.
       - Mutation: a timer that reads nothing fails two tests in each file.
 
-- [ ] **P-219 — a memory low can fall between two reports when the heartbeat does not divide
-      thirty seconds** · S · P-218 · Found measuring `P-218`
+- [x] **P-219 — a memory low can fall between two reports when the heartbeat does not divide
+      thirty seconds** · M (was S) · P-218 · Found measuring `P-218`
       (`docs/findings/2026-09-28-memory-sampling.md`). The core records whichever report reached it
       last, so each record reads a report up to a heartbeat old.
       - **At 10 s it is never lost.** 10 divides 30, so consecutive records read reports exactly
@@ -5370,6 +5370,92 @@ because each is a decision rather than a defect:
       hello, so the 10 s default catches exactly what it does now. A mocked-timer test at a 20 s
       heartbeat records a squeeze placed in today's gap. The administration guide says a low can
       arrive one record late, by up to a heartbeat's age, so nobody reads the lag as a fault.
+
+      **Re-scoped to M, protocol 20, by the orchestrator (2026-09-29).** The window above was
+      built and not landed. A window of 30 s plus the heartbeat leaves no gap, but it puts a
+      low in two records wherever consecutive windows overlap, which is 10 s of every 30 at the
+      shipped heartbeat. Everything that reads *duration* then sees 60 s where there were 30:
+      - a trigger latency between 30 and 60 s fires on a squeeze it let pass;
+      - an error limit writes 30 s of Down into Probe Health's state history after the condition
+        has cleared, which is invented downtime.
+
+      A report that covers only the time since the last one the core received cannot fix it
+      alone, because the core recorded only the latest report. At 10 s it would lose two reports'
+      lows in three. **The done-when became: each reading in exactly one record, at any heartbeat.**
+
+      **P-219 outcome.** The probe and the core split time between records exactly, from protocol
+      20. 19 is `P-236`'s, which lands first.
+      - **The probe.** `AvailableMemoryWatch.takeLow()` is the lowest since the last take.
+        `ProbeHealthReporter.report({ seq, peerVersion })` takes both watches' lows at each
+        heartbeat and keeps them until `acknowledged(seq)`. At 20 a report carries the low of
+        every unacknowledged heartbeat, so:
+        - a heartbeat lost as the link dropped is carried by the next;
+        - an outage is carried by the first heartbeat after it, since reading goes on (`P-218`).
+
+        Past 64 unacknowledged heartbeats the oldest two merge, keeping their low. Below 20 the
+        report is the 30 s window, as before. `CoreClient` hands the reporter the seq and the
+        negotiated version, and passes each `heartbeat-ack` on.
+      - **The core.** `ProbeEndpoint` folds each protocol-20 report into a per-probe-object fold:
+        the lowest available (percent and MB), the highest limit usage, and the ceiling as last
+        reported.
+        - The fold lives beside the session, not in it. A link that drops between records has
+          already had its last reports acknowledged, and the first record after the drop takes
+          them.
+        - `takeMemory` empties it. Probe Health's `sweep` takes each probe's fold once and shares
+          it among the sensors reporting on that probe, and nothing else takes it.
+        - `read()`, which the metrics scrape and the API use, still gives the latest report.
+      - **A gap when a record got no heartbeat.** At a heartbeat over 30 s, every other record
+        gaps the three channels rather than repeat the last heartbeat as a new reading.
+        `administration.md` says so, in a new section on what a record's memory channels cover,
+        with the lag of up to one heartbeat and what a pre-20 probe still does. The exporter's
+        help text says a scrape is the latest heartbeat.
+      - **Mixed versions.**
+        - A 19 probe against a 20 core: the core folds nothing and records the latest, as before.
+        - A 20 probe against a 19 core: it negotiates to 19 and sends the 30 s window, which is
+          what that core records.
+        - No field is added, so `healthForPeer` and `P-224`'s guard are unchanged.
+      - **The local probe (`M-21`).** Its machine pair stays the gap `read` gives it, folded or
+        not, connected or dropped: a fold laid over it would be the second alarm for one squeeze
+        that `M-21` removed. Its own limit channels are folded as on any probe. `M-21`'s scenario
+        built its probe at protocol 19 and read the bump as skew; it uses `PROTOCOL_VERSION` now.
+
+      **Tests.**
+      - `machine-memory.test.ts` 1: `takeLow`, each reading once, including past the window.
+      - `capabilities.test.ts`: `memorySinceLastReport` at 20, and the full capability list.
+      - `probe-health-report.test.ts` 7:
+        - a squeeze in the heartbeat after it and no other;
+        - an unacknowledged heartbeat carried;
+        - an outage carried;
+        - a 19 peer getting the window;
+        - a low kept past the merge bound;
+        - the scenario: the reporter and a model of the core's fold, with records every 30 s. At
+          10 s and at 20 s, a low read at every 2 s from 2 to 120 s is in exactly one record;
+        - the scenario's control: below 20 at 20 s, lows are missed, including the finding's
+          22 s.
+      - `core-client.test.ts` 2: the seq, the negotiated version and the ack passed through, and
+        a 19 welcome giving peerVersion 19.
+      - `probe-endpoint.test.ts` 3: the fold (min, max, latest ceiling, emptied by a take, the link
+        still the latest); a fold kept across a dropped link; nothing folded below 20.
+      - `probe-health.test.ts` 6:
+        - a 20 probe recorded from its fold, taken once for its two sensors;
+        - a gap with no fold;
+        - a 19 probe recorded by its latest report;
+        - a dropped probe's fold recorded once;
+        - a core without the fold recording the latest;
+        - the local probe's machine pair a gap under a fold, connected and dropped, its limit
+          folded, with a remote probe as the control.
+
+      Mutation 10/10, each run alone against its own tests:
+      - the report always the window (5 fail);
+      - the ack ignored (4);
+      - a merge dropping the older low (1);
+      - `CoreClient` not passing the ack (1);
+      - the core folding any version (1);
+      - the fold keeping the latest instead of the lowest (1);
+      - the take per sensor instead of per probe (1);
+      - the last report repeated when nothing arrived (1);
+      - a dropped probe's fold ignored (1);
+      - the fold laid over the local probe's machine pair (1).
 
 - [x] **P-226 — a backfill after a long replay rebuilt every channel's history from one channel's** ·
       M · S-06, R-03 · Found in the round-3 review. A backfill cleared its window **for every

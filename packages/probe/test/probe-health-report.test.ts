@@ -2,7 +2,12 @@ import { strict as assert } from 'node:assert';
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, it, type TestContext } from 'node:test';
-import { AvailableMemoryWatch, MemorySampler, type AvailableMemoryLow } from '@ms/shared';
+import {
+  AvailableMemoryWatch,
+  MemorySampler,
+  PROTOCOL_VERSION,
+  type AvailableMemoryLow,
+} from '@ms/shared';
 import { ProbeHealthReporter } from '../src/health/report.js';
 import type { ProcessRunnerStats } from '../src/runner/process-runner.js';
 import type { PoolStats } from '../src/runner/pool.js';
@@ -113,8 +118,8 @@ function reporter(options: {
       ? {}
       : { drain: () => ({ ...DRAIN, stalledForMs: options.stalledForMs ?? 0 }) }),
     memory: options.memory ?? {
-      machine: { lowest: () => options.machine ?? null },
-      limit: { lowest: () => options.limit ?? null },
+      machine: { lowest: () => options.machine ?? null, takeLow: () => options.machine ?? null },
+      limit: { lowest: () => options.limit ?? null, takeLow: () => options.limit ?? null },
       start: () => undefined,
       stop: () => undefined,
     },
@@ -229,8 +234,8 @@ describe('the probe’s own health report', () => {
       scheduler: () => WHEEL,
       pool: () => ({ ...unread, ceiling: 64, heldBack: 0 }),
       memory: {
-        machine: { lowest: () => null },
-        limit: { lowest: () => null },
+        machine: { lowest: () => null, takeLow: () => null },
+        limit: { lowest: () => null, takeLow: () => null },
         start: () => undefined,
         stop: () => undefined,
       },
@@ -479,6 +484,164 @@ describe('the probe’s own health report', () => {
 
       until(t, at, 60_000);
       assert.equal(health.report().memoryAvailablePercent, 15);
+    });
+
+    describe('at protocol 20, each low in one report (P-219)', () => {
+      /**
+       * A machine squeezed from `from` to `to`, read every two seconds on a clock the test moves
+       * itself, and the reporter over it. No timers: `step` reads when a two-second read is due.
+       */
+      function tiled(from: number, to: number) {
+        const at = { ms: 0 };
+        const now = (): number => at.ms;
+        const machine = new AvailableMemoryWatch({
+          read: () => ({ availableBytes: at.ms >= from && at.ms < to ? 15 : 60, totalBytes: 100 }),
+          now,
+        });
+        const limit = new AvailableMemoryWatch({ read: () => null, now });
+        const memory = new MemorySampler({ machine, limit });
+        const health = reporter({ memory });
+        let seq = 0;
+        return {
+          health,
+          /** Moves the clock to `ms`, reading every two seconds on the way. */
+          to(ms: number): void {
+            while (at.ms < ms) {
+              at.ms += 1_000;
+              if (at.ms % 2_000 === 0) memory.sample();
+            }
+          },
+          beat(peerVersion = PROTOCOL_VERSION): { seq: number; percent: number | undefined } {
+            seq += 1;
+            return {
+              seq,
+              percent: health.report({ seq, peerVersion }).memoryAvailablePercent,
+            };
+          },
+        };
+      }
+
+      it('reports a squeeze in the heartbeat after it, and in no other', () => {
+        const probe = tiled(12_000, 16_000);
+        const sent: (number | undefined)[] = [];
+        for (const ms of [10_000, 20_000, 30_000, 40_000]) {
+          probe.to(ms);
+          const beat = probe.beat();
+          sent.push(beat.percent);
+          probe.health.acknowledged(beat.seq);
+        }
+        assert.deepEqual(sent, [60, 15, 60, 60]);
+      });
+
+      it('carries a heartbeat the core never acknowledged into the next one', () => {
+        // Sent as the link dropped: the core may never have had it, so its low goes again.
+        const probe = tiled(12_000, 16_000);
+        probe.to(10_000);
+        probe.health.acknowledged(probe.beat().seq);
+        probe.to(20_000);
+        assert.equal(probe.beat().percent, 15, 'sent, and never acknowledged');
+        probe.to(30_000);
+        const again = probe.beat();
+        assert.equal(again.percent, 15, 'so it is carried');
+        probe.health.acknowledged(again.seq);
+        probe.to(40_000);
+        assert.equal(probe.beat().percent, 60, 'and once acknowledged, not again');
+      });
+
+      it('carries an outage into the first heartbeat after it', () => {
+        // No heartbeat while disconnected, and reading goes on (`P-218`), so the first report
+        // after the reconnect covers the whole outage — however much longer than thirty seconds.
+        const probe = tiled(44_000, 48_000);
+        probe.to(10_000);
+        probe.health.acknowledged(probe.beat().seq);
+        probe.to(130_000);
+        assert.equal(probe.beat().percent, 15);
+      });
+
+      it('sends a core below 20 the last thirty seconds, which is what it records', () => {
+        // A 20 probe against a 19 core negotiates down: that core records the latest report, and
+        // a report of one heartbeat's worth would lose every low between its records.
+        const probe = tiled(12_000, 16_000);
+        const sent: (number | undefined)[] = [];
+        for (const ms of [10_000, 20_000, 30_000, 50_000]) {
+          probe.to(ms);
+          const beat = probe.beat(19);
+          sent.push(beat.percent);
+          probe.health.acknowledged(beat.seq);
+        }
+        assert.deepEqual(sent, [60, 15, 15, 60], 'the thirty-second window, as before');
+      });
+
+      it('keeps a low however many heartbeats go unacknowledged', () => {
+        // Past the bound, the oldest are merged, which keeps their low.
+        const probe = tiled(0, 4_000);
+        let last = { seq: 0, percent: undefined as number | undefined };
+        for (let ms = 2_000; ms <= 200_000; ms += 2_000) {
+          probe.to(ms);
+          last = probe.beat();
+        }
+        assert.equal(last.percent, 15, 'from a hundred heartbeats ago');
+        probe.health.acknowledged(last.seq);
+        probe.to(202_000);
+        assert.equal(probe.beat().percent, 60);
+      });
+
+      /**
+       * The whole path, with the core modelled: it records every thirty seconds, a second off
+       * each heartbeat so nothing ties, and folds every report since its last record (from 20)
+       * or takes the latest one (below). The squeeze is one reading, at `squeeze`; a longer one
+       * that spans the last heartbeat before a record is rightly in two, because it was low in
+       * both. Returns how many records held it.
+       */
+      function recordsHolding(options: {
+        heartbeatMs: number;
+        peerVersion: number;
+        squeeze: number;
+      }): number {
+        const probe = tiled(options.squeeze, options.squeeze + 2_000);
+        const folds = options.peerVersion >= 20;
+        let held: number | undefined;
+        let holding = 0;
+        for (let ms = 1_000; ms <= 181_000; ms += 1_000) {
+          probe.to(ms);
+          if (ms % options.heartbeatMs === 0) {
+            const beat = probe.beat(options.peerVersion);
+            probe.health.acknowledged(beat.seq);
+            held =
+              folds && held !== undefined && beat.percent !== undefined
+                ? Math.min(held, beat.percent)
+                : (beat.percent ?? (folds ? held : undefined));
+          }
+          if (ms > 1_000 && ms % 30_000 === 1_000) {
+            if (held === 15) holding += 1;
+            if (folds) held = undefined;
+          }
+        }
+        return holding;
+      }
+
+      it('puts every reading in exactly one record, at a heartbeat that divides thirty or not', () => {
+        for (const heartbeatMs of [10_000, 20_000]) {
+          for (let squeeze = 2_000; squeeze <= 120_000; squeeze += 2_000) {
+            assert.equal(
+              recordsHolding({ heartbeatMs, peerVersion: PROTOCOL_VERSION, squeeze }),
+              1,
+              `a low read at ${String(squeeze / 1_000)} s, heartbeat ${String(heartbeatMs / 1_000)} s`,
+            );
+          }
+        }
+      });
+
+      it('the control: below 20, at 20 s, a low fell between two records and was in none', () => {
+        const missed = [];
+        for (let squeeze = 2_000; squeeze <= 120_000; squeeze += 2_000) {
+          if (recordsHolding({ heartbeatMs: 20_000, peerVersion: 19, squeeze }) === 0) {
+            missed.push(squeeze / 1_000);
+          }
+        }
+        assert.ok(missed.length > 0, 'the gap P-219 closes');
+        assert.ok(missed.includes(22), `the finding's own case, 22 s; missed ${missed.join(', ')}`);
+      });
     });
 
     it('gaps both memory channels until it is started, rather than reading once at the report', () => {

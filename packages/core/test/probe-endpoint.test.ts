@@ -1570,6 +1570,79 @@ describe(
       }
     });
 
+    describe('the memory lows it folds for Probe Health (P-219)', () => {
+      const beat = async (
+        probe: TestProbe,
+        seq: number,
+        health: NonNullable<Extract<ProbeToCoreMessage, { type: 'heartbeat' }>['health']>,
+      ): Promise<void> => {
+        probe.send({ type: 'heartbeat', seq, sentAt: new Date().toISOString(), health });
+        await probe.waitFor((m) => m.type === 'heartbeat-ack' && m.seq === seq);
+      };
+
+      it('folds every report of a protocol-20 probe until the sweep takes them, then starts again', async () => {
+        await withProbe(new StubSource(), async (probe, endpoint) => {
+          await waitUntil(() => endpoint.linkFor(7).connected);
+          await beat(probe, 1, {
+            memoryAvailablePercent: 50,
+            memoryAvailableMb: 4_000,
+            memoryLimitUsagePercent: 30,
+            memoryLimitMb: 4_096,
+          });
+          await beat(probe, 2, {
+            memoryAvailablePercent: 12,
+            memoryAvailableMb: 960,
+            memoryLimitUsagePercent: 70,
+          });
+          await beat(probe, 3, {
+            memoryAvailablePercent: 40,
+            memoryAvailableMb: 3_200,
+            memoryLimitUsagePercent: 50,
+            memoryLimitMb: 2_048,
+          });
+          assert.deepEqual(endpoint.takeMemory(7), {
+            memoryAvailablePercent: 12,
+            memoryAvailableMb: 960,
+            memoryLimitUsagePercent: 70,
+            // A size, not a low: the ceiling as last reported.
+            memoryLimitMb: 2_048,
+          });
+          assert.equal(endpoint.takeMemory(7), undefined, 'taken once, and then nothing since');
+          const link = endpoint.linkFor(7);
+          assert.ok(link.connected);
+          assert.equal(
+            link.health?.memoryAvailablePercent,
+            40,
+            'the link still reads the latest report, for a scrape',
+          );
+        });
+      });
+
+      it('keeps what arrived before a dropped link for the first sweep after it', async () => {
+        // The probe let go of these lows when the core acknowledged them.
+        const source = new StubSource();
+        await withProbe(source, async (probe, endpoint) => {
+          await waitUntil(() => endpoint.linkFor(7).connected);
+          await beat(probe, 1, { memoryAvailablePercent: 8.5 });
+          probe.close();
+          await waitUntil(() => !endpoint.linkFor(7).connected);
+          assert.deepEqual(endpoint.takeMemory(7), { memoryAvailablePercent: 8.5 });
+        });
+      });
+
+      it('folds nothing from a probe below 20, whose report is its last thirty seconds', async () => {
+        await withProbe(
+          new StubSource(),
+          async (probe, endpoint) => {
+            await waitUntil(() => endpoint.linkFor(7).connected);
+            await beat(probe, 1, { memoryAvailablePercent: 12 });
+            assert.equal(endpoint.takeMemory(7), undefined);
+          },
+          { protocolVersion: 19 },
+        );
+      });
+    });
+
     it('pushes again when the probe acknowledges a different number of sensors', async () => {
       // **`P-149`.** A full push is one `config-set` plus N-1 deltas at the same version, and the
       // probe stamps itself as holding that version on the *first* one — so a link that drops

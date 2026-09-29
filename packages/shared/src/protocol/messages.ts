@@ -41,6 +41,12 @@ import { AppError } from '../errors/app-error.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
+ * Version 20 adds `memorySinceLastReport` (`P-219`): a new meaning for the memory health fields
+ * rather than a new field. From 20 a report's machine-memory and limit fields are the lowest since
+ * the last heartbeat the core acknowledged, and the core folds every report between two Probe
+ * Health records into the second, so each low is recorded once. Below 20 they are the lowest of
+ * the last thirty seconds and the core records the latest.
+ *
  * Version 19 adds `poolCeiling`, `poolMemoryCap` and `poolHeldBack` (`P-236`): the check pool's
  * ceiling in force, the most workers the probe's memory can hold, and how many the ceiling would
  * allow and memory does not. Gated and stripped like 17's and 18's.
@@ -83,7 +89,7 @@ import { AppError } from '../errors/app-error.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 19;
+export const PROTOCOL_VERSION = 20;
 
 /**
  * The oldest peer version this build still understands.
@@ -533,7 +539,8 @@ export interface ProbeHealthReport {
   uptimeSeconds?: number;
   /**
    * The probe's *machine*: what the operating system says is available, as a percentage of its
-   * total and in megabytes — the lowest in the last thirty seconds, not the latest (`P-208`).
+   * total and in megabytes — the lowest in the last thirty seconds, not the latest (`P-208`), and
+   * from protocol 20 the lowest since the last heartbeat the core acknowledged (`P-219`).
    *
    * Absent where the platform cannot say, so the channels gap: a kernel without `MemAvailable`,
    * or anything but Linux and Windows. Since protocol 17, and stripped for an older core.
@@ -543,7 +550,7 @@ export interface ProbeHealthReport {
   /**
    * The probe's *cgroup*: its working set as a percentage of the ceiling the kernel enforces on it
    * — the lower of `memory.high` and `memory.max` — and that ceiling in megabytes (`P-210`). The
-   * highest in the last thirty seconds, and **above 100 past the ceiling**, which a cgroup can be:
+   * highest over the same span as the machine's, and **above 100 past the ceiling**, which a cgroup can be:
    * the kernel throttles it past `memory.high` rather than stopping it there.
    *
    * Absent where there is no ceiling, on cgroup v1, and off Linux. Since protocol 18.

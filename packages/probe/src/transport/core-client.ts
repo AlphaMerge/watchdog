@@ -66,8 +66,15 @@ export interface CoreClientOptions {
    * and a snapshot handed over at construction would report the probe as it was at start-up for
    * ever. Absent means this build reports nothing, and Probe Health then shows only what the
    * core knows — which is the same shape as a probe too old to send any of it.
+   *
+   * Told which heartbeat a report is for and the version the two ends speak, and told when the
+   * core acknowledges one: from protocol 20 a report's memory channels cover exactly the time since
+   * the last acknowledged heartbeat, so that the core records each low once (`P-219`).
    */
-  health?: () => ProbeHealthReport;
+  health?: {
+    report: (heartbeat: { seq: number; peerVersion: number }) => ProbeHealthReport;
+    acknowledged: (seq: number) => void;
+  };
   /**
    * A query to run right now, with the core waiting on the answer (`R-09`).
    *
@@ -597,6 +604,7 @@ export class CoreClient {
 
       case 'heartbeat-ack':
         this.#logger.trace({ seq: message.seq }, 'heartbeat acknowledged');
+        this.#options.health?.acknowledged(message.seq);
         return;
 
       case 'bye':
@@ -613,10 +621,14 @@ export class CoreClient {
       this.#heartbeatSeq += 1;
       // Gathered here rather than on a timer of its own: the heartbeat is already the periodic
       // "I am here and this is how I am", and a second cadence would be a second thing to keep
-      // in step with the first. Memory is the one exception (`P-218`): its channels are the
-      // lowest of a window, which is filled every two seconds between heartbeats and only read
-      // here.
-      const health = this.#options.health?.();
+      // in step with the first. Memory is the one exception (`P-218`): it is read every two
+      // seconds between heartbeats, and each heartbeat reports the lowest since the last one the
+      // core acknowledged — or, to a core older than protocol 20, of the last thirty seconds
+      // (`P-219`).
+      const health = this.#options.health?.report({
+        seq: this.#heartbeatSeq,
+        peerVersion: this.#coreProtocolVersion,
+      });
       connection.send({
         type: 'heartbeat',
         seq: this.#heartbeatSeq,

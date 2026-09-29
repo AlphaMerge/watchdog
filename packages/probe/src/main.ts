@@ -499,7 +499,12 @@ async function main(): Promise<void> {
     config,
     logger,
     agentVersion: VERSION,
-    health: () => health.report(),
+    health: {
+      report: (heartbeat) => health.report(heartbeat),
+      acknowledged: (seq) => {
+        health.acknowledged(seq);
+      },
+    },
     onStateChange: handlers.onStateChange,
     onConfig: handlers.onConfig,
     onSweep: handlers.onSweep,
