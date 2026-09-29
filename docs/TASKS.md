@@ -3033,6 +3033,51 @@ because each is a decision rather than a defect:
       - Latin-1 sent raw (1);
       - no line-break fold before encoding (1).
 
+- [x] **N-19 — a secret header Node will not send fails every delivery, and is retried** · S ·
+      N-08, N-18 · Found by `N-18`'s sweep. A webhook template's `secretHeaders` were checked
+      as strings of at most 2,000 characters. So the template save accepted a name that is not an
+      HTTP token, or a value with a line break or a character above U+00FF. `http.request`
+      throws on either before the request is sent, and the client read that as retryable. Each
+      delivery spent its attempts and gave up, and the template looked fine until then.
+
+      **Done when** the template save refuses such a header with a 400 that names it and never
+      echoes its value, and a row stored before the check fails at once, not retryably, with an
+      error naming the header and not its value.
+
+      **N-19 outcome.** Both halves.
+      - **At save.** The webhook's settings schema gives `secretHeaders` a `propertyNames`
+        pattern: an HTTP token, which is what Node checks. Each value gets a tab, printable ASCII
+        or the rest of Latin-1, which is what Node sends. `MethodRegistry.validate` words a
+        pattern refusal rather than quoting the regex: "is not a header name: letters, digits
+        and …", "cannot be sent as a header value: it has a line break or a character above
+        U+00FF". It names the property when the name is what failed, and never quotes a value:
+        ajv does not put one in its message, and the problems are built from the path, the name
+        and those words.
+      - **Stored secrets are checked too.** Settings are validated after the stored secrets
+        are merged in, so an edit to a template that already holds a bad header is refused,
+        naming it. That template could not deliver anyway.
+      - **At delivery.** `GuardedHttpClient` treats `ERR_INVALID_CHAR` and
+        `ERR_INVALID_HTTP_TOKEN` as not retryable: "a header this template sets cannot be sent:
+        Invalid character in header content ["x-token"]". Node's message names the header and
+        never its value, so it is passed on as it is. After `N-18` no rendered value reaches a
+        header, so only a stored secret can reach this.
+
+      **Tests.**
+      - `templates.test.ts` 2:
+        - through the method registry: a Cyrillic value, a value with CRLF and a name with a
+          space are each refused, named and without the value. Every token character, a tab and
+          Latin-1 are still accepted;
+        - over HTTP: the 400 names `x-token`, and none of the value comes back.
+      - `webhook-delivery.test.ts` 1: a stored bad value and a stored bad name each fail once,
+        not retryably, naming the header without its value, and nothing reaches the endpoint.
+
+      Mutation 5/5:
+      - no name pattern;
+      - no value pattern;
+      - the client retrying;
+      - the raw pattern message instead of the words;
+      - the property name left out.
+
 ## Phase 5 — Web UI
 
 - [x] **U-01 — Frontend scaffold** · M · F-01 · React 19 + TypeScript + Vite 8, routing, design

@@ -105,7 +105,20 @@ export class GuardedHttpClient {
           timeoutMs: remaining,
         });
       } catch (error: unknown) {
-        return { ok: false, retryable: true, error: describeError(error).message };
+        const described = describeError(error);
+        // **A header Node will not send fails every attempt the same way** (`N-19`). The template
+        // save refuses one now, but a row stored before it can still carry a secret header whose
+        // name is not a token or whose value has a character above U+00FF. Retrying that only
+        // spends the attempts and delays the answer. Node's message names the header and never
+        // its value, which is a secret, so it is passed on as it is.
+        if (UNSENDABLE_HEADER.has(described.code ?? '')) {
+          return {
+            ok: false,
+            retryable: false,
+            error: `a header this template sets cannot be sent: ${described.message}`,
+          };
+        }
+        return { ok: false, retryable: true, error: described.message };
       }
 
       if (exchange.status >= 300 && exchange.status < 400 && exchange.location !== null) {
@@ -329,6 +342,12 @@ function classify(exchange: Exchange, target: URL): DeliveryResult {
  * redirect points is how one webhook becomes two deliveries to two endpoints.
  */
 const REDIRECT_VERB = 'GET';
+
+/** What `http.request` throws, synchronously, for a header it will not put on the wire. */
+const UNSENDABLE_HEADER: ReadonlySet<string> = new Set([
+  'ERR_INVALID_CHAR',
+  'ERR_INVALID_HTTP_TOKEN',
+]);
 
 function firstHeader(value: string | string[] | undefined): string | null {
   if (value === undefined) return null;

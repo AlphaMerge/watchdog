@@ -91,6 +91,37 @@ describe('notification methods', () => {
     assert.ok(!JSON.stringify(settings).includes('xoxb'));
   });
 
+  it('refuses a secret header Node would not send, naming it and never its value (N-19)', () => {
+    // Accepted before, and then every delivery failed on it, retried, and gave up.
+    const refusal = (secretHeaders: Record<string, string>): string => {
+      try {
+        notificationMethods.validate('webhook', {
+          url: 'https://example.test/hook',
+          secretHeaders,
+        });
+      } catch (error: unknown) {
+        assert.ok(error instanceof MethodError);
+        return [error.message, ...error.details.problems].join('\n');
+      }
+      return assert.fail('it was accepted');
+    };
+    const script = refusal({ 'x-token': 'Bearer Київ-s3cret' });
+    assert.match(script, /\/secretHeaders\/x-token cannot be sent as a header value/u);
+    assert.doesNotMatch(script, /s3cret|Київ/u);
+    const broken = refusal({ 'x-token': 'Bearer s3cret\r\nBcc: someone@else' });
+    assert.match(broken, /\/secretHeaders\/x-token cannot be sent as a header value/u);
+    assert.doesNotMatch(broken, /s3cret/u);
+    const name = refusal({ 'Bad Name': 's3cret' });
+    assert.match(name, /\/secretHeaders "Bad Name" is not a header name/u);
+    assert.doesNotMatch(name, /s3cret/u);
+
+    // What Node does send is still accepted: every token character, a tab and Latin-1.
+    notificationMethods.validate('webhook', {
+      url: 'https://example.test/hook',
+      secretHeaders: { "x!#$%&'*+.^_`|~-09AZaz": 'café\tþ' },
+    });
+  });
+
   it('strips a whole secret object, not just its known keys', () => {
     const stored = notificationMethods.validate('webhook', {
       url: 'https://example.test/hook',
@@ -628,6 +659,25 @@ describe('templates', { skip: available ? false : 'no database' }, () => {
       { writeOnly?: boolean }
     >;
     assert.equal(properties['webhookUrl']?.writeOnly, true);
+  });
+
+  it('answers an unsendable secret header with a 400 that names it and not its value (N-19)', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/templates',
+      payload: {
+        name: 'Pager',
+        method: 'webhook',
+        settings: {
+          url: 'https://example.test/hook',
+          secretHeaders: { 'x-token': 'Bearer Київ-do-not-leak' },
+        },
+      },
+    });
+    assert.equal(response.statusCode, 400);
+    assert.match(response.body, /x-token cannot be sent as a header value/u);
+    assert.ok(!response.body.includes('do-not-leak'), 'the value came back');
+    assert.ok(!response.body.includes('Київ'), 'part of the value came back');
   });
 
   it('never puts a secret on the wire, on any route that serves a template', async () => {

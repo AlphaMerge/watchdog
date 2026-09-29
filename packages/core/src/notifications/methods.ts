@@ -123,6 +123,26 @@ export const EMAIL_METHOD: NotificationMethod = {
 };
 
 /**
+ * What Node will put on the wire as a header name: an HTTP token (RFC 9110 §5.6.2), which is what
+ * `http.request` checks before it sends anything (`N-19`).
+ */
+const HEADER_NAME = "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$";
+/**
+ * What Node will put on the wire as a header value: a tab, printable ASCII or the rest of Latin-1.
+ * A line break or anything above U+00FF throws before the request is sent (`N-19`).
+ */
+const HEADER_VALUE = '^[\\t\\x20-\\x7E\\x80-\\xFF]*$';
+
+/** A pattern's refusal in words, where the pattern itself would tell an operator nothing. */
+const PATTERN_WORDS: ReadonlyMap<string, string> = new Map([
+  [HEADER_NAME, "is not a header name: letters, digits and !#$%&'*+-.^_`|~ only"],
+  [
+    HEADER_VALUE,
+    'cannot be sent as a header value: it has a line break or a character above U+00FF',
+  ],
+]);
+
+/**
  * A generic HTTP action (`CAPABILITIES.MD §5.2`) — the method that covers most integrations.
  *
  * The URL is **visible**, unlike Slack's and Teams', because a generic webhook's address is
@@ -160,7 +180,10 @@ export const WEBHOOK_METHOD: NotificationMethod = {
       secretHeaders: {
         type: 'object',
         writeOnly: true,
-        additionalProperties: { type: 'string', maxLength: 2000 },
+        // Refused here rather than at every delivery (`N-19`): a header Node will not send
+        // failed each attempt, retried, and gave up, and the template looked fine until then.
+        propertyNames: { pattern: HEADER_NAME },
+        additionalProperties: { type: 'string', maxLength: 2000, pattern: HEADER_VALUE },
         default: {},
       },
       timeoutMs: { type: 'integer', minimum: 100, maximum: 120_000, default: 10_000 },
@@ -363,12 +386,18 @@ export class MethodRegistry {
     const { validate } = this.#entry(methodId);
     const copy: Record<string, unknown> = structuredClone(settings);
     if (!validate(copy)) {
-      const problems = (validate.errors ?? []).map(
-        (error) =>
-          `${error.instancePath === '' ? 'settings' : error.instancePath} ${
-            error.message ?? 'is invalid'
-          }`,
-      );
+      // **Never the value** (`N-19`). The path names the field, and a property name is named
+      // when it is the name that failed; a value can be a secret and is never quoted back.
+      const problems = (validate.errors ?? [])
+        .filter((error) => error.keyword !== 'propertyNames')
+        .map((error) => {
+          const at = error.instancePath === '' ? 'settings' : error.instancePath;
+          const name = error.propertyName === undefined ? '' : ` "${error.propertyName}"`;
+          const pattern: unknown =
+            error.keyword === 'pattern' ? error.params['pattern'] : undefined;
+          const words = typeof pattern === 'string' ? PATTERN_WORDS.get(pattern) : undefined;
+          return `${at}${name} ${words ?? error.message ?? 'is invalid'}`;
+        });
       throw new MethodError(
         `this ${methodId} template cannot be saved`,
         { method: methodId },

@@ -343,6 +343,26 @@ describe('the webhook transport', () => {
     });
   });
 
+  it('gives up at once on a stored secret header Node will not send, naming it (N-19)', async () => {
+    // A row saved before the check: every attempt failed the same way and was retried.
+    for (const [header, secretHeaders] of [
+      ['x-token', { 'x-token': 'Bearer Київ-s3cret' }],
+      ['Bad Name', { 'Bad Name': 's3cret' }],
+    ] as const) {
+      const result = await transport().send(
+        message({
+          settings: { url: url(), verb: 'POST', contentType: 'application/json', secretHeaders },
+        }),
+      );
+      assert.ok(!result.ok);
+      assert.equal(result.retryable, false, 'no retry sends it');
+      assert.match(result.error, /a header this template sets cannot be sent/u);
+      assert.ok(result.error.includes(header), 'the header is named');
+      assert.doesNotMatch(result.error, /s3cret|Київ/u);
+    }
+    assert.equal(seen.length, 0, 'nothing reached the endpoint');
+  });
+
   it('sends the secret headers it was configured with', async () => {
     await transport().send(
       message({
