@@ -6280,7 +6280,7 @@ because each is a decision rather than a defect:
       and it is equivalent: a deleted object has no effective triggers, so it adds nothing to
       what a trigger covers.
 
-- [ ] **M-26 — a factory over a lost or frozen probe's sensor goes Down beside Probe Health** · M ·
+- [x] **M-26 — a factory over a lost or frozen probe's sensor goes Down beside Probe Health** · M ·
       M-23, M-22, P-135 · Found in `M-23`, which checked the sibling the review left unchecked.
       A Sensor Factory reads the latest sample of each channel it names, within its
       `maxAgeSeconds` (600 s by default). A sensor under a lost or frozen probe records nothing.
@@ -6321,6 +6321,54 @@ because each is a decision rather than a defect:
       - a scenario test in `probe-episode-scenario.test.ts`, per `M-17`: one lost probe with a
         factory over one of its sensors gives exactly one alarm, with each asserted alarm
         asserted present first. Mutants as usual.
+
+      **Done.** The factory sweep holds a factory whose every gap is on a sensor reading
+      `unknown`/`probe`, on a factory held for one, or on a withheld sensor, as long as one is the
+      probe's. `FactoryReach` lays `probeReachable: false` over it, so row 3 decides it:
+      `unknown`/`probe`, with a gap, and a message that names nothing. It settles on crossing, as
+      the voucher check does.
+      - **Carried by its inputs' probe.** `FactoryReach` keeps each held factory's inputs as the
+        sensors a probe scans, through any factory held between them. The episode index's
+        `carrierOf` resolves a held factory through the first of those that the lost and frozen
+        sets hold. Where the sets no longer account for them (the boot grace, a return), `#holds`
+        asks the tree about the inputs and gives a carrier only to carried sensors: an input asked
+        about is not held by being one. `probesAbove` skips core-evaluated types, so no factory is
+        ever carried by the probe it sits under. `heldFor` includes the factories a probe carries,
+        so `M-24`'s and `M-25`'s releases reach them.
+      - **Through `M-18`'s held return.** A returned probe's sensors read their last reading at
+        once, and nothing is measured until the first result, and a spool drains oldest first.
+        The factory went Down in that interval, beside Probe Health's held return, and again at
+        each relapse. The sweep now counts an input it saw away as away while it has reported
+        nothing since and is not paused, for at most the factory's own maximum age. Past that the
+        gap is the factory's own.
+      - **The dependency mark is narrower than the pinned overlay's.** `M-23`'s "until evaluated"
+        is honoured for `unknown`/`probe` on a Sensor Factory only. A probe-scanned master marked
+        while withheld reads `unknown`/`probe` when its own probe is lost, and lets go then, as
+        `P-135` has it.
+      - **Accepted residues.**
+        - A factory that crosses between withheld for what it reads (`M-23`) and held for its
+          probe in one sweep is re-decided by two settles in two transactions. It passes through
+          its last reading between them: one extra transition, and an Up on a trigger on Up. `M-23`
+          has the same between its two sets.
+        - A factory held before a core restart is carried by nothing until the first factory
+          sweep. A reconciliation in that window arms it as any sensor, and the due sweep parks
+          it if that sweep has run by then.
+        - During a return its message still says the probe is lost or behind.
+
+      Tests:
+      - `probe-episode-scenario`: a factory in the lost probe's tree and one under another probe,
+        through a loss, a held return, a relapse and the input's first result. The first says
+        nothing throughout; Probe Health raises one alarm per trigger. The second is one Unknown
+        and one recovery under its own probe's trigger, never Down. Triggers added in the return
+        window hold the factory and still page the Down input. And a factory Unknown/`probe` that
+        nothing in memory accounts for is not held behind the probe it sits under.
+      - `factory-service`: held with the sensors it lacks through a chain; kept held after the
+        return until the input reports, is paused, or its own maximum age runs out.
+      - `probe-episodes`: the index carries a held factory by its inputs and releases it with the
+        probe's sensors.
+      - `dependencies`: a factory master held Down keeps holding; a withheld probe-scanned master
+        whose probe is lost lets go.
+      Mutations 20/20.
 
 - [ ] **M-27 — a Probe Health retargeted mid-loss leaves the sensors it held held** · S · M-25,
       M-24, M-22 · Found finishing `M-25`.

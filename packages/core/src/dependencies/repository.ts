@@ -1,4 +1,5 @@
 import type { Queryable } from '../db/pool.js';
+import { FACTORY_SENSOR_TYPE } from '../factory/reach.js';
 import type { ObjectId } from '../objects/types.js';
 import { DEPENDENCY_MASTER_ID } from '../settings/registry.js';
 
@@ -17,15 +18,34 @@ export interface MasterState {
   readonly state: string;
   /** When its recovery delay ends. Never a hold with no end: that is `untilEvaluated`. */
   readonly clearAt: Date | null;
-  /** Withheld while Down, and holding until it is evaluated again (`M-23`). */
+  /**
+   * Withheld while Down, or a factory held Down for its inputs' probe, and holding until it is
+   * evaluated again (`M-23`, `M-26`).
+   */
   readonly untilEvaluated: boolean;
 }
 
 /**
- * The deadline of a master withheld while Down (`M-23`): it holds until it is evaluated again,
- * which no clock can say. `holding` honours it only while the master still reads withheld.
+ * The deadline of a master withheld while Down (`M-23`), or of a Sensor Factory held Down for its
+ * inputs' probe (`M-26`): it holds until it is evaluated again, which no clock can say. Honoured
+ * only while the master is still not being evaluated, which is `stillUnevaluated`.
  */
 const UNTIL_EVALUATED = 'infinity';
+
+/**
+ * Whether the master in `row` is still not being evaluated, as SQL: withheld, `unknown`/`access`
+ * (`M-23`), or a Sensor Factory held for its inputs' probe, `unknown`/`probe` (`M-26`). Only a
+ * factory for the second. A sensor a probe scans reads `unknown`/`probe` when its own probe is
+ * lost, and lets go then as `P-135` has it, whatever it was marked while it was withheld.
+ */
+function stillUnevaluated(row: string): string {
+  return `(${row}.state = 'unknown'
+           AND (${row}.cause = 'access'
+                OR (${row}.cause = 'probe'
+                    AND EXISTS (SELECT 1 FROM sensor_config f
+                                WHERE f.object_id = ${row}.object_id
+                                  AND f.type = '${FACTORY_SENSOR_TYPE}'))))`;
+}
 
 /**
  * Everything the dependency graph does in SQL (`M-11`).
@@ -287,11 +307,11 @@ export class DependencyRepository {
         WHERE m.state IN ('down', 'down_acknowledged')
            OR (m.dependency_clear_at IS NOT NULL AND m.dependency_clear_at > $1
                AND m.dependency_clear_at <> '${UNTIL_EVALUATED}')
-           -- A master withheld while Down holds until it is evaluated again (M-23), and only
-           -- while it is still withheld: a pause, or its probe lost, lets go as it would for any
-           -- master, and the hold is there again if it comes back withheld.
-           OR (m.dependency_clear_at = '${UNTIL_EVALUATED}'
-               AND m.state = 'unknown' AND m.cause = 'access')
+           -- A master withheld while Down holds until it is evaluated again (M-23), as does a
+           -- factory held Down for its inputs' probe (M-26), and only while it is still not
+           -- being evaluated: a pause lets go as it would for any master, and the hold is there
+           -- again if it comes back unevaluated.
+           OR (m.dependency_clear_at = '${UNTIL_EVALUATED}' AND ${stillUnevaluated('m')})
 
         UNION
 
@@ -467,12 +487,12 @@ export class DependencyRepository {
     // `infinity` is not a date, and pg reads it as the number `Infinity`, so it is answered as
     // a flag instead of in `clear_at`.
     const rows = await q.query<{ state: string; clear_at: Date | null; until_evaluated: boolean }>(
-      `SELECT state,
-              CASE WHEN dependency_clear_at = '${UNTIL_EVALUATED}' THEN NULL
-                   ELSE dependency_clear_at END AS clear_at,
-              (dependency_clear_at = '${UNTIL_EVALUATED}' AND state = 'unknown'
-               AND cause = 'access') AS until_evaluated
-       FROM sensor_runtime WHERE object_id = $1`,
+      `SELECT sr.state,
+              CASE WHEN sr.dependency_clear_at = '${UNTIL_EVALUATED}' THEN NULL
+                   ELSE sr.dependency_clear_at END AS clear_at,
+              (sr.dependency_clear_at = '${UNTIL_EVALUATED}' AND ${stillUnevaluated('sr')})
+                AS until_evaluated
+       FROM sensor_runtime sr WHERE sr.object_id = $1`,
       [sensorId],
     );
     const row = rows[0];

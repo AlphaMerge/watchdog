@@ -33,6 +33,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { actorNamed, buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { nothingFollowsReach } from './support/vouching.js';
 
 /**
  * `A-29`, the second half: who vouched for a sensor, re-checked every time it is evaluated.
@@ -359,6 +360,7 @@ describe(
         db,
         logger: silent,
         vouching,
+        reach: nothingFollowsReach,
         ingest: async (results) => {
           ingested.push(...results);
           await ingest(

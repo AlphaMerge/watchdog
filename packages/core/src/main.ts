@@ -57,6 +57,7 @@ import { SchedulePauses } from './schedules/pauses.js';
 import { ScheduleRepository } from './schedules/repository.js';
 import { ScheduleService } from './schedules/service.js';
 import { ScheduleSweep } from './schedules/sweep.js';
+import { FactoryReach } from './factory/reach.js';
 import { FactoryService } from './factory/service.js';
 import { FactorySweep } from './factory/sweep.js';
 import { ScheduleSync } from './schedules/sync.js';
@@ -398,11 +399,23 @@ async function serve(): Promise<void> {
   // the boot reconciliation below, and republished by every sweep. The other two sources are
   // built much later, so they are read through the late references.
   const probeHealthTargets = new ProbeHealthTargets();
+  // And the Sensor Factories held for their inputs' probe (`M-26`), carried by that probe, and
+  // laid over the facts by the state service, which the holder needs.
+  // eslint-disable-next-line prefer-const -- assigned below, once the state service exists.
+  let factoryReachRef: FactoryReach | undefined;
+  const noneUnreached: ReadonlySet<number> = new Set();
   const episodes = new ProbeEpisodeIndex({
     lost: () => reachabilityRef,
     frozen: () => clockFreezeRef,
     alarms: () => probeHealthTargets,
+    factories: () => factoryReachRef,
   });
+  // A core-evaluated sensor is not scanned by the probe it sits under (`P-13`), so neither a
+  // probe's outage nor the tree carries it: `ProbeReachability`, `ClockFreeze` and the engine's
+  // fallback all leave these out (`M-26`).
+  const coreEvaluatedTypes = catalogue
+    .ids()
+    .filter((id) => catalogue.declaration(id).evaluatedBy === 'core');
   const alarms = new AlarmEngine({
     logger,
     onArmed: () => {
@@ -414,6 +427,7 @@ async function serve(): Promise<void> {
     episodes,
     // Probe Health's five minutes, and nothing for any other type (`M-18`).
     recoveryHolds: holdsFrom(catalogue),
+    coreEvaluatedTypes,
   });
   // Live state changes for the UI (U-02). Published after the commit, from `writeStateHistory`
   // — the one function every state change in the system goes through — so ingestion, a pause,
@@ -455,6 +469,7 @@ async function serve(): Promise<void> {
     onStatesCommitted: publishStates,
     unreachableSensors: () => reachabilityRef?.unreachableSensors() ?? noProbesDown,
     clockFrozenSensors: () => clockFreezeRef?.frozenSensors() ?? noneFrozen,
+    unreachedFactories: () => factoryReachRef?.unreached() ?? noneUnreached,
     withheldSensors: () => vouchingRef?.withheld() ?? nothingWithheld,
   });
   // The configuration half of the same job: adding a trigger during an outage has to arm the
@@ -533,8 +548,8 @@ async function serve(): Promise<void> {
     // Off, the layer is off, and nobody's voucher is held against a sensor (`A-45`).
     requireAuthentication: config.api.requireAuthentication,
     states,
-    // A master that stops being evaluated is Unknown, not Down, so whatever it held is released
-    // here — the same reason `ProbeReachability` is handed it (`P-135`).
+    // A master withheld while Down keeps holding until it is evaluated again, and one vouched for
+    // again settles as any master returning from Down does (`M-23`).
     dependencies: dependencyPauses,
   });
   vouchingRef = vouching;
@@ -661,10 +676,13 @@ async function serve(): Promise<void> {
   // shipping other sensors' history out to it. The results go through `acceptResults` exactly as
   // a probe's do, which is what gives a factory sensor history, limits, dependencies and alarms
   // with no special case anywhere downstream.
+  const factoryReach = new FactoryReach({ db, logger, states, dependencies: dependencyPauses });
+  factoryReachRef = factoryReach;
   const factory = new FactoryService({
     db,
     logger,
     vouching,
+    reach: factoryReach,
     ingest: async (results) => {
       await ingestion.acceptResults(IN_PROCESS_SOURCE.factory, {
         type: 'results',
@@ -1216,10 +1234,6 @@ async function serve(): Promise<void> {
     // Nothing older than the longest anything is kept (`P-231`); the retention decides it.
     maxResultAgeMs: maxResultAgeMs(config.housekeeping.retention),
   });
-
-  const coreEvaluatedTypes = catalogue
-    .ids()
-    .filter((id) => catalogue.declaration(id).evaluatedBy === 'core');
 
   // A lost probe is one alarm, not a thousand (`R-05`). Built before the endpoint, which is
   // what tells it when a link comes and goes.

@@ -36,10 +36,13 @@ const T3 = new Date('2026-09-29T11:00:00.000Z');
 function world(): {
   lost: Map<number, LostProbe>;
   frozen: Map<number, FrozenProbe>;
+  /** The factories held for their inputs' probe, each with the sensors it lacks (`M-26`). */
+  factories: Map<number, readonly number[]>;
   index: ProbeEpisodeIndex;
 } {
   const lost = new Map<number, LostProbe>();
   const frozen = new Map<number, FrozenProbe>();
+  const factories = new Map<number, readonly number[]>();
   const carrier = (probes: ReadonlyMap<number, { sensorIds: Iterable<number> }>, id: number) => {
     for (const [probe, held] of probes) if ([...held.sensorIds].includes(id)) return probe;
     return undefined;
@@ -57,8 +60,12 @@ function world(): {
       reportingOn: (probe) => (probe === PROBE ? [HEALTH] : []),
       reportsOn: (id) => (id === HEALTH ? PROBE : undefined),
     }),
+    factories: () => ({
+      unreached: () => new Set(factories.keys()),
+      inputsOf: (id) => factories.get(id),
+    }),
   });
-  return { lost, frozen, index };
+  return { lost, frozen, factories, index };
 }
 
 describe('the episode index (`M-22`)', () => {
@@ -170,6 +177,22 @@ describe('the episode index (`M-22`)', () => {
     assert.equal(index.endedEpisodeOf(HEALTH)?.kind, 'lost');
   });
 
+  it('carries a factory held for its inputs’ probe by that probe, and lets it go with them (`M-26`)', () => {
+    const { lost, frozen, factories, index } = world();
+    lost.set(PROBE, { sensorIds: [1, 2], reason: 'link', since: T1 });
+    frozen.set(OTHER, { sensorIds: new Set([3]), since: T1 });
+    factories.set(50, [2]);
+    factories.set(51, [4, 3]);
+    factories.set(52, [5]);
+    assert.equal(index.carrierOf(50), PROBE);
+    assert.equal(index.carrierOf(51), OTHER, 'the first input a probe holds');
+    assert.equal(index.carrierOf(52), undefined, 'none of its inputs is held any more');
+    assert.deepEqual(index.inputsOf(51), [4, 3]);
+    assert.deepEqual(index.inputsOf(1), [], 'a sensor a probe scans lacks nothing');
+    assert.deepEqual(index.heldFor(HEALTH), [1, 2, 50]);
+    assert.equal(index.episodeOf(HEALTH)?.held, 2, 'the episode counts what the probe carries');
+  });
+
   it('answers nothing before its sources exist', () => {
     const index = new ProbeEpisodeIndex({
       lost: () => undefined,
@@ -177,6 +200,7 @@ describe('the episode index (`M-22`)', () => {
       alarms: () => undefined,
     });
     assert.equal(index.carrierOf(1), undefined);
+    assert.deepEqual(index.inputsOf(1), []);
     assert.deepEqual(index.alarmsFor(PROBE), []);
     assert.equal(index.episodeOf(HEALTH), undefined);
     assert.equal(index.endedEpisodeOf(HEALTH), undefined);

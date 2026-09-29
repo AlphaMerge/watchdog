@@ -1015,6 +1015,50 @@ describe(
       assert.equal((await runtimeOf(httpId)).dependency, false);
     });
 
+    it('keeps a Sensor Factory held Down for its inputs’ probe holding, as a withheld master (`M-26`)', async () => {
+      // Its dependents may be anywhere, scanned as before, and would each page on the outage it
+      // can no longer speak for: `M-23`'s reason, reached through a lost probe.
+      const factory = (
+        await h.service.create(testActor, {
+          kind: 'sensor',
+          parentId: deviceId,
+          name: 'Total',
+          sensorType: 'core.factory',
+          params: { channels: [{ key: 'v', formula: `channel(${String(snmpId)}, 'x')` }] },
+        } as never)
+      ).id;
+      await h.service.setDependency(testActor, factory, 'device', undefined, undefined);
+      await setState(factory, 'down');
+      await react([{ sensorId: factory, state: 'down', previousState: 'up' }]);
+      assert.equal((await runtimeOf(httpId)).dependency, true, 'held by the outage');
+
+      // What `FactoryReach` does: mark, re-decide, settle.
+      await db.tx((q) => pauses.holdWithheld(q, [factory]));
+      await setState(factory, 'unknown', 'probe');
+      await db.tx((q) => pauses.recompute(q, NOW));
+      assert.equal((await runtimeOf(httpId)).dependency, true, 'still held');
+      const view = await h.service.pauseState(httpId);
+      assert.deepEqual(
+        [view.dependency?.holding, view.dependency?.releasesAt, view.dependency?.masterState],
+        [true, null, 'unknown'],
+      );
+    });
+
+    it('lets a master marked while withheld go when its own probe is lost, as `P-135` has it (`M-26`)', async () => {
+      // Its dependents are Unknown with it. The mark is still there, and only a factory reading
+      // Unknown for its probe is held by one.
+      await masterForDevice();
+      await setState(pingId, 'down');
+      await react([{ sensorId: pingId, state: 'down', previousState: 'up' }]);
+      await withhold(pingId);
+      assert.equal((await runtimeOf(httpId)).dependency, true, 'withheld: held');
+
+      await setState(pingId, 'unknown', 'probe');
+      await db.tx((q) => pauses.recompute(q, NOW));
+      assert.equal((await runtimeOf(httpId)).dependency, false, 'its probe lost: let go');
+      assert.equal((await h.service.pauseState(httpId)).dependency?.holding, false);
+    });
+
     // -------------------------------------------------------------------------------------
     // Over HTTP.
     // -------------------------------------------------------------------------------------

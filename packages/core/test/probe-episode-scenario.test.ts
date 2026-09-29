@@ -5,6 +5,8 @@ import { PROTOCOL_VERSION, type CheckResult, type IngestionConfig } from '@ms/sh
 import { CompositeAuditSink, DatabaseAuditSink } from '../src/audit/store.js';
 import { Reach, Visibility } from '../src/auth/access.js';
 import type { Database } from '../src/db/pool.js';
+import { FactoryReach } from '../src/factory/reach.js';
+import { FactoryService } from '../src/factory/service.js';
 import { ProbeHealthService, ProbeHealthTargets } from '../src/health/probe-health.js';
 import { ChannelResolver } from '../src/ingestion/channels.js';
 import { Ingestor } from '../src/ingestion/ingestor.js';
@@ -136,6 +138,9 @@ describe(
       readonly health: ProbeHealthService;
       uptimeMs: number;
       readonly watch: ProbeDeliveryWatch;
+      /** The factories held for their inputs' probe, and the sweep that holds them (`M-26`). */
+      readonly reach: FactoryReach;
+      readonly factories: FactoryService;
     }
     let core: Core | undefined;
     const now = (): Core => {
@@ -149,12 +154,21 @@ describe(
       episodeOf: (id) => now().index.episodeOf(id),
       endedEpisodeOf: (id) => now().index.endedEpisodeOf(id),
       heldFor: (id) => now().index.heldFor(id),
+      inputsOf: (id) => now().index.inputsOf(id),
     };
     const none: ReadonlySet<number> = new Set();
 
     let batch = 0;
     /** Probe Health results through ingestion, the way the core's own sweep sends them. */
     async function ingestHealth(results: readonly CheckResult[]): Promise<void> {
+      await ingestFrom(IN_PROCESS_SOURCE.probeHealth, results);
+    }
+
+    /** A core producer's results through ingestion: Probe Health's, or the factory sweep's. */
+    async function ingestFrom(
+      source: (typeof IN_PROCESS_SOURCE)[keyof typeof IN_PROCESS_SOURCE],
+      results: readonly CheckResult[],
+    ): Promise<void> {
       const states = h.states;
       assert.ok(states !== undefined);
       const ingestor = new Ingestor({ db, logger: silent, config: CONFIG, alarms: engine });
@@ -166,9 +180,9 @@ describe(
         resolver: channels,
       });
       batch += 1;
-      await ingestion.acceptResults(IN_PROCESS_SOURCE.probeHealth, {
+      await ingestion.acceptResults(source, {
         type: 'results',
-        batchId: `probe-health-${String(batch)}`,
+        batchId: `${source}-${String(batch)}`,
         results: [...results],
       });
       await ingestor.stop();
@@ -202,10 +216,12 @@ describe(
         coreEvaluatedTypes: CORE_EVALUATED,
         probeAlarms,
       });
+      const reach = new FactoryReach({ db, logger: silent, states, dependencies });
       const index = new ProbeEpisodeIndex({
         lost: () => reachability,
         frozen: () => freeze,
         alarms: () => targets,
+        factories: () => reach,
       });
       const watch = new ProbeDeliveryWatch({
         db,
@@ -223,7 +239,24 @@ describe(
         delivery: watch,
         ingest: ingestHealth,
       });
-      const booted: Core = { reachability, freeze, targets, index, health, uptimeMs: 0, watch };
+      const factories = new FactoryService({
+        db,
+        logger: silent,
+        vouching: everyVoucherHolds,
+        reach,
+        ingest: (results) => ingestFrom(IN_PROCESS_SOURCE.factory, results),
+      });
+      const booted: Core = {
+        reachability,
+        freeze,
+        targets,
+        index,
+        health,
+        uptimeMs: 0,
+        watch,
+        reach,
+        factories,
+      };
       return booted;
     }
 
@@ -493,12 +526,14 @@ describe(
         logger: silent,
         episodes,
         recoveryHolds: (type) => (holding ? holds(type) : 0),
+        coreEvaluatedTypes: CORE_EVALUATED,
       });
       h = await buildHarness(db, {
         states: true,
         alarms: engine,
         unreachableSensors: () => core?.reachability.unreachableSensors() ?? none,
         clockFrozenSensors: () => core?.freeze.frozenSensors() ?? none,
+        unreachedFactories: () => core?.reach.unreached() ?? none,
       });
       triggerSync = new TriggerSync({ engine, logger: silent });
       h.audit.also = triggerSync;
@@ -1296,6 +1331,184 @@ describe(
       assert.notEqual((await listed(made))?.recovering ?? null, null, 'held again');
       await scheduler.sweep(new Date(Date.now() + 6 * MINUTE));
       assert.equal(await listed(made), undefined, 'over, and off the list');
+    });
+
+    /** The device a sensor sits on. */
+    async function deviceOf(sensorId: number): Promise<number> {
+      const parent = (await h.repository.get(db, sensorId))?.parentId;
+      assert.ok(parent !== undefined && parent !== null);
+      return parent;
+    }
+
+    /** A Sensor Factory reading one sensor's `rtt`, which it accepts up to a minute old. */
+    async function factoryOver(deviceId: number, name: string, input: number): Promise<number> {
+      return (
+        await h.service.create(testActor, {
+          kind: 'sensor',
+          parentId: deviceId,
+          name,
+          sensorType: 'core.factory',
+          params: {
+            channels: [{ key: 'v', formula: `channel(${String(input)}, 'rtt')` }],
+            maxAgeSeconds: 60,
+          },
+        } as never)
+      ).id;
+    }
+
+    /** A reading of a sensor's `rtt`, `agoSeconds` old, as ingestion would have stored it. */
+    async function measure(sensorId: number, value: number, agoSeconds = 0): Promise<void> {
+      await db.query(
+        `INSERT INTO sample (channel_id, time, value)
+         SELECT id, now() - ($2 || ' seconds')::interval, $3
+         FROM channel WHERE sensor_id = $1 AND key = 'rtt'`,
+        [sensorId, String(agoSeconds), value],
+      );
+    }
+
+    /** Every reading a sensor has, two hours old: past any factory's maximum age here. */
+    async function age(sensorId: number): Promise<void> {
+      await db.query(
+        `UPDATE sample SET time = now() - interval '2 hours'
+         WHERE channel_id IN (SELECT id FROM channel WHERE sensor_id = $1)`,
+        [sensorId],
+      );
+    }
+
+    async function factorySweep(): Promise<void> {
+      await now().factories.sweep();
+      await fire();
+    }
+
+    async function stateOf(sensorId: number): Promise<{ state: string; cause: string }> {
+      const [row] = await db.query<{ state: string; cause: string }>(
+        'SELECT state::text AS state, cause::text AS cause FROM sensor_runtime WHERE object_id = $1',
+        [sensorId],
+      );
+      assert.ok(row !== undefined);
+      return { state: row.state, cause: row.cause };
+    }
+
+    it('a factory over a lost probe’s sensor is Unknown with it, not Down beside Probe Health, through a held return (`M-26`)', async (t) => {
+      // Its input records nothing while the probe is away, so once its maximum age ran out every
+      // channel gapped and it reported an error: Down, and a page beside the one Probe Health
+      // alarm for the outage. And again at the return, until the input's first result.
+      holding = true;
+      t.after(() => {
+        holding = false;
+      });
+      const made = await probeWith('factory-far', { health: true });
+      const home = await bareProbe('factory-home');
+      const health = healthOf(made);
+      // A Down one, notified already: what it says at the return is its own, and a factory
+      // reading it must not hold it.
+      const input = made.pings[0];
+      assert.ok(input !== undefined);
+      // One in the lost probe's own tree, and one under a probe whose triggers never hear of it.
+      const near = await factoryOver(await deviceOf(input), 'factory-far-total', input);
+      const away = await factoryOver(await deviceOf(home.health), 'factory-home-total', input);
+      t.after(async () => {
+        await deleteSensor(near);
+        await deleteSensor(away);
+      });
+      await trigger(made.probe, 'down', 'email');
+      await trigger(made.probe, 'unknown', 'webhook');
+      await trigger(home.probe, 'down', 'email');
+      await trigger(home.probe, 'unknown', 'webhook');
+      await settle(made);
+      await measure(input, 5);
+      await factorySweep();
+      assert.deepEqual(await stateOf(near), { state: 'up', cause: 'scan' });
+      assert.deepEqual(await stateOf(away), { state: 'up', cause: 'scan' });
+
+      const step = await mark();
+      await lose(made);
+      await factorySweep();
+      assert.equal((await stateOf(near)).state, 'up', 'inside its maximum age it still computes');
+      await age(input);
+      await factorySweep();
+      assert.deepEqual(await stateOf(near), { state: 'unknown', cause: 'probe' });
+      assert.deepEqual(await stateOf(away), { state: 'unknown', cause: 'probe' });
+      assert.deepEqual(await queued(step, [health]), {
+        'email:down:initial': 1,
+        'webhook:unknown:initial': 1,
+      });
+      assert.deepEqual(
+        await queued(step, [near]),
+        {},
+        'held behind Probe Health, as the pings are',
+      );
+      assert.deepEqual(await queued(step, made.pings), {});
+      // Carried by its input's probe, whose Probe Health these triggers do not cover: its own
+      // Unknown, as a ping of that probe's under them would be. Neither Down nor silence.
+      assert.deepEqual(await queued(step, [away]), { 'webhook:unknown:initial': 1 });
+      assert.deepEqual(await queued(step, [home.health]), {});
+
+      // Back, and not measured yet: the input reads its last reading at once, and has nothing
+      // inside either factory's maximum age until it reports.
+      const back = await mark();
+      await find(made);
+      await factorySweep();
+      assert.deepEqual(await stateOf(near), { state: 'unknown', cause: 'probe' }, 'not Down');
+      // A relapse inside the hold, and back again: one outage throughout.
+      await lose(made);
+      await factorySweep();
+      await find(made);
+      await factorySweep();
+      assert.deepEqual(await queued(back, [health, near, away, ...made.pings]), {});
+      // Triggers added meanwhile find it carried by the probe its input sits under, and the
+      // input, back and Down, carried by nothing.
+      const added = await mark();
+      await trigger(made.probe, 'unknown', 'email');
+      await trigger(made.probe, 'down', 'webhook');
+      await fire();
+      assert.deepEqual(await queued(added, [input]), { 'webhook:down:initial': 1 });
+      assert.deepEqual(await queued(added, [near]), {});
+
+      // Measured again, and the factories with it.
+      await ingest([{ sensorId: input, at: new Date(), outcome: 'ok', message: 'reply' }]);
+      await measure(input, 6);
+      await factorySweep();
+      assert.deepEqual(await stateOf(near), { state: 'up', cause: 'scan' });
+      assert.deepEqual(await queued(back, [away]), { 'webhook:unknown:recovery': 1 });
+      await scheduler.sweep(new Date(Date.now() + 6 * MINUTE));
+      assert.deepEqual(await queued(back, [health]), {
+        'email:down:recovery': 1,
+        'webhook:unknown:recovery': 1,
+      });
+      assert.deepEqual(await queued(step, [near]), {}, 'and nothing from it throughout');
+    });
+
+    it('a factory Unknown for its inputs’ probe that nothing in memory accounts for is carried by no probe, never the one it sits under (`M-26`)', async (t) => {
+      // After a core restart a factory held for a lost probe still reads Unknown/`probe`, and
+      // nothing says what it lacks until the first factory sweep. The tree carries a probe's
+      // own sensors in that gap, and must not carry the factory by where it sits: that probe has
+      // no episode, and a trigger on Unknown over it would hear nothing.
+      const home = await bareProbe('factory-fallback');
+      const box = await deviceOf(home.health);
+      const input = (
+        await h.service.create(testActor, {
+          kind: 'sensor',
+          parentId: box,
+          name: 'factory-fallback-ping',
+          sensorType: 'icmp.ping',
+        } as never)
+      ).id;
+      const factory = await factoryOver(box, 'factory-fallback-total', input);
+      t.after(async () => {
+        await deleteSensor(factory);
+      });
+      await healthSweep();
+      await db.query(
+        `UPDATE sensor_runtime SET state = 'unknown', cause = 'probe' WHERE object_id = $1`,
+        [factory],
+      );
+
+      const step = await mark();
+      await trigger(home.probe, 'unknown', 'email');
+      await fire();
+      assert.deepEqual(await queued(step, [factory]), { 'email:unknown:initial': 1 });
+      assert.deepEqual(await queued(step, [home.health]), {});
     });
   },
 );

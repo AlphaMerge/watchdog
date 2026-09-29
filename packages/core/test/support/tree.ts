@@ -108,6 +108,8 @@ export async function buildHarness(
     unreachableSensors?: () => ReadonlySet<number>;
     /** The sensors a probe's clock has frozen (`P-232`); `ClockFreeze.frozenSensors`. */
     clockFrozenSensors?: () => ReadonlySet<number>;
+    /** The factories held for their inputs' probe (`M-26`); `FactoryReach.unreached`. */
+    unreachedFactories?: () => ReadonlySet<number>;
   } = {},
 ): Promise<Harness> {
   await new Migrator({ db, logger: silent, migrations: MIGRATIONS }).up();
@@ -138,6 +140,9 @@ export async function buildHarness(
           ...(options.clockFrozenSensors === undefined
             ? {}
             : { clockFrozenSensors: options.clockFrozenSensors }),
+          ...(options.unreachedFactories === undefined
+            ? {}
+            : { unreachedFactories: options.unreachedFactories }),
         })
       : undefined;
   // Built here rather than in each test, because the pause sweep releases dependency delays and

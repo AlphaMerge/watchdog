@@ -322,14 +322,23 @@ export class AlarmRepository {
    * while nothing in memory says which probe holds them until the delivery watch's grace has run
    * out. Without this, the boot reconciliation armed a trigger on Unknown once per such sensor,
    * which is the wave the hold exists to prevent, produced by the restart.
+   *
+   * A sensor of a type in `coreEvaluated` has no probe above it here (`M-26`): the core
+   * evaluates it, so the probe it sits under says nothing about it.
    */
-  async probesAbove(q: Queryable, sensorIds: readonly number[]): Promise<Map<number, number>> {
+  async probesAbove(
+    q: Queryable,
+    sensorIds: readonly number[],
+    coreEvaluated: readonly string[] = [],
+  ): Promise<Map<number, number>> {
     const out = new Map<number, number>();
     if (sensorIds.length === 0) return out;
     const rows = await q.query<{ sensor_id: string; probe_id: string }>(
       `WITH RECURSIVE up AS (
          SELECT o.id AS sensor_id, o.parent_id, 0 AS depth
-         FROM object o WHERE o.id = ANY($1::bigint[])
+         FROM object o
+         JOIN sensor_config sc ON sc.object_id = o.id
+         WHERE o.id = ANY($1::bigint[]) AND NOT (sc.type = ANY($2::text[]))
          UNION ALL
          SELECT up.sensor_id, parent.parent_id, up.depth + 1
          FROM object parent JOIN up ON parent.id = up.parent_id
@@ -338,7 +347,7 @@ export class AlarmRepository {
        SELECT up.sensor_id::text AS sensor_id, parent.id::text AS probe_id
        FROM up JOIN object parent ON parent.id = up.parent_id
        WHERE parent.kind = 'probe'`,
-      [sensorIds],
+      [sensorIds, [...coreEvaluated]],
     );
     for (const row of rows) out.set(Number(row.sensor_id), Number(row.probe_id));
     return out;

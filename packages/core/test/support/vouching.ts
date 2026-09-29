@@ -1,3 +1,4 @@
+import type { FactoryReach } from '../../src/factory/reach.js';
 import type { VoucherCheck } from '../../src/objects/vouching.js';
 
 /**
@@ -9,4 +10,9 @@ export const everyVoucherHolds: VoucherCheck & { withheld(): ReadonlyMap<number,
   refusals: () => Promise.resolve(new Map<number, string>()),
   settle: () => Promise.resolve(0),
   withheld: () => new Map<number, string>(),
+};
+
+/** Somewhere a factory held for its inputs' probe goes and nothing follows (`M-26`). */
+export const nothingFollowsReach: Pick<FactoryReach, 'settle'> = {
+  settle: () => Promise.resolve(0),
 };

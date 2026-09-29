@@ -98,6 +98,15 @@ export interface AlarmEngineOptions {
    * Absent, no type holds one, and every alarm ends at its return as it did before.
    */
   recoveryHolds?: (sensorType: string) => number;
+  /**
+   * The sensor types the core evaluates itself (`M-26`): the catalogue's `evaluatedBy: 'core'`.
+   * A carried sensor the lost and frozen sets do not account for is carried by the probe above
+   * it in the tree, and one of these never is: it is not scanned by the probe it sits under, so
+   * an outage there says nothing about it.
+   *
+   * Absent, none is excluded.
+   */
+  coreEvaluatedTypes?: readonly string[];
 }
 
 /** A sensor as the hold reads it: its id, and its state and why. */
@@ -199,6 +208,7 @@ export class AlarmEngine {
   readonly #onQueued: (() => void) | undefined;
   readonly #episodes: ProbeEpisodes | undefined;
   readonly #recoveryHolds: ((sensorType: string) => number) | undefined;
+  readonly #coreEvaluatedTypes: readonly string[];
   #queued = 0;
   #fired = 0;
   /**
@@ -222,6 +232,7 @@ export class AlarmEngine {
     this.#onQueued = options.onQueued;
     this.#episodes = options.episodes;
     this.#recoveryHolds = options.recoveryHolds;
+    this.#coreEvaluatedTypes = options.coreEvaluatedTypes ?? [];
   }
 
   get stats(): { queued: number; fired: number; untemplated: number } {
@@ -1046,14 +1057,32 @@ export class AlarmEngine {
     if (episodes === undefined) return NO_HOLDS;
     const carrier = new Map<number, number>();
     const unaccounted: number[] = [];
+    const throughInputs = new Map<number, readonly number[]>();
     for (const sensor of sensors) {
       if (!isCarried(sensor)) continue;
       const probe = episodes.carrierOf(sensor.sensorId);
-      if (probe === undefined) unaccounted.push(sensor.sensorId);
-      else carrier.set(sensor.sensorId, probe);
+      if (probe !== undefined) {
+        carrier.set(sensor.sensorId, probe);
+        continue;
+      }
+      // A factory held for its inputs' probe, which the sets no longer account for: carried by
+      // the probe its inputs sit under (`M-26`). Not by its own place in the tree, which is
+      // excluded below: that probe has no episode, and a trigger on Unknown would hear nothing.
+      const inputs = episodes.inputsOf(sensor.sensorId);
+      if (inputs.length > 0) throughInputs.set(sensor.sensorId, inputs);
+      else unaccounted.push(sensor.sensorId);
     }
-    for (const [sensorId, probe] of await this.#alarms.probesAbove(q, unaccounted)) {
-      carrier.set(sensorId, probe);
+    // One walk for both. Only a carried sensor gets a carrier: an input asked about here is not
+    // held by being one, and a carrier is what holds it.
+    const asked = new Set([...unaccounted, ...[...throughInputs.values()].flat()]);
+    const above = await this.#alarms.probesAbove(q, [...asked], this.#coreEvaluatedTypes);
+    for (const sensorId of unaccounted) {
+      const probe = above.get(sensorId);
+      if (probe !== undefined) carrier.set(sensorId, probe);
+    }
+    for (const [factory, inputs] of throughInputs) {
+      const probe = inputs.map((input) => above.get(input)).find((one) => one !== undefined);
+      if (probe !== undefined) carrier.set(factory, probe);
     }
     if (carrier.size === 0) return NO_HOLDS;
 

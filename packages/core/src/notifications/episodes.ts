@@ -54,8 +54,18 @@ export interface EndedEpisode extends ProbeEpisode {
 
 /** Where the engine learns which probe holds which sensors, and which sensors are its alarm. */
 export interface ProbeEpisodes {
-  /** The probe whose loss or clock holds this sensor Unknown, while one does. */
+  /**
+   * The probe whose loss or clock holds this sensor Unknown, while one does. For a Sensor Factory
+   * held for its inputs' probe, the probe holding the first of those inputs (`M-26`).
+   */
   carrierOf(sensorId: number): number | undefined;
+  /**
+   * The sensors a Sensor Factory held for its inputs' probe lacks, and nothing for any other
+   * sensor (`M-26`). Where the lost and frozen sets no longer account for them, which is the
+   * boot grace and a probe's return, the factory is carried by the probe they sit under in the
+   * tree, and never by the one it sits under itself.
+   */
+  inputsOf(sensorId: number): readonly number[];
   /** The sensors that are this probe's own alarm: its Probe Health, as its last sweep found it. */
   alarmsFor(probeObjectId: number): readonly number[];
   /** The episode this probe-alarm sensor stands for, while its probe's sensors are held. */
@@ -64,7 +74,7 @@ export interface ProbeEpisodes {
   endedEpisodeOf(alarmSensorId: number): EndedEpisode | undefined;
   /**
    * The sensors this probe-alarm sensor's probe holds now, so that when the alarm stops being
-   * live they can be re-decided unheld (`M-24`).
+   * live they can be re-decided unheld (`M-24`). Factories carried by it included (`M-26`).
    */
   heldFor(alarmSensorId: number): readonly number[];
 }

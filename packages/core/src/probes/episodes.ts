@@ -36,6 +36,16 @@ export interface EpisodeSources {
         reportsOn(sensorId: number): number | undefined;
       }
     | undefined;
+  /**
+   * `FactoryReach`: the Sensor Factories held Unknown for their inputs' probe, and the sensors
+   * each lacks (`M-26`). Absent where no factory is ever held.
+   */
+  readonly factories?: () =>
+    | {
+        unreached(): ReadonlySet<number>;
+        inputsOf(factoryId: number): readonly number[] | undefined;
+      }
+    | undefined;
 }
 
 /**
@@ -60,7 +70,19 @@ export class ProbeEpisodeIndex implements ProbeEpisodes {
   }
 
   carrierOf(sensorId: number): number | undefined {
-    return this.#sources.lost()?.carrierOf(sensorId) ?? this.#sources.frozen()?.carrierOf(sensorId);
+    const carrier = this.#carrierOfScanned(sensorId);
+    if (carrier !== undefined) return carrier;
+    // A factory held for its inputs' probe is carried where they are (`M-26`), never where it
+    // sits in the tree: the first of them that a lost or frozen probe holds.
+    for (const input of this.inputsOf(sensorId)) {
+      const probe = this.#carrierOfScanned(input);
+      if (probe !== undefined) return probe;
+    }
+    return undefined;
+  }
+
+  inputsOf(sensorId: number): readonly number[] {
+    return this.#sources.factories?.()?.inputsOf(sensorId) ?? [];
   }
 
   alarmsFor(probeObjectId: number): readonly number[] {
@@ -82,7 +104,19 @@ export class ProbeEpisodeIndex implements ProbeEpisodes {
 
   heldFor(alarmSensorId: number): readonly number[] {
     const probe = this.#sources.alarms()?.reportsOn(alarmSensorId);
-    return probe === undefined ? [] : [...this.#held(probe).held];
+    if (probe === undefined) return [];
+    const held = [...this.#held(probe).held];
+    // And the factories carried by it (`M-26`), which its sets do not name: they are held behind
+    // the same alarm, and have to be let go with the sensors when it stops being live.
+    for (const factory of this.#sources.factories?.()?.unreached() ?? []) {
+      if (this.carrierOf(factory) === probe) held.push(factory);
+    }
+    return held;
+  }
+
+  /** The probe whose loss or clock holds a probe-scanned sensor, while one does. */
+  #carrierOfScanned(sensorId: number): number | undefined {
+    return this.#sources.lost()?.carrierOf(sensorId) ?? this.#sources.frozen()?.carrierOf(sensorId);
   }
 
   /** What holds a probe's sensors, and which sensors: the lost set and the frozen set, joined. */

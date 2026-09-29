@@ -133,7 +133,7 @@ object it cannot read.
   not being evaluated is withheld too**, in evaluation order, so the withholding carries down a
   chain. Its message names nothing. The status of a withheld sensor in a formula reads not-up,
   which is the formula language's rule for any Unknown. A factory over a lost or frozen probe's
-  sensor still goes Down when its readings run out (`M-26`).
+  sensor is Unknown for its probe rather than withheld, which is below (`M-26`).
 - **Like `probeReachable`, the fact is not persisted.** It is re-derived every sweep from the
   voucher stored on the sensor and the grants as they are now, so a grant restored, an account
   re-enabled or an edit by somebody who can read it clears it at the next sweep.
@@ -684,6 +684,39 @@ Two further notes for whoever picks those up:
   it is a new episode, so a probe killed and restarted every few seconds is one alarm on a
   trigger on Unknown as on one on Down. An **emptied** episode recovers at once: its probe has
   not come back, and nothing flaps.
+- **A Sensor Factory over a lost or frozen probe's sensor is Unknown with it** (`M-26`). Its
+  inputs record nothing, so once its maximum age runs out every channel gaps. It reported an
+  error for that, and paged Down beside the probe's Probe Health. Now the factory sweep holds a
+  factory whose every gap is on a sensor reading `unknown`/`probe`, or on a factory held for one,
+  or on a withheld sensor, as long as at least one is the probe's. It lays `probeReachable: false`
+  over the factory's facts, as the lost set does, so row 3 decides it: `unknown`/`probe`, with a
+  gap, and a message that names nothing. The probe is the wider fact, so a factory reading both
+  is the probe's rather than withheld. The set settles on crossing, as the voucher check's does:
+  what crossed is re-decided in one transaction, and the set goes back if the write fails. Like
+  the lost set, it is live and not persisted, and after a restart it is empty until the first
+  factory sweep.
+  - **Until its inputs report again.** A sensor whose probe has come back reads its last reading
+    at once, but nothing is measured until its first result, and a spool replays oldest first.
+    So a factory stays held while every gap is on a sensor it saw away, that has reported nothing
+    since and is not paused, for at most the factory's own maximum age after it last saw it away.
+    Past that, the gap is its own, and it reports an error as before. Without this it went Down
+    during Probe Health's held return (`M-18`), and again at every relapse.
+  - **Carried by its inputs' probe, never by its own.** The alarm engine holds it behind the
+    Probe Health of the probe holding the first of its inputs the lost and frozen sets hold, as it
+    holds those sensors. Where the sets do not account for them, which is the boot grace and a
+    return, it is carried by the probe its inputs sit under in the tree. The tree's fallback never
+    carries a core-evaluated sensor by the probe it sits under: that probe has no episode, and a
+    trigger on Unknown over it would hear nothing. A trigger that covers the probe's live Probe
+    Health hears of the factory once, in the episode's alarm. One that does not hears its Unknown,
+    as it would a sensor of that probe's. Held factories are let go with the probe's sensors when
+    its Probe Health is paused, withheld or deleted during the loss (`M-24`, `M-25`). A factory
+    held before a core restart is carried by nothing until the first factory sweep, so a
+    reconciliation in that window arms it as any sensor, and the due sweep parks it if that sweep
+    has run by then.
+  - **A factory master held Down keeps holding**, for `M-23`'s reason: its dependents may be
+    anywhere, scanned as before. The mark is `M-23`'s, honoured for `unknown`/`probe` on a
+    factory only. A master a probe scans that was marked while withheld reads `unknown`/`probe`
+    when its own probe is lost, and lets go then, as `P-135` has it.
 - **State never bumps `object.version`.** `sensor_runtime` has no `object_touch_owner` trigger,
   and state is deliberately absent from `GET /objects/:id`, whose ETag is built from
   configuration versions. A scan is not a configuration change, and if it were, `R-04` would

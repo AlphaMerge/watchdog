@@ -1,5 +1,6 @@
 import type { CheckResult, Logger } from '@ms/shared';
 import type { Database } from '../db/pool.js';
+import { FACTORY_SENSOR_TYPE, type FactoryReach } from './reach.js';
 import {
   storedVoucher,
   WITHHELD,
@@ -55,6 +56,11 @@ export interface FactoryServiceOptions {
    * now, so a factory reading a withheld Probe Health knows it (`M-23`).
    */
   readonly vouching: VoucherCheck & { withheld(): ReadonlyMap<number, string> };
+  /**
+   * Where a factory whose every channel reads a sensor on a lost or frozen probe is held Unknown
+   * (`M-26`). Required for `vouching`'s reason.
+   */
+  readonly reach: Pick<FactoryReach, 'settle'>;
   readonly now?: () => Date;
 }
 
@@ -84,9 +90,12 @@ export interface FactoryStats {
   readonly cycles: number;
   /** Factories not evaluated because of who vouched for them (`A-29`), counted per sweep. */
   readonly withheld: number;
+  /**
+   * Factories held Unknown because what they read is on a lost or frozen probe (`M-26`), counted
+   * per sweep.
+   */
+  readonly unreached: number;
 }
-
-const FACTORY_TYPE = 'core.factory';
 
 /**
  * The sweep that withholds a factory for what it reads rather than for who vouched for it
@@ -95,12 +104,14 @@ const FACTORY_TYPE = 'core.factory';
  */
 const UPSTREAM = 'factory-upstream';
 const NOTHING_WITHHELD: ReadonlyMap<number, string> = new Map();
+const NOTHING_HELD: ReadonlyMap<number, readonly number[]> = new Map();
 
 export class FactoryService {
   readonly #db: Database;
   readonly #logger: Logger;
   readonly #ingest: (results: readonly CheckResult[]) => Promise<void>;
   readonly #vouching: VoucherCheck & { withheld(): ReadonlyMap<number, string> };
+  readonly #reach: Pick<FactoryReach, 'settle'>;
   readonly #now: () => Date;
 
   #sweeps = 0;
@@ -110,12 +121,20 @@ export class FactoryService {
   #failed = 0;
   #cycles = 0;
   #withheld = 0;
+  #unreached = 0;
+  /**
+   * When each sensor a factory reads was last seen on a probe that is away, in ms (`M-26`). Kept
+   * past the probe's return, until the sensor reports again, so that a factory is not failed in
+   * the interval between the two for readings the outage kept from it.
+   */
+  readonly #lastAway = new Map<number, number>();
 
   constructor(options: FactoryServiceOptions) {
     this.#db = options.db;
     this.#logger = options.logger.child({ component: 'factory' });
     this.#ingest = options.ingest;
     this.#vouching = options.vouching;
+    this.#reach = options.reach;
     this.#now = options.now ?? ((): Date => new Date());
   }
 
@@ -128,6 +147,7 @@ export class FactoryService {
       failed: this.#failed,
       cycles: this.#cycles,
       withheld: this.#withheld,
+      unreached: this.#unreached,
     };
   }
 
@@ -140,7 +160,7 @@ export class FactoryService {
     const withheld = await this.#vouching.refusals(
       sensors.map((sensor) => ({
         sensorId: sensor.sensorId,
-        sensorType: FACTORY_TYPE,
+        sensorType: FACTORY_SENSOR_TYPE,
         params: sensor.params,
         enclosingProbeId: null,
         voucher: sensor.voucher,
@@ -149,13 +169,16 @@ export class FactoryService {
     await this.#vouching.settle('factory', withheld);
     if (sensors.length === 0) {
       await this.#vouching.settle(UPSTREAM, NOTHING_WITHHELD);
+      await this.#reach.settle(NOTHING_HELD);
+      this.#lastAway.clear();
       return 0;
     }
 
     const cycles = findCycles(sensors);
     const order = evaluationOrder(sensors, cycles);
     const inputs = await this.#readInputs(sensors);
-    const at = this.#now().toISOString();
+    const started = this.#now();
+    const at = started.toISOString();
 
     // **What is not being evaluated right now** (`M-23`), for the factories that read it: this
     // sweep's refusals, anything another sweep withholds (a Probe Health, Core Health), and each
@@ -168,6 +191,16 @@ export class FactoryService {
       if (!factories.has(id)) unevaluated.add(id);
     }
     const upstream = new Map<number, string>();
+    // **And what is on a probe that is away** (`M-26`): the sensors a lost or frozen probe carries,
+    // which read `unknown`/`probe`, and each factory held for them this sweep, in evaluation
+    // order. Factories are left out of what was read for the reason they are left out above.
+    const unreached = new Set<number>();
+    for (const id of inputs.lost) {
+      if (!factories.has(id)) unreached.add(id);
+    }
+    const widest = Math.max(...sensors.map((sensor) => sensor.maxAgeSeconds));
+    const returning = this.#returning(inputs.runtime, unreached, started.getTime(), widest);
+    const held = new Map<number, readonly number[]>();
 
     const results: CheckResult[] = [];
     for (const sensor of order) {
@@ -262,11 +295,34 @@ export class FactoryService {
         // that is not being evaluated: nothing it is built on has failed, the question stopped
         // being asked upstream, and an error here would page Down on every factory downstream
         // of one grant edit. Unknown with a gap instead, as the one it reads is.
-        if (missing.every((key) => readsAny(sensor.parsed.get(key), unevaluated))) {
+        //
+        // **Held for its inputs' probe** (`M-26`), the same, when any of it is on a probe that
+        // is lost or behind: Unknown, cause `probe`, as the sensors it reads are, and not a Down
+        // beside the probe's own alarm. The probe's is the wider fact, as in the state machine.
+        //
+        // **Until what it reads reports again**: a sensor on a probe that has come back reads
+        // its last reading at once, but nothing is measured until its first result, and a
+        // replayed spool arrives oldest first. Within this factory's own maximum age of being
+        // seen away, and only until it reports, it is still the outage's.
+        const cutoff = started.getTime() - sensor.maxAgeSeconds * 1000;
+        const isAway = (id: number): boolean =>
+          unreached.has(id) || (returning.get(id) ?? -Infinity) >= cutoff;
+        const isUnevaluated = (id: number): boolean => unevaluated.has(id);
+        const reads = (key: string, test: (id: number) => boolean): boolean =>
+          readsAny(sensor.parsed.get(key), test);
+        const away = missing.some((key) => reads(key, isAway));
+        if (!away && missing.every((key) => reads(key, isUnevaluated))) {
           upstream.set(sensor.sensorId, WITHHELD.upstream);
           unevaluated.add(sensor.sensorId);
           inputs.up.set(sensor.sensorId, false);
           this.#withheld += 1;
+          continue;
+        }
+        if (away && missing.every((key) => reads(key, isUnevaluated) || reads(key, isAway))) {
+          held.set(sensor.sensorId, lacking(sensor, missing, isAway, held));
+          unreached.add(sensor.sensorId);
+          inputs.up.set(sensor.sensorId, false);
+          this.#unreached += 1;
           continue;
         }
         // Every channel gapped. Not a reading of none: the sources this sensor is built on are
@@ -304,6 +360,7 @@ export class FactoryService {
     // Before the results, as the factory sweep's own set is, so that a factory let go here is
     // re-decided before its fresh result is applied.
     await this.#vouching.settle(UPSTREAM, upstream);
+    await this.#reach.settle(held);
     if (results.length > 0) await this.#ingest(results);
     if (this.#cycles > 0 && cycles.size > 0) {
       // Once a sweep, not once a sensor: a ring of eight would otherwise be eight identical
@@ -333,7 +390,7 @@ export class FactoryService {
                  OR sr.paused_by_schedule OR sr.paused_manually)
       ORDER BY sc.object_id
       `,
-      [FACTORY_TYPE],
+      [FACTORY_SENSOR_TYPE],
     );
 
     const out: FactorySensor[] = [];
@@ -392,6 +449,10 @@ export class FactoryService {
   async #readInputs(sensors: readonly FactorySensor[]): Promise<{
     channels: Map<string, ChannelReading>;
     up: Map<number, boolean>;
+    /** The ones on a probe that is lost or behind: `unknown`/`probe` (`M-26`). */
+    lost: Set<number>;
+    /** Whether each is paused, and when it last reported, in ms (`M-26`). */
+    runtime: Map<number, InputRuntime>;
   }> {
     const wanted = new Set<number>();
     // The widest cut-off in play, and nothing more: it bounds how far back the one query has to
@@ -404,7 +465,9 @@ export class FactoryService {
     }
     const channels = new Map<string, ChannelReading>();
     const up = new Map<number, boolean>();
-    if (wanted.size === 0) return { channels, up };
+    const lost = new Set<number>();
+    const runtime = new Map<number, InputRuntime>();
+    if (wanted.size === 0) return { channels, up, lost, runtime };
 
     const ids = [...wanted];
     const [values, states] = await Promise.all([
@@ -432,8 +495,14 @@ export class FactoryService {
       // `sensor_runtime`, not `sensor_state`: the latter is the append-only history uptime is
       // computed from, and asking it for "the state right now" means a `DISTINCT ON` per sensor
       // over a hypertable. `M-02` put the current state in a row per sensor for exactly this.
-      this.#db.query<{ object_id: string; state: string }>(
-        `SELECT object_id, state FROM sensor_runtime WHERE object_id = ANY($1::int[])`,
+      this.#db.query<{
+        object_id: string;
+        state: string;
+        cause: string;
+        last_result_at: Date | null;
+      }>(
+        `SELECT object_id, state, cause, last_result_at
+         FROM sensor_runtime WHERE object_id = ANY($1::int[])`,
         [ids],
       ),
     ]);
@@ -447,18 +516,85 @@ export class FactoryService {
       });
     }
     for (const row of states) {
-      up.set(Number(row.object_id), row.state === 'up' || row.state === 'warning');
+      const id = Number(row.object_id);
+      up.set(id, row.state === 'up' || row.state === 'warning');
+      if (row.state === 'unknown' && row.cause === 'probe') lost.add(id);
+      runtime.set(id, {
+        paused: row.state === 'paused',
+        lastResultAt: row.last_result_at?.getTime() ?? null,
+      });
     }
-    return { channels, up };
+    return { channels, up, lost, runtime };
+  }
+
+  /**
+   * The sensors seen away at an earlier sweep that are back and have not reported since, each
+   * with when it was last seen away (`M-26`). Records the ones away now, and forgets any that
+   * reported, were paused, are no longer read, or have been back longer than any factory waits.
+   */
+  #returning(
+    runtime: ReadonlyMap<number, InputRuntime>,
+    away: ReadonlySet<number>,
+    now: number,
+    widestSeconds: number,
+  ): Map<number, number> {
+    for (const id of away) this.#lastAway.set(id, now);
+    const returning = new Map<number, number>();
+    for (const [id, seen] of this.#lastAway) {
+      if (away.has(id)) continue;
+      const row = runtime.get(id);
+      if (
+        row === undefined ||
+        row.paused ||
+        (row.lastResultAt !== null && row.lastResultAt > seen) ||
+        now - seen > widestSeconds * 1000
+      ) {
+        this.#lastAway.delete(id);
+        continue;
+      }
+      returning.set(id, seen);
+    }
+    return returning;
   }
 }
 
-/** Whether a formula names any of these sensors. A formula that did not parse names none. */
-function readsAny(node: Node | FormulaError | undefined, ids: ReadonlySet<number>): boolean {
+/** What the factory sweep needs of a sensor it reads beyond its state (`M-26`). */
+interface InputRuntime {
+  readonly paused: boolean;
+  /** When its last result was measured, in ms, or null for never. */
+  readonly lastResultAt: number | null;
+}
+
+/**
+ * The sensors on a probe that is away that these channels' formulas lead to (`M-26`), in id
+ * order. A factory held this sweep stands for the sensors it lacks, so what is kept is always
+ * sensors a probe scans, which is where the alarm engine finds the probe.
+ */
+function lacking(
+  sensor: FactorySensor,
+  channels: readonly string[],
+  away: (id: number) => boolean,
+  held: ReadonlyMap<number, readonly number[]>,
+): number[] {
+  const reads = new Set<number>();
+  for (const key of channels) {
+    const node = sensor.parsed.get(key);
+    if (node !== undefined && !(node instanceof FormulaError)) referencedSensors(node, reads);
+  }
+  const out = new Set<number>();
+  for (const id of reads) {
+    if (!away(id)) continue;
+    for (const input of held.get(id) ?? [id]) out.add(input);
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+/** Whether a formula names any sensor that passes. A formula that did not parse names none. */
+function readsAny(node: Node | FormulaError | undefined, test: (id: number) => boolean): boolean {
   if (node === undefined || node instanceof FormulaError) return false;
   const reads = new Set<number>();
   referencedSensors(node, reads);
-  return [...reads].some((id) => ids.has(id));
+  return [...reads].some(test);
 }
 
 /**

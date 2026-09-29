@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { CheckResult } from '@ms/shared';
+import { FactoryReach, UNREACHED_MESSAGE } from '../src/factory/reach.js';
 import { FactoryService } from '../src/factory/service.js';
 import { FactorySweep } from '../src/factory/sweep.js';
 import type { Database } from '../src/db/pool.js';
@@ -11,7 +12,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, testActor } from './support/tree.js';
-import { everyVoucherHolds } from './support/vouching.js';
+import { everyVoucherHolds, nothingFollowsReach } from './support/vouching.js';
 
 /**
  * The Sensor Factory evaluator (`T-21`), against a real tree and real readings.
@@ -61,6 +62,7 @@ describe('sensor factory', { skip: available ? false : 'no database' }, () => {
 
     factory = new FactoryService({
       vouching: everyVoucherHolds,
+      reach: nothingFollowsReach,
       db,
       logger: silentLogger,
       ingest: (results) => {
@@ -454,6 +456,175 @@ describe('sensor factory', { skip: available ? false : 'no database' }, () => {
     assert.equal(await factory.sweep(), 0);
     assert.equal(ingested.length, 0);
   });
+
+  it('holds a factory over a lost probe’s sensor, and one built on it, instead of failing them (M-26)', async () => {
+    // Its inputs record nothing, so once its maximum age ran out every channel gapped and it
+    // reported an error: Down, and a page beside the probe's own alarm.
+    const far = await source('far', 'rtt', 5, { ageSeconds: 3_600, state: 'unknown' });
+    await db.query(`UPDATE sensor_runtime SET cause = 'probe' WHERE object_id = $1`, [far]);
+    const hidden = await source('hidden', 'rtt', 7, { ageSeconds: 3_600 });
+    const live = await source('near', 'rtt', 9);
+
+    const over = await makeFactory('Over far', [
+      { key: 'v', formula: `channel(${String(far)}, 'rtt')` },
+    ]);
+    const above = await makeFactory('Over that', [
+      { key: 'v', formula: `channel(${String(over)}, 'v') * 2` },
+    ]);
+    // Partly on the lost probe and partly withheld is still not measured, and the probe's.
+    const both = await makeFactory('Far and hidden', [
+      { key: 'v', formula: `channel(${String(far)}, 'rtt') + channel(${String(hidden)}, 'rtt')` },
+    ]);
+    // One that can compute a channel computes it.
+    const mixed = await makeFactory('Far and near', [
+      { key: 'far', formula: `channel(${String(far)}, 'rtt')` },
+      { key: 'near', formula: `channel(${String(live)}, 'rtt')` },
+    ]);
+    // And one missing something that is simply missing is its own fault, as it always was.
+    const partly = await makeFactory('Far and nothing', [
+      { key: 'far', formula: `channel(${String(far)}, 'rtt')` },
+      { key: 'none', formula: `channel(${String(live)}, 'never-recorded')` },
+    ]);
+
+    const settled: ReadonlyMap<number, readonly number[]>[] = [];
+    factory = new FactoryService({
+      vouching: { ...everyVoucherHolds, withheld: () => new Map([[hidden, 'withheld']]) },
+      reach: {
+        settle: (next) => {
+          settled.push(next);
+          return Promise.resolve(0);
+        },
+      },
+      db,
+      logger: silentLogger,
+      ingest: (results) => {
+        ingested.push(...results);
+        return Promise.resolve();
+      },
+    });
+    await factory.sweep();
+
+    assert.deepEqual(
+      [...(settled.at(-1) ?? new Map()).entries()].sort(([a], [b]) => a - b),
+      [
+        [over, [far]],
+        [above, [far]],
+        [both, [far]],
+      ].sort(([a], [b]) => Number(a) - Number(b)),
+      'each held with the sensors it lacks on the probe that is away, through the factory between',
+    );
+    for (const id of [over, above, both]) {
+      assert.equal(resultFor(id), undefined, `nothing recorded for ${String(id)}: a gap`);
+    }
+    assert.equal(resultFor(mixed)?.outcome, 'ok');
+    assert.equal(valueOf(mixed, 'near'), 9);
+    assert.equal(resultFor(partly)?.outcome, 'error');
+    assert.equal(factory.stats().unreached, 3);
+
+    // Back: measured again, and everything computes, held by nothing.
+    await db.query(
+      `INSERT INTO sample (channel_id, time, value)
+       SELECT id, now(), 6 FROM channel WHERE sensor_id = $1 AND key = 'rtt'`,
+      [far],
+    );
+    await db.query(
+      `UPDATE sensor_runtime SET state = 'up', cause = 'scan', last_result_at = now()
+       WHERE object_id = $1`,
+      [far],
+    );
+    ingested = [];
+    await factory.sweep();
+    assert.equal(settled.at(-1)?.size, 0);
+    assert.equal(valueOf(above, 'v'), 12);
+  });
+
+  it('keeps a factory held once its input’s probe is back, until the input reports, for no longer than its maximum age (M-26)', async () => {
+    // A sensor on a probe that has come back reads its last reading at once, and nothing is
+    // measured until its first result: a spool replays oldest first. Failing the factory in
+    // that interval would page Down beside the probe's return, for the outage's readings.
+    const lost = async (name: string): Promise<number> => {
+      const id = await source(name, 'rtt', 5, { ageSeconds: 3_600, state: 'unknown' });
+      await db.query(
+        `UPDATE sensor_runtime SET cause = 'probe', last_result_at = now() - interval '1 hour'
+         WHERE object_id = $1`,
+        [id],
+      );
+      return id;
+    };
+    const slow = await lost('slow');
+    const quick = await lost('quick');
+    const rested = await lost('rested');
+    const waits = await makeFactory('Waits', [
+      { key: 'v', formula: `channel(${String(slow)}, 'rtt')` },
+    ]);
+    const answered = await makeFactory('Answered', [
+      { key: 'v', formula: `channel(${String(quick)}, 'rtt')` },
+    ]);
+    const paused = await makeFactory('Paused', [
+      { key: 'v', formula: `channel(${String(rested)}, 'rtt')` },
+    ]);
+    // Over the same input as the first, and waiting a minute where that one waits ten.
+    const brief = await makeFactory(
+      'Brief',
+      [{ key: 'v', formula: `channel(${String(slow)}, 'rtt')` }],
+      { maxAgeSeconds: 60 },
+    );
+
+    let clock = Date.now();
+    const settled: ReadonlyMap<number, readonly number[]>[] = [];
+    factory = new FactoryService({
+      vouching: everyVoucherHolds,
+      reach: {
+        settle: (next) => {
+          settled.push(next);
+          return Promise.resolve(0);
+        },
+      },
+      db,
+      logger: silentLogger,
+      ingest: (results) => {
+        ingested.push(...results);
+        return Promise.resolve();
+      },
+      now: () => new Date(clock),
+    });
+    const heldNow = (): number[] => [...(settled.at(-1)?.keys() ?? [])].sort((a, b) => a - b);
+    await factory.sweep();
+    assert.deepEqual(
+      heldNow(),
+      [waits, answered, paused, brief].sort((a, b) => a - b),
+    );
+
+    // Back: each reads its last reading. One has reported since, a Down result that recorded
+    // nothing, and one has been paused; the third has done neither.
+    await db.query(
+      `UPDATE sensor_runtime SET state = 'up', cause = 'scan' WHERE object_id = ANY($1::int[])`,
+      [[slow, quick, rested]],
+    );
+    await db.query(
+      `UPDATE sensor_runtime SET state = 'down', last_result_at = now() WHERE object_id = $1`,
+      [quick],
+    );
+    await db.query(
+      `UPDATE sensor_runtime SET state = 'paused', cause = 'user' WHERE object_id = $1`,
+      [rested],
+    );
+    clock += 90_000;
+    ingested = [];
+    await factory.sweep();
+    assert.deepEqual(heldNow(), [waits], 'the one still waiting for its input stays held');
+    assert.equal(resultFor(waits), undefined, 'a gap, and not an error');
+    assert.equal(resultFor(answered)?.outcome, 'error', 'reported, and still nothing: its own');
+    assert.equal(resultFor(paused)?.outcome, 'error', 'paused is not the outage’s');
+    assert.equal(resultFor(brief)?.outcome, 'error', 'past its own maximum age of waiting');
+
+    // Nothing inside its own maximum age of being seen away: the outage is no longer the reason.
+    clock += 511_000;
+    ingested = [];
+    await factory.sweep();
+    assert.deepEqual(heldNow(), []);
+    assert.equal(resultFor(waits)?.outcome, 'error');
+  });
 });
 
 describe('the factory sweep', () => {
@@ -499,5 +670,61 @@ describe('the factory sweep', () => {
     await sweep.tick();
     await sweep.tick();
     assert.equal(calls, 2);
+  });
+});
+
+describe('the factories held for their inputs’ probe (`M-26`)', () => {
+  function reachOver(fails = false) {
+    const calls: string[] = [];
+    const reach = new FactoryReach({
+      db: { tx: (fn) => fn({} as never) },
+      logger: silentLogger,
+      states: {
+        reevaluate: (_q, ids, _at, cause) => {
+          calls.push(`reevaluate ${ids.join(',')} ${cause.sources?.join(',') ?? ''}`);
+          assert.equal(cause.message, UNREACHED_MESSAGE);
+          return fails ? Promise.reject(new Error('could not serialize')) : Promise.resolve(1);
+        },
+      },
+      dependencies: {
+        holdWithheld: (_q, ids) => {
+          calls.push(`hold ${ids.join(',')}`);
+          return Promise.resolve();
+        },
+        returnWithheld: (_q, ids) => {
+          calls.push(`return ${ids.join(',')}`);
+          return Promise.resolve();
+        },
+        recompute: () => {
+          calls.push('recompute');
+          return Promise.resolve({ moved: 0 });
+        },
+      },
+    });
+    return { reach, calls };
+  }
+
+  it('re-decides only what crossed, as cause probe, keeping a Down master holding', async () => {
+    const { reach, calls } = reachOver();
+    await reach.settle(new Map([[1, [9]]]));
+    assert.deepEqual(calls, ['hold 1', 'reevaluate 1 probe', 'return ', 'recompute']);
+    assert.deepEqual([...reach.unreached()], [1]);
+    assert.deepEqual(reach.inputsOf(1), [9]);
+
+    calls.length = 0;
+    await reach.settle(new Map([[1, [8]]]));
+    assert.deepEqual(calls, [], 'nothing crossed');
+    assert.deepEqual(reach.inputsOf(1), [8], 'but what it lacks is kept current');
+
+    await reach.settle(new Map());
+    assert.deepEqual(calls, ['hold ', 'reevaluate 1 probe', 'return 1', 'recompute']);
+    assert.equal(reach.unreached().size, 0);
+  });
+
+  it('takes the set back when the write fails, so the next sweep tries again', async () => {
+    const { reach } = reachOver(true);
+    assert.equal(await reach.settle(new Map([[1, [9]]])), 0);
+    assert.equal(reach.unreached().size, 0);
+    assert.equal(reach.inputsOf(1), undefined);
   });
 });

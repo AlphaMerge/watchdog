@@ -274,9 +274,8 @@ the system holds each one to the account that stands behind it (`A-29`):
   withheld sensor is withheld too, down the chain, with *"Not evaluated: every channel it computes
   reads a sensor that is itself not being evaluated…"*, and it names nothing. A factory that can
   still compute a channel computes it, with a gap for the rest.
-- **One gap remains** (`M-26`). A factory reading a sensor under a probe that is lost, or whose
-  clock is behind, runs out of readings after its maximum age, and goes **Down**. It pages
-  alongside the probe's Probe Health: a known second alarm, until `M-26` makes it Unknown.
+- **A factory over a lost or frozen probe's sensor** is Unknown too, for its probe rather than
+  for its voucher (`M-26`). *A lost or frozen probe, and who is told* below says what it pages.
 - **To start it again**, save its parameters as an account that can read everything it names —
   an administrator, usually — or give the original account its access back. Either takes effect
   at the next sweep, within thirty seconds. The state log shows the transition with cause `access`.
@@ -630,6 +629,13 @@ recovery until it really recovers.
 - **A probe lost while it carries nothing** raises nothing on Unknown: there is nothing held. When
   sensors are moved, created or cloned under it, they are held from that moment and the one
   alarm is raised for them, as if they had been there all along (`M-24`).
+- **A Sensor Factory reading the probe's sensors** goes Unknown with them once its maximum age
+  has run out, not Down (`M-26`): *Not evaluated: every channel it computes reads a sensor on a
+  probe that is lost, or whose clock is behind.* Wherever it sits in the tree, it is held behind
+  the Probe Health of the probe its inputs are on, as those sensors are. A trigger covering that
+  Probe Health hears nothing more, and one that does not hears the factory's Unknown, once. It
+  stays Unknown after the probe is back until its inputs report, for at most its maximum age, so
+  the minutes a probe takes to replay its spool are not a Down.
 
 - **A trigger covers a sensor when it applies to it**: on the sensor itself or on anything above
   it. A trigger on the root covers every probe's Probe Health.
