@@ -1,8 +1,12 @@
 // Side-effect import: @fastify/swagger augments FastifySchema with `description`.
 import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
-import { ALARM_STATES, type AlarmService, type AlarmSort } from '../../state/alarms.js';
-import type { SensorState } from '../../state/tables.js';
+import {
+  ALARM_KINDS,
+  type AlarmKind,
+  type AlarmService,
+  type AlarmSort,
+} from '../../state/alarms.js';
 import { onQueryObject, visibilityOf } from '../authorization.js';
 
 export interface AlarmRouteOptions {
@@ -16,8 +20,8 @@ const alarmQuery = {
     objectId: { type: 'integer', minimum: 1 },
     state: {
       oneOf: [
-        { enum: [...ALARM_STATES] },
-        { type: 'array', items: { enum: [...ALARM_STATES] }, maxItems: ALARM_STATES.length },
+        { enum: [...ALARM_KINDS] },
+        { type: 'array', items: { enum: [...ALARM_KINDS] }, maxItems: ALARM_KINDS.length },
       ],
     },
     priorityMin: { type: 'integer', minimum: 1, maximum: 5 },
@@ -29,7 +33,7 @@ const alarmQuery = {
 
 interface AlarmQueryString {
   objectId?: number;
-  state?: SensorState | SensorState[];
+  state?: AlarmKind | AlarmKind[];
   priorityMin?: number;
   includeAcknowledged?: boolean;
   sort?: AlarmSort;
@@ -53,6 +57,7 @@ export const alarmSchema = {
     'acknowledged',
     'acknowledgedUntil',
     'consecutiveFailures',
+    'recovering',
   ],
   properties: {
     sensorId: { type: 'integer' },
@@ -67,6 +72,18 @@ export const alarmSchema = {
     acknowledged: { type: 'boolean' },
     acknowledgedUntil: { type: ['string', 'null'] },
     consecutiveFailures: { type: 'integer' },
+    recovering: {
+      description:
+        'The return its alarm is holding (`M-18`), or null. `confirmsAt` is when the alarm is ' +
+        'over if the sensor does not fail again.',
+      type: ['object', 'null'],
+      additionalProperties: false,
+      required: ['since', 'confirmsAt'],
+      properties: {
+        since: { type: 'string' },
+        confirmsAt: { type: ['string', 'null'] },
+      },
+    },
   },
 } as const;
 
@@ -74,11 +91,17 @@ export const alarmPageSchema = {
   $id: 'ms:alarmPage',
   type: 'object',
   additionalProperties: false,
-  required: ['items', 'total', 'counts'],
+  required: ['items', 'total', 'counts', 'now'],
   properties: {
     items: { type: 'array', items: { $ref: 'ms:alarm' } },
     total: { type: 'integer' },
     counts: { type: 'object', additionalProperties: { type: 'integer' } },
+    now: {
+      type: 'string',
+      description:
+        "The core's clock when the list was read. A held return's end is not a state change, " +
+        'so a client that wants to see it go asks again at `confirmsAt`, measured from this.',
+    },
   },
 } as const;
 
@@ -105,7 +128,8 @@ export function alarmRoutes(app: FastifyInstance, options: AlarmRouteOptions): v
       config: onQueryObject('read', 'objectId', { optional: true }),
       schema: {
         tags: ['state'],
-        summary: 'Every sensor that is currently in an alarm state, worst first',
+        summary:
+          'Every sensor that is currently in an alarm state, worst first, and every held return',
         description:
           'Down, Down (Partial), Down (Acknowledged), Warning and Unusual — the five states ' +
           '`WORKFLOW.MD §7` names. **Paused and Unknown are absent by design**: a paused sensor ' +
@@ -114,6 +138,12 @@ export function alarmRoutes(app: FastifyInstance, options: AlarmRouteOptions): v
           'one an operator scrolls past. `objectId` scopes to that object and everything ' +
           'beneath it. `counts` is per state across the whole scope and ignores the `state` ' +
           'filter, so a severity chip can still say how many it is hiding.\n\n' +
+          'A sensor that is back while its alarm waits to see the return last (`M-18`) is ' +
+          'listed too, after everything still happening, with `recovering` saying when it is ' +
+          'over. It counts as `recovering` rather than as its state, unless that state is one ' +
+          "of the five, and `state=recovering` filters to those. `now` is the core's clock, " +
+          'to time the moment a hold ends against: that is not a state change, and the state ' +
+          'stream does not announce it.\n\n' +
           'Only sensors the caller can read are listed or counted, and `path` and `pathNames` ' +
           'carry only the steps the caller can read.',
         querystring: alarmQuery,

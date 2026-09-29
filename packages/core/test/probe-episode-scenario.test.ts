@@ -22,6 +22,7 @@ import { ProbeDeliveryWatch } from '../src/probes/delivery-watch.js';
 import { ProbeEpisodeIndex } from '../src/probes/episodes.js';
 import { ProbeReachability } from '../src/probes/reachability.js';
 import { ReachabilitySync } from '../src/probes/reachability-sync.js';
+import { AlarmService, type Alarm } from '../src/state/alarms.js';
 import { readSensorState, writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
 import type { SensorResult } from '../src/state/service.js';
 import type { SensorState } from '../src/state/tables.js';
@@ -454,6 +455,16 @@ describe(
         [after, sensorId],
       );
       return rows.map((row) => row.message);
+    }
+
+    /** Probe Health's row on the alarms list, scoped to its own probe (`M-18`). */
+    async function listed(made: Made): Promise<Alarm | undefined> {
+      const page = await new AlarmService({ db, logger: silent }).list({
+        visibility: Visibility.EVERYTHING,
+        objectId: made.probe,
+        limit: 500,
+      });
+      return page.items.find((item) => item.sensorId === healthOf(made));
     }
 
     const healthOf = (made: Made): number => {
@@ -1240,6 +1251,51 @@ describe(
       await withTreeSync(() => h.service.move(testActor, made.site, live, { kind: 'none' }));
       assert.deepEqual(await alarmsOn([health]), [], 'recovered by the move, not held');
       assert.deepEqual(await queued(moved, [health]), { 'email:unknown:recovery': 1 });
+      // And the list says what is true: the probe is still lost, and nothing is held.
+      const row = await listed(made);
+      assert.equal(row?.state, 'down');
+      assert.equal(row.recovering, null);
+    });
+
+    it('lists a return held through an episode’s end as recovering, a relapse as Down, and nothing once it has lasted (`M-18`)', async (t) => {
+      // The alarm list's side of the loop. The one alarm an Unknown trigger holds for the probe
+      // stands on Probe Health, whose own state is Up while that alarm waits to see the return
+      // last: the list is the one place that says the alarm is not over.
+      holding = true;
+      t.after(() => {
+        holding = false;
+      });
+      const made = await probeWith('listed-held', { health: true });
+      await trigger(made.probe, 'unknown', 'email');
+      await settle(made);
+
+      await lose(made);
+      const lost = await listed(made);
+      assert.equal(lost?.state, 'down');
+      assert.equal(lost.recovering, null);
+
+      const found = Date.now();
+      await find(made);
+      const held = await listed(made);
+      assert.equal(held?.state, 'up', 'Probe Health is back, and says so');
+      assert.ok(held.recovering !== null, 'and its episode alarm is held');
+      const confirmsAt = Date.parse(held.recovering.confirmsAt ?? '');
+      assert.ok(
+        confirmsAt >= found + 5 * MINUTE && confirmsAt <= Date.now() + 5 * MINUTE,
+        `over five minutes after the reconnect: ${held.recovering.confirmsAt ?? 'null'}`,
+      );
+
+      // A relapse is a state change the stream carries, and the same alarm resumed: Down, and
+      // nothing held.
+      await lose(made);
+      const relapsed = await listed(made);
+      assert.equal(relapsed?.state, 'down');
+      assert.equal(relapsed.recovering, null);
+
+      await find(made);
+      assert.notEqual((await listed(made))?.recovering ?? null, null, 'held again');
+      await scheduler.sweep(new Date(Date.now() + 6 * MINUTE));
+      assert.equal(await listed(made), undefined, 'over, and off the list');
     });
   },
 );

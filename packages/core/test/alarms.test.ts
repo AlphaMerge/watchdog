@@ -2,12 +2,15 @@ import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
 import { ApiServer } from '../src/api/server.js';
-import { AuditRepository } from '../src/audit/store.js';
+import { AuditRepository, DatabaseAuditSink } from '../src/audit/store.js';
 import type { Database } from '../src/db/pool.js';
+import { AlarmEngine, holdsFrom } from '../src/notifications/engine.js';
+import { AlarmScheduler } from '../src/notifications/scheduler.js';
 import { AlarmService, type AlarmPage } from '../src/state/alarms.js';
 import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
 import type { SensorResult } from '../src/state/service.js';
 import { HistoryService } from '../src/timeseries/history.js';
+import { TriggerService } from '../src/triggers/service.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -19,6 +22,7 @@ import { Reach, Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
 const NOW = new Date('2026-08-25T12:00:00.000Z');
+const at = (seconds: number): Date => new Date(NOW.getTime() + seconds * 1000);
 
 describe(
   'the alarms list',
@@ -29,6 +33,13 @@ describe(
     let h: Harness;
     let app: FastifyInstance;
     let alarms: AlarmService;
+    /**
+     * The engine a held return needs (`M-18`), with the holds `main.ts` gives it. Nothing is
+     * configured to notify anybody outside the tests that add a trigger, so everywhere else it
+     * costs its one guard query.
+     */
+    let engine: AlarmEngine;
+    let triggers: TriggerService;
 
     let probeId: number;
     let berlin: number;
@@ -41,8 +52,10 @@ describe(
     before(async () => {
       scratch = await createScratchDatabase('alarms');
       db = scratch.db;
-      h = await buildHarness(db, { states: true });
+      engine = new AlarmEngine({ logger: silent, recoveryHolds: holdsFrom(testCatalogue()) });
+      h = await buildHarness(db, { states: true, alarms: engine });
       alarms = new AlarmService({ db, logger: silent });
+      triggers = new TriggerService({ db, audit: new DatabaseAuditSink(), logger: silent });
 
       const server = new ApiServer({
         config: {
@@ -139,6 +152,12 @@ describe(
       await db.tx(async (q) => {
         await writeStateHistory(q, decisions.transitions);
         await writeRuntimes(q, decisions.runtimes);
+        // Where the state service reacts, in the same transaction (`M-18` needs it).
+        await engine.react(
+          q,
+          results.map((result) => result.sensorId),
+          results[0]?.at ?? NOW,
+        );
       });
     }
 
@@ -403,6 +422,206 @@ describe(
     });
 
     // -----------------------------------------------------------------------------------------
+    // A return held before its alarm is over (`M-18`).
+    // -----------------------------------------------------------------------------------------
+
+    /** A Probe Health under the probe, outside both groups: the type that holds a return. */
+    async function probeHealth(): Promise<number> {
+      const box = (
+        await h.service.create(testActor, {
+          kind: 'device',
+          parentId: probeId,
+          name: 'probe-box',
+          host: '192.0.2.30',
+        })
+      ).id;
+      return (
+        await h.service.create(testActor, {
+          kind: 'sensor',
+          parentId: box,
+          name: 'Probe Health',
+          sensorType: 'ms.probe.health',
+          priority: 5,
+        })
+      ).id;
+    }
+
+    async function downTrigger(on: number, settings: Record<string, unknown> = {}): Promise<void> {
+      // A template id nothing reads: a held alarm that is still pending is cancelled, not sent.
+      await triggers.create(testActor, on, {
+        kind: 'state',
+        settings: { state: 'down', initialTemplateId: 101, ...settings },
+      });
+    }
+
+    async function back(sensorId: number, when: Date): Promise<void> {
+      await report([{ sensorId, at: when, outcome: 'ok', message: 'ok', channels: null }]);
+    }
+
+    it('lists a sensor that is back while its alarm waits out the hold, and when it is over (`M-18`)', async () => {
+      const health = await probeHealth();
+      await downTrigger(probeId);
+      await knockDown(health, NOW);
+      await back(health, at(120));
+
+      const page = await list({ limit: 100 });
+      assert.deepEqual(
+        page.items.map((alarm) => alarm.sensorId),
+        [health],
+      );
+      const row = page.items[0];
+      assert.ok(row);
+      assert.equal(row.state, 'up', 'the sensor is back, and says so');
+      assert.equal(row.since, at(120).toISOString(), 'back since');
+      assert.deepEqual(row.recovering, {
+        since: at(120).toISOString(),
+        // Probe Health's own five minutes: the trigger sets none.
+        confirmsAt: at(420).toISOString(),
+      });
+      assert.deepEqual(page.counts, { recovering: 1 });
+
+      // Once the hold has ended the alarm is over, and so is the row.
+      await new AlarmScheduler({ db, engine, logger: silent }).sweep(at(421));
+      const after = await list({ limit: 100 });
+      assert.deepEqual(after.items, []);
+      assert.deepEqual(after.counts, {});
+    });
+
+    it('lists a sensor back only as far as Warning as Warning, with the hold beside it, and a relapse as Down and not held (`M-18`)', async () => {
+      const health = await probeHealth();
+      await downTrigger(probeId);
+      await knockDown(health, NOW);
+      await back(health, at(120));
+      await report([
+        { sensorId: health, at: at(180), outcome: 'error', message: 'lost', channels: null },
+      ]);
+
+      const warned = await list({ limit: 100 });
+      assert.equal(warned.items[0]?.state, 'warning');
+      assert.deepEqual(warned.items[0].recovering, {
+        since: at(120).toISOString(),
+        confirmsAt: at(420).toISOString(),
+      });
+      assert.deepEqual(warned.counts, { warning: 1 }, 'counted once, by its state');
+
+      // Down again inside the hold: the same alarm resumes, and nothing is held any more.
+      await report([
+        { sensorId: health, at: at(240), outcome: 'error', message: 'lost', channels: null },
+      ]);
+      const relapsed = await list({ limit: 100 });
+      assert.equal(relapsed.items[0]?.state, 'down');
+      assert.equal(relapsed.items[0].recovering, null);
+      assert.deepEqual(relapsed.counts, { down: 1 });
+    });
+
+    it('puts a held return after every alarm still happening, whatever its priority (`M-18`)', async () => {
+      // Probe Health is priority 5 and came back first; HTTP is priority 2 and broke later. By
+      // priority, and by duration, the held return would lead; it follows instead.
+      const health = await probeHealth();
+      await downTrigger(probeId);
+      await knockDown(health, NOW);
+      await back(health, at(120));
+      await knockDown(http, at(600));
+
+      for (const sort of ['priority', 'duration'] as const) {
+        const page = await list({ limit: 100, sort });
+        assert.deepEqual(
+          page.items.map((alarm) => alarm.sensorId),
+          [http, health],
+          sort,
+        );
+      }
+    });
+
+    it('filters to held returns, and counts them while they are filtered out (`M-18`)', async () => {
+      const health = await probeHealth();
+      await downTrigger(probeId);
+      await knockDown(health, NOW);
+      await back(health, at(120));
+      await knockDown(http, at(600));
+
+      const held = await list({ limit: 100, states: ['recovering'] });
+      assert.deepEqual(
+        held.items.map((alarm) => alarm.sensorId),
+        [health],
+      );
+      assert.equal(held.total, 1);
+
+      const down = await list({ limit: 100, states: ['down'] });
+      assert.deepEqual(
+        down.items.map((alarm) => alarm.sensorId),
+        [http],
+      );
+      assert.deepEqual(down.counts, { down: 1, recovering: 1 });
+
+      // And on the path that reads the chips on their own, when the filter empties the list.
+      const none = await list({ limit: 100, states: ['warning'] });
+      assert.deepEqual(none.items, []);
+      assert.deepEqual(none.counts, { down: 1, recovering: 1 });
+    });
+
+    it('lists and counts a held return only for a reader who can see it (`A-12`, `M-18`)', async () => {
+      // Probe Health sits under the probe, outside the branch this reader is granted. The
+      // provider's own probe recovering is not a customer's alarm, and a chip saying so would
+      // announce it.
+      const health = await probeHealth();
+      await downTrigger(probeId);
+      await downTrigger(berlin, { recoveryHoldSeconds: 300 });
+      await knockDown(health, NOW);
+      await back(health, at(120));
+      await knockDown(ping, NOW);
+      await back(ping, at(120));
+
+      const everything = await list({ limit: 100 });
+      assert.deepEqual(everything.counts, { recovering: 2 }, 'both are held');
+
+      const berliner = Visibility.of(new Map([[berlin, true]]), false, null);
+      const seen = await alarms.list({ visibility: berliner, limit: 100 });
+      assert.deepEqual(
+        seen.items.map((alarm) => alarm.sensorId),
+        [ping],
+        'the visible held return is listed, so the other is absent for being hidden',
+      );
+      assert.equal(seen.total, 1);
+      assert.deepEqual(seen.counts, { recovering: 1 });
+
+      const emptied = await alarms.list({ visibility: berliner, limit: 100, states: ['down'] });
+      assert.deepEqual(emptied.counts, { recovering: 1 });
+    });
+
+    it('says a sensor held by two triggers is over when the later of their holds ends (`M-18`)', async () => {
+      // Each trigger holds its own alarm, and a trigger may set its own hold. The row goes when
+      // the last of them is over, so that is the time it gives.
+      await downTrigger(berlin, { recoveryHoldSeconds: 300 });
+      await downTrigger(berlin, { recoveryHoldSeconds: 600 });
+      await knockDown(ping, NOW);
+      await back(ping, at(120));
+
+      const page = await list({ limit: 100 });
+      assert.deepEqual(page.items[0]?.recovering, {
+        since: at(120).toISOString(),
+        confirmsAt: at(720).toISOString(),
+      });
+
+      // The shorter hold ends, and the row stays until the longer one does.
+      const sweep = new AlarmScheduler({ db, engine, logger: silent });
+      await sweep.sweep(at(421));
+      assert.equal(
+        (await list({ limit: 100 })).items[0]?.recovering?.confirmsAt,
+        at(720).toISOString(),
+      );
+      await sweep.sweep(at(721));
+      assert.deepEqual((await list({ limit: 100 })).items, []);
+    });
+
+    it('stamps the page with the core’s clock, for a reader timing the end of a hold (`M-18`)', async () => {
+      const before = Date.now();
+      const page = await list({ limit: 100 });
+      const stamped = Date.parse(page.now);
+      assert.ok(stamped >= before && stamped <= Date.now(), page.now);
+    });
+
+    // -----------------------------------------------------------------------------------------
     // Over HTTP.
     // -----------------------------------------------------------------------------------------
 
@@ -439,6 +658,30 @@ describe(
         url: '/api/v1/alarms?state=down&state=warning',
       });
       assert.equal(both.json<AlarmPage>().items.length, 2);
+    });
+
+    it('serves a held return, filters to one, and says what time the core makes it (`M-18`)', async () => {
+      const health = await probeHealth();
+      await downTrigger(probeId);
+      await knockDown(health, NOW);
+      await back(health, at(120));
+
+      const asked = Date.now();
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/alarms',
+        query: { state: 'recovering' },
+      });
+      const answered = Date.now();
+      assert.equal(response.statusCode, 200, response.body);
+      const body = response.json<AlarmPage>();
+      assert.deepEqual(body.items[0]?.recovering, {
+        since: at(120).toISOString(),
+        confirmsAt: at(420).toISOString(),
+      });
+      assert.deepEqual(body.counts, { recovering: 1 });
+      const now = Date.parse(body.now);
+      assert.ok(now >= asked && now <= answered, body.now);
     });
 
     it('refuses a state that is not an alarm state', async () => {

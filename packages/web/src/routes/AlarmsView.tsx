@@ -2,24 +2,26 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { ApiError, send, useApi } from '../api/client';
 import { useStateStream } from '../api/stream';
-import type { Alarm, AlarmPage, SensorState } from '../api/types';
+import type { Alarm, AlarmKind, AlarmPage, HeldReturn } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
-import { StatusBadge } from '../components/StatusBadge';
+import { RecoveringBadge, StatusBadge } from '../components/StatusBadge';
 import { formatDuration } from './detail/model';
-import { whereSteps } from './alarms-model';
+import { kindOf, useConfirmReload, whereSteps } from './alarms-model';
 import { PageTitle } from '../components/PageTitle';
 
 /**
- * The severities, worst first — the same five `WORKFLOW.MD §7` names and the core returns.
+ * The severities, worst first — the same five `WORKFLOW.MD §7` names and the core returns — and a
+ * held return last (`M-18`), which is not a severity at all: the sensor is back.
  *
  * Ordered by how much they demand, so the chips read as a scale rather than a set.
  */
-const SEVERITIES: readonly { state: SensorState; label: string }[] = [
+const SEVERITIES: readonly { state: AlarmKind; label: string }[] = [
   { state: 'down', label: 'Down' },
   { state: 'down_partial', label: 'Partial' },
   { state: 'down_acknowledged', label: 'Acknowledged' },
   { state: 'warning', label: 'Warning' },
   { state: 'unusual', label: 'Unusual' },
+  { state: 'recovering', label: 'Recovering' },
 ];
 
 /** How long to wait after a state change before refetching, so a burst is one request. */
@@ -74,6 +76,8 @@ export function AlarmsView(): React.JSX.Element {
   // is not currently scoped to — and the counts are about the scope, not the filter.
   const live = useStateStream(null);
   useSettledReload(live.states, reload);
+  // The one change the stream cannot announce: a held return's end (`M-18`).
+  useConfirmReload(alarms.status === 'ready' ? alarms.data : null, reload);
 
   const set = useCallback(
     (mutate: (query: URLSearchParams) => void) => {
@@ -125,7 +129,7 @@ export function AlarmsView(): React.JSX.Element {
   );
 }
 
-function isSeverity(value: string): value is SensorState {
+function isSeverity(value: string): value is AlarmKind {
   return SEVERITIES.some((severity) => severity.state === value);
 }
 
@@ -176,14 +180,14 @@ function Filters({
   scope,
   onChange,
 }: {
-  counts: Partial<Record<SensorState, number>>;
-  chosen: readonly SensorState[];
+  counts: Partial<Record<AlarmKind, number>>;
+  chosen: readonly AlarmKind[];
   hideAcknowledged: boolean;
   sort: string;
   scope: string | null;
   onChange: (mutate: (query: URLSearchParams) => void) => void;
 }): React.JSX.Element {
-  const toggle = (state: SensorState): void => {
+  const toggle = (state: AlarmKind): void => {
     onChange((query) => {
       const held = query.getAll('state').filter(isSeverity);
       const next = held.includes(state)
@@ -213,7 +217,7 @@ function Filters({
               }`}
             >
               {/* The badge carries the colour and the word, so the chip is never colour alone. */}
-              <StatusBadge state={severity.state} size="sm" />
+              <KindBadge kind={severity.state} />
               <span className="tabular-nums">{count}</span>
             </button>
           );
@@ -271,7 +275,7 @@ function AlarmList({ page, onActed }: { page: AlarmPage; onActed: () => void }):
   if (page.items.length === 0) {
     return (
       <Card>
-        <Empty because="Down, Partial, Acknowledged, Warning and Unusual. A paused sensor is deliberately silent and an unscanned one is Unknown; neither is a fault.">
+        <Empty because="Down, Partial, Acknowledged, Warning and Unusual, and a sensor that is back while its alarm waits to see the return last. A paused sensor is deliberately silent and an unscanned one is Unknown; neither is a fault.">
           Nothing is in an alarm state.
         </Empty>
       </Card>
@@ -292,6 +296,32 @@ function AlarmList({ page, onActed }: { page: AlarmPage; onActed: () => void }):
         </p>
       )}
     </Card>
+  );
+}
+
+/** A chip's or a row's badge: its state, or a held return (`M-18`). */
+function KindBadge({ kind }: { kind: AlarmKind }): React.JSX.Element {
+  return kind === 'recovering' ? (
+    <RecoveringBadge size="sm" />
+  ) : (
+    <StatusBadge state={kind} size="sm" />
+  );
+}
+
+/**
+ * When a held return began and when its alarm is over (`M-18`).
+ *
+ * Clock times rather than "in 3 minutes": `confirmsAt` is on the core's clock, and a countdown
+ * worked out against the browser's would be as wrong as the browser is.
+ */
+function HeldNote({ held }: { held: HeldReturn }): React.JSX.Element {
+  const time = (iso: string): string =>
+    new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return (
+    <span className="text-xs text-text-muted">
+      Back since {time(held.since)}
+      {held.confirmsAt !== null && `; over at ${time(held.confirmsAt)} unless it fails again`}
+    </span>
   );
 }
 
@@ -324,7 +354,7 @@ function AlarmRow({ alarm, onActed }: { alarm: Alarm; onActed: () => void }): Re
   return (
     <li className="space-y-1 py-2.5">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <StatusBadge state={alarm.state} size="sm" />
+        <KindBadge kind={kindOf(alarm)} />
         <span className="tabular-nums text-xs text-text-muted" title="Priority, 5 is highest">
           P{alarm.priority}
         </span>
@@ -341,6 +371,7 @@ function AlarmRow({ alarm, onActed }: { alarm: Alarm; onActed: () => void }): Re
       </div>
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pl-1">
+        {alarm.recovering !== null && <HeldNote held={alarm.recovering} />}
         <span className="text-xs text-text-muted">{alarm.cause}</span>
         {alarm.message !== '' && (
           <span className="min-w-0 truncate text-xs text-text-muted">{alarm.message}</span>
@@ -407,7 +438,8 @@ function Actions({
 
   return (
     <span className="ml-auto flex shrink-0 flex-wrap items-center gap-1.5">
-      {alarm.acknowledged ? (
+      {/* A held return is a sensor that is back: there is nothing Down to acknowledge. */}
+      {kindOf(alarm) === 'recovering' ? null : alarm.acknowledged ? (
         <button
           type="button"
           disabled={busy}

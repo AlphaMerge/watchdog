@@ -4920,7 +4920,7 @@ because each is a decision rather than a defect:
       systemd's watchdog killed both idle services, the core twice. With the start limit, enough of
       those leave the core `failed`: that is `P-220`.
 
-- [ ] **M-18 — a flapping Probe Health link alarm re-fires on every Down that follows a brief Up** ·
+- [x] **M-18 — a flapping Probe Health link alarm re-fires on every Down that follows a brief Up** ·
       M · M-17, P-215 · Measured in `P-215`: a probe killed at its memory ceiling and restarted
       connects for a few seconds each round, and the core's
       thirty-second Probe Health sweep sees it Up between outages. `ms.probe.link` is a lookup, so
@@ -5042,9 +5042,72 @@ because each is a decision rather than a defect:
         - the registration check and the trigger's maximum loosened;
         - Probe Health declaring no hold;
         - a35d8f's guard removed.
-      - **Part 2 follows:** the alarm list and `GET /alarms` show a held return as recovering,
-        with when it confirms. The list asks again at that moment on the core's clock, because
-        the end of a hold is the one change it sees with no state frame behind it.
+
+      **M-18 part 2 outcome: the alarms list shows a held return until its alarm is over.**
+      - **`GET /alarms` lists it.**
+        - A sensor whose return is held is listed with `recovering: {since, confirmsAt}`, below
+          everything still happening, whatever its priority.
+        - It counts, and filters with `state=recovering`, as `recovering`. A sensor held but
+          back only as far as Warning is listed and counted as Warning, with the hold beside it.
+        - A sensor held by several triggers confirms at the last of their holds.
+        - The held returns are read from `notification_alarm` into the same scan as the alarm
+          states, a union so the partial index still answers the states, and under the same
+          visibility. A hold the reader cannot see is neither listed nor counted (`A-12`).
+        - The page carries `now`, the core's clock.
+      - **The list shows it** with a Recovering badge and chip, and "back since …; over at …
+        unless it fails again" in clock times. It offers no acknowledge, since nothing is Down.
+      - **The stream is unchanged, a departure agreed with the orchestrator.**
+        - The hold starts in the transaction that records the return, so the state frame for
+          the return already prompts the list's reload and the reload sees the hold. A relapse
+          is a state change too.
+        - The end of a hold is the one change with no state frame behind it. The list asks again
+          at the earliest `confirmsAt`, measured from `page.now` rather than the browser's
+          clock, plus a second. If the hold is still there by then, the list backs off 2 s, 5 s,
+          then 15 s, planned once per page.
+        - A new frame would have claimed stream protocol 2 for a stream that "carries state
+          changes and nothing else". The stream route's comment says so.
+      - **Tests.**
+        - `alarms.test.ts`:
+          - listed as recovering, with when it is over, and gone after the sweep;
+          - Warning with the hold beside it, then a relapse as Down and not held;
+          - held below a Down of lower priority, on both sorts;
+          - filtered and counted, on both count paths;
+          - the later of two triggers' holds;
+          - a hidden Probe Health neither listed nor counted for a branch reader, beside a visible
+            held ping that is;
+          - `now`, and all of it over HTTP.
+        - `probe-episode-scenario.test.ts`:
+          - Probe Health held through an episode's end is listed Up and recovering, five minutes
+            from the reconnect;
+          - a relapse is Down and not held;
+          - held again, then gone after the sweep;
+          - an emptied episode is listed Down, not held.
+        - `alarms-view.test.ts` covers what a row counts as and the wait, from the core's clock
+          with the browser ten minutes either way. It also covers the backoff across pages, and
+          that re-rendering one page schedules nothing more.
+        - `alarms-held.test.tsx` renders the view:
+          - the badge, the note, the chip, and no acknowledge;
+          - with a silent socket, the row leaves at the hold's end plus the margin, in at most
+            three requests.
+        - `object-visibility.test.ts`'s sweep still passes with the new scan.
+        - `docs/api-reference.md` is regenerated.
+      - **Mutation: 16/16.** The mutants were:
+        - held returns sorted by priority or duration alone;
+        - the held half of the scan dropped;
+        - a held return's kind read as its state, in the list and in the chips;
+        - the earliest hold taken for the latest;
+        - the chips' visibility dropped;
+        - a wrong `now`;
+        - `state=recovering` refused;
+        - the wait measured on the browser's clock, or without its margin;
+        - the backoff not resetting, or not growing;
+        - what a row counts as ignoring the hold;
+        - the view's timer removed;
+        - acknowledge offered on a held row.
+      - **Not re-measured:** `perf/visibility-performance` times this query. The held half adds
+        a scan of `notification_alarm`, which holds only standing alarms.
+      - **Not seen in a browser:** a dev core would need ms-server's database, and ms-server stays
+        stopped until 0059 is re-recorded. The view is rendered in jsdom instead.
 
 - [x] **M-19 — A template's user and group recipients have never been delivered to** · M · A-01,
       A-12, N-07 · Found 2026-09-28 by bc8184 while scoping `V2-05`. `CAPABILITIES.MD` marks

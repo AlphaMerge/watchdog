@@ -26,7 +26,23 @@ export const ALARM_STATES: readonly SensorState[] = [
   'unusual',
 ];
 
-const ALARM_STATE_SET = new Set<string>(ALARM_STATES);
+/**
+ * A sensor that is back, while the alarm it raised is not yet over (`M-18`).
+ *
+ * Not a state: the sensor is Up, and says so everywhere else. It is listed here because the alarm
+ * still stands — a relapse inside the hold resumes it rather than raising a second — and a list
+ * of what is not over that left it out would show nothing while the notification that it has
+ * recovered is still to come.
+ */
+export const RECOVERING = 'recovering';
+
+/** What the list sorts rows into: the alarm states, and a held return. */
+export type AlarmKind = SensorState | typeof RECOVERING;
+
+/** The kinds, alarm states first, as the chips show them. */
+export const ALARM_KINDS: readonly AlarmKind[] = [...ALARM_STATES, RECOVERING];
+
+const ALARM_KIND_SET = new Set<string>(ALARM_KINDS);
 
 export interface Alarm {
   readonly sensorId: number;
@@ -53,6 +69,25 @@ export interface Alarm {
   /** `null` while acknowledged indefinitely, absent when not acknowledged at all. */
   readonly acknowledgedUntil: string | null;
   readonly consecutiveFailures: number;
+  /**
+   * The return its alarm is holding, or `null` when none is (`M-18`).
+   *
+   * Set on a sensor that is back and listed for that alone, and also on one that is back from
+   * Down only as far as Warning, whose Down alarm is still waiting to see the return last.
+   */
+  readonly recovering: HeldReturn | null;
+}
+
+/** A return to Up that has not yet lasted its hold (`M-18`). */
+export interface HeldReturn {
+  /** When the sensor came back, ISO-8601. */
+  readonly since: string;
+  /**
+   * When the alarm is over if it does not fail again, ISO-8601 — the last of its alarms' holds to
+   * end, since the row goes when that one does. `null` only if nothing is due, which the engine
+   * never leaves a held return in.
+   */
+  readonly confirmsAt: string | null;
 }
 
 export interface AlarmQuery {
@@ -64,8 +99,8 @@ export interface AlarmQuery {
   readonly visibility: Visibility;
   /** Scope to one object and everything beneath it. Absent means the whole installation. */
   readonly objectId?: number;
-  /** Which of `ALARM_STATES` to include. Absent means all of them. */
-  readonly states?: readonly SensorState[];
+  /** Which of `ALARM_KINDS` to include. Absent means all of them. */
+  readonly states?: readonly AlarmKind[];
   /** Sensors at or above this priority. 5 is the highest. */
   readonly priorityMin?: number;
   /** Whether to include alarms somebody has already acknowledged. Defaults to true. */
@@ -82,9 +117,18 @@ export type AlarmSort = 'priority' | 'duration';
 
 export interface AlarmPage {
   readonly items: readonly Alarm[];
+  /**
+   * The core's clock when the page was read, ISO-8601.
+   *
+   * For the one timer a reader needs (`M-18`): a held return's end is not a state change, so the
+   * list asks again at `confirmsAt`. Measured against this rather than the browser's clock, which
+   * can be minutes out, and a list waiting on it would reload long before the hold ended or long
+   * after.
+   */
+  readonly now: string;
   /** How many matched before `limit`, so a truncated list can say what it is not showing. */
   readonly total: number;
-  /** Counts per state across the whole scope, ignoring the state filter — the filter's own chips. */
+  /** Counts per kind across the whole scope, ignoring the state filter — the filter's own chips. */
   readonly counts: Readonly<Record<string, number>>;
 }
 
@@ -92,6 +136,39 @@ export interface AlarmServiceOptions {
   db: Database;
   logger: Logger;
 }
+
+/**
+ * The returns being held (`M-18`), one row per sensor, for the scans below. `$1` is `ALARM_STATES`.
+ *
+ * **Every held alarm on the sensor, summed up.** Each trigger holds its own alarm, and a trigger
+ * may set its own hold, so the row is over when the last of them is: its return began at the
+ * earliest and it confirms at the latest. `notification_alarm` only has rows for alarms that
+ * stand, so reading all of it is reading a few dozen rows.
+ */
+const HELD = `held AS (
+        SELECT sensor_id, min(recovering_since) AS since, max(next_due_at) AS confirms_at
+        FROM notification_alarm
+        WHERE recovering_since IS NOT NULL
+        GROUP BY sensor_id
+      )`;
+
+/**
+ * Which sensors a scan starts from: those in an alarm state, and those whose return is held.
+ *
+ * A union rather than an `OR` in one `WHERE`, so the first half is still the partial index's to
+ * answer and the second half adds only the held few.
+ */
+const LISTED = `
+          SELECT object_id FROM sensor_runtime WHERE state = ANY($1::sensor_state_kind[])
+          UNION
+          SELECT sensor_id FROM held`;
+
+/**
+ * A row's kind: its state when that is an alarm state, and otherwise a held return. A sensor back
+ * from Down as far as Warning is listed as Warning, with the hold beside it.
+ */
+const KIND = `CASE WHEN r.state = ANY($1::sensor_state_kind[]) THEN r.state::text
+                    ELSE '${RECOVERING}' END`;
 
 /**
  * What is wrong right now (`U-06`, `CAPABILITIES.MD §8`).
@@ -108,6 +185,12 @@ export interface AlarmServiceOptions {
  * are the chain's names — and walking up from a few dozen alarming sensors touches a few dozen
  * chains. Walking down from the root to find them would touch every object in the installation
  * on every refresh, and this view refreshes whenever anything changes state.
+ *
+ * **A held return is listed until its alarm is over** (`M-18`). The sensor is Up, but its alarm
+ * still stands and will either recover or resume. It is listed apart, as `recovering`, below
+ * everything still happening. It is read from `notification_alarm` beside the runtime rows, and
+ * seen through the same visibility, so a return the reader cannot see is neither listed nor
+ * counted (`A-12`).
  */
 export class AlarmService {
   readonly #db: Database;
@@ -124,8 +207,9 @@ export class AlarmService {
 
   /** The query itself, so a caller inside a transaction can use it too. */
   async read(q: Queryable, query: AlarmQuery): Promise<AlarmPage> {
-    const states = (query.states ?? ALARM_STATES).filter((state) => ALARM_STATE_SET.has(state));
-    if (states.length === 0) return { items: [], total: 0, counts: {} };
+    const now = new Date().toISOString();
+    const kinds = (query.states ?? ALARM_KINDS).filter((kind) => ALARM_KIND_SET.has(kind));
+    if (kinds.length === 0) return { items: [], total: 0, counts: {}, now };
 
     // Every alarm state goes into the scan; the requested subset filters *after* the scope is
     // established. That ordering is what lets the severity chips keep counting a kind the reader
@@ -133,23 +217,26 @@ export class AlarmService {
     const values: unknown[] = [ALARM_STATES, query.objectId ?? null];
     const bind = (value: unknown): string => `$${String(values.push(value))}`;
     // Part of the scan, so it is part of the scope: what the reader cannot see is neither listed
-    // nor counted (`A-12`).
+    // nor counted (`A-12`). That includes a held return, which enters through the same scan.
     const visibleSensor = query.visibility.where('r.object_id', bind);
     const visibleStep = query.visibility.where('chain.id', bind);
-    const where: string[] = [`state = ANY($${String(values.push(states))}::sensor_state_kind[])`];
+    const where: string[] = [`kind = ANY($${String(values.push(kinds))}::text[])`];
     if (query.priorityMin !== undefined) {
       where.push(`priority >= $${String(values.push(query.priorityMin))}`);
     }
     if (query.includeAcknowledged === false) where.push('NOT acknowledged');
     const limit = `$${String(values.push(query.limit))}`;
 
+    // A held return comes after every alarm that is still happening, whatever its priority
+    // (`M-18`): the sensor is back, and a priority-5 Probe Health waiting out its hold above a
+    // priority-3 Down would put the one thing nobody can act on at the top of the list.
     const order =
       query.sort === 'duration'
         ? // Oldest first: the question is "what has been broken longest".
-          'since ASC, sensor_id ASC'
+          `kind = '${RECOVERING}', since ASC, sensor_id ASC`
         : // WORKFLOW.MD §7: priority then duration. Highest priority first, and within a
           // priority the one that has been wrong longest.
-          'priority DESC, since ASC, sensor_id ASC';
+          `kind = '${RECOVERING}', priority DESC, since ASC, sensor_id ASC`;
 
     const rows = await q.query<{
       sensor_id: string;
@@ -164,13 +251,18 @@ export class AlarmService {
       acknowledged: boolean;
       acknowledged_until: Date | null;
       consecutive_failures: number;
+      recovering_since: Date | null;
+      confirms_at: Date | null;
       total: string;
       counts: Record<string, number>;
     }>(
       `
-      WITH RECURSIVE alarming AS (
+      WITH RECURSIVE ${HELD},
+      alarming AS (
         -- The partial index answers this. Everything below walks a few dozen rows, not the tree.
         SELECT r.object_id AS sensor_id, r.state, r.cause, r.message,
+               ${KIND} AS kind,
+               held.since AS recovering_since, held.confirms_at,
                -- **How long it has been wrong, from the state history** (P-142). This read
                -- sensor_runtime.since, which is when the sensor entered its *current state* --
                -- and acknowledging a Down is a state change, so the moment an operator said "I
@@ -195,7 +287,8 @@ export class AlarmService {
                  r.since) AS since,
                r.acknowledged_at, r.acknowledged_until, r.consecutive_failures
         FROM sensor_runtime r
-        WHERE r.state = ANY($1::sensor_state_kind[])
+        LEFT JOIN held ON held.sensor_id = r.object_id
+        WHERE r.object_id IN (${LISTED})
           AND ${visibleSensor}
       ),
       chain AS (
@@ -225,7 +318,8 @@ export class AlarmService {
       ),
       scoped AS (
         SELECT a.sensor_id, p.name, p.path, p.path_names, p.priority,
-               a.state, a.cause, a.message, a.since, a.consecutive_failures,
+               a.state, a.kind, a.cause, a.message, a.since, a.consecutive_failures,
+               a.recovering_since, a.confirms_at,
                a.acknowledged_at IS NOT NULL AS acknowledged,
                a.acknowledged_until
         FROM alarming a
@@ -242,11 +336,12 @@ export class AlarmService {
              f.state, f.cause, f.message, f.since, f.priority,
              f.path::text[] AS path, f.path_names,
              f.acknowledged, f.acknowledged_until, f.consecutive_failures,
+             f.recovering_since, f.confirms_at,
              (SELECT count(*) FROM filtered)::text AS total,
              -- Counts come from "scoped", before the state and priority filters, so the chips
              -- keep saying how many there are of a kind the reader has currently filtered out.
-             (SELECT coalesce(jsonb_object_agg(state, n), '{}'::jsonb)
-                FROM (SELECT state, count(*) AS n FROM scoped GROUP BY state) AS s) AS counts
+             (SELECT coalesce(jsonb_object_agg(kind, n), '{}'::jsonb)
+                FROM (SELECT kind, count(*) AS n FROM scoped GROUP BY kind) AS s) AS counts
       FROM filtered f
       ORDER BY ${order}
       LIMIT ${limit}
@@ -262,6 +357,7 @@ export class AlarmService {
         items: [],
         total: 0,
         counts: await this.#counts(q, query.objectId ?? null, query.visibility),
+        now,
       };
     }
 
@@ -279,13 +375,21 @@ export class AlarmService {
         acknowledged: row.acknowledged,
         acknowledgedUntil: row.acknowledged_until?.toISOString() ?? null,
         consecutiveFailures: row.consecutive_failures,
+        recovering:
+          row.recovering_since === null
+            ? null
+            : {
+                since: row.recovering_since.toISOString(),
+                confirmsAt: row.confirms_at?.toISOString() ?? null,
+              },
       })),
       total: Number(first.total),
       counts: first.counts,
+      now,
     };
   }
 
-  /** The per-state chips when the filtered list came back empty. */
+  /** The per-kind chips when the filtered list came back empty. */
   async #counts(
     q: Queryable,
     objectId: number | null,
@@ -296,12 +400,14 @@ export class AlarmService {
       'r.object_id',
       (value) => `$${String(values.push(value))}`,
     );
-    const rows = await q.query<{ state: string; n: string }>(
+    const rows = await q.query<{ kind: string; n: string }>(
       `
-      WITH RECURSIVE alarming AS (
-        SELECT r.object_id AS sensor_id, r.state
+      WITH RECURSIVE ${HELD},
+      alarming AS (
+        SELECT r.object_id AS sensor_id, ${KIND} AS kind
         FROM sensor_runtime r
-        WHERE r.state = ANY($1::sensor_state_kind[])
+        LEFT JOIN held ON held.sensor_id = r.object_id
+        WHERE r.object_id IN (${LISTED})
           AND ${visibleSensor}
       ),
       chain AS (
@@ -312,16 +418,16 @@ export class AlarmService {
         FROM chain JOIN object p ON p.id = chain.parent_id
         WHERE chain.depth < ${String(MAX_WALK_DEPTH)}
       )
-      SELECT a.state, count(*)::text AS n
+      SELECT a.kind, count(*)::text AS n
       FROM alarming a
       WHERE $2::bigint IS NULL
          OR EXISTS (SELECT 1 FROM chain c WHERE c.sensor_id = a.sensor_id AND c.id = $2::bigint)
-      GROUP BY a.state
+      GROUP BY a.kind
       `,
       values,
     );
     const counts: Record<string, number> = {};
-    for (const row of rows) counts[row.state] = Number(row.n);
+    for (const row of rows) counts[row.kind] = Number(row.n);
     return counts;
   }
 

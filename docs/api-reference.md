@@ -2002,9 +2002,9 @@ What changed, when, from what, why, and how long it lasted. Scope to a branch wi
 
 ### `GET /api/v1/alarms`
 
-Every sensor that is currently in an alarm state, worst first
+Every sensor that is currently in an alarm state, worst first, and every held return
 
-Down, Down (Partial), Down (Acknowledged), Warning and Unusual — the five states `WORKFLOW.MD §7` names. **Paused and Unknown are absent by design**: a paused sensor is deliberately silent, and Unknown means nothing has scanned it yet, which is a gap in coverage rather than a fault. Reporting either as an alarm is how a list becomes one an operator scrolls past. `objectId` scopes to that object and everything beneath it. `counts` is per state across the whole scope and ignores the `state` filter, so a severity chip can still say how many it is hiding. Only sensors the caller can read are listed or counted, and `path` and `pathNames` carry only the steps the caller can read.
+Down, Down (Partial), Down (Acknowledged), Warning and Unusual — the five states `WORKFLOW.MD §7` names. **Paused and Unknown are absent by design**: a paused sensor is deliberately silent, and Unknown means nothing has scanned it yet, which is a gap in coverage rather than a fault. Reporting either as an alarm is how a list becomes one an operator scrolls past. `objectId` scopes to that object and everything beneath it. `counts` is per state across the whole scope and ignores the `state` filter, so a severity chip can still say how many it is hiding. A sensor that is back while its alarm waits to see the return last (`M-18`) is listed too, after everything still happening, with `recovering` saying when it is over. It counts as `recovering` rather than as its state, unless that state is one of the five, and `state=recovering` filters to those. `now` is the core's clock, to time the moment a hold ends against: that is not a state change, and the state stream does not announce it. Only sensors the caller can read are listed or counted, and `path` and `pathNames` carry only the steps the caller can read.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -2015,7 +2015,7 @@ Down, Down (Partial), Down (Acknowledged), Warning and Unusual — the five stat
 | `sort` | query | `priority` · `duration` |  |
 | `limit` | query | integer |  |
 
-**200** { items, total, counts }
+**200** { items, total, counts, now }
 
 ## stream
 

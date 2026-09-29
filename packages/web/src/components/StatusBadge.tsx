@@ -78,3 +78,22 @@ export function StatusBadge({
     </span>
   );
 }
+
+/**
+ * A sensor that is back while the alarm it raised waits to see the return last (`M-18`).
+ *
+ * Not a state, so not in `PRESENTATION`: the sensor is Up, and every other view says so. The
+ * alarms list is the one place the alarm itself is shown, and there it needs a word of its own.
+ * Up's colours, because it is back, and a shape no state uses.
+ */
+export function RecoveringBadge({ size = 'md' }: { size?: 'sm' | 'md' }): React.JSX.Element {
+  const padding = size === 'sm' ? 'px-1.5 py-0.5 text-xs' : 'px-2 py-0.5 text-sm';
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 border ${padding} bg-up-bg text-up-fg border-up-border`}
+    >
+      <span aria-hidden="true">◔</span>
+      Recovering
+    </span>
+  );
+}

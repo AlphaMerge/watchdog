@@ -169,6 +169,9 @@ type ServerFrame =
  *
  * One number rather than a negotiation: this stream carries state changes and nothing else, and
  * a client that does not understand the version reconnects and reloads rather than guessing.
+ *
+ * The end of a held return (`M-18`) is the only change to the alarms list with no state change
+ * behind it, and the list covers it with a timer at the hold's end rather than a frame here.
  */
 const PROTOCOL = 1;
 

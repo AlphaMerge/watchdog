@@ -301,6 +301,11 @@ The Alarms view is the operator's home screen: every sensor in Down, Down (Parti
 Down (Acknowledged), Warning or Unusual, filterable to errors only / warnings only, scoped
 globally or to one branch of the tree, sorted by priority then duration.
 
+A sensor that is back while its alarm waits out a recovery hold (`M-18`, §6) is listed too, as
+Recovering, below everything still happening. The row says when the alarm is over if the
+sensor does not fail again, and leaves the list at that moment. A relapse puts it back in the
+list's main part as the same alarm.
+
 ---
 
 ## 8. Maintenance workflow

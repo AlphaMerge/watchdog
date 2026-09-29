@@ -411,14 +411,31 @@ export interface Alarm {
   acknowledged: boolean;
   acknowledgedUntil: string | null;
   consecutiveFailures: number;
+  /**
+   * The return its alarm is holding (`M-18`), or `null`. A sensor that is back and listed for this
+   * alone is Up; one back only as far as Warning is listed as Warning with this beside it.
+   */
+  recovering: HeldReturn | null;
 }
+
+/** A return to Up that has not yet lasted its hold (`M-18`). */
+export interface HeldReturn {
+  since: string;
+  /** When the alarm is over if the sensor does not fail again, on the core's clock. */
+  confirmsAt: string | null;
+}
+
+/** What the list's chips sort rows into: the alarm states, and a held return (`M-18`). */
+export type AlarmKind = SensorState | 'recovering';
 
 export interface AlarmPage {
   items: Alarm[];
   /** How many matched before the limit, so a truncated list can say what it is not showing. */
   total: number;
-  /** Per state across the whole scope, ignoring the state filter — the chips' own numbers. */
-  counts: Partial<Record<SensorState, number>>;
+  /** Per kind across the whole scope, ignoring the state filter — the chips' own numbers. */
+  counts: Partial<Record<AlarmKind, number>>;
+  /** The core's clock when the page was read — what a held return's `confirmsAt` is measured on. */
+  now: string;
 }
 
 /** One notification the dispatcher handled (`N-13`), for the Logs view's system-events third. */
