@@ -9,7 +9,8 @@ export interface MigrateOptions {
   action: MigrateAction;
   /** How many migrations `down` reverts. Deliberately one by default. */
   steps: number;
-  config: CoreConfig;
+  /** Only the database section is read, so a test can pass one without a whole core's config. */
+  config: Pick<CoreConfig, 'database'>;
   logger: Logger;
   write: (line: string) => void;
 }
@@ -44,8 +45,11 @@ export async function runMigrateCommand(options: MigrateOptions): Promise<number
       if (status.drifted.length > 0) {
         write('');
         write('DRIFT: these applied migrations have been edited since they were applied:');
+        // Both checksums, so the version that was applied can be told from this build's (`P-238`).
         for (const row of status.drifted) {
           write(`  !!! ${String(row.id).padStart(4, '0')} ${row.name}`);
+          write(`        applied:    ${row.appliedChecksum}`);
+          write(`        this build: ${row.currentChecksum}`);
         }
         return 1;
       }

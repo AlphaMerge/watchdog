@@ -1,6 +1,9 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { Client } from 'pg';
+import { pino } from 'pino';
+import type { Logger } from '@ms/shared';
+import { runMigrateCommand } from '../src/commands/migrate.js';
 import { MIGRATION_LOCK_KEY, Migrator, MigrationError, type LockWait } from '../src/db/migrator.js';
 import { MIGRATIONS } from '../src/db/migrations/index.js';
 import type { Migration } from '../src/db/migrations/types.js';
@@ -115,6 +118,42 @@ describe(
       await assert.rejects(() => m.down(), MigrationError);
     });
 
+    it('names the edited migration and both checksums, in the refusal and the log (P-238)', async () => {
+      // A refused start prints the message and nothing else. Without the name, a development core
+      // restarted about 470 times before anyone could say which migration it meant.
+      const lines: Record<string, unknown>[] = [];
+      const logger = pino(
+        { level: 'info' },
+        { write: (line: string) => lines.push(JSON.parse(line) as Record<string, unknown>) },
+      ) as unknown as Logger;
+      const edited: Migration = { ...trivial, up: 'CREATE TABLE trivial_thing (id bigint)' };
+      const m = new Migrator({ db: scratch.db, logger, migrations: [edited, second] });
+      const [drift] = (await m.status()).drifted;
+      assert.ok(drift !== undefined);
+      assert.notEqual(drift.appliedChecksum, drift.currentChecksum);
+      const named = `9001 trivial (applied ${drift.appliedChecksum}, this build ${drift.currentChecksum})`;
+
+      for (const run of [() => m.up(), () => m.down()]) {
+        await assert.rejects(
+          run,
+          (error: unknown) =>
+            error instanceof MigrationError &&
+            error.refusal &&
+            error.message.endsWith(`disagree about the schema: ${named}`),
+        );
+      }
+      const logged = lines.filter((line) => line['level'] === 50);
+      assert.equal(logged.length, 2, 'one error line per refusal');
+      assert.deepEqual(logged[0]?.['drifted'], [
+        {
+          id: 9001,
+          name: 'trivial',
+          appliedChecksum: drift.appliedChecksum,
+          currentChecksum: drift.currentChecksum,
+        },
+      ]);
+    });
+
     it('refuses to migrate a database that is newer than this build', async () => {
       // The operator downgraded ms-core, or a newer core in a pair started first.
       const olderBuild = migrator(scratch.db, [trivial]);
@@ -128,7 +167,10 @@ describe(
       await assert.rejects(
         () => olderBuild.up(),
         (error: unknown) =>
-          error instanceof MigrationError && /newer than this build/.test(error.message),
+          error instanceof MigrationError &&
+          /newer than this build/.test(error.message) &&
+          // Which, as `refuseSchema` says it with `autoMigrate` off (`P-238`).
+          error.message.includes('1 migration(s) this build does not define (newest: 9002 second)'),
       );
     });
 
@@ -833,6 +875,48 @@ describe(
         assert.equal(error.refusal, true);
         return true;
       });
+    });
+  },
+);
+
+describe(
+  'ms-core migrate status (P-238)',
+  { skip: available ? false : 'no PostgreSQL reachable (start docker-compose.dev.yml)' },
+  () => {
+    let scratch: ScratchDatabase;
+
+    before(async () => {
+      scratch = await createScratchDatabase('migrate_status');
+      await new Migrator({ db: scratch.db, logger: silentLogger, migrations: MIGRATIONS }).up();
+    });
+
+    after(async () => {
+      await scratch.drop();
+    });
+
+    it('lists an edited migration with the checksum it was applied under and this build’s', async () => {
+      const first = MIGRATIONS[0];
+      assert.ok(first !== undefined);
+      // The record says one version of the migration was applied, and this build carries another.
+      await scratch.db.query(
+        `UPDATE schema_migration SET checksum = 'applied-elsewhere' WHERE id = $1`,
+        [first.id],
+      );
+      const lines: string[] = [];
+      const code = await runMigrateCommand({
+        action: 'status',
+        steps: 1,
+        config: { database: { ...testDatabaseConfig(), database: scratch.name } },
+        logger: silentLogger,
+        write: (line) => lines.push(line),
+      });
+      assert.equal(code, 1);
+      const at = lines.findIndex((line) =>
+        line.startsWith(`  !!! ${String(first.id).padStart(4, '0')} `),
+      );
+      assert.ok(at >= 0, 'the edited migration is listed');
+      assert.equal(lines[at + 1], '        applied:    applied-elsewhere');
+      assert.match(lines[at + 2] ?? '', /^ {8}this build: [0-9a-f]{64}$/u);
     });
   },
 );

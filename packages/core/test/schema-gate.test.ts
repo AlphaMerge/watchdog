@@ -60,8 +60,24 @@ describe('the schema gate', () => {
         drifted: [{ id: 7, name: 'probe-identity', appliedChecksum: 'a', currentChecksum: 'b' }],
       }),
     );
-    assert.match(refusal ?? '', /7 probe-identity/);
+    assert.match(refusal ?? '', /7 probe-identity \(applied a, this build b\)/);
     assert.match(refusal ?? '', /neither applying nor rolling back is safe/);
+  });
+
+  it('names five drifted migrations and counts the rest (P-238)', () => {
+    const drifted = [1, 2, 3, 4, 5, 6, 7].map((id) => ({
+      id,
+      name: `m${String(id)}`,
+      appliedChecksum: `a${String(id)}`,
+      currentChecksum: `c${String(id)}`,
+    }));
+    const refusal = refuseSchema(status({ drifted })) ?? '';
+    assert.match(
+      refusal,
+      /^7 applied migration\(s\) no longer match this build: 1 m1 \(applied a1/,
+    );
+    assert.match(refusal, /5 m5 \(applied a5, this build c5\); and 2 more\./);
+    assert.doesNotMatch(refusal, /m6/);
   });
 
   it('diagnoses a mismatched pair rather than sending them to migrate up', () => {

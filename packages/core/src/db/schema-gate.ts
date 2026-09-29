@@ -1,4 +1,4 @@
-import type { MigrationStatus } from './migrator.js';
+import { describeDrift, type MigrationStatus } from './migrator.js';
 
 /**
  * Whether this build may run against the schema it found (`H-03`).
@@ -50,7 +50,7 @@ export function refuseSchema(status: MigrationStatus): string | null {
   if (status.drifted.length > 0) {
     return (
       `${String(status.drifted.length)} applied migration(s) no longer match this build: ` +
-      status.drifted.map((one) => `${String(one.id)} ${one.name}`).join(', ') +
+      describeDrift(status.drifted) +
       '. The schema and the record of it disagree, so neither applying nor rolling back is safe'
     );
   }

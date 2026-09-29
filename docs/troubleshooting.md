@@ -31,8 +31,9 @@ sudo systemctl reset-failed ms-core
 sudo systemctl start ms-core
 ```
 
-**"the database has N migration(s) this build does not know"** — the database was migrated by a
-newer `ms-core`. Install the matching release. Do not migrate backwards; the refusal is what
+**"the database has N migration(s) this build does not know"**, or with `autoMigrate` on **"the
+database schema is newer than this build"** — the database was migrated by a newer `ms-core`, and
+the message names the newest migration it has. Install the matching release. Do not migrate backwards; the refusal is what
 stops a newer schema from being written by an older build that misunderstands it. A backup taken
 before that upgrade is the other way out.
 
@@ -47,9 +48,12 @@ this until step 3 of the installation guide sets the password.
 waiting, and says for whom. See
 [a core that is still starting](administration.md#a-core-that-is-still-starting).
 
-**"N applied migration(s) no longer match this build"** — the schema and the record of it
-disagree, so neither applying nor rolling back is safe. This means a migration file changed after
-it was applied, or two builds were mixed. Restore from a backup rather than guessing.
+**"N applied migration(s) no longer match this build"**, or with `autoMigrate` on **"an
+already-applied migration has been edited"** — the schema and the record of it disagree, so
+neither applying nor rolling back is safe. This means a migration file changed after it was
+applied, or two builds were mixed. The message names each migration with two checksums, the one
+recorded when it was applied and this build's, and `ms-core migrate status` lists the same
+(`P-238`). Restore from a backup rather than guessing.
 
 **A configuration error** — `config check` reports *every* problem in the file, not the first, so
 one pass gives the whole list. If the service started before the last upgrade and does not now,

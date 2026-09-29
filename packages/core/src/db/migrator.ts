@@ -128,6 +128,30 @@ function checksum(migration: Migration): string {
     .digest('hex');
 }
 
+/** How many drifted migrations a refusal names before it counts the rest. */
+const DRIFT_NAMED = 5;
+
+/**
+ * The drifted migrations in words: each id and name, and both checksums in full (`P-238`).
+ *
+ * **In the message, not only the context**, because the message is all a refused start prints. A
+ * core that said "an already-applied migration has been edited" and nothing else restarted about
+ * 470 times on a development database before anyone could say which. The checksums are what tells
+ * one version of a migration from another, and a record can only be put right by the full value.
+ * Past five, the rest are counted: a build that changed every migration's text needs no list.
+ */
+export function describeDrift(drifted: MigrationStatus['drifted']): string {
+  const named = drifted
+    .slice(0, DRIFT_NAMED)
+    .map(
+      (one) =>
+        `${String(one.id)} ${one.name} (applied ${one.appliedChecksum}, this build ${one.currentChecksum})`,
+    )
+    .join('; ');
+  const more = drifted.length - DRIFT_NAMED;
+  return more > 0 ? `${named}; and ${String(more)} more` : named;
+}
+
 /**
  * Forward and backward schema migrations.
  *
@@ -224,8 +248,12 @@ export class Migrator {
 
       if (status.unknown.length > 0) {
         // The database has been migrated by a newer build. Going forward is not our call.
+        const newest = status.unknown[status.unknown.length - 1];
         throw new MigrationError(
-          'the database schema is newer than this build; upgrade ms-core or restore a matching backup',
+          `the database schema is newer than this build: it has ${String(status.unknown.length)} ` +
+            `migration(s) this build does not define` +
+            (newest === undefined ? '' : ` (newest: ${String(newest.id)} ${newest.name})`) +
+            '; upgrade ms-core or restore a matching backup',
           {
             refusal: true,
             context: {
@@ -309,16 +337,20 @@ export class Migrator {
 
   #refuseOnDrift(status: MigrationStatus): void {
     if (status.drifted.length === 0) return;
-    throw new MigrationError(
-      'an already-applied migration has been edited; the database and this build disagree about the schema',
-      {
-        refusal: true,
-        context: {
-          ids: status.drifted.map((d) => d.id).join(','),
-          names: status.drifted.map((d) => d.name).join(','),
-        },
+    const message =
+      'an already-applied migration has been edited; the database and this build disagree about ' +
+      `the schema: ${describeDrift(status.drifted)}`;
+    // Every one of them in the log, where the message counts past five (`P-238`).
+    this.#logger.error({ drifted: status.drifted }, message);
+    throw new MigrationError(message, {
+      refusal: true,
+      context: {
+        ids: status.drifted.map((d) => d.id).join(','),
+        names: status.drifted.map((d) => d.name).join(','),
+        appliedChecksums: status.drifted.map((d) => d.appliedChecksum).join(','),
+        currentChecksums: status.drifted.map((d) => d.currentChecksum).join(','),
       },
-    );
+    });
   }
 
   async #apply(migration: Migration): Promise<void> {

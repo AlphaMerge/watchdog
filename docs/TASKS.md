@@ -6252,6 +6252,54 @@ because each is a decision rather than a defect:
       - `#present` registering regardless of the reading (4 tests);
       - never removing a metric once registered (1 test).
 
+- [x] **P-238 — a start refused on migration drift does not say which migration** · S · P-222,
+      H-03 · Found 2026-09-29, when the development `ms-server` had restarted about 470 times
+      with "an already-applied migration has been edited; the database and this build disagree
+      about the schema". Nothing more: a refused start prints its message and exits 78 (`P-222`),
+      and the ids and names were in the error's context, which never reaches the line. Finding
+      the migration took `ms-core migrate status`, which named it and gave neither checksum. It
+      was 059, applied from a draft that was edited before it landed (`H-24` is that cause). The
+      same held for the refusal of a database newer than the build. With `autoMigrate` off,
+      `refuseSchema` named the drifted migrations but gave no checksums, and named the newest
+      unknown one.
+
+      **Done when** a start refused on drift names each migration with the checksum it was applied
+      under and this build's, in the line it prints and in a log line, whether `autoMigrate` is on
+      or off, and a refusal of a newer database names its newest migration.
+
+      **P-238 outcome.** `describeDrift` is the one wording: each drifted migration's id, name and
+      both checksums in full. The full value is what tells one version of a migration from another,
+      and what a record can be put right with. It names five and counts the rest, because a build
+      that changed every migration's text needs no list of sixty.
+      - **The migrator's refusal** puts it in the message. A refused start prints that message and
+        `ms-core migrate up` or `down` prints it too. The refusal also logs it at error with every
+        drifted migration as structured fields, and adds both checksums to the error's context.
+      - **`refuseSchema`**, the check with `autoMigrate` off, uses the same wording.
+      - **The newer-database refusal** says how many migrations the build does not define, and
+        the newest, as `refuseSchema` already did.
+      - **`ms-core migrate status`** prints both checksums under each drifted migration.
+      - `troubleshooting.md` gives both wordings of each refusal and says what the checksums are.
+      - `runMigrateCommand` takes only the database section of the config, which is all it reads,
+        so a test can call it without a whole core's.
+
+      **Tests.**
+      - `migrator.test.ts` 2 and one assertion:
+        - an edited migration named with both checksums, in `up`'s and `down`'s refusals and in
+          one error line each, with the structured list;
+        - `migrate status` against a migrated scratch database with a record edited, listing
+          both checksums under it;
+        - the newer-database refusal naming its newest migration.
+      - `schema-gate.test.ts` 1 and one assertion: the checksums in the drift refusal, and five
+        named of seven with the rest counted.
+
+      Mutation 6/6, each alone against its own file:
+      - the migrator's message without the list;
+      - no log line;
+      - the list unbounded;
+      - `migrate status` without the applied checksum;
+      - the newer refusal without its newest;
+      - `refuseSchema` with names only (2 tests).
+
 - [x] **P-209 — ms-server stayed Up for ten hours with no core in it** · S · — · On 2026-09-15
       the UI on :5173 answered `502 Bad Gateway`. The dev PostgreSQL had stopped cleanly the day
       before and has no restart policy, so it stayed down when Docker restarted at 01:02 UTC;
