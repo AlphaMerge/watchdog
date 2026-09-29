@@ -94,6 +94,13 @@ export interface ProbeHealthServiceOptions {
    * engine, which is built long before this service. Absent, the service keeps its own.
    */
   readonly targets?: ProbeHealthTargets;
+  /**
+   * Told of the probes a sweep found with fewer Probe Health sensors reporting on them than the
+   * last one, before its results go in (`M-27`). The alarm engine re-decides what those probes
+   * hold, so a trigger that heard of a probe only from a Probe Health moved off it stops holding.
+   * Absent, nobody is told.
+   */
+  readonly onReportersLost?: (probeObjectIds: readonly number[]) => Promise<void>;
   readonly now?: () => Date;
   /** How long this core has been running, in seconds. Injectable so a test can start it late. */
   readonly uptime?: () => number;
@@ -189,15 +196,26 @@ export class ProbeHealthTargets {
     this.publish(reportsOn);
   }
 
-  publish(reportsOn: ReadonlyMap<number, number>): void {
+  /**
+   * Replaces the targets with `reportsOn`, and returns the probes that a sensor stopped reporting
+   * on (`M-27`): retargeted by an edit to its *Probe* parameter or a move, withheld, or deleted.
+   */
+  publish(reportsOn: ReadonlyMap<number, number>): number[] {
     const reporting = new Map<number, number[]>();
     for (const [sensorId, probeObjectId] of reportsOn) {
       const list = reporting.get(probeObjectId) ?? [];
       list.push(sensorId);
       reporting.set(probeObjectId, list);
     }
+    const lost: number[] = [];
+    for (const [sensorId, probeObjectId] of this.#reportsOn) {
+      if (reportsOn.get(sensorId) !== probeObjectId && !lost.includes(probeObjectId)) {
+        lost.push(probeObjectId);
+      }
+    }
     this.#reportsOn = reportsOn;
     this.#reporting = reporting;
+    return lost;
   }
 }
 
@@ -221,6 +239,9 @@ export class ProbeHealthService {
   #unresolved = 0;
   #withheld = 0;
   readonly #targets: ProbeHealthTargets;
+  readonly #onReportersLost: ((probeObjectIds: readonly number[]) => Promise<void>) | undefined;
+  /** Probes that lost a reporter and whose held sensors are still to be re-decided (`M-27`). */
+  readonly #releasing = new Set<number>();
 
   constructor(options: ProbeHealthServiceOptions) {
     this.#db = options.db;
@@ -230,6 +251,7 @@ export class ProbeHealthService {
     this.#ingest = options.ingest;
     this.#vouching = options.vouching;
     this.#targets = options.targets ?? new ProbeHealthTargets();
+    this.#onReportersLost = options.onReportersLost;
     this.#now = options.now ?? ((): Date => new Date());
     this.#uptime = options.uptime ?? ((): number => process.uptime());
   }
@@ -448,7 +470,7 @@ export class ProbeHealthService {
     await this.#vouching.settle('probe-health', withheld);
     const reportsOn = new Map<number, number>();
     if (sensors.length === 0) {
-      this.#targets.publish(reportsOn);
+      await this.#publish(reportsOn);
       return 0;
     }
 
@@ -528,9 +550,33 @@ export class ProbeHealthService {
     }
 
     // Before the results go in, because they are what the alarm engine reacts to (`M-22`).
-    this.#targets.publish(reportsOn);
+    await this.#publish(reportsOn);
     await this.#ingest(results);
     return results.length;
+  }
+
+  /**
+   * Publishes the targets, and tells whoever is listening which probes lost a sensor reporting
+   * on them (`M-27`). Nothing else re-decides what such a probe holds: the sensor itself still
+   * has a row and may still be live, reporting on another probe now, so neither a pause's
+   * reaction nor a delete's reaches the sensors it held.
+   */
+  async #publish(reportsOn: ReadonlyMap<number, number>): Promise<void> {
+    for (const probe of this.#targets.publish(reportsOn)) this.#releasing.add(probe);
+    const release = this.#onReportersLost;
+    if (release === undefined || this.#releasing.size === 0) return;
+    const probes = [...this.#releasing];
+    try {
+      await release(probes);
+      for (const probe of probes) this.#releasing.delete(probe);
+    } catch (error) {
+      // Kept, so the next sweep asks again (`A-45`): the targets have moved, and it would find
+      // nothing new to tell.
+      this.#logger.error(
+        { ...describeError(error), probes },
+        'could not re-decide what a probe held after a Probe Health stopped reporting on it; the next sweep tries again',
+      );
+    }
   }
 
   /**

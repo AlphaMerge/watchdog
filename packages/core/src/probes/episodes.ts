@@ -104,12 +104,15 @@ export class ProbeEpisodeIndex implements ProbeEpisodes {
 
   heldFor(alarmSensorId: number): readonly number[] {
     const probe = this.#sources.alarms()?.reportsOn(alarmSensorId);
-    if (probe === undefined) return [];
-    const held = [...this.#held(probe).held];
+    return probe === undefined ? [] : this.heldBy(probe);
+  }
+
+  heldBy(probeObjectId: number): readonly number[] {
+    const held = [...this.#held(probeObjectId).held];
     // And the factories carried by it (`M-26`), which its sets do not name: they are held behind
     // the same alarm, and have to be let go with the sensors when it stops being live.
     for (const factory of this.#sources.factories?.()?.unreached() ?? []) {
-      if (this.carrierOf(factory) === probe) held.push(factory);
+      if (this.carrierOf(factory) === probeObjectId) held.push(factory);
     }
     return held;
   }

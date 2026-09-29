@@ -154,6 +154,7 @@ describe(
       episodeOf: (id) => now().index.episodeOf(id),
       endedEpisodeOf: (id) => now().index.endedEpisodeOf(id),
       heldFor: (id) => now().index.heldFor(id),
+      heldBy: (probe) => now().index.heldBy(probe),
       inputsOf: (id) => now().index.inputsOf(id),
     };
     const none: ReadonlySet<number> = new Set();
@@ -238,6 +239,10 @@ describe(
         sources: { link: linkOf, frozenSensors: (probe) => freeze.frozenOn(probe) },
         delivery: watch,
         ingest: ingestHealth,
+        // As production wires it: a Probe Health moved off a probe lets go of what it held (`M-27`).
+        onReportersLost: async (probes) => {
+          await db.tx((q) => engine.releaseProbes(q, probes, new Date()));
+        },
       });
       const factories = new FactoryService({
         db,
@@ -1331,6 +1336,77 @@ describe(
       assert.notEqual((await listed(made))?.recovering ?? null, null, 'held again');
       await scheduler.sweep(new Date(Date.now() + 6 * MINUTE));
       assert.equal(await listed(made), undefined, 'over, and off the list');
+    });
+
+    /** Points a Probe Health at another probe, as an operator editing its *Probe* would. */
+    async function retarget(health: number, probe: number): Promise<void> {
+      await h.service.update(
+        testActor,
+        health,
+        { kind: 'sensor', params: { probeId: probe } },
+        { kind: 'none' },
+      );
+    }
+
+    it('a Probe Health retargeted during a loss: the sensors it held notify one by one, as for a pause (`M-27`)', async () => {
+      // Still live, and still a row, so neither a pause's reaction nor a delete's reached what it
+      // held: they stayed held, with no alarm, under a trigger that heard of the probe only from
+      // it, until each was next re-decided.
+      const made = await probeWith('retargeted-mid-loss', { health: true });
+      const elsewhere = await bareProbe('retargeted-to');
+      await trigger(made.probe, 'unknown', 'email');
+      await settle(made);
+      const health = healthOf(made);
+      const step = await mark();
+      await lose(made);
+      assert.deepEqual(await queued(step, [health]), { 'email:unknown:initial': 1 });
+      assert.deepEqual(await alarmsOn(made.pings), [], 'held behind it');
+
+      const moved = await mark();
+      await retarget(health, elsewhere.probe);
+      await healthSweep();
+      assert.equal((await alarmsOn(made.pings)).length, PINGS, 'one alarm armed per sensor');
+      await fire();
+      assert.deepEqual(await queued(moved, made.pings), { 'email:unknown:initial': PINGS });
+      // It reads its new probe now, which answers, and its own alarm recovers with it: in that
+      // probe's words, not the episode's, which is `M-29`.
+      assert.deepEqual(await queued(moved, [health]), { 'email:unknown:recovery': 1 });
+
+      const lift = await mark();
+      await find(made);
+      assert.deepEqual(await queued(lift, made.pings), {
+        'email:unknown:recovery': PINGS - DOWN_PINGS,
+      });
+    });
+
+    it('one of two Probe Healths retargeted during a loss: the other still holds its sensors (`M-27`)', async () => {
+      const made = await probeWith('two-retargeted', { health: true });
+      const first = healthOf(made);
+      const box = await deviceOf(first);
+      const second = (
+        await h.service.create(testActor, {
+          kind: 'sensor',
+          parentId: box,
+          name: 'two-retargeted-health-2',
+          sensorType: 'ms.probe.health',
+          params: {},
+        } as never)
+      ).id;
+      const elsewhere = await bareProbe('two-retargeted-to');
+      await trigger(made.probe, 'unknown', 'email');
+      await settle(made);
+      await healthSweep();
+      await lose(made);
+      assert.equal((await alarmsOn([second])).length, 1, 'the other’s episode alarm stands');
+      assert.deepEqual(await alarmsOn(made.pings), [], 'and the sensors are held');
+
+      const moved = await mark();
+      await retarget(first, elsewhere.probe);
+      await healthSweep();
+      await fire();
+      assert.deepEqual(await alarmsOn(made.pings), [], 'still held, behind the other');
+      assert.deepEqual(await queued(moved, made.pings), {});
+      assert.equal((await alarmsOn([second])).length, 1, 'which still stands for them');
     });
 
     /** The device a sensor sits on. */

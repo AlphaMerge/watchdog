@@ -453,6 +453,28 @@ export class AlarmEngine {
   }
 
   /**
+   * Re-decides what these probes hold, after a Probe Health stopped reporting on them (`M-27`).
+   *
+   * **Retargeted, it is live and has a row**, so neither `#released` nor `releaseDeleted` sees
+   * it: its *Probe* parameter was edited, or its device moved, and the health sweep's targets
+   * already name its new probe. Asked by the sweep that found the change, with the targets
+   * already published, so `#holds` finds no Probe Health for the old probe under a trigger it
+   * alone covered, and that trigger stops holding. One that another live Probe Health covers
+   * still holds.
+   */
+  async releaseProbes(
+    q: Queryable,
+    probeObjectIds: readonly number[],
+    now: Date,
+  ): Promise<AlarmReaction> {
+    const episodes = this.#episodes;
+    if (episodes === undefined) return { ...EMPTY };
+    const held = new Set(probeObjectIds.flatMap((probe) => episodes.heldBy(probe)));
+    if (held.size === 0) return { ...EMPTY };
+    return this.react(q, [...held], now);
+  }
+
+  /**
    * Fires every alarm whose next step has fallen due.
    *
    * Returns how many it fired, so a caller that got a full sweep can come straight back rather

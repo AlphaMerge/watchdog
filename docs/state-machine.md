@@ -674,7 +674,12 @@ Two further notes for whoever picks those up:
   Probe Health deleted during the loss** has no row left to be re-decided (`M-25`). So the
   delete's own transaction re-decides what it held, while the episode index still maps it to
   its probe, and the triggers it alone covered stop holding. A sensor another live Probe Health
-  covers stays held behind that one.
+  covers stays held behind that one. **A Probe Health retargeted during the loss**, by an edit
+  to its *Probe* or a move of its device, is still live and still has a row, so neither of those
+  reaches it (`M-27`). The health sweep that sees it report on another probe publishes the new
+  targets and then re-decides everything the old probe holds, before its own results go in, and
+  the same follows. A failed re-decision is asked again at the next sweep. Its own episode alarm
+  recovers with it, since it reads its new probe now, in that probe's words (`M-29`).
 - **A return is held before an alarm is over, and a relapse inside the hold is the same alarm**
   (`M-18`). This is the alarm engine's, not the state machine's: the sensor reads Up at the
   return, in `sensor_state` and everywhere else, and only the alarm waits. How long comes from
@@ -718,7 +723,8 @@ Two further notes for whoever picks those up:
     trigger on Unknown over it would hear nothing. A trigger that covers the probe's live Probe
     Health hears of the factory once, in the episode's alarm. One that does not hears its Unknown,
     as it would a sensor of that probe's. Held factories are let go with the probe's sensors when
-    its Probe Health is paused, withheld or deleted during the loss (`M-24`, `M-25`). A factory
+    its Probe Health is paused, withheld, deleted or retargeted during the loss (`M-24`, `M-25`,
+    `M-27`). A factory
     held before a core restart is carried by nothing until the first factory sweep, so a
     reconciliation in that window arms it as any sensor, and the due sweep parks it if that sweep
     has run by then.

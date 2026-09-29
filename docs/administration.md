@@ -631,7 +631,7 @@ hears about the probe once, from that sensor, and not once per sensor the probe 
 | On Up, covering Probe Health | Nothing | One notification, for Probe Health, not one per sensor |
 | Not covering Probe Health, such as a team's trigger on a group below the probe | One per sensor, as before | One per sensor |
 | Any, on a probe with no Probe Health, or one that is paused or withheld (`A-29`) | One per sensor, as before | One per sensor |
-| Any, when Probe Health is paused, withheld or deleted during the loss | The one alarm is cancelled, and from then on one per sensor, as if it had been paused first (`M-24`, `M-25`). Another live Probe Health the trigger covers keeps the one alarm | One per sensor |
+| Any, when Probe Health is paused, withheld, deleted or retargeted to another probe during the loss | The one alarm is cancelled, and from then on one per sensor, as if it had been paused first (`M-24`, `M-25`, `M-27`). A retargeted one recovers instead, at the next health sweep. Another live Probe Health the trigger covers keeps the one alarm | One per sensor |
 
 A sensor that was Down before its probe went resumes where it was: no second page, and no
 recovery until it really recovers.

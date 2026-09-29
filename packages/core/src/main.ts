@@ -1414,6 +1414,10 @@ async function serve(): Promise<void> {
     logger,
     vouching,
     targets: probeHealthTargets,
+    // A Probe Health moved off a probe during its loss lets go of what it held there (`M-27`).
+    onReportersLost: async (probeObjectIds) => {
+      await db.tx((q) => alarms.releaseProbes(q, probeObjectIds, new Date()));
+    },
     sources: {
       link: (probeObjectId) => probeEndpoint.linkFor(probeObjectId),
       timeRefusals: (gid) => ingestion.timeRefusals(gid),

@@ -6370,7 +6370,7 @@ because each is a decision rather than a defect:
         whose probe is lost lets go.
       Mutations 20/20.
 
-- [ ] **M-27 — a Probe Health retargeted mid-loss leaves the sensors it held held** · S · M-25,
+- [x] **M-27 — a Probe Health retargeted mid-loss leaves the sensors it held held** · S · M-25,
       M-24, M-22 · Found finishing `M-25`.
       `ProbeHealthTargets.publish` replaces which probe each Probe Health reports on at every
       health sweep. A Probe Health retargeted during a loss drops out of the old probe's
@@ -6394,6 +6394,24 @@ because each is a decision rather than a defect:
       - a sensor still covered through another live Probe Health stays held;
       - a scenario test in `probe-episode-scenario.test.ts`, per `M-17`, covers both, with each
         asserted alarm asserted present first. Mutants as usual.
+
+      **Done.** `ProbeHealthTargets.publish` returns the probes a sensor stopped reporting on. The
+      health sweep hands them to `onReportersLost` once the targets are published and before its
+      results go in. `main.ts` wires that to `AlarmEngine.releaseProbes`, which reacts on the
+      union of the episode index's new `heldBy(probe)`: the probe's lost or frozen set and the
+      factories it carries. `heldFor` now asks `heldBy`. `#holds` then finds no live Probe Health
+      for the old probe under a trigger the retargeted one alone covered, so that trigger stops
+      holding and arms per sensor. A trigger that another live Probe Health covers still holds. A
+      failed release is kept and asked again at the next sweep. A Probe Health paused, withheld or
+      deleted also drops out of the targets and is released here too, which re-decides nothing
+      new.
+      - **A sibling, not grown into this:** the retargeted Probe Health's own episode alarm
+        recovers, because it reads its new probe now. It recovers in that probe's words, because
+        `endedEpisodeOf` resolves through its new target. Filed as `M-29`.
+
+      Tests: two scenarios in `probe-episode-scenario`, the only live Probe Health retargeted and
+      one of two retargeted. In `probe-health`: what a publish says, and the sweep's hook with its
+      retry. Mutations 6/6.
 
 - [x] **M-28 — a factory crossing withheld (`M-23`) and held-for-its-probe in one sweep is
       re-decided in two transactions, and passes through its last reading** · S · M-26, M-23 ·
@@ -6441,6 +6459,24 @@ because each is a decision rather than a defect:
       - `factory-service`: one re-decision per crossing, what is marked and returned counted
         against all three sets, and every set taken back when the write fails.
       Mutations 11/11.
+
+- [ ] **M-29 — a Probe Health retargeted mid-loss recovers its own episode alarm in the new
+      probe's words while the old one is still lost** · S · M-27, M-24 · Found finishing `M-27`.
+      A Probe Health moved or edited to report on another probe during a loss reads that probe
+      from the next health sweep. When that probe answers, the Probe Health goes Up, and its
+      episode alarm under a trigger on Unknown recovers. `endedEpisodeOf` resolves through the
+      health sweep's targets, which already name the new probe, so the recovery takes the generic
+      path and not `episodeEndedMessage`. It goes out in the new probe's words, such as
+      *connected; its own numbers are unavailable…*, while the old probe is still lost. The
+      per-sensor alarms that `M-27` arms go out in the same sweep, so nothing is silent. But the
+      one recovery reads as though the probe were back. `M-27`'s scenario pins the count, one
+      recovery, and not the words.
+
+      **Done when:**
+      - the recovery of a retargeted Probe Health's episode alarm says the old probe is still
+        lost, silent or behind, and that its sensors now notify one by one, as `M-24`'s emptied
+        episode says why;
+      - `M-27`'s scenario asserts the words. Mutants as usual.
 
 - [x] **M-24 — `M-22`'s episode and its held set are not linked in every direction** · M · M-22,
       M-17 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `M-24`).

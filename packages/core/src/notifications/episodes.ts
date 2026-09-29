@@ -77,6 +77,12 @@ export interface ProbeEpisodes {
    * live they can be re-decided unheld (`M-24`). Factories carried by it included (`M-26`).
    */
   heldFor(alarmSensorId: number): readonly number[];
+  /**
+   * The sensors this probe holds now, factories carried by it included (`M-27`): what to re-decide
+   * when a Probe Health stops reporting on it and the question can no longer go through that
+   * sensor, whose target has already moved.
+   */
+  heldBy(probeObjectId: number): readonly number[];
 }
 
 interface Standing {

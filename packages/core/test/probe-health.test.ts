@@ -1355,6 +1355,96 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.deepEqual(targets.reportingOn(probeId), [orphanId]);
     });
 
+    it('says which probes a sensor stopped reporting on, each once (`M-27`)', () => {
+      const targets = new ProbeHealthTargets();
+      assert.deepEqual(
+        targets.publish(
+          new Map([
+            [1, 10],
+            [2, 10],
+            [3, 20],
+            [4, 30],
+          ]),
+        ),
+        [],
+        'nothing reported on anything before',
+      );
+      const lost = targets.publish(
+        new Map([
+          [1, 11],
+          [2, 11],
+          [4, 30],
+        ]),
+      );
+      assert.deepEqual(
+        [...lost].sort((a, b) => a - b),
+        [10, 20],
+        'retargeted and gone, and not the one unchanged',
+      );
+      assert.deepEqual(targets.reportingOn(11), [1, 2]);
+      assert.deepEqual(
+        targets.publish(
+          new Map([
+            [1, 11],
+            [2, 11],
+            [4, 30],
+          ]),
+        ),
+        [],
+        'and nothing once it has been said',
+      );
+    });
+
+    it('tells whoever listens which probes lost a reporter, before its results go in, and asks again when that fails (`M-27`)', async () => {
+      const targets = new ProbeHealthTargets();
+      // A sensor that reported on another probe last sweep and is gone from this one.
+      targets.publish(
+        new Map([
+          [sensorId, probeId],
+          [orphanId, probeId],
+          [-1, -2],
+        ]),
+      );
+      // Recorded and asserted after: a throw in here is the failure the sweep logs and survives.
+      const told: { probes: number[]; ingested: boolean; moved: boolean }[] = [];
+      let failing = true;
+      let ingested = false;
+      const service = new ProbeHealthService({
+        vouching: everyVoucherHolds,
+        db,
+        logger: silent,
+        targets,
+        sources: { link: () => connected() },
+        onReportersLost: (probes) => {
+          told.push({ probes: [...probes], ingested, moved: targets.reportsOn(-1) === undefined });
+          return failing ? Promise.reject(new Error('no database')) : Promise.resolve();
+        },
+        ingest: () => {
+          ingested = true;
+          return Promise.resolve();
+        },
+      });
+      await service.sweep();
+      assert.deepEqual(
+        told,
+        [{ probes: [-2], ingested: false, moved: true }],
+        'before the results, with the targets already moved',
+      );
+      assert.equal(ingested, true, 'a failure does not keep the results back');
+
+      ingested = false;
+      failing = false;
+      await service.sweep();
+      assert.deepEqual(
+        told.map((one) => one.probes),
+        [[-2], [-2]],
+        'asked again, though nothing new moved',
+      );
+
+      await service.sweep();
+      assert.equal(told.length, 2, 'and not once it has been heard');
+    });
+
     it('resolves them from the tree before any sweep has run, for the boot pass (`M-22`)', async () => {
       const targets = new ProbeHealthTargets();
       assert.deepEqual(targets.reportingOn(probeId), []);
