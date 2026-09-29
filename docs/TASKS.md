@@ -4949,6 +4949,17 @@ because each is a decision rather than a defect:
       harness after `P-236`, on a probe that stays up. The harness no longer signals pid 0, which
       is how this run killed itself and lost PID 1's journal and the probe's output.
 
+      **Third run: no OOM, one watchdog kill, and not from the log** (2026-09-29,
+      `docs/findings/2026-09-29-probe-starvation-c.md`). `P-236` held: the pool stopped at 79–131
+      workers in the 4 GiB box, and nothing was killed for memory. systemd's watchdog killed the
+      probe once, 110 s into the stalled-log stage, after a 30.4 s ping gap. The log buffered
+      rather than blocked: its backlog grew to about 1 MB and drained in five seconds once the
+      reader resumed. The core, whose stdout was never stalled, reached 25.6 s in the same stage.
+      So the cause was CPU starvation with the memory at the box's limit, holding both services'
+      main threads for 7–15 s at a time. The log path's own faults are real but smaller: one line
+      per refused check (99.4% of 12.6 MB), and a backlog with no bound. **Part 3** takes those; the
+      ping cadence and the cap's 90% against `memoryLimitUsage`'s 80% warning are for new tickets.
+
 - [x] **P-236 — under checks that hang to their timeout, the pool grows past the memory it has and
       the probe is OOM-killed** · M · P-34, P-210 · Found by `P-216b`
       (`docs/findings/2026-09-29-probe-starvation-b.md`). The pool sizer (`P-34`) derives its
@@ -5004,6 +5015,10 @@ because each is a decision rather than a defect:
       21 tests in `pool-memory-cap.test.ts`, the scenario included, each mutation-checked: growth
       that ignores memory, no giving back while saturated, exiting workers counted against
       shrinking, and a log line per attempt all fail them. `P-216c` is the acceptance.
+
+      **Accepted by `P-216c`** (2026-09-29, `docs/findings/2026-09-29-probe-starvation-c.md`): the
+      same 4 GiB box and workload as `P-216b`, and no OOM kill in any stage. The pool stayed at
+      79–131 workers, up to 207 held back, and resident at or below 3.2 GiB.
 
 - [x] **P-220 — under host load systemd's watchdog kills idle services, and each kill now counts
       toward `P-215`'s start limit** · M · P-215 · Seen in `P-215`'s rerun, at load 24.67 on 8 CPUs
