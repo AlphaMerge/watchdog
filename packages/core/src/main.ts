@@ -528,6 +528,8 @@ async function serve(): Promise<void> {
     logger,
     sensorTypes: sensorTypeGate,
     sight: (principal, q) => objectAccess.visibilityFor(principal, q),
+    // Off, the layer is off, and nobody's voucher is held against a sensor (`A-45`).
+    requireAuthentication: config.api.requireAuthentication,
     states,
     // A master that stops being evaluated is Unknown, not Down, so whatever it held is released
     // here — the same reason `ProbeReachability` is handed it (`P-135`).

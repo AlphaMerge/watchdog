@@ -328,6 +328,18 @@ export function reachOf(request: FastifyRequest, action: ReachedBy): Reach {
 }
 
 /**
+ * Whether the authorisation layer is off for this request: a build without it, or
+ * `api.requireAuthentication` off (`A-45`).
+ *
+ * **Not whether the request has a principal.** With the layer off a caller can still log in, or
+ * send a token, and has one; the layer gives it the everyone sight all the same.
+ */
+function layerOff(request: FastifyRequest): boolean {
+  const sight = sights.get(request);
+  return sight === undefined || sight.fresh === EVERYONE;
+}
+
+/**
  * Whether this request's caller clears an account-level bar, asked rather than enforced (`A-26`).
  *
  * For a route whose answer depends on who is asking rather than one that refuses. An object's
@@ -338,8 +350,7 @@ export function reachOf(request: FastifyRequest, action: ReachedBy): Reach {
  * on a `PUBLIC` route.
  */
 export function clears(request: FastifyRequest, bar: 'read' | 'write' | 'admin'): boolean {
-  const sight = sights.get(request);
-  if (sight === undefined || sight.fresh === EVERYONE) return true;
+  if (layerOff(request)) return true;
   const principal = request.principal;
   if (principal === undefined) return false;
   if (!ROLES[bar].includes(principal.role)) return false;
@@ -352,7 +363,7 @@ export function clears(request: FastifyRequest, bar: 'read' | 'write' | 'admin')
  *
  * The account vouches as itself, with this request's sight, resolved only when a write first
  * needs it and then on that write's connection (`P-235`). With the authorisation layer off there
- * is nobody to hide anything from, and the installation vouches.
+ * is nobody to hide anything from, and the installation vouches, whoever is logged in.
  */
 export async function writerFor(request: FastifyRequest): Promise<Writer> {
   const principal = request.principal;
@@ -362,16 +373,17 @@ export async function writerFor(request: FastifyRequest): Promise<Writer> {
     await visibilityOf(request);
     return { kind: 'anonymous', remoteAddress: request.ip };
   }
+  const who = { kind: 'user', userId: principal.userId, login: principal.login } as const;
+  // **The layer says whether anybody's grants apply, not the principal** (`A-45`). With the layer
+  // off an account that logged in vouched as itself, so the sweep held the sensor to grants the
+  // layer never applied, and withheld it — Core Health's included — once the account was disabled
+  // or deleted. The installation vouches, for what a sensor names and for where credentials go
+  // (`A-41`), as it does for an anonymous caller, and the audit still names the account.
+  if (layerOff(request)) return { ...who, voucher: INSTALLATION_VOUCHES };
   // What it can see is resolved only if the write names something, and then inside the write's
   // transaction (`P-235`): most writes name nothing, and this was a query on every one of them.
-  const layerOff = (sights.get(request)?.fresh ?? EVERYONE) === EVERYONE;
   return {
-    // With the layer off the installation vouches for where credentials go, as for everything
-    // else (`A-41`): an account's grants are not what decides anything then.
-    ...(layerOff ? { credentials: INSTALLATION_VOUCHES } : {}),
-    kind: 'user',
-    userId: principal.userId,
-    login: principal.login,
+    ...who,
     voucher: {
       kind: 'account',
       userId: principal.userId,

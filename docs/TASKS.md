@@ -16049,6 +16049,63 @@ because each is a decision rather than a defect:
       - the `principal === undefined` sweep is listed in the outcome, each site fixed or argued.
       Tests per the findings doc. Mutants as usual.
 
+      **A-45 part 1 outcome.** Everything but the settle rollback. That part waits for `A-41a`,
+      which changes `settle`'s contract, and is built on it.
+      - **Layer off, the installation vouches.** `writerFor` asks whether the layer is off, not
+        whether there is a principal: the everyone sight, or no sight at all, the test `clears`
+        already made, now one function `layerOff`. A logged-in account's write vouches as the
+        installation, and the audit still names the account. `A-41a`'s layer-off branch, which
+        made only the credential voucher the installation's, is subsumed: `credentialVoucherOf`
+        falls back to the voucher, which is now the installation's too.
+      - **059's rows: neither re-vouched at startup nor left to an upgrade note.** `SensorVouching`
+        takes `requireAuthentication`. With it off, `refusals` holds no account's voucher against
+        a sensor and asks nothing. Nobody's grants apply to any reader then, so withholding
+        protected nobody. This covers 059's backfill on such an installation, and any voucher an
+        account wrote before this fix.
+        - A startup rewrite would drop every account's voucher for good the first time an
+          operator switched the layer off, for instance to recover a locked-out administrator. A
+          revoked account's factory would then go on publishing once the layer was back on.
+        - Left in place, each is held to its account again when the layer is switched on. That
+          fails closed: a sensor withheld then says so, and says how to vouch for it.
+        - `administration.md` says both.
+      - **A sight is cached only under its own epoch.** `#readableFor` stores a resolved sight
+        only when its `Visibility.epoch` is the one the caches hold. One from another epoch
+        answers the call that asked and is not kept. The per-id answers need no guard: an epoch
+        change empties the map they go into, so a late one lands where nothing reads it again.
+      - **The `principal === undefined` sweep**, every read of `request.principal` in
+        `packages/core/src`:
+        - `writerFor`: the defect, fixed.
+        - `clears`: already asked the layer. It now shares `layerOff`.
+        - `partitionByRight` (bulk): asks `authorizing` first, so a logged-in caller with the
+          layer off passes (`R10`'s fix).
+        - `actorFor`: audit attribution, which should name whoever logged in, layer or not.
+        - `requireRole`, and the self routes in `auth.ts`, `tokens.ts` and `access.ts`: refuse
+          without a principal. That is the answer for "my account" and for the administrator
+          routes, layer or not.
+        - The rate limiter's key and the CSRF guard's token exemption: whoever is calling, not a
+          question about the layer.
+        - `viewerOf` in the maps, reports and libraries routes, and the map background route:
+          argued, not changed. They refuse an anonymous caller and filter to the caller's own
+          account, even with the layer off. That fails closed: an account sees what its grants
+          allow rather than everything. All three are v2 features whose ownership is per
+          account, and "everything, when the layer is off" there is a product decision for them,
+          not a leak.
+        - Stream log lines: logging only.
+
+      **Tests (part 1).**
+      - `access-matrix.test.ts` 1: a server with the layer off; a logged-in `readwrite` account
+        creates a factory, which is vouched for by the installation with the account in the
+        audit.
+      - `sensor-vouching.test.ts` 2:
+        - the layer off withholds nothing and asks nothing, for a revoked read, a deleted
+          account and Core Health short of root; the control with the layer on refuses all three;
+        - the race: a sweep waiting on a sight while a grant is revoked and another sweep reads
+          the new epoch. The next sweep refuses; the waiting sweep's own answer is the control.
+
+      Mutation 3/3: `writerFor` without the layer test, `refusals` without it, and the sight
+      cached at any epoch. The `main.ts` line that passes `requireAuthentication` is covered by
+      no unit test.
+
 - [ ] **A-46 — three places still show or count what the reader cannot see** · S · A-26, A-31,
       A-35 · Found in review round four (`findings/2026-09-29-review-round-4.md`, `A-46`). All
       low.

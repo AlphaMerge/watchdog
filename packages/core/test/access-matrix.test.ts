@@ -11,6 +11,7 @@ import { SessionService } from '../src/auth/sessions.js';
 import { TokenService } from '../src/auth/tokens.js';
 import { TotpService } from '../src/auth/totp.js';
 import { AuditRepository, DatabaseAuditSink } from '../src/audit/store.js';
+import type { Actor } from '../src/objects/audit.js';
 import { TriggerService } from '../src/triggers/service.js';
 import { TemplateService } from '../src/notifications/templates.js';
 import { MessageContextLoader } from '../src/notifications/context.js';
@@ -1036,6 +1037,56 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
         assert.equal(body.outcomes[0]?.ok, true);
       } finally {
         await open.app.close();
+      }
+    });
+
+    it('vouches as the installation for an account logged in while the layer is off (A-45)', async () => {
+      // A login is not the layer. The account vouched as itself, and the sweep then held the
+      // sensor to grants the layer never applied, and withheld it once the account was disabled
+      // or deleted, Core Health's included.
+      const open = new ApiServer(optionsFor(false));
+      await open.build('9.9.9', harness.service);
+      const audited: Actor[] = [];
+      const previous = harness.audit.also;
+      harness.audit.also = {
+        record: (_q, actor) => {
+          audited.push(actor);
+          return Promise.resolve();
+        },
+      };
+      let made = 0;
+      try {
+        const response = await open.app.inject({
+          method: 'POST',
+          url: '/api/v1/objects',
+          headers: asRole('readwrite'),
+          payload: {
+            kind: 'sensor',
+            parentId: deviceId,
+            name: 'Layer-off factory',
+            sensorType: 'core.factory',
+            params: {
+              channels: [{ key: 'total', formula: `channel(${String(sensorId)}, 'rtt')` }],
+            },
+          },
+        });
+        assert.equal(response.statusCode, 201, response.body);
+        made = response.json<{ id: number }>().id;
+        const [row] = await db.query(
+          `SELECT vouched_by, vouched_by_user::text AS vouched_by_user
+           FROM sensor_config WHERE object_id = $1`,
+          [made],
+        );
+        assert.deepEqual(row, { vouched_by: 'installation', vouched_by_user: null });
+        assert.deepEqual(
+          audited,
+          [{ kind: 'user', userId: userIds.get('readwrite'), login: 'readwrite' }],
+          'and the audit still names the account',
+        );
+      } finally {
+        harness.audit.also = previous;
+        await open.app.close();
+        if (made !== 0) await db.query('DELETE FROM object WHERE id = $1', [made]);
       }
     });
 

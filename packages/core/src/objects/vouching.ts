@@ -80,6 +80,11 @@ export interface SensorVouchingOptions {
   sensorTypes: Pick<SensorTypeGate, 'reads'>;
   /** What an account can see: `AccessService.visibilityFor`. */
   sight: (principal: AccessPrincipal, q: Queryable) => Promise<Visibility>;
+  /**
+   * `api.requireAuthentication` (`A-45`). Off, the authorisation layer is off, and no account's
+   * voucher is held against a sensor. Defaults to on.
+   */
+  requireAuthentication?: boolean;
   /** Absent in a unit test that only asks for verdicts. */
   states?: WithheldReevaluator;
   dependencies?: WithheldDependencies;
@@ -126,6 +131,7 @@ export class SensorVouching implements VoucherCheck {
   readonly #logger: Logger;
   readonly #sensorTypes: Pick<SensorTypeGate, 'reads'>;
   readonly #sight: (principal: AccessPrincipal, q: Queryable) => Promise<Visibility>;
+  readonly #requireAuthentication: boolean;
   readonly #states: WithheldReevaluator | undefined;
   readonly #dependencies: WithheldDependencies | undefined;
   readonly #now: () => Date;
@@ -154,6 +160,7 @@ export class SensorVouching implements VoucherCheck {
     this.#logger = options.logger.child({ component: 'vouching' });
     this.#sensorTypes = options.sensorTypes;
     this.#sight = options.sight;
+    this.#requireAuthentication = options.requireAuthentication ?? true;
     this.#states = options.states;
     this.#dependencies = options.dependencies;
     this.#now = options.now ?? (() => new Date());
@@ -181,6 +188,15 @@ export class SensorVouching implements VoucherCheck {
   async refusals(sensors: readonly SensorToVouchFor[]): Promise<Map<number, string>> {
     this.#checked += sensors.length;
     const refused = new Map<number, string>();
+    // **With the layer off, no account's voucher is held against a sensor** (`A-45`). Nobody's
+    // grants apply to any reader then, so a sensor republishes nothing its readers could not read
+    // anyway, and withholding it protected nobody while stopping what it measures, Core Health's
+    // own figures included. That covers the vouchers migration 059 took from the audit log on
+    // such an installation, and any an account wrote while `writerFor` took a login to mean the
+    // layer was on. They are not rewritten: switching the layer on holds each to its account
+    // again, as a write made then would be, where rewriting them at a start with the layer off
+    // would drop every account's voucher for good the first time an operator switched it off.
+    if (!this.#requireAuthentication) return refused;
     const byAccount = sensors.filter(
       (sensor): sensor is SensorToVouchFor & { voucher: { kind: 'account' } } =>
         sensor.voucher.kind === 'account',
@@ -331,6 +347,17 @@ export class SensorVouching implements VoucherCheck {
     return undefined;
   }
 
+  /**
+   * What this account can read of these ids, cached for the epoch `refusals` last read.
+   *
+   * **Stored only under the epoch it was resolved at** (`A-45`). The factory, Probe Health and
+   * Core Health sweeps share this and run in phase, so another sweep's `refusals` can move the
+   * epoch and empty the caches while this one waits on the database. A sight resolved before a
+   * revoke and stored after that answered with the revoked grant under the new epoch, until the
+   * next grant change, which on a quiet installation is never. A sight from another epoch is used
+   * for this call and not kept. The answers need no such guard: a new epoch empties the map they
+   * go into, so one that lands late lands where nothing reads it again.
+   */
   async #readableFor(
     userId: number,
     account: Account,
@@ -349,11 +376,16 @@ export class SensorVouching implements VoucherCheck {
     if (sees === undefined) {
       sees = await this.#sight({ userId, role: account.role }, this.#db);
       this.#sightsResolved += 1;
-      this.#sights.set(key, sees);
+      if (this.#current(sees)) this.#sights.set(key, sees);
     }
     if (!sees.everything) this.#readsAsked += 1;
     const visible = await sees.visibleAmong(this.#db, unknown);
     for (const id of unknown) known.set(id, visible.has(id));
     return known;
+  }
+
+  /** Whether a sight was resolved at the epoch the caches hold. */
+  #current(sees: Visibility): boolean {
+    return sees.epoch !== null && String(sees.epoch) === this.#epoch;
   }
 }

@@ -247,6 +247,14 @@ the system holds each one to the account that stands behind it (`A-29`):
 The system itself vouches for what it writes, and so does a discovery run — its sensors come from
 a template somebody with the server's file system installed.
 
+**With `api.requireAuthentication` off, the installation vouches for everything** (`A-45`). The
+authorisation layer is off, so nobody's grants apply to any reader, and there is nothing a sensor
+could republish that they could not read already. A write vouches as the installation even when
+the account making it has logged in, and the audit log still names that account. A sensor an
+account already vouches for, from migration 059 or from a time the layer was on, is not checked
+while the layer stays off: nothing is withheld for its voucher. Switch the layer on and each of
+those is held to its account again from the next sweep.
+
 **On upgrade** (migration 059) every existing sensor is assigned the account that last created it
 or wrote its parameters, from the audit log, directly or through one of its tokens. That account
 is then checked at the first sweep, so **a factory written by somebody who has since lost access
@@ -254,7 +262,8 @@ goes Unknown right after the upgrade** — which is the point: it had been publi
 no longer see. A sensor the audit log cannot tie to a live account — written by the system, by an
 account since deleted, or inside a clone, which is recorded under the clone's top object — is
 vouched for by the installation, and goes on as before. Save one again to put an account behind
-it.
+it. On an installation with `api.requireAuthentication` off, the accounts it assigns are recorded
+and not checked until the layer is switched on.
 ---
 
 ## Credentials for monitored devices

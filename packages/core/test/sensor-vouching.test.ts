@@ -389,6 +389,78 @@ describe(
       assert.equal(queries, 0);
     });
 
+    it('holds no account’s voucher against a sensor while the layer is off (A-45)', async () => {
+      // Nobody's grants apply to any reader then, so withholding protected nobody, and stopped
+      // Core Health for an account deleted or short of read on the root. That is also where
+      // migration 059 left an installation that had run with the layer off.
+      let queries = 0;
+      const off = new SensorVouching({
+        db: countingQueries(db, () => {
+          queries += 1;
+        }),
+        logger: silent,
+        sensorTypes: gate,
+        sight,
+        requireAuthentication: false,
+      });
+      const check = [
+        factorySensor(1, byAnalyst()),
+        factorySensor(2, { kind: 'account', userId: null }),
+        { ...factorySensor(3, byAnalyst()), sensorType: 'ms.core.health', params: {} },
+      ];
+      await revokeSources();
+      try {
+        assert.deepEqual([...(await off.refusals(check))], []);
+        assert.equal(queries, 0, 'and asks nothing');
+        assert.equal((await newVouching().refusals(check)).size, 3, 'the control: the layer on');
+      } finally {
+        await restoreSources();
+      }
+    });
+
+    it('keeps a sight resolved before a revoke out of the cache the revoke started (A-45)', async () => {
+      // The three sweeps share one instance and run in phase. One waited on the analyst's sight
+      // while a grant was revoked and another sweep read the new epoch; the sight that landed was
+      // from before the revoke, and cached under the new epoch it kept answering with the old
+      // grant until the next grant change.
+      const early = await access.visibilityFor({ userId: analyst.id, role: analyst.role });
+      let release: (sees: Visibility) => void = () => undefined;
+      const held = { asked: false };
+      const racing = new SensorVouching({
+        db,
+        logger: silent,
+        sensorTypes: gate,
+        sight: (principal, q) => {
+          if (held.asked || principal.userId !== analyst.id) return sight(principal, q);
+          held.asked = true;
+          return new Promise<Visibility>((resolve) => {
+            release = resolve;
+          });
+        },
+      });
+      const mine = [factorySensor(1, byAnalyst())];
+      const waiting = racing.refusals(mine);
+      for (let turns = 0; !held.asked && turns < 1_000; turns += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      assert.ok(held.asked, 'the first sweep is waiting on the sight');
+
+      await revokeSources();
+      try {
+        // Another sweep reads the revoke's epoch, and empties the caches.
+        await racing.refusals([factorySensor(2, { kind: 'account', userId: admin.id })]);
+        release(early);
+        assert.deepEqual(
+          [...(await waiting)],
+          [],
+          'the control: the sweep that waited answered from before the revoke',
+        );
+        assert.deepEqual([...(await racing.refusals(mine))], [[1, WITHHELD.lostRead]]);
+      } finally {
+        await restoreSources();
+      }
+    });
+
     it('withholds a sensor once its voucher loses read, and lets it go when read returns', async () => {
       const check = [factorySensor(1, byAnalyst())];
       assert.deepEqual([...((await vouching?.refusals(check)) ?? [])], []);
