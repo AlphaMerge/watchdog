@@ -1505,6 +1505,67 @@ describe(
       });
     });
 
+    it('sends nothing, and logs no credential, when the probe goes while its configuration is read (A-50)', async () => {
+      // At debug, which is what an operator turns on to diagnose a link that flaps. The push
+      // awaited the read, which decrypts every credential, and then sent to the closed connection,
+      // which logged the whole message.
+      const lines: string[] = [];
+      const logger = pino(
+        { level: 'debug' },
+        {
+          write: (chunk: string) => {
+            lines.push(chunk);
+          },
+        },
+      );
+      let release: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let reading = false;
+      const source = new StubSource();
+      source.sensors = [
+        sensor(1, {
+          params: { count: 4, token: 's3cret-token' },
+          credentials: { snmp: { community: 's3cret-community' } },
+        }),
+      ];
+      const read = source.assignmentsFor.bind(source);
+      source.assignmentsFor = async (): Promise<ProbeAssignments> => {
+        reading = true;
+        await gate;
+        return read();
+      };
+      const endpoint = new ProbeEndpoint({
+        config: endpointConfig(dir),
+        logger,
+        coreVersion: '9.9.9',
+        probeConfig: source,
+      });
+      const address = await endpoint.start();
+      try {
+        const probe = await TestProbe.connect(dir, address.port);
+        probe.send(hello());
+        await waitUntil(() => reading);
+        probe.close();
+        await waitUntil(() => !endpoint.linkFor(7).connected);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        release?.();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        const logged = lines.join('');
+        assert.match(logged, /probe connection closed/u, 'the control: it closed mid-read');
+        assert.doesNotMatch(logged, /s3cret/u);
+        assert.doesNotMatch(
+          logged,
+          /"type":"config-(set|delta)"/u,
+          'the push stopped rather than sending to a closed connection',
+        );
+      } finally {
+        await endpoint.stop();
+      }
+    });
+
     it('keeps the link when a heartbeat carries a health reading out of range (P-224)', async () => {
       // A probe in a container whose `/proc/meminfo` claimed more available than total sent
       // 100.3%, on every heartbeat — it sends the worst of thirty seconds each time. The core

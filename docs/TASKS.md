@@ -15635,7 +15635,7 @@ because each is a decision rather than a defect:
       - the preview hides `%host` with `%device`.
       Tests in `object-visibility.test.ts`. Mutants as usual.
 
-- [ ] **A-50 — a debug log line carries a probe's decrypted credentials** · S · A-05 · Found in
+- [x] **A-50 — a debug log line carries a probe's decrypted credentials** · S · A-05 · Found in
       review round 4b (`findings/2026-09-29-review-round-4b.md`, `A-50`). Medium.
       `MessageConnection.send` (`shared/src/protocol/connection.ts:83`) logs the whole message at
       debug when the connection is closed. A config push racing a disconnect, with `logLevel:
@@ -15648,6 +15648,34 @@ because each is a decision rather than a defect:
       races a close, contains no credential value. The critic's sweep found no other payload
       log. Say in the outcome whether redact paths should be made depth-free as defence in
       depth. Mutants as usual.
+
+      **A-50 outcome.** Both halves.
+      - **`MessageConnection.send` logs a dropped message by its type alone.** `Outbound` is
+        now constrained to messages with a `type`, so the line cannot be written from anything
+        else. The comment beside it says why.
+      - **The configuration push returns after reading the assignments if the connection has
+        closed.** It sends nothing and updates nothing. The next session asks again.
+
+      **Depth-free redact paths: no.** pino's redaction (fast-redact) has no recursive
+      wildcard. The only depth-free alternative is a formatter that walks every object on every
+      line for secret-looking keys, which puts a cost on each of the core's log lines to guard
+      against a payload being logged at all. The rule that prevents that is cheaper and is now
+      in the code: a connection logs a message's type, never the message. The critic's sweep
+      found no other payload log, and neither did a grep for `{ message }` across `shared`,
+      the core's transport and the probe's.
+
+      **Tests.**
+      - `shared/test/connection.test.ts` 1, new: through the real `createLogger` at debug, a
+        push carrying an SNMP community, an SSH passphrase and three `writeOnly` parameters is
+        dropped on a closed connection. The line says `config-set` and none of the secrets.
+      - `probe-endpoint.test.ts` 1: the probe connects, its assignment read is held, and the
+        probe closes during it. With a debug log captured, no credential appears, and no
+        `config-set` or `config-delta` is even attempted.
+
+      Mutation 2/2:
+      - the whole message logged (the shared test fails; the endpoint test does not, because
+        the push has already returned);
+      - no return after the read (the endpoint test fails).
 
 ### Panel round two — notifications, schedules, triggers
 

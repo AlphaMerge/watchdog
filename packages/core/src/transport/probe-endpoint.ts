@@ -1389,6 +1389,10 @@ export class ProbeEndpoint {
           session.probeObjectId === null
             ? EMPTY_ASSIGNMENTS
             : await source.assignmentsFor(session.probeObjectId);
+        // **Gone while its configuration was read** (`A-50`). What was read carries every sensor's
+        // decrypted credentials, and a connection that has closed has nowhere to send them; the
+        // next session asks again.
+        if (session.connection.closed) return;
 
         const held = presented ?? session.sentVersion;
         if (!force && assignments.version === held) {

@@ -30,7 +30,7 @@ export interface MessageConnectionOptions<Inbound> {
  * A framed, validated message channel over any duplex stream (a `tls.TLSSocket` in production,
  * a socket pair in tests). Knows nothing about who is core and who is probe.
  */
-export class MessageConnection<Inbound, Outbound> {
+export class MessageConnection<Inbound, Outbound extends { readonly type: string }> {
   readonly #socket: Duplex;
   readonly #logger: Logger;
   readonly #decoder: FrameDecoder;
@@ -80,7 +80,13 @@ export class MessageConnection<Inbound, Outbound> {
 
   send(message: Outbound): void {
     if (this.#closed) {
-      this.#logger.debug({ message }, 'dropping outbound message on a closed connection');
+      // **Its type and nothing else** (`A-50`). A configuration push carries every sensor's
+      // decrypted credentials and `writeOnly` parameters, at a depth no redact path reaches, and
+      // one that raced a disconnect wrote them all to the log of anyone diagnosing that link.
+      this.#logger.debug(
+        { type: message.type },
+        'dropping outbound message on a closed connection',
+      );
       return;
     }
     try {
