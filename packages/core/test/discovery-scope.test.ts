@@ -11,9 +11,11 @@ import { LoginThrottle } from '../src/auth/throttle.js';
 import { SessionService } from '../src/auth/sessions.js';
 import { TokenService } from '../src/auth/tokens.js';
 import { TotpService } from '../src/auth/totp.js';
+import type { DiscoveryLevel } from '@ms/shared';
 import { DiscoveryError } from '../src/discovery/errors.js';
+import { provisionRun, type RunProvisioning } from '../src/discovery/provision.js';
 import { RediscoveryService } from '../src/discovery/rediscovery.js';
-import { DiscoveryService, type DispatchMessage } from '../src/discovery/service.js';
+import { DiscoveryService, GROUP_MOVED, type DispatchMessage } from '../src/discovery/service.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import { ScheduleService } from '../src/schedules/service.js';
 import {
@@ -273,6 +275,201 @@ describe(
           (error: unknown) =>
             error instanceof DiscoveryError && error.code === 'DISCOVERY_SCHEDULE_INVALID',
         );
+      });
+    });
+
+    describe('a run whose group moves under another probe after it started (`P-241`)', () => {
+      // The rule above was checked when a run started and never again. A run keeps its probe, so
+      // after its group moved from A to B, A went on sweeping from its own network, and what it
+      // found was provisioned into B's branch. Each case below checks one place the run goes to
+      // its probe, or to the tree, and the ones that follow a move back hold the check to "now".
+
+      /** Nothing else going on either probe, so `pump` reaches the run under test first. */
+      const quiesce = async (): Promise<void> => {
+        await db.query(
+          `UPDATE discovery_run SET status = 'cancelled'
+           WHERE status IN ('queued', 'running', 'identifying')`,
+        );
+        sent.length = 0;
+      };
+      const groupUnderA = async (name: string): Promise<number> =>
+        (await harness.service.create(testActor, { kind: 'group', parentId: probeA, name })).id;
+      const startOn = (groupId: number, range: string, level: DiscoveryLevel = 'standard') =>
+        discovery.start({ groupId, probeId: probeA, range, level }, testActor);
+      const moveUnder = (groupId: number, probeId: number) =>
+        harness.service.move(testActor, groupId, probeId, { kind: 'none' });
+      /** Every sweep or identification offered for a run, to any probe. */
+      const offered = (runId: number) =>
+        sent.filter(
+          ({ message }) =>
+            (message.kind === 'start' || message.kind === 'identify') &&
+            message.job.runId === runId,
+        );
+      const failedFor = async (runId: number, reason: string): Promise<void> => {
+        const run = await discovery.get(runId);
+        assert.equal(run?.status, 'failed');
+        assert.equal(run.message, reason);
+      };
+      /** Who the audit says failed a run, and why. */
+      const failure = async (runId: number) =>
+        (
+          await db.query<{ actor_kind: string; actor_ref: string; reason: string }>(
+            `SELECT actor_kind, actor_ref, summary->>'reason' AS reason FROM audit_log
+             WHERE action = 'discovery.failed' AND (summary->>'runId')::bigint = $1`,
+            [runId],
+          )
+        )[0];
+      const found = [
+        { address: '10.0.9.1', rttMs: 1 },
+        { address: '10.0.9.2', rttMs: 1 },
+      ];
+
+      let provisioned = 0;
+      /** What `main.ts` gives `provisionRun`, with a provisioner that only counts. */
+      const wiring = (): RunProvisioning => ({
+        discovery,
+        provisioner: {
+          provision: () => {
+            provisioned += 1;
+            return Promise.resolve({
+              matched: 0,
+              devicesCreated: 0,
+              sensorsCreated: 0,
+              mastersSet: 0,
+              sensorsSkipped: 0,
+              problems: [],
+              devices: [],
+            });
+          },
+        },
+        existing: () => Promise.resolve({ devices: [], sensors: [] }),
+        vouchers: {
+          authRequired: false,
+          ruleWriter: () => Promise.resolve(null),
+          rights: () => Promise.resolve(new Map<number, 'none'>()),
+        },
+      });
+
+      it('fails a waiting run when its probe asks for work, and offers the next one', async () => {
+        await quiesce();
+        const moving = await groupUnderA('moving while queued');
+        const run = await startOn(moving, '10.0.9.0/29');
+        const staying = await startOn(groupA, '10.0.10.0/29');
+        // Dropped, as a probe restart leaves it: both runs wait for A to come back.
+        await discovery.probeDisconnected(probeA);
+        await moveUnder(moving, probeB);
+        sent.length = 0;
+
+        await discovery.pump(probeA);
+        await failedFor(run.id, GROUP_MOVED);
+        assert.deepEqual(offered(run.id), [], 'the old probe was offered the run again');
+        assert.equal(offered(staying.id).length, 1, 'and the next run in its queue was not');
+        assert.ok(
+          sent.some(
+            ({ probeId, message }) =>
+              probeId === probeA && message.kind === 'cancel' && message.runId === run.id,
+          ),
+          'the probe is told to stop, as a cancel tells it',
+        );
+
+        // Recorded as the core's own decision, with the reason.
+        assert.deepEqual(await failure(run.id), {
+          actor_kind: 'system',
+          actor_ref: 'discovery',
+          reason: GROUP_MOVED,
+        });
+
+        // Terminal: neither probe is offered it again.
+        sent.length = 0;
+        await discovery.pump(probeA);
+        await discovery.pump(probeB);
+        assert.deepEqual(offered(run.id), []);
+      });
+
+      it('offers a run whose group moved away and back before its probe asked', async () => {
+        // The check is where the group is now, not whether it ever moved.
+        await quiesce();
+        const moving = await groupUnderA('moved and back');
+        const run = await startOn(moving, '10.0.11.0/29');
+        await discovery.probeDisconnected(probeA);
+        await moveUnder(moving, probeB);
+        await moveUnder(moving, probeA);
+        sent.length = 0;
+
+        await discovery.pump(probeA);
+        assert.equal(offered(run.id).length, 1);
+        assert.equal((await discovery.get(run.id))?.status, 'running');
+      });
+
+      it('fails a run at the hand-off to identification, which does not pass through pump', async () => {
+        await quiesce();
+        const moving = await groupUnderA('moving mid-sweep');
+        const run = await startOn(moving, '10.0.12.0/29');
+        await discovery.progress(probeA, run.id, 4, found, 0);
+        await moveUnder(moving, probeB);
+        sent.length = 0;
+
+        await discovery.finished(probeA, run.id, 'done', 8, '');
+        await failedFor(run.id, GROUP_MOVED);
+        assert.deepEqual(offered(run.id), [], 'identification was offered to the old probe');
+      });
+
+      it('stops identification between batches, which do not pass through pump either', async () => {
+        await quiesce();
+        const moving = await groupUnderA('moving mid-identification');
+        const run = await startOn(moving, '10.0.13.0/29');
+        await discovery.progress(probeA, run.id, 4, found, 0);
+        await discovery.finished(probeA, run.id, 'done', 8, '');
+        assert.equal((await discovery.get(run.id))?.status, 'identifying');
+        await moveUnder(moving, probeB);
+        sent.length = 0;
+
+        await discovery.identifyFinished(probeA, run.id, 'done', '');
+        await failedFor(run.id, GROUP_MOVED);
+        assert.deepEqual(offered(run.id), []);
+      });
+
+      it('provisions nothing from a run that finished before its group moved', async () => {
+        // The finding's own sequence: the sweep is over and nothing is offered again, so the
+        // only place left to stop it is provisioning.
+        await quiesce();
+        const moving = await groupUnderA('moving after the sweep');
+        const run = await startOn(moving, '10.0.14.0/29', 'ping');
+        await discovery.progress(probeA, run.id, 4, found, 0);
+        await discovery.finished(probeA, run.id, 'done', 8, '');
+        assert.equal((await discovery.get(run.id))?.status, 'done');
+        await moveUnder(moving, probeB);
+        provisioned = 0;
+
+        await assert.rejects(
+          () => provisionRun(wiring(), run.id, testActor),
+          (error: unknown) => {
+            assert.ok(error instanceof DiscoveryError);
+            assert.equal(error.code, 'DISCOVERY_RUN_FAILED');
+            assert.match(error.message, /created nothing: its group moved to another probe/);
+            return true;
+          },
+        );
+        assert.equal(provisioned, 0, 'devices were created in the new probe’s branch');
+        await failedFor(run.id, GROUP_MOVED);
+        // Failed by whoever asked for it, as a deleted rule's run is.
+        assert.deepEqual(await failure(run.id), {
+          actor_kind: 'system',
+          actor_ref: 'test',
+          reason: GROUP_MOVED,
+        });
+      });
+
+      it('still provisions a run whose group stayed where it was', async () => {
+        await quiesce();
+        const run = await startOn(groupA, '10.0.15.0/29', 'ping');
+        await discovery.progress(probeA, run.id, 4, found, 0);
+        await discovery.finished(probeA, run.id, 'done', 8, '');
+        provisioned = 0;
+
+        await provisionRun(wiring(), run.id, testActor);
+        assert.equal(provisioned, 1);
+        assert.equal((await discovery.get(run.id))?.status, 'done');
       });
     });
 

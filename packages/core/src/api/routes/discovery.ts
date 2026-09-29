@@ -542,7 +542,12 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
             'deleting the rule withdraws that. With accounts on, the run is failed with the ' +
             'reason “its rule was deleted”, recorded in the audit log, and this answers 409 ' +
             '`DISCOVERY_RUN_FAILED` with the same sentence. Start a new run to provision those ' +
-            'addresses.',
+            'addresses.\n\n' +
+            '**Nor does a run whose group has since moved under another probe** (`P-241`): what ' +
+            'it found was read from the old probe’s network, and would become devices in the ' +
+            'new one’s branch. The run is failed with the reason “its group moved to another ' +
+            'probe”, recorded in the audit log, and this answers 409 `DISCOVERY_RUN_FAILED` with ' +
+            'that sentence. Start a new run from the group’s new probe.',
           params: idParams,
           response: {
             200: {

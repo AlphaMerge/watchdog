@@ -27,12 +27,27 @@ export async function requireGroupProbe(
   groupId: number,
   probeId: number,
 ): Promise<void> {
-  const nearest = await objects.nearestProbe(q, groupId);
-  if (nearest === null || nearest.id !== probeId) {
+  if (!(await isUnderProbe(q, groupId, probeId))) {
     throw new DiscoveryError(
       'DISCOVERY_PROBE_INVALID',
       'a discovery runs from the probe its group is under, and that is not the probe given',
       { context: { groupId, phase: 'discovery' } },
     );
   }
+}
+
+/**
+ * Whether a group is under this probe now: the one rule above, asked of a run already going.
+ *
+ * A run keeps the probe it started on, and its group can move under another afterwards
+ * (`P-241`). Asked again wherever the run is offered to its probe, and before anything is
+ * provisioned from it.
+ */
+export async function isUnderProbe(
+  q: Queryable,
+  groupId: number,
+  probeId: number,
+): Promise<boolean> {
+  const nearest = await objects.nearestProbe(q, groupId);
+  return nearest !== null && nearest.id === probeId;
 }

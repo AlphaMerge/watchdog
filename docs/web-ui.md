@@ -121,6 +121,11 @@ next, whether it creates what it finds, and when it last ran.
 - **A rule refused when it fired says so first.** If a rule's group has moved under another
   probe, the rule is refused every time it is due, and its row says why. Editing the rule's probe
   to the group's new one puts it right.
+- **A run whose group moves under another probe creates nothing.** What it found was read from
+  the old probe's network. It fails with "its group moved to another probe" at its next step:
+  when that probe next asks for work, when its sweep hands over to identification, between
+  identification batches, or when you create what it found. Start the scan again from the
+  group's new probe.
 - **An edit changes a rule, not its group.** For another group, write another rule. The edit
   sends only what you changed, with the version you opened. If somebody else saved first, the
   form says so and offers the rule as it now is, rather than saving over their change.

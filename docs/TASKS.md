@@ -6553,7 +6553,7 @@ because each is a decision rather than a defect:
       The first version of "always the timer" did not compile, because removing the check also
       removed TypeScript's narrowing, so it was rewritten to fall through to the timer.
 
-- [ ] **P-241 — two probe-ownership edges: history read through an ancestor, and discovery after
+- [x] **P-241 — two probe-ownership edges: history read through an ancestor, and discovery after
       its group moves** · S · P-228 · Found in review round four
       (`findings/2026-09-29-review-round-4.md`, `P-241`). Both low.
       - **Misclassified as moved** (`ownership.ts:221`). Group G moves from A to B, and a sensor
@@ -6569,9 +6569,11 @@ because each is a decision rather than a defect:
       moved to another probe". Tests per the findings doc, including the existing moved case
       still passing. Mutants as usual.
 
-      **The ownership half has landed; the discovery half waits for `A-41a`.** A-41a adds
-      `DiscoveryService.fail` and a tested `provisionRun`, and makes `failed` terminal, so the
-      re-check will be built on those rather than on a second path (WatchDog, 2026-09-29).
+      **Done, in two halves.** The ownership half landed first (`485f08b`). The discovery half
+      waited for `A-41a`, and is built on its `DiscoveryService.fail`, its `provisionRun` and
+      its terminal `failed`, not on a second path (WatchDog, 2026-09-29).
+
+      **The ownership half.**
       - **The bound.** `#formerlyUnder` follows a move, or reads a move's `fromProbeId`, only if
         the move was made at or after the sensor's `created_at`.
       - **Tests.** A sensor created in a group after the group left A is `foreign` to A and
@@ -6583,6 +6585,53 @@ because each is a decision rather than a defect:
         move, and reads as `moved`, the side that warns nobody.
       - **Mutations caught: 4 of 4.** Each bound taken out, the comparison reversed, and the
         time of asking used in place of the sensor's creation.
+
+      **The discovery half.** A run whose group is no longer under its probe fails with "its
+      group moved to another probe", through `fail`. That records it in the audit and tells the
+      probe to stop.
+      - **Checked where the run is, not whether it ever moved.** `scope.ts`'s `isUnderProbe` is
+        the one statement of the rule, and `requireGroupProbe` now asks it too. A group moved
+        away and back is offered as before.
+      - **Checked wherever the run goes to its probe.** That is `pump`, which then offers the
+        probe's next queued run, so a moved run cannot block the queue behind it. It is also the
+        two identification offers that do not pass through `pump`: the sweep's hand-off, and
+        each next batch.
+      - **`pump`'s loop does not select a run it found out of place again.** A mutant that
+        reported a move without failing the run made `pump` pick the same run for ever, and the
+        suite hung rather than failed. The real `fail` always ends the run, but whether the loop
+        ends should not depend on that.
+      - **Checked before anything is provisioned.** `provisionRun` asks before who vouches, and
+        refuses with 409 `DISCOVERY_RUN_FAILED` in the reason's words. That is the only place
+        left for a run whose sweep finished before the move, the finding's own sequence.
+      - **Who failed it.** Failed while being offered, the audit names the core
+        (`system`/`discovery`). Failed when somebody asks to provision, it names whoever asked.
+      - **Not done: a sweep already running when the group moves is not stopped mid-sweep.** It
+        is stopped at its next step. Stopping it at the move would need an audit sink on every
+        move; the step it reaches next already fails it, and nothing reaches the tree first.
+      - **Not changed: `progress` still stores hosts for a run that has failed.** That was so
+        before, and nothing provisions a failed run whose group is still under another probe.
+        If the group moves back, the failed run can be provisioned, since its hosts come from
+        the group's own probe again.
+      - **Tests** (`discovery-scope.test.ts`, six cases):
+        - a waiting run is failed when its probe asks, and the next run is offered;
+        - both probes are offered nothing afterwards, and the audit names the reason and the
+          core;
+        - a group moved away and back is offered;
+        - a moved run fails at the hand-off to identification, and between identification
+          batches;
+        - a run that finished before its group moved provisions nothing, and the audit names
+          whoever asked;
+        - an unmoved run still provisions.
+        The `A-28` and `A-41` cases pass unchanged.
+      - **Mutations caught: 12 of 12.**
+        - `pump`: never asking; failing the run and offering it anyway; failing it and offering
+          nothing else.
+        - The sweep's hand-off unchecked, and the next identification batch unchecked.
+        - `provisionRun` unchecked, and failing the run then provisioning anyway.
+        - `isUnderProbe`'s comparison reversed.
+        - In `failIfGroupMoved`: the caller ignored in the audit, the wrong reason, a run
+          reported out of place but not failed, and another component named.
+      - **Docs.** The web UI guide's discovery section, and the provision route's description.
 
 - [ ] **P-242 — an on-demand check runs process-isolated types in the query pool** · S · P-236,
       S-19 · Found in review round four (`findings/2026-09-29-review-round-4.md`, `P-242`).

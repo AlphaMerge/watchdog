@@ -13,7 +13,7 @@ import type { Actor, AuditSink } from '../objects/audit.js';
 import type { ProbeRefusals } from '../probes/refusals.js';
 import { DiscoveryError } from './errors.js';
 import { readFingerprint } from './fingerprint.js';
-import { requireGroupProbe } from './scope.js';
+import { isUnderProbe, requireGroupProbe } from './scope.js';
 import { describeRun, type DiscoverySummary } from './summary.js';
 
 /**
@@ -48,6 +48,15 @@ export interface DiscoveredHost {
  * it found any more.
  */
 export const RULE_DELETED = 'its rule was deleted';
+
+/**
+ * Why a run whose group moved under another probe creates nothing (`P-241`): what it found was
+ * read from the old probe's network, and the group's devices now live on the new one's.
+ */
+export const GROUP_MOVED = 'its group moved to another probe';
+
+/** Who fails a run the core found out of place while offering it, with nobody asking. */
+const DISCOVERY: Actor = { kind: 'system', component: 'discovery' };
 
 export interface DiscoveryRunRow {
   id: number;
@@ -353,17 +362,27 @@ export class DiscoveryService {
    * cursor, which is a no-op the probe reports honestly rather than a duplicate sweep.
    */
   async pump(probeId: number): Promise<void> {
-    const rows = await this.#db.query<Record<string, unknown>>(
-      `SELECT * FROM discovery_run
-       WHERE probe_id = $1 AND status IN ('queued', 'running', 'identifying')
-       ORDER BY id
-       LIMIT 1`,
-      [probeId],
-    );
-    const row = rows[0];
-    if (row === undefined) return;
+    let run: DiscoveryRunRow;
+    // Failed, not offered, when its group has moved under another probe since it started, and
+    // the next run in this probe's queue is offered instead. A run found out of place is not
+    // selected again, so this ends whatever failing it did to the row.
+    const outOfPlace: number[] = [];
+    for (;;) {
+      const rows = await this.#db.query<Record<string, unknown>>(
+        `SELECT * FROM discovery_run
+         WHERE probe_id = $1 AND status IN ('queued', 'running', 'identifying')
+           AND NOT (id = ANY($2::bigint[]))
+         ORDER BY id
+         LIMIT 1`,
+        [probeId, outOfPlace],
+      );
+      const row = rows[0];
+      if (row === undefined) return;
+      run = read(row);
+      if (!(await this.failIfGroupMoved(run))) break;
+      outOfPlace.push(run.id);
+    }
 
-    const run = read(row);
     if (run.status === 'identifying') {
       await this.#offerIdentify(run);
       return;
@@ -506,6 +525,8 @@ export class DiscoveryService {
         levelDefinition(run.level).identify &&
         run.found > 0
       ) {
+        // Straight to identification, not through `pump`, so the group is asked about here.
+        if (await this.failIfGroupMoved(run)) return;
         await this.#db.query(
           `UPDATE discovery_run SET status = 'identifying', cursor = GREATEST(cursor, $2)
            WHERE id = $1 AND probe_id = $3 AND status = 'running'`,
@@ -743,7 +764,11 @@ export class DiscoveryService {
     }
 
     const run = await this.get(runId);
-    if (run !== null && run.status === 'identifying') await this.#offerIdentify(run);
+    if (run === null || run.status !== 'identifying') return;
+    // The next batch goes straight to the probe too, so a group that moved mid-identification
+    // stops it here.
+    if (await this.failIfGroupMoved(run)) return;
+    await this.#offerIdentify(run);
   }
 
   /** Asks the probe to stop, and records the operator's decision immediately. */
@@ -838,6 +863,33 @@ export class DiscoveryService {
       this.#dispatch(ended.run.probeId, { kind: 'identify-cancel', runId });
     }
     return ended.run;
+  }
+
+  /**
+   * Fails a run whose group is no longer under the probe it started on (`P-241`).
+   *
+   * A run keeps its probe, and the rule that a run uses the probe its group is under was checked
+   * only when it started. An operator who then moved the group under probe B left the run on A:
+   * A went on sweeping from its own network, and what it found was provisioned into B's branch,
+   * as devices B may not be able to reach. So it is asked again wherever the run goes to its
+   * probe (`pump`, and the two offers of identification that do not pass through it), and
+   * before anything is provisioned from it (`provisionRun`). The run fails with
+   * {@link GROUP_MOVED} through `fail`, which records it and tells the probe to stop.
+   *
+   * True when the run is out of place. It then no longer goes anywhere, whether this call failed
+   * it or an earlier one had.
+   */
+  async failIfGroupMoved(
+    run: Pick<DiscoveryRunRow, 'id' | 'groupId' | 'probeId'>,
+    actor: Actor = DISCOVERY,
+  ): Promise<boolean> {
+    if (await isUnderProbe(this.#db, run.groupId, run.probeId)) return false;
+    this.#logger.warn(
+      { runId: run.id, groupId: run.groupId, probeId: run.probeId },
+      'a discovery run’s group moved to another probe; failing the run',
+    );
+    await this.fail(run.id, GROUP_MOVED, actor);
+    return true;
   }
 
   async get(runId: number): Promise<DiscoveryRunRow | null> {

@@ -10,6 +10,7 @@ import type { ObjectService } from '../objects/service.js';
 import type { StoredVoucher } from '../objects/vouching.js';
 import { DiscoveryError } from './errors.js';
 import {
+  GROUP_MOVED,
   RULE_DELETED,
   type DiscoveredHost,
   type DiscoveryRunRow,
@@ -78,7 +79,10 @@ export async function runVoucher(
 }
 
 export interface RunProvisioning {
-  discovery: Pick<DiscoveryService, 'get' | 'hosts' | 'recordProvisioning' | 'fail'>;
+  discovery: Pick<
+    DiscoveryService,
+    'get' | 'hosts' | 'recordProvisioning' | 'fail' | 'failIfGroupMoved'
+  >;
   provisioner: Pick<ProvisionService, 'provision'>;
   /** The devices already in a group and their sensors, so a re-run creates nothing twice. */
   existing: (
@@ -90,10 +94,11 @@ export interface RunProvisioning {
 /**
  * Provisions what a run found, or fails the run with the reason it cannot be (`D-04`, `A-41`).
  *
- * Re-checks who stands behind the run when asked rather than when the run started: a rule
- * deleted after its run finished, whose run an operator then asks to provision, creates nothing.
- * The run fails with "its rule was deleted", recorded in the audit, and the caller is refused with
- * the same sentence — the pattern `P-241` uses for a group that moved.
+ * Re-checks where the run belongs and who stands behind it when asked, rather than when the run
+ * started. A run whose group has since moved under another probe creates nothing (`P-241`): its
+ * hosts were found from the old probe's network, and would become devices in the new one's
+ * branch. Nor does a run whose rule was deleted after it finished. Either way the run fails with
+ * the reason, recorded in the audit, and the caller is refused with the same sentence.
  */
 export async function provisionRun(
   options: RunProvisioning,
@@ -110,14 +115,13 @@ export async function provisionRun(
       },
     );
   }
+  if (await options.discovery.failIfGroupMoved(run, actor)) {
+    throw createdNothing(runId, GROUP_MOVED);
+  }
   const credentials = await runVoucher(run, options.vouchers);
   if (credentials === null) {
     await options.discovery.fail(runId, RULE_DELETED, actor);
-    throw new DiscoveryError(
-      'DISCOVERY_RUN_FAILED',
-      `discovery run ${String(runId)} created nothing: ${RULE_DELETED}`,
-      { context: { runId } },
-    );
+    throw createdNothing(runId, RULE_DELETED);
   }
   const [hosts, existing] = await Promise.all([
     options.discovery.hosts(runId, 65_536),
@@ -133,6 +137,15 @@ export async function provisionRun(
   });
   await options.discovery.recordProvisioning(runId, report);
   return report;
+}
+
+/** The refusal for a run that failed when asked to provision, in the reason's own words. */
+function createdNothing(runId: number, reason: string): DiscoveryError {
+  return new DiscoveryError(
+    'DISCOVERY_RUN_FAILED',
+    `discovery run ${String(runId)} created nothing: ${reason}`,
+    { context: { runId } },
+  );
 }
 
 export interface ProvisionOptions {
