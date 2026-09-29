@@ -7,6 +7,7 @@ export type { ConfigSources, LoadConfigOptions, LoadedConfig } from './config/lo
 export {
   allowedHostProblem,
   coreConfigSchema,
+  DEFAULT_RATE_LIMIT_PER_MINUTE,
   probeConfigSchema,
   trustedProxyProblem,
 } from './config/schema.js';

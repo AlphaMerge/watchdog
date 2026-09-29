@@ -718,11 +718,12 @@ describe('the CSRF guard, on a name the Host check let through (A-47)', () => {
 describe('rate limiting', () => {
   let app: FastifyInstance;
   let clock = 0;
+  let limiter: ReturnType<typeof registerRateLimit> | undefined;
 
   beforeEach(async () => {
     clock = 1_000_000;
     app = await build((instance) => {
-      registerRateLimit(instance, {
+      limiter = registerRateLimit(instance, {
         logger: silent,
         max: 3,
         windowMs: 60_000,
@@ -747,6 +748,48 @@ describe('rate limiting', () => {
     assert.equal(response.statusCode, 429);
     assert.equal(response.json<{ error: { code: string } }>().error.code, 'AUTH_THROTTLED');
     assert.ok(response.headers['retry-after'] !== undefined);
+  });
+
+  it('counts what it refuses, for Core Health, and nothing it lets through (A-39)', async () => {
+    assert.ok(limiter !== undefined);
+    for (let n = 0; n < 3; n += 1) await get();
+    assert.deepEqual(limiter.stats(), { refused: 0 });
+    await get();
+    await get();
+    assert.deepEqual(limiter.stats(), { refused: 2 });
+  });
+
+  it('lets a script that honours Retry-After finish a 5,000-create build at the default (A-39)', async () => {
+    // The project's own named legitimate client. At 1,200 a minute it is refused at request 1,201;
+    // one that waits as it is told finishes, in four waits of a minute, rather than stopping with
+    // the tree half-built. The clock is injected, so the four minutes are the limiter's
+    // arithmetic and not this test's running time.
+    let at = 5_000_000;
+    const defaulted = await build((instance) => {
+      registerRateLimit(instance, { logger: silent, now: () => at });
+    });
+    try {
+      let created = 0;
+      let refused = 0;
+      let waitedSeconds = 0;
+      while (created < 5_000) {
+        const response = await defaulted.inject({ method: 'POST', url: '/api/v1/thing' });
+        if (response.statusCode === 429) {
+          refused += 1;
+          const retryAfter = Number(response.headers['retry-after']);
+          assert.ok(retryAfter >= 1, 'a refusal says when to come back');
+          waitedSeconds += retryAfter;
+          at += retryAfter * 1_000;
+          continue;
+        }
+        assert.equal(response.statusCode, 200);
+        created += 1;
+      }
+      assert.equal(refused, 4, 'one wait for each full window');
+      assert.equal(waitedSeconds, 240, 'four minutes, which administration.md says');
+    } finally {
+      await defaulted.close();
+    }
   });
 
   it('reports what is left on every response, not only the refusal', async () => {

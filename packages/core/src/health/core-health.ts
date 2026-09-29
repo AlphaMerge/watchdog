@@ -98,6 +98,11 @@ export interface CoreHealthSources {
    */
   hosts?: () => { refused: number };
   /**
+   * `ApiServer.rateLimitStats()` — requests the per-client rate limit refused, since it started
+   * (`A-39`). Absent, or answering nothing, where no limit is registered, and the channel gaps.
+   */
+  rateLimit?: () => { refused: number } | undefined;
+  /**
    * The last housekeeping pass's view of the disk (`S-17`).
    *
    * Read from the *report* rather than measured here, and that is deliberate: the number Core
@@ -205,6 +210,7 @@ export class CoreHealthMeters {
   readonly log = new DeltaMeter();
   localProbeLog: { readonly meter: DeltaMeter; readonly session: number } | undefined;
   readonly hosts = new DeltaMeter();
+  readonly rateLimit = new DeltaMeter();
 }
 
 const MB = 1024 * 1024;
@@ -303,6 +309,7 @@ export class CoreHealthService {
     const limit = this.#sources.limitMemory();
     const log = this.#sources.log?.();
     const hosts = this.#sources.hosts?.();
+    const rateLimit = this.#sources.rateLimit?.();
 
     const memory = this.#process.memoryUsage();
     const queues = await this.#queues(now, degradeOnDatabaseError);
@@ -373,6 +380,9 @@ export class CoreHealthService {
       // Since the last reading, and the whole count on the first: the total started with this
       // process, as the meter did.
       hostsRefused: hosts === undefined ? null : meters.hosts.take(hosts.refused, uptime, true),
+      // The same shape: refused since the last reading, and the whole count on the first.
+      rateLimited:
+        rateLimit === undefined ? null : meters.rateLimit.take(rateLimit.refused, uptime, true),
     };
     return { reading, parkedError: queues.parked.lastError };
   }

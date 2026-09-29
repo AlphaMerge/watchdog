@@ -516,6 +516,7 @@ alarm.
 | `logDropped` | **Any value above zero is a warning.** Log lines the core could not write since the last reading, because the journal stopped taking them and 8 MiB were already waiting. With a local probe, its lines too: one journal, one alarm. See [a journal that is not keeping up](#a-journal-that-is-not-keeping-up). `logBacklog` beside it is what is waiting, in MB, with no limit |
 | `notifyOldest` | Notifications queued and undelivered. 15 minutes warns; an hour means nobody is being told anything |
 | `hostsRefused` | Requests refused since the last reading because their `Host` is not one of the core's names. No limit, since scanners send these all day. A step up after a DNS or proxy change is somebody reaching the core by a name nobody listed. See [the names the core answers to](#the-names-the-core-answers-to) |
+| `rateLimited` | **Any value above zero is a warning.** Requests refused since the last reading by the per-client rate limit. Nobody using the web UI meets it, so a refusal is a runaway loop, an enumeration, or a provisioning script that should use `POST /objects/tree` or needs `api.rateLimitPerMinute` raised. The log names the client. See [the rate limit, and provisioning scripts](#the-rate-limit-and-provisioning-scripts) |
 | `alarmOverdue` | The alarm sweep is not running. Everything downstream of it is silently stale |
 | `probesDown` | Probes not connected. Their sensors are not being checked |
 
@@ -1265,6 +1266,42 @@ installation with authentication off that only ever reads: it now needs the key 
 
 Set `notifications.publicUrl` to the same origin, or alarm emails will link to an address nobody
 receiving them can open.
+
+## The rate limit, and provisioning scripts
+
+Each client may make **1,200 requests a minute**, counted per account, or per address where nobody
+is signed in (an IPv6 address counts as its /64). The next request is refused with `429` and a
+`Retry-After` header saying how many seconds until the minute is over. Every response carries
+`X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`, so a client can slow down
+before it is refused. The limit is a backstop against a runaway loop or somebody enumerating ids.
+Nobody using the web UI meets it (`A-09`, `A-39`).
+
+**A provisioning script can meet it.** Creating 5,000 objects with one request each is refused at
+request 1,201. A script that stops at the first refusal leaves the tree half-built. One that waits
+as `Retry-After` says finishes, but the arithmetic is fixed by the limit and not by the server:
+5,000 creates need five windows, so **at least four minutes** however fast each request is. Three
+ways to go faster, in the order to reach for them:
+
+- **Build with `POST /objects/tree`.** It creates a subtree of up to 5,000 objects in one request,
+  all or nothing, with the same validation and audit as one at a time. Measured building 5,000
+  objects as a real caller, it took 2.6 s with an administrator's token and 3.5 s with anyone
+  else's, against 35.7 and 44.7 s one object per request with the limit raised out of the way
+  (`P-225`, `docs/findings/2026-09-29-tree-build-with-authentication.md`).
+- **Honour `Retry-After`**, for a script that has to send objects one at a time.
+- **Raise `api.rateLimitPerMinute`**, from 60 to 1,000,000; the default is 1,200. It applies to
+  every client, API tokens included. Tokens are deliberately not exempt, because a leaked token
+  with no limit is worse than a slow script.
+
+```json
+{
+  "api": {
+    "rateLimitPerMinute": 6000
+  }
+}
+```
+
+Every refusal is logged with the client it refused. **Core Health's `rateLimited` channel counts
+them**, and any is a warning (see [What to watch](#what-to-watch)).
 
 ## Map tiles
 

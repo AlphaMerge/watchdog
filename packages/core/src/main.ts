@@ -1352,6 +1352,7 @@ async function serve(): Promise<void> {
       queries: () => probeQueries.stats(),
       ingestionDiscards: () => ingestion.stats(),
       hosts: () => api.hostStats(),
+      rateLimit: () => api.rateLimitStats(),
       // Gaps in the v1 profile, which has no reporting to count (`H-12`).
       ...(v2.reporting === undefined ? {} : { reports: v2.reporting.stats }),
     },

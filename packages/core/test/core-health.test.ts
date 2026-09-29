@@ -644,6 +644,39 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
     });
   });
 
+  describe('the requests the rate limit refused (A-39)', () => {
+    it('counts them per reading, from the first, and clears', async () => {
+      // Backpressure is visible: a script meeting the limit is a warning here, not only a 429
+      // in somebody else's terminal.
+      const limit = { refused: 5 };
+      const service = new CoreHealthService({
+        vouching: everyVoucherHolds,
+        db,
+        logger: silent,
+        sources: { ...sources(), rateLimit: () => ({ ...limit }) },
+        ingest: () => Promise.resolve(),
+        process: fakeProcess({ cpuUs: [], elapsedNs: [], uptime: 1_000 }),
+      });
+      assert.equal((await service.read())['rateLimited'], 5);
+      limit.refused = 9;
+      assert.equal((await service.read())['rateLimited'], 4);
+      assert.equal((await service.read())['rateLimited'], 0, 'a count, not a total');
+    });
+
+    it('gaps where no limit is registered', async () => {
+      assert.equal((await build().read())['rateLimited'], null);
+      const service = new CoreHealthService({
+        vouching: everyVoucherHolds,
+        db,
+        logger: silent,
+        sources: { ...sources(), rateLimit: () => undefined },
+        ingest: () => Promise.resolve(),
+        process: fakeProcess({ cpuUs: [], elapsedNs: [], uptime: 1_000 }),
+      });
+      assert.equal((await service.read())['rateLimited'], null, 'a server with no limit');
+    });
+  });
+
   describe('rollup lag', () => {
     it('is a gap when no tier has ever run, not an infinite lag', async () => {
       // A core that started a minute ago has not fallen behind. Reporting the age of the epoch

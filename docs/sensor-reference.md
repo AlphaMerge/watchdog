@@ -1012,6 +1012,7 @@ cost: **light** · evaluated by the core, never by a probe
 | `logDropped` | Log lines dropped | lines | default limits: warn above 0 |
 | `logBacklog` | Log waiting to be written | MB | — |
 | `hostsRefused` | Requests refused for an unknown Host | requests | — |
+| `rateLimited` | Requests refused by the rate limit | requests | default limits: warn above 0 |
 
 Takes no parameters.
 

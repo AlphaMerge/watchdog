@@ -39,6 +39,7 @@ import {
   registerForwardedHeaderNotice,
   registerHostCheck,
   registerRateLimit,
+  type RateLimitStats,
   registerSecurityHeaders,
   registerUpgradeOriginCheck,
 } from './hardening.js';
@@ -126,8 +127,11 @@ import { SHARED_SCHEMAS } from './schemas/objects.js';
  * a server built for a route test is not behind a proxy and is reached by address, and saying so
  * in every one of them would be noise.
  */
-export type ApiListenerConfig = Omit<CoreConfig['api'], 'trustedProxies' | 'allowedHosts'> &
-  Partial<Pick<CoreConfig['api'], 'trustedProxies' | 'allowedHosts'>>;
+export type ApiListenerConfig = Omit<
+  CoreConfig['api'],
+  'trustedProxies' | 'allowedHosts' | 'rateLimitPerMinute'
+> &
+  Partial<Pick<CoreConfig['api'], 'trustedProxies' | 'allowedHosts' | 'rateLimitPerMinute'>>;
 
 export interface ApiServerOptions {
   config: ApiListenerConfig;
@@ -296,12 +300,6 @@ export interface ApiServerOptions {
   stream?: StateBroadcaster;
   /** Narrower bounds on each stream socket, for a test that has to reach them (`A-30`). */
   streamLimits?: Partial<StreamLimits>;
-  /**
-   * A different ceiling for the per-client rate limit, for a benchmark that measures what a
-   * request costs rather than how many one account may make (`P-225`). Not a setting: `A-39`
-   * makes the limit one, and until then production always has the default.
-   */
-  rateLimit?: { max: number };
 }
 
 /**
@@ -354,7 +352,8 @@ export class ApiServer {
   readonly #tester: NotificationTester | undefined;
   readonly #stream: StateBroadcaster | undefined;
   readonly #streamLimits: Partial<StreamLimits>;
-  readonly #rateLimit: { max: number } | undefined;
+  /** What the rate limit has refused, once it is registered (`A-39`). */
+  #rateLimit: { stats: () => RateLimitStats } | undefined;
   readonly #undeclared: string[] = [];
   /** Routes that declared no `access`, which makes `build` throw (`A-11`). */
   readonly #unauthorized: string[] = [];
@@ -444,7 +443,6 @@ export class ApiServer {
     this.#tester = options.tester;
     this.#stream = options.stream;
     this.#streamLimits = options.streamLimits ?? {};
-    this.#rateLimit = options.rateLimit;
 
     this.#app = Fastify({
       logger: false, // pino is configured centrally; Fastify's own instance would double-log
@@ -659,7 +657,12 @@ export class ApiServer {
         logger: this.#logger,
         allowedOrigins: this.#config.allowedOrigins,
       });
-      registerRateLimit(this.#app, { logger: this.#logger, ...this.#rateLimit });
+      this.#rateLimit = registerRateLimit(this.#app, {
+        logger: this.#logger,
+        ...(this.#config.rateLimitPerMinute === undefined
+          ? {}
+          : { max: this.#config.rateLimitPerMinute }),
+      });
       // **After authentication, before every route** (`A-11`). Authentication answers who this
       // is; this answers whether they may. Both are global hooks for the same reason: a check
       // wired per route is a check the next route forgets.
@@ -1104,6 +1107,14 @@ export class ApiServer {
   /** Requests refused for a `Host` this core does not answer to, since it started (`A-47`). */
   hostStats(): { refused: number } {
     return this.#hosts.stats();
+  }
+
+  /**
+   * Requests the per-client rate limit refused, since it started (`A-39`). Undefined before
+   * `build`, and on a server with no authentication wired, which registers no limit.
+   */
+  rateLimitStats(): RateLimitStats | undefined {
+    return this.#rateLimit?.stats();
   }
 
   async start(): Promise<AddressInfo> {

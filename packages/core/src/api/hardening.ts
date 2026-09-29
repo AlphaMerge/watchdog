@@ -1,6 +1,6 @@
 import { isIP } from 'node:net';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { trustedProxyProblem, type Logger } from '@ms/shared';
+import { DEFAULT_RATE_LIMIT_PER_MINUTE, trustedProxyProblem, type Logger } from '@ms/shared';
 import { addressKey } from '../auth/address-key.js';
 import { AuthError } from '../auth/errors.js';
 
@@ -445,10 +445,12 @@ export function registerForwardedHeaderNotice(
 /**
  * A ceiling on requests per client, per window.
  *
- * **Not a fairness mechanism and not a quota — a backstop.** The limit is set high enough that no
- * legitimate client meets it, because the thing it defends against is a loop in somebody's script
- * or an enumeration run, and a limit low enough to shape traffic would page an operator every
- * time the UI opened a busy page.
+ * **Not a fairness mechanism and not a quota — a backstop.** The limit is set high enough that
+ * nobody using the web UI meets it, because the thing it defends against is a loop in somebody's
+ * script or an enumeration run, and a limit low enough to shape traffic would page an operator
+ * every time the UI opened a busy page. **A provisioning script can meet it** (`A-39`), so it is
+ * `api.rateLimitPerMinute` rather than a constant, a refusal says when to come back, and Core
+ * Health counts the refusals: backpressure an operator can see and raise, never a silent wall.
  *
  * **Keyed by account where there is one, by address where there is not.** Keying only by address
  * puts everybody behind one NAT in the same bucket; keying only by account leaves an
@@ -459,17 +461,25 @@ export function registerForwardedHeaderNotice(
  */
 export interface RateLimitOptions {
   logger: Logger;
-  /** Requests allowed per window. */
+  /** Requests allowed per window: `api.rateLimitPerMinute`. */
   max?: number;
   windowMs?: number;
   now?: () => number;
 }
 
-const DEFAULT_MAX = 1_200;
 const DEFAULT_WINDOW_MS = 60_000;
 
-export function registerRateLimit(app: FastifyInstance, options: RateLimitOptions): void {
-  const max = options.max ?? DEFAULT_MAX;
+/** What the rate limit has refused, for Core Health (`A-39`). */
+export interface RateLimitStats {
+  /** Requests refused since this process started. */
+  readonly refused: number;
+}
+
+export function registerRateLimit(
+  app: FastifyInstance,
+  options: RateLimitOptions,
+): { stats: () => RateLimitStats } {
+  const max = options.max ?? DEFAULT_RATE_LIMIT_PER_MINUTE;
   const windowMs = options.windowMs ?? DEFAULT_WINDOW_MS;
   const now = options.now ?? Date.now;
 
@@ -482,6 +492,7 @@ export function registerRateLimit(app: FastifyInstance, options: RateLimitOption
    * is a backstop rather than a quota.
    */
   const buckets = new Map<string, { count: number; resetAt: number }>();
+  let refused = 0;
 
   // Swept rather than left to grow: a bucket per address is a slow leak in a service that runs
   // for months, and the sweep is O(buckets) once a window rather than per request.
@@ -516,6 +527,7 @@ export function registerRateLimit(app: FastifyInstance, options: RateLimitOption
     void reply.header('x-ratelimit-reset', String(Math.ceil(bucket.resetAt / 1000)));
 
     if (bucket.count > max) {
+      refused += 1;
       const retryAfter = Math.max(1, Math.ceil((bucket.resetAt - at) / 1000));
       void reply.header('retry-after', String(retryAfter));
       options.logger.warn({ key, count: bucket.count, max }, 'rate limit exceeded');
@@ -528,4 +540,6 @@ export function registerRateLimit(app: FastifyInstance, options: RateLimitOption
     }
     done();
   });
+
+  return { stats: () => ({ refused }) };
 }

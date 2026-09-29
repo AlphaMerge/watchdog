@@ -5,7 +5,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import { loadConfig } from '../src/config/load.js';
-import { coreConfigSchema, probeConfigSchema } from '../src/config/schema.js';
+import {
+  coreConfigSchema,
+  DEFAULT_RATE_LIMIT_PER_MINUTE,
+  probeConfigSchema,
+} from '../src/config/schema.js';
 import { ConfigError } from '../src/errors/app-error.js';
 
 /** `assert.throws` returns nothing, so capture the error when the message matters. */
@@ -229,6 +233,38 @@ describe('how long a session lasts (A-38)', () => {
     // Equal is fine: the idle timeout and the ceiling arrive together.
     const { config } = load({ idleTimeoutMinutes: 1_440, absoluteTimeoutHours: 24 });
     assert.equal(config.sessions.idleTimeoutMinutes, 1_440);
+  });
+});
+
+describe('how many requests a client may make in a minute (A-39)', () => {
+  const load = (api: Record<string, unknown>, env: NodeJS.ProcessEnv = {}) =>
+    loadConfig({
+      schema: coreConfigSchema,
+      env,
+      argv: ['--config', tempFile('core.json', JSON.stringify({ api }))],
+    });
+
+  it('is 1,200 unless it is set', () => {
+    const { config } = loadConfig({ schema: coreConfigSchema, env: {}, argv: [] });
+    assert.equal(config.api.rateLimitPerMinute, 1_200);
+    assert.equal(DEFAULT_RATE_LIMIT_PER_MINUTE, 1_200, 'and the limit falls back on the same');
+  });
+
+  it('takes it from the file or the environment', () => {
+    assert.equal(load({ rateLimitPerMinute: 6_000 }).config.api.rateLimitPerMinute, 6_000);
+    const { config } = load({}, { MS_API__RATE_LIMIT_PER_MINUTE: '20000' });
+    assert.equal(config.api.rateLimitPerMinute, 20_000);
+  });
+
+  it('refuses it outside its bounds, and takes both bounds exactly', () => {
+    for (const rateLimitPerMinute of [59, 1_000_001, 0, 600.5]) {
+      const error = captureError(() => load({ rateLimitPerMinute }));
+      assert.ok(error instanceof ConfigError, String(rateLimitPerMinute));
+      assert.match(error.message, /api\.rateLimitPerMinute/, String(rateLimitPerMinute));
+    }
+    for (const rateLimitPerMinute of [60, 1_000_000]) {
+      assert.equal(load({ rateLimitPerMinute }).config.api.rateLimitPerMinute, rateLimitPerMinute);
+    }
   });
 });
 

@@ -418,6 +418,19 @@ export interface CoreConfig {
      * file — for a single-operator install, or one behind something else that authenticates.
      */
     requireAuthentication: boolean;
+    /**
+     * Requests one client may make in a minute before it is refused with 429 and `Retry-After`
+     * (`A-09`, `A-39`). A client is an account, or an address where nobody is signed in.
+     *
+     * **A backstop against a loop or an enumeration, not a quota**, so the default is high enough
+     * that nobody using the web UI meets it. A provisioning script can: 5,000 objects created one
+     * request each need at least four minutes under the default of 1,200. The answer for a script is
+     * `POST /objects/tree`, which builds a tree in one request; the answer for one that has to
+     * send them one at a time is to honour `Retry-After`, or to raise this. **Tokens are not
+     * exempt**: a leaked token with no limit is worse than a slow script, and this setting is the
+     * lever. Core Health's `rateLimited` counts the refusals.
+     */
+    rateLimitPerMinute: number;
   };
   /**
    * How long a signed-in browser stays signed in (`A-01`, `A-38`).
@@ -721,6 +734,9 @@ export interface ProbeConfig {
 
 const logLevels: LogLevel[] = ['trace', 'debug', 'info', 'warn', 'error', 'fatal'];
 
+/** `api.rateLimitPerMinute`'s default, which the rate limit also falls back on (`A-39`). */
+export const DEFAULT_RATE_LIMIT_PER_MINUTE = 1_200;
+
 function serviceSchema(defaultName: string, defaultDataDir: string): JSONSchemaType<ServiceConfig> {
   return {
     type: 'object',
@@ -846,6 +862,7 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
         'trustedProxies',
         'allowedHosts',
         'requireAuthentication',
+        'rateLimitPerMinute',
       ],
       properties: {
         host: { type: 'string', minLength: 1, default: '127.0.0.1' },
@@ -860,6 +877,14 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
         // Checked by `allowedHostProblem` below, which names the entry.
         allowedHosts: { type: 'array', default: [], items: { type: 'string', minLength: 1 } },
         requireAuthentication: { type: 'boolean', default: true },
+        // Sixty at the least, so a slip of the keyboard cannot lock every client out; a million at
+        // the most, which no client reaches while still being a limit.
+        rateLimitPerMinute: {
+          type: 'integer',
+          minimum: 60,
+          maximum: 1_000_000,
+          default: DEFAULT_RATE_LIMIT_PER_MINUTE,
+        },
       },
     },
     sessions: {

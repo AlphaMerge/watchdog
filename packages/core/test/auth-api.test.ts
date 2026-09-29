@@ -94,6 +94,9 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
   let gatedThrottle: LoginThrottle;
   /** The same, with a failure's recording held on request. */
   let pausedApp: FastifyInstance;
+  /** With `api.rateLimitPerMinute` at its floor (`A-39`), and the server, for its count. */
+  let limited: FastifyInstance;
+  let limitedServer: ApiServer | undefined;
   let pausing: PausingThrottle;
   let tokens: TokenService;
 
@@ -122,7 +125,11 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
       required: boolean,
       allowedOrigins: string[] = [],
       trustedProxies: string[] = [],
-      over: { accounts?: AccountService; throttle?: LoginThrottle } = {},
+      over: {
+        accounts?: AccountService;
+        throttle?: LoginThrottle;
+        rateLimitPerMinute?: number;
+      } = {},
     ): Promise<FastifyInstance> => {
       const server = new ApiServer({
         config: {
@@ -134,6 +141,9 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
           allowedHosts: ['core.test'],
           trustedProxies,
           requireAuthentication: true,
+          ...(over.rateLimitPerMinute === undefined
+            ? {}
+            : { rateLimitPerMinute: over.rateLimitPerMinute }),
         },
         logger: silent,
         version: '9.9.9',
@@ -164,6 +174,8 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
     behind = await build(false, [], ['loopback']);
     gated = await build(false, [], [], { accounts: counting, throttle: gatedThrottle });
     pausedApp = await build(false, [], [], { accounts: counting, throttle: pausing });
+    limited = await build(false, [], [], { rateLimitPerMinute: 60 });
+    limitedServer = built.at(-1);
   });
 
   after(async () => {
@@ -829,6 +841,36 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
       assert.match(next.body, /from this address/);
       const neighbour = await attempt('ops', 'correct-horse-battery', '2001:db8:a:c::1');
       assert.equal(neighbour.statusCode, 200, 'the next /64 is somebody else');
+    });
+  });
+
+  describe('the rate limit, as an operator set it (A-39)', () => {
+    it('is 1,200 a minute unless api.rateLimitPerMinute says otherwise', async () => {
+      const response = await app.inject({ method: 'GET', url: '/api/v1/auth/session' });
+      assert.equal(response.headers['x-ratelimit-limit'], '1200');
+    });
+
+    it('takes the setting, refuses past it with Retry-After, and counts for Core Health', async () => {
+      const server = limitedServer;
+      assert.ok(server !== undefined);
+      const session = () =>
+        limited.inject({
+          method: 'GET',
+          url: '/api/v1/auth/session',
+          remoteAddress: '192.0.2.39',
+        });
+      for (let n = 0; n < 60; n += 1) {
+        const response = await session();
+        assert.equal(response.statusCode, 200, `request ${String(n + 1)}: ${response.body}`);
+        assert.equal(response.headers['x-ratelimit-remaining'], String(59 - n));
+        if (n === 0) assert.equal(response.headers['x-ratelimit-limit'], '60');
+      }
+      assert.deepEqual(server.rateLimitStats(), { refused: 0 });
+
+      const refused = await session();
+      assert.equal(refused.statusCode, 429, refused.body);
+      assert.ok(Number(refused.headers['retry-after']) >= 1);
+      assert.deepEqual(server.rateLimitStats(), { refused: 1 });
     });
   });
 

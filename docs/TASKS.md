@@ -16425,7 +16425,7 @@ because each is a decision rather than a defect:
       `main.ts` has no test of its own, and the path from `core.json` to the constructor is read,
       not run.
 
-- [ ] **A-39 — The rate limit refuses a provisioning script, and nothing lets an operator raise
+- [x] **A-39 — The rate limit refuses a provisioning script, and nothing lets an operator raise
       it** · S · A-09, P-225 · Found 2026-09-29 by `P-225`'s review. `A-09` set the per-client
       limit at 1,200 requests a minute "high enough that no legitimate client meets it", as a
       constant nobody can change. The project's own named legitimate client meets it: a
@@ -16450,6 +16450,39 @@ because each is a decision rather than a defect:
       completing a 5,000-create build under the default limit, slowly, rather than stopping
       half-built (on an injected clock or a short window, so the test itself does not take four
       minutes); and the documentation says the above.
+
+      **Outcome.**
+      - **`api.rateLimitPerMinute`**, an integer from 60 to 1,000,000, default 1,200. The default
+        is one constant, `DEFAULT_RATE_LIMIT_PER_MINUTE` in `@ms/shared`, which the schema and
+        `registerRateLimit` both use. `ApiListenerConfig` takes it as optional, as it does
+        `trustedProxies`, so a route test need not name it. It replaces `P-225`'s
+        `ApiServerOptions.rateLimit`, and the benchmark raises the setting as an operator would.
+        Tokens are not exempt.
+      - **Visible on Core Health**, because backpressure is: `registerRateLimit` counts its
+        refusals, `ApiServer.rateLimitStats()` hands them on, and the new `rateLimited` channel
+        reads the refusals since the last reading, as `hostsRefused` does. **Any is a warning**:
+        a refusal is a runaway loop, an enumeration, or a script an operator should move to the
+        bulk route or raise the setting for. The channel gaps where no limit is registered.
+      - **`administration.md`** has a section for the limit and provisioning scripts. It names
+        `POST /objects/tree` first, gives the arithmetic (5,000 serial creates are five windows,
+        at least four minutes, however fast each request is), and describes `Retry-After`, the
+        setting and the channel. The Core Health table has the row.
+
+      **Tests.**
+      - `hardening.test.ts`: a script that honours `Retry-After` builds 5,000 against the
+        default limit on an injected clock. It is refused four times and waits 240 s. Refusals
+        are counted, and requests let through are not.
+      - `auth-api.test.ts`, on a real server: the default is 1,200. At a setting of 60, request
+        61 is refused with `Retry-After`, and `rateLimitStats()` counts it.
+      - `core-health.test.ts`: `rateLimited` counts per reading, and gaps with no limit.
+      - `config.test.ts`: the default, the file and the environment, both bounds exactly, and
+        refusals outside them.
+      The `main.ts` line that hands the stats to Core Health is covered by no unit test.
+
+      Mutation 9/9: the setting never reaching the limit; refusals not counted; every request
+      counted; Core Health showing the total rather than the change; a floor of one; a ceiling of
+      a hundred million; a different default; a fallback of the limiter's own; no warning on a
+      refusal.
 
 - [x] **A-40 — A stored secret follows its endpoint wherever a writer points it** · M · A-05,
       N-05, A-29 · Found 2026-09-29 by `V2-07`'s design review, which found it for a directory's

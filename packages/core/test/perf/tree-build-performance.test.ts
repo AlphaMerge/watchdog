@@ -42,10 +42,10 @@ const available = await databaseAvailable();
  * no authentication at all, which is what the committed numbers before `P-225` measured and is
  * kept so the difference is the cost of authentication and nothing else.
  *
- * **The per-account rate limit is raised for the two authenticated callers, and only here.** At
- * the default, 1,200 requests a minute, one account's serial build is refused at request 1,201;
- * this file measures what a request costs, and a limiter measures how many one account may make.
- * `A-39` is the policy.
+ * **The per-account rate limit is raised for the two authenticated callers**, through
+ * `api.rateLimitPerMinute` as an operator would raise it (`A-39`). At the default, 1,200 requests a
+ * minute, one account's serial build is refused at request 1,201; this file measures what a
+ * request costs, and a limiter measures how many one account may make.
  */
 const TARGET_OBJECTS = Number(process.env['MS_BENCH_TREE_OBJECTS'] ?? 5_000);
 const BUDGET_MS = 30_000;
@@ -246,6 +246,8 @@ describe(
           webRoot: '',
           allowedOrigins: [],
           requireAuthentication: true,
+          // The setting an operator would raise, far above anything a build sends in a window.
+          rateLimitPerMinute: RAISED_LIMIT,
         },
         logger: silent,
         version: '9.9.9',
@@ -254,7 +256,7 @@ describe(
         db: scratch.db,
         audit: new AuditRepository(),
         catalogue: testCatalogue(),
-        ...(wired === undefined ? {} : { auth: wired.auth, rateLimit: { max: RAISED_LIMIT } }),
+        ...(wired === undefined ? {} : { auth: wired.auth }),
       });
       await server.build('9.9.9', service);
       const address = await server.start();
@@ -497,12 +499,12 @@ describe(
       const windows = Math.ceil(creates / 1_200);
       process.stdout.write(
         `      "% spare" is against the 30 s criterion, which these do not carry: bulk does\n` +
-          `      (P-225). No account can build this way at these speeds in production. The rate\n` +
-          `      limit allows one account 1,200 requests a minute, so ${creates.toLocaleString('en-GB')} ` +
+          `      (P-225). No account can build this way at these speeds under the default rate\n` +
+          `      limit, 1,200 requests a minute for one account, so ${creates.toLocaleString('en-GB')} ` +
           `creates need\n` +
           `      ${String(windows)} windows, at least ${String(windows - 1)} ` +
           `minute${windows - 1 === 1 ? '' : 's'}, whatever a ` +
-          `request costs (A-39).\n` +
+          `request costs, unless api.rateLimitPerMinute is raised (A-39).\n` +
           `      baseline after S-16 was 21.0 s unauthenticated; Phase 3 costs each create a\n` +
           `      sensor_runtime row (M-02) and a guard against a paused ancestor (M-08) — see P-19.\n` +
           `      The spread above is WITHIN one run and understates the uncertainty. Four quiet\n` +

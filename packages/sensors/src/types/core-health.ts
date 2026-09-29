@@ -438,6 +438,21 @@ const CHANNELS: readonly ChannelDef[] = [
   // for the core is not in `api.allowedHosts` yet — who is told why in the answer itself. What the
   // line is for is the second case showing up as a step, when a DNS name or a proxy changes.
   { key: 'hostsRefused', name: 'Requests refused for an unknown Host', unit: 'requests' },
+  // **Requests the per-client rate limit refused** (`A-39`), since the last reading. **Any is the
+  // warning**: the limit is a backstop nobody using the web UI meets, so a refusal is a runaway
+  // loop, an enumeration, or a provisioning script that needs `api.rateLimitPerMinute` raised or
+  // `POST /objects/tree` used instead. The log names the client.
+  {
+    key: 'rateLimited',
+    name: 'Requests refused by the rate limit',
+    unit: 'requests',
+    limits: {
+      upperWarning: 0,
+      warningMessage:
+        'a client is being refused by the rate limit; if it is a script that needs more, raise ' +
+        'api.rateLimitPerMinute or have it build with POST /objects/tree',
+    },
+  },
 ];
 
 export const coreHealth: SensorType = {
