@@ -557,9 +557,11 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
           'Whole-document, with one exception: a secret the request does not carry is **kept**, ' +
           'because the form it came from was rendered without it. Send an explicit `null` to ' +
           'clear one. **A secret is kept only while it goes where it went:** a request that ' +
-          "changes a webhook's `url` or a program's `path` clears the secrets sent there unless " +
-          'it carries them again, so re-pointing a template never sends a token somebody else ' +
-          'set to a new destination.',
+          "changes a webhook's `url`, or a program's `path` or any of its `args`, clears the " +
+          'secrets sent there unless it carries them again, so re-pointing a template never ' +
+          'sends a token somebody else set to a new destination. A field left out counts as ' +
+          'its default: a program with no `args` keeps its `secretArgs` through an edit that ' +
+          'sends none.',
         params: idParams,
         body: { $ref: 'ms:templateInput' },
         response: { 200: { $ref: 'ms:template' } },

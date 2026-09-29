@@ -536,9 +536,10 @@ export class TemplateService {
    * as "remove it" would break the template every time somebody fixed a typo in the subject.
    * Sending an explicit `null` clears it. See `notificationMethods.mergeSecrets`.
    *
-   * **Kept only while it goes where it went** (`A-40`). An edit that changes the webhook's URL or
-   * the program's path clears the secrets bound to it unless it sends them again, so editing a
-   * template is not a way to send somebody else's token to a host of one's own.
+   * **Kept only while it goes where it went** (`A-40`). An edit that changes the webhook's URL, or
+   * the program's path or any of its visible arguments (`A-48`), clears the secrets bound to it
+   * unless it sends them again, so editing a template is not a way to send somebody else's token
+   * to a host of one's own. A field left out counts as its default, as the save will store it.
    */
   async update(actor: Actor, id: number, input: TemplateInput): Promise<TemplateView> {
     const now = new Date();

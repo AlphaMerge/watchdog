@@ -16798,7 +16798,7 @@ because each is a decision rather than a defect:
         simulators 24, sensors 1,029 (10 skipped: the MySQL and SQL Server simulators were not
         running), probe 379, web 46 files, all passing.
 
-- [ ] **A-48 — a program template's secret arguments follow a change of its visible arguments** ·
+- [x] **A-48 — a program template's secret arguments follow a change of its visible arguments** ·
       S · A-40 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `A-48`).
       Medium. `PROGRAM_METHOD` (`methods.ts:253`) treats only `path` as the destination of
       `secretArgs`. A template editor who has never seen the key changes
@@ -16810,6 +16810,36 @@ because each is a decision rather than a defect:
       clears them unless they are sent again. The route description and the `update()` comment
       say so. Test: an args-only edit clears the secret, and the audit names it. Mutants as
       usual.
+
+      **A-48 outcome.** `PROGRAM_METHOD.secretDestinations` is `{ secretArgs: ['path', 'args'] }`.
+      - **An edit that changes any visible argument clears the secret arguments unless it sends
+        them again.** That includes adding one, removing one, or reordering them, since each is a
+        different command line. The audit's `secretsCleared` names `secretArgs`.
+      - **Found while doing it: a field left out counts as its default.** `mergeSecrets` runs
+        before validation fills the defaults in, and `args` defaults to `[]`. Compared raw, a
+        whole-document edit that did not mention `args` read as a new command line against the
+        stored `[]` and cleared the key it never touched. `#stays` now compares each destination
+        field as the save will store it, the value or its schema default, on both sides, so a row
+        stored before the default existed reads the same way. No other destination field has a
+        default today.
+      - **Said where it is read:** the `PUT /templates/:id` description (regenerated into
+        `api-reference.md`), `TemplateService.update()`'s comment, the `secretDestinations`
+        contract, and `web-ui.md`'s template section.
+      - **Tests:**
+        - `templates.test.ts` unit cases:
+          - a new gateway, an added argument, a reorder and no arguments at all each clear the
+            secret, and `secretsLeftBehind` names it;
+          - the same command line keeps it;
+          - a secret sent again is kept;
+          - arguments left out read as none, from a row with `args: []` and from one without the
+            field, and leaving out arguments that were set clears.
+        - The service case: an echoed form keeps the key with nothing in `secretsCleared`, and an
+          args-only edit removes it from storage while the audit names `secretArgs` and never
+          its value.
+        - 108 pass in the templates, program delivery, placeholders and build-hygiene suites.
+      - **Mutation 6/6:** the destination back to `path` alone, no default for a missing field,
+        the default on one side only (each way), arrays always read as the same, and the default
+        never read.
 
 - [ ] **A-49 — four answers that still reveal what the reader cannot see** · S · A-32, A-31,
       A-12 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `A-49`). All low.

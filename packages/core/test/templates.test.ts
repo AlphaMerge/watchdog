@@ -228,6 +228,74 @@ describe('notification methods', () => {
       assert.equal(other['secretArgs'], undefined);
     });
 
+    describe('and a program’s visible arguments are where its secret ones go (A-48)', () => {
+      const GATEWAY = ['--gateway', 'https://sms.example.test/api'];
+      const sms = { path: 'sms.sh', args: GATEWAY, secretArgs: ['--key', 'do-not-leak'] };
+
+      it('leaves them behind when an edit changes the arguments and not the program', () => {
+        // The attack A-40 closed for the path, through the arguments instead: the program stays
+        // `sms.sh`, and the gateway it is told to post the key to becomes somebody's own.
+        for (const args of [
+          ['--gateway', 'https://collector.attacker.test/api'],
+          ['--gateway', 'https://sms.example.test/api', '--copy-to', 'https://attacker.test/'],
+          ['https://sms.example.test/api', '--gateway'],
+          [],
+        ]) {
+          const incoming = { path: 'sms.sh', args };
+          const merged = notificationMethods.mergeSecrets('program', incoming, sms);
+          assert.equal(merged['secretArgs'], undefined, JSON.stringify(args));
+          assert.deepEqual(
+            notificationMethods.secretsLeftBehind('program', incoming, sms),
+            ['secretArgs'],
+            JSON.stringify(args),
+          );
+        }
+      });
+
+      it('keeps them through an edit that leaves the command line as it was', () => {
+        const incoming = { path: 'sms.sh', args: [...GATEWAY], timeoutMs: 5_000 };
+        const merged = notificationMethods.mergeSecrets('program', incoming, sms);
+        assert.deepEqual(merged['secretArgs'], ['--key', 'do-not-leak']);
+        assert.deepEqual(notificationMethods.secretsLeftBehind('program', incoming, sms), []);
+      });
+
+      it('keeps what the same edit sends again', () => {
+        const incoming = {
+          path: 'sms.sh',
+          args: ['--gateway', 'https://sms.example.test/v2'],
+          secretArgs: ['--key', 'typed-again'],
+        };
+        const merged = notificationMethods.mergeSecrets('program', incoming, sms);
+        assert.deepEqual(merged['secretArgs'], ['--key', 'typed-again']);
+        assert.deepEqual(notificationMethods.secretsLeftBehind('program', incoming, sms), []);
+      });
+
+      it('reads arguments left out as none, which is what the save stores', () => {
+        // Merged before validation fills the default in. A program saved with no arguments stores
+        // `args: []`, and an edit that does not mention them has not changed them.
+        const bare = { path: 'page.sh', args: [], secretArgs: ['--token=s3cret'] };
+        const kept = notificationMethods.mergeSecrets('program', { path: 'page.sh' }, bare);
+        assert.deepEqual(kept['secretArgs'], ['--token=s3cret']);
+        assert.deepEqual(
+          notificationMethods.secretsLeftBehind('program', { path: 'page.sh' }, bare),
+          [],
+        );
+        // A row stored without the field reads the same way.
+        const older = { path: 'page.sh', secretArgs: ['--token=s3cret'] };
+        const echoed = notificationMethods.mergeSecrets(
+          'program',
+          { path: 'page.sh', args: [] },
+          older,
+        );
+        assert.deepEqual(echoed['secretArgs'], ['--token=s3cret']);
+        // And leaving out arguments that were set is saving none: a change.
+        assert.deepEqual(
+          notificationMethods.secretsLeftBehind('program', { path: 'sms.sh' }, sms),
+          ['secretArgs'],
+        );
+      });
+    });
+
     it('says nothing is left behind where nothing was set', () => {
       // A webhook with no secret headers loses nothing by moving, and an audit entry saying it
       // cleared an empty bag would invite somebody to go looking for a token that never existed.
@@ -528,6 +596,53 @@ describe('templates', { skip: available ? false : 'no database' }, () => {
     const entry = audited.find((m) => m.action === 'template.updated');
     assert.ok(entry?.action === 'template.updated');
     assert.deepEqual(entry.secretsCleared, ['secretHeaders'], 'the history names what went');
+    assert.ok(!JSON.stringify(entry).includes('do-not-leak'), 'by name, never by value');
+  });
+
+  it('clears the secret arguments of a program an edit gives new arguments, and says so (A-48)', async () => {
+    const created = await templates.create(testActor, {
+      name: 'SMS',
+      method: 'program',
+      settings: {
+        path: 'sms.sh',
+        args: ['--gateway', 'https://sms.example.test/api'],
+        secretArgs: ['--key', 'do-not-leak'],
+      },
+    });
+    const stored = async (): Promise<string> => {
+      const rows = await db.query<{ settings: Record<string, unknown> }>(
+        'SELECT settings FROM notification_template WHERE id = $1',
+        [created.id],
+      );
+      return JSON.stringify(rows[0]?.settings);
+    };
+
+    // The form echoed back, with the subject fixed: the key stays, and nothing is cleared.
+    audited.length = 0;
+    const echoed = await templates.update(testActor, created.id, {
+      name: 'SMS',
+      method: 'program',
+      settings: { path: 'sms.sh', args: ['--gateway', 'https://sms.example.test/api'] },
+      subject: 'fixed the typo',
+    });
+    assert.deepEqual(echoed.redactedSettings, ['secretArgs'], 'still set');
+    const kept = audited.find((m) => m.action === 'template.updated');
+    assert.ok(kept?.action === 'template.updated');
+    assert.equal(kept.secretsCleared, undefined);
+
+    // The same program, pointed at another gateway.
+    audited.length = 0;
+    const moved = await templates.update(testActor, created.id, {
+      name: 'SMS',
+      method: 'program',
+      settings: { path: 'sms.sh', args: ['--gateway', 'https://collector.attacker.test/api'] },
+    });
+    assert.deepEqual(moved.redactedSettings, [], 'the form now shows them as not set');
+    assert.ok(!(await stored()).includes('do-not-leak'), 'gone from storage');
+
+    const entry = audited.find((m) => m.action === 'template.updated');
+    assert.ok(entry?.action === 'template.updated');
+    assert.deepEqual(entry.secretsCleared, ['secretArgs'], 'the history names what went');
     assert.ok(!JSON.stringify(entry).includes('do-not-leak'), 'by name, never by value');
   });
 

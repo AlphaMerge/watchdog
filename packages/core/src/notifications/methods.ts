@@ -65,8 +65,8 @@ export interface NotificationMethod {
    *
    * **A secret does not follow its destination.** An edit that leaves a secret out keeps it —
    * the form was rendered without it — but only while the fields named here are unchanged. Change
-   * the webhook's URL or the program's path and a secret the same request does not send again is
-   * cleared. Otherwise anybody who may edit a template could point a bearer token somebody else
+   * the webhook's URL, or the program's path or arguments, and a secret the same request does not
+   * send again is cleared. Otherwise anybody who may edit a template could point a bearer token somebody else
    * set at a host of their own, press "test", and read it off the wire.
    *
    * Required, and checked against the schema's `writeOnly` paths when the registry is built, so
@@ -272,8 +272,10 @@ export const PROGRAM_METHOD: NotificationMethod = {
   summarisable: false,
   // The arguments are content: an operator writes `--message %lastmessage` and means it.
   placeholderFields: ['args', 'secretArgs'],
-  // A password written for one script is not one for whichever script the path names next.
-  secretDestinations: { secretArgs: ['path'] },
+  // A password written for one command line is not one for the next (`A-48`). The visible
+  // arguments are as much where it goes as the path: `--gateway https://sms.example/api` becomes
+  // somebody's own URL without the program changing at all.
+  secretDestinations: { secretArgs: ['path', 'args'] },
   settingsSchema: {
     type: 'object',
     additionalProperties: false,
@@ -489,11 +491,11 @@ export class MethodRegistry {
     incoming: Readonly<Record<string, unknown>>,
     stored: Readonly<Record<string, unknown>>,
   ): boolean {
-    const destinations = this.#entries.get(methodId)?.method.secretDestinations[path] ?? [];
-    return destinations.every((field) => {
-      const segments = field.split('.');
-      return sameDestination(readAtPath(incoming, segments), readAtPath(stored, segments));
-    });
+    const method = this.#entries.get(methodId)?.method;
+    const destinations = method?.secretDestinations[path] ?? [];
+    return destinations.every((field) =>
+      sameDestination(asSaved(method, incoming, field), asSaved(method, stored, field)),
+    );
   }
 
   #entry(id: string): {
@@ -575,6 +577,28 @@ function checkDestinations(method: NotificationMethod, writeOnly: readonly strin
       }
     }
   }
+}
+
+/**
+ * A destination field as the template will be saved with it: absent reads as the schema's default.
+ *
+ * The merge runs before validation fills the defaults in, and a whole-document edit that leaves
+ * out a field with a default means the default. Read raw, a program template saved with no
+ * arguments stores `args: []`, and an edit that did not mention them would read as a new command
+ * line and clear the secret it never touched (`A-48`).
+ */
+function asSaved(
+  method: NotificationMethod | undefined,
+  settings: Readonly<Record<string, unknown>>,
+  field: string,
+): unknown {
+  const value = readAtPath(settings, field.split('.'));
+  if (value !== undefined) return value;
+  const properties = (method?.settingsSchema['properties'] ?? {}) as Record<string, unknown>;
+  const declared = properties[field];
+  return typeof declared === 'object' && declared !== null
+    ? (declared as Record<string, unknown>)['default']
+    : undefined;
 }
 
 /**

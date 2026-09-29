@@ -150,9 +150,9 @@ Notification templates — what a message says, who receives it, and when it is 
   administrator may list who is in the installation. Anyone else who edits a template sees the
   users and groups already on it by number, keeps them as they are, and can still remove them.
 - **A secret stays with where it is sent.** Secret headers and secret arguments are never shown,
-  and saving a form that leaves them blank keeps them. Changing an HTTP action's URL or a
-  program's name clears the secrets that went there, unless you enter them again in the same
-  save. After such a save the form shows them as not set, and the template's history says which
+  and saving a form that leaves them blank keeps them. Changing an HTTP action's URL, or a
+  program's name or any of its arguments, clears the secrets that went there, unless you enter
+  them again in the same save. After such a save the form shows them as not set, and the template's history says which
   were cleared. This is so that editing a template cannot send a token somebody else set to an
   address of your choosing.
 - **An HTTP action sends its subject as the `x-ms-subject` header**, so an endpoint can route on
