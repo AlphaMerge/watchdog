@@ -41,3 +41,33 @@ export function reorderSiblings(
   next.splice(to, 0, id);
   return { next, from, to };
 }
+
+/**
+ * The same move, made among only the siblings its caller can see (`A-46`).
+ *
+ * `seen` is those siblings, or null for a caller who sees them all. **Every other sibling keeps
+ * its index**: the ones the caller can see are reordered among themselves and put back into the
+ * places they held, so "up" passes the nearest visible sibling above and "last" lands on the last
+ * visible place. A hole is neither moved nor counted, and a caller cannot tell by moving an object
+ * whether anything sits between two of the siblings it sees.
+ *
+ * `from` and `to` are indices among all the siblings, as `reorderSiblings` gives them.
+ */
+export function reorderAmong(
+  ordered: readonly ObjectId[],
+  seen: ReadonlySet<ObjectId> | null,
+  id: ObjectId,
+  move: SiblingMove,
+): Reordering | null {
+  if (seen === null) return reorderSiblings(ordered, id, move);
+  const change = reorderSiblings(
+    ordered.filter((one) => seen.has(one)),
+    id,
+    move,
+  );
+  if (change === null) return null;
+
+  const placed = change.next.values();
+  const next = ordered.map((one) => (seen.has(one) ? (placed.next().value ?? one) : one));
+  return { next, from: ordered.indexOf(id), to: next.indexOf(id) };
+}

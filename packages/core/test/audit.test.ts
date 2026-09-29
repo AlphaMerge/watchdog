@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
 import { ApiServer } from '../src/api/server.js';
+import { Visibility } from '../src/auth/access.js';
 import {
   AuditRepository,
   CompositeAuditSink,
@@ -290,7 +291,7 @@ describe(
       await service.create(testActor, { kind: 'group', parentId: probeId, name: 'bbb-second' });
       await db.query('DELETE FROM audit_log');
 
-      await service.reorder(testActor, first.id, 'last', { kind: 'none' });
+      await service.reorder(testActor, first.id, 'last', { kind: 'none' }, Visibility.EVERYTHING);
 
       const [entry] = await entries(first.id);
       assert.ok(entry);

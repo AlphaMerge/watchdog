@@ -25,7 +25,7 @@ import { PauseRepository, flattenActor, type PauseCursor } from './pause-reposit
 import type { Actor, AuditSink, Mutation } from './audit.js';
 import { assertDeviceHost } from './device-host.js';
 import { ObjectError, notFound, parentNotFound } from './errors.js';
-import { reorderSiblings } from './ordering.js';
+import { reorderAmong } from './ordering.js';
 import { planTree, type TreeNodeInput, type TreePlanInput } from './tree-plan.js';
 import { versionConflict } from './repository.js';
 import type { ObjectRepository } from './repository.js';
@@ -2065,12 +2065,18 @@ export class ObjectService {
    * A move that changes nothing — up at the top, down at the bottom — is a no-op that returns
    * the object unchanged, with no version bump and no audit entry. Someone holding the up arrow
    * on the first item is not making a mistake.
+   *
+   * **Among the siblings `visibility` shows** (`A-46`). Every other sibling keeps its index and
+   * nothing its owners hold goes stale: "up" passes the nearest visible sibling, and the top the
+   * caller can see is the top, whatever sits above it. The entry records positions among every
+   * sibling, and the history leaves them out for a reader who cannot see them all.
    */
   async reorder(
     actor: Actor,
     id: ObjectId,
     move: SiblingMove,
     pre: Precondition,
+    visibility: Visibility,
   ): Promise<ObjectDetail> {
     return this.#db.tx(async (q) => {
       await this.#repo.lockTreeExclusive(q);
@@ -2087,10 +2093,16 @@ export class ObjectService {
       }
 
       const siblings = await this.#repo.siblingOrder(q, object.parentId);
-      const change = reorderSiblings(siblings, id, move);
+      const seen = visibility.everything ? null : await visibility.visibleAmong(q, siblings);
+      const change = reorderAmong(siblings, seen, id, move);
       if (change === null) return this.#redact(object);
 
-      await this.#repo.writeSiblingOrder(q, object.parentId, change.next);
+      await this.#repo.writeSiblingOrder(
+        q,
+        object.parentId,
+        change.next,
+        new Set(seen === null ? [] : siblings.filter((one) => !seen.has(one))),
+      );
 
       const after = await this.#repo.get(q, id);
       if (after === null) throw notFound(id);

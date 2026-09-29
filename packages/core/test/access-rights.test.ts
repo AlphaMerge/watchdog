@@ -529,6 +529,9 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
       visible: number;
       hidden: number;
       children: number;
+      /** `hidesBeneath` and `hidesChildOf` asked, and how many of them answered yes. */
+      holes: number;
+      holesFound: number;
     }
 
     /**
@@ -541,6 +544,7 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
       paths: ReadonlyMap<number, readonly number[]>,
       ids: readonly number[],
       tally: Tally,
+      options: { holes?: boolean } = {},
     ): Promise<void> {
       for (const { name, principal } of principalsOf()) {
         const expected = await access.resolveManyFor(principal, ids);
@@ -598,6 +602,36 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
           if (readable) tally.visible += 1;
           else tally.hidden += 1;
         }
+
+        // **Whether a history's counts and positions count a hole** (`A-46`): something hidden
+        // strictly beneath a visible object, and a hidden child of any object at all. Asked of
+        // every container, since a leaf answers no without a query worth checking.
+        if (options.holes !== true) continue;
+        const readable = (id: number): boolean => atLeast(expected.get(id) ?? 'none', 'read');
+        const hidesBeneath = new Set<number>();
+        const hidesChild = new Set<number>();
+        for (const id of ids) {
+          if (readable(id)) continue;
+          const path = paths.get(id) ?? [];
+          for (const above of path.slice(0, -1)) hidesBeneath.add(above);
+          const parent = path.at(-2);
+          if (parent !== undefined) hidesChild.add(parent);
+        }
+        const containers = new Set(ids.map((id) => paths.get(id)?.at(-2)));
+        for (const id of ids) {
+          if (!containers.has(id)) continue;
+          const where = `${label}, ${name}, object ${String(id)}`;
+          if (readable(id)) {
+            const beneath = await visibility.hidesBeneath(db, id);
+            assert.equal(beneath, hidesBeneath.has(id), `hidesBeneath disagreed: ${where}`);
+            tally.holes += 1;
+            if (beneath) tally.holesFound += 1;
+          }
+          const child = await visibility.hidesChildOf(db, id);
+          assert.equal(child, hidesChild.has(id), `hidesChildOf disagreed: ${where}`);
+          tally.holes += 1;
+          if (child) tally.holesFound += 1;
+        }
       }
     }
 
@@ -606,10 +640,18 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
       const paths = await pathsOfEverything();
       const ids = [...paths.keys()].sort((a, b) => a - b);
 
-      const tally: Tally = { comparisons: 0, visible: 0, hidden: 0, children: 0 };
+      const tally: Tally = {
+        comparisons: 0,
+        visible: 0,
+        hidden: 0,
+        children: 0,
+        holes: 0,
+        holesFound: 0,
+      };
       for (let seed = 1; seed <= 40; seed += 1) {
         await scatterGrants(random(seed), ids);
-        await agree(`seed ${String(seed)}`, paths, ids, tally);
+        // The hole questions on a quarter of the seeds: a query each, per container, per role.
+        await agree(`seed ${String(seed)}`, paths, ids, tally, { holes: seed % 4 === 0 });
       }
 
       // Not vacuous: both answers occurred plenty, so a condition that said "yes" to everything
@@ -618,6 +660,11 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
       assert.ok(tally.visible > 500, `only ${String(tally.visible)} visible answers`);
       assert.ok(tally.hidden > 500, `only ${String(tally.hidden)} hidden answers`);
       assert.ok(tally.children > 1000, `only ${String(tally.children)} children checked`);
+      assert.ok(tally.holesFound > 100, `only ${String(tally.holesFound)} holes found`);
+      assert.ok(
+        tally.holes - tally.holesFound > 100,
+        `only ${String(tally.holes - tally.holesFound)} objects without a hole`,
+      );
     });
 
     it('agrees on every nested shape of hole in a readable root (A-33)', async () => {
@@ -727,14 +774,21 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
 
       const groupIds = { alpha: alphaId, beta: betaId, gamma: gammaId };
       const readers = principalsOf().filter(({ principal }) => principal.scope !== 'none');
-      const tally: Tally = { comparisons: 0, visible: 0, hidden: 0, children: 0 };
+      const tally: Tally = {
+        comparisons: 0,
+        visible: 0,
+        hidden: 0,
+        children: 0,
+        holes: 0,
+        holesFound: 0,
+      };
       for (const { shape, grants, seen } of SHAPES) {
         await db.query('DELETE FROM object_access');
         await access.grant(harness.rootId, alphaId, 'read', actorNamed('agreement'));
         for (const [on, group, right] of grants) {
           await access.grant(named[on], groupIds[group], right, actorNamed('agreement'));
         }
-        await agree(shape, paths, ids, tally);
+        await agree(shape, paths, ids, tally, { holes: true });
 
         for (const { name, principal } of readers) {
           const visibility = await access.visibilityFor(principal);

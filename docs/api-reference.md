@@ -91,7 +91,7 @@ Listed by login, for the notification recipients editor. Only what choosing an a
 
 ### `GET /api/v1/objects/{id}/audit`
 
-An object's configuration history, newest first: who changed it, when, and what changed. Page with `before`, using the `nextBefore` from the previous page. Sensor parameters changed are listed in `summary.paramsChanged` by key. Values appear in `diff` for parameters the sensor type does not mark `writeOnly`; a credential never appears in either, in any entry, at any age. **Grant entries are an administrator's**, as the grants themselves are: `full` on an object does not let an account read who else may see it, so for anybody else they are left out and a page is still a full page of the rest.
+An object's configuration history, newest first: who changed it, when, and what changed. Page with `before`, using the `nextBefore` from the previous page. Sensor parameters changed are listed in `summary.paramsChanged` by key. Values appear in `diff` for parameters the sensor type does not mark `writeOnly`; a credential never appears in either, in any entry, at any age. **Grant entries are an administrator's**, as the grants themselves are: `full` on an object does not let an account read who else may see it, so for anybody else they are left out and a page is still a full page of the rest. **So are a probe's trust entries** (`A-46`) — its address, where it may connect from and the notes on it — as `GET /probes` is. **A count of what is beneath the object** (`sensorsAffected`, `movedCount`, `clonedCount`) is left out for a reader who cannot see all of it, and a reorder's positions for one who cannot see every sibling: each was counted over whoever acted, and would count what this reader cannot see.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -1320,7 +1320,7 @@ Changes what it is given and keeps the rest. **Where a sensor sends its inherite
 
 ### `POST /api/v1/objects/{id}/order`
 
-Moves an object within its parent's children, the way PRTG's move up / move down does. Siblings nobody has arranged keep sorting by name, so a tree that has never been ordered by hand reads exactly as it did before. Listings honour the arrangement through `GET /objects?parentId=…&sort=manual` and through the tree endpoint, which always does. A move that changes nothing is a no-op, not an error.
+Moves an object within its parent's children, the way PRTG's move up / move down does. Siblings nobody has arranged keep sorting by name, so a tree that has never been ordered by hand reads exactly as it did before. Listings honour the arrangement through `GET /objects?parentId=…&sort=manual` and through the tree endpoint, which always does. A move that changes nothing is a no-op, not an error. **Among the siblings the caller can see** (`A-46`): every other sibling keeps its place, "up" passes the nearest one the caller can see, and the top it can see is the top.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |

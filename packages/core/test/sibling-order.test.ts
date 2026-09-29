@@ -4,8 +4,9 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
 import { ApiServer } from '../src/api/server.js';
 import { AuditRepository } from '../src/audit/store.js';
-import type { Database } from '../src/db/pool.js';
-import { reorderSiblings } from '../src/objects/ordering.js';
+import type { Database, Queryable } from '../src/db/pool.js';
+import { reorderAmong, reorderSiblings } from '../src/objects/ordering.js';
+import { ObjectRepository } from '../src/objects/repository.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import {
   createScratchDatabase,
@@ -48,6 +49,32 @@ describe('sibling reordering', () => {
 
   it('does nothing for an object that is not among them', () => {
     assert.equal(reorderSiblings(list, 99, 'up'), null);
+  });
+
+  it('moves among only the siblings it is shown, leaving every other at its index (A-46)', () => {
+    const seen = new Set([1, 3, 5]);
+    // "Up" passes the nearest one shown; 2 and 4 keep their places.
+    assert.deepEqual(reorderAmong(list, seen, 5, 'up'), { next: [1, 2, 5, 4, 3], from: 4, to: 2 });
+    assert.deepEqual(reorderAmong(list, seen, 1, 'down')?.next, [3, 2, 1, 4, 5]);
+    assert.deepEqual(reorderAmong(list, seen, 5, 'first')?.next, [5, 2, 1, 4, 3]);
+    assert.deepEqual(reorderAmong(list, seen, 1, 'last')?.next, [3, 2, 5, 4, 1]);
+  });
+
+  it('stops at the first and last places it is shown, whatever is beyond them (A-46)', () => {
+    const seen = new Set([2, 3, 4]);
+    assert.equal(reorderAmong(list, seen, 2, 'up'), null);
+    assert.equal(reorderAmong(list, seen, 2, 'first'), null);
+    assert.equal(reorderAmong(list, seen, 4, 'down'), null);
+    assert.equal(reorderAmong(list, seen, 4, 'last'), null);
+    // Nor does it move one it is not shown.
+    assert.equal(reorderAmong(list, seen, 1, 'down'), null);
+  });
+
+  it('is the plain move for a caller shown them all', () => {
+    for (const move of ['up', 'down', 'first', 'last'] as const) {
+      assert.deepEqual(reorderAmong(list, null, 3, move), reorderSiblings(list, 3, move));
+      assert.deepEqual(reorderAmong(list, new Set(list), 3, move), reorderSiblings(list, 3, move));
+    }
   });
 });
 
@@ -334,6 +361,63 @@ describe(
           toIndex: 0,
         },
       ]);
+    });
+
+    interface Place {
+      version: number;
+      sort_order: number | null;
+      updated_at: Date;
+    }
+    const placeOf = async (q: Queryable, name: string): Promise<Place> => {
+      const [row] = await q.query<Place>(
+        'SELECT version, sort_order, updated_at FROM object WHERE id = $1',
+        [ids[name] ?? 0],
+      );
+      return row ?? assert.fail(`no ${name}`);
+    };
+
+    it('writes a sibling’s place quietly when told it is unseen, and bumps whatever comes after (A-46)', async () => {
+      // Nobody has arranged the group: every place is NULL.
+      const repository = new ObjectRepository();
+      const order = ['alpha', 'bravo', 'charlie', 'delta', 'echo'].map((name) => ids[name] ?? 0);
+      const bravo = await placeOf(db, 'bravo');
+      const alpha = await placeOf(db, 'alpha');
+      await db.tx(async (q) => {
+        await repository.writeSiblingOrder(q, groupId, order, new Set([ids['bravo'] ?? 0]));
+        const quiet = await placeOf(q, 'bravo');
+        assert.equal(quiet.sort_order, 1);
+        assert.equal(quiet.version, bravo.version);
+        assert.deepEqual(quiet.updated_at, bravo.updated_at);
+        // The others are written after it, in the same transaction, and bumped.
+        assert.equal((await placeOf(q, 'alpha')).version, alpha.version + 1);
+
+        // **Cleared straight after**: a write later in the same transaction bumps, even of the
+        // row that was spared and even when it is only a place.
+        await q.query('UPDATE object SET sort_order = 7 WHERE id = $1', [ids['bravo'] ?? 0]);
+        assert.equal((await placeOf(q, 'bravo')).version, bravo.version + 1);
+      });
+    });
+
+    it('spares a change of place and nothing else, and only in the transaction that asks (A-46)', async () => {
+      const bravo = ids['bravo'] ?? 0;
+      /** How far one UPDATE moved bravo's version. */
+      const step = async (q: Queryable, set: string): Promise<number> => {
+        const before = await placeOf(q, 'bravo');
+        await q.query(`UPDATE object SET ${set} WHERE id = $1`, [bravo]);
+        return (await placeOf(q, 'bravo')).version - before.version;
+      };
+      await db.tx(async (q) => {
+        await q.query(`SELECT set_config('ms.sibling_order_only', 'on', true)`);
+        const before = await placeOf(q, 'bravo');
+        assert.equal(await step(q, 'sort_order = 4'), 0);
+        assert.equal(await step(q, 'sort_order = NULL'), 0, 'back to no place');
+        assert.deepEqual((await placeOf(q, 'bravo')).updated_at, before.updated_at, 'its time');
+        assert.equal(await step(q, `sort_order = 5, name = 'bravo-2'`), 1, 'a rename with it');
+        assert.equal(await step(q, `name = 'bravo-3'`), 1, 'a rename alone');
+        assert.equal(await step(q, 'sort_order = sort_order'), 1, 'no change at all');
+      });
+      // Transaction-local: the next one has not asked.
+      assert.equal(await step(db, 'sort_order = 6'), 1);
     });
   },
 );

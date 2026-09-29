@@ -16894,7 +16894,7 @@ because each is a decision rather than a defect:
 
       Mutation 2/2: the owner's answer not put back, and the live fact not recounted.
 
-- [ ] **A-46 — three places still show or count what the reader cannot see** · S · A-26, A-31,
+- [x] **A-46 — three places still show or count what the reader cannot see** · S · A-26, A-31,
       A-35 · Found in review round four (`findings/2026-09-29-review-round-4.md`, `A-46`). All
       low.
       - **Reorder** (`objects/service.ts:1951`) rewrites hidden siblings' rows, bumping their
@@ -16913,6 +16913,90 @@ because each is a decision rather than a defect:
       - history counts are dropped or flagged for a reader with holes under the object;
       - the unchecked writes are checked, with the outcome listing them.
       Tests in `object-visibility.test.ts`. Mutants as usual.
+
+      **A-46 outcome (2026-09-29).** Migration 066.
+      - **Reorder moves among the siblings its caller can see.** The route passes the caller's
+        visibility, and `reorderAmong` reorders the visible siblings as before and puts them back
+        into the places they held. Every hidden sibling keeps its index. "Up" passes the nearest
+        visible sibling, and "up" and "first" stop at the top the caller can see, so a no-op there
+        reads the same whether or not something hidden sits above.
+        - **A hidden row is written only where it does not hold its place yet.** That happens on
+          a parent nobody arranged, or one arranged in part: a NULL sorts after every place, so
+          leaving the row alone would slide it to the end. The index written is the position the
+          NULL ordering already gave it. The write runs under `ms.sibling_order_only`, set with
+          `set_config(…, true)` and cleared straight after that one statement. Migration 066's
+          `object_touch` skips the version and `updated_at` bump only while that is set and
+          `sort_order` is the only column that differs. Its rollback restores 002's body, byte for
+          byte.
+        - **The entry still records positions among every sibling**, so an administrator's
+          history is exact. The history route empties the diff for a reader with a hidden child
+          of the entry's parent, whoever moved it. Positions recorded over the mover's view would
+          still count, for another reader, siblings that reader cannot see (an administrator's
+          reorder read by a branch account), and entries from before this fix count them anyway.
+          This departs from the finding's "positions among visible siblings". The mover with the
+          hole reads no positions for its own move; the tree shows it where it went.
+      - **Probe-trust entries are an administrator's**, as grants are:
+        `withoutCategories: ['grant', 'probe']` for anyone who does not clear `admin`, role and
+        scope both. The route description and `administration.md` say so.
+      - **History counts are dropped for a reader with a hole beneath the object.** That means
+        `sensorsAffected`, `movedCount` and `clonedCount`. `Visibility.hidesBeneath` climbs from
+        the reader's hidden boundaries and never descends a subtree. The entries stay, and filling
+        the hole in brings the counts back. One bit remains, whether the count is there, which says
+        a hole sits beneath the object: the bit `A-35`'s refusals already give.
+      - **Checked** (the ticket's "Not checked"):
+        - A setting set or reverted on a container, singly or in bulk, writes only that
+          container's `object_setting` row. `object_touch_owner` bumps only the container. The
+          hole inherits the value, as `A-31` decided for pauses, and the entry carries no count.
+          Tested.
+        - A pause or resume, singly or in bulk, writes the `object_pause` row on the container
+          only. `recompute` writes `sensor_runtime`, which bumps no version. The counts are the
+          history fix above.
+        - A schedule or dependency setting on a container: `ScheduleSync` and `DependencySync`
+          write `sensor_runtime` only.
+        - A bulk move or delete is partitioned by subtree (`A-35`), so a caller with a hole
+          beneath is refused before anything is written. An administrator's `movedCount` is the
+          history fix.
+        - A bulk clone copies only what its caller sees (`A-35`). `clonedCount` is the history
+          fix, for a reader with a hole under the copy: the copy carries its source's grants.
+        - **A device's new host clears the secrets in every sensor beneath it (`A-41`), hidden
+          ones included**, each with a version bump and an entry of its own. Left as it is:
+          otherwise the hidden sensor's secret goes to a host its writer chose, and refusing
+          would say the hole is there. The device's own answer and history name none of those
+          sensors.
+        - **Found, and fixed here:** the answers to `PATCH /objects/:id` and to a reorder carried
+          `childCount` over every child, holes included. Both now count what the caller can see,
+          as a read does (`A-12`).
+      - **Tests:**
+        - `sibling-order.test.ts`, 5:
+          - three `reorderAmong` units: up, down, first and last among the shown; the stops at
+            the shown ends; and the plain move for a caller shown everything;
+          - the repository writes a place quietly, and a later write in the same transaction
+            bumps, even of that row;
+          - the setting spares a change of place and nothing else (a rename with it, a rename
+            alone, no change at all), and only in the transaction that set it.
+        - `migrator.test.ts`, 1: 066 forward, back, with `pg_get_functiondef` identical to before,
+          and forward again.
+        - `object-visibility.test.ts`, 5:
+          - an unarranged parent: the order, the hidden row's place, version, time and tag, the
+            moved row's bump, the answer's count, and positions for an administrator but not for
+            the operator until the sibling is granted;
+          - a parent arranged in part: up, first and last, a place already written not written
+            again, and no-ops under a hidden top;
+          - probe trust as watcher, operator, administrator and an administrator's read token;
+          - counts two levels down: an acknowledgement, a drill, a pause, a move and a clone,
+            dropped for the watcher, kept for a sensor with nothing beneath, and back once the
+            hole is filled;
+          - settings on a container, singly and in bulk, and a PATCH's `childCount`.
+        - `access-rights.test.ts`: `hidesBeneath` and `hidesChildOf` agree with the resolver on
+          every container, for every role and scope, on every fixed hole shape and a quarter of
+          the random seeds.
+      - **Mutation 20/20.** The walk, the boundaries and the condition of both `Visibility`
+        questions; the three conditions of 066's trigger; the setting left off, and not cleared
+        after; the service's visibility and its unseen set; positions among the visible only;
+        reorder ignoring what its caller sees (written `seen === null || seen.size >= 0`, since
+        the first form did not compile); probe entries for everyone; counts dropped without a
+        hole, and never; positions never dropped, and dropped for a hole anywhere beneath the
+        parent; `clonedCount` kept; and the PATCH and reorder answers counting every child.
 
 - [x] **A-47 — Host, throttle, proxy range and idle timeout: four gaps in `A-36` and `A-38`** · M
       · A-36, A-38 · Found in review round four (`findings/2026-09-29-review-round-4.md`,

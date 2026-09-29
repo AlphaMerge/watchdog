@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it, type TestContext } from 'node:test';
 import type { FastifyInstance } from 'fastify';
+import { PROTOCOL_VERSION } from '@ms/shared';
 import type { WebSocket } from 'ws';
 import { ApiServer } from '../src/api/server.js';
 import { AccessService } from '../src/auth/access.js';
@@ -2877,6 +2878,392 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         [],
         'a read token read a grant entry',
       );
+    });
+  });
+
+  describe('what a reorder, a probe’s trust and a count tell a reader with holes (A-46)', () => {
+    before(() => {
+      // The harness only captures; the history is read from what is stored.
+      harness.audit.also = new DatabaseAuditSink();
+    });
+
+    after(() => {
+      harness.audit.also = undefined;
+    });
+
+    const create = async (input: Record<string, unknown>): Promise<number> =>
+      (await harness.service.create(testActor, input as never)).id;
+    const grant = (id: number, right: 'none' | 'read' | 'write'): Promise<unknown> =>
+      access.grant(id, teamId, right, actorNamed('visibility'));
+
+    /** A parent's children, in the order everybody who sees them all is shown them. */
+    const orderOf = async (parentId: number): Promise<string[]> =>
+      (
+        await db.query<{ name: string }>(
+          'SELECT name FROM object WHERE parent_id = $1 ORDER BY sort_order NULLS LAST, name, id',
+          [parentId],
+        )
+      ).map((row) => row.name);
+
+    interface Row {
+      version: number;
+      sort_order: number | null;
+      updated_at: Date;
+    }
+    const rowOf = async (id: number): Promise<Row> => {
+      const rows = await db.query<Row>(
+        'SELECT version, sort_order, updated_at FROM object WHERE id = $1',
+        [id],
+      );
+      assert.ok(rows[0] !== undefined, `no object ${String(id)}`);
+      return rows[0];
+    };
+
+    /** What an administrator's client holds for it, which a write it cannot see must not move. */
+    const adminTag = async (id: number): Promise<unknown> => {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/objects/${String(id)}`,
+        headers: as('admin'),
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      return response.headers.etag;
+    };
+
+    const reorder = async (id: number, move: string, login = 'operator'): Promise<number> => {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/v1/objects/${String(id)}/order`,
+        headers: as(login),
+        payload: { move },
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      return response.json<{ childCount: number }>().childCount;
+    };
+
+    interface Entry {
+      action: string;
+      summary: Record<string, unknown>;
+      diff: unknown[];
+    }
+    const historyOf = async (id: number, headers: Record<string, string>): Promise<Entry[]> => {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/objects/${String(id)}/audit`,
+        headers,
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      return response.json<{ items: Entry[] }>().items;
+    };
+    const positionsIn = async (id: number, login: string): Promise<unknown[]> =>
+      (await historyOf(id, as(login)))
+        .filter((entry) => entry.action === 'object.reordered')
+        .map((entry) => entry.diff);
+
+    /** Unchanged, as its owners' clients hold it: its version, its time and its tag. */
+    async function untouched(id: number, before: Row, tag: unknown, what: string): Promise<void> {
+      const after = await rowOf(id);
+      assert.equal(after.version, before.version, `${what}: its version moved`);
+      assert.deepEqual(after.updated_at, before.updated_at, `${what}: its time moved`);
+      assert.equal(await adminTag(id), tag, `${what}: its tag moved`);
+    }
+
+    it('moves an object among the siblings its mover can see, on a parent nobody arranged', async () => {
+      // Every place is NULL, so the order is by name, and the hidden sibling sits second.
+      const shelf = await create({ kind: 'group', parentId: branchId, name: 'a-shelf' });
+      const first = await create({ kind: 'group', parentId: shelf, name: 'a-1' });
+      const hidden = await create({ kind: 'group', parentId: shelf, name: 'a-2' });
+      const moved = await create({ kind: 'group', parentId: shelf, name: 'a-3' });
+      await create({ kind: 'group', parentId: shelf, name: 'a-4' });
+      await create({ kind: 'group', parentId: moved, name: 'a-3-kept' });
+      const hole = await create({ kind: 'group', parentId: moved, name: `${MARK}-3-hole` });
+      await grant(shelf, 'write');
+      await grant(hidden, 'none');
+      await grant(hole, 'none');
+
+      const hiddenBefore = await rowOf(hidden);
+      const hiddenTag = await adminTag(hidden);
+      const movedBefore = await rowOf(moved);
+      const firstBefore = await rowOf(first);
+
+      // And the answer counts the children its caller can see, as a read of it does (`A-12`).
+      assert.equal(await reorder(moved, 'up'), 1);
+
+      // "Up" passed the nearest sibling the operator can see and nothing else moved: the hidden
+      // one kept its place, and the place written into its row is the one the name order gave it.
+      assert.deepEqual(await orderOf(shelf), ['a-3', 'a-2', 'a-1', 'a-4']);
+      assert.equal((await rowOf(hidden)).sort_order, 1);
+      await untouched(hidden, hiddenBefore, hiddenTag, 'the hidden sibling');
+      // Written after the hidden row, in the same transaction, and bumped as ever: the setting
+      // that spared the hidden row was cleared straight after it.
+      assert.equal((await rowOf(moved)).version, movedBefore.version + 1);
+      assert.equal((await rowOf(first)).version, firstBefore.version + 1);
+
+      // The history. An administrator reads the positions among every sibling; a reader with a
+      // hidden sibling reads none, since they count it — whoever moved it.
+      const moveUp = [{ field: 'siblingPosition', before: 2, after: 0 }];
+      assert.deepEqual(await positionsIn(moved, 'admin'), [moveUp]);
+      assert.deepEqual(await positionsIn(moved, 'operator'), [[]]);
+      // ...and a reader who can see every sibling reads them, from the same entry.
+      await grant(hidden, 'read');
+      assert.deepEqual(await positionsIn(moved, 'operator'), [moveUp]);
+    });
+
+    it('moves an object among the siblings its mover can see, on a parent arranged in part', async () => {
+      const rack = await create({ kind: 'group', parentId: branchId, name: 'a-rack' });
+      const ids = new Map<string, number>();
+      for (const name of ['b-1', 'b-2', 'b-3', 'b-4', 'b-5']) {
+        ids.set(name, await create({ kind: 'group', parentId: rack, name }));
+      }
+      const id = (name: string): number => ids.get(name) ?? 0;
+      // Two placed by hand and three never: b-4, b-1, then the rest by name.
+      await db.query('UPDATE object SET sort_order = 0 WHERE id = $1', [id('b-4')]);
+      await db.query('UPDATE object SET sort_order = 1 WHERE id = $1', [id('b-1')]);
+      assert.deepEqual(await orderOf(rack), ['b-4', 'b-1', 'b-2', 'b-3', 'b-5']);
+      await grant(rack, 'write');
+      await grant(id('b-2'), 'none');
+
+      let hiddenBefore = await rowOf(id('b-2'));
+      let hiddenTag = await adminTag(id('b-2'));
+      const placed = await rowOf(id('b-4'));
+
+      await reorder(id('b-5'), 'up');
+      assert.deepEqual(await orderOf(rack), ['b-4', 'b-1', 'b-2', 'b-5', 'b-3']);
+      assert.equal((await rowOf(id('b-2'))).sort_order, 2);
+      await untouched(id('b-2'), hiddenBefore, hiddenTag, 'b-2 on "up"');
+      // A place already written down is not written again.
+      assert.equal((await rowOf(id('b-4'))).version, placed.version);
+
+      // "First" and "last" are the first and last places the operator can see.
+      await reorder(id('b-3'), 'first');
+      assert.deepEqual(await orderOf(rack), ['b-3', 'b-4', 'b-2', 'b-1', 'b-5']);
+      await reorder(id('b-4'), 'last');
+      assert.deepEqual(await orderOf(rack), ['b-3', 'b-1', 'b-2', 'b-5', 'b-4']);
+      await untouched(id('b-2'), hiddenBefore, hiddenTag, 'b-2 on "first" and "last"');
+
+      // With the hidden sibling on top, the top the operator can see is where "up" and "first"
+      // stop — which is also what they do with nothing above it, so neither tells.
+      await reorder(id('b-2'), 'first', 'admin');
+      assert.deepEqual(await orderOf(rack), ['b-2', 'b-3', 'b-1', 'b-5', 'b-4']);
+      hiddenBefore = await rowOf(id('b-2'));
+      hiddenTag = await adminTag(id('b-2'));
+      const top = await rowOf(id('b-3'));
+      await reorder(id('b-3'), 'up');
+      await reorder(id('b-3'), 'first');
+      assert.deepEqual(await orderOf(rack), ['b-2', 'b-3', 'b-1', 'b-5', 'b-4']);
+      assert.equal((await rowOf(id('b-3'))).version, top.version, 'a no-op was written');
+      await untouched(id('b-2'), hiddenBefore, hiddenTag, 'b-2 under a no-op');
+
+      // The history of a sibling the operator moved: positions for an administrator, none for
+      // the operator, who cannot see b-2.
+      assert.deepEqual(await positionsIn(id('b-4'), 'admin'), [
+        [{ field: 'siblingPosition', before: 1, after: 4 }],
+      ]);
+      assert.deepEqual(await positionsIn(id('b-4'), 'operator'), [[]]);
+    });
+
+    it('keeps a probe’s trust entries for an administrator, as its grants are', async () => {
+      const site = await create({ kind: 'probe', parentId: harness.rootId, name: 'a-site-probe' });
+      const registry = new ProbeRegistry({
+        db,
+        audit: new DatabaseAuditSink(),
+        logger: silent,
+        enrolmentKeys: ['visibility-key'],
+      });
+      const gid = 'a46-site';
+      await registry.admit({
+        gid,
+        displayName: 'a-site',
+        agentVersion: '0.1.0',
+        protocolVersion: PROTOCOL_VERSION,
+        accessKey: 'visibility-key',
+        remoteAddress: '192.0.2.44',
+      });
+      await registry.approve(gid, site, actorNamed('visibility'));
+      await registry.setAllowFrom(gid, ['192.0.2.0/24'], actorNamed('visibility'));
+      await harness.service.setSetting(testActor, site, 'scan.intervalSeconds', 300);
+      // How a customer is handed their own site's probe.
+      await grant(site, 'read');
+
+      const actions = async (headers: Record<string, string>): Promise<string[]> =>
+        (await historyOf(site, headers)).map((entry) => entry.action);
+      const trust = (list: readonly string[]): string[] =>
+        list.filter((action) => action.startsWith('probe.'));
+
+      // The address it called from, where it may call from and the notes on it are what
+      // `GET /probes` keeps `ADMIN`: nobody else reads them here, and the rest is still read.
+      for (const login of ['watcher', 'operator']) {
+        const seen = await actions(as(login));
+        assert.deepEqual(trust(seen), [], `${login} read a trust entry`);
+        assert.deepEqual(seen, ['setting.set', 'object.created'], login);
+      }
+      assert.deepEqual(trust(await actions(as('admin'))), [
+        'probe.allowFrom.set',
+        'probe.approved',
+      ]);
+
+      // The bar is `ADMIN`'s, role and scope both, as for grants (`A-26`).
+      const issued = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/tokens',
+        headers: as('admin'),
+        payload: { name: 'trust history', scope: 'read' },
+      });
+      assert.equal(issued.statusCode, 201, issued.body);
+      const bearer = { authorization: `Bearer ${issued.json<{ secret: string }>().secret}` };
+      assert.deepEqual(trust(await actions(bearer)), [], 'a read token read a trust entry');
+    });
+
+    it('leaves out a count of what is beneath an object for a reader with a hole there', async () => {
+      const room = await create({ kind: 'group', parentId: branchId, name: 'a-room' });
+      const box = await create({
+        kind: 'device',
+        parentId: room,
+        name: 'a-counted',
+        host: '10.0.3.1',
+      });
+      const shown = [
+        await create({ kind: 'sensor', parentId: box, name: 'a-c1', sensorType: 'icmp.ping' }),
+        await create({ kind: 'sensor', parentId: box, name: 'a-c2', sensorType: 'icmp.ping' }),
+      ];
+      const hole = await create({
+        kind: 'sensor',
+        parentId: box,
+        name: `${MARK}-c-hole`,
+        sensorType: 'icmp.ping',
+      });
+      await grant(hole, 'none');
+      await scan([...shown, hole], false);
+
+      // An administrator's actions, each over all three sensors — two levels down, from the room.
+      const act = async (
+        method: 'POST' | 'DELETE',
+        url: string,
+        payload?: object,
+      ): Promise<void> => {
+        const response = await app.inject({
+          method,
+          url: `/api/v1/objects/${url}`,
+          headers: as('admin'),
+          ...(payload === undefined ? {} : { payload }),
+        });
+        assert.ok(response.statusCode < 300, `${method} ${url}: ${response.body}`);
+      };
+      await act('POST', `${String(box)}/acknowledge`, { message: 'on it' });
+      await act('DELETE', `${String(box)}/acknowledge`);
+      await act('POST', `${String(box)}/simulate-error`, { message: 'drill' });
+      await act('DELETE', `${String(box)}/simulate-error`);
+      await act('POST', `${String(room)}/pause`, { message: 'moving racks' });
+      await act('DELETE', `${String(room)}/pause`);
+      await act('POST', `${String(box)}/move`, { targetParentId: branchId });
+      await act('POST', `${String(box)}/move`, { targetParentId: room });
+      const cloned = await app.inject({
+        method: 'POST',
+        url: `/api/v1/objects/${String(box)}/clone`,
+        headers: as('admin'),
+        // Beside the room, not in it: the copy carries the hole's grant (`A-35`), and would be
+        // a hole beneath the room of its own once the original is filled in below.
+        payload: { targetParentId: branchId },
+      });
+      assert.equal(cloned.statusCode, 201, cloned.body);
+      const copy = cloned.json<{ object: { id: number } }>().object.id;
+      // One of the sensors paused on its own, with nothing beneath it to hide.
+      await act('POST', `${String(shown[0] ?? 0)}/pause`, { message: 'just this one' });
+
+      const COUNTS = ['sensorsAffected', 'movedCount', 'clonedCount'];
+      const countsIn = async (id: number, login: string): Promise<string[]> =>
+        (await historyOf(id, as(login))).flatMap((entry) =>
+          COUNTS.filter((key) => key in entry.summary).map(
+            (key) => `${entry.action} ${key} ${JSON.stringify(entry.summary[key])}`,
+          ),
+        );
+
+      // The control: an administrator reads every count, and each counts the hole.
+      const box3 = await countsIn(box, 'admin');
+      assert.deepEqual(
+        box3.map((line) => line.split(' ').slice(0, 2).join(' ')),
+        [
+          'object.moved movedCount',
+          'object.moved movedCount',
+          'sensor.simulatedError sensorsAffected',
+          'sensor.simulatedError sensorsAffected',
+          'sensor.acknowledgementCleared sensorsAffected',
+          'sensor.acknowledged sensorsAffected',
+        ],
+      );
+      assert.deepEqual(await countsIn(room, 'admin'), [
+        'object.resumed sensorsAffected 3',
+        'object.paused sensorsAffected 3',
+      ]);
+      assert.equal((await countsIn(copy, 'admin')).length, 1);
+
+      // A reader with the hole beneath: the entries, without their counts.
+      for (const id of [room, box, copy]) {
+        assert.deepEqual(await countsIn(id, 'watcher'), [], `object ${String(id)}`);
+      }
+      assert.deepEqual(
+        (await historyOf(room, as('watcher'))).map((entry) => entry.action),
+        (await historyOf(room, as('admin'))).map((entry) => entry.action),
+        'an entry went with its count',
+      );
+      // Nothing beneath the sensor, so nothing to leave out.
+      assert.deepEqual(await countsIn(shown[0] ?? 0, 'watcher'), [
+        'object.paused sensorsAffected 1',
+      ]);
+      // And once the hole is filled, the same entries read with their counts.
+      await grant(hole, 'read');
+      assert.deepEqual(await countsIn(room, 'watcher'), await countsIn(room, 'admin'));
+      assert.deepEqual(await countsIn(box, 'watcher'), box3);
+
+      await act('DELETE', `${String(shown[0] ?? 0)}/pause`);
+    });
+
+    it('writes only a container’s own row for a setting on it, one at a time or in bulk', async () => {
+      // `write` on the device, and a sensor beneath it carved `none` (the fixture's). A setting
+      // set on the device is inherited by the sensor, which is what inheritance is; its row is
+      // not written, and nothing its owners hold goes stale.
+      const hidden = await rowOf(carvedSensorId);
+      const tag = await adminTag(carvedSensorId);
+      const device = await rowOf(deviceId);
+      const call = async (
+        method: 'PUT' | 'DELETE' | 'POST' | 'PATCH',
+        url: string,
+        payload?: object,
+        headers: Record<string, string> = {},
+      ): Promise<{ childCount?: number }> => {
+        const response = await app.inject({
+          method,
+          url: `/api/v1/${url}`,
+          headers: { ...as('operator'), ...headers },
+          ...(payload === undefined ? {} : { payload }),
+        });
+        assert.equal(response.statusCode, 200, `${method} ${url}: ${response.body}`);
+        return response.json<{ childCount?: number }>();
+      };
+      const setting = `objects/${String(deviceId)}/settings/scan.intervalSeconds`;
+      await call('PUT', setting, { value: 120 });
+      await call('DELETE', setting);
+      const bulk = { ids: [deviceId], key: 'scan.intervalSeconds' };
+      await call('POST', 'objects/bulk', { ...bulk, operation: 'setting', value: 180 });
+      await call('POST', 'objects/bulk', { ...bulk, operation: 'revertSetting' });
+      await untouched(carvedSensorId, hidden, tag, 'the hidden sensor');
+      assert.equal((await rowOf(deviceId)).version, device.version + 4, 'one step per write');
+
+      // And an edit of the device answers with the children its writer can see, as a read of
+      // it does (`A-12`): a-held and a-ping, and not the hole.
+      const read = await app.inject({
+        method: 'GET',
+        url: `/api/v1/objects/${String(deviceId)}`,
+        headers: as('operator'),
+      });
+      const edited = await call(
+        'PATCH',
+        `objects/${String(deviceId)}`,
+        { kind: 'device', tags: ['a-edited'] },
+        { 'if-match': String(read.headers.etag) },
+      );
+      assert.equal(edited.childCount, 2);
+      assert.equal(read.json<{ childCount: number }>().childCount, 2);
     });
   });
 });

@@ -1186,6 +1186,64 @@ describe(
       }
     });
 
+    it('spares a change of place only while asked, and gives every bump back on the way down (066)', async () => {
+      // `A-46` writes a hidden sibling's place without bumping its version. Only a transaction
+      // that asks, only for `sort_order`, and 066's rollback puts back the body it replaced.
+      const fresh = await createScratchDatabase('sibling_order_only');
+      try {
+        await migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id < 66),
+        ).up();
+        const q = fresh.db;
+        const body = async (): Promise<string> => {
+          const [row] = await q.query<{ body: string }>(
+            `SELECT pg_get_functiondef(p.oid) AS body FROM pg_proc p WHERE p.proname = 'object_touch'`,
+          );
+          return row?.body ?? assert.fail('no object_touch');
+        };
+        const replaced = await body();
+        const [root] = await q.query<{ id: string }>(`SELECT id FROM object WHERE kind = 'root'`);
+        const [probe] = await q.query<{ id: string }>(
+          `INSERT INTO object (parent_id, kind, name) VALUES ($1, 'probe', 'probe') RETURNING id::text`,
+          [root?.id],
+        );
+        /** How far one UPDATE moved the probe's version, asked or not. */
+        const bumpOf = async (set: string, asked: boolean): Promise<number> =>
+          q.tx(async (t) => {
+            if (asked) await t.query(`SELECT set_config('ms.sibling_order_only', 'on', true)`);
+            const [before] = await t.query<{ version: number }>(
+              'SELECT version FROM object WHERE id = $1',
+              [probe?.id],
+            );
+            const [after] = await t.query<{ version: number }>(
+              `UPDATE object SET ${set} WHERE id = $1 RETURNING version`,
+              [probe?.id],
+            );
+            return (after?.version ?? 0) - (before?.version ?? 0);
+          });
+
+        const since = MIGRATIONS.filter((one) => one.id >= 66);
+        const all = migrator(fresh.db, MIGRATIONS);
+        await all.up();
+        assert.equal(await bumpOf('sort_order = 1', true), 0);
+        assert.equal(await bumpOf('sort_order = 2', false), 1, 'not asked');
+
+        await all.down(since.length);
+        assert.equal(await body(), replaced, 'not the body 066 replaced');
+        assert.equal(await bumpOf('sort_order = 3', true), 1, 'asked, after the rollback');
+
+        const again = await all.up();
+        assert.deepEqual(
+          again.applied.map((one) => one.id),
+          since.map((one) => one.id),
+        );
+        assert.equal(await bumpOf('sort_order = 4', true), 0);
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('applies the real migration set forward and all the way back', async () => {
       const fresh = await createScratchDatabase('roundtrip');
       try {

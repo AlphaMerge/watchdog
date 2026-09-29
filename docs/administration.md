@@ -106,6 +106,19 @@ A few consequences are worth knowing before somebody reports them as bugs:
   which groups may see the object and who decided so, which is what the grants list says, and
   that list is an administrator's. `full` on an object is the right to change it, not to read who
   else may.
+- **And a probe's trust entries** (approved, revoked, where it may connect from). They carry the
+  address it last called from and the notes written on it, which `GET /probes` keeps for
+  administrators: handing a branch its own site's probe does not hand it those.
+- **A count in an object's history is left out where it would count a hole.** A pause, a resume,
+  an acknowledgement or a drill records how many sensors it reached, a move how many objects went
+  with it, a clone how many it copied. Each was counted over whoever acted, often an
+  administrator, so for a reader with anything hidden beneath the object the entry is served
+  without its count. A reorder's positions go the same way for a reader who cannot see every
+  sibling. The entries themselves stay, and the numbers come back if the hole is filled in.
+- **Moving an object up or down moves it among the siblings you can see.** A sibling hidden from
+  you keeps its place, "up" passes the nearest one you can see, and the top you can see is the
+  top. On a parent nobody had arranged, keeping a hidden sibling's place writes it into that
+  sibling's row, without a version bump, so nothing its owners hold goes stale.
 - **The history of a deleted sensor is visible to administrators only.** Nothing records which
   branch it was in, so there is no grant left to read it through.
 - **A change of grant reaches an open page at the next state change.** The live stream checks for

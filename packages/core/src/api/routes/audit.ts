@@ -1,9 +1,10 @@
 // Side-effect import: @fastify/swagger augments FastifySchema with `description`.
 import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
-import { AUDIT_CATEGORIES, type AuditRepository } from '../../audit/store.js';
-import type { Database } from '../../db/pool.js';
-import { ADMIN, clears, onObject } from '../authorization.js';
+import type { Visibility } from '../../auth/access.js';
+import { AUDIT_CATEGORIES, type AuditEntry, type AuditRepository } from '../../audit/store.js';
+import type { Database, Queryable } from '../../db/pool.js';
+import { ADMIN, clears, onObject, visibilityOf } from '../authorization.js';
 
 export interface AuditRoutesOptions {
   db: Database;
@@ -94,6 +95,58 @@ function when(value: string | undefined): Date | undefined {
   return Number.isNaN(at.getTime()) ? undefined : at;
 }
 
+/**
+ * The summary fields that count objects beneath an entry's object (`A-46`): a pause's, a resume's,
+ * an acknowledgement's and a drill's sensors, a move's objects and a clone's copies. Each was
+ * counted over whoever acted — an administrator counts everything — so for a reader with a hole
+ * beneath the object it counts the hole.
+ */
+const COUNTS: readonly string[] = ['sensorsAffected', 'movedCount', 'clonedCount'];
+
+/**
+ * An object's history as this reader may have it (`A-46`).
+ *
+ * **What an entry counts is fixed when it is written, over somebody else's view**, and cannot be
+ * counted again for this reader's. So a count goes for a reader who cannot see everything beneath
+ * the object, and a reorder's positions for one who cannot see every sibling; what the entry says
+ * happened stays. A reader who sees it all, an administrator always, keeps both — and a hole
+ * filled in later brings them back, since nothing was deleted.
+ */
+async function asSeenBy(
+  q: Queryable,
+  objectId: number,
+  items: readonly AuditEntry[],
+  visibility: Visibility,
+): Promise<AuditEntry[]> {
+  if (visibility.everything) return [...items];
+  const counts = (entry: AuditEntry): boolean => COUNTS.some((key) => key in entry.summary);
+  const hidesBeneath = items.some(counts) && (await visibility.hidesBeneath(q, objectId));
+
+  // Per parent, because an object's reorders are among the siblings of wherever it was then.
+  const hidesSiblings = new Map<number, boolean>();
+  for (const entry of items) {
+    const parentId = entry.summary['parentId'];
+    if (entry.action !== 'object.reordered' || typeof parentId !== 'number') continue;
+    if (!hidesSiblings.has(parentId)) {
+      hidesSiblings.set(parentId, await visibility.hidesChildOf(q, parentId));
+    }
+  }
+
+  return items.map((entry) => {
+    const parentId = entry.summary['parentId'];
+    if (entry.action === 'object.reordered' && typeof parentId === 'number') {
+      return hidesSiblings.get(parentId) === true ? { ...entry, diff: [] } : entry;
+    }
+    if (!hidesBeneath || !counts(entry)) return entry;
+    return {
+      ...entry,
+      summary: Object.fromEntries(
+        Object.entries(entry.summary).filter(([key]) => !COUNTS.includes(key)),
+      ),
+    };
+  });
+}
+
 export async function auditRoutes(
   app: FastifyInstance,
   options: AuditRoutesOptions,
@@ -114,7 +167,12 @@ export async function auditRoutes(
           'credential never appears in either, in any entry, at any age. **Grant entries are ' +
           "an administrator's**, as the grants themselves are: `full` on an object does not " +
           'let an account read who else may see it, so for anybody else they are left out ' +
-          'and a page is still a full page of the rest.',
+          "and a page is still a full page of the rest. **So are a probe's trust entries** " +
+          '(`A-46`) — its address, where it may connect from and the notes on it — as ' +
+          '`GET /probes` is. **A count of what is beneath the object** (`sensorsAffected`, ' +
+          '`movedCount`, `clonedCount`) is left out for a reader who cannot see all of it, ' +
+          "and a reorder's positions for one who cannot see every sibling: each was counted " +
+          'over whoever acted, and would count what this reader cannot see.',
         params: idParams,
         querystring: auditQuery,
         response: { 200: { $ref: 'ms:auditPage' } },
@@ -132,13 +190,23 @@ export async function auditRoutes(
       // /objects/:id/access` is `ADMIN`, and its own entries say the same thing a line at a
       // time: which group may do what here, and who set it. `full` on an object does not let
       // an account read its grants, so it does not let it read their history either.
-      const items = await db.tx((q) =>
-        audit.list(q, {
-          objectId: request.params.id,
-          ...(clears(request, 'admin') ? {} : { withoutCategories: ['grant'] }),
-          ...(before === undefined ? {} : { before }),
-          limit,
-        }),
+      //
+      // **Probe-trust entries the same way** (`A-46`). `GET /probes` is `ADMIN`: where a probe
+      // last called from, where it may call from and the notes on it are infrastructure, and a
+      // branch handed its own site's probe was never granted them.
+      const visibility = await visibilityOf(request);
+      const items = await db.tx(async (q) =>
+        asSeenBy(
+          q,
+          request.params.id,
+          await audit.list(q, {
+            objectId: request.params.id,
+            ...(clears(request, 'admin') ? {} : { withoutCategories: ['grant', 'probe'] }),
+            ...(before === undefined ? {} : { before }),
+            limit,
+          }),
+          visibility,
+        ),
       );
 
       return {

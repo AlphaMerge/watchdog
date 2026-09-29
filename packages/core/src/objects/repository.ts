@@ -824,24 +824,43 @@ export class ObjectRepository {
    *
    * Only rows whose position actually moves are written, so dragging one item in a long list
    * does not bump the version of every sibling that stayed where it was.
+   *
+   * **`unseen` are written without a version bump** (`A-46`, migration 066): the siblings the
+   * caller cannot see, which a reorder keeps where they are. One of them is written only when its
+   * row does not hold its place yet — on a parent nobody had arranged, where a NULL sorts after
+   * every place and would slide it to the end. Nothing its owners hold goes stale over that. The
+   * setting that spares them is cleared straight after their statement, so the rows written after
+   * it, and anything else in the transaction, bump as ever.
    */
   async writeSiblingOrder(
     q: Queryable,
     parentId: ObjectId,
     ordered: readonly ObjectId[],
+    unseen: ReadonlySet<ObjectId> = new Set(),
   ): Promise<number> {
-    if (ordered.length === 0) return 0;
-    const rows = await q.query<{ id: string }>(
-      `UPDATE object o
-       SET sort_order = w.pos
-       FROM unnest($1::bigint[], $2::int[]) AS w(id, pos)
-       WHERE o.id = w.id
-         AND o.parent_id = $3
-         AND o.sort_order IS DISTINCT FROM w.pos
-       RETURNING o.id`,
-      [[...ordered], ordered.map((_, index) => index), parentId],
-    );
-    return rows.length;
+    const write = async (ids: readonly ObjectId[]): Promise<number> => {
+      if (ids.length === 0) return 0;
+      const rows = await q.query<{ id: string }>(
+        `UPDATE object o
+         SET sort_order = w.pos
+         FROM unnest($1::bigint[], $2::int[]) AS w(id, pos)
+         WHERE o.id = w.id
+           AND o.parent_id = $3
+           AND o.sort_order IS DISTINCT FROM w.pos
+         RETURNING o.id`,
+        [[...ids], ids.map((id) => ordered.indexOf(id)), parentId],
+      );
+      return rows.length;
+    };
+
+    let written = 0;
+    const hidden = ordered.filter((id) => unseen.has(id));
+    if (hidden.length > 0) {
+      await q.query(`SELECT set_config('ms.sibling_order_only', 'on', true)`);
+      written += await write(hidden);
+      await q.query(`SELECT set_config('ms.sibling_order_only', 'off', true)`);
+    }
+    return written + (await write(ordered.filter((id) => !unseen.has(id))));
   }
 
   async channels(q: Queryable, sensorId: ObjectId): Promise<ChannelRecord[]> {

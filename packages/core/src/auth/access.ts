@@ -390,6 +390,53 @@ export class Visibility {
   }
 
   /**
+   * Whether anything beneath this object is hidden (`A-46`): for a count an object's history
+   * recorded over somebody else's view, which counts it.
+   *
+   * **Asked of an object this principal can see**, which is the history route's bar. Beneath a
+   * visible object visibility changes only at a boundary, so something beneath it is hidden
+   * exactly when a hidden boundary is. The walk climbs from those, a handful, and never descends
+   * a subtree of thousands.
+   */
+  async hidesBeneath(q: Queryable, id: number): Promise<boolean> {
+    const boundaries = this.#boundaries;
+    if (boundaries === null) return false;
+    const hidden = [...boundaries].filter(([, label]) => !label).map(([boundary]) => boundary);
+    if (hidden.length === 0) return false;
+    const rows = await q.query<{ hides: boolean }>(
+      `WITH RECURSIVE above AS (
+         SELECT o.parent_id AS id, 1 AS depth FROM object o WHERE o.id = ANY($1::bigint[])
+         UNION ALL
+         SELECT o.parent_id, above.depth + 1
+         FROM object o
+         JOIN above ON o.id = above.id
+         WHERE o.parent_id IS NOT NULL AND above.depth < ${String(MAX_WALK_DEPTH)}
+       )
+       SELECT EXISTS (SELECT 1 FROM above WHERE above.id = $2) AS hides`,
+      [hidden, id],
+    );
+    return rows[0]?.hides === true;
+  }
+
+  /**
+   * Whether any child of this object is hidden (`A-46`): for a position among siblings an
+   * object's history recorded over somebody else's view. The parent may be hidden itself, where
+   * the object alone was granted, so this is the whole condition and not `whereChildOfVisible`.
+   */
+  async hidesChildOf(q: Queryable, parentId: number): Promise<boolean> {
+    if (this.#boundaries === null) return false;
+    const values: unknown[] = [parentId];
+    const visible = this.where('c.id', (value) => `$${String(values.push(value))}`);
+    const rows = await q.query<{ hides: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM object c WHERE c.parent_id = $1 AND NOT (${visible})
+       ) AS hides`,
+      values,
+    );
+    return rows[0]?.hides === true;
+  }
+
+  /**
    * The boundaries this principal can see, or null when it sees everything.
    *
    * The only candidates for where a branch account's tree starts (`ObjectRepository.tops`).

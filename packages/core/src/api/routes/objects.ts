@@ -13,6 +13,7 @@ import type {
   CreateObjectInput,
   DeleteExpectation,
   ListSort,
+  ObjectDetail,
   ObjectKind,
   SiblingMove,
   UpdateObjectInput,
@@ -351,6 +352,21 @@ export async function objectRoutes(
 ): Promise<void> {
   const { service, validatorSalt, bulk, access } = options;
   const authorizing = options.authorizing ?? false;
+
+  /**
+   * A write's answer, with the children its caller can see (`A-46`). An edit or a reorder of a
+   * container answered `childCount` over every child, holes included, where a read of the same
+   * object counts only what its reader can see (`A-12`).
+   */
+  const answerFor = async (
+    request: FastifyRequest,
+    detail: ObjectDetail,
+  ): Promise<ObjectDetail> => {
+    const visibility = await visibilityOf(request);
+    return visibility.everything
+      ? detail
+      : { ...detail, childCount: await service.visibleChildCount(detail.id, visibility) };
+  };
 
   const sendDetail = async (
     request: FastifyRequest,
@@ -739,7 +755,7 @@ export async function objectRoutes(
       const id = request.params.id;
       const pre = requireIfMatch(request.headers['if-match']);
       const updated = await service.update(await writerFor(request), id, request.body, pre);
-      await reply.header('ETag', etagFor(updated.version)).send(updated);
+      await reply.header('ETag', etagFor(updated.version)).send(await answerFor(request, updated));
     },
   );
 
@@ -810,7 +826,10 @@ export async function objectRoutes(
           'does. Siblings nobody has arranged keep sorting by name, so a tree that has never ' +
           'been ordered by hand reads exactly as it did before. Listings honour the ' +
           'arrangement through `GET /objects?parentId=…&sort=manual` and through the tree ' +
-          'endpoint, which always does. A move that changes nothing is a no-op, not an error.',
+          'endpoint, which always does. A move that changes nothing is a no-op, not an error. ' +
+          '**Among the siblings the caller can see** (`A-46`): every other sibling keeps its ' +
+          'place, "up" passes the nearest one the caller can see, and the top it can see is ' +
+          'the top.',
         params: idParams,
         body: {
           type: 'object',
@@ -827,8 +846,11 @@ export async function objectRoutes(
         request.params.id,
         request.body.move,
         optionalIfMatch(request.headers['if-match']),
+        await visibilityOf(request),
       );
-      await reply.header('ETag', etagFor(reordered.version)).send(reordered);
+      await reply
+        .header('ETag', etagFor(reordered.version))
+        .send(await answerFor(request, reordered));
     },
   );
 
