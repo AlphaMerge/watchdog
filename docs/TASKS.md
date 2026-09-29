@@ -17270,18 +17270,46 @@ because each is a decision rather than a defect:
         the push has already returned);
       - no return after the read (the endpoint test fails).
 
-- [ ] **A-51 — `object.moved` history names the hidden place an object came from** · S · A-46,
+- [x] **A-51 — `object.moved` history names the hidden place an object came from** · S · A-46,
       A-12 · Found while doing `A-46`. Low.
       An `object.moved` entry's diff carries the old and new `parentId`, and its summary
       `fromProbeId` and `toProbeId`. `GET /objects/:id/audit` serves them to anyone with `read`
       on the moved object, so a reader who can see the object but not where it came from, or the
-      probe it was on, is handed the ids of objects hidden from them. Ids only, never names; the
-      same history names nothing else it cannot see.
+      probe it was on, is handed the ids of objects hidden from them. Ids only, never names.
+      **Widened when it was taken up**: the same history names three more objects by id, each
+      of which can be hidden from a reader of the entry. They are `object.reordered`'s
+      `summary.parentId` (hidden where only the object was granted), `object.cloned`'s
+      `sourceId`, and a `dependency.masterId` setting's before and after, on `setting.set` and
+      `setting.reverted`.
 
-      **Done when** the history route leaves out, for a reader who cannot see it, each of those
-      ids that names a hidden object, in the way `A-46` leaves out counts, and an administrator
-      still reads them all. A test in `object-visibility.test.ts` moves a visible device out of a
-      group the reader cannot see, and back. Mutants as usual.
+      **Done when** the history route puts all four sites through one step. An id naming an
+      object hidden from the reader reads null, and an administrator still reads them all. A
+      test in `object-visibility.test.ts` covers each site, hidden id and visible id alike: a move
+      out of a group the reader cannot see and back, a reorder inside it, a clone of a hidden
+      device, and a hidden master set and reverted. Mutants as usual.
+
+      **A-51 outcome (2026-09-29).**
+      - **One step, `throughNamed`, knows the four sites.** They are `object.moved`'s `parentId`
+        before and after and its `fromProbeId` and `toProbeId`, `object.reordered`'s `parentId`,
+        `object.cloned`'s `sourceId`, and `dependency.masterId`'s before and after on
+        `setting.set` and `setting.reverted`. The history route collects the ids once, asks
+        `Visibility.visibleAmong` which of them the reader can see, and nulls the rest. An
+        administrator's history is returned untouched.
+      - **A deleted object reads null too**, for anyone but an administrator, as `visibleAmong`
+        finds no row for it. That is the same answer as for an id that was never used.
+      - **A reorder's positions are still decided on the parent's real id**, before it is
+        nulled, so `A-46`'s rule does not change.
+      - **Checked, and left alone:** a trigger's template ids and a `schedule.id` setting name
+        no object in the tree. The ids inside `object.deleted`'s `destroyed` list are read only
+        by an administrator, since a deleted object has no grant left.
+      - **Tests:** `object-visibility.test.ts` 1: every site, for the watcher and for an
+        administrator, hidden and visible ids alike. That means a move into a hidden group and out
+        again, one through a visible group, a reorder inside the hidden group, a clone of a
+        hidden device to where the copy is seen, and a hidden master set and reverted, then a
+        visible one.
+      - **Mutation 9/9:** a move's parents kept; its `toProbeId` kept; a reorder's parent
+        kept; a clone's source kept; a master kept; a reverted master kept; only the after side
+        rewritten; every id nulled, visible or not; and nothing asked about, so nothing seen.
 
 ### Panel round two — notifications, schedules, triggers
 

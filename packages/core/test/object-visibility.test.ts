@@ -3266,6 +3266,162 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       assert.equal(read.json<{ childCount: number }>().childCount, 2);
     });
   });
+
+  describe('the ids an object’s history names (A-51)', () => {
+    before(() => {
+      // The harness only captures; the history is read from what is stored.
+      harness.audit.also = new DatabaseAuditSink();
+    });
+
+    after(() => {
+      harness.audit.also = undefined;
+    });
+
+    const create = async (input: Record<string, unknown>): Promise<number> =>
+      (await harness.service.create(testActor, input as never)).id;
+    const grant = (id: number, right: 'none' | 'read'): Promise<unknown> =>
+      access.grant(id, teamId, right, actorNamed('visibility'));
+
+    interface Entry {
+      action: string;
+      summary: Record<string, unknown>;
+      diff: { field: string; before: unknown; after: unknown }[];
+    }
+    /** One action's entries in an object's history, newest first, by what `pick` reads of each. */
+    const named = async (
+      id: number,
+      login: string,
+      action: string,
+      pick: (entry: Entry) => unknown,
+    ): Promise<unknown[]> => {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/objects/${String(id)}/audit`,
+        headers: as(login),
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      return response
+        .json<{ items: Entry[] }>()
+        .items.filter((entry) => entry.action === action)
+        .map(pick);
+    };
+    const change = (entry: Entry, field: string): unknown[] => {
+      const found = entry.diff.find((one) => one.field === field);
+      return [found?.before, found?.after];
+    };
+
+    it('reads an id naming what the reader cannot see as null, wherever one is named', async () => {
+      const elsewhere = await create({ kind: 'group', parentId: branchId, name: `${MARK}-away` });
+      const somewhere = await create({ kind: 'group', parentId: branchId, name: 'a-somewhere' });
+      const mover = await create({
+        kind: 'device',
+        parentId: branchId,
+        name: 'a-mover',
+        host: '10.0.4.1',
+      });
+      await create({ kind: 'device', parentId: elsewhere, name: 'a-neighbour', host: '10.0.4.2' });
+      const source = await create({
+        kind: 'device',
+        parentId: elsewhere,
+        name: 'a-source',
+        host: '10.0.4.3',
+      });
+      const dependent = await create({
+        kind: 'sensor',
+        parentId: mover,
+        name: 'a-dependent',
+        sensorType: 'icmp.ping',
+      });
+      await grant(elsewhere, 'none');
+      // Granted on its own, so the reader sees it wherever it goes.
+      await grant(mover, 'read');
+
+      const act = async (url: string, payload: object): Promise<unknown> => {
+        const response = await app.inject({
+          method: 'POST',
+          url: `/api/v1/objects/${url}`,
+          headers: as('admin'),
+          payload,
+        });
+        assert.ok(response.statusCode < 300, `${url}: ${response.body}`);
+        return response.json();
+      };
+      // Into the hidden group, arranged among what is there, out again, and on through a group
+      // the reader can see.
+      await act(`${String(mover)}/move`, { targetParentId: elsewhere });
+      await act(`${String(mover)}/order`, { move: 'last' });
+      await act(`${String(mover)}/move`, { targetParentId: branchId });
+      await act(`${String(mover)}/move`, { targetParentId: somewhere });
+      // A hidden device copied to where the reader can see the copy.
+      const copied = (await act(`${String(source)}/clone`, {
+        targetParentId: somewhere,
+        name: 'a-copied',
+      })) as { object: { id: number } };
+      // A master the reader cannot see, and taken away again.
+      await harness.service.setDependency(
+        testActor,
+        dependent,
+        'object',
+        carvedSensorId,
+        undefined,
+      );
+      await harness.service.setDependency(testActor, dependent, 'parent', undefined, undefined);
+
+      const moves = (login: string): Promise<unknown[]> =>
+        named(mover, login, 'object.moved', (entry) => [
+          ...change(entry, 'parentId'),
+          entry.summary['fromProbeId'],
+          entry.summary['toProbeId'],
+        ]);
+      // The probe is above the branch, so hidden from it too.
+      assert.deepEqual(await moves('admin'), [
+        [branchId, somewhere, probeId, probeId],
+        [elsewhere, branchId, probeId, probeId],
+        [branchId, elsewhere, probeId, probeId],
+      ]);
+      assert.deepEqual(await moves('watcher'), [
+        [branchId, somewhere, null, null],
+        [null, branchId, null, null],
+        [branchId, null, null, null],
+      ]);
+
+      const parents = (login: string): Promise<unknown[]> =>
+        named(mover, login, 'object.reordered', (entry) => entry.summary['parentId']);
+      assert.deepEqual(await parents('admin'), [elsewhere]);
+      assert.deepEqual(await parents('watcher'), [null]);
+
+      const sources = (login: string): Promise<unknown[]> =>
+        named(copied.object.id, login, 'object.cloned', (entry) => entry.summary['sourceId']);
+      assert.deepEqual(await sources('admin'), [source]);
+      assert.deepEqual(await sources('watcher'), [null]);
+
+      const masters = async (login: string): Promise<unknown[]> => [
+        ...(await named(dependent, login, 'setting.set', (entry) =>
+          change(entry, 'setting.dependency.masterId'),
+        )),
+        ...(await named(dependent, login, 'setting.reverted', (entry) =>
+          change(entry, 'setting.dependency.masterId'),
+        )),
+      ];
+      assert.deepEqual(await masters('admin'), [
+        [null, carvedSensorId],
+        [carvedSensorId, null],
+      ]);
+      assert.deepEqual(await masters('watcher'), [
+        [null, null],
+        [null, null],
+      ]);
+
+      // A master the reader can see reads as it is.
+      await harness.service.setDependency(testActor, dependent, 'object', pingId, undefined);
+      assert.deepEqual(
+        (await masters('watcher'))[0],
+        [null, pingId],
+        'a visible master was hidden',
+      );
+      await harness.service.setDependency(testActor, dependent, 'parent', undefined, undefined);
+    });
+  });
 });
 
 /**

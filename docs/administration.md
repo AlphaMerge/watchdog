@@ -115,6 +115,10 @@ A few consequences are worth knowing before somebody reports them as bugs:
   administrator, so for a reader with anything hidden beneath the object the entry is served
   without its count. A reorder's positions go the same way for a reader who cannot see every
   sibling. The entries themselves stay, and the numbers come back if the hole is filled in.
+- **An id in an object's history that names an object you cannot see reads null** (`A-51`):
+  where the object moved from and to, the probes it left and joined, the parent a reorder was
+  among, the source it was cloned from, and a dependency's master. An administrator reads them
+  all.
 - **Moving an object up or down moves it among the siblings you can see.** A sibling hidden from
   you keeps its place, "up" passes the nearest one you can see, and the top you can see is the
   top. On a parent nobody had arranged, keeping a hidden sibling's place writes it into that

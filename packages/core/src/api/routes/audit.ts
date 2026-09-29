@@ -2,8 +2,10 @@
 import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
 import type { Visibility } from '../../auth/access.js';
+import type { FieldChange } from '../../audit/diff.js';
 import { AUDIT_CATEGORIES, type AuditEntry, type AuditRepository } from '../../audit/store.js';
 import type { Database, Queryable } from '../../db/pool.js';
+import { DEPENDENCY_MASTER_ID } from '../../settings/registry.js';
 import { ADMIN, clears, onObject, visibilityOf } from '../authorization.js';
 
 export interface AuditRoutesOptions {
@@ -104,6 +106,40 @@ function when(value: string | undefined): Date | undefined {
 const COUNTS: readonly string[] = ['sensorsAffected', 'movedCount', 'clonedCount'];
 
 /**
+ * Every place an entry names another object by id, rewritten through `f` (`A-51`): where an
+ * object moved from and to, and the probes it left and joined; the parent a reorder was among;
+ * the source of a clone; and a dependency's master, before and after.
+ */
+function throughNamed(entry: AuditEntry, f: (value: unknown) => unknown): AuditEntry {
+  const summary = (keys: readonly string[]): Record<string, unknown> => {
+    const out = { ...entry.summary };
+    for (const key of keys) if (key in out) out[key] = f(out[key]);
+    return out;
+  };
+  const diff = (field: string): FieldChange[] =>
+    entry.diff.map((change) =>
+      change.field === field
+        ? { ...change, before: f(change.before), after: f(change.after) }
+        : change,
+    );
+  switch (entry.action) {
+    case 'object.moved':
+      return { ...entry, summary: summary(['fromProbeId', 'toProbeId']), diff: diff('parentId') };
+    case 'object.reordered':
+      return { ...entry, summary: summary(['parentId']) };
+    case 'object.cloned':
+      return { ...entry, summary: summary(['sourceId']) };
+    case 'setting.set':
+    case 'setting.reverted':
+      return entry.summary['key'] === DEPENDENCY_MASTER_ID.key
+        ? { ...entry, diff: diff(`setting.${DEPENDENCY_MASTER_ID.key}`) }
+        : entry;
+    default:
+      return entry;
+  }
+}
+
+/**
  * An object's history as this reader may have it (`A-46`).
  *
  * **What an entry counts is fixed when it is written, over somebody else's view**, and cannot be
@@ -111,6 +147,9 @@ const COUNTS: readonly string[] = ['sensorsAffected', 'movedCount', 'clonedCount
  * the object, and a reorder's positions for one who cannot see every sibling; what the entry says
  * happened stays. A reader who sees it all, an administrator always, keeps both — and a hole
  * filled in later brings them back, since nothing was deleted.
+ *
+ * **An id that names an object this reader cannot see reads null** (`A-51`), as one that names
+ * an object since deleted does: the place something moved from, a clone's source, a master.
  */
 async function asSeenBy(
   q: Queryable,
@@ -132,16 +171,28 @@ async function asSeenBy(
     }
   }
 
+  const named: number[] = [];
+  for (const entry of items) {
+    throughNamed(entry, (value) => {
+      if (typeof value === 'number') named.push(value);
+      return value;
+    });
+  }
+  const seen = named.length === 0 ? new Set<number>() : await visibility.visibleAmong(q, named);
+
   return items.map((entry) => {
     const parentId = entry.summary['parentId'];
+    const shown = throughNamed(entry, (value) =>
+      typeof value === 'number' && !seen.has(value) ? null : value,
+    );
     if (entry.action === 'object.reordered' && typeof parentId === 'number') {
-      return hidesSiblings.get(parentId) === true ? { ...entry, diff: [] } : entry;
+      return hidesSiblings.get(parentId) === true ? { ...shown, diff: [] } : shown;
     }
-    if (!hidesBeneath || !counts(entry)) return entry;
+    if (!hidesBeneath || !counts(entry)) return shown;
     return {
-      ...entry,
+      ...shown,
       summary: Object.fromEntries(
-        Object.entries(entry.summary).filter(([key]) => !COUNTS.includes(key)),
+        Object.entries(shown.summary).filter(([key]) => !COUNTS.includes(key)),
       ),
     };
   });
@@ -172,7 +223,10 @@ export async function auditRoutes(
           '`GET /probes` is. **A count of what is beneath the object** (`sensorsAffected`, ' +
           '`movedCount`, `clonedCount`) is left out for a reader who cannot see all of it, ' +
           "and a reorder's positions for one who cannot see every sibling: each was counted " +
-          'over whoever acted, and would count what this reader cannot see.',
+          'over whoever acted, and would count what this reader cannot see. **An id naming an ' +
+          'object the reader cannot see reads null** (`A-51`): where a move came from and went, ' +
+          "the probes it left and joined, a reorder's parent, a clone's source and a " +
+          "dependency's master.",
         params: idParams,
         querystring: auditQuery,
         response: { 200: { $ref: 'ms:auditPage' } },
