@@ -658,8 +658,8 @@ Two further notes for whoever picks those up:
   unheld, so from then on they notify one by one. Which came first, the pause or the loss, no
   longer decides whether a trigger hears anything, and holding still never takes the last route
   away. The link runs from Probe Health's own re-decision, so it is only as prompt as that. **A
-  Probe Health deleted during the loss is the gap**: nothing is left in any batch to stand for
-  what it held, and those sensors stay held until each is next re-decided.
+  Probe Health deleted during the loss is the gap** (`M-25`): nothing is left in any batch to
+  stand for what it held, and those sensors stay held until each is next re-decided.
 - **State never bumps `object.version`.** `sensor_runtime` has no `object_touch_owner` trigger,
   and state is deliberately absent from `GET /objects/:id`, whose ETag is built from
   configuration versions. A scan is not a configuration change, and if it were, `R-04` would

@@ -5976,6 +5976,31 @@ because each is a decision rather than a defect:
       then fail raises no new alarm; factory B withheld leaves factory C not Down and not
       notifying. Mutants as usual.
 
+- [ ] **M-25 — a Probe Health deleted mid-loss leaves the sensors it held held** · S · M-24,
+      M-22 · Found finishing `M-24`.
+      A lost or frozen probe's carried sensors are held, per trigger, behind the probe's live
+      Probe Health (`M-22`). `M-24` re-decides them unheld when that Probe Health stops being
+      live, paused or withheld, by adding the probe's held set to the reaction that sees it
+      (`engine.ts` `#released`). A deleted Probe Health has no runtime row, so `#released` skips
+      it, and `ProbeHealthService`'s mapping still names it until the next health sweep. Nothing
+      re-decides what it held. Those sensors stay held until each is next re-decided, which is
+      usually when the probe returns. By then they go back to their last reading, and there is
+      nothing to recover. A trigger that heard of the probe only from that Probe Health hears
+      nothing for the rest of the outage, and nothing when it ends. The deleted Probe Health's
+      own episode alarm goes with the cascade, as every deleted sensor's does, and that is out of
+      scope here.
+
+      **Suggested fix:** in the delete transaction, re-react the held set of every probe that a
+      deleted probe-alarm sensor reported on. Key it off `ProbeHealthService`'s last mapping,
+      before the sweep drops it, so the carried sensors are re-decided unheld, as for a pause.
+
+      **Done when:**
+      - deleting a probe's only live Probe Health during a loss re-decides the sensors it held,
+        unheld, in the same transaction, and they notify one by one as after a pause mid-loss;
+      - a sensor still covered through another live Probe Health on the same probe stays held;
+      - a scenario test in `probe-episode-scenario.test.ts`, per `M-17`, covers both, with each
+        asserted alarm asserted present first. Mutants as usual.
+
 - [x] **M-24 — `M-22`'s episode and its held set are not linked in every direction** · M · M-22,
       M-17 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `M-24`).
       - **Medium, lost alarms** (`reachability.ts:238`, `:326`). A probe that is lost while
@@ -6036,7 +6061,7 @@ because each is a decision rather than a defect:
         Probe Health would buy nothing.
       - **The gap is a Probe Health deleted mid-loss.** Nothing is left in any batch to stand for
         what it held, so those sensors stay held until each is next re-decided. State-machine §7
-        records it, and it is offered as a ticket rather than grown into this one.
+        records it, and it is filed as `M-25` rather than grown into this one.
 
       Tests: four scenarios in `probe-episode-scenario` (an arrival under an empty lost probe, an
       emptied episode with a repeat, acknowledgement and its lapse, a pause mid-loss), the
