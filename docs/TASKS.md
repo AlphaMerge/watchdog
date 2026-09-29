@@ -6036,6 +6036,42 @@ because each is a decision rather than a defect:
       margin taken from the measured spread and stated in the test, or it is dropped because the
       absolute budgets already carry the claim. The entry says which, and why.
 
+- [x] **P-223 — the core's unlabelled metrics export a gap as zero** · S · P-14, H-12 · Found
+      2026-09-28 in the round-2 review of `H-12`. The exporter's rule is that a gap is an absent
+      series, never a zero, and its tests covered only the probe's series. Those are labelled, and
+      a labelled metric has no series until something sets one. The core's carry no labels, and
+      `prom-client` gives an unlabelled metric a series at 0 from the moment it exists, and again
+      on every `reset()`. The exporter reset a core gauge whose reading was null, and left a null
+      counter alone, so both kinds exported `0`:
+      - `ms_core_disk_free_percent 0` on a core whose database is on another host, and before the
+        first housekeeping pass. That fires any disk-low alert, for ever.
+      - The memory-limit series at 0 where there is no cgroup ceiling.
+      - A v1 core's five report series at 0. `H-12` makes those channels gaps because a zero
+        would say nothing failed, about a subsystem that is not running.
+
+      **Done when** a core series whose reading is null is absent from the scrape, and comes back
+      when the reading does, with a test for each kind.
+
+      **P-223 outcome.** The core's metrics are built outside the registry. `#present` registers
+      each one while its reading is a number and removes it while the reading is a gap. A metric
+      that leaves keeps its value, so a counter that comes back resumes from where it was rather
+      than restarting. The probe's series were already right and are unchanged. The Prometheus
+      section of `administration.md` now says a missing reading is an absent series, and that a
+      rule wanting to hear about one should use `absent()`.
+
+      **Tests.** `metrics.test.ts` 5, with `fixedCoreHealth` taking a disk source and a v1 switch:
+      - with every core reading a gap at once, the scrape has exactly the families it has with no
+        Core Health at all. Every channel rather than the ones a source can null today, so a
+        channel added later is held to the rule without being listed;
+      - disk free and the memory limit are absent while they are gaps, with a control;
+      - a v1 core's report counters and gauges are absent, and a full core's are there;
+      - disk free goes from absent to 37.5 and back to absent, neither held nor zeroed;
+      - with no Core Health to read, no core series at all, and the process series stay.
+
+      Mutation 2/2:
+      - `#present` registering regardless of the reading (4 tests);
+      - never removing a metric once registered (1 test).
+
 - [x] **P-209 — ms-server stayed Up for ten hours with no core in it** · S · — · On 2026-09-15
       the UI on :5173 answered `502 Bad Gateway`. The dev PostgreSQL had stopped cleanly the day
       before and has no restart policy, so it stayed down when Docker restarted at 01:02 UTC;

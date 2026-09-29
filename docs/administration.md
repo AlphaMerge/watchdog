@@ -782,6 +782,12 @@ A scraper authenticates with an API token, which is what `authorization` in a `s
 for. While the core is still starting it answers **503** rather than an empty body, because an
 empty body is recorded as every series vanishing at once.
 
+**A reading the core does not have is an absent series, never a zero** (`P-223`). That covers
+`ms_core_disk_free_percent` on a core whose database is on another host, the memory-limit series
+where there is no cgroup ceiling, and the five report series on a core that runs no reporting. A
+disk-low alert therefore stays quiet on such a core rather than firing for ever. If a series
+going missing should page someone, write that rule with `absent()`.
+
 ---
 
 ## Housekeeping, retention and a full disk

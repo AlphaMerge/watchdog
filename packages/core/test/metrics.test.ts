@@ -11,7 +11,11 @@ import { TokenService } from '../src/auth/tokens.js';
 import { TotpService } from '../src/auth/totp.js';
 import { AuditRepository, DatabaseAuditSink } from '../src/audit/store.js';
 import { HistoryService } from '../src/timeseries/history.js';
-import type { CoreHealthService } from '../src/health/core-health.js';
+import type {
+  CoreHealthReading,
+  CoreHealthService,
+  CoreHealthSources,
+} from '../src/health/core-health.js';
 import { ProbeHealthService } from '../src/health/probe-health.js';
 import { MetricsExporter } from '../src/metrics/exporter.js';
 import type { ProbeLink } from '../src/transport/probe-endpoint.js';
@@ -207,6 +211,116 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
         false,
         'the gauge kept its last value',
       );
+    });
+  });
+
+  describe('a core series with no reading (P-223)', () => {
+    // The core's series carry no labels, and an unlabelled metric has a series at 0 from the
+    // moment it exists. So these were exported as 0: disk free on a core whose database is on
+    // another host, which fires a disk-low alert for ever, and a v1 core's report failures.
+    it('leaves out a core gauge whose reading is a gap, rather than exporting zero', async () => {
+      // The fixture's disk and limit are gaps: a database elsewhere, and no cgroup ceiling.
+      const body = (await exporter().scrape()).body;
+      for (const name of [
+        'ms_core_disk_free_percent',
+        'ms_core_memory_limit_usage_ratio',
+        'ms_core_memory_limit_bytes',
+      ]) {
+        assert.equal(body.includes(name), false, `${name} was exported with no reading`);
+      }
+      assert.equal(parse(body).get('ms_core_ingestion_queue_rows'), 41, 'the control');
+    });
+
+    it('leaves out a v1 core’s report series, counters and gauges, which it does not run', async () => {
+      const core = fixedCoreHealth(db, { reporting: false });
+      const body = (
+        await new MetricsExporter({
+          db,
+          logger: silent,
+          coreHealth: () => core,
+          probeHealth: () => undefined,
+        }).scrape()
+      ).body;
+      for (const name of [
+        'ms_core_reports_deferred_total',
+        'ms_core_report_runs_failed_total',
+        'ms_core_reports_undelivered',
+        'ms_core_report_formats_waiting',
+        'ms_core_report_formats_refused_total',
+      ]) {
+        assert.equal(
+          body.includes(name),
+          false,
+          `${name} was exported on a core without reporting`,
+        );
+      }
+      const full = parse((await exporter().scrape()).body);
+      assert.equal(full.get('ms_core_report_runs_failed_total'), 3, 'the control: a full core');
+    });
+
+    it('exports a core series while it has a reading, and stops when it loses it', async () => {
+      let disk: ReturnType<CoreHealthSources['disk']> = null;
+      const core = fixedCoreHealth(db, { disk: () => disk });
+      const exports = new MetricsExporter({
+        db,
+        logger: silent,
+        coreHealth: () => core,
+        probeHealth: () => undefined,
+      });
+      assert.equal(parse((await exports.scrape()).body).has('ms_core_disk_free_percent'), false);
+      disk = { freePercent: 37.5, freeBytes: 1, databaseBytes: 1 };
+      assert.equal(parse((await exports.scrape()).body).get('ms_core_disk_free_percent'), 37.5);
+      disk = null;
+      assert.equal(
+        parse((await exports.scrape()).body).has('ms_core_disk_free_percent'),
+        false,
+        'it kept its last value, or went to zero',
+      );
+    });
+
+    it('exports nothing of the core’s own when there is no Core Health to read', async () => {
+      const body = (
+        await new MetricsExporter({
+          db,
+          logger: silent,
+          coreHealth: () => undefined,
+          probeHealth: () => undefined,
+        }).scrape()
+      ).body;
+      assert.equal(body.includes('ms_core_ingestion_queue_rows'), false);
+      assert.match(body, /ms_core_process_resident_memory_bytes/, 'the process series stay');
+    });
+
+    it('exports only what it would without Core Health when every core reading is a gap', async (t) => {
+      // Every channel at once, rather than the ones whose source can be null today, so a channel
+      // added later is held to the rule without anyone remembering to list it here.
+      const families = async (exports: MetricsExporter): Promise<Set<string>> =>
+        new Set(
+          (await exports.scrape()).body
+            .split('\n')
+            .filter((line) => line.startsWith('# TYPE ms_core_'))
+            .map((line) => line.split(' ')[2] ?? ''),
+        );
+      const over = (core: CoreHealthService | undefined): MetricsExporter =>
+        new MetricsExporter({
+          db,
+          logger: silent,
+          coreHealth: () => core,
+          probeHealth: () => undefined,
+        });
+      const core = fixedCoreHealth(db);
+      const read = core.read.bind(core);
+      const gapped = t.mock.method(
+        core,
+        'read',
+        async (...args: Parameters<CoreHealthService['read']>): Promise<CoreHealthReading> =>
+          Object.fromEntries(Object.keys(await read(...args)).map((key) => [key, null])),
+      );
+      const without = await families(over(undefined));
+      const exported = [...(await families(over(core)))].filter((name) => !without.has(name));
+      assert.deepEqual(exported, [], 'a core series exported with no reading');
+      assert.equal(gapped.mock.callCount(), 1, 'the control: the gapped reading was the one read');
+      assert.ok((await families(over(fixedCoreHealth(db)))).size > without.size, 'the control');
     });
   });
 

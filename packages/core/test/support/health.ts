@@ -1,4 +1,4 @@
-import { CoreHealthService } from '../../src/health/core-health.js';
+import { CoreHealthService, type CoreHealthSources } from '../../src/health/core-health.js';
 import { ProbeHealthService } from '../../src/health/probe-health.js';
 import type { Database } from '../../src/db/pool.js';
 import type { ProbeLink } from '../../src/transport/probe-endpoint.js';
@@ -9,13 +9,21 @@ import { everyVoucherHolds } from './vouching.js';
  * Core Health over fixed readings, for a test about what is done with the numbers rather than
  * how they are taken: the metrics export, and the routes that serve them (`A-31`).
  */
-export function fixedCoreHealth(db: Database): CoreHealthService {
+export function fixedCoreHealth(
+  db: Database,
+  options: {
+    /** What the disk reads; a gap by default, as on a core whose database is elsewhere. */
+    readonly disk?: CoreHealthSources['disk'];
+    /** False for a v1 core, which runs no reporting and so has no report source (`H-12`). */
+    readonly reporting?: boolean;
+  } = {},
+): CoreHealthService {
   return new CoreHealthService({
     vouching: everyVoucherHolds,
     db,
     logger: silent,
     sources: {
-      disk: () => null,
+      disk: options.disk ?? (() => null),
       evictedChunks: () => 0,
       machineMemory: () => ({
         availablePercent: 42.5,
@@ -38,13 +46,17 @@ export function fixedCoreHealth(db: Database): CoreHealthService {
       }),
       probes: () => ({ probesDown: 1, probesSilent: 2 }),
       alarms: () => ({ fired: 6, nextWakeAt: null }),
-      reports: () => ({
-        deferred: 5,
-        failed: 3,
-        undelivered: 4,
-        formatsWaiting: 2,
-        formatsRefused: 1,
-      }),
+      ...(options.reporting === false
+        ? {}
+        : {
+            reports: () => ({
+              deferred: 5,
+              failed: 3,
+              undelivered: 4,
+              formatsWaiting: 2,
+              formatsRefused: 1,
+            }),
+          }),
       queries: () => ({ refused: 2 }),
       ingestionDiscards: () => ({ discardedFutureTime: 0, discardedPastTime: 0 }),
       delivery: () => Promise.resolve({ pending: 9, failed: 4, oldestPendingAgeMs: 125_000 }),

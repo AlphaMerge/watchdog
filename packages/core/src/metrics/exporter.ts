@@ -20,6 +20,14 @@ import type { ProbeHealthService } from '../health/probe-health.js';
  * set only where there is a reading — a gauge that kept its last value would report a probe that
  * has gone as still running at whatever it was doing when it left.
  *
+ * **The core's series are registered only while they have a reading** (`P-223`). The probe's are
+ * labelled, and a labelled metric has no series until something sets one, so a reset leaves it
+ * absent. The core's carry no labels, and `prom-client` gives an unlabelled metric a series at 0
+ * from the moment it exists, and again on every reset. So a disk-free gauge on a core whose
+ * database is on another host exported `0`, which fires any disk-low alert for ever, and a v1 core
+ * with no reporting exported its report failures as `0`, a claim about a subsystem that is not
+ * running. Each core metric is kept out of the registry while its reading is a gap.
+ *
  * **Base units, because that is what every dashboard and alert assumes.** Milliseconds become
  * seconds, megabytes become bytes, percentages become ratios. The channels keep their own units,
  * which are the ones an operator reads on a graph; these are the ones `rate()` and `histogram`
@@ -557,16 +565,17 @@ export class MetricsExporter {
     // user's existing Node dashboards already read, which is exactly why they are not re-spelled.
     collectDefaultMetrics({ register: this.#registry, prefix: 'ms_core_' });
 
+    // Registered by `#present` while each has a reading, and never before (`P-223`).
     for (const metric of CORE_METRICS) {
       if (metric.counter === true) {
         this.#coreCounters.set(
           metric.key,
-          new Counter({ name: metric.name, help: metric.help, registers: [this.#registry] }),
+          new Counter({ name: metric.name, help: metric.help, registers: [] }),
         );
       } else {
         this.#coreGauges.set(
           metric.key,
-          new Gauge({ name: metric.name, help: metric.help, registers: [this.#registry] }),
+          new Gauge({ name: metric.name, help: metric.help, registers: [] }),
         );
       }
     }
@@ -637,25 +646,22 @@ export class MetricsExporter {
 
   #set(metric: Metric, value: number | null, labels: Record<string, string>): void {
     const scaled = value === null || !Number.isFinite(value) ? null : value * (metric.scale ?? 1);
+    const core = labels[PROBE_LABEL] === undefined;
     if (metric.counter !== true) {
-      const gauge = (labels[PROBE_LABEL] === undefined ? this.#coreGauges : this.#probeGauges).get(
-        metric.key,
-      );
+      const gauge = (core ? this.#coreGauges : this.#probeGauges).get(metric.key);
       if (gauge === undefined) return;
-      // **An absent reading is an absent series**, not a zero. `reset()` on the core gauges is
-      // per-metric because they carry no labels; the probe gauges are reset wholesale above.
-      if (scaled === null) {
-        if (labels[PROBE_LABEL] === undefined) gauge.reset();
-        return;
-      }
+      // **An absent reading is an absent series**, not a zero: a core gauge leaves the registry,
+      // and the probe gauges were reset wholesale above.
+      if (core) this.#present(gauge, metric.name, scaled !== null);
+      if (scaled === null) return;
       gauge.set(labels, scaled);
       return;
     }
 
-    const counter = (
-      labels[PROBE_LABEL] === undefined ? this.#coreCounters : this.#probeCounters
-    ).get(metric.key);
-    if (counter === undefined || scaled === null) return;
+    const counter = (core ? this.#coreCounters : this.#probeCounters).get(metric.key);
+    if (counter === undefined) return;
+    if (core) this.#present(counter, metric.name, scaled !== null);
+    if (scaled === null) return;
     const held = `${metric.name}|${labels[PROBE_LABEL] ?? ''}`;
     const previous = this.#lastCounter.get(held);
     this.#lastCounter.set(held, scaled);
@@ -670,5 +676,12 @@ export class MetricsExporter {
     // *reading*; only a reading that is missing may be an absent series. It also gives `rate()`
     // and any "no data" alert a baseline to start from, which is why the convention exists.
     counter.inc(labels, delta > 0 ? delta : 0);
+  }
+
+  /** An unlabelled core metric in the registry while it has a reading, and out of it while not. */
+  #present(metric: Gauge<string> | Counter<string>, name: string, present: boolean): void {
+    const registered = this.#registry.getSingleMetric(name) !== undefined;
+    if (present && !registered) this.#registry.registerMetric(metric);
+    if (!present && registered) this.#registry.removeSingleMetric(name);
   }
 }
