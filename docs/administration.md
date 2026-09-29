@@ -712,12 +712,23 @@ the probe grew until the kernel killed it, six times in six minutes, and the sta
 `failed` (`docs/findings/2026-09-29-probe-starvation-b.md`).
 
 The pool now stops at what memory holds: the memory left under the probe's ceiling, less a reserve
-of 10% of the ceiling or 256 MiB, whichever is larger, divided by 40 MiB a worker. Past that,
+of a quarter of the ceiling or 256 MiB, whichever is larger, divided by 40 MiB a worker. Past that,
 checks wait in the queue and are refused and counted when it is full, and the probe stays up.
 Probe Health says so in its message — *memory holds the pool at 77 workers, 179 short of its
 ceiling* — and the probe logs *memory is holding the check pool back* once per episode, with the
 numbers it used. If memory runs short while the pool is large, workers are given up as they finish
 their checks, never in the middle of one.
+
+**A quarter, so that a full pool stays clear of the memory warnings** (`P-244`). A saturated,
+capped probe sits at 75% of its ceiling or a little under, below the 80% at which
+`memoryLimitUsage` warns, and on a probe measuring the machine above the 20% at which
+`memoryAvailable` does. The saturation is one alarm, the pool's, and it clears when the
+saturation does, even though the workers stay until the pool shrinks. The warnings keep their
+meaning: from 80% the start-up surge `P-206` measured, 14% of the ceiling in five seconds, may not
+fit. The reserve used to be a tenth, which parked a saturated probe at about 90% of its ceiling
+with a warning that outlasted the saturation. The cost is workers, and only while memory is what
+binds: at the stock 6 GiB a saturated pool stops at about 107 workers rather than 130, and past
+about 13 GiB the ceiling of 256 workers binds first.
 
 What to do depends on why the pool wanted so many:
 

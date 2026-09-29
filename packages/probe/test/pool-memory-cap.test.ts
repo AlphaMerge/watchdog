@@ -3,12 +3,11 @@ import { join } from 'node:path';
 import { Writable } from 'node:stream';
 import { after, describe, it } from 'node:test';
 import { pino } from 'pino';
-import type { Logger } from '@ms/shared';
+import { memoryReserveBytes, type Logger } from '@ms/shared';
 import {
   CheckPool,
   MEMORY_CAP_READ_INTERVAL_MS,
   MemoryCap,
-  memoryReserveBytes,
   workersMemoryAllows,
   type MemoryCapReading,
 } from '../src/runner/index.js';
@@ -81,12 +80,25 @@ function recording(): { logger: Logger; lines: { msg: string; level: number }[] 
 }
 
 describe('what memory allows (P-236)', () => {
-  it('keeps back the larger of 256 MiB and a tenth of the ceiling', () => {
+  it('keeps back the larger of 256 MiB and a quarter of the ceiling (P-244)', () => {
+    assert.equal(memoryReserveBytes(768 * MIB), 256 * MIB);
     assert.equal(memoryReserveBytes(1 * GIB), 256 * MIB);
-    assert.equal(memoryReserveBytes(2560 * MIB), 256 * MIB);
-    assert.equal(memoryReserveBytes(4 * GIB), Math.ceil(0.4 * GIB));
-    assert.equal(memoryReserveBytes(6 * GIB), Math.ceil(0.6 * GIB));
+    assert.equal(memoryReserveBytes(4 * GIB), 1 * GIB);
+    assert.equal(memoryReserveBytes(6 * GIB), 1.5 * GIB);
   });
+
+  // `P-244`: where a saturated pool settles is where the cap stops, which must be under the 80%
+  // `memoryLimitUsage` warns at, and leave the machine above the 20% `memoryAvailable` warns at.
+  for (const totalMiB of [1_024, 2_048, 4_096, 6_144, 8_192, 12_288, 16_384, 65_536]) {
+    it(`stops a saturated pool under both warnings at a ${String(totalMiB)} MiB ceiling`, () => {
+      const total = totalMiB * MIB;
+      // The pool grows while a worker's worth is spare above the reserve, so it stops with less
+      // than that left: the most it can use is the ceiling less the reserve.
+      const settledPercent = ((total - memoryReserveBytes(total)) / total) * 100;
+      assert.ok(settledPercent < 80, `${String(settledPercent)}% of the ceiling`);
+      assert.ok(100 - settledPercent > 20);
+    });
+  }
 
   const perWorkerBytes = 40 * MIB;
   const table: {
@@ -96,16 +108,21 @@ describe('what memory allows (P-236)', () => {
     readonly totalMiB: number;
     readonly workers: number;
   }[] = [
-    // 4 GiB: 410 MiB kept back, so 1,000 MiB free is 590 spare, 14 workers more.
-    { name: 'room for more', held: 10, availableMiB: 1_000, totalMiB: 4_096, workers: 24 },
+    // 4 GiB: 1,024 MiB kept back, so 1,600 MiB free is 576 spare, 14 workers more.
+    { name: 'room for more', held: 10, availableMiB: 1_600, totalMiB: 4_096, workers: 24 },
     // Exactly the reserve free: not one more.
-    { name: 'at the reserve', held: 66, availableMiB: 410, totalMiB: 4_096, workers: 66 },
+    { name: 'at the reserve', held: 66, availableMiB: 1_024, totalMiB: 4_096, workers: 66 },
     // P-216b's first kill, as Probe Health read it: 21.5% of 4 GiB left with 75 workers held.
-    { name: 'the incident', held: 75, availableMiB: 880, totalMiB: 4_096, workers: 86 },
+    // Under a quarter now, so four go back rather than eleven more coming.
+    { name: 'the incident', held: 75, availableMiB: 880, totalMiB: 4_096, workers: 71 },
     // Below the reserve, what memory allows is fewer than are held: the pool gives some back.
-    { name: 'under the reserve', held: 50, availableMiB: 250, totalMiB: 4_096, workers: 46 },
+    { name: 'under the reserve', held: 50, availableMiB: 250, totalMiB: 4_096, workers: 30 },
     // Past the ceiling — a working set above `memory.high` — reads as negative available.
-    { name: 'past the ceiling', held: 20, availableMiB: -100, totalMiB: 4_096, workers: 7 },
+    { name: 'past the ceiling', held: 40, availableMiB: -100, totalMiB: 4_096, workers: 11 },
+    // A 16 GiB ceiling with the pool's 256 workers of 40 MiB and 300 MiB besides: 5,844 MiB
+    // left, 4 GiB of it kept back, still room for 43 more. The pool's ceiling binds first, so the
+    // quarter costs a large ceiling nothing, and capping it would buy nothing (`P-244`).
+    { name: 'a large ceiling', held: 256, availableMiB: 5_844, totalMiB: 16_384, workers: 299 },
     // Never negative, however far under.
     { name: 'far under', held: 3, availableMiB: -2_000, totalMiB: 4_096, workers: 0 },
     // A spare fraction of a worker does not buy one.
@@ -147,14 +164,14 @@ describe('reading memory for the cap (P-236)', () => {
     const cap = new MemoryCap({
       sources: {
         limit: () => null,
-        machine: () => ({ availableBytes: 2 * GIB, totalBytes: 8 * GIB }),
+        machine: () => ({ availableBytes: 3 * GIB, totalBytes: 8 * GIB }),
         now: () => 0,
       },
     });
     const reading = cap.read(0);
     assert.equal(reading?.source, 'machine');
-    // 8 GiB keeps back 819 MiB; 2,048 − 819.2 = 1,228.8 MiB spare is 30 workers of 40.
-    assert.equal(reading.workers, 30);
+    // 8 GiB keeps back 2,048 MiB; 3,072 − 2,048 = 1,024 MiB spare is 25 workers of 40.
+    assert.equal(reading.workers, 25);
   });
 
   it('has no cap where neither can be read, rather than a cap of nothing', () => {
@@ -171,13 +188,13 @@ describe('reading memory for the cap (P-236)', () => {
       sources: {
         limit: () => {
           reads += 1;
-          return { availableBytes: 810 * MIB, totalBytes: 4 * GIB };
+          return { availableBytes: 1_424 * MIB, totalBytes: 4 * GIB };
         },
         machine: () => null,
         now: () => now,
       },
     });
-    // 810 − 410 = 400 MiB spare: ten more than the 20 held.
+    // 1,424 − 1,024 = 400 MiB spare: ten more than the 20 held.
     assert.equal(cap.read(20)?.workers, 30);
     // Ten started since: the reading does not have them in it, so the cap is still 30, not 40.
     now = MEMORY_CAP_READ_INTERVAL_MS - 1;

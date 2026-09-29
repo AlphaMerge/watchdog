@@ -1,4 +1,9 @@
-import { readLimitMemory, readMachineMemory, type AvailableMemory } from '@ms/shared';
+import {
+  memoryReserveBytes,
+  readLimitMemory,
+  readMachineMemory,
+  type AvailableMemory,
+} from '@ms/shared';
 import { WORKER_RESIDENT_MIB } from '../measured.js';
 
 /**
@@ -37,23 +42,6 @@ export interface MemoryCapReading {
 }
 
 const MIB = 1024 * 1024;
-
-/** A quarter of a GiB at least. */
-const RESERVE_FLOOR_BYTES = 256 * MIB;
-const RESERVE_FRACTION = 0.1;
-
-/**
- * Memory kept back from the pool: the larger of 256 MiB and a tenth of the ceiling.
- *
- * For what is not workers: the main thread's heap, the spool, the log's backlog when stdout is
- * slow, and the growth of workers that have only just started — a worker is ready well before it
- * has reached its full size. A tenth, because at `MemoryMax=6G` that is 600 MiB and `P-206`'s
- * main-thread peak was under 100; the floor, because a tenth of a small ceiling is not enough for
- * the main thread alone.
- */
-export function memoryReserveBytes(totalBytes: number): number {
-  return Math.max(RESERVE_FLOOR_BYTES, Math.ceil(totalBytes * RESERVE_FRACTION));
-}
 
 /**
  * The arithmetic, pure, so it can be tested against a table.

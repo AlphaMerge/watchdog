@@ -112,6 +112,7 @@ export { DeltaMeter } from './process/delta-meter.js';
 export { parseMeminfo, readMachineMemory } from './process/machine-memory.js';
 export type { MachineMemory, MachineMemorySources } from './process/machine-memory.js';
 export { readLimitMemory } from './process/limit-memory.js';
+export { memoryReserveBytes } from './process/memory-reserve.js';
 export type { LimitMemorySources } from './process/limit-memory.js';
 export { AvailableMemoryWatch } from './process/memory-watch.js';
 export { MEMORY_SAMPLE_INTERVAL_MS, MemorySampler } from './process/memory-sampler.js';

@@ -6746,7 +6746,7 @@ because each is a decision rather than a defect:
       pings sent against those received in the findings. If the answer is the kill, the findings
       show the restart helped. The core's 25.6 s is part of the acceptance, not only the probe's.
 
-- [ ] **P-244 — the memory cap holds a saturated probe over `memoryLimitUsage`'s warning** · S ·
+- [x] **P-244 — the memory cap holds a saturated probe over `memoryLimitUsage`'s warning** · S ·
       P-236, M-21 · Found by `P-216c`. The cap keeps back 10% of the limit, so a saturated probe
       settles at about 90% of it: 89.9–94.7% in every stage of that run, the baseline included.
       Probe Health warns on `memoryLimitUsage` above 80%. Whether that is a problem depends on
@@ -6764,6 +6764,35 @@ because each is a decision rather than a defect:
       scenario test drives a saturated, capped probe through Probe Health's sweep and ingestion,
       the entry says which of the two it is and which fix, and the test shows one alarm for one
       saturation.
+
+      **Done: the second, a standing warning, and it was true.** The workers stay until the pool
+      shrinks, so the warning outlived the saturation, and `poolUsage` was already Down for the
+      saturation itself. The warning was also right: its limit is where `P-206`'s surge (14% of
+      the ceiling in five seconds) stops fitting, and the cap was parking the probe past it.
+      **Fixed with the reserve**, now the larger of 256 MiB and 25%, moved to `@ms/shared` as
+      `memoryReserveBytes` so the core's test uses the real arithmetic. A saturated probe now
+      settles at or under 75% of its ceiling, clear of the 80% warning. On the machine path it
+      stays above `memoryAvailable`'s 20% warning, where at a tenth it sat on the 10% error.
+      Not the other fix: the declared limits are static per channel, and a warning that moves
+      with the cap would stop warning at 90%, where the surge kills. The cost is workers while
+      memory binds: at 6 GiB, about 107 rather than 130.
+
+      **Uncapped, because the limits are fractions too.** Assuming 40 MiB a worker, 300 MiB
+      besides and the 256-worker ceiling, a saturated pool settles at:
+      - **1 GiB:** 256 MiB kept back (the floor), 11 workers, 72.3%.
+      - **4 GiB:** 1 GiB kept back, 69 workers, 74.7%.
+      - **16 GiB:** 4 GiB kept back, and never reached. Memory would hold 299 workers, so the
+        ceiling binds first at 256, which is 64.3%.
+
+      `max(256 MiB, min(25%, 1 GiB))` gives the same three numbers. It differs only between
+      them, and there it is wrong: the stock 6 GiB settles at 83.0% with 120 workers, and
+      8 GiB at 87.2%. Every ceiling above 5 GiB would be back over the warning. On a probe
+      with no ceiling of its own, it would let a 16 GiB machine fall to 6% available, under
+      `memoryAvailable`'s 10% error. The test is
+      `saturated-memory-cap-scenario.test.ts`, which runs Probe Health through ingestion and the
+      state machine for a probe on a ceiling and one on the machine: calm, two saturations, and
+      the full idle pool between them. Each history reads up, down, up, down, up, with nothing
+      about memory in a Down. With a tenth, the probe on a ceiling reads up, down, warning, down, warning, at 89.5% of its limit: the standing warning `P-216c` saw.
 
 - [x] **P-245 — `P-219`'s memory fold outlives its record window, and is folded twice** · S ·
       P-219 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `P-245`).
