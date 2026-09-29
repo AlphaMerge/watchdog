@@ -509,7 +509,11 @@ describe('ms-enrol', { skip: linux ? false : 'Linux only' }, () => {
 });
 
 describe('placing a release', { skip: linux ? false : 'Linux only' }, () => {
-  /** An unpacked release whose launcher's `config check` refuses any file that says "bad". */
+  /**
+   * An unpacked release whose launcher's `config check` refuses any file that says `refused-port`.
+   * Letters a hex key cannot spell: setup writes one into every configuration it installs, and a
+   * marker of `bad` refused about 1.5% of runs for the key alone.
+   */
   function release(box: Sandbox, version: string): string {
     const from = join(box.dir, `release-${version}`);
     for (const sub of ['app', 'bin', 'etc', 'deploy/systemd', 'docs']) {
@@ -522,7 +526,7 @@ describe('placing a release', { skip: linux ? false : 'Linux only' }, () => {
       writeFileSync(
         join(from, 'bin', `ms-${svc}`),
         `#!/usr/bin/env bash\necho "ms-${svc} ${version} $*" >> "$STUB_LOG"\n` +
-          `grep -q bad "$4" && { echo "api.port: must be integer"; exit 1; }\nexit 0\n`,
+          `grep -q refused-port "$4" && { echo "api.port: must be integer"; exit 1; }\nexit 0\n`,
         { mode: 0o755 },
       );
       writeFileSync(join(from, 'etc', `${svc}.json`), '{}');
@@ -559,7 +563,7 @@ describe('placing a release', { skip: linux ? false : 'Linux only' }, () => {
   it('asks the new build first, and on a refusal changes nothing at all', () => {
     const box = sandbox();
     const { prefix, conf } = installed(box);
-    writeFileSync(join(conf, 'core.json'), '{"api":{"port":"bad"}}');
+    writeFileSync(join(conf, 'core.json'), '{"api":{"port":"refused-port"}}');
     const result = place(box, release(box, '2.0.0'), prefix, conf);
 
     assert.equal(result.status, 1);
@@ -621,7 +625,7 @@ describe('placing a release', { skip: linux ? false : 'Linux only' }, () => {
   it('does not ask under --no-start, and still never swaps under a running service', () => {
     const box = sandbox();
     const { prefix, conf } = installed(box);
-    writeFileSync(join(conf, 'core.json'), '{"api":{"port":"bad"}}');
+    writeFileSync(join(conf, 'core.json'), '{"api":{"port":"refused-port"}}');
     const result = place(box, release(box, '2.0.0'), prefix, conf, '--no-start');
     assert.equal(result.status, 0, result.stderr);
     assert.ok(!box.logged().includes('config check'));
@@ -1056,7 +1060,7 @@ describe(
       for (const svc of ['core', 'probe']) {
         writeFileSync(
           join(prefix, 'bin', `ms-${svc}`),
-          `#!/usr/bin/env bash\ngrep -q bad "$4" && { echo "api.port: must be integer"; exit 1; }\nexit 0\n`,
+          `#!/usr/bin/env bash\ngrep -q refused-port "$4" && { echo "api.port: must be integer"; exit 1; }\nexit 0\n`,
           { mode: 0o755 },
         );
         writeFileSync(
@@ -1153,7 +1157,7 @@ describe(
 
     it('on a refusal, has reloaded the units, starts nothing, and says what is running', () => {
       const box = sandbox();
-      const { prefix, conf } = installation(box, '{"api":{"port":"bad"}}');
+      const { prefix, conf } = installation(box, '{"api":{"port":"refused-port"}}');
       const result = setup(box, prefix, conf, ['--components', 'core'], {
         STATE_ms_core: 'inactive',
       });
