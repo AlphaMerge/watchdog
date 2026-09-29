@@ -17529,6 +17529,19 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       - The smoke's own refusal needs Docker, so a mutant cannot reach it. The Mac-repacked run
         above is what proves it.
 
+      **Addendum: the pre-candidate baseline, main at `55bc0d7`.** The heavy runs above were on the
+      pre-rebase commit, and `H-23` changed `package.sh` and `smoke-install.sh` under them. So main
+      as it stood was run again, from a clean worktree. This is the build a release candidate would
+      be cut from, and nothing was tagged or cut.
+      - **`package.sh`, v1.** `build.json`: commit `55bc0d76f5a1`, `dirty: false`, `profile: v1`,
+        `lock: sha256:0ad323b7…`, the sha256 of the lock it ships. The tarball,
+        `ms-0.1.0-linux-aarch64.tar.gz`, is sha256 `fe0e9b86…`.
+      - **`smoke-install.sh` on it:** passed. The profile and the lock at `55bc0d7` were asserted,
+        and so was `H-23`'s recovery: stopped by the start limit after 6 kills, then started again
+        16 s later, after a 15 s cool-down.
+      - **`smoke-packages.sh`:** the `.deb` on Debian and the `.rpm` on Rocky both passed, each
+        reporting the build it is.
+
 - [x] **H-21 — An upgrade that keeps what the operator did, and a restore that can be followed**
       · L · H-03, H-04, H-05 · Found on 2026-09-28 by review rounds 2 and 3 of the upgrade path,
       each finding checked by two verifiers. Upgrade and backup/restore only: start-up recovery is
