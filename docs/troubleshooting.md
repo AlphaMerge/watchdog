@@ -277,6 +277,10 @@ inherited, and whether a **role** or a **token** capped it.
 - Otherwise the grant itself is missing, or an explicit `none` lower in the tree is overriding an
   inherited right. Deleting a `none` grant restores inheritance; granting `read` does not, it
   pins it.
+- **An account that is not an administrator is told only `none`** where it holds nothing, with
+  no source, as it is for an id that does not exist (`A-49`). Where the `none` comes from would
+  name a hole, and whether an object sits inside it. An administrator asks on its behalf with
+  `?userId=<account>` and gets the whole answer.
 
 ## Writes from the browser are refused
 

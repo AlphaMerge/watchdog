@@ -16841,7 +16841,7 @@ because each is a decision rather than a defect:
         the default on one side only (each way), arrays always read as the same, and the default
         never read.
 
-- [ ] **A-49 — four answers that still reveal what the reader cannot see** · S · A-32, A-31,
+- [x] **A-49 — four answers that still reveal what the reader cannot see** · S · A-32, A-31,
       A-12 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `A-49`). All low.
       - **ETag moves when a hidden ancestor changes** (`routes/objects.ts:412`). With
         `?include=`, a restricted caller's tag covers the whole ancestor chain. An identical
@@ -16860,6 +16860,35 @@ because each is a decision rather than a defect:
       - a non-admin's own "none" answers exactly as an unused id does;
       - the preview hides `%host` with `%device`.
       Tests in `object-visibility.test.ts`. Mutants as usual.
+
+      **Outcome (2026-09-29).**
+      - **The chain.** `chainValidator` takes a restricted `Visibility` and covers only the object
+        and the ancestors `Visibility.trim` keeps, which are the steps of the breadcrumb the
+        reader is shown. `detailTag` passes the view unless the include has `settings` or
+        `credentials`: those carry what hidden ancestors hand down, and keep the whole chain.
+        Test: a comment on the hidden probe answers the watcher's `?include=ancestors` 304, a
+        comment on the visible branch answers 200, and under `?include=settings` or
+        `credentials` the hidden probe's change still answers 200.
+      - **The count.** Every caller's tag folds in the child count, an all-seeing caller's too, as
+        `W/"<version>-<hex>"` where it was `W/"<version>"`. `If-Match` reads either, and the web
+        client builds its own from the version. No trigger was added: touching the parent on
+        every child create would 412 concurrent edits to it. Test: an administrator's tag answers
+        200 after a child is added, moved out and deleted, and 304 once nothing changed. A-32's
+        administrator-form assertion now expects the new form and PATCHes with it. The write
+        routes still answer the bare version tag, which never matches a GET's, so it costs a
+        full answer and never a stale one.
+      - **Effective access.** A non-administrator asking about itself is answered `DENIED`, now
+        exported from `auth/access.ts`, wherever the result is `none`. That is the same body an
+        unused id gets, with no source. An administrator's `?userId=` still reports where the
+        `none` came from. Test: the watcher's answer for the carved device, a sensor under it and
+        id 2^31-1 are equal, and contain no digit. The administrator's question about the watcher
+        names the carved device. The route comment, its description,
+        `NO_MARKER_TO_REACH`'s reason and `troubleshooting.md` say so.
+      - **`%host`.** `#contextFor` hides a hidden nearest device's host with its name, so a draft
+        or saved preview over a sensor re-granted inside a hole renders `(outside your view)`.
+        Test: both previews as the watcher, against the administrator and against a visible
+        device.
+      - **Mutants: 8, all killed.**
 
 - [x] **A-50 — a debug log line carries a probe's decrypted credentials** · S · A-05 · Found in
       review round 4b (`findings/2026-09-29-review-round-4b.md`, `A-50`). Medium.

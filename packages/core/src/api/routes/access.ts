@@ -1,6 +1,6 @@
 import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
-import type { AccessRight, AccessService } from '../../auth/access.js';
+import { DENIED, type AccessRight, type AccessService } from '../../auth/access.js';
 import type { AccountService } from '../../auth/accounts.js';
 import { AuthError } from '../../auth/errors.js';
 import { actorFor, requireRole } from '../authentication.js';
@@ -80,8 +80,12 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
     {
       // **Read, not `read` on the object.** "What may I do here?" has to be answerable when the
       // answer is "nothing" — refusing it would make a UI unable to tell a hidden object from a
-      // broken request, and the reply carries no fact about the object beyond the right itself.
-      // Asking about *another* account is still an administrator's question, guarded below.
+      // broken request. **And a non-administrator's own "nothing" says nothing more** (`A-49`):
+      // where the `none` came from is the id of a hole and whether an object sits inside it, so
+      // the caller walking ids would list every object in every hole. It answers as an unused id
+      // does. An administrator asking with `userId` still gets the whole answer, which is how a
+      // refusal is debugged. Asking about *another* account is an administrator's question,
+      // guarded below.
       config: READS,
       schema: {
         tags: ['access'],
@@ -90,7 +94,10 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
           'Resolves the three rules — inheritance up the tree, explicit beats inherited, highest ' +
           'wins across groups — and reports where the winning grant came from, which is what ' +
           'makes a refusal debuggable. Without `userId` it answers about the calling account; ' +
-          'asking about somebody else needs an administrator.',
+          'asking about somebody else needs an administrator. **An account that is not an ' +
+          'administrator, asking about itself, is told `none` with no source** wherever it ' +
+          'holds nothing, as it is for an id that does not exist, so that an object hidden from ' +
+          'it cannot be told from one that is not there (`A-49`).',
         params: idParams,
         querystring: {
           type: 'object',
@@ -149,7 +156,7 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
       // that capped by its role (`A-04`) and by the token in hand (`A-06`). Answering the first
       // here told a read-only account it held `full` on a device it could not edit.
       if (asked === undefined || asked === principal.userId) {
-        return access.resolveFor(
+        const own = await access.resolveFor(
           {
             userId: principal.userId,
             role: principal.role,
@@ -157,6 +164,7 @@ export function accessRoutes(app: FastifyInstance, options: AccessRoutesOptions)
           },
           request.params.id,
         );
+        return own.right === 'none' && principal.role !== 'admin' ? DENIED : own;
       }
 
       const subject = await accounts.get(asked);

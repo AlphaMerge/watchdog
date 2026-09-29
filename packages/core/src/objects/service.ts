@@ -1575,10 +1575,15 @@ export class ObjectService {
    * The cache validator for a response that carries inherited content (S-13).
    *
    * Read-only and deliberately outside `get`: the point is to answer "has anything changed"
-   * without paying for the resolution work the answer would otherwise require.
+   * without paying for the resolution work the answer would otherwise require. A restricted
+   * `visibility` narrows it to what that reader's answer can show (`A-49`).
    */
-  async chainValidator(id: ObjectId, salt: string): Promise<string | null> {
-    return this.#db.tx((q) => this.#repo.chainValidator(q, id, salt));
+  async chainValidator(
+    id: ObjectId,
+    salt: string,
+    visibility?: Visibility,
+  ): Promise<string | null> {
+    return this.#db.tx((q) => this.#repo.chainValidator(q, id, salt, visibility));
   }
 
   async create(writer: Writer, input: CreateObjectInput): Promise<ObjectDetail> {

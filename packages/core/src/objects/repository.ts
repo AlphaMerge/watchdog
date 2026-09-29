@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 import type { AccessRight, Visibility } from '../auth/access.js';
@@ -673,8 +674,23 @@ export class ObjectRepository {
    *
    * md5 because this is a cache validator, not a security primitive: it has to change when the
    * input changes, not resist an adversary choosing the input.
+   *
+   * **Given a restricted `visibility`, only the ancestors it keeps are covered** (`A-49`): the
+   * object and the steps of its path `Visibility.trim` leaves, which are what a trimmed breadcrumb
+   * shows. Over the whole chain, a rename or a comment on an ancestor the reader cannot see moved
+   * their tag and answered them 200 with an unchanged body — the one bit, and the time, of an edit
+   * they were not to know of. A caller whose answer carries what hidden ancestors hand down, the
+   * inherited settings and credentials, is not given one, and is covered by all of it.
    */
-  async chainValidator(q: Queryable, id: ObjectId, salt: string): Promise<string | null> {
+  async chainValidator(
+    q: Queryable,
+    id: ObjectId,
+    salt: string,
+    visibility?: Visibility,
+  ): Promise<string | null> {
+    if (visibility !== undefined && !visibility.everything) {
+      return this.#visibleChainValidator(q, id, salt, visibility);
+    }
     const rows = await q.query<{ validator: string | null }>(
       `
       WITH RECURSIVE chain AS (
@@ -698,6 +714,44 @@ export class ObjectRepository {
     );
     // No rows at all means no such object; the caller reads it and gets the 404.
     return rows[0]?.validator ?? null;
+  }
+
+  /** `chainValidator` over the object and the ancestors `visibility` keeps (`A-49`). */
+  async #visibleChainValidator(
+    q: Queryable,
+    id: ObjectId,
+    salt: string,
+    visibility: Visibility,
+  ): Promise<string | null> {
+    const rows = await q.query<{ id: string; version: string; depth: number }>(
+      `
+      WITH RECURSIVE chain AS (
+        SELECT o.id, o.parent_id, o.version, 0 AS depth
+        FROM object o
+        WHERE o.id = $1
+
+        UNION ALL
+
+        SELECT parent.id, parent.parent_id, parent.version, chain.depth + 1
+        FROM object parent
+        JOIN chain ON parent.id = chain.parent_id
+        WHERE chain.depth < ${String(MAX_WALK_DEPTH)}
+      )
+      SELECT id::text AS id, version::text AS version, depth FROM chain ORDER BY depth DESC
+      `,
+      [id],
+    );
+    if (rows.length === 0) return null;
+    // Decided on the whole root-first path, as the breadcrumb is. The object itself is kept: the
+    // reader is answered about it only because they can see it.
+    const kept = new Set(visibility.trim(rows.map((row) => Number(row.id))));
+    const covered = rows
+      .filter((row) => kept.has(Number(row.id)))
+      .reverse()
+      .map((row) => `${row.id}:${row.version}`);
+    return createHash('md5')
+      .update(covered.join(',') + salt)
+      .digest('hex');
   }
 
   /**

@@ -85,7 +85,12 @@ export interface ResolvedAccess {
   cappedByToken?: boolean;
 }
 
-const DENIED: ResolvedAccess = {
+/**
+ * No right, from no grant: what an object outside every grant resolves to, and so what an unused
+ * id does too. Also what a non-administrator is told about their own `none`, whatever made it,
+ * so that a hidden object answers exactly as an absent one (`A-49`).
+ */
+export const DENIED: ResolvedAccess = {
   right: 'none',
   sourceObjectId: null,
   sourceGroupId: null,

@@ -36,7 +36,7 @@ Only the explicit ones. What an account may actually do here is the *resolved* r
 
 What an account may actually do with this object
 
-Resolves the three rules — inheritance up the tree, explicit beats inherited, highest wins across groups — and reports where the winning grant came from, which is what makes a refusal debuggable. Without `userId` it answers about the calling account; asking about somebody else needs an administrator.
+Resolves the three rules — inheritance up the tree, explicit beats inherited, highest wins across groups — and reports where the winning grant came from, which is what makes a refusal debuggable. Without `userId` it answers about the calling account; asking about somebody else needs an administrator. **An account that is not an administrator, asking about itself, is told `none` with no source** wherever it holds nothing, as it is for an id that does not exist, so that an object hidden from it cannot be told from one that is not there (`A-49`).
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |

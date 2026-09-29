@@ -422,10 +422,11 @@ export class TemplateService {
   /**
    * The facts a message is rendered against: one sensor, as it stands right now.
    *
-   * **With the containers the reader cannot see left unnamed** (`A-12`). `%probe` is the probe
-   * above a customer's branch, and `%device` over a sensor re-granted inside a hole is a device
-   * they were refused; a real notification goes to whoever the template names and says it all,
-   * but a preview goes to whoever asked.
+   * **With the containers the reader cannot see left unnamed** (`A-12`), and a hidden device's
+   * address with its name (`A-49`). `%probe` is the probe above a customer's branch, and
+   * `%device` over a sensor re-granted inside a hole is a device they were refused; a real
+   * notification goes to whoever the template names and says it all, but a preview goes to
+   * whoever asked.
    */
   async #contextFor(
     sensorId: ObjectId,
@@ -498,6 +499,9 @@ export class TemplateService {
     return {
       ...context,
       deviceName: outside.has('device') ? HIDDEN_NAME : context.deviceName,
+      // The device's own fact, as its name is (`A-49`): `%host` over a sensor re-granted inside a
+      // hole is the address of a device the reader was refused.
+      host: outside.has('device') ? HIDDEN_NAME : context.host,
       groupName: outside.has('group') ? HIDDEN_NAME : context.groupName,
       probeName: outside.has('probe') ? HIDDEN_NAME : context.probeName,
     };

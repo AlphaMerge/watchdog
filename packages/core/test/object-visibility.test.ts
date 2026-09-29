@@ -1980,8 +1980,17 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       assert.notEqual(tagOf(operator), tagOf(watcher));
     });
 
-    it('keeps the tag an administrator always had, and takes a restricted one as If-Match', async () => {
-      assert.match(tagOf(await detail('admin', deviceId)), /^W\/"\d+"$/);
+    it('gives an administrator a tag that covers the count, and takes either as If-Match', async () => {
+      // `W/"<version>"` until `A-49`, which let a child created under the object answer 304.
+      const admin = await detail('admin', deviceId);
+      assert.match(tagOf(admin), /^W\/"\d+-[0-9a-f]{32}"$/);
+      const byAdmin = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/objects/${String(deviceId)}`,
+        headers: { ...as('admin'), 'if-match': tagOf(admin) },
+        payload: { kind: 'device', comments: 'edited from an administrator’s tag (A-49)' },
+      });
+      assert.equal(byAdmin.statusCode, 200, byAdmin.body);
       const operator = await detail('operator', deviceId);
       assert.match(tagOf(operator), /^W\/"\d+-[0-9a-f]{32}"$/);
       const patched = await app.inject({
@@ -1991,6 +2000,174 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         payload: { kind: 'device', comments: 'edited from a restricted tag (A-32)' },
       });
       assert.equal(patched.statusCode, 200, patched.body);
+    });
+  });
+
+  describe('four answers that told what the reader cannot see (A-49)', () => {
+    const detail = (login: string, id: number, tag?: string, include?: string) =>
+      app.inject({
+        method: 'GET',
+        url: `/api/v1/objects/${String(id)}${include === undefined ? '' : `?include=${include}`}`,
+        headers: { ...as(login), ...(tag === undefined ? {} : { 'if-none-match': tag }) },
+      });
+    const tagOf = (response: { headers: Record<string, unknown> }): string =>
+      String(response.headers['etag']);
+    const comment = (id: number, kind: 'probe' | 'group', comments: string) =>
+      harness.service.update(testActor, id, { kind, comments }, { kind: 'none' });
+
+    it('answers 304 when only an ancestor it cannot see changed, and 200 for one it can', async () => {
+      const first = await detail('watcher', pingId, undefined, 'ancestors');
+      assert.equal(first.statusCode, 200, first.body);
+
+      // The probe above the branch: a changed tag on an unchanged body would tell of this edit.
+      await comment(probeId, 'probe', 'edited out of the watcher’s sight (A-49)');
+      const hidden = await detail('watcher', pingId, tagOf(first), 'ancestors');
+      assert.equal(hidden.statusCode, 304, 'the tag moved for an ancestor the path leaves out');
+
+      await comment(branchId, 'group', 'edited in the watcher’s sight (A-49)');
+      const seen = await detail('watcher', pingId, tagOf(first), 'ancestors');
+      assert.equal(seen.statusCode, 200, 'a step of the path it shows is still covered');
+    });
+
+    it('covers every ancestor when the answer carries what they hand down', async () => {
+      // Inherited settings and credentials come from hidden ancestors by design, so a change to
+      // one of those is a change to the answer.
+      for (const [login, include] of [
+        ['watcher', 'settings'],
+        ['operator', 'credentials'],
+      ] as const) {
+        const first = await detail(login, pingId, undefined, include);
+        assert.equal(first.statusCode, 200, first.body);
+        await comment(probeId, 'probe', `changed under ?include=${include} (A-49)`);
+        const after = await detail(login, pingId, tagOf(first), include);
+        assert.equal(after.statusCode, 200, `${include}: a hidden ancestor's change was 304`);
+      }
+    });
+
+    it('answers an administrator 200 once a child is added, deleted or moved out', async () => {
+      const countOf = (response: { body: string }): number =>
+        (JSON.parse(response.body) as { childCount: number }).childCount;
+      const first = await detail('admin', deviceId);
+      const before = countOf(first);
+
+      const added = await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name: 'a-counted',
+        sensorType: 'icmp.ping',
+      });
+      const grown = await detail('admin', deviceId, tagOf(first));
+      assert.equal(grown.statusCode, 200, 'a 304 would keep the old count');
+      assert.equal(countOf(grown), before + 1);
+
+      await harness.service.move(testActor, added.id, lonelyDeviceId, { kind: 'none' });
+      const movedOut = await detail('admin', deviceId, tagOf(grown));
+      assert.equal(movedOut.statusCode, 200, 'moved out, and the count kept');
+      assert.equal(countOf(movedOut), before);
+
+      await harness.service.move(testActor, added.id, deviceId, { kind: 'none' });
+      const back = await detail('admin', deviceId);
+      await harness.service.delete(testActor, added.id, { kind: 'leafOnly' }, { kind: 'none' });
+      const deleted = await detail('admin', deviceId, tagOf(back));
+      assert.equal(deleted.statusCode, 200, 'deleted, and the count kept');
+      assert.equal(countOf(deleted), before);
+
+      const unchanged = await detail('admin', deviceId, tagOf(deleted));
+      assert.equal(unchanged.statusCode, 304, 'and nothing changed since answers 304');
+    });
+
+    it('tells a non-administrator a hidden object’s access as it tells an unused id', async () => {
+      const effective = (login: string, id: number, userId?: number) =>
+        app.inject({
+          method: 'GET',
+          url: `/api/v1/objects/${String(id)}/access/effective${
+            userId === undefined ? '' : `?userId=${String(userId)}`
+          }`,
+          headers: as(login),
+        });
+      const nothing = {
+        right: 'none',
+        sourceObjectId: null,
+        sourceGroupId: null,
+        inherited: false,
+        viaAdminGroup: false,
+      };
+      // The carved device, a sensor under it, and an id nothing has.
+      for (const id of [carvedDeviceId, underCarveId, 2 ** 31 - 1]) {
+        const response = await effective('watcher', id);
+        assert.equal(response.statusCode, 200, response.body);
+        assert.deepEqual(response.json(), nothing, String(id));
+        assert.doesNotMatch(response.body, /\d/, 'no id of the hole, nor of anything in it');
+      }
+      const visible = await effective('watcher', pingId);
+      assert.equal(visible.json<{ right: string }>().right, 'read', 'the control');
+
+      // An administrator asking about the account is still told where the `none` came from.
+      const me = await app.inject({
+        method: 'GET',
+        url: '/api/v1/auth/me',
+        headers: as('watcher'),
+      });
+      const watcherId = me.json<{ userId: number }>().userId;
+      const debugged = await effective('admin', underCarveId, watcherId);
+      assert.equal(debugged.statusCode, 200, debugged.body);
+      assert.deepEqual(
+        {
+          right: debugged.json<{ right: string }>().right,
+          source: debugged.json<{ sourceObjectId: number }>().sourceObjectId,
+          inherited: debugged.json<{ inherited: boolean }>().inherited,
+        },
+        { right: 'none', source: carvedDeviceId, inherited: true },
+      );
+    });
+
+    it('hides a hidden device’s address with its name, drafted or saved', async () => {
+      const template = {
+        name: 'Addresses (A-49)',
+        method: 'email',
+        settings: {},
+        subject: '%device|%host',
+        body: '%device|%host',
+        recipients: [{ kind: 'address', value: 'ops@example.test' }],
+      };
+      const draft = (login: string, sensorId: number) =>
+        app.inject({
+          method: 'POST',
+          url: '/api/v1/templates/preview',
+          headers: as(login),
+          payload: { template, sensorId },
+        });
+
+      const hidden = await draft('watcher', regrantedId);
+      assert.equal(hidden.statusCode, 200, hidden.body);
+      assert.ok(!hidden.body.includes('10.0.0.2'), 'the carved device’s address was rendered');
+      assert.ok(hidden.body.includes('(outside your view)|(outside your view)'), hidden.body);
+      assert.ok((await draft('admin', regrantedId)).body.includes('10.0.0.2'), 'the control');
+      assert.ok((await draft('watcher', pingId)).body.includes('10.0.0.1'), 'a visible device');
+
+      const saved = await app.inject({
+        method: 'POST',
+        url: '/api/v1/templates',
+        headers: as('admin'),
+        payload: template,
+      });
+      assert.equal(saved.statusCode, 201, saved.body);
+      const id = saved.json<{ id: number }>().id;
+      try {
+        const previewed = await app.inject({
+          method: 'GET',
+          url: `/api/v1/templates/${String(id)}/preview?sensorId=${String(regrantedId)}`,
+          headers: as('watcher'),
+        });
+        assert.equal(previewed.statusCode, 200, previewed.body);
+        assert.ok(!previewed.body.includes('10.0.0.2'), 'the saved preview rendered the address');
+      } finally {
+        await app.inject({
+          method: 'DELETE',
+          url: `/api/v1/templates/${String(id)}`,
+          headers: as('admin'),
+        });
+      }
     });
   });
 
@@ -2827,10 +3004,12 @@ const NO_MARKER_TO_REACH: readonly string[] = [
   '/api/v1/objects/:id/counts',
   '/api/v1/schedules',
   '/api/v1/schedules/:id',
+  // Ids and a right, with no name to find. A hidden id answers as an unused one, which the `A-49`
+  // test asserts by value: the route has no `onObject`, since "nothing" is an answer it gives.
+  '/api/v1/objects/:id/access/effective',
   // About the object asked and nothing beneath it, and the sweep asks about visible objects
   // only. A hidden id is refused by each route's own `onObject`, which the access matrix
   // sweeps route by route.
-  '/api/v1/objects/:id/access/effective',
   '/api/v1/objects/:id/audit',
   '/api/v1/objects/:id/channels',
   '/api/v1/objects/:id/credentials',

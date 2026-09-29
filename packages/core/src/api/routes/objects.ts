@@ -384,8 +384,8 @@ export async function objectRoutes(
   };
 
   /** Undefined rather than null, so `etagFor` falls back to the plain version tag. */
-  const validatorFor = async (id: number): Promise<string | undefined> =>
-    (await service.chainValidator(id, validatorSalt)) ?? undefined;
+  const validatorFor = async (id: number, visibility?: Visibility): Promise<string | undefined> =>
+    (await service.chainValidator(id, validatorSalt, visibility)) ?? undefined;
 
   /**
    * The validator for this caller's answer about an object: the render and the 304 build it here,
@@ -399,18 +399,33 @@ export async function objectRoutes(
    * read. Neither moves the object's version or its chain, so a grant or a hole that changed them
    * was answered "not modified". The access epoch moves with every grant, membership and move.
    * The principal keeps one account's tag from matching a copy cached for another. The count
-   * changes with neither: a sensor created under a device moves no epoch. A caller who sees
-   * everything gets none of this, and the tag it always had.
+   * changes with neither: a sensor created under a device moves no epoch.
+   *
+   * **The chain is the part of it the answer can show** (`A-49`). A restricted caller's covers the
+   * ancestors their view keeps, so an edit to one they cannot see is not told them by a changed
+   * tag on an unchanged body — unless the answer carries inherited settings or credentials, which
+   * hidden ancestors hand down by design.
+   *
+   * **Every caller's tag covers the count of children** (`A-49`), a caller who sees everything
+   * too: no trigger touches a parent when a child is created, deleted or moved, so a tag without
+   * it answered 304 with the old count. Folded into the chain part, which makes an all-seeing
+   * caller's tag `W/"<version>-<hex>"` where it was `W/"<version>"`; `If-Match` reads either.
    */
   const detailTag = async (
     request: FastifyRequest,
-    object: { id: number; version: number },
+    object: { id: number; version: number; childCount: number },
     include: ReadonlySet<IncludeToken>,
     visibility: Visibility,
     childCount: number | undefined,
   ): Promise<string> => {
-    const chain = include.size === 0 ? undefined : await validatorFor(object.id);
-    if (visibility.everything) return etagFor(object.version, chain);
+    const inheritsHidden = include.has('settings') || include.has('credentials');
+    const chain =
+      include.size === 0
+        ? undefined
+        : await validatorFor(object.id, inheritsHidden ? undefined : visibility);
+    if (visibility.everything) {
+      return etagFor(object.version, viewedChain(chain, `#${String(object.childCount)}`));
+    }
     const view = `${sightOf(request).key}@${String(visibility.epoch)}#${String(childCount)}`;
     return etagFor(object.version, viewedChain(chain, view));
   };
