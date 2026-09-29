@@ -144,9 +144,10 @@ describe('what an edit sends', () => {
 });
 
 describe('a save refused because somebody else saved first', () => {
-  it('is a 412 or a 409, and nothing else', () => {
+  it('is a 412, and nothing else (`L-06`)', () => {
     expect(isStale({ status: 412 })).toBe(true);
-    expect(isStale({ status: 409 })).toBe(true);
+    // A clash of names, which reloading does not fix.
+    expect(isStale({ status: 409 })).toBe(false);
     expect(isStale({ status: 400 })).toBe(false);
     expect(isStale({ status: 404 })).toBe(false);
   });

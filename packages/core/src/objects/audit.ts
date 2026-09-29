@@ -2,6 +2,7 @@ import type { Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
 import type { AccessRight } from '../auth/access.js';
 import type { ChannelLimits } from '../state/limits.js';
+import type { LibraryNode } from '../libraries/nodes.js';
 import type { ChannelProcessing } from './types.js';
 import type {
   CloneCounts,
@@ -897,12 +898,18 @@ export interface ReportAudit {
  * The nodes as text, one line each, rather than as the stored document: a diff is read by a
  * person, and "Customer A › Routers: types snmp.traffic; states down" is a change somebody can
  * recognise where a `jsonb` blob is not. `L-01`'s `describeNodes` writes it.
+ *
+ * **The document rides along, and decides whether the nodes changed** (`L-06`). The text is
+ * lossy — tags `core` and `berlin` and a single tag `core, berlin` read alike, and so do two ids
+ * behind one name — and comparing it recorded a real change as `diff: []`. So the diff compares
+ * `document`, and records the text when that says what moved.
  */
 export interface LibraryAudit {
   readonly name: string;
   readonly description: string;
   readonly priority: number;
   readonly nodes: string;
+  readonly document: readonly LibraryNode[];
 }
 
 /**

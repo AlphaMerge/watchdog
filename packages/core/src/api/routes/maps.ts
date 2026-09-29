@@ -10,6 +10,8 @@ import { MapError } from '../../maps/errors.js';
 import { MAX_IMAGE_BYTES } from '../../maps/images.js';
 import { actorFor } from '../authentication.js';
 import { READS, writesIn } from '../authorization.js';
+import { grantParams, idParams, pathId } from '../params.js';
+import { etagFor } from '../preconditions.js';
 
 /**
  * Maps (`G-01`, `CAPABILITIES.MD §6`).
@@ -46,6 +48,14 @@ export interface MapRouteOptions {
 
 /** Every change to a map: `write` here, and the right on the map itself in `MapService`. */
 const MAP_WRITES = writesIn('MapService');
+
+/** `/maps/:id/shares/:shareId`, bounded as every other id here is (`L-06`). */
+const shareParams = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['id', 'shareId'],
+  properties: { id: pathId, shareId: pathId },
+} as const;
 
 /**
  * The version an edit was made against, from `If-Match`.
@@ -233,28 +243,34 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
     async (request) => ({ items: (await maps.list(viewerOf(request))).map(serialise) }),
   );
 
-  app.get<{ Params: { id: string } }>(
+  app.get<{ Params: { id: number } }>(
     '/maps/:id',
     {
       config: READS,
       schema: {
+        params: idParams,
         tags: ['maps'],
         summary: 'One map, with its canvas',
         description:
           'A map this account may not read answers 404 rather than 403, so the error cannot be ' +
-          'used to enumerate which ids exist.',
+          'used to enumerate which ids exist. The `ETag` is the version, to send back as ' +
+          '`If-Match`.',
         response: { 200: mapResponse },
       },
     },
-    async (request) => serialise(await maps.get(viewerOf(request), Number(request.params.id))),
+    async (request, reply) => {
+      const map = await maps.get(viewerOf(request), request.params.id);
+      return reply.header('ETag', etagFor(map.version)).send(serialise(map));
+    },
   );
 
   if (resolver !== undefined) {
-    app.get<{ Params: { id: string } }>(
+    app.get<{ Params: { id: number } }>(
       '/maps/:id/view',
       {
         config: READS,
         schema: {
+          params: idParams,
           tags: ['maps'],
           summary: 'One map with its widgets filled in',
           description:
@@ -324,7 +340,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
       },
       async (request) => {
         const viewer = viewerOf(request);
-        const map = await maps.get(viewer, Number(request.params.id));
+        const map = await maps.get(viewer, request.params.id);
         const resolved = await resolver.resolve(map.layout, { kind: 'viewer', viewer });
         return {
           map: serialise(map),
@@ -360,28 +376,30 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
     async (request, reply) => {
       const viewer = viewerOf(request);
       const created = await maps.create(viewer, request.body, actorFor(request));
-      return reply.code(201).send(serialise(created));
+      return reply.code(201).header('ETag', etagFor(created.version)).send(serialise(created));
     },
   );
 
-  app.patch<{ Params: { id: string }; Body: Partial<MapBody>; Headers: { 'if-match'?: string } }>(
+  app.patch<{ Params: { id: number }; Body: Partial<MapBody>; Headers: { 'if-match'?: string } }>(
     '/maps/:id',
     {
       config: MAP_WRITES,
       schema: {
+        params: idParams,
         tags: ['maps'],
         summary: 'Change a map',
         description:
           '`If-Match` carries the version this edit was made against. Without it the request is ' +
           'refused with 428: a designer is a thing two people open at once, and last-write-wins ' +
-          'there means somebody’s afternoon disappears without a message.',
+          'there means somebody’s afternoon disappears without a message. One that has moved ' +
+          'on is refused with 412 and `MAP_CHANGED`, as HTTP answers a failed precondition.',
         body: { ...mapBody, required: [] },
         response: { 200: mapResponse },
       },
     },
-    async (request) => {
+    async (request, reply) => {
       const viewer = viewerOf(request);
-      const id = Number(request.params.id);
+      const id = request.params.id;
       const updated = await maps.update(
         viewer,
         id,
@@ -389,15 +407,16 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
         request.body,
         actorFor(request),
       );
-      return serialise(updated);
+      return reply.header('ETag', etagFor(updated.version)).send(serialise(updated));
     },
   );
 
-  app.get<{ Params: { id: string } }>(
+  app.get<{ Params: { id: number } }>(
     '/maps/:id/shares',
     {
       config: READS,
       schema: {
+        params: idParams,
         tags: ['maps'],
         summary: 'The public share links on this map',
         description:
@@ -415,15 +434,16 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
       },
     },
     async (request) => ({
-      items: (await maps.shares(viewerOf(request), Number(request.params.id))).map(serialiseShare),
+      items: (await maps.shares(viewerOf(request), request.params.id)).map(serialiseShare),
     }),
   );
 
-  app.post<{ Params: { id: string }; Body: { label: string; expiresAt: string } }>(
+  app.post<{ Params: { id: number }; Body: { label: string; expiresAt: string } }>(
     '/maps/:id/shares',
     {
       config: MAP_WRITES,
       schema: {
+        params: idParams,
         tags: ['maps'],
         summary: 'Make a public share link',
         description:
@@ -459,7 +479,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
       }
       const made = await maps.createShare(
         viewerOf(request),
-        Number(request.params.id),
+        request.params.id,
         { label: request.body.label, expiresAt },
         actorFor(request),
       );
@@ -467,11 +487,12 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
     },
   );
 
-  app.delete<{ Params: { id: string; shareId: string } }>(
+  app.delete<{ Params: { id: number; shareId: number } }>(
     '/maps/:id/shares/:shareId',
     {
       config: MAP_WRITES,
       schema: {
+        params: shareParams,
         tags: ['maps'],
         summary: 'Revoke a share link',
         description:
@@ -483,8 +504,8 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
     async (request, reply) => {
       await maps.revokeShare(
         viewerOf(request),
-        Number(request.params.id),
-        Number(request.params.shareId),
+        request.params.id,
+        request.params.shareId,
         actorFor(request),
       );
       return reply.code(204).send();
@@ -495,7 +516,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
     done(null, body);
   });
 
-  app.post<{ Params: { id: string } }>(
+  app.post<{ Params: { id: number } }>(
     '/maps/:id/background',
     {
       config: MAP_WRITES,
@@ -504,6 +525,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
       // is a limit that moves when somebody adds a second caller.
       bodyLimit: MAX_IMAGE_BYTES,
       schema: {
+        params: idParams,
         tags: ['maps'],
         summary: 'Put a background image behind a map',
         description:
@@ -528,7 +550,7 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
       }
       const stored = await maps.setBackground(
         viewerOf(request),
-        Number(request.params.id),
+        request.params.id,
         body,
         actorFor(request),
       );
@@ -536,11 +558,12 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
     },
   );
 
-  app.delete<{ Params: { id: string } }>(
+  app.delete<{ Params: { id: number } }>(
     '/maps/:id/background',
     {
       config: MAP_WRITES,
       schema: {
+        params: idParams,
         tags: ['maps'],
         summary: 'Take the background off a map',
         description: 'Silent when there was none: the map ends up without one either way.',
@@ -548,16 +571,17 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
       },
     },
     async (request, reply) => {
-      await maps.removeBackground(viewerOf(request), Number(request.params.id), actorFor(request));
+      await maps.removeBackground(viewerOf(request), request.params.id, actorFor(request));
       return reply.code(204).send();
     },
   );
 
-  app.delete<{ Params: { id: string } }>(
+  app.delete<{ Params: { id: number } }>(
     '/maps/:id',
     {
       config: MAP_WRITES,
       schema: {
+        params: idParams,
         tags: ['maps'],
         summary: 'Delete a map',
         description: 'Needs full access. The grants on it go with it.',
@@ -565,16 +589,17 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
       },
     },
     async (request, reply) => {
-      await maps.remove(viewerOf(request), Number(request.params.id), actorFor(request));
+      await maps.remove(viewerOf(request), request.params.id, actorFor(request));
       return reply.code(204).send();
     },
   );
 
-  app.get<{ Params: { id: string } }>(
+  app.get<{ Params: { id: number } }>(
     '/maps/:id/access',
     {
       config: READS,
       schema: {
+        params: idParams,
         tags: ['maps'],
         summary: 'Which groups may see this map',
         description: 'Needs full access: who else can see a thing is not a read.',
@@ -605,18 +630,19 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
       },
     },
     async (request) => {
-      const grants = await maps.grants(viewerOf(request), Number(request.params.id));
+      const grants = await maps.grants(viewerOf(request), request.params.id);
       return {
         items: grants.map((grant) => ({ ...grant, grantedAt: grant.grantedAt.toISOString() })),
       };
     },
   );
 
-  app.put<{ Params: { id: string; groupId: string }; Body: { right: AccessRight } }>(
+  app.put<{ Params: { id: number; groupId: number }; Body: { right: AccessRight } }>(
     '/maps/:id/access/:groupId',
     {
       config: MAP_WRITES,
       schema: {
+        params: grantParams,
         tags: ['maps'],
         summary: 'Grant a group access to this map',
         description:
@@ -634,8 +660,8 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
     async (request, reply) => {
       await maps.grant(
         viewerOf(request),
-        Number(request.params.id),
-        Number(request.params.groupId),
+        request.params.id,
+        request.params.groupId,
         request.body.right,
         actorFor(request),
       );
@@ -643,11 +669,12 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
     },
   );
 
-  app.delete<{ Params: { id: string; groupId: string } }>(
+  app.delete<{ Params: { id: number; groupId: number } }>(
     '/maps/:id/access/:groupId',
     {
       config: MAP_WRITES,
       schema: {
+        params: grantParams,
         tags: ['maps'],
         summary: 'Take a group’s access away',
         response: { 204: { type: 'null' } },
@@ -656,8 +683,8 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
     async (request, reply) => {
       await maps.revoke(
         viewerOf(request),
-        Number(request.params.id),
-        Number(request.params.groupId),
+        request.params.id,
+        request.params.groupId,
         actorFor(request),
       );
       return reply.code(204).send();
@@ -677,11 +704,12 @@ export function mapRoutes(app: FastifyInstance, options: MapRouteOptions): void 
 export function mapBackgroundRoute(app: FastifyInstance, options: { maps: MapService }): void {
   const { maps } = options;
 
-  app.get<{ Params: { id: string }; Headers: { 'if-none-match'?: string } }>(
+  app.get<{ Params: { id: number }; Headers: { 'if-none-match'?: string } }>(
     '/maps/:id/background',
     {
       config: READS,
       schema: {
+        params: idParams,
         tags: ['maps'],
         summary: 'The background image behind a map',
         description:
@@ -699,7 +727,7 @@ export function mapBackgroundRoute(app: FastifyInstance, options: { maps: MapSer
           ? { userId: principal.userId, role: principal.role }
           : { userId: principal.userId, role: principal.role, scope: principal.scope };
 
-      const id = Number(request.params.id);
+      const id = request.params.id;
       // Metadata first, and the bytes only if they are actually needed: answering a conditional
       // request should not cost a two-megabyte read.
       const stored = await maps.backgroundOf(viewer, id);

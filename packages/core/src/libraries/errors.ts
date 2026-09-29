@@ -21,9 +21,8 @@ export const LIBRARY_ERROR_STATUS: Readonly<Record<LibraryErrorCode, number>> = 
   LIBRARY_NOT_FOUND: 404,
   LIBRARY_GROUP_NOT_FOUND: 404,
   LIBRARY_NAME_TAKEN: 409,
-  // Somebody else saved while this editor was open: the request is well formed and the state of
-  // the library is what refuses it.
-  LIBRARY_CHANGED: 409,
+  // Somebody else saved while this editor was open. 412, as `MAP_CHANGED` says (`L-06`).
+  LIBRARY_CHANGED: 412,
   // 428, as the object and map APIs answer a missing `If-Match` (`A-14`).
   LIBRARY_PRECONDITION_REQUIRED: 428,
   LIBRARY_FORBIDDEN: 403,

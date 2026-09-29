@@ -141,9 +141,8 @@ export class LibraryService {
     const nodes = validateNodes(input.nodes ?? []);
 
     return this.#db.tx(async (tx) => {
-      // Checked rather than caught: a unique violation inside a transaction aborts it, and every
-      // statement after that fails for the wrong reason.
-      if (await this.#repository.nameTaken(tx, name, null)) throw nameTaken(name, null);
+      // Among what this viewer can read, under a lock on the name (`L-06`): `FlatAccess` says why.
+      if (await this.#access.nameTaken(tx, viewer, name, null)) throw nameTaken(name, null);
 
       const library = await this.#repository.create(tx, { name, description, priority, nodes });
       await this.#access.grantCreator(tx, library.id, viewer, actor, now);
@@ -197,7 +196,7 @@ export class LibraryService {
       if (
         next.name !== undefined &&
         next.name.toLowerCase() !== current.name.toLowerCase() &&
-        (await this.#repository.nameTaken(tx, next.name, id))
+        (await this.#access.nameTaken(tx, viewer, next.name, id))
       ) {
         throw nameTaken(next.name, id);
       }
@@ -304,6 +303,7 @@ function auditOf(library: {
     description: library.description,
     priority: library.priority,
     nodes: describeNodes(library.nodes),
+    document: library.nodes,
   };
 }
 

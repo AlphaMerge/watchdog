@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import type { Queryable } from '../db/pool.js';
 import type {
   AccountAudit,
@@ -501,13 +502,19 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         summary: { libraryId: mutation.libraryId, name: mutation.after.name },
         // Only what moved, for the reason a schedule's diff gives: renaming a library and
         // narrowing what it shows are different events.
-        diff: LIBRARY_FIELDS.filter(
-          (field) => mutation.before[field] !== mutation.after[field],
-        ).map((field) => ({
-          field: `library.${field}`,
-          before: mutation.before[field],
-          after: mutation.after[field],
-        })),
+        diff: LIBRARY_FIELDS.filter((field) =>
+          field === 'nodes'
+            ? !isDeepStrictEqual(mutation.before.document, mutation.after.document)
+            : mutation.before[field] !== mutation.after[field],
+        ).map((field) =>
+          field === 'nodes'
+            ? nodesChange(mutation.before, mutation.after)
+            : {
+                field: `library.${field}`,
+                before: mutation.before[field],
+                after: mutation.after[field],
+              },
+        ),
       };
 
     case 'library.deleted':
@@ -1167,6 +1174,19 @@ const GROUP_FIELDS = [
   'description',
   'isAdmin',
 ] as const satisfies readonly (keyof GroupAudit)[];
+
+/**
+ * What a library's nodes were and became, once `document` says they moved (`L-06`).
+ *
+ * **The text when it shows the change**, because the text is what a person recognises. When it
+ * does not — the two documents render alike — the documents themselves, so the entry still says
+ * what moved rather than showing one line twice.
+ */
+function nodesChange(before: LibraryAudit, after: LibraryAudit): FieldChange {
+  return before.nodes === after.nodes
+    ? { field: 'library.nodes', before: before.document, after: after.document }
+    : { field: 'library.nodes', before: before.nodes, after: after.nodes };
+}
 
 /**
  * The diff of a flat entity, in the three shapes every one of them has (`A-17`).

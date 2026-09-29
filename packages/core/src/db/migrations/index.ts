@@ -61,6 +61,7 @@ import { migration060 } from './060-credential-voucher.js';
 import { migration061 } from './061-rediscovery-writer.js';
 import { migration062 } from './062-login-address-key.js';
 import { migration063 } from './063-alarm-recovering.js';
+import { migration064 } from './064-flat-names-per-viewer.js';
 import { migration043 } from './043-request-settled-at.js';
 
 /**
@@ -133,6 +134,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration061,
   migration062,
   migration063,
+  migration064,
 ];
 
 export type { Migration } from './types.js';

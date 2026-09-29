@@ -168,11 +168,7 @@ export class MapService {
 
     return this.#db.tx(async (tx) => {
       await this.#mayPlace(viewer, layout, null, tx, 'create');
-      const existing = await tx.query<{ id: string }>(
-        `SELECT id FROM map WHERE lower(name) = lower($1)`,
-        [name],
-      );
-      if (existing.length > 0) {
+      if (await this.#access.nameTaken(tx, viewer, name, null)) {
         throw new MapError('MAP_NAME_TAKEN', `a map called ${name} already exists`, {
           context: { phase: 'create' },
           details: { name },
@@ -224,17 +220,15 @@ export class MapService {
         next.layout = patch.layout;
       }
 
-      if (next.name !== undefined && next.name.toLowerCase() !== current.name.toLowerCase()) {
-        const clash = await tx.query<{ id: string }>(
-          `SELECT id FROM map WHERE lower(name) = lower($1) AND id <> $2`,
-          [next.name, id],
-        );
-        if (clash.length > 0) {
-          throw new MapError('MAP_NAME_TAKEN', `a map called ${next.name} already exists`, {
-            context: { mapId: id, phase: 'update' },
-            details: { name: next.name },
-          });
-        }
+      if (
+        next.name !== undefined &&
+        next.name.toLowerCase() !== current.name.toLowerCase() &&
+        (await this.#access.nameTaken(tx, viewer, next.name, id))
+      ) {
+        throw new MapError('MAP_NAME_TAKEN', `a map called ${next.name} already exists`, {
+          context: { mapId: id, phase: 'update' },
+          details: { name: next.name },
+        });
       }
 
       const updated = await this.#repository.update(tx, id, expectedVersion, next);

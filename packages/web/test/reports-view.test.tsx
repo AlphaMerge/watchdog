@@ -90,6 +90,8 @@ function stubApi(
     report?: ReportSummary;
     runs?: ReportRun[];
     subjects?: ReportSubjects;
+    /** What a save is refused with, when it is. */
+    refuseSave?: { status: number; code: string; message: string };
   } = {},
 ): { calls: { method: string; path: string; body: unknown }[] } {
   const calls: { method: string; path: string; body: unknown }[] = [];
@@ -105,6 +107,15 @@ function stubApi(
           headers: { 'content-type': 'application/json' },
         }),
       );
+    const refusal = over.refuseSave;
+    if (init?.method === 'PATCH' && refusal !== undefined) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ error: { code: refusal.code, message: refusal.message } }), {
+          status: refusal.status,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    }
     if (path.endsWith('/subjects')) return json(over.subjects ?? SUBJECTS);
     if (path.endsWith('/runs')) return json({ items: over.runs ?? [RUN] });
     if (/\/reports\/\d+$/u.test(path)) return json(over.report ?? REPORT);
@@ -167,6 +178,19 @@ describe('the reports list', () => {
   it('says a template does not render before somebody schedules it', async () => {
     await showList([{ ...REPORT, kind: 'graph_only' }]);
     expect(screen.getByText(/does not render yet/u)).toBeDefined();
+  });
+
+  it('gives the id beside a name two reports share, and only then (`L-06`)', async () => {
+    // An administrator reads every report, and a name is unique only among what one account can
+    // read — so two "Monthly uptime"s can both be listed, and the links must not read alike.
+    await showList([
+      REPORT,
+      { ...REPORT, id: 8, name: 'monthly UPTIME' },
+      { ...REPORT, id: 9, name: 'Weekly' },
+    ]);
+    expect(screen.getByRole('link', { name: 'Monthly uptime #7' })).toBeDefined();
+    expect(screen.getByRole('link', { name: 'monthly UPTIME #8' })).toBeDefined();
+    expect(screen.getByRole('link', { name: 'Weekly' })).toBeDefined();
   });
 
   it('warns beside the chooser rather than after the fact', async () => {
@@ -311,6 +335,28 @@ describe('the settings form', () => {
     });
     expect(within(outputs).getByText(/Recipients/u)).toBeDefined();
     expect(within(outputs).getByText(/still stores the report until it has gone/u)).toBeDefined();
+  });
+
+  it('says somebody else saved first when the core answers 412, and keeps the edit (`L-06`)', async () => {
+    // What a stale `If-Match` is answered with. The form must say so and keep what was typed:
+    // reloading over it would be this form deciding whose edit wins.
+    await showReport({
+      refuseSave: {
+        status: 412,
+        code: 'REPORT_CHANGED',
+        message: 'report 7 has moved on: expected version 3, found 4',
+      },
+    });
+    const name = screen.getByRole('textbox', { name: 'Name' });
+    fireEvent.change(name, { target: { value: 'Monthly uptime, renamed' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toContain('REPORT_CHANGED');
+    });
+    expect(screen.getByText(/Somebody else saved this report/u)).toBeDefined();
+    expect((name as HTMLInputElement).value).toBe('Monthly uptime, renamed');
+    expect(screen.queryByText('Saved.')).toBeNull();
   });
 
   it('names a bad address individually, and will not save while one stands', async () => {

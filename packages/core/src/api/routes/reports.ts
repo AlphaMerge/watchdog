@@ -23,6 +23,8 @@ import { MAX_PDF_PAGES } from '../../reports/pdf.js';
 import type { ReportService, ReportViewer } from '../../reports/service.js';
 import { actorFor } from '../authentication.js';
 import { READS, writesIn } from '../authorization.js';
+import { grantParams, idParams, pathId } from '../params.js';
+import { etagFor } from '../preconditions.js';
 
 /**
  * The report CRUD surface (`E-01`, `CAPABILITIES.MD §6`).
@@ -62,6 +64,21 @@ export interface ReportRouteOptions {
 
 /** Every change to a report: `write` here, and the right on the report in `ReportService`. */
 const REPORT_WRITES = writesIn('ReportService');
+
+/**
+ * `/reports/:id/runs/:runId/:format` (`L-06`). The format is one a run can have stored, so a
+ * name PostgreSQL cannot take as text — one carrying a NUL — is a 400 rather than a 500.
+ */
+const outputParams = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['id', 'runId', 'format'],
+  properties: {
+    id: pathId,
+    runId: pathId,
+    format: { type: 'string', enum: [...REPORT_FORMATS, 'zip'] },
+  },
+} as const;
 
 /** `If-Match` read the way `routes/maps.ts` reads it: 428 when missing, 400 when not a version. */
 function expectedVersion(header: string | undefined, reportId: number): number {
@@ -538,21 +555,25 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
     },
   );
 
-  app.get<{ Params: { id: string } }>(
+  app.get<{ Params: { id: number } }>(
     '/reports/:id',
     {
       config: READS,
       schema: {
+        params: idParams,
         tags: ['reports'],
         summary: 'One report',
         description:
           'A report this account may not read answers 404 rather than 403, so the error cannot ' +
-          'be used to enumerate which ids exist.',
+          'be used to enumerate which ids exist. The `ETag` is the version, to send back as ' +
+          '`If-Match`.',
         response: { 200: reportResponse },
       },
     },
-    async (request) =>
-      serialise(await reports.get(viewerOf(request), Number(request.params.id)), new Date()),
+    async (request, reply) => {
+      const report = await reports.get(viewerOf(request), request.params.id);
+      return reply.header('ETag', etagFor(report.version)).send(serialise(report, new Date()));
+    },
   );
 
   app.post<{ Body: ReportBody }>(
@@ -585,12 +606,15 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
     },
     async (request, reply) => {
       const created = await reports.create(viewerOf(request), request.body, actorFor(request));
-      return reply.code(201).send(serialise(created, new Date()));
+      return reply
+        .code(201)
+        .header('ETag', etagFor(created.version))
+        .send(serialise(created, new Date()));
     },
   );
 
   app.patch<{
-    Params: { id: string };
+    Params: { id: number };
     Body: Partial<ReportBody>;
     Headers: { 'if-match'?: string };
   }>(
@@ -598,11 +622,12 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
     {
       config: REPORT_WRITES,
       schema: {
+        params: idParams,
         tags: ['reports'],
         summary: 'Change a report',
         description:
           '`If-Match` carries the version this edit was made against, and is refused with 428 ' +
-          'when missing. Changing `runAs` needs ' +
+          'when missing and 412 `REPORT_CHANGED` when it has moved on. Changing `runAs` needs ' +
           'full access rather than write: it decides whose data the output contains, which is ' +
           'the same class of act as granting access. **Full is enough only to point it at ' +
           'yourself** — naming any other account needs an administrator, as it does on create.',
@@ -610,8 +635,8 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
         response: { 200: reportResponse },
       },
     },
-    async (request) => {
-      const id = Number(request.params.id);
+    async (request, reply) => {
+      const id = request.params.id;
       const updated = await reports.update(
         viewerOf(request),
         id,
@@ -619,15 +644,16 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
         request.body,
         actorFor(request),
       );
-      return serialise(updated, new Date());
+      return reply.header('ETag', etagFor(updated.version)).send(serialise(updated, new Date()));
     },
   );
 
-  app.delete<{ Params: { id: string } }>(
+  app.delete<{ Params: { id: number } }>(
     '/reports/:id',
     {
       config: REPORT_WRITES,
       schema: {
+        params: idParams,
         tags: ['reports'],
         summary: 'Delete a report',
         description: 'Needs full access, because deleting one takes its grants with it.',
@@ -635,16 +661,17 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
       },
     },
     async (request, reply) => {
-      await reports.remove(viewerOf(request), Number(request.params.id), actorFor(request));
+      await reports.remove(viewerOf(request), request.params.id, actorFor(request));
       return reply.code(204).send();
     },
   );
 
-  app.get<{ Params: { id: string } }>(
+  app.get<{ Params: { id: number } }>(
     '/reports/:id/subjects',
     {
       config: READS,
       schema: {
+        params: idParams,
         tags: ['reports'],
         summary: 'What this report would contain, as its security context sees it',
         description:
@@ -693,7 +720,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
       },
     },
     async (request) => {
-      const report = await reports.get(viewerOf(request), Number(request.params.id));
+      const report = await reports.get(viewerOf(request), request.params.id);
       const resolved = await context.subjectsFor(report);
       return {
         runAs: { login: resolved.principal.login, role: resolved.principal.role },
@@ -703,11 +730,12 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
     },
   );
 
-  app.post<{ Params: { id: string } }>(
+  app.post<{ Params: { id: number } }>(
     '/reports/:id/runs',
     {
       config: REPORT_WRITES,
       schema: {
+        params: idParams,
         tags: ['reports'],
         summary: 'Run this report now',
         description:
@@ -726,17 +754,18 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
       },
     },
     async (request, reply) => {
-      const report = await reports.require(viewerOf(request), Number(request.params.id), 'write');
+      const report = await reports.require(viewerOf(request), request.params.id, 'write');
       const run = await runner.runNow(report, request.principal?.login ?? '');
       return reply.code(201).send(serialiseRun(run, await outputStore.list(db, run.id)));
     },
   );
 
-  app.get<{ Params: { id: string } }>(
+  app.get<{ Params: { id: number } }>(
     '/reports/:id/runs',
     {
       config: READS,
       schema: {
+        params: idParams,
         tags: ['reports'],
         summary: 'When this report ran, and what happened',
         description:
@@ -757,7 +786,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
       },
     },
     async (request) => {
-      const report = await reports.get(viewerOf(request), Number(request.params.id));
+      const report = await reports.get(viewerOf(request), request.params.id);
       const listed = await runs.list(db, report.id, RUNS_PER_PAGE);
       // One query for every run's outputs rather than one per run: a page of fifty would
       // otherwise be fifty round trips to say how big things are.
@@ -771,11 +800,12 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
     },
   );
 
-  app.get<{ Params: { id: string } }>(
+  app.get<{ Params: { id: number } }>(
     '/reports/:id/access',
     {
       config: READS,
       schema: {
+        params: idParams,
         tags: ['reports'],
         summary: 'Which groups may see this report',
         description: 'Needs full access: who else can read a report is not a read-only detail.',
@@ -790,17 +820,16 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
       },
     },
     async (request) => ({
-      items: (await reports.grants(viewerOf(request), Number(request.params.id))).map(
-        serialiseGrant,
-      ),
+      items: (await reports.grants(viewerOf(request), request.params.id)).map(serialiseGrant),
     }),
   );
 
-  app.put<{ Params: { id: string; groupId: string }; Body: { right: AccessRight } }>(
+  app.put<{ Params: { id: number; groupId: number }; Body: { right: AccessRight } }>(
     '/reports/:id/access/:groupId',
     {
       config: REPORT_WRITES,
       schema: {
+        params: grantParams,
         tags: ['reports'],
         summary: 'Grant a group access to this report',
         description:
@@ -818,8 +847,8 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
     async (request, reply) => {
       await reports.grant(
         viewerOf(request),
-        Number(request.params.id),
-        Number(request.params.groupId),
+        request.params.id,
+        request.params.groupId,
         request.body.right,
         actorFor(request),
       );
@@ -827,11 +856,12 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
     },
   );
 
-  app.delete<{ Params: { id: string; groupId: string } }>(
+  app.delete<{ Params: { id: number; groupId: number } }>(
     '/reports/:id/access/:groupId',
     {
       config: REPORT_WRITES,
       schema: {
+        params: grantParams,
         tags: ['reports'],
         summary: 'Take a group’s access away',
         response: { 204: { type: 'null' } },
@@ -840,8 +870,8 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
     async (request, reply) => {
       await reports.revoke(
         viewerOf(request),
-        Number(request.params.id),
-        Number(request.params.groupId),
+        request.params.id,
+        request.params.groupId,
         actorFor(request),
       );
       return reply.code(204).send();
@@ -859,11 +889,12 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
 export function reportRenderRoute(app: FastifyInstance, options: ReportRouteOptions): void {
   const { reports, renderer, formatter } = options;
 
-  app.get<{ Params: { id: string }; Querystring: { format?: string } }>(
+  app.get<{ Params: { id: number }; Querystring: { format?: string } }>(
     '/reports/:id/render',
     {
       config: READS,
       schema: {
+        params: idParams,
         tags: ['reports'],
         summary: 'Render this report now, as HTML, CSV, XML or PDF',
         description:
@@ -892,7 +923,7 @@ export function reportRenderRoute(app: FastifyInstance, options: ReportRouteOpti
           details: { format },
         });
       }
-      const report = await reports.get(viewerOf(request), Number(request.params.id));
+      const report = await reports.get(viewerOf(request), request.params.id);
       const document = await renderer.build(report);
 
       const slug = report.name.replaceAll(/[^\w.-]+/gu, '-').replace(/^-+|-+$/gu, '') || 'report';
@@ -921,13 +952,14 @@ export function reportDownloadRoute(app: FastifyInstance, options: ReportRouteOp
   const { reports, runs, outputStore, db } = options;
 
   app.get<{
-    Params: { id: string; runId: string; format: string };
+    Params: { id: number; runId: number; format: string };
     Headers: { 'if-none-match'?: string };
   }>(
     '/reports/:id/runs/:runId/:format',
     {
       config: READS,
       schema: {
+        params: outputParams,
         tags: ['reports'],
         summary: 'Download what a run produced',
         description:
@@ -943,8 +975,8 @@ export function reportDownloadRoute(app: FastifyInstance, options: ReportRouteOp
     async (request, reply) => {
       // Read on the *report* is the gate, and the run has to belong to it: without that check a
       // caller who may read one report could download any run by guessing an id.
-      const report = await reports.get(viewerOf(request), Number(request.params.id));
-      const runId = Number(request.params.runId);
+      const report = await reports.get(viewerOf(request), request.params.id);
+      const runId = request.params.runId;
       const run = await runs.find(db, runId);
       if (run === undefined || run.reportId !== report.id) {
         throw new ReportError('REPORT_NOT_FOUND', `run ${String(runId)} does not exist`, {

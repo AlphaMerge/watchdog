@@ -22,9 +22,11 @@ export const MAP_ERROR_STATUS: Readonly<Record<MapErrorCode, number>> = {
   MAP_NOT_FOUND: 404,
   MAP_GROUP_NOT_FOUND: 404,
   MAP_NAME_TAKEN: 409,
-  // The request is well formed and the state of the map is what refuses it: somebody else saved
-  // while this designer was open.
-  MAP_CHANGED: 409,
+  // Somebody else saved while this designer was open, so the version `If-Match` carried no longer
+  // holds. **412, as HTTP answers a failed precondition** (`L-06`), and as objects and rediscovery
+  // rules already did: it was 409 here, and a client needed two answers to one question. The
+  // code stays in the body.
+  MAP_CHANGED: 412,
   // **428, as the object API answers it** (`A-14`). This was a 401 `AUTH_REQUIRED` — "log in
   // first" — to a caller who was logged in and had left out a header, which also counted as a
   // refusal in every sweep that asks whether a route turned a principal away.

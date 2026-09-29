@@ -377,6 +377,56 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
     assert.ok(listed.json<{ items: { id: number }[] }>().items.some((one) => one.id === made.id));
   });
 
+  it('answers 400 to an id that is not one, on every route, and never 500 (`L-06`)', async () => {
+    // `abc` reached PostgreSQL as NaN (22P02), and an id past bigint arrived whole (22003). A
+    // format is one a run can have stored, so one PostgreSQL cannot take as text is refused too.
+    const good = String((await makeReport('ids')).id);
+    const formatless = await app.inject({
+      method: 'GET',
+      url: `/api/v1/reports/${good}/runs/1/n%00pe`,
+      headers: as(author),
+    });
+    assert.equal(formatless.statusCode, 400, formatless.body);
+
+    for (const bad of ['abc', '0', '1.5', '9007199254740992', '99999999999999999999']) {
+      const requests: {
+        method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
+        url: string;
+        headers?: Record<string, string>;
+        payload?: object;
+      }[] = [
+        { method: 'GET', url: `/api/v1/reports/${bad}` },
+        {
+          method: 'PATCH',
+          url: `/api/v1/reports/${bad}`,
+          headers: { 'if-match': '1' },
+          payload: {},
+        },
+        { method: 'DELETE', url: `/api/v1/reports/${bad}` },
+        { method: 'GET', url: `/api/v1/reports/${bad}/subjects` },
+        { method: 'POST', url: `/api/v1/reports/${bad}/runs` },
+        { method: 'GET', url: `/api/v1/reports/${bad}/runs` },
+        { method: 'GET', url: `/api/v1/reports/${bad}/render` },
+        { method: 'GET', url: `/api/v1/reports/${bad}/access` },
+        { method: 'PUT', url: `/api/v1/reports/${good}/access/${bad}`, payload: { right: 'read' } },
+        { method: 'DELETE', url: `/api/v1/reports/${bad}/access/${good}` },
+        { method: 'GET', url: `/api/v1/reports/${bad}/runs/1/csv` },
+        { method: 'GET', url: `/api/v1/reports/${good}/runs/${bad}/csv` },
+      ];
+      for (const request of requests) {
+        const response = await app.inject({
+          ...request,
+          headers: { ...as(author), ...request.headers },
+        });
+        assert.equal(
+          response.statusCode,
+          400,
+          `${request.method} ${request.url}: ${response.body}`,
+        );
+      }
+    }
+  });
+
   it('answers the creator’s own login as the security context, and calls it available', async () => {
     const made = await makeReport('whose-eyes');
     assert.deepEqual(made.runAs, { login: 'author', available: true });
@@ -425,7 +475,7 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
       assert.equal(garbled.json<{ error: { code: string } }>().error.code, 'REPORT_INVALID');
     });
 
-    it('accepts a weak entity tag, and answers 409 once the version has moved on', async () => {
+    it('accepts a weak entity tag, and answers 412 once the version has moved on (`L-06`)', async () => {
       const made = await makeReport('versioned');
       const first = await app.inject({
         method: 'PATCH',
@@ -435,6 +485,7 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
       });
       assert.equal(first.statusCode, 200, first.body);
       assert.equal(first.json<Wire>().version, made.version + 1);
+      assert.equal(first.headers.etag, `W/"${String(made.version + 1)}"`);
 
       const stale = await app.inject({
         method: 'PATCH',
@@ -442,8 +493,31 @@ describe('the reports API', { skip: available ? false : 'no database' }, () => {
         headers: { ...as(author), 'if-match': String(made.version) },
         payload: { description: 'too late' },
       });
-      assert.equal(stale.statusCode, 409);
+      assert.equal(stale.statusCode, 412);
       assert.equal(stale.json<{ error: { code: string } }>().error.code, 'REPORT_CHANGED');
+
+      // Every read and write carries the version as its tag, and a read's is the one to send back.
+      const read = await app.inject({
+        method: 'GET',
+        url: `/api/v1/reports/${String(made.id)}`,
+        headers: as(author),
+      });
+      assert.equal(read.headers.etag, `W/"${String(made.version + 1)}"`);
+      const created = await app.inject({
+        method: 'POST',
+        url: '/api/v1/reports',
+        headers: as(author),
+        payload: { name: 'tagged', kind: 'table_only' },
+      });
+      assert.equal(created.statusCode, 201, created.body);
+      assert.equal(created.headers.etag, `W/"${String(created.json<Wire>().version)}"`);
+      const again = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/reports/${String(made.id)}`,
+        headers: { ...as(author), 'if-match': read.headers.etag },
+        payload: { description: 'on time' },
+      });
+      assert.equal(again.statusCode, 200, again.body);
     });
   });
 

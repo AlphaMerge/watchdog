@@ -817,11 +817,11 @@ The creator’s primary group is granted full access in the same transaction —
 
 One library, with its nodes and their rules
 
-The document, not what it shows: each node’s rule is evaluated when the library is viewed, through the viewer’s own rights. A library this account may not read answers 404 rather than 403, so the error cannot be used to enumerate which ids exist.
+The document, not what it shows: each node’s rule is evaluated when the library is viewed, through the viewer’s own rights. A library this account may not read answers 404 rather than 403, so the error cannot be used to enumerate which ids exist. The `ETag` is the version, to send back as `If-Match`.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **200** { id, name, description, priority, nodes, version, createdAt, updatedAt }
 
@@ -829,11 +829,11 @@ The document, not what it shows: each node’s rule is evaluated when the librar
 
 Change a library
 
-`If-Match` carries the version this edit was made against, and without it the request is refused with 428: two people arranging one library is two people in a designer. `nodes`, when sent, replaces every node — there is no merging of one tree into another.
+`If-Match` carries the version this edit was made against, and without it the request is refused with 428: two people arranging one library is two people in a designer. One that has moved on is refused with 412 and `LIBRARY_CHANGED`. `nodes`, when sent, replaces every node — there is no merging of one tree into another.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **Body**
 
@@ -854,7 +854,7 @@ Needs full access. The grants on it go with it; no sensor does, because a librar
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **204**
 
@@ -866,7 +866,7 @@ Needs full access: who else can see a thing is not a read.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **200** { items }
 
@@ -878,8 +878,8 @@ Needs full access, so a write holder may arrange the nodes without deciding who 
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
-| `groupId` | path | string | **required** |
+| `id` | path | integer | **required** |
+| `groupId` | path | integer | **required** |
 
 **Body**
 
@@ -895,8 +895,8 @@ Take a group’s access away
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
-| `groupId` | path | string | **required** |
+| `id` | path | integer | **required** |
+| `groupId` | path | integer | **required** |
 
 **204**
 
@@ -953,11 +953,11 @@ The creator’s primary group is granted full access in the same transaction —
 
 One map, with its canvas
 
-A map this account may not read answers 404 rather than 403, so the error cannot be used to enumerate which ids exist.
+A map this account may not read answers 404 rather than 403, so the error cannot be used to enumerate which ids exist. The `ETag` is the version, to send back as `If-Match`.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **200** { id, name, description, priority, layout, version, createdAt, updatedAt }
 
@@ -965,11 +965,11 @@ A map this account may not read answers 404 rather than 403, so the error cannot
 
 Change a map
 
-`If-Match` carries the version this edit was made against. Without it the request is refused with 428: a designer is a thing two people open at once, and last-write-wins there means somebody’s afternoon disappears without a message.
+`If-Match` carries the version this edit was made against. Without it the request is refused with 428: a designer is a thing two people open at once, and last-write-wins there means somebody’s afternoon disappears without a message. One that has moved on is refused with 412 and `MAP_CHANGED`, as HTTP answers a failed precondition.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **Body**
 
@@ -990,7 +990,7 @@ Needs full access. The grants on it go with it.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **204**
 
@@ -1002,7 +1002,7 @@ What a map draws, rather than the document it is stored as. A widget naming an o
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **200** { map, widgets, connectors, problems, geo, tiles }
 
@@ -1014,7 +1014,7 @@ Needs full access: a share link is a grant to everybody, and `full` is the right
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **200** { items }
 
@@ -1026,7 +1026,7 @@ Answers with the URL’s token **once**. Only its hash is stored, so it cannot b
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **Body**
 
@@ -1045,8 +1045,8 @@ The link stops working immediately. The row stays, revoked, so the record of wha
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
-| `shareId` | path | string | **required** |
+| `id` | path | integer | **required** |
+| `shareId` | path | integer | **required** |
 
 **204**
 
@@ -1058,7 +1058,7 @@ The stored bytes, with the SHA-256 of them as a strong ETag. Send `If-None-Match
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **200**
 
@@ -1070,7 +1070,7 @@ PNG, JPEG or WebP, at most 2 MiB and 4096 pixels on a side. The format is decide
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **200** { mediaType, digest, width, height, bytes, uploadedAt, uploadedBy }
 
@@ -1082,7 +1082,7 @@ Silent when there was none: the map ends up without one either way.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **204**
 
@@ -1094,7 +1094,7 @@ Needs full access: who else can see a thing is not a read.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **200** { items }
 
@@ -1106,8 +1106,8 @@ Needs full access, so a write holder may edit the canvas without deciding who el
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
-| `groupId` | path | string | **required** |
+| `id` | path | integer | **required** |
+| `groupId` | path | integer | **required** |
 
 **Body**
 
@@ -1123,8 +1123,8 @@ Take a group’s access away
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
-| `groupId` | path | string | **required** |
+| `id` | path | integer | **required** |
+| `groupId` | path | integer | **required** |
 
 **204**
 
@@ -1540,11 +1540,11 @@ The creator’s primary group is granted full access in the same transaction, or
 
 One report
 
-A report this account may not read answers 404 rather than 403, so the error cannot be used to enumerate which ids exist.
+A report this account may not read answers 404 rather than 403, so the error cannot be used to enumerate which ids exist. The `ETag` is the version, to send back as `If-Match`.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **200** { id, name, description, kind, subjects, span, resolved, unresolvable, outputs, schedule, scheduleSummary, nextRunAt, lastRunAt, runAs, version, createdAt, updatedAt }
 
@@ -1552,11 +1552,11 @@ A report this account may not read answers 404 rather than 403, so the error can
 
 Change a report
 
-`If-Match` carries the version this edit was made against, and is refused with 428 when missing. Changing `runAs` needs full access rather than write: it decides whose data the output contains, which is the same class of act as granting access. **Full is enough only to point it at yourself** — naming any other account needs an administrator, as it does on create.
+`If-Match` carries the version this edit was made against, and is refused with 428 when missing and 412 `REPORT_CHANGED` when it has moved on. Changing `runAs` needs full access rather than write: it decides whose data the output contains, which is the same class of act as granting access. **Full is enough only to point it at yourself** — naming any other account needs an administrator, as it does on create.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **Body**
 
@@ -1581,7 +1581,7 @@ Needs full access, because deleting one takes its grants with it.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **204**
 
@@ -1593,7 +1593,7 @@ A report renders through a named account, not through whoever is asking (`§6`).
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **200** { runAs, visible, unavailable }
 
@@ -1605,7 +1605,7 @@ Newest first, at most 50 of them. A run that failed carries the same code the AP
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **200** { items }
 
@@ -1617,7 +1617,7 @@ Renders the report against its span and its security context, and records the ou
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **201** { id, reportId, trigger, requestedBy, state, queuedAt, startedAt, finishedAt, durationMs, spanLabel, sections, unavailable, cells, errorCode, errorMessage, delivery, outputs }
 
@@ -1629,7 +1629,7 @@ Needs full access: who else can read a report is not a read-only detail.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **200** { items }
 
@@ -1641,8 +1641,8 @@ Needs full access, so a write holder may edit what a report measures without dec
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
-| `groupId` | path | string | **required** |
+| `id` | path | integer | **required** |
+| `groupId` | path | integer | **required** |
 
 **Body**
 
@@ -1658,8 +1658,8 @@ Take a group’s access away
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
-| `groupId` | path | string | **required** |
+| `id` | path | integer | **required** |
+| `groupId` | path | integer | **required** |
 
 **204**
 
@@ -1671,7 +1671,7 @@ Runs the report against its span and its security context and answers the docume
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | integer | **required** |
 
 **200**
 
@@ -1683,9 +1683,9 @@ The stored document, as `html`, `csv`, `xml`, `pdf` or `zip` depending on what t
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
-| `runId` | path | string | **required** |
-| `format` | path | string | **required** |
+| `id` | path | integer | **required** |
+| `runId` | path | integer | **required** |
+| `format` | path | `html` · `csv` · `xml` · `pdf` · `zip` | **required** |
 
 **200**
 

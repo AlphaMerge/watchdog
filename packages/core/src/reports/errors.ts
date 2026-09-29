@@ -34,8 +34,8 @@ export const REPORT_ERROR_STATUS: Readonly<Record<ReportErrorCode, number>> = {
   REPORT_GROUP_NOT_FOUND: 404,
   REPORT_USER_NOT_FOUND: 404,
   REPORT_NAME_TAKEN: 409,
-  // Well formed, and the state of the report is what refuses it: somebody else saved first.
-  REPORT_CHANGED: 409,
+  // Somebody else saved first. 412, as `MAP_CHANGED` says (`L-06`).
+  REPORT_CHANGED: 412,
   // 428, as the object and map APIs answer it (`A-14`). It was 401 — "log in first" — to a
   // caller who was logged in and had left out `If-Match`.
   REPORT_PRECONDITION_REQUIRED: 428,
@@ -49,8 +49,8 @@ export const REPORT_ERROR_STATUS: Readonly<Record<ReportErrorCode, number>> = {
   // request entity is a few hundred bytes — and it is not a 500, because nothing failed: the
   // answer is "narrow it", and only the author can.
   REPORT_TOO_LARGE: 422,
-  // **409, because the state of the report is what refuses it** — the same reasoning as
-  // `REPORT_CHANGED`. A report already rendering will not render again, and the fix is to wait
+  // **409, because the state of the report is what refuses it**, not a precondition the request
+  // carried. A report already rendering will not render again, and the fix is to wait
   // rather than to change the request. A 429 would suggest a rate limit that clears on its own
   // schedule; this clears when that run finishes, which the runs list can be asked about.
   REPORT_BUSY: 409,

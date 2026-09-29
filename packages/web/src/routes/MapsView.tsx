@@ -4,6 +4,7 @@ import { ApiError, send, useApi } from '../api/client';
 import type { MapSummary } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { PageTitle } from '../components/PageTitle';
+import { listedName, sharedNames } from './names';
 
 /**
  * The maps this account may see, and the button that makes another (`G-01`, `G-03`).
@@ -15,6 +16,7 @@ import { PageTitle } from '../components/PageTitle';
  */
 export function MapsView(): React.JSX.Element {
   const maps = useApi<{ items: MapSummary[] }>('/maps');
+  const shared = sharedNames(maps.status === 'ready' ? maps.data.items : []);
   const [name, setName] = useState('');
   const [creating, setCreating] = useState(false);
   const [failure, setFailure] = useState<ApiError | null>(null);
@@ -84,7 +86,7 @@ export function MapsView(): React.JSX.Element {
             {maps.data.items.map((map) => (
               <li key={map.id} className="py-2">
                 <Link to={`/maps/${String(map.id)}`} className="text-sm text-text underline">
-                  {map.name}
+                  {listedName(map, shared)}
                 </Link>
                 {map.description !== '' && (
                   <p className="text-xs text-text-muted">{map.description}</p>

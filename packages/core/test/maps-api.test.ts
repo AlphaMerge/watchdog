@@ -442,12 +442,96 @@ describe('the maps API', { skip: available ? false : 'no database' }, () => {
       assert.equal(garbled.statusCode, 400, garbled.body);
       assert.equal(garbled.json<{ error: { code: string } }>().error.code, 'MAP_INVALID');
     });
+
+    it('answers 412 for an edit that has moved on, and tags every read with the version (`L-06`)', async () => {
+      const created = await app.inject({
+        method: 'POST',
+        url: '/api/v1/maps',
+        headers: as(author),
+        payload: { name: 'tagged' },
+      });
+      assert.equal(created.statusCode, 201, created.body);
+      const { id, version } = created.json<{ id: number; version: number }>();
+      assert.equal(created.headers.etag, `W/"${String(version)}"`);
+
+      const patch = (ifMatch: string, description: string) =>
+        app.inject({
+          method: 'PATCH',
+          url: `/api/v1/maps/${String(id)}`,
+          headers: { ...as(author), 'if-match': ifMatch },
+          payload: { description },
+        });
+      const saved = await patch(created.headers.etag, 'first');
+      assert.equal(saved.statusCode, 200, saved.body);
+      assert.equal(saved.headers.etag, `W/"${String(version + 1)}"`);
+
+      // 412, as HTTP answers a failed precondition and objects and rules already did.
+      const stale = await patch(String(version), 'too late');
+      assert.equal(stale.statusCode, 412, stale.body);
+      assert.equal(stale.json<{ error: { code: string } }>().error.code, 'MAP_CHANGED');
+
+      const read = await app.inject({
+        method: 'GET',
+        url: `/api/v1/maps/${String(id)}`,
+        headers: as(author),
+      });
+      assert.equal(read.headers.etag, `W/"${String(version + 1)}"`);
+      assert.equal((await patch(read.headers.etag, 'on time')).statusCode, 200);
+    });
   });
 
   it('answers 404 for a map that does not exist, in the same words', async () => {
     const response = await view(999_999, author);
     assert.equal(response.statusCode, 404);
     assert.equal(response.json<{ error: { code: string } }>().error.code, 'MAP_NOT_FOUND');
+  });
+
+  it('answers 400 to an id that is not one, on every route, and never 500 (`L-06`)', async () => {
+    // `abc` reached PostgreSQL as NaN (22P02), and an id past bigint arrived whole (22003).
+    const good = String(await makeMap('ids', []));
+    const tomorrow = new Date(Date.now() + 86_400_000).toISOString();
+    for (const bad of ['abc', '0', '1.5', '9007199254740992', '99999999999999999999']) {
+      const requests: {
+        method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
+        url: string;
+        headers?: Record<string, string>;
+        payload?: object;
+      }[] = [
+        { method: 'GET', url: `/api/v1/maps/${bad}` },
+        { method: 'GET', url: `/api/v1/maps/${bad}/view` },
+        { method: 'PATCH', url: `/api/v1/maps/${bad}`, headers: { 'if-match': '1' }, payload: {} },
+        { method: 'DELETE', url: `/api/v1/maps/${bad}` },
+        { method: 'GET', url: `/api/v1/maps/${bad}/shares` },
+        {
+          method: 'POST',
+          url: `/api/v1/maps/${bad}/shares`,
+          payload: { label: 'wall', expiresAt: tomorrow },
+        },
+        { method: 'DELETE', url: `/api/v1/maps/${good}/shares/${bad}` },
+        {
+          method: 'POST',
+          url: `/api/v1/maps/${bad}/background`,
+          headers: { 'content-type': 'image/png' },
+          payload: Buffer.alloc(24),
+        },
+        { method: 'GET', url: `/api/v1/maps/${bad}/background` },
+        { method: 'DELETE', url: `/api/v1/maps/${bad}/background` },
+        { method: 'GET', url: `/api/v1/maps/${bad}/access` },
+        { method: 'PUT', url: `/api/v1/maps/${good}/access/${bad}`, payload: { right: 'read' } },
+        { method: 'DELETE', url: `/api/v1/maps/${bad}/access/${good}` },
+      ];
+      for (const request of requests) {
+        const response = await app.inject({
+          ...request,
+          headers: { ...as(author), ...request.headers },
+        });
+        assert.equal(
+          response.statusCode,
+          400,
+          `${request.method} ${request.url}: ${response.body}`,
+        );
+      }
+    }
   });
 
   describe('the background image', () => {

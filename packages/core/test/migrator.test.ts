@@ -981,6 +981,77 @@ describe(
       }
     });
 
+    it('lets two maps, reports and libraries share a name, and renames all but one on the way back (064)', async () => {
+      // `L-06`: a name is unique among what the caller can read, so the database stops insisting
+      // on it everywhere. The way back restores the unique indexes, which a database holding two
+      // of one name cannot have: every duplicate but the oldest is suffixed with its id, cut to
+      // fit the hundred characters a name may have, and moves on a version.
+      const fresh = await createScratchDatabase('flatnames');
+      try {
+        const all = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 64),
+        );
+        await all.up();
+        const unique = async (): Promise<Record<string, boolean>> =>
+          Object.fromEntries(
+            (
+              await fresh.db.query<{ name: string; unique: boolean }>(
+                `SELECT c.relname AS name, i.indisunique AS unique
+                 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+                 WHERE c.relname IN ('map_name_idx', 'report_name_idx', 'library_name_idx')`,
+              )
+            ).map((row) => [row.name, row.unique]),
+          );
+        assert.deepEqual(await unique(), {
+          map_name_idx: false,
+          report_name_idx: false,
+          library_name_idx: false,
+        });
+
+        const long = 'x'.repeat(100);
+        const ids = { map: [] as number[], report: [] as number[], library: [] as number[] };
+        for (const table of ['map', 'report', 'library'] as const) {
+          for (const name of ['Core Network', 'core network', 'Edge', long, long.toUpperCase()]) {
+            const rows = await fresh.db.query<{ id: string }>(
+              table === 'report'
+                ? `INSERT INTO report (name, kind) VALUES ($1, 'table_only') RETURNING id`
+                : `INSERT INTO ${table} (name) VALUES ($1) RETURNING id`,
+              [name],
+            );
+            ids[table].push(Number(rows[0]?.id));
+          }
+        }
+
+        await all.down(1);
+        assert.deepEqual(await unique(), {
+          map_name_idx: true,
+          report_name_idx: true,
+          library_name_idx: true,
+        });
+        for (const table of ['map', 'report', 'library'] as const) {
+          const [first, second, edge, third, fourth] = ids[table];
+          const rows = await fresh.db.query<{ id: string; name: string; version: string }>(
+            `SELECT id, name, version FROM ${table} ORDER BY id`,
+          );
+          const suffix = (id: number | undefined): string => ` (#${String(id)})`;
+          assert.deepEqual(
+            rows.map((row) => [Number(row.id), row.name, Number(row.version)]),
+            [
+              [first, 'Core Network', 1],
+              [second, `core network${suffix(second)}`, 2],
+              [edge, 'Edge', 1],
+              [third, long, 1],
+              [fourth, `${'X'.repeat(100 - suffix(fourth).length)}${suffix(fourth)}`, 2],
+            ],
+            table,
+          );
+        }
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('applies the real migration set forward and all the way back', async () => {
       const fresh = await createScratchDatabase('roundtrip');
       try {

@@ -6,6 +6,7 @@ import { Card, Empty, ErrorPanel, Loading, Stat } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
 import { PageTitle } from '../components/PageTitle';
 import { HOME_PRIORITY, starredMaps } from './home-maps';
+import { listedName, sharedNames } from './names';
 
 interface OpenApi {
   info: { version: string };
@@ -194,6 +195,7 @@ export function Overview(): React.JSX.Element {
  */
 function HomeMapList({ items }: { readonly items: readonly MapSummary[] }): React.JSX.Element {
   const { shown, hidden } = starredMaps(items);
+  const shared = sharedNames(shown);
 
   if (shown.length === 0) {
     return (
@@ -209,7 +211,7 @@ function HomeMapList({ items }: { readonly items: readonly MapSummary[] }): Reac
         {shown.map((map) => (
           <li key={map.id} className="py-1.5">
             <Link to={`/maps/${String(map.id)}`} className="text-text underline">
-              {map.name}
+              {listedName(map, shared)}
             </Link>
             {map.description !== '' && <p className="text-xs text-text-muted">{map.description}</p>}
           </li>

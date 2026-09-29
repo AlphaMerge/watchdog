@@ -121,6 +121,41 @@ export function validateNodes(raw: unknown): LibraryNode[] {
   return raw.map((node, index) => readNode(node, `nodes[${String(index)}]`, 1));
 }
 
+/**
+ * Refuses nodes nested deeper than `MAX_DEPTH`, without recursing (`L-06`).
+ *
+ * **Asked before the route's schema runs.** `ms:libraryNode` refers to itself, so the schema walks
+ * a body one stack frame per level, and a body a few thousand levels deep ran out of stack before
+ * `validateNodes` could say that six is the most — which answered 500. This walk keeps its own
+ * stack and stops at the first node too deep, so it costs no more than the body limit allows and
+ * answers as `validateNodes` would, at the same path.
+ *
+ * Everything that is not the shape of a node is left alone: saying what is wrong with it is the
+ * schema's job, and this runs so that the schema can.
+ */
+export function refuseTooDeep(raw: unknown): void {
+  if (!Array.isArray(raw)) return;
+  // Reversed onto the stack, so nodes come off it in document order and the one named is the
+  // first too-deep node a reader would reach.
+  const pending: { value: unknown; path: string; depth: number }[] = [];
+  const push = (values: readonly unknown[], at: (index: number) => string, depth: number): void => {
+    for (let index = values.length - 1; index >= 0; index -= 1) {
+      pending.push({ value: values[index], path: at(index), depth });
+    }
+  };
+  push(raw, (index) => `nodes[${String(index)}]`, 1);
+
+  for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
+    if (node.depth > MAX_DEPTH) {
+      throw invalid(node.path, `a library is at most ${String(MAX_DEPTH)} levels deep`);
+    }
+    const children = isRecord(node.value) ? node.value['children'] : undefined;
+    if (!Array.isArray(children)) continue;
+    const parent = node;
+    push(children, (index) => `${parent.path}.children[${String(index)}]`, parent.depth + 1);
+  }
+}
+
 function readRule(value: unknown, path: string): NodeRule {
   if (!isRecord(value)) throw invalid(path, 'must be an object or null');
   for (const key of Object.keys(value)) {

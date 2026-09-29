@@ -45,7 +45,8 @@ export interface FlatGrant {
  *
  * **A closed set of literals, never a string from anywhere else.** These are interpolated into
  * SQL as identifiers, which is safe only because the type admits exactly the tables that exist; a
- * `string` here would be one refactor away from an injection.
+ * `string` here would be one refactor away from an injection. `subject` is also the entity's own
+ * table, which `nameTaken` reads.
  */
 export type GrantTable =
   | { readonly table: 'map_access'; readonly key: 'map_id'; readonly subject: 'map' }
@@ -141,6 +142,46 @@ export class FlatAccess {
   async listScope(viewer: FlatViewer, q: Queryable): Promise<ListScope> {
     if (await this.#isAdmin(viewer.userId, q)) return { all: true };
     return { all: false, groupIds: await this.#groupsOf(viewer.userId, q) };
+  }
+
+  /**
+   * Whether another one this viewer can read already has this name (`L-06`).
+   *
+   * **Unique among what the viewer can read, not across the installation.** A name unique
+   * everywhere made the refusal an oracle: a writer on one branch learned what another branch's
+   * maps, reports and libraries were called by trying names. Two groups may now each have a "Core
+   * Network", and an administrator, who reads both, tells them apart by id.
+   *
+   * **Serialised per name** by a transaction-scoped advisory lock on (kind, `lower(name)`), taken
+   * before the question is asked. No unique index stops two concurrent creates any more, and
+   * without the lock both would ask, both be told no, and both insert. The lock is held until the
+   * caller's transaction ends, so the second asks after the first has committed — and under READ
+   * COMMITTED each statement sees what committed before it began. The two-key form, so it cannot
+   * meet the single-key locks the tree and the housekeeper take.
+   *
+   * @param q the caller's transaction, which the lock lasts as long as.
+   * @param exceptId the one being renamed, which does not clash with itself.
+   */
+  async nameTaken(
+    q: Queryable,
+    viewer: FlatViewer,
+    name: string,
+    exceptId: number | null,
+  ): Promise<boolean> {
+    const { subject } = this.#grants;
+    await q.query(`SELECT pg_advisory_xact_lock(hashtext($1), hashtext(lower($2)))`, [
+      `ms:${subject}-name`,
+      name,
+    ]);
+    const scope = await this.listScope(viewer, q);
+    const visible = scope.all ? '' : `AND ${grantedTo(this.#grants, 'e.id', '$3')}`;
+    const rows = await q.query<{ id: string }>(
+      `SELECT e.id FROM ${subject} e
+       WHERE lower(e.name) = lower($1) AND ($2::bigint IS NULL OR e.id <> $2) ${visible}
+       LIMIT 1`,
+      scope.all ? [name, exceptId] : [name, exceptId, scope.groupIds],
+    );
+    return rows.length > 0;
   }
 
   /**

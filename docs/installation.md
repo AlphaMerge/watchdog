@@ -338,6 +338,15 @@ sudo systemctl start ms-core ms-probe
 A package has no `previous`: install the earlier package version with `apt` or `dnf`, after the
 same `migrate down`.
 
+**Taking back migration 064 can rename maps, reports and libraries.** Since 064 a name is unique
+only among what one account can read, so two groups may each have a "Core Network". The releases
+before it insist on a name being unique across the installation, so the way back keeps the oldest
+of each name as it is and appends its id to every other one — `Core Network (#12)`, shortened to
+fit the 100 characters a name may have — and moves its version on, so an editor still open on the
+old name is refused rather than saving it back. Nothing is merged or deleted. If a renamed one
+would still clash, because somebody had already used that exact name, the rollback stops and
+changes nothing; rename one of the two and run it again.
+
 ## Uninstalling
 
 ```bash

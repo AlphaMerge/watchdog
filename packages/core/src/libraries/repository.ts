@@ -82,15 +82,6 @@ export class LibraryRepository {
     return row === undefined ? undefined : toLibrary(row);
   }
 
-  /** Whether another library already has this name, compared as the unique index compares it. */
-  async nameTaken(q: Queryable, name: string, exceptId: number | null): Promise<boolean> {
-    const rows = await q.query<{ id: string }>(
-      `SELECT id FROM library WHERE lower(name) = lower($1) AND ($2::bigint IS NULL OR id <> $2)`,
-      [name, exceptId],
-    );
-    return rows.length > 0;
-  }
-
   async create(
     q: Queryable,
     input: {

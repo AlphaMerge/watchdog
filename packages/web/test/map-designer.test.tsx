@@ -254,7 +254,8 @@ describe('the designer canvas', () => {
     // **The one moment the afternoon exists only in this tab.** Rolling the canvas back to show a
     // tidy error would be precisely the loss `If-Match` was added to prevent.
     const save = vi.fn<(canvas: Canvas) => Promise<void>>(() =>
-      Promise.reject(new ApiError(409, 'MAP_CHANGED', 'map 4 has moved on', 'abc')),
+      // 412, as the core answers a stale `If-Match` since `L-06`.
+      Promise.reject(new ApiError(412, 'MAP_CHANGED', 'map 4 has moved on', 'abc')),
     );
     designer(save);
     const tile = router();

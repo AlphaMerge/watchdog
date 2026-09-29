@@ -188,6 +188,12 @@ not read is absent from the list rather than refused.
   its maker loses a grant, and stops opening at all, as a revoked link does, when the maker's
   account is disabled or deleted.
 - **Five-star maps surface in the Home menu.** Priority is set on the map itself.
+- **A name is unique among the maps you can read, not across the installation.** Two groups can
+  each have a "Core Network" without either learning the other's exists, and a list that holds two
+  of one name — an administrator's, which holds everything — gives each one's id beside it. The
+  same holds for reports and libraries.
+- **A save somebody else beat you to is refused, and your edit stays on screen.** Open the map
+  again in another tab to see what changed before saving over it.
 - **Geographical maps need a tile source, and this installation may not have one.** With none
   configured the widgets are drawn over the background image instead — the designer says so where
   somebody is arranging one, because the fix is an administrator's
@@ -206,6 +212,7 @@ by group, so a report you may not read is absent from the list rather than refus
 - **A report that will not run says so in the list**, not only on its own page — a lost security
   context, or a template that does not render yet. The failure that prevents is scanning twenty
   reports and seeing nothing wrong with the one that has been refusing since August.
+- **A save somebody else beat you to is refused and says so**, with your edit still in the form.
 - **The schedule form offers only the fields its frequency uses.** A weekday appears for a weekly
   report and not for a monthly one, because the core refuses the second outright.
 - **What the period works out to is shown while you are still editing it**, along with the bucket

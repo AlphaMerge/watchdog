@@ -5,6 +5,7 @@ import {
   MAX_NODES,
   countNodes,
   describeNodes,
+  refuseTooDeep,
   validateNodes,
   type LibraryNode,
 } from '../src/libraries/nodes.js';
@@ -187,5 +188,60 @@ describe('library nodes', () => {
       ].join('\n'),
     );
     assert.equal(describeNodes([]), '');
+  });
+
+  describe('the depth bound asked before the schema (`L-06`)', () => {
+    /** A chain of nodes `levels` deep, each the only child of the one above it. */
+    const chain = (levels: number): unknown[] => {
+      let node: Record<string, unknown> = { id: `n${String(levels)}`, name: 'N' };
+      for (let level = levels - 1; level >= 1; level -= 1) {
+        node = { id: `n${String(level)}`, name: 'N', children: [node] };
+      }
+      return [node];
+    };
+    const tooDeep = (raw: unknown): string => {
+      try {
+        refuseTooDeep(raw);
+      } catch (error) {
+        assert.ok(error instanceof LibraryError, `not a LibraryError: ${String(error)}`);
+        assert.equal(error.code, 'LIBRARY_INVALID');
+        return String(error.details['path']);
+      }
+      return 'accepted';
+    };
+
+    it('lets the deepest document validateNodes accepts through, and refuses one level more', () => {
+      assert.equal(tooDeep(chain(MAX_DEPTH)), 'accepted');
+      assert.equal(tooDeep(chain(MAX_DEPTH + 1)), `nodes[0]${'.children[0]'.repeat(MAX_DEPTH)}`);
+      // The same path the validator it runs ahead of names, so a client sees one answer.
+      assert.equal(refusal(chain(MAX_DEPTH + 1)), tooDeep(chain(MAX_DEPTH + 1)));
+    });
+
+    it('names the first too-deep node in document order', () => {
+      const shallow = { id: 'a', name: 'A', children: [] };
+      assert.equal(
+        tooDeep([shallow, ...chain(MAX_DEPTH + 3)]),
+        `nodes[1]${'.children[0]'.repeat(MAX_DEPTH)}`,
+      );
+      const wide = { id: 'w', name: 'W', children: [shallow, ...chain(MAX_DEPTH + 1)] };
+      assert.equal(tooDeep([wide]), `nodes[0].children[1]${'.children[0]'.repeat(MAX_DEPTH - 1)}`);
+    });
+
+    it('stops at the seventh of a hundred thousand levels', () => {
+      assert.equal(tooDeep(chain(100_000)), `nodes[0]${'.children[0]'.repeat(MAX_DEPTH)}`);
+    });
+
+    it('leaves what is not the shape of a node to the schema', () => {
+      for (const raw of [
+        undefined,
+        null,
+        'nodes',
+        { children: [] },
+        [1, 'two', null],
+        [{ children: 'x' }],
+      ]) {
+        assert.equal(tooDeep(raw), 'accepted');
+      }
+    });
   });
 });

@@ -20898,6 +20898,116 @@ from rules already written, and are settled here so that no ticket re-derives th
       page, creating a node rooted there. It is its own ticket because it is the only one that
       changes the device tree's UI.
 
+- [x] **L-06 — Library, map and report hardening, before anything is built on them** · M ·
+      L-01 · Found by review round 1 on 2026-09-28. Six things `L-01` left, each small, and
+      each one `L-02`…`L-05` would otherwise build on. Maps and reports share most of them.
+      Some may already be done at HEAD by other work: the outcome says which.
+
+      1. **No params schema on any library, map or report route.** So `GET /libraries/abc` is a
+         500: `Number('abc')` reaches PostgreSQL as `NaN` (22P02), and an id past bigint does
+         the same. Give each route an integer id, and a group, share or run id where it has
+         one, as the object routes' `idParams` does.
+      2. **The library audit diff compares `describeNodes`' lossy text**
+         (`audit/store.ts:471-476`). Two different documents can render the same line:
+         `['core','berlin']` and `['core, berlin']`, a changed node id, or a name containing
+         ` › `. A real change is then recorded with `diff: []`. Diff the structured document,
+         and keep the one-line-per-node text for a person to read.
+      3. **Bound the depth before the recursive schema runs.** `ms:libraryNode` refers to itself
+         and AJV runs before `validateNodes`. So a body nested a few thousand levels deep is
+         walked by the schema, one stack frame per level, before the six-level bound is
+         asked, and it answers 500.
+      4. **`LIBRARY_NAME_TAKEN`, `MAP_NAME_TAKEN` and `REPORT_NAME_TAKEN` are existence
+         oracles.** Each name is unique across the installation, so a writer on one branch
+         learns what another branch's libraries, maps and reports are called by trying names.
+         A name becomes unique among what the caller can read: migration **064** drops the
+         three unique `lower(name)` indexes for plain ones. Conditions (WatchDog):
+         - a transaction-scoped advisory lock on (kind, `lower(name)`), with a test of two
+           concurrent creates;
+         - nothing resolves one of the three by name, and the outcome says what was checked;
+         - administrators' lists and pickers show enough, the owning group or the id, to tell
+           two of the same name apart;
+         - the down migration suffixes duplicates with " (#id)", and that is documented.
+      5. **"records nothing for a change that was refused"** (`libraries-service.test.ts:408`)
+         cannot fail: the version check throws before the audit is written, so an entry written
+         outside the transaction would pass it too. Make it fail after the entry is written.
+      6. **A stale version is a 412, as HTTP defines it**, not the 409 maps, reports and
+         libraries answer today while objects and rediscovery rules answer 412. The `*_CHANGED`
+         codes stay in the body, reads carry an `ETag` if they lack one, and `api-reference.md`
+         is regenerated. The web's `isStale()` narrows to 412, and `ReportSettings`, the map
+         editor and the library editor are each tested against it. Added 2026-09-28 by
+         WatchDog when `D-11` chose 412.
+
+      **Done.** None of the six was done at HEAD by other work; each was checked before it was
+      written.
+
+      1. **Params schemas.** Every library, map and report route with an id in its path declares
+         one — 30 routes: 6 library, 13 map, 11 report. The shapes shared by all three files are
+         in `api/params.ts`, bounded as `objects.ts`' `idParams` is (1 to 2^53−1). `abc`, `0`,
+         `1.5`, 2^53 and 10^20 are a 400 on every route. A download's `format` is one a run can
+         store, so a name PostgreSQL cannot take as text is refused too. The handlers take the
+         coerced number.
+      2. **The audit diff compares the document.** `LibraryAudit` carries `document` beside the
+         text, and `library.updated` asks `isDeepStrictEqual` of the documents, which ignores the
+         key order `jsonb` changes. The entry keeps the text when the text differs. When the two
+         documents render alike, it records the documents instead, so the entry still says what
+         moved. Tested with the finding's tags and with a changed node id; each recorded
+         `diff: []` before.
+      3. **Depth before schema.** `refuseTooDeep` walks the body on its own stack and stops at
+         the first node deeper than six, naming the path `validateNodes` names. A route
+         `preValidation` hook on POST and PATCH runs it after the authorisation hook and before
+         AJV. A body 10,000 levels deep is a 400 `LIBRARY_INVALID` at the seventh level on both
+         routes. Every node in that test has one id, so only the early bound can name the
+         seventh level; past the schema the duplicate id would be named first.
+      4. **Names unique among what the caller can read** (migration **064**).
+         `FlatAccess.nameTaken` is the one check for all three. It takes
+         `pg_advisory_xact_lock(hashtext('ms:<kind>-name'), hashtext(lower(name)))`, then asks
+         among the rows the viewer can list — every row for an administrator. 064 swaps the
+         three unique `lower(name)` indexes for plain ones. Its down migration leaves the oldest
+         of each name as it is and appends " (#id)" to every other one, cut to 100 characters,
+         and moves its version on. A name that still clashes fails the rollback whole.
+         `installation.md` says so beside `migrate down`. The conditions:
+         - **The lock**, with a test that makes the race happen: the first create is held after
+           its row is written until the second is seen waiting on the lock (`pg_blocking_pids`),
+           or has finished without waiting. With the lock taken out, both land.
+         - **Nothing resolves one of the three by name.** Checked: the core's SQL on `map`,
+           `report` and `library` (by name only in the list ordering and the old uniqueness
+           checks), the report scheduler, the CLI (`migrate` only), the web's routes (all by id)
+           and its pickers. `ObjectPicker` and `RecipientsEditor` pick objects and recipients,
+           not these.
+         - **Lists tell two apart.** There is no picker for any of the three. The maps list,
+           the reports list and the Home menu's maps show the id beside a name another row in
+           the same list shares, and only then. The id is in the link text, so the two links do
+           not read alike either. Libraries have no web list until `L-03`.
+         - **The rollback's renaming is documented** (`installation.md`, and 064's comment).
+         `LibraryRepository.nameTaken` and the two inline checks are gone.
+      5. **The refused-change test can fail now.** The suite's sink writes its entry and then
+         throws when armed. The test asserts that neither the entry nor the change survives, as
+         well as refusing the stale version it already checked. With the entry written outside
+         the transaction, it fails.
+      6. **A stale version is a 412** for `MAP_CHANGED`, `REPORT_CHANGED` and
+         `LIBRARY_CHANGED`, and the code stays in the body. `GET` one, `POST` and `PATCH` answer
+         with `ETag: W/"<version>"`, and a read's tag is accepted back as `If-Match` (tested for
+         each). `api-reference.md` is regenerated. On the web:
+         - `isStale()` is 412 only; a 409 is a clash of names, which reloading does not fix.
+         - `ReportSettings` says somebody else saved first on `REPORT_CHANGED`, as the map
+           designer does, and keeps the edit. It is tested against a 412 from `fetch`.
+         - The map designer and the Home menu's priority control are tested against 412.
+         - **The library editor does not exist yet.** It is `L-04`'s, and should be tested the
+           same way.
+
+      **Mutations caught: 16 of 17.** The one that lived locks on the name without the kind,
+      which only serialises more than it must: an equivalent mutant. **Tests:**
+      - `flat-names.test.ts`: 9 cases, three per kind.
+      - `library-nodes.test.ts`: 4 cases for the bound.
+      - `libraries-api.test.ts`: 2 cases (ids, depth) and the version case extended.
+      - `maps-api.test.ts`: 2 cases (ids, 412 and tags). `reports-api.test.ts`: 1 case (ids), and
+        the version case now expects 412 and tags.
+      - `libraries-service.test.ts`: the diff case, and the refused-change case rewritten.
+      - `migrator.test.ts`: 064 forward and back.
+      - `maps-schema.test.ts`: now asserts two maps of one name are held.
+      - Web: `names.test.ts`, and a case each in `reports-view.test.tsx` for the list and the
+        stale save.
+
 **Not in this phase**: a library as a report's subjects or as the source of a map widget (both
 would reuse `L-02`'s resolver, and neither is §6's row); libraries in the Home menu, which §6 gives
 to maps; and PRTG's per-node display settings.

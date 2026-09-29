@@ -121,7 +121,7 @@ describe('starring one', () => {
     vi.stubGlobal('fetch', () =>
       Promise.resolve(
         new Response(JSON.stringify({ error: { code: 'MAP_CHANGED', message: 'moved on' } }), {
-          status: 409,
+          status: 412,
           headers: { 'content-type': 'application/json' },
         }),
       ),

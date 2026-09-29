@@ -64,9 +64,14 @@ describe(
       assert.deepEqual(rows[0]?.layout, { widgets: [] });
     });
 
-    it('refuses two maps whose names differ only in case', async () => {
+    it('holds two maps of one name, because a name is unique only among what somebody can read', async () => {
+      // Migration 064 (`L-06`): a name unique everywhere was an existence oracle, so the rule is
+      // `FlatAccess.nameTaken`'s now, asked among the caller's own maps. The table keeps the
+      // case-folded index for that question and no longer refuses the row.
       await makeMap('Core Network');
-      await assert.rejects(() => makeMap('core network'), /map_name_idx/);
+      await makeMap('core network');
+      const rows = await db.query(`SELECT 1 FROM map WHERE lower(name) = 'core network'`);
+      assert.equal(rows.length, 2);
     });
 
     it('refuses a priority outside the 1..5 the tree uses', async () => {

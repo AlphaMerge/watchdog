@@ -149,7 +149,9 @@ describe('the libraries API', { skip: available ? false : 'no database' }, () =>
       payload: { name, nodes },
     });
     assert.equal(response.statusCode, 201, response.body);
-    return response.json<{ id: number; version: number }>();
+    const made = response.json<{ id: number; version: number }>();
+    assert.equal(response.headers.etag, `W/"${String(made.version)}"`);
+    return made;
   };
 
   const errorOf = (body: string) =>
@@ -215,7 +217,76 @@ describe('the libraries API', { skip: available ? false : 'no database' }, () =>
     }
   });
 
-  it('asks for If-Match, and refuses one that has moved on', async () => {
+  it('answers 400 to an id that is not one, on every route, and never 500 (`L-06`)', async () => {
+    // `abc` reached PostgreSQL as NaN (22P02), and an id past bigint arrived whole (22003).
+    const { id } = await make('ids');
+    const good = String(id);
+    for (const bad of ['abc', '0', '1.5', '9007199254740992', '99999999999999999999']) {
+      for (const request of [
+        { method: 'GET' as const, url: `/api/v1/libraries/${bad}` },
+        {
+          method: 'PATCH' as const,
+          url: `/api/v1/libraries/${bad}`,
+          headers: { 'if-match': '1' },
+          payload: {},
+        },
+        { method: 'DELETE' as const, url: `/api/v1/libraries/${bad}` },
+        { method: 'GET' as const, url: `/api/v1/libraries/${bad}/access` },
+        {
+          method: 'PUT' as const,
+          url: `/api/v1/libraries/${good}/access/${bad}`,
+          payload: { right: 'read' },
+        },
+        { method: 'DELETE' as const, url: `/api/v1/libraries/${bad}/access/${good}` },
+      ]) {
+        const response = await app.inject({
+          ...request,
+          headers: { ...as(author), ...request.headers },
+        });
+        assert.equal(
+          response.statusCode,
+          400,
+          `${request.method} ${request.url}: ${response.body}`,
+        );
+      }
+    }
+  });
+
+  it('refuses a document nested thousands of levels deep before its schema walks it (`L-06`)', async () => {
+    // The node schema refers to itself, so a body this deep ran the validator out of stack and
+    // answered 500 before anything could say that six levels is the most. Every node has the
+    // same id, so only the bound asked *before* the schema names the seventh level: past the
+    // schema, `validateNodes` would name the second level's id first.
+    // Written as text: building it as an object would ask this process's own `JSON.stringify` to
+    // recurse as deep as the server is being asked not to.
+    const levels = 10_000;
+    const nodes = `[${'{"id":"n","name":"N","children":['.repeat(levels)}${']}'.repeat(levels)}]`;
+    const seventh = `nodes[0]${'.children[0]'.repeat(6)}`;
+    const { id, version } = await make('deep');
+
+    for (const request of [
+      { method: 'POST' as const, url: '/api/v1/libraries', fields: '"name":"deep-post",' },
+      {
+        method: 'PATCH' as const,
+        url: `/api/v1/libraries/${String(id)}`,
+        headers: { 'if-match': String(version) },
+        fields: '',
+      },
+    ]) {
+      const response = await app.inject({
+        method: request.method,
+        url: request.url,
+        headers: { ...as(author), ...request.headers, 'content-type': 'application/json' },
+        payload: `{${request.fields}"nodes":${nodes}}`,
+      });
+      assert.equal(response.statusCode, 400, `${request.method}: ${response.body.slice(0, 300)}`);
+      const error = errorOf(response.body);
+      assert.equal(error.code, 'LIBRARY_INVALID');
+      assert.equal(error.details?.['path'], seventh);
+    }
+  });
+
+  it('asks for If-Match, and refuses one that has moved on with 412 (`L-06`)', async () => {
     const { id, version } = await make('versioned');
     const patch = (ifMatch: string | undefined, priority: number) =>
       app.inject({
@@ -234,10 +305,23 @@ describe('the libraries API', { skip: available ? false : 'no database' }, () =>
     const saved = await patch(`W/"${String(version)}"`, 4);
     assert.equal(saved.statusCode, 200, saved.body);
     assert.equal(saved.json<{ version: number }>().version, version + 1);
+    assert.equal(saved.headers.etag, `W/"${String(version + 1)}"`);
 
+    // 412, as HTTP answers a failed precondition and objects and rules already did; the code
+    // still says which.
     const stale = await patch(String(version), 2);
-    assert.equal(stale.statusCode, 409);
+    assert.equal(stale.statusCode, 412);
     assert.equal(errorOf(stale.body).code, 'LIBRARY_CHANGED');
+
+    // A read's tag is the one to send back.
+    const read = await app.inject({
+      method: 'GET',
+      url: `/api/v1/libraries/${String(id)}`,
+      headers: as(author),
+    });
+    const tag = read.headers.etag;
+    assert.equal(tag, `W/"${String(version + 1)}"`);
+    assert.equal((await patch(tag, 3)).statusCode, 200);
   });
 
   it('refuses a document that does not fit, naming the node, as a 400 rather than a 500', async () => {

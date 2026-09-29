@@ -193,12 +193,13 @@ function sameList(a: readonly string[], b: readonly string[]): boolean {
 /**
  * Whether a refused save was refused because somebody else saved first.
  *
- * **409 and 412 alike.** HTTP's answer to a failed `If-Match` is 412, which rules and objects
- * give; maps, reports and libraries answer 409 until `L-06` aligns them. The person's next step
- * is the same either way — reload and look at what changed — so the form treats them as one.
+ * **412 and nothing else**: HTTP's answer to a failed `If-Match`, and since `L-06` the one every
+ * versioned thing gives — rules, objects, maps, reports and libraries. It accepted 409 while maps,
+ * reports and libraries answered that, and a 409 is also a clash of names, which reloading does
+ * not fix.
  */
 export function isStale(error: Pick<ApiError, 'status'>): boolean {
-  return error.status === 409 || error.status === 412;
+  return error.status === 412;
 }
 
 /** `W/"3"`, as the core writes an `ETag` and reads `If-Match`. */

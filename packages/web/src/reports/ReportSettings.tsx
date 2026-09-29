@@ -17,7 +17,7 @@ import {
  *
  * **`If-Match` on every save**, because a report is a thing two people open at once and the core
  * refuses a `PATCH` without it rather than letting the second save discard the first. The version
- * comes from the report that was loaded; a conflict answers 409 and the error panel says so, which
+ * comes from the report that was loaded; a conflict answers 412 and the error panel says so, which
  * is the honest outcome — silently reloading and re-applying would be this form deciding whose
  * edit wins.
  *
@@ -462,7 +462,17 @@ export function ReportSettings({
           {saved && <span className="text-xs text-text-muted">Saved.</span>}
         </div>
 
-        {failure !== null && <ErrorPanel error={failure} />}
+        {failure !== null && (
+          <div className="space-y-2">
+            <ErrorPanel error={failure} />
+            {failure.code === 'REPORT_CHANGED' && (
+              <p className="text-sm text-text-muted">
+                Somebody else saved this report while it was open. Nothing here has been thrown away
+                — open the report again in another tab to see what changed before saving over it.
+              </p>
+            )}
+          </div>
+        )}
       </form>
     </Card>
   );

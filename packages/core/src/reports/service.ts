@@ -195,7 +195,7 @@ export class ReportService {
     const outputs = validateOutputs(input.outputs ?? DEFAULT_OUTPUTS);
 
     return this.#db.tx(async (tx) => {
-      await this.#refuseDuplicateName(tx, name, null);
+      await this.#refuseDuplicateName(tx, viewer, name, null);
       // The creator's own login when nobody was named: a report renders as whoever made it
       // unless an administrator said otherwise (`A-13`).
       const runAs = await this.#resolveContext(tx, viewer, input.runAs ?? loginOf(actor), null);
@@ -274,7 +274,7 @@ export class ReportService {
       }
 
       if (next.name !== undefined && next.name.toLowerCase() !== current.name.toLowerCase()) {
-        await this.#refuseDuplicateName(tx, next.name, id);
+        await this.#refuseDuplicateName(tx, viewer, next.name, id);
       }
 
       const updated = await this.#repository.update(tx, id, expectedVersion, next);
@@ -407,12 +407,14 @@ export class ReportService {
     return { userId: account.id, login: account.login };
   }
 
-  async #refuseDuplicateName(q: Queryable, name: string, exceptId: number | null): Promise<void> {
-    const clash = await q.query<{ id: string }>(
-      `SELECT id FROM report WHERE lower(name) = lower($1) AND ($2::bigint IS NULL OR id <> $2)`,
-      [name, exceptId],
-    );
-    if (clash.length > 0) {
+  /** Among what this viewer can read, under a lock on the name (`L-06`): `FlatAccess` says why. */
+  async #refuseDuplicateName(
+    q: Queryable,
+    viewer: ReportViewer,
+    name: string,
+    exceptId: number | null,
+  ): Promise<void> {
+    if (await this.#access.nameTaken(q, viewer, name, exceptId)) {
       throw new ReportError('REPORT_NAME_TAKEN', `a report called ${name} already exists`, {
         context: { ...(exceptId === null ? {} : { reportId: exceptId }), phase: 'name' },
         details: { name },

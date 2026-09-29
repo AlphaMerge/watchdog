@@ -1,8 +1,8 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
-import type { Database } from '../src/db/pool.js';
+import type { Database, Queryable } from '../src/db/pool.js';
 import { DatabaseAuditSink } from '../src/audit/store.js';
-import type { Actor } from '../src/objects/audit.js';
+import type { Actor, AuditSink, Mutation } from '../src/objects/audit.js';
 import { LibraryRepository } from '../src/libraries/repository.js';
 import { LibraryService, type LibraryViewer } from '../src/libraries/service.js';
 import {
@@ -13,6 +13,22 @@ import {
 import { buildHarness, silent } from './support/tree.js';
 
 const available = await databaseAvailable();
+
+/**
+ * Records, then fails when told to: `flat-audit.test.ts`'s sink. The one refusal that can tell an
+ * entry written in the change's transaction from one written beside it (`L-06`).
+ */
+class FailsAfterRecording implements AuditSink {
+  readonly #inner = new DatabaseAuditSink();
+  failOn: string | null = null;
+
+  async record(q: Queryable, actor: Actor, mutations: readonly Mutation[], at: Date) {
+    await this.#inner.record(q, actor, mutations, at);
+    if (mutations.some((mutation) => mutation.action === this.failOn)) {
+      throw new Error(`failing after recording ${String(this.failOn)}`);
+    }
+  }
+}
 
 /**
  * Who may do what with a library, and what the audit log says they did (`L-01`).
@@ -29,6 +45,7 @@ describe(
     let scratch: ScratchDatabase;
     let db: Database;
     let libraries: LibraryService;
+    const sink = new FailsAfterRecording();
 
     before(async () => {
       scratch = await createScratchDatabase('libsvc');
@@ -37,7 +54,7 @@ describe(
       libraries = new LibraryService({
         db,
         repository: new LibraryRepository(),
-        audit: new DatabaseAuditSink(),
+        audit: sink,
         logger: silent,
       });
     });
@@ -405,23 +422,91 @@ describe(
         );
       });
 
+      it('records a change the one-line text cannot show, with the documents (`L-06`)', async () => {
+        // Two tags and one tag with a comma in it read alike, and so do two ids behind one name.
+        // Compared as text, each of these edits was recorded as `diff: []`.
+        const user = await owner();
+        const node = (id: string, tags: string[]) => ({ id, name: 'Sites', rule: { tags } });
+        const stored = (id: string, tags: string[]) => ({
+          id,
+          name: 'Sites',
+          rule: { roots: [], types: [], tags, states: [] },
+          children: [],
+        });
+        const made = await libraries.create(viewer(user), actor(user), {
+          name: `lossy-${String(seq)}`,
+          nodes: [node('a', ['core', 'berlin'])],
+        });
+        const retagged = await libraries.update(viewer(user), actor(user), made.id, made.version, {
+          nodes: [node('a', ['core, berlin'])],
+        });
+        await libraries.update(viewer(user), actor(user), made.id, retagged.version, {
+          nodes: [node('b', ['core, berlin'])],
+        });
+        // What did not move is still not recorded: the same document again is no change.
+        const unchanged = await libraries.get(viewer(user), made.id);
+        await libraries.update(viewer(user), actor(user), made.id, unchanged.version, {
+          nodes: [node('b', ['core, berlin'])],
+          priority: 5,
+        });
+
+        const rows = await auditFor(made.id);
+        assert.deepEqual(rows[1]?.diff, [
+          {
+            field: 'library.nodes',
+            before: [stored('a', ['core', 'berlin'])],
+            after: [stored('a', ['core, berlin'])],
+          },
+        ]);
+        assert.deepEqual(rows[2]?.diff, [
+          {
+            field: 'library.nodes',
+            before: [stored('a', ['core, berlin'])],
+            after: [stored('b', ['core, berlin'])],
+          },
+        ]);
+        assert.deepEqual(
+          rows[3]?.diff.map((entry) => entry.field),
+          ['library.priority'],
+        );
+      });
+
       it('records nothing for a change that was refused', async () => {
         // **In the transaction, so the two cannot disagree.** A row for a write that rolled back
-        // is a false record, and this is the case where it would be written: the version check
-        // fails after everything before it succeeded.
+        // is a false record. A stale version is refused before anything is recorded, so it
+        // cannot show where the entry is written; a failure *after* the entry is written can
+        // (`L-06`), and only an entry inside the transaction goes when the change does.
         const user = await owner();
         const made = await libraries.create(viewer(user), actor(user), {
           name: `stale-${String(seq)}`,
         });
-        await libraries.update(viewer(user), actor(user), made.id, made.version, { priority: 5 });
+        const edited = await libraries.update(viewer(user), actor(user), made.id, made.version, {
+          priority: 5,
+        });
         await assert.rejects(
           () => libraries.update(viewer(user), actor(user), made.id, made.version, { priority: 1 }),
           codeOf('LIBRARY_CHANGED'),
         );
+
+        sink.failOn = 'library.updated';
+        try {
+          await assert.rejects(
+            () =>
+              libraries.update(viewer(user), actor(user), made.id, edited.version, {
+                priority: 1,
+              }),
+            /failing after recording library.updated/,
+          );
+        } finally {
+          sink.failOn = null;
+        }
+
         assert.deepEqual(
           (await auditFor(made.id)).map((row) => row.action),
           ['library.created', 'library.updated'],
         );
+        // And the change went with its entry.
+        assert.equal((await libraries.get(viewer(user), made.id)).priority, 5);
       });
     });
   },

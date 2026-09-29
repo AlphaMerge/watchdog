@@ -5,6 +5,7 @@ import type { ReportKind, ReportSummary } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { PageTitle } from '../components/PageTitle';
 import { REPORT_KINDS, labelOfKind, nextRunText, whyItCannotRun } from './reports-model';
+import { listedName, sharedNames } from './names';
 
 /**
  * The reports this account may see, and the button that makes another (`E-11`).
@@ -20,6 +21,7 @@ import { REPORT_KINDS, labelOfKind, nextRunText, whyItCannotRun } from './report
  */
 export function ReportsView(): React.JSX.Element {
   const reports = useApi<{ items: ReportSummary[] }>('/reports');
+  const shared = sharedNames(reports.status === 'ready' ? reports.data.items : []);
   const [name, setName] = useState('');
   const [kind, setKind] = useState<ReportKind>('table_only');
   const [creating, setCreating] = useState(false);
@@ -125,7 +127,7 @@ export function ReportsView(): React.JSX.Element {
                       to={`/reports/${String(report.id)}`}
                       className="text-sm text-text underline"
                     >
-                      {report.name}
+                      {listedName(report, shared)}
                     </Link>
                     <span className="ms-label text-text-muted">{labelOfKind(report.kind)}</span>
                   </div>

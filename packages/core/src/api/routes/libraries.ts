@@ -1,14 +1,21 @@
 // Side-effect import: @fastify/swagger augments FastifySchema with `description`.
 import '@fastify/swagger';
-import type { FastifyInstance } from 'fastify';
+import type {
+  FastifyInstance,
+  FastifyReply,
+  FastifyRequest,
+  HookHandlerDoneFunction,
+} from 'fastify';
 import { AuthError } from '../../auth/errors.js';
 import type { AccessRight } from '../../auth/access.js';
 import type { LibraryRow } from '../../libraries/repository.js';
 import type { LibraryInput, LibraryService, LibraryViewer } from '../../libraries/service.js';
 import { LibraryError } from '../../libraries/errors.js';
-import { MAX_NODES } from '../../libraries/nodes.js';
+import { MAX_NODES, refuseTooDeep } from '../../libraries/nodes.js';
 import { actorFor } from '../authentication.js';
 import { READS, writesIn } from '../authorization.js';
+import { grantParams, idParams } from '../params.js';
+import { etagFor } from '../preconditions.js';
 
 /**
  * Libraries (`L-01`, `CAPABILITIES.MD §6`).
@@ -57,6 +64,26 @@ function expectedVersion(header: string | undefined, libraryId: number): number 
     );
   }
   return version;
+}
+
+/**
+ * Refuses a body nested past six levels before its schema is asked (`L-06`): `refuseTooDeep`
+ * says why. On the route rather than the app, so it runs after the authorisation hook — a caller
+ * who may not write a library learns nothing about the shape of one — and before validation.
+ */
+function nestingBounded(
+  request: FastifyRequest,
+  _reply: FastifyReply,
+  done: HookHandlerDoneFunction,
+): void {
+  const body: unknown = request.body;
+  try {
+    if (typeof body === 'object' && body !== null && 'nodes' in body) refuseTooDeep(body.nodes);
+  } catch (error) {
+    done(error instanceof Error ? error : new Error(String(error)));
+    return;
+  }
+  done();
 }
 
 const grantResponse = {
@@ -124,27 +151,33 @@ export function libraryRoutes(app: FastifyInstance, options: LibraryRouteOptions
     async (request) => ({ items: (await libraries.list(viewerOf(request))).map(serialise) }),
   );
 
-  app.get<{ Params: { id: string } }>(
+  app.get<{ Params: { id: number } }>(
     '/libraries/:id',
     {
       config: READS,
       schema: {
+        params: idParams,
         tags: ['libraries'],
         summary: 'One library, with its nodes and their rules',
         description:
           'The document, not what it shows: each node’s rule is evaluated when the library is ' +
           'viewed, through the viewer’s own rights. A library this account may not read answers ' +
-          '404 rather than 403, so the error cannot be used to enumerate which ids exist.',
+          '404 rather than 403, so the error cannot be used to enumerate which ids exist. The ' +
+          '`ETag` is the version, to send back as `If-Match`.',
         response: { 200: { $ref: 'ms:library' } },
       },
     },
-    async (request) => serialise(await libraries.get(viewerOf(request), Number(request.params.id))),
+    async (request, reply) => {
+      const library = await libraries.get(viewerOf(request), request.params.id);
+      return reply.header('ETag', etagFor(library.version)).send(serialise(library));
+    },
   );
 
   app.post<{ Body: LibraryInput }>(
     '/libraries',
     {
       config: LIBRARY_WRITES,
+      preValidation: nestingBounded,
       schema: {
         tags: ['libraries'],
         summary: 'Create a library',
@@ -159,24 +192,27 @@ export function libraryRoutes(app: FastifyInstance, options: LibraryRouteOptions
     },
     async (request, reply) => {
       const created = await libraries.create(viewerOf(request), actorFor(request), request.body);
-      return reply.code(201).send(serialise(created));
+      return reply.code(201).header('ETag', etagFor(created.version)).send(serialise(created));
     },
   );
 
   app.patch<{
-    Params: { id: string };
+    Params: { id: number };
     Body: Partial<LibraryInput>;
     Headers: { 'if-match'?: string };
   }>(
     '/libraries/:id',
     {
       config: LIBRARY_WRITES,
+      preValidation: nestingBounded,
       schema: {
+        params: idParams,
         tags: ['libraries'],
         summary: 'Change a library',
         description:
           '`If-Match` carries the version this edit was made against, and without it the request ' +
           'is refused with 428: two people arranging one library is two people in a designer. ' +
+          'One that has moved on is refused with 412 and `LIBRARY_CHANGED`. ' +
           '`nodes`, when sent, replaces every node — there is no merging of one tree into another.',
         body: {
           type: 'object',
@@ -191,8 +227,8 @@ export function libraryRoutes(app: FastifyInstance, options: LibraryRouteOptions
         response: { 200: { $ref: 'ms:library' } },
       },
     },
-    async (request) => {
-      const id = Number(request.params.id);
+    async (request, reply) => {
+      const id = request.params.id;
       const updated = await libraries.update(
         viewerOf(request),
         actorFor(request),
@@ -200,15 +236,16 @@ export function libraryRoutes(app: FastifyInstance, options: LibraryRouteOptions
         expectedVersion(request.headers['if-match'], id),
         request.body,
       );
-      return serialise(updated);
+      return reply.header('ETag', etagFor(updated.version)).send(serialise(updated));
     },
   );
 
-  app.delete<{ Params: { id: string } }>(
+  app.delete<{ Params: { id: number } }>(
     '/libraries/:id',
     {
       config: LIBRARY_WRITES,
       schema: {
+        params: idParams,
         tags: ['libraries'],
         summary: 'Delete a library',
         description:
@@ -218,16 +255,17 @@ export function libraryRoutes(app: FastifyInstance, options: LibraryRouteOptions
       },
     },
     async (request, reply) => {
-      await libraries.remove(viewerOf(request), actorFor(request), Number(request.params.id));
+      await libraries.remove(viewerOf(request), actorFor(request), request.params.id);
       return reply.code(204).send();
     },
   );
 
-  app.get<{ Params: { id: string } }>(
+  app.get<{ Params: { id: number } }>(
     '/libraries/:id/access',
     {
       config: READS,
       schema: {
+        params: idParams,
         tags: ['libraries'],
         summary: 'Which groups may see this library',
         description: 'Needs full access: who else can see a thing is not a read.',
@@ -242,18 +280,19 @@ export function libraryRoutes(app: FastifyInstance, options: LibraryRouteOptions
       },
     },
     async (request) => {
-      const grants = await libraries.grants(viewerOf(request), Number(request.params.id));
+      const grants = await libraries.grants(viewerOf(request), request.params.id);
       return {
         items: grants.map((grant) => ({ ...grant, grantedAt: grant.grantedAt.toISOString() })),
       };
     },
   );
 
-  app.put<{ Params: { id: string; groupId: string }; Body: { right: AccessRight } }>(
+  app.put<{ Params: { id: number; groupId: number }; Body: { right: AccessRight } }>(
     '/libraries/:id/access/:groupId',
     {
       config: LIBRARY_WRITES,
       schema: {
+        params: grantParams,
         tags: ['libraries'],
         summary: 'Grant a group access to this library',
         description:
@@ -272,19 +311,20 @@ export function libraryRoutes(app: FastifyInstance, options: LibraryRouteOptions
       await libraries.grant(
         viewerOf(request),
         actorFor(request),
-        Number(request.params.id),
-        Number(request.params.groupId),
+        request.params.id,
+        request.params.groupId,
         request.body.right,
       );
       return reply.code(204).send();
     },
   );
 
-  app.delete<{ Params: { id: string; groupId: string } }>(
+  app.delete<{ Params: { id: number; groupId: number } }>(
     '/libraries/:id/access/:groupId',
     {
       config: LIBRARY_WRITES,
       schema: {
+        params: grantParams,
         tags: ['libraries'],
         summary: 'Take a group’s access away',
         response: { 204: { type: 'null' } },
@@ -294,8 +334,8 @@ export function libraryRoutes(app: FastifyInstance, options: LibraryRouteOptions
       await libraries.revoke(
         viewerOf(request),
         actorFor(request),
-        Number(request.params.id),
-        Number(request.params.groupId),
+        request.params.id,
+        request.params.groupId,
       );
       return reply.code(204).send();
     },
