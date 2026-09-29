@@ -65,7 +65,8 @@ export const snmpTrap: SensorType = {
         description:
           'On by default: the sensor counts only notifications whose sender is the device it ' +
           'sits under. Turn it off for a collector sensor that watches a whole subnet, and use ' +
-          'the rules below to say which.',
+          'the rules below to say which. A device addressed by name is looked up on the probe, ' +
+          'and one whose name resolves to nothing fails the check rather than counting nothing.',
       },
       rules: {
         type: 'array',
@@ -167,20 +168,19 @@ export const snmpTrap: SensorType = {
     // A trap's sender is an *address*; a device's host is often a name. Comparing the two
     // directly counts zero for ever on any device addressed by hostname — which looks exactly
     // like a quiet network, the one failure this type must not have. So the name is resolved,
-    // and a name that will not resolve fails the check instead of reporting nothing.
-    const addresses = onlyDevice ? await addressesFor(host) : new Set<string>();
-    if (onlyDevice && addresses.size === 0) {
-      throw new Error(
-        `this sensor counts only notifications from ${host}, and that name did not resolve to ` +
-          'any address — so nothing could be attributed to this device. Give the device a ' +
-          'literal address, or turn off “only this device” and use a filter rule',
-      );
-    }
+    // and a name that will not resolve fails the check instead of reporting nothing. The
+    // resolver is shared with the other listener types (`P-246`).
+    const { canonicalAddress, fromDevice } = await import('../support/sender.js');
+    const isDevice = onlyDevice ? await fromDevice(host, 'notifications') : null;
 
     const mine: ReceivedNotification[] = [];
     let unmatched = 0;
-    for (const item of batch.items) {
-      if (onlyDevice && !addresses.has(item.source)) {
+    for (const received of batch.items) {
+      // The sender in the form a rule's `10.1.` prefix is written in: a dual-stack listener
+      // reports an IPv4 sender as `::ffff:10.1.1.1`, which no such prefix would ever match.
+      const source = canonicalAddress(received.source);
+      const item = source === received.source ? received : { ...received, source };
+      if (isDevice !== null && !isDevice(source)) {
         unmatched += 1;
         continue;
       }
@@ -216,51 +216,6 @@ export const snmpTrap: SensorType = {
     return { channels, message: describe(mine, unmatched, batch) };
   },
 };
-
-/**
- * How long a resolved device address is reused.
- *
- * A check per scan interval per trap sensor is not much DNS, but it is DNS on a path that
- * otherwise does no I/O at all, and the answer changes about as often as a device is renumbered.
- */
-const RESOLVE_TTL_MS = 300_000;
-
-interface Resolved {
-  readonly addresses: Set<string>;
-  readonly at: number;
-}
-
-/** Worker-local, so a busy probe resolves each device once per five minutes per worker. */
-const resolved = new Map<string, Resolved>();
-
-/**
- * Every address a device's host stands for, including the host itself when it is already one.
- *
- * Empty when the name does not resolve, which the caller turns into a failed check — silently
- * matching nothing would make an unresolvable device indistinguishable from a quiet one.
- */
-async function addressesFor(host: string): Promise<Set<string>> {
-  const trimmed = host.trim();
-  if (trimmed === '') return new Set();
-
-  const { isIP } = await import('node:net');
-  if (isIP(trimmed) !== 0) return new Set([trimmed]);
-
-  const cached = resolved.get(trimmed);
-  if (cached !== undefined && Date.now() - cached.at < RESOLVE_TTL_MS) return cached.addresses;
-
-  const addresses = new Set<string>();
-  try {
-    const { lookup } = await import('node:dns/promises');
-    for (const entry of await lookup(trimmed, { all: true })) addresses.add(entry.address);
-  } catch {
-    // Left empty on purpose. The caller reports it as a failed check naming the host, which is
-    // a diagnosis; a cached empty answer would be a sensor that quietly counts nothing.
-    return addresses;
-  }
-  resolved.set(trimmed, { addresses, at: Date.now() });
-  return addresses;
-}
 
 function readRules(params: Readonly<Record<string, unknown>>): TrapRule[] {
   const raw = params['rules'];

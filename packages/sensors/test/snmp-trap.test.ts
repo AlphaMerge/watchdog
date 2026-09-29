@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
+import { after, before, describe, it } from 'node:test';
+import snmp from 'net-snmp';
 import { snmpTrap } from '../src/types/snmp-trap.js';
+import { openTrapReceiver, type ReceivedTrap } from '../src/support/snmp/receiver.js';
 import {
   genericNameOf,
   renderTrap,
@@ -330,5 +332,104 @@ describe('snmp.trap', () => {
 
   it('declares the listener that feeds it, which is how the probe knows not to poll it', () => {
     assert.equal(snmpTrap.listener, 'snmp-trap');
+  });
+});
+
+describe('which senders are this device (`P-246`)', () => {
+  // Bound to `::`, which is dual-stack: an IPv4 sender arrives as `::ffff:127.0.0.1`. A fixed
+  // port, because the receiver does not say which one it got; off the other suites' ranges.
+  const port = 24_000 + (process.pid % 1_000);
+  const seen: ReceivedTrap[] = [];
+  let receiver: { close(): Promise<void> };
+
+  before(() => {
+    receiver = openTrapReceiver({
+      port,
+      address: '::',
+      transport: 'udp6',
+      onTrap: (trap) => seen.push(trap),
+      onMalformed: () => undefined,
+    });
+  });
+
+  after(async () => {
+    await receiver.close();
+  });
+
+  /** One v2c linkDown sent over a real socket from a loopback address, as the sensor reads it. */
+  async function sentFrom(from: '127.0.0.1' | '::1') {
+    seen.length = 0;
+    const session = snmp.createSession(from, 'public', {
+      port,
+      trapPort: port,
+      version: snmp.Version2c,
+      transport: from === '::1' ? 'udp6' : 'udp4',
+    });
+    try {
+      // Sent again until one lands: the receiver binds after it returns, and UDP says nothing
+      // about a datagram that reached no socket.
+      const deadline = Date.now() + 5_000;
+      while (seen.length === 0) {
+        if (Date.now() > deadline) throw new Error(`no trap arrived from ${from}`);
+        session.trap(2 /* linkDown */, () => undefined);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    } finally {
+      session.close();
+    }
+    const [one] = seen;
+    assert.ok(one !== undefined);
+    return notification({ source: one.source, text: `${one.source} trap v2c linkDown` });
+  }
+
+  const other = notification({ source: '192.0.2.99' });
+
+  it('reports an IPv4 sender wrapped in IPv6, which is the premise of the rest', async () => {
+    assert.equal((await sentFrom('127.0.0.1')).source, '::ffff:127.0.0.1');
+    assert.equal((await sentFrom('::1')).source, '::1');
+  });
+
+  it('counts the device’s traps when it is addressed by name', async () => {
+    const execution = await run({}, batch([await sentFrom('127.0.0.1'), other]), 'localhost');
+    assert.equal(valueOf(execution, 'count'), 1);
+    assert.equal(valueOf(execution, 'unmatched'), 1);
+  });
+
+  it('counts an IPv6 sender for a device addressed by name', async (t) => {
+    const { lookup } = await import('node:dns/promises');
+    const localhost = await lookup('localhost', { all: true });
+    if (!localhost.some((entry) => entry.address === '::1')) {
+      t.skip('localhost does not resolve to ::1 on this machine');
+      return;
+    }
+    const execution = await run({}, batch([await sentFrom('::1'), other]), 'localhost');
+    assert.equal(valueOf(execution, 'count'), 1);
+  });
+
+  it('counts the device by address, however either side spells it', async () => {
+    const v4 = await sentFrom('127.0.0.1');
+    const v6 = await sentFrom('::1');
+    const items = batch([v4, v6, other]);
+    for (const [host, which] of [
+      ['127.0.0.1', /::ffff:127\.0\.0\.1 trap/],
+      ['::ffff:127.0.0.1', /::ffff:127\.0\.0\.1 trap/],
+      ['::1', /::1 trap/],
+      ['0:0:0:0:0:0:0:1', /::1 trap/],
+    ] as const) {
+      const execution = await run({}, items, host);
+      assert.equal(valueOf(execution, 'count'), 1, host);
+      assert.match(execution.message ?? '', which, host);
+    }
+  });
+
+  it('matches a rule’s address prefix against an IPv4 sender a dual-stack listener wrapped', async () => {
+    // The same defect one step on: `::ffff:127.0.0.1` does not start with `127.0.0.`, so a
+    // collector sensor's subnet rule counted nothing from a listener bound to `::`.
+    const execution = await run(
+      { sourceIsDevice: false, rules: [{ source: '127.0.0.' }] },
+      batch([await sentFrom('127.0.0.1'), other]),
+    );
+    assert.equal(valueOf(execution, 'count'), 1);
+    assert.equal(valueOf(execution, 'unmatched'), 1);
   });
 });

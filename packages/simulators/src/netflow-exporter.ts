@@ -1,4 +1,5 @@
 import { createSocket } from 'node:dgram';
+import { isIPv6 } from 'node:net';
 
 /**
  * A NetFlow v5 exporter (`B-01`).
@@ -121,14 +122,18 @@ export function renderNetflowV5(
   return options.truncateTo === undefined ? datagram : datagram.subarray(0, options.truncateTo);
 }
 
-/** Sends one datagram to a collector. Resolves once the socket reports it written. */
+/**
+ * Sends one datagram to a collector. Resolves once the socket reports it written.
+ *
+ * From an IPv6 socket when the collector's host is an IPv6 address.
+ */
 export async function exportNetflowV5(
   target: { host: string; port: number },
   flows: readonly ExportedFlow[],
   options: ExportOptions = {},
 ): Promise<void> {
   const datagram = renderNetflowV5(flows, options);
-  const socket = createSocket('udp4');
+  const socket = createSocket(isIPv6(target.host) ? 'udp6' : 'udp4');
   try {
     await new Promise<void>((resolve, reject) => {
       socket.send(datagram, target.port, target.host, (error) => {

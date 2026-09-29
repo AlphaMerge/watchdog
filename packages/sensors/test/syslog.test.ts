@@ -168,16 +168,19 @@ describe('TCP framing (RFC 6587)', () => {
 async function openOnFreePort(
   handlers: Pick<Parameters<typeof openSyslogReceiver>[0], 'onMessage' | 'onMalformed'>,
   offset = 0,
+  bind: Pick<Parameters<typeof openSyslogReceiver>[0], 'address' | 'ipVersion'> = {
+    address: '127.0.0.1',
+    ipVersion: 'udp4',
+  },
 ): Promise<{ receiver: Awaited<ReturnType<typeof openSyslogReceiver>>; port: number }> {
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const candidate = 20_000 + offset + Math.floor(attempt * 37 + (process.pid % 500));
     try {
       const receiver = await openSyslogReceiver({
         port: candidate,
-        address: '127.0.0.1',
         udp: true,
         tcp: true,
-        ipVersion: 'udp4',
+        ...bind,
         ...handlers,
       });
       return { receiver, port: candidate };
@@ -333,6 +336,9 @@ async function until(predicate: () => boolean, timeoutMs = 5_000): Promise<void>
   }
 }
 
+/** The device the sensor sits under, by address, which is what a listener reports a sender as. */
+const DEVICE = '192.0.2.10';
+
 /** A notification exactly as the probe's listener builds one. */
 function notification(
   over: Partial<{
@@ -351,8 +357,8 @@ function notification(
   );
   return {
     at: '2026-08-27T09:15:00.000Z',
-    source: over.source ?? 'device.example.invalid',
-    text: renderSyslog(over.source ?? 'device.example.invalid', parsed),
+    source: over.source ?? DEVICE,
+    text: renderSyslog(over.source ?? DEVICE, parsed),
     detail: {
       ...parsed,
       severity: over.severity ?? 3,
@@ -369,7 +375,7 @@ function run(
 ): Promise<CheckExecution> {
   return syslogReceiver.execute({
     sensorId: 1,
-    target: { host: 'device.example.invalid', ipVersion: 'auto' },
+    target: { host: DEVICE, ipVersion: 'auto' },
     params,
     credentials: {},
     signal: new AbortController().signal,
@@ -447,11 +453,10 @@ describe('syslog.receiver', () => {
 
   it('counts only this device by default, and everything when told to', async () => {
     // A relay forwards other hosts' messages under its own address, so "which host said this"
-    // and "which host sent it to us" are different questions.
-    const items = [
-      notification({ source: 'device.example.invalid' }),
-      notification({ source: '10.0.0.9' }),
-    ];
+    // and "which host sent it to us" are different questions. Both senders are addresses, as a
+    // listener reports them: this passed with a name as the sender, which no socket produces,
+    // while a device addressed by name counted nothing (`P-246`).
+    const items = [notification({ source: DEVICE }), notification({ source: '10.0.0.9' })];
     assert.equal(valueOf(await run({}, items), 'messages'), 1);
     assert.equal(valueOf(await run({ sourceIsDevice: false }, items), 'messages'), 2);
     assert.equal(valueOf(await run({ sourceIsDevice: false }, items), 'senders'), 2);
@@ -504,6 +509,103 @@ describe('syslog.receiver', () => {
     const execution = await run({}, []);
     assert.equal(valueOf(execution, 'messages'), 0);
     assert.match(execution.message ?? '', /0 messages since/);
+  });
+});
+
+describe('which senders are this device’s (`P-246`)', () => {
+  // Bound to `::`, which is dual-stack: an IPv4 sender arrives as `::ffff:127.0.0.1`, and a
+  // device whose host is `127.0.0.1` has to match it anyway.
+  let receiver: Awaited<ReturnType<typeof openSyslogReceiver>>;
+  let port = 0;
+  const seen: ReceivedSyslog[] = [];
+
+  before(async () => {
+    ({ receiver, port } = await openOnFreePort(
+      { onMessage: (one) => seen.push(one), onMalformed: () => undefined },
+      250,
+      { address: '::', ipVersion: 'udp6' },
+    ));
+  });
+
+  after(async () => {
+    await receiver.close();
+  });
+
+  /** One message sent over a real socket from a loopback address, as the listener hands it on. */
+  async function sentFrom(from: '127.0.0.1' | '::1', transport: 'udp' | 'tcp') {
+    seen.length = 0;
+    const message = {
+      format: 'rfc3164' as const,
+      severity: 3,
+      hostname: 'gw',
+      tag: 'sshd[1]',
+      message: `from ${from} over ${transport}`,
+    };
+    if (transport === 'udp') await sendUdp(port, [message], from);
+    else await sendTcp(port, [message], { host: from });
+    await until(() => seen.length === 1);
+    const [one] = seen;
+    assert.ok(one !== undefined);
+    return notification({ source: one.source, message: message.message });
+  }
+
+  const other = notification({ source: '192.0.2.99', message: 'from somebody else' });
+  const at = (host: string): Partial<CheckContext> => ({ target: { host, ipVersion: 'auto' } });
+
+  it('reports an IPv4 sender wrapped in IPv6, which is the premise of the rest', async () => {
+    assert.equal((await sentFrom('127.0.0.1', 'udp')).source, '::ffff:127.0.0.1');
+    assert.equal((await sentFrom('127.0.0.1', 'tcp')).source, '::ffff:127.0.0.1');
+    assert.equal((await sentFrom('::1', 'udp')).source, '::1');
+  });
+
+  it('counts the device’s messages when it is addressed by name', async () => {
+    // The finding: a device named `core-sw1.corp.example` sends from 10.1.1.1, and a string
+    // comparison skipped every message — Up at zero for ever, where no limit can fire.
+    const items = [await sentFrom('127.0.0.1', 'udp'), await sentFrom('127.0.0.1', 'tcp'), other];
+    const execution = await run({}, items, at('localhost'));
+    assert.equal(valueOf(execution, 'messages'), 2);
+    assert.doesNotMatch(execution.message ?? '', /somebody else/);
+  });
+
+  it('counts an IPv6 sender for a device addressed by name', async (t) => {
+    const { lookup } = await import('node:dns/promises');
+    const localhost = await lookup('localhost', { all: true });
+    if (!localhost.some((entry) => entry.address === '::1')) {
+      t.skip('localhost does not resolve to ::1 on this machine');
+      return;
+    }
+    const items = [await sentFrom('::1', 'udp'), await sentFrom('::1', 'tcp'), other];
+    assert.equal(valueOf(await run({}, items, at('localhost')), 'messages'), 2);
+  });
+
+  it('counts the device by address, however either side spells it', async () => {
+    const v4 = await sentFrom('127.0.0.1', 'udp');
+    const v6 = await sentFrom('::1', 'tcp');
+    const hosts: [string, RegExp][] = [
+      ['127.0.0.1', /from 127\.0\.0\.1 over udp/],
+      ['::ffff:127.0.0.1', /from 127\.0\.0\.1 over udp/],
+      ['::1', /from ::1 over tcp/],
+      ['0:0:0:0:0:0:0:1', /from ::1 over tcp/],
+    ];
+    for (const [host, which] of hosts) {
+      const execution = await run({}, [v4, v6, other], at(host));
+      assert.equal(valueOf(execution, 'messages'), 1, host);
+      assert.match(execution.message ?? '', which, host);
+    }
+  });
+
+  it('fails, rather than reading Up at zero, when the device’s name resolves to nothing', async () => {
+    const items = [await sentFrom('127.0.0.1', 'udp')];
+    await assert.rejects(
+      () => run({}, items, at('no-such-device.invalid')),
+      /counts only messages from no-such-device\.invalid, and that name did not resolve/,
+    );
+  });
+
+  it('resolves nothing when it counts every sender', async () => {
+    const items = [await sentFrom('127.0.0.1', 'udp'), other];
+    const execution = await run({ sourceIsDevice: false }, items, at('no-such-device.invalid'));
+    assert.equal(valueOf(execution, 'messages'), 2);
   });
 });
 

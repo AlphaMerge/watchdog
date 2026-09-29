@@ -1,6 +1,8 @@
 import { strict as assert } from 'node:assert';
-import { describe, it } from 'node:test';
+import { after, before, describe, it } from 'node:test';
+import { exportNetflowV5 } from '@ms/simulators';
 import type { CheckContext, ReceivedBatch, ReceivedNotification } from '../src/contract.js';
+import { openFlowReceiver, type ReceivedFlow } from '../src/support/flow/receiver.js';
 import { flowCollector, inCidr, matchesFlow, readCustomChannels } from '../src/types/flow.js';
 
 /**
@@ -49,11 +51,12 @@ function batch(items: ReceivedNotification[], dropped = 0): ReceivedBatch {
 function context(
   received: ReceivedBatch | undefined,
   params: Record<string, unknown> = {},
+  host = EXPORTER,
 ): CheckContext {
   return {
     sensorId: 1,
     params,
-    target: { host: EXPORTER },
+    target: { host },
     signal: new AbortController().signal,
     ...(received === undefined ? {} : { received }),
   } as unknown as CheckContext;
@@ -338,5 +341,98 @@ describe('the flow sensor', () => {
       ]),
       false,
     );
+  });
+});
+
+describe('which exporters are this device (`P-246`)', () => {
+  // Bound to `::`, which is dual-stack: an IPv4 exporter arrives as `::ffff:127.0.0.1`, and a
+  // device whose host is `127.0.0.1` has to match it anyway. A fixed port, because the receiver
+  // does not say which one it got; off the syslog tests' range.
+  const port = 23_000 + (process.pid % 1_000);
+  const seen: ReceivedFlow[] = [];
+  let receiver: Awaited<ReturnType<typeof openFlowReceiver>>;
+
+  before(async () => {
+    receiver = await openFlowReceiver({
+      port,
+      address: '::',
+      ipVersion: 'udp6',
+      onFlow: (one) => seen.push(one),
+      onMalformed: () => undefined,
+    });
+  });
+
+  after(async () => {
+    await receiver.close();
+  });
+
+  /** One NetFlow v5 record exported over a real socket from a loopback address. */
+  async function exportedFrom(from: '127.0.0.1' | '::1', octets: number) {
+    seen.length = 0;
+    await exportNetflowV5({ host: from, port }, [
+      { srcAddr: '10.0.0.1', dstAddr: '10.0.0.2', protocol: 6, packets: 1, octets },
+    ]);
+    const deadline = Date.now() + 5_000;
+    while (seen.length === 0) {
+      if (Date.now() > deadline) throw new Error(`no flow arrived from ${from}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const [one] = seen;
+    assert.ok(one !== undefined);
+    return { ...flow({ octets }), source: one.source };
+  }
+
+  // Octets per source, so the byte rate over the ten-second batch says which flows counted.
+  const other = { ...flow({ octets: 90_000 }), source: '198.51.100.9' };
+  const bytesAt = async (host: string, items: ReceivedNotification[]) =>
+    valueOf(await read(context(batch(items), {}, host)), 'bytes');
+
+  it('reports an IPv4 exporter wrapped in IPv6, which is the premise of the rest', async () => {
+    assert.equal((await exportedFrom('127.0.0.1', 1_000)).source, '::ffff:127.0.0.1');
+    assert.equal((await exportedFrom('::1', 5_000)).source, '::1');
+  });
+
+  it('counts the device’s flows when it is addressed by name', async () => {
+    // The finding: a router addressed by name matched none of its own flows, and failed every
+    // scan with "no flows arrived" while they did.
+    const items = [await exportedFrom('127.0.0.1', 1_000), other];
+    assert.equal(await bytesAt('localhost', items), 100);
+  });
+
+  it('counts an IPv6 exporter for a device addressed by name', async (t) => {
+    const { lookup } = await import('node:dns/promises');
+    const localhost = await lookup('localhost', { all: true });
+    if (!localhost.some((entry) => entry.address === '::1')) {
+      t.skip('localhost does not resolve to ::1 on this machine');
+      return;
+    }
+    assert.equal(await bytesAt('localhost', [await exportedFrom('::1', 5_000), other]), 500);
+  });
+
+  it('counts the device by address, however either side spells it', async () => {
+    const items = [await exportedFrom('127.0.0.1', 1_000), await exportedFrom('::1', 5_000), other];
+    assert.equal(await bytesAt('127.0.0.1', items), 100);
+    assert.equal(await bytesAt('::ffff:127.0.0.1', items), 100);
+    assert.equal(await bytesAt('::1', items), 500);
+    assert.equal(await bytesAt('0:0:0:0:0:0:0:1', items), 500);
+  });
+
+  it('fails naming the host, not the exporter, when the name resolves to nothing', async () => {
+    // Even with silence taken as an idle link, where it used to read zero for ever.
+    const items = [await exportedFrom('127.0.0.1', 1_000)];
+    for (const params of [{}, { silenceIsIdle: true }]) {
+      await assert.rejects(
+        () => flowCollector.execute(context(batch(items), params, 'no-such-device.invalid')),
+        /counts only flows from no-such-device\.invalid, and that name did not resolve/,
+      );
+    }
+  });
+
+  it('resolves nothing when it counts every exporter', async () => {
+    const items = [await exportedFrom('127.0.0.1', 1_000), other];
+    const channels = await read(
+      context(batch(items), { sourceIsDevice: false }, 'no-such-device.invalid'),
+    );
+    assert.equal(valueOf(channels, 'bytes'), 9_100);
   });
 });

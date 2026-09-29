@@ -121,7 +121,9 @@ export const syslogReceiver: SensorType = {
           'Counts only messages whose sender is the device this sensor sits under. Turn it off ' +
           'for a sensor watching a relay, which forwards other hosts’ messages under its own ' +
           'address — “which host said this” and “which host sent it to us” are different ' +
-          'questions and only one of them is in the packet header.',
+          'questions and only one of them is in the packet header. A device addressed by name is ' +
+          'looked up on the probe, and one whose name resolves to nothing fails the check rather ' +
+          'than counting nothing.',
       },
       match: {
         type: 'array',
@@ -192,26 +194,22 @@ export const syslogReceiver: SensorType = {
     ];
   },
 
-  execute(context: CheckContext): Promise<CheckExecution> {
+  async execute(context: CheckContext): Promise<CheckExecution> {
     const batch = context.received;
     if (batch === undefined || batch.listener !== SYSLOG_LISTENER) {
       // Never a zero. A receiver that was never switched on must not look like a quiet network.
-      return Promise.reject(
-        new Error(
-          'this probe’s syslog listener is not running, so there is nothing to count — enable ' +
-            '`syslogListener` in the probe’s configuration. A sensor reporting zero here would ' +
-            'say the network is quiet, which is not what is being observed',
-        ),
+      throw new Error(
+        'this probe’s syslog listener is not running, so there is nothing to count — enable ' +
+          '`syslogListener` in the probe’s configuration. A sensor reporting zero here would ' +
+          'say the network is quiet, which is not what is being observed',
       );
     }
     if (batch.dropped > 0) {
-      return Promise.reject(
-        new Error(
-          `${String(batch.dropped)} message${batch.dropped === 1 ? '' : 's'} were overwritten ` +
-            'before this sensor read them — the probe’s syslog buffer is smaller than the flood ' +
-            'it is seeing, or this sensor scans too rarely for the volume. Reporting the rest ' +
-            'as a count would undercount exactly the incident this sensor exists to find',
-        ),
+      throw new Error(
+        `${String(batch.dropped)} message${batch.dropped === 1 ? '' : 's'} were overwritten ` +
+          'before this sensor read them — the probe’s syslog buffer is smaller than the flood ' +
+          'it is seeing, or this sensor scans too rarely for the volume. Reporting the rest ' +
+          'as a count would undercount exactly the incident this sensor exists to find',
       );
     }
 
@@ -219,6 +217,12 @@ export const syslogReceiver: SensorType = {
     const floor = severityFloor(context.params['minSeverity']);
     const onlyThisDevice = context.params['sourceIsDevice'] !== false;
     const retain = Math.min(MAX_RETAINED, Number(context.params['retain'] ?? 3));
+    // A sender is an address and a device's host is often a name (`P-246`). Compared as strings,
+    // a device addressed by name counted nothing, for ever, and read Up at zero, where no limit
+    // can fire. The name is resolved, and one that resolves to nothing fails the check.
+    const isDevice = onlyThisDevice
+      ? await (await import('../support/sender.js')).fromDevice(context.target.host, 'messages')
+      : null;
 
     const counts = new Map<string, number>(SEVERITIES.map((name) => [name, 0]));
     const senders = new Set<string>();
@@ -226,7 +230,7 @@ export const syslogReceiver: SensorType = {
     let total = 0;
 
     for (const item of batch.items) {
-      if (onlyThisDevice && item.source !== context.target.host) continue;
+      if (isDevice !== null && !isDevice(item.source)) continue;
       const severity = Number(item.detail['severity'] ?? 7);
       if (floor !== null && severity > floor) continue;
       if (!matches(item, rules)) continue;
@@ -240,7 +244,7 @@ export const syslogReceiver: SensorType = {
       if (recent.length > retain) recent.shift();
     }
 
-    return Promise.resolve({
+    return {
       channels: [
         { key: 'messages', value: total },
         ...SEVERITIES.map((name) => ({ key: name, value: counts.get(name) ?? 0 })),
@@ -249,7 +253,7 @@ export const syslogReceiver: SensorType = {
       message:
         `${String(total)} message${total === 1 ? '' : 's'} since ${batch.since}` +
         (recent.length === 0 ? '' : `; ${recent.join(' | ')}`),
-    });
+    };
   },
 };
 

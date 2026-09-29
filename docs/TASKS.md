@@ -6525,7 +6525,7 @@ because each is a decision rather than a defect:
       The "none on this probe" row survives both sweep mutants. A per-probe take is the only
       mutant it would kill, and a drain with no arguments has no way to express one.
 
-- [ ] **P-246 — syslog and flow sensors compare the sender's address with a hostname** · S ·
+- [x] **P-246 — syslog and flow sensors compare the sender's address with a hostname** · S ·
       T-20, B-04 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `P-246`).
       Medium. `syslog.ts:229` and `flow.ts:344` match `item.source` against the device's host
       as literal strings. A device addressed by name therefore matches nothing, for ever:
@@ -6537,6 +6537,88 @@ because each is a decision rather than a defect:
       cached, skipping literal addresses, normalising `::ffff:` sources, and refusing with "did
       not resolve" when a name resolves to nothing. Tests against the simulator harness, for a
       device by name and by address, and for IPv4 and IPv6 senders. Mutants as usual.
+
+      **Done.** `support/sender.ts` is the one resolver, and `snmp.trap`, `syslog.receiver` and
+      `flow.*` all go through it. Each type asks it for a test of "this sender is the device":
+      - **Cached** for five minutes per worker, as the trap type did. The cache ignores case, so
+        `Core-SW1` and `core-sw1` share one answer.
+      - **A literal address is never looked up.**
+      - **A failure is not cached, and neither is an empty answer.** The next scan asks again.
+      - **A name that resolves to nothing fails the check** with "did not resolve", naming the
+        host and what the sensor counts. It never matches nothing, which reads as a quiet device.
+
+      **Both sides are compared in one form (`canonicalAddress`).**
+      - **IPv4-mapped.** A listener bound to `::` is dual-stack. It reports an IPv4 sender as
+        `::ffff:10.1.1.1`, and that is unwrapped in any spelling, hex included. Before this, such
+        a sender missed even a device whose host was the literal `10.1.1.1`.
+      - **IPv6.** Other IPv6 addresses take the URL standard's form: lower case, zeros
+        compressed. An operator's `2001:DB8:0::1` matches a socket's `2001:db8::1`.
+      - **Zones.** A zone is kept, because it names the link.
+
+      **One step further than the ticket: a trap rule's address prefix.** A collector sensor's
+      `10.1.` rule is matched against the unwrapped sender too. It had the same defect: nothing
+      from a dual-stack listener starts with `10.1.`.
+
+      **Also changed.**
+      - `syslog.receiver` and `flow.*` now have an `async execute`, and their refusals are
+        `throw`s.
+      - The three "only this device" descriptions say a name is looked up on the probe, and that
+        one resolving to nothing fails the check. `sensor-reference.md` is regenerated.
+      - The simulators' `sendUdp` and `exportNetflowV5` send from `udp6` for an IPv6 target.
+      - The flow half lands here, so `B-07` need not carry it, as the finding suggested.
+
+      **Tests.**
+      - `sender.test.ts` checks the resolver against a scripted lookup, with no DNS. It covers:
+        - eleven spellings;
+        - literals of both families asking nothing;
+        - one lookup per name per TTL, in either case, and the renumbered answer after it;
+        - failures and empty answers asked again;
+        - a blank host;
+        - the "did not resolve" refusal;
+        - a sender compared in canonical form.
+      - Each type's own suite adds a dual-stack receiver, bound to `::`, fed over real sockets:
+        syslog over UDP and TCP from `@ms/simulators`, traps from `net-snmp`, and NetFlow v5 from
+        the simulator's exporter. Each suite covers:
+        - senders from `127.0.0.1` and `::1`, with the wrapped IPv4 source asserted as the
+          premise;
+        - the device by name (`localhost`), for an IPv4 sender and an IPv6 one;
+        - the device by address in four spellings, asserting which sender counted;
+        - `no-such-device.invalid` failing, flow's "silence is idle" included, where it used to
+          read zero for ever;
+        - no lookup at all with "only this device" off.
+      - The IPv6-by-name case skips with a reason on a machine where `localhost` is not `::1`. The
+        toolchain container resolves it, so nothing was skipped there.
+      - syslog's "counts only this device" test used a hostname as the sender, which no socket
+        produces. That is why it passed for the wrong reason. Its helpers now default to an
+        address.
+
+      **Mutations caught: 25 of 25.** Each was built and run against the four suites; the
+      baseline and the restored build pass 127/127 with nothing skipped.
+      - **In `canonicalAddress`, 6:**
+        - `::ffff:` never unwrapped;
+        - the pattern unanchored, so `1::ffff:…` is taken for IPv4;
+        - the octets swapped within each word;
+        - IPv6 left as typed;
+        - the zone dropped;
+        - the sender not trimmed.
+      - **In `DeviceAddresses`, 11:**
+        - a literal sent to the lookup;
+        - a literal left uncanonical;
+        - the answers left uncanonical;
+        - no cache;
+        - `<=` at the TTL;
+        - a case-sensitive key;
+        - a failure cached;
+        - an empty answer cached;
+        - `ttlMs` ignored;
+        - a blank host looked up;
+        - the untrimmed name looked up.
+      - **In `fromDevice`, 2:** an empty set accepted as "matches nothing", and the sender
+        compared raw.
+      - **In the types, 6:**
+        - syslog's and flow's literal compare restored, which is the finding itself;
+        - each of the three types resolving with "only this device" off;
+        - the trap rules shown the raw sender.
 
 - [ ] **P-247 — the core's own clock: blamed on the probes, and four durations on the wall
       clock** · M · P-231, P-232 · Found in review round 4b

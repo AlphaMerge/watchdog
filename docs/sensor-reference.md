@@ -351,7 +351,7 @@ cost: **light** · fed by the `syslog` listener, not polled
 | `minSeverity` | `` · `emergency` · `alert` · `critical` · `error` · `warning` · `notice` · `informational` · `debug` | _(empty)_ |  |  |
 | `retain` | integer | `3` | ≥ 0, ≤ 5 |  |
 
-- **Only this device** (`sourceIsDevice`) — Counts only messages whose sender is the device this sensor sits under. Turn it off for a sensor watching a relay, which forwards other hosts’ messages under its own address — “which host said this” and “which host sent it to us” are different questions and only one of them is in the packet header.
+- **Only this device** (`sourceIsDevice`) — Counts only messages whose sender is the device this sensor sits under. Turn it off for a sensor watching a relay, which forwards other hosts’ messages under its own address — “which host said this” and “which host sent it to us” are different questions and only one of them is in the packet header. A device addressed by name is looked up on the probe, and one whose name resolves to nothing fails the check rather than counting nothing.
 - **Match rules** (`match`) — A message must satisfy **all** of these to be counted. Empty counts everything. If this meant “any”, adding a second rule would widen the sensor, which is the opposite of what anybody typing one intends.
 - **At least this severe** (`minSeverity`) — Ignores anything less severe. Emergency is the most severe and debug the least, so “warning” counts warnings, errors, criticals, alerts and emergencies.
 - **Lines to show** (`retain`) — The most recent matching lines, in this sensor’s message, so an operator can see what arrived without opening anything else. This is not a log store and is not trying to be.
@@ -831,7 +831,7 @@ cost: **light** · fed by the `snmp-trap` listener, not polled
 | `rules` | array of object | _(none)_ | ≤ 20 entries |  |
 | `warnOnDropped` | boolean | `true` |  |  |
 
-- **Only this device** (`sourceIsDevice`) — On by default: the sensor counts only notifications whose sender is the device it sits under. Turn it off for a collector sensor that watches a whole subnet, and use the rules below to say which.
+- **Only this device** (`sourceIsDevice`) — On by default: the sensor counts only notifications whose sender is the device it sits under. Turn it off for a collector sensor that watches a whole subnet, and use the rules below to say which. A device addressed by name is looked up on the probe, and one whose name resolves to nothing fails the check rather than counting nothing.
 - **Filter rules** (`rules`) — A notification counts when it matches *any* rule; with no rules at all, everything that got past “only this device” counts. Within one rule every field given must match, so adding a field always narrows.
 - **Fail when notifications were missed** (`warnOnDropped`) — The probe’s listener holds a bounded buffer. If more arrived than it could keep before this sensor next scanned, the count is short by a known number — and a trap sensor quietly under-reporting the flood it exists to report is worse than a failed check. Leave this on unless a deliberate flood is normal for this device.
 
@@ -1123,7 +1123,7 @@ Every sensor of this type has:
 | `warnOnDropped` | boolean | `true` |  |  |
 | `channels` | array of object | _(none)_ | ≤ 10 entries |  |
 
-- **Only this exporter** (`sourceIsDevice`) — Counts only flows exported by the device this sensor sits under. Turn it off for a sensor watching every exporter that reaches this probe, which is what you want on a single site-wide traffic sensor and not what you want on a per-router one.
+- **Only this exporter** (`sourceIsDevice`) — Counts only flows exported by the device this sensor sits under. Turn it off for a sensor watching every exporter that reaches this probe, which is what you want on a single site-wide traffic sensor and not what you want on a per-router one. A device addressed by name is looked up on the probe, and one whose name resolves to nothing fails the check rather than reporting no flows.
 - **Treat silence as an idle link** (`silenceIsIdle`) — Off by default, and deliberately. A flow exporter with nothing to report sends nothing at all — there is no heartbeat — so an interval with no flows is either an idle link or an exporter that has stopped, and nothing in what arrived can tell them apart. Left off, the check fails and says so. Turn it on for a link that is genuinely quiet much of the time, and accept that a stopped exporter will then read as zero.
 - **Fail when the buffer overflowed** (`warnOnDropped`) — Flows that reached this probe but were overwritten before this sensor read them make every count short by an unknown amount. Failing is the honest reading; turn this off only for an exporter whose flood is expected and whose totals you do not act on.
 - **Extra channels** (`channels`) — Your own channels, each counting the traffic that satisfies **all** of its rules — what `CAPABILITIES.MD` calls custom flow variants. Each reports bytes per second, beside the built-in channels rather than instead of them.

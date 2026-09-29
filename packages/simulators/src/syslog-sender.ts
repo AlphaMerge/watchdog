@@ -1,5 +1,5 @@
 import { createSocket } from 'node:dgram';
-import { connect, type Socket } from 'node:net';
+import { connect, isIPv6, type Socket } from 'node:net';
 
 /**
  * A syslog sender, over UDP and both of RFC 6587's TCP framings (`P-06`, for `T-20`).
@@ -54,13 +54,17 @@ export function renderMessage(options: SyslogMessageOptions = {}): string {
   return `<${String(priority)}>${month} ${day} ${clock} ${host} ${tag}: ${text}`;
 }
 
-/** Sends one datagram per message and returns once they are all handed to the socket. */
+/**
+ * Sends one datagram per message and returns once they are all handed to the socket.
+ *
+ * From an IPv6 socket when `host` is an IPv6 address, so a test can be a sender of either family.
+ */
 export async function sendUdp(
   port: number,
   messages: readonly SyslogMessageOptions[],
   host = '127.0.0.1',
 ): Promise<void> {
-  const socket = createSocket('udp4');
+  const socket = createSocket(isIPv6(host) ? 'udp6' : 'udp4');
   try {
     for (const message of messages) {
       const payload = Buffer.from(renderMessage(message), 'utf8');

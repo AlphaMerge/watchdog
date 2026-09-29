@@ -203,7 +203,9 @@ export const flowCollector: SensorType = {
         description:
           'Counts only flows exported by the device this sensor sits under. Turn it off for a ' +
           'sensor watching every exporter that reaches this probe, which is what you want on a ' +
-          'single site-wide traffic sensor and not what you want on a per-router one.',
+          'single site-wide traffic sensor and not what you want on a per-router one. A device ' +
+          'addressed by name is looked up on the probe, and one whose name resolves to nothing ' +
+          'fails the check rather than reporting no flows.',
       },
       silenceIsIdle: {
         type: 'boolean',
@@ -314,47 +316,47 @@ export const flowCollector: SensorType = {
     ];
   },
 
-  execute(context: CheckContext): Promise<CheckExecution> {
+  async execute(context: CheckContext): Promise<CheckExecution> {
     const batch = context.received;
     if (batch === undefined || batch.listener !== FLOW_LISTENER) {
       // Never a zero. A collector nobody switched on must not look like a silent network.
-      return Promise.reject(
-        new Error(
-          'this probe’s flow collector is not running, so there is nothing to count — enable ' +
-            '`flowListener` in the probe’s configuration. A sensor reporting zero here would ' +
-            'say the link carried no traffic, which is not what is being observed',
-        ),
+      throw new Error(
+        'this probe’s flow collector is not running, so there is nothing to count — enable ' +
+          '`flowListener` in the probe’s configuration. A sensor reporting zero here would ' +
+          'say the link carried no traffic, which is not what is being observed',
       );
     }
 
     if (batch.dropped > 0 && context.params['warnOnDropped'] !== false) {
-      return Promise.reject(
-        new Error(
-          `${String(batch.dropped)} flow${batch.dropped === 1 ? '' : 's'} reached this probe but ` +
-            'were overwritten before this sensor read them, so every count below is short by an ' +
-            'unknown amount — the probe’s flow buffer is smaller than the export it is seeing, ' +
-            'or this sensor scans too rarely for the volume',
-        ),
+      throw new Error(
+        `${String(batch.dropped)} flow${batch.dropped === 1 ? '' : 's'} reached this probe but ` +
+          'were overwritten before this sensor read them, so every count below is short by an ' +
+          'unknown amount — the probe’s flow buffer is smaller than the export it is seeing, ' +
+          'or this sensor scans too rarely for the volume',
       );
     }
 
     const onlyThisDevice = context.params['sourceIsDevice'] !== false;
     const custom = readCustomChannels(context.params);
-    const mine = onlyThisDevice
-      ? batch.items.filter((item) => item.source === context.target.host)
-      : batch.items;
+    // An exporter is an address and a device's host is often a name (`P-246`). Compared as
+    // strings, a router addressed by name matched none of its own flows, and failed every scan
+    // with "no flows arrived" while they did. The name is resolved, and one that resolves to
+    // nothing fails naming the host rather than blaming the exporter.
+    const isDevice = onlyThisDevice
+      ? await (await import('../support/sender.js')).fromDevice(context.target.host, 'flows')
+      : null;
+    const mine =
+      isDevice === null ? batch.items : batch.items.filter((item) => isDevice(item.source));
 
     if (mine.length === 0 && context.params['silenceIsIdle'] !== true) {
       // **The decision this file exists to make.** See the note on the module: there is no
       // heartbeat in NetFlow, so silence is unreadable rather than zero.
-      return Promise.reject(
-        new Error(
-          `no flows arrived from ${onlyThisDevice ? context.target.host : 'any exporter'} since ` +
-            `${batch.since}. A flow exporter with nothing to report sends nothing at all, so ` +
-            'this is either an idle link or an exporter that has stopped — and reporting zero ' +
-            'would pick one of those silently. Set “Treat silence as an idle link” if this link ' +
-            'is quiet by nature',
-        ),
+      throw new Error(
+        `no flows arrived from ${onlyThisDevice ? context.target.host : 'any exporter'} since ` +
+          `${batch.since}. A flow exporter with nothing to report sends nothing at all, so ` +
+          'this is either an idle link or an exporter that has stopped — and reporting zero ' +
+          'would pick one of those silently. Set “Treat silence as an idle link” if this link ' +
+          'is quiet by nature',
       );
     }
 
@@ -401,7 +403,7 @@ export const flowCollector: SensorType = {
     const icmp = protocols.get(ICMP) ?? 0;
     const other = bytes - tcp - udp - icmp;
 
-    return Promise.resolve({
+    return {
       channels: [
         { key: 'bytes', value: perSecond(bytes) },
         { key: 'packets', value: perSecond(packets) },
@@ -424,7 +426,7 @@ export const flowCollector: SensorType = {
         // read as one — and because an operator comparing this against an interface counter
         // needs to know why the two do not agree exactly.
         (sampled === 0 ? '' : `; estimated from ${String(sampled)} sampled`),
-    });
+    };
   },
 };
 
