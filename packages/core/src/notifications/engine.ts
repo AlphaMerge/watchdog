@@ -388,6 +388,38 @@ export class AlarmEngine {
   }
 
   /**
+   * Re-decides, unheld, what deleted probe-alarm sensors held (`M-25`).
+   *
+   * **The one path `#released` cannot see.** A Probe Health paused or withheld mid-loss is in the
+   * batch that re-decides it, and brings what its probe holds with it (`M-24`). A deleted one has
+   * no row, and nothing re-decided anything for it: the sensors held behind it stayed held, with
+   * no alarm under any trigger that heard of the probe only from it, until each was next
+   * re-decided. That was usually when the probe came back, when there was nothing left to say.
+   *
+   * Asked from the delete's own transaction, while the episode index still maps the deleted
+   * sensor to its probe: Probe Health's targets are re-read only at its next sweep. `#holds` then
+   * finds no row for it, so a trigger it alone covered stops holding, and one that another live
+   * Probe Health covers still holds.
+   */
+  async releaseDeleted(
+    q: Queryable,
+    sensorIds: readonly number[],
+    now: Date,
+  ): Promise<AlarmReaction> {
+    const episodes = this.#episodes;
+    if (episodes === undefined || sensorIds.length === 0) return { ...EMPTY };
+    const deleted = new Set(sensorIds);
+    const held = new Set<number>();
+    for (const sensorId of sensorIds) {
+      for (const id of episodes.heldFor(sensorId)) {
+        if (!deleted.has(id)) held.add(id);
+      }
+    }
+    if (held.size === 0) return { ...EMPTY };
+    return this.react(q, [...held], now);
+  }
+
+  /**
    * Fires every alarm whose next step has fallen due.
    *
    * Returns how many it fired, so a caller that got a full sweep can come straight back rather

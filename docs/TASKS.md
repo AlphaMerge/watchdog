@@ -6079,7 +6079,7 @@ because each is a decision rather than a defect:
       another sweep withholds (all in `sensor-vouching`); the hold's branches, the pause view
       and the API in `dependencies`. Mutations 19/19.
 
-- [ ] **M-25 — a Probe Health deleted mid-loss leaves the sensors it held held** · S · M-24,
+- [x] **M-25 — a Probe Health deleted mid-loss leaves the sensors it held held** · S · M-24,
       M-22 · Found finishing `M-24`.
       A lost or frozen probe's carried sensors are held, per trigger, behind the probe's live
       Probe Health (`M-22`). `M-24` re-decides them unheld when that Probe Health stops being
@@ -6103,6 +6103,22 @@ because each is a decision rather than a defect:
       - a sensor still covered through another live Probe Health on the same probe stays held;
       - a scenario test in `probe-episode-scenario.test.ts`, per `M-17`, covers both, with each
         asserted alarm asserted present first. Mutants as usual.
+
+      **Done.** `TriggerSync` already rides every mutation's transaction, and it now hands the
+      sensors an `object.deleted` destroyed to `AlarmEngine.releaseDeleted`. That keeps the ones
+      the episode index still maps to a probe as its alarm, which is so until the next health
+      sweep re-reads the targets. It then reacts the probe's held set. `#holds` finds no row for
+      the deleted Probe Health, so a trigger it alone covered stops holding and arms per sensor,
+      as after a pause mid-loss. A trigger that another live Probe Health covers still holds.
+      Deleting a whole probe re-decides nothing extra, because its sensors went with it.
+      - **A sibling, not grown into this:** a Probe Health moved or edited to report on another
+        probe during a loss drops out of the old probe's mapping at the next health sweep. The
+        old probe's held sensors are then as silent as they were here. Filed as `M-27`.
+
+      Tests: two scenarios in `probe-episode-scenario`, the only live Probe Health deleted and
+      one of two deleted. Mutations 3/4. The survivor counts a Probe Health with no row as live,
+      and it is equivalent: a deleted object has no effective triggers, so it adds nothing to
+      what a trigger covers.
 
 - [ ] **M-26 — a factory over a lost or frozen probe's sensor goes Down beside Probe Health** · M ·
       M-23, M-22, P-135 · Found in `M-23`, which checked the sibling the review left unchecked.
@@ -6138,6 +6154,31 @@ because each is a decision rather than a defect:
       - a scenario test in `probe-episode-scenario.test.ts`, per `M-17`: one lost probe with a
         factory over one of its sensors gives exactly one alarm, with each asserted alarm
         asserted present first. Mutants as usual.
+
+- [ ] **M-27 — a Probe Health retargeted mid-loss leaves the sensors it held held** · S · M-25,
+      M-24, M-22 · Found finishing `M-25`.
+      `ProbeHealthTargets.publish` replaces which probe each Probe Health reports on at every
+      health sweep. A Probe Health retargeted during a loss drops out of the old probe's
+      `reportingOn` at the next sweep. It is retargeted when its device is moved to another probe
+      (a Probe Health that names no probe reports on the one it sits under), or when its *Probe*
+      parameter is edited. Nothing re-reacts the old probe's held sensors. They stay held, with no
+      alarm under any trigger that heard of the probe only from that Probe Health, until each is
+      next re-decided. That is the silence `M-25` fixed for a delete, reached by another route.
+      `M-25`'s fix cannot see it: the Probe Health still has a row, and by the time anything asks,
+      `heldFor(sensor)` resolves to its new probe.
+
+      **Suggested fix:** `publish()` diffs the old reporting map against the new one. For each
+      probe that lost a reporter and still holds sensors, it hands the probe to a hook. `main.ts`
+      wires the hook to `db.tx` → `AlarmEngine.react` on that probe's held set. That needs a
+      probe-keyed `heldBy(probeObjectId)` on the episode index. It touches the engine, so it lands
+      after `M-18`.
+
+      **Done when:**
+      - retargeting a probe's only live Probe Health during a loss re-decides the sensors it held,
+        unheld, at the sweep that sees the change, and they notify one by one;
+      - a sensor still covered through another live Probe Health stays held;
+      - a scenario test in `probe-episode-scenario.test.ts`, per `M-17`, covers both, with each
+        asserted alarm asserted present first. Mutants as usual.
 
 - [x] **M-24 — `M-22`'s episode and its held set are not linked in every direction** · M · M-22,
       M-17 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `M-24`).

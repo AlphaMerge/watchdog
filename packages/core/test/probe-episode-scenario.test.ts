@@ -1089,5 +1089,68 @@ describe(
         'email:unknown:recovery': PINGS - DOWN_PINGS,
       });
     });
+
+    /** Deletes one sensor as an operator would, with the tree's sinks in the transaction. */
+    async function deleteSensor(sensorId: number): Promise<void> {
+      await withTreeSync(() =>
+        h.service.delete(testActor, sensorId, { kind: 'exact', descendants: 0 }, { kind: 'none' }),
+      );
+    }
+
+    it('a Probe Health deleted during a loss: the sensors it held notify one by one, as for a pause (`M-25`)', async () => {
+      // A deleted Probe Health has no row, so nothing re-decided anything for it: the sensors
+      // held behind it stayed held, with no alarm, until the probe came back and there was
+      // nothing left to say.
+      const made = await probeWith('deleted-mid-loss', { health: true });
+      await trigger(made.probe, 'unknown', 'email');
+      await settle(made);
+      const health = healthOf(made);
+      const step = await mark();
+      await lose(made);
+      assert.deepEqual(await queued(step, [health]), { 'email:unknown:initial': 1 });
+      assert.equal((await alarmsOn([health])).length, 1, 'the episode alarm stands');
+      assert.deepEqual(await alarmsOn(made.pings), [], 'and holds its sensors');
+
+      const deleted = await mark();
+      await deleteSensor(health);
+      assert.equal((await alarmsOn(made.pings)).length, PINGS, 'one alarm armed per sensor');
+      await fire();
+      assert.deepEqual(await queued(deleted, made.pings), { 'email:unknown:initial': PINGS });
+
+      const lift = await mark();
+      await find(made);
+      assert.deepEqual(await queued(lift, made.pings), {
+        'email:unknown:recovery': PINGS - DOWN_PINGS,
+      });
+    });
+
+    it('one of two Probe Healths deleted during a loss: the other still holds its sensors (`M-25`)', async () => {
+      const made = await probeWith('two-healths', { health: true });
+      const first = healthOf(made);
+      const box = (await h.repository.get(db, first))?.parentId;
+      assert.ok(box !== undefined && box !== null);
+      const second = (
+        await h.service.create(testActor, {
+          kind: 'sensor',
+          parentId: box,
+          name: 'two-healths-health-2',
+          sensorType: 'ms.probe.health',
+          params: {},
+        } as never)
+      ).id;
+      await trigger(made.probe, 'unknown', 'email');
+      await settle(made);
+      await healthSweep();
+      await lose(made);
+      assert.equal((await alarmsOn([second])).length, 1, 'the other’s episode alarm stands');
+      assert.deepEqual(await alarmsOn(made.pings), [], 'and the sensors are held');
+
+      const deleted = await mark();
+      await deleteSensor(first);
+      await fire();
+      assert.deepEqual(await alarmsOn(made.pings), [], 'still held, behind the other');
+      assert.deepEqual(await queued(deleted, made.pings), {});
+      assert.equal((await alarmsOn([second])).length, 1, 'which still stands for them');
+    });
   },
 );

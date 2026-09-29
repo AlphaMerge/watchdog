@@ -44,14 +44,25 @@ export class TriggerSync implements AuditSink {
     // The objects whose subtrees need looking at, deduplicated: a batch that edits three
     // triggers on one device should walk it once.
     const roots = new Set<ObjectId>();
+    // And the sensors a delete destroyed. A Probe Health among them was the route some triggers
+    // heard of a lost probe by, and what it held is re-decided without it (`M-25`).
+    const destroyed: number[] = [];
     for (const mutation of mutations) {
       const root = affected(mutation);
       if (root !== null) roots.add(root);
+      if (mutation.action === 'object.deleted') {
+        for (const ref of mutation.destroyed) {
+          if (ref.kind === 'sensor') destroyed.push(ref.id);
+        }
+      }
     }
-    if (roots.size === 0) return;
-
     let armed = 0;
     let cleared = 0;
+    if (destroyed.length > 0) {
+      const released = await this.#engine.releaseDeleted(q, destroyed, at);
+      armed += released.armed;
+      cleared += released.cleared;
+    }
     for (const root of roots) {
       const result = await this.#engine.reconcileSubtree(q, root, at);
       armed += result.armed;
