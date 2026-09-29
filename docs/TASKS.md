@@ -4906,7 +4906,7 @@ because each is a decision rather than a defect:
       harness after `P-236`, on a probe that stays up. The harness no longer signals pid 0, which
       is how this run killed itself and lost PID 1's journal and the probe's output.
 
-- [ ] **P-236 — under checks that hang to their timeout, the pool grows past the memory it has and
+- [x] **P-236 — under checks that hang to their timeout, the pool grows past the memory it has and
       the probe is OOM-killed** · M · P-34, P-210 · Found by `P-216b`
       (`docs/findings/2026-09-29-probe-starvation-b.md`). The pool sizer (`P-34`) derives its
       ceiling from Little's law on measured durations and knows nothing about memory: with 5,000
@@ -4942,6 +4942,25 @@ because each is a decision rather than a defect:
       sensor type that only ends on abort shows the pool stopping at the cap, refusals counted,
       `poolHeldBack` above zero, and no worker retired mid-check. Acceptance is `P-216c`: the same
       4 GiB box, and the probe stays up with `NRestarts` 0.
+
+      **Landed** (2026-09-29). `runner/memory-cap.ts` holds the arithmetic and a reading of memory
+      that is kept for a second, because the pool asks on every growth attempt and a saturated
+      probe attempts on every submit. **Enforced in the pool rather than in the sizer**, which is
+      one change from the design above: growth and every ceiling the sizer sets both pass through
+      the pool, so one place bounds both, and the sizer's ceiling stays the workload's number so
+      `poolHeldBack` can say how far apart the two are. Two things the design did not foresee:
+      - **A saturated pool never has a spare worker**, so the over-ceiling sweep could not give
+        memory back while the probe was busy, which is when it is short. A worker that comes free
+        while the pool is over what memory allows is now given up instead of handed the next
+        check, and never one in the middle of a check.
+      - **Workers that have been given up are still resident until their threads exit.** Counting
+        them against shrinking would give up more to free memory already on its way back, and a
+        mutation that did so took eight workers told to shed to three down to the floor. Counting
+        them against growing is right, and that is what the pool does.
+
+      21 tests in `pool-memory-cap.test.ts`, the scenario included, each mutation-checked: growth
+      that ignores memory, no giving back while saturated, exiting workers counted against
+      shrinking, and a log line per attempt all fail them. `P-216c` is the acceptance.
 
 - [ ] **P-220 — under host load systemd's watchdog kills idle services, and each kill now counts
       toward `P-215`'s start limit** · M · P-215 · Seen in `P-215`'s rerun, at load 24.67 on 8 CPUs

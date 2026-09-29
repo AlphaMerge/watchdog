@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { describeError, type CheckResult, type Logger } from '@ms/shared';
+import type { MemoryCapReading } from './memory-cap.js';
 import type { CheckPhase, CheckRequest, ResultMeta, SessionCounters } from './types.js';
 
 /** Latencies kept for the percentiles Probe Health reports (P-13). */
@@ -135,6 +136,20 @@ export interface PoolStats {
   size: number;
   /** The ceiling it will not grow past. `size` at it is a probe that wants a bigger one. */
   maxSize: number;
+  /**
+   * The ceiling in force: `maxSize`, or fewer where memory allows fewer (`P-236`).
+   *
+   * Equal to `maxSize` whenever memory is not what binds, and always where the cap is not
+   * enforced — an explicit `workerPoolSize` is the operator's word.
+   */
+  ceiling: number;
+  /**
+   * The most workers the memory this probe may use can hold, or absent where it cannot be read
+   * (`P-236`). Reported whether or not it is enforced, so an explicit size above it shows.
+   */
+  memoryCap?: number;
+  /** `maxSize` less `ceiling`: the workers the ceiling would allow and memory does not. */
+  heldBack: number;
   /** Workers added because checks were waiting, and given up again while nothing was. */
   grown: number;
   shrunk: number;
@@ -223,6 +238,21 @@ export interface CheckPoolOptions {
   abortGraceMs?: number;
   /** Module whose default export is a `CheckRegistry`. P-05 supplies the real one. */
   registryModule?: string;
+  /**
+   * How many workers memory allows (`P-236`). Absent means no memory bound, as before it.
+   *
+   * Asked with the number of workers already started, and answers with an absolute count that
+   * includes them. `MemoryCap` is the real one.
+   */
+  memoryCap?: { read: (held: number) => MemoryCapReading | undefined };
+  /**
+   * Whether the pool obeys `memoryCap` or only reports it. Default true.
+   *
+   * False where `workerPoolSize` was set: a non-zero setting is the operator's statement of how
+   * much memory the probe may use (`P-34`), and a derived number must not overrule it. The pool
+   * still says, once per episode, when that setting is more than memory holds.
+   */
+  enforceMemoryCap?: boolean;
   onResult: (result: CheckResult, meta: ResultMeta) => void;
 }
 
@@ -435,6 +465,23 @@ export class CheckPool {
   readonly #retryTimers = new Set<NodeJS.Timeout>();
   /** Set only while the pool is above its ceiling and still has workers to give back (`P-45`). */
   #overCeilingTimer: NodeJS.Timeout | undefined;
+  readonly #memoryCap: { read: (held: number) => MemoryCapReading | undefined } | undefined;
+  readonly #enforceMemoryCap: boolean;
+  /**
+   * Set while memory is holding the pool back, so the log says so once per episode (`P-236`).
+   *
+   * An episode ends when nothing is waiting any more. Once per growth attempt would be once per
+   * submit on a saturated probe, which is the refusal flood `P-216` was about.
+   */
+  #memoryBinding = false;
+  /**
+   * Workers given up whose threads have not exited yet (`P-236`).
+   *
+   * Still resident, so still inside any memory reading, and not in `#slots`. Without them a pool
+   * shedding workers for memory would read the memory they have not yet released as memory taken
+   * by something else, and shed more.
+   */
+  #terminating = 0;
   #startFailures = 0;
   #stopped = false;
   #disabled = false;
@@ -465,6 +512,8 @@ export class CheckPool {
     this.#registryModule =
       options.registryModule ?? join(import.meta.dirname, 'catalogue-registry.js');
     this.#onResult = options.onResult;
+    this.#memoryCap = options.memoryCap;
+    this.#enforceMemoryCap = options.enforceMemoryCap ?? true;
   }
 
   /** Workers held right now, which since `P-18` is not the same as the configured maximum. */
@@ -730,6 +779,15 @@ export class CheckPool {
     return {
       size: this.#slots.length,
       maxSize: this.#maxSize,
+      ...(() => {
+        const memory = this.#readMemory();
+        const ceiling = this.#ceiling(memory);
+        return {
+          ceiling,
+          ...(memory === undefined ? {} : { memoryCap: memory.workers }),
+          heldBack: this.#maxSize - ceiling,
+        };
+      })(),
       grown: this.#grown,
       shrunk: this.#shrunk,
       busy: this.#slots.filter((slot) => slot.job !== undefined).length,
@@ -753,6 +811,19 @@ export class CheckPool {
   }
 
   #pump(): void {
+    // **Over memory, a worker that comes free is given up rather than handed the next check**
+    // (`P-236`). The over-ceiling sweep only retires workers it finds spare, and a saturated pool
+    // has none: each hands its slot to the next queued check the moment it finishes. So memory
+    // taken by something else would never be given back while the probe is busy, which is exactly
+    // when it matters. Only a ready worker holding nothing is taken, as `P-26` requires.
+    const over = this.#overMemory();
+    let retired = 0;
+    for (const slot of [...this.#slots]) {
+      if (retired >= over) break;
+      if (!slot.ready || slot.job !== undefined || slot.retired) continue;
+      this.#retire(slot, { overMemory: over - retired });
+      retired += 1;
+    }
     for (const slot of this.#slots) {
       if (this.#queue.length === 0) break;
       if (!slot.ready || slot.job !== undefined) continue;
@@ -788,9 +859,12 @@ export class CheckPool {
    */
   #grow(): void {
     if (this.#stopped || this.#disabled) return;
+    if (this.#queue.length === 0) {
+      this.#endMemoryEpisode();
+      return;
+    }
     const held = this.#slots.length + this.#growing;
     if (held >= this.#maxSize) return;
-    if (this.#queue.length === 0) return;
 
     // **The queue that pending spawns will absorb must not also justify more spawns.** `held`
     // already counts the workers on their way, so counting the whole queue as unmet demand
@@ -804,7 +878,11 @@ export class CheckPool {
     // checks arriving against 4 workers now goes straight to the ceiling in a single step rather
     // than in a handful of rounds.
     const unmet = Math.max(0, this.#queue.length - this.#growing);
-    const want = Math.min(this.#maxSize, held + unmet);
+    const wanted = Math.min(this.#maxSize, held + unmet);
+    // **Memory is the last word on growth** (`P-236`), read at every step rather than folded into
+    // the sizer's ceiling, because growth is immediate and the sizer runs every thirty seconds:
+    // `P-216b`'s probe went from 5 workers to 108 in eleven.
+    const want = this.#memoryBound(wanted, held, this.#readMemory());
     const add = want - held;
     if (add <= 0) return;
 
@@ -877,6 +955,82 @@ export class CheckPool {
     this.#retire(spare, { idleForMs: Math.round(Number(now - spare.idleSince) / 1e6) });
   }
 
+  /**
+   * What memory allows, as a number of workers resident at once.
+   *
+   * Asked with every worker whose memory is in the reading: those held, and those given up whose
+   * threads have not exited. **The two uses treat the second kind differently, on purpose.**
+   * Shrinking compares the workers held with the cap, because the ones exiting are already on
+   * their way out and counting them would give up more to free memory that is coming back anyway.
+   * Growing counts them, because until they exit their memory is not free to spend.
+   */
+  #readMemory(): MemoryCapReading | undefined {
+    return this.#memoryCap?.read(this.#slots.length + this.#terminating);
+  }
+
+  /** The ceiling in force given a memory reading: `maxSize`, or less where memory binds. */
+  #ceiling(memory: MemoryCapReading | undefined): number {
+    if (memory === undefined || !this.#enforceMemoryCap) return this.#maxSize;
+    // Never under the floor: `minSize` is a number an operator set, and the pool starts that many
+    // whatever memory says. The floor is also what `start` spawned, so a cap below it would retire
+    // workers the pool is about to need again.
+    return Math.max(this.#minSize, Math.min(this.#maxSize, memory.workers));
+  }
+
+  /** Workers held beyond what memory allows, for `#pump` to give up as they come free. */
+  #overMemory(): number {
+    if (!this.#enforceMemoryCap || this.#stopped) return 0;
+    const memory = this.#readMemory();
+    if (memory === undefined) return 0;
+    return Math.max(0, this.#slots.length - this.#ceiling(memory));
+  }
+
+  /**
+   * How far growth may go, given what memory allows; logs the first time in an episode that it
+   * binds.
+   */
+  #memoryBound(wanted: number, held: number, memory: MemoryCapReading | undefined): number {
+    if (memory === undefined) return wanted;
+    // Workers still exiting hold memory growth cannot spend yet (`#readMemory`).
+    const room = Math.max(this.#minSize, memory.workers - this.#terminating);
+    if (wanted <= room) return wanted;
+    if (!this.#memoryBinding) {
+      this.#memoryBinding = true;
+      const fields = {
+        held,
+        wanted,
+        cap: memory.workers,
+        maxSize: this.#maxSize,
+        queued: this.#queue.length,
+        availableMb: Math.round(memory.availableBytes / 2 ** 20),
+        reserveMb: Math.round(memory.reserveBytes / 2 ** 20),
+        perWorkerMb: Math.round(memory.perWorkerBytes / 2 ** 20),
+        source: memory.source,
+      };
+      if (this.#enforceMemoryCap) {
+        this.#logger.warn(
+          fields,
+          'memory is holding the check pool back; checks will wait and be refused rather than the probe run out',
+        );
+      } else {
+        this.#logger.warn(
+          fields,
+          "workerPoolSize allows more workers than memory holds; growing past it on the operator's setting",
+        );
+      }
+    }
+    return this.#enforceMemoryCap ? Math.max(held, Math.min(this.#maxSize, room)) : wanted;
+  }
+
+  #endMemoryEpisode(): void {
+    if (!this.#memoryBinding) return;
+    this.#memoryBinding = false;
+    this.#logger.info(
+      { size: this.#slots.length, maxSize: this.#maxSize },
+      'nothing is waiting for a worker; memory is no longer holding the check pool back',
+    );
+  }
+
   /** Workers that can be retired safely, oldest idle first. Never one in the middle of a check. */
   #scheduleOverCeilingSweep(): void {
     if (this.#overCeilingTimer !== undefined || this.#stopped) return;
@@ -903,7 +1057,10 @@ export class CheckPool {
     this.#bankSessions(slot);
     const index = this.#slots.indexOf(slot);
     if (index >= 0) this.#slots.splice(index, 1);
-    void slot.worker.terminate();
+    this.#terminating += 1;
+    void slot.worker.terminate().finally(() => {
+      this.#terminating -= 1;
+    });
   }
 
   #dispatch(slot: Slot, job: Job): void {

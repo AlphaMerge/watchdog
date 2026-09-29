@@ -87,6 +87,9 @@ const FULL: ProbeHealthReport = {
   memoryAvailableMb: 1_860,
   memoryLimitUsagePercent: 55.2,
   memoryLimitMb: 4_096,
+  poolCeiling: 64,
+  poolMemoryCap: 90,
+  poolHeldBack: 0,
 };
 
 describe('the Probe Health sensor', { skip: available ? false : 'no database' }, () => {
@@ -238,6 +241,43 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       const { reading } = build(() => connected()).read(probeId);
       assert.equal(reading['memoryLimitUsage'], 55.2);
       assert.equal(reading['memoryLimit'], 4_096);
+    });
+
+    it('carries how far memory lets the pool grow, and how much it holds back (P-236)', () => {
+      const { reading } = build(() => connected()).read(probeId);
+      assert.equal(reading['poolCeiling'], 64);
+      assert.equal(reading['poolMemoryCap'], 90);
+      assert.equal(reading['poolHeldBack'], 0);
+    });
+
+    it('says in the message when memory is what holds the pool back (P-236)', () => {
+      // "pool 100% of 50" alone reads as a probe that wants a bigger `workerPoolSize`, and the
+      // remedy is memory instead.
+      const { message } = build(() =>
+        connected({
+          health: {
+            ...FULL,
+            poolSize: 50,
+            poolBusy: 50,
+            poolCeiling: 50,
+            poolMemoryCap: 50,
+            poolHeldBack: 14,
+          },
+        }),
+      ).read(probeId);
+      assert.match(
+        message,
+        /pool 100% of 50, memory holds the pool at 50 workers, 14 short of its ceiling/,
+      );
+    });
+
+    it('gaps the pool’s memory channels for a probe too old to send them, never reading zero', () => {
+      const { poolCeiling: _a, poolMemoryCap: _b, poolHeldBack: _c, ...older } = FULL;
+      const { reading, message } = build(() => connected({ health: older })).read(probeId);
+      assert.equal(reading['poolCeiling'], null);
+      assert.equal(reading['poolMemoryCap'], null);
+      assert.equal(reading['poolHeldBack'], null);
+      assert.doesNotMatch(message, /memory holds/);
     });
 
     it('gaps the limit for a probe with no ceiling or too old to say, never reading it as zero', () => {
@@ -504,6 +544,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       // workers and for forty-eight.
       assert.match(message, /pool 25% of 48/);
       assert.match(message, /500 results spooled/);
+      assert.doesNotMatch(message, /memory holds/, 'nothing held back, nothing said');
     });
 
     it('gaps the pool percentage rather than dividing by a pool of none', () => {

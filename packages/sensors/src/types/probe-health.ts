@@ -183,6 +183,21 @@ const CHANNELS: readonly ChannelDef[] = [
   // diagnosis it names was one an operator could not actually make. No threshold, for the same
   // reason as its pair: a pool that opens sessions is a pool doing its job.
   { key: 'sessionsOpened', name: 'Sessions opened', unit: 'sessions', counter: { bits: 64 } },
+  // **How far memory lets the pool grow** (`P-236`). `P-34` derives the ceiling from the work
+  // alone, and checks that hang to their timeout made it about 540 workers against a 4 GiB box
+  // that held about a hundred: the probe grew until the kernel killed it, six times, while
+  // `memoryLimitUsage` read 95% (`docs/findings/2026-09-29-probe-starvation-b.md`). The ceiling in
+  // force is now the lower of the two, and these say which one is binding.
+  //
+  // **No limits on any of the three.** Memory holding the pool back is not an outage by itself —
+  // a small box running a light workload may be held back and keep up — and when it does not keep
+  // up, `poolUsage` and `refused` are already the alarm. One outage, one alarm. These are what an
+  // operator reads to see that the remedy is memory (`MemoryMax`, fewer sensors) rather than
+  // `workerPoolSize`.
+  { key: 'poolCeiling', name: 'Worker pool ceiling', unit: 'workers' },
+  // A gap where memory cannot be read, never a zero, which would say memory holds no workers.
+  { key: 'poolMemoryCap', name: 'Workers memory can hold', unit: 'workers' },
+  { key: 'poolHeldBack', name: 'Workers held back by memory', unit: 'workers' },
   { key: 'queued', name: 'Checks waiting for a worker', unit: 'checks' },
   { key: 'checkWait', name: 'Wait for a worker (p95)', unit: 'ms' },
   // Skip-if-still-running: the previous scan of that sensor had not finished. Counted, never

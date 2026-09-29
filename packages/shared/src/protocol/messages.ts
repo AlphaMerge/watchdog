@@ -41,6 +41,10 @@ import { AppError } from '../errors/app-error.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
+ * Version 19 adds `poolCeiling`, `poolMemoryCap` and `poolHeldBack` (`P-236`): the check pool's
+ * ceiling in force, the most workers the probe's memory can hold, and how many the ceiling would
+ * allow and memory does not. Gated and stripped like 17's and 18's.
+ *
  * Version 18 adds `memoryLimitUsagePercent` and `memoryLimitMb` (`P-210`): how close the probe's
  * cgroup is to the memory ceiling the kernel enforces on it. Gated the same way as 17's pair, and
  * stripped separately, so a v17 core still gets 17's fields.
@@ -79,7 +83,7 @@ import { AppError } from '../errors/app-error.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 18;
+export const PROTOCOL_VERSION = 19;
 
 /**
  * The oldest peer version this build still understands.
@@ -374,6 +378,22 @@ export interface ProbeHealthReport {
   /** Worker slots, and how many are busy right now. */
   poolSize?: number;
   poolBusy?: number;
+  /**
+   * The pool's ceiling in force: the most workers it will grow to now (`P-236`). The derived or
+   * configured ceiling, or fewer where memory binds.
+   */
+  poolCeiling?: number;
+  /**
+   * The most workers the memory this probe may use can hold (`P-236`), whether or not it is
+   * enforced. Absent where memory cannot be read. Since protocol 19.
+   */
+  poolMemoryCap?: number;
+  /**
+   * Workers the ceiling would allow and memory does not (`P-236`). Above zero, a saturated pool is
+   * waiting on memory rather than on its ceiling, and checks wait and are refused rather than the
+   * probe growing until the kernel kills it. Since protocol 19.
+   */
+  poolHeldBack?: number;
   /** Checks waiting for a slot. Rising queue depth is backpressure before anything is refused. */
   queued?: number;
   /** How long a check waited for a slot, in milliseconds. */
@@ -830,6 +850,9 @@ const PROBE_HEALTH_SCHEMA = {
     clockJumps: { type: 'integer', minimum: 0 },
     poolSize: { type: 'integer', minimum: 0 },
     poolBusy: { type: 'integer', minimum: 0 },
+    poolCeiling: { type: 'integer', minimum: 0 },
+    poolMemoryCap: { type: 'integer', minimum: 0 },
+    poolHeldBack: { type: 'integer', minimum: 0 },
     queued: { type: 'integer', minimum: 0 },
     queueWaitMs: PERCENTILES_SCHEMA,
     deferred: { type: 'integer', minimum: 0 },

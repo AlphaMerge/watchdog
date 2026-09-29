@@ -287,6 +287,21 @@ const PROBE_METRICS: readonly Metric[] = [
     help: 'Worker slots in use, as a fraction of the pool.',
     scale: PERCENT,
   },
+  {
+    key: 'poolCeiling',
+    name: 'ms_probe_pool_ceiling_workers',
+    help: 'The most workers the check pool will grow to now: its ceiling, or fewer where memory binds.',
+  },
+  {
+    key: 'poolMemoryCap',
+    name: 'ms_probe_pool_memory_cap_workers',
+    help: 'The most check workers the memory the probe may use can hold. Absent where memory cannot be read.',
+  },
+  {
+    key: 'poolHeldBack',
+    name: 'ms_probe_pool_held_back_workers',
+    help: "Workers the check pool's ceiling allows and memory does not.",
+  },
   { key: 'queued', name: 'ms_probe_checks_queued', help: 'Checks waiting for a worker slot.' },
   {
     key: 'checkWait',

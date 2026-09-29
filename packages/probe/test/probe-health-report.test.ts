@@ -30,7 +30,10 @@ const WHEEL: WheelStats = {
 
 const POOL: PoolStats = {
   size: 48,
-  maxSize: 48,
+  maxSize: 64,
+  ceiling: 50,
+  memoryCap: 50,
+  heldBack: 14,
   grown: 0,
   shrunk: 0,
   busy: 12,
@@ -211,6 +214,30 @@ describe('the probe’s own health report', () => {
       checked.length >= 5,
       `expected both runners, both listeners and the check-flow watchdog, saw ${checked.join(', ')}`,
     );
+  });
+
+  it('says how far memory lets the pool grow, and how much it holds back (P-236)', () => {
+    const report = reporter({}).report();
+    assert.equal(report.poolCeiling, 50);
+    assert.equal(report.poolMemoryCap, 50);
+    assert.equal(report.poolHeldBack, 14);
+  });
+
+  it('leaves the memory cap out where memory cannot be read, rather than a cap of nothing', () => {
+    const { memoryCap: _cap, ...unread } = POOL;
+    const report = new ProbeHealthReporter({
+      scheduler: () => WHEEL,
+      pool: () => ({ ...unread, ceiling: 64, heldBack: 0 }),
+      memory: {
+        machine: { lowest: () => null },
+        limit: { lowest: () => null },
+        start: () => undefined,
+        stop: () => undefined,
+      },
+    }).report();
+    assert.equal('poolMemoryCap' in report, false);
+    assert.equal(report.poolCeiling, 64);
+    assert.equal(report.poolHeldBack, 0);
   });
 
   it('says whether the pool is alive, and what it threw away', () => {

@@ -225,11 +225,12 @@ waits for you.
 
 **The unit's memory ceiling is part of the box.** `ms-probe.service` sets `MemoryMax=6G`, which by
 the formula above holds about 170 workers once settled and about 155 through the start-up peak —
-well short of the 256 auto-sizing may reach. Past it the kernel kills the probe, and the probe
-restarts into the same workload and is killed again (`P-213`). Probe Health's `memoryLimitUsage`
-warns at 80% of it; raise it before a workload that needs more, with
-`systemctl set-property ms-probe MemoryMax=…` (`administration.md`, "A service at its memory
-ceiling").
+well short of the 256 auto-sizing may reach. **Since `P-236` the pool stops at what that ceiling
+holds** — the memory left under it, less a reserve, at 40 MiB a worker — and checks past that wait
+and are refused rather than the probe growing until the kernel kills it, which is what it did
+before (`P-216b`). Probe Health's `poolHeldBack` says how many workers memory is holding back;
+raise the ceiling before a workload that needs more, with `systemctl set-property ms-probe
+MemoryMax=…` (`administration.md`, "A probe held back by memory").
 
 **Setting `workerPoolSize` to anything non-zero turns this off** and fixes the ceiling there,
 because the setting is a statement about how much memory the probe may use and a derived number

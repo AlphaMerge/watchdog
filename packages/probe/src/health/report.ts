@@ -146,6 +146,11 @@ export class ProbeHealthReporter {
       clockJumps: scheduler.clockJumps,
       poolSize: pool.size,
       poolBusy: pool.busy,
+      // `P-236`: the ceiling memory leaves the pool, and how much of the one it would otherwise
+      // have that memory is holding back. The cap is absent where memory cannot be read.
+      poolCeiling: pool.ceiling,
+      ...(pool.memoryCap === undefined ? {} : { poolMemoryCap: pool.memoryCap }),
+      poolHeldBack: pool.heldBack,
       queued: pool.queued,
       queueWaitMs: pool.waitMs,
       deferred: pool.deferred,

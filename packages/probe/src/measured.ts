@@ -70,6 +70,19 @@ export const MODEL_CHECK_MS = 200;
 export const POOL_DEMAND_MARGIN = 1.3;
 
 /**
+ * What one check worker holds resident, in MiB, when its checks wait
+ * (`docs/findings/2026-09-29-probe-starvation-b.md`).
+ *
+ * Measured from the probe's own samples under 5,000 `port.tcp` checks that each waited out a 5 s
+ * timeout: the resident size above what the probe held at five workers, divided by the workers
+ * added, came to 35 MiB at 99 workers and 40 at 66. The larger, because `P-236` divides the memory
+ * left by this to decide how many more workers fit, and an estimate that is low is a probe that
+ * grows past its limit. An idle pool costs less, about 27 MiB a worker in `P-216`'s first run, which
+ * only means the cap is conservative there.
+ */
+export const WORKER_RESIDENT_MIB = 40;
+
+/**
  * Workers a workload needs merely to keep up — Little's law (`P-33`).
  *
  * A pool completes `workers / checkDuration` checks a second, so below this the backlog grows

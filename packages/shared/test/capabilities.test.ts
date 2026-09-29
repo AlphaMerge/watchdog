@@ -43,6 +43,7 @@ describe('what a protocol version can do', () => {
       resultSendTime: false,
       machineMemory: false,
       memoryLimit: false,
+      poolMemory: false,
     });
   });
 
@@ -205,6 +206,9 @@ describe('the health a peer can be sent', () => {
     memoryAvailableMb: 1_860,
     memoryLimitUsagePercent: 55.2,
     memoryLimitMb: 4_096,
+    poolCeiling: 77,
+    poolMemoryCap: 77,
+    poolHeldBack: 179,
   };
 
   it('leaves the machine’s memory and the limit out for a core older than protocol 17', () => {
@@ -223,8 +227,17 @@ describe('the health a peer can be sent', () => {
     });
   });
 
+  it('leaves the pool’s memory cap out for a core at 18, and keeps 18’s limit', () => {
+    // `P-236`: stripped on its own, so a core at 18 still gets the limit it knows.
+    const sent = healthForPeer(health, 18);
+    assert.equal('poolCeiling' in sent, false);
+    assert.equal('poolMemoryCap' in sent, false);
+    assert.equal('poolHeldBack' in sent, false);
+    assert.equal(sent.memoryLimitUsagePercent, 55.2);
+  });
+
   it('sends everything to a core that knows it', () => {
-    assert.deepEqual(healthForPeer(health, 18), health);
+    assert.deepEqual(healthForPeer(health, 19), health);
     assert.deepEqual(healthForPeer(health, PROTOCOL_VERSION), health);
   });
 
@@ -240,6 +253,9 @@ describe('the health a peer can be sent', () => {
       memoryAvailableMb: 17,
       memoryLimitUsagePercent: 18,
       memoryLimitMb: 18,
+      poolCeiling: 19,
+      poolMemoryCap: 19,
+      poolHeldBack: 19,
     };
     // The rest predate `P-178`, and a core older than that refuses a newer probe at the handshake,
     // in words, so it is never sent a heartbeat at all. Pinned by count, so that a new field is
@@ -267,5 +283,7 @@ describe('the health a peer can be sent', () => {
     assert.equal(versionFor('machineMemory'), 17);
     assert.ok(missingCapabilities(17).includes('report how close it is to its own memory limit'));
     assert.equal(versionFor('memoryLimit'), 18);
+    assert.ok(missingCapabilities(18).includes('report how far memory lets its check pool grow'));
+    assert.equal(versionFor('poolMemory'), 19);
   });
 });

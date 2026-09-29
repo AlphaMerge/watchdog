@@ -78,6 +78,11 @@ export interface ProbeCapabilities {
    * the same reason as `machineMemory`, and separately, so a core at 17 still gets 17's fields.
    */
   memoryLimit: boolean;
+  /**
+   * Reports the pool's ceiling in force and what memory allows it (`P-236`). Stripped below this
+   * like the two before it.
+   */
+  poolMemory: boolean;
 }
 
 /**
@@ -98,6 +103,7 @@ const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
   ['resultSendTime', 16],
   ['machineMemory', 17],
   ['memoryLimit', 18],
+  ['poolMemory', 19],
 ];
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -112,6 +118,7 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   resultSendTime: 'say when it sent a batch, so a replay can be told from live data',
   machineMemory: 'report how much memory its machine has left',
   memoryLimit: 'report how close it is to its own memory limit',
+  poolMemory: 'report how far memory lets its check pool grow',
 };
 
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
@@ -127,6 +134,7 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     resultSendTime: has(16),
     machineMemory: has(17),
     memoryLimit: has(18),
+    poolMemory: has(19),
   };
 }
 
@@ -143,6 +151,10 @@ export function healthForPeer(health: ProbeHealthReport, peerVersion: number): P
   let sent = health;
   // Newest first; each capability's fields are stripped on their own, so a peer one version
   // behind loses only that version's.
+  if (!capabilities.poolMemory) {
+    const { poolCeiling: _ceiling, poolMemoryCap: _cap, poolHeldBack: _heldBack, ...older } = sent;
+    sent = older;
+  }
   if (!capabilities.memoryLimit) {
     const { memoryLimitUsagePercent: _usage, memoryLimitMb: _limit, ...older } = sent;
     sent = older;

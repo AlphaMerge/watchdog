@@ -388,6 +388,7 @@ alarm.
 | `connected` | The link to the core |
 | `schedulerLag` | Checks starting later than scheduled. Warns at 1 s, errors at 5 s — this is the first sign of an overloaded probe |
 | `poolUsage` | Worker pool saturation, sampled at the heartbeat rather than averaged — on a bursty workload it under-reads badly (4.7% measured while every worker was saturated once a second, `findings/2026-09-04-live-probe-check.md`), so do not size down from a low reading. Warns at 80%. Since `P-34` the probe raises its own ceiling from the checks it was assigned, so sustained saturation means either `workerPoolSize` is pinned or the workload outgrew what a probe derives for itself — see the troubleshooting runbook, and note that a pool below its floor accumulates rather than refusing |
+| `poolCeiling`, `poolMemoryCap`, `poolHeldBack` | How far the worker pool may grow, and whether memory is what stops it (`P-236`). `poolCeiling` is the ceiling in force; `poolMemoryCap` is how many workers the memory the probe may use can hold; `poolHeldBack` is how many the ceiling would allow and memory does not. No limits: memory holding the pool back is not an outage by itself, and when it costs checks, `poolUsage` and `refused` are the alarm. Read these to see that the remedy is memory rather than `workerPoolSize` — see [a probe held back by memory](#a-probe-held-back-by-memory). A gap for a probe older than protocol 19, and `poolMemoryCap` also where memory cannot be read |
 | `deferred` | Checks the pool could not start. **Backpressure is counted, never silent** |
 | `sessionOverflows` | **Any value above zero is an error.** SNMP or SSH sessions were opened past the pool's bound because every existing one was in use — the pools do that rather than fail a check, and sustained overflow is a probe heading for `EMFILE`. Lengthen `idleMs`, move devices to another probe, or raise the bound |
 | `sessionsOpen` | Device sessions held right now. No threshold — how many is a property of your catalogue, not of health |
@@ -537,6 +538,43 @@ killed by its own 30-second watchdog within 25, and restarted into the same stan
 as nobody intervened (`P-213`, `docs/findings/2026-09-28-memory-ceiling.md`). Where a unit does
 set one, `memoryLimitUsage` measures against it, and can read past 100% — which is what its error
 limit is for.
+
+### A probe held back by memory
+
+**The probe grows its worker pool only as far as its memory holds** (`P-236`). The ceiling it
+derives from its checks (`P-34`) knows nothing about memory: checks that wait out their timeout,
+against a device or a network that has stopped answering, make it enormous. Measured, 5,000
+`port.tcp` checks against a port that never answered wanted about 540 workers at 35–40 MiB each;
+the probe grew until the kernel killed it, six times in six minutes, and the start limit left it
+`failed` (`docs/findings/2026-09-29-probe-starvation-b.md`).
+
+The pool now stops at what memory holds: the memory left under the probe's ceiling, less a reserve
+of 10% of the ceiling or 256 MiB, whichever is larger, divided by 40 MiB a worker. Past that,
+checks wait in the queue and are refused and counted when it is full, and the probe stays up.
+Probe Health says so in its message — *memory holds the pool at 77 workers, 179 short of its
+ceiling* — and the probe logs *memory is holding the check pool back* once per episode, with the
+numbers it used. If memory runs short while the pool is large, workers are given up as they finish
+their checks, never in the middle of one.
+
+What to do depends on why the pool wanted so many:
+
+- **Checks are hanging.** A device or a network down makes every check against it wait out its
+  timeout, and the pool fills with workers waiting. The refusals end when the target answers or
+  its sensors are paused. More memory would only let the probe hold more workers waiting.
+- **The workload is genuinely that large.** Raise the ceiling, `systemctl set-property ms-probe
+  MemoryMax=…`, or move sensors to another probe.
+
+**Where the probe has no memory ceiling of its own, it measures the machine's instead**, and then
+it competes with everything else on the host: the reserve is its only protection, and something
+else growing can still take what it counted on. That is cgroup v1 (RHEL 8 by default), a unit
+whose `MemoryMax` was removed, and Windows, where WinSW sets no limit. **On Linux, keep a
+`MemoryMax` on `ms-probe`** — the shipped unit sets 6 GiB — so the probe is bounded by memory that
+is its own.
+
+**`workerPoolSize` set to anything non-zero is obeyed, not capped.** It is your statement of how
+much memory the probe may use. If it is more than memory holds, the probe logs *workerPoolSize
+allows more workers than memory holds* once per episode and grows past it anyway, and
+`poolMemoryCap` shows the number it would have stopped at.
 
 ### A core that is still starting
 

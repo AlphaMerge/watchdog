@@ -177,6 +177,10 @@ export class ProbeHealthService {
       reportsForeign: refusals?.foreignRecently ?? null,
       schedulerLag: health?.schedulerLagMs?.p95 ?? null,
       poolUsage: poolUsage(health?.poolBusy, health?.poolSize),
+      // Absent below protocol 19 (`P-236`); the memory cap also wherever memory cannot be read.
+      poolCeiling: health?.poolCeiling ?? null,
+      poolMemoryCap: health?.poolMemoryCap ?? null,
+      poolHeldBack: health?.poolHeldBack ?? null,
       queued: health?.queued ?? null,
       checkWait: health?.queueWaitMs?.p95 ?? null,
       deferred: health?.deferred ?? null,
@@ -475,6 +479,21 @@ function describe(
       poolSize === undefined
         ? `pool ${String(usage)}%`
         : `pool ${String(usage)}% of ${String(poolSize)}`,
+    );
+  }
+  // Named when it binds (`P-236`): "pool 100% of 77" reads as a probe that needs a bigger
+  // `workerPoolSize`, and the remedy is memory instead.
+  const heldBack = reading['poolHeldBack'];
+  const ceiling = reading['poolCeiling'];
+  if (
+    heldBack !== null &&
+    heldBack !== undefined &&
+    heldBack > 0 &&
+    ceiling !== null &&
+    ceiling !== undefined
+  ) {
+    parts.push(
+      `memory holds the pool at ${String(ceiling)} workers, ${String(heldBack)} short of its ceiling`,
     );
   }
   const spool = reading['spoolDepth'];

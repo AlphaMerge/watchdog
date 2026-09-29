@@ -198,6 +198,12 @@ moves its own ceiling — so the two cases where you have to intervene are:
 - **The workload needs more than a probe will derive on its own** (256 workers). The probe logs
   `workload needs more workers than a probe may derive for itself` with the number it wanted.
   Set `workerPoolSize` explicitly, and check the box has the memory: about 35 MB a worker.
+- **Memory is holding the pool back** (`P-236`). Probe Health's message says *memory holds the
+  pool at N workers*, `poolHeldBack` is above zero, and the probe logs *memory is holding the
+  check pool back*. Raising `workerPoolSize` does not help — the probe stops at what memory holds
+  whatever the setting derives to. Either checks are hanging against something that has stopped
+  answering, or the probe needs a higher `MemoryMax` or fewer sensors (`administration.md`, "A
+  probe held back by memory").
 
 A worked case: 5,000 `icmp.ping` sensors on a 60-second interval is a burst of 83 a second, and
 a ping check costs 600 ms, so the pool needs 50 workers. On 48 that measured a **median** check

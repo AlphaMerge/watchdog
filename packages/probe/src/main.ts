@@ -12,6 +12,7 @@ import {
 import { SCRIPT_DIR_ENV } from '@ms/sensors/script';
 import { POWERSHELL_ENV } from '@ms/sensors/windows';
 import { CheckPool } from './runner/pool.js';
+import { MemoryCap } from './runner/memory-cap.js';
 import { ProcessRunner } from './runner/process-runner.js';
 import { QueryRunner } from './queries/runner.js';
 import { resultSink } from './result-sink.js';
@@ -190,6 +191,11 @@ async function main(): Promise<void> {
     idleShrinkMs: config.probe.workerPoolIdleShrinkMs,
     queueMaxLength: config.probe.checkQueueMaxLength,
     abortGraceMs: config.probe.checkAbortGraceMs,
+    // Bounded by the memory this probe may use (`P-236`), unless `workerPoolSize` was set: that
+    // is the operator's statement of how much it may use, and the pool only says when it is more
+    // than memory holds.
+    memoryCap: new MemoryCap(),
+    enforceMemoryCap: config.probe.workerPoolSize <= 0,
     onResult: spoolResult,
   });
   await pool.start();
