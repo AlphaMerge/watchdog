@@ -260,6 +260,37 @@ describe('check pool', () => {
     assert.equal(pool.stats().refused, 1, 'never dropped without counting');
   });
 
+  it('logs a refusal episode once, with the first check refused and the bound (P-216)', async () => {
+    const lines: Record<string, unknown>[] = [];
+    const pool = new CheckPool({
+      logger: pino(
+        { level: 'info' },
+        { write: (line: string) => lines.push(JSON.parse(line) as Record<string, unknown>) },
+      ),
+      size: 1,
+      minSize: 1,
+      queueMaxLength: 2,
+      abortGraceMs: 10_000,
+      registryModule: FIXTURES,
+      onResult: () => undefined,
+    });
+    pools.push(pool);
+    await pool.start();
+    pool.submit({ ...request(90, 'test.hang'), timeoutMs: 60_000 });
+    pool.submit(request(91, 'test.ok'));
+    pool.submit(request(92, 'test.ok'));
+    for (let sensor = 93; sensor < 593; sensor += 1) {
+      assert.equal(pool.submit(request(sensor, 'test.ok')), 'queue-full');
+    }
+    assert.equal(pool.stats().refused, 500, 'every refusal counted');
+    const refusals = lines.filter((line) => String(line['msg']).includes('refusing a check'));
+    assert.equal(refusals.length, 1, 'and one line for all of them');
+    const first = refusals[0] ?? {};
+    assert.equal(first['sensorId'], 93);
+    assert.equal(first['sensorType'], 'test.ok');
+    assert.equal(first['queueMax'], 2);
+  });
+
   it('answers every queued check when it stops, rather than dropping them', async () => {
     const seen: Seen[] = [];
     const pool = new CheckPool({

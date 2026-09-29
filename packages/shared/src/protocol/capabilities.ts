@@ -96,6 +96,11 @@ export interface ProbeCapabilities {
    * version, and a newer probe speaking to an older core sends the window.
    */
   memorySinceLastReport: boolean;
+  /**
+   * Reports what its log output dropped and holds (`P-216` part 3). Stripped below this like the
+   * pool's memory fields.
+   */
+  logOutput: boolean;
 }
 
 /**
@@ -118,6 +123,7 @@ const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
   ['memoryLimit', 18],
   ['poolMemory', 19],
   ['memorySinceLastReport', 20],
+  ['logOutput', 21],
 ];
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -134,6 +140,7 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   memoryLimit: 'report how close it is to its own memory limit',
   poolMemory: 'report how far memory lets its check pool grow',
   memorySinceLastReport: 'report each memory low once, rather than the last thirty seconds',
+  logOutput: 'report the log lines it could not write',
 };
 
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
@@ -151,6 +158,7 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     memoryLimit: has(18),
     poolMemory: has(19),
     memorySinceLastReport: has(20),
+    logOutput: has(21),
   };
 }
 
@@ -167,6 +175,10 @@ export function healthForPeer(health: ProbeHealthReport, peerVersion: number): P
   let sent = health;
   // Newest first; each capability's fields are stripped on their own, so a peer one version
   // behind loses only that version's.
+  if (!capabilities.logOutput) {
+    const { logDropped: _dropped, logBacklogBytes: _backlog, ...older } = sent;
+    sent = older;
+  }
   if (!capabilities.poolMemory) {
     const { poolCeiling: _ceiling, poolMemoryCap: _cap, poolHeldBack: _heldBack, ...older } = sent;
     sent = older;

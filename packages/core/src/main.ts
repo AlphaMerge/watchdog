@@ -7,6 +7,7 @@ import {
   coreConfigSchema,
   describeBuild,
   describeError,
+  exitWithLine,
   MemorySampler,
   runConfigCheck,
   type CoreConfig,
@@ -252,7 +253,7 @@ async function migrateOnStart(db: Database, logger: Logger, lifecycle: Lifecycle
 }
 
 async function serve(): Promise<void> {
-  const { config, logger, lifecycle } = bootstrap<CoreConfig>({
+  const { config, logger, lifecycle, logOutput } = bootstrap<CoreConfig>({
     schema: coreConfigSchema,
     version: VERSION,
     build: BUILD,
@@ -1303,6 +1304,23 @@ async function serve(): Promise<void> {
       evictedChunks: () => housekeeper.stats.evictedChunks,
       machineMemory: () => memory.machine.lowest(),
       limitMemory: () => memory.limit.lowest(),
+      // What the log dropped and holds while the journal was not reading (`P-216` part 3), and the
+      // local probe's drops beside it: one journal, one alarm, and Core Health owns it (`M-21`).
+      ...(logOutput === undefined ? {} : { log: () => logOutput.stats() }),
+      localProbeLog: async (q) => {
+        const rows = await q.query<{ object_id: string }>(
+          'SELECT object_id::text AS object_id FROM probe_config WHERE is_local',
+        );
+        const local = rows[0];
+        if (local === undefined) return null;
+        const link = probeEndpoint.linkFor(Number(local.object_id));
+        if (!link.connected) return null;
+        const dropped = link.health?.logDropped;
+        const uptimeSeconds = link.health?.uptimeSeconds;
+        return dropped === undefined || uptimeSeconds === undefined
+          ? null
+          : { droppedLines: dropped, uptimeSeconds };
+      },
       queries: () => probeQueries.stats(),
       ingestionDiscards: () => ingestion.stats(),
       // Gaps in the v1 profile, which has no reporting to count (`H-12`).
@@ -1525,8 +1543,8 @@ export async function engineOrRefuse(
 if (process.argv[1] !== undefined && import.meta.filename === realpathSync(process.argv[1])) {
   main().catch((error: unknown) => {
     const { status, line } = startFailure(error);
-    process.stderr.write(line);
-    process.exit(status);
+    // Waited for, so a stalled journal cannot discard the one line that says why (`P-216` part 3).
+    exitWithLine(status, line);
   });
 }
 

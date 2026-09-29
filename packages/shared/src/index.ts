@@ -24,6 +24,13 @@ export type {
 
 export { createLogger } from './logging/logger.js';
 export type { Logger, LoggerFactoryOptions } from './logging/logger.js';
+export {
+  LOG_BACKLOG_MAX_BYTES,
+  LOG_EXIT_FLUSH_MS,
+  LogOutput,
+  writeLineSync,
+} from './logging/output.js';
+export type { LogOutputOptions, LogOutputStats } from './logging/output.js';
 export { currentCorrelation, newCorrelationId, withCorrelation } from './logging/correlation.js';
 export type { CorrelationContext } from './logging/correlation.js';
 
@@ -32,7 +39,7 @@ export type { LifecycleOptions, ShutdownHook, ShutdownReason } from './lifecycle
 export { bootstrap } from './lifecycle/bootstrap.js';
 export type { BootstrapOptions, BootstrappedService } from './lifecycle/bootstrap.js';
 export { createServiceNotifier, watchdogIntervalMs } from './lifecycle/systemd.js';
-export { EX_CONFIG, startFailure } from './lifecycle/exit.js';
+export { EX_CONFIG, exitWithLine, startFailure } from './lifecycle/exit.js';
 export { ADDRESS_WAIT_MS, waitForLocalAddress } from './lifecycle/address-wait.js';
 export type { AddressWaitOptions } from './lifecycle/address-wait.js';
 export type { ServiceNotifier } from './lifecycle/systemd.js';
@@ -101,6 +108,7 @@ export type {
   UnusableHealthField,
 } from './protocol/messages.js';
 export { CpuMeter } from './process/cpu-meter.js';
+export { DeltaMeter } from './process/delta-meter.js';
 export { parseMeminfo, readMachineMemory } from './process/machine-memory.js';
 export type { MachineMemory, MachineMemorySources } from './process/machine-memory.js';
 export { readLimitMemory } from './process/limit-memory.js';

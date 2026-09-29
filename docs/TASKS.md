@@ -5009,7 +5009,7 @@ because each is a decision rather than a defect:
       A mutation that ignores the flag fails it. What it does not cover, and `administration.md`
       says so: a probe on the core's host that is not flagged local still reports both.
 
-- [ ] **P-216 — under host starvation the dev probe grew past 4.7 GiB and went silent after its
+- [x] **P-216 — under host starvation the dev probe grew past 4.7 GiB and went silent after its
       queue filled** · M · P-206, P-207 · Seen 2026-09-28, on the dev VM, with ms-server's probe at
       its usual ~5,000 sensors: **4.76 GiB resident and 337% CPU**, with the VM at 457 MB available,
       swap exhausted and a load of 75 on 8 CPUs. Its last output was a burst of *check queue is full,
@@ -5063,6 +5063,20 @@ because each is a decision rather than a defect:
       main threads for 7–15 s at a time. The log path's own faults are real but smaller: one line
       per refused check (99.4% of 12.6 MB), and a backlog with no bound. **Part 3** takes those; the
       ping cadence and the cap's 90% against `memoryLimitUsage`'s 80% warning are for new tickets.
+
+      **Part 3 landed** (2026-09-29, protocol 21). Both services write through `LogOutput`
+      (`packages/shared/src/logging/output.ts`) instead of pino's SonicBoom: synchronous writes to a
+      descriptor Node has already made non-blocking, so a write never waits, and nothing is ever in
+      flight for an exit to lose. It holds at most 8 MiB and drops and counts past that. Every exit
+      flushes, waiting up to 2 s for a stalled journal: `SIGTERM`, an uncaught exception, and the
+      exit-78 configuration refusal, which now writes its line synchronously too. Each is tested
+      in a child process whose output is full when it ends. A refused check logs once per episode:
+      the first line names the sensor, its type and the queue bound, then a count every 30 s, and
+      one line after 30 s with no refusal. The sizer's warning is once per episode. Probe Health and
+      Core Health gain `logDropped` (lines since the last reading, warning above 0) and
+      `logBacklog` (MB, no limit). On a single host Core Health's `logDropped` counts the local
+      probe's lines with its own and the local probe's gaps: one journal, one alarm (`M-21`'s rule).
+      The ping cadence is `P-243`, and the cap against `memoryLimitUsage` is `P-244`.
 
 - [x] **P-236 — under checks that hang to their timeout, the pool grows past the memory it has and
       the probe is OOM-killed** · M · P-34, P-210 · Found by `P-216b`

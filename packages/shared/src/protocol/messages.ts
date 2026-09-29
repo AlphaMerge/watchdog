@@ -41,6 +41,10 @@ import { AppError } from '../errors/app-error.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
+ * Version 21 adds `logDropped` and `logBacklogBytes` (`P-216` part 3): the lines the probe's log
+ * output has dropped since it started, a running total the core turns into a count per reading,
+ * and what the output holds that its reader has not taken. Gated and stripped like 19's.
+ *
  * Version 20 adds `memorySinceLastReport` (`P-219`): a new meaning for the memory health fields
  * rather than a new field. From 20 a report's machine-memory and limit fields are the lowest since
  * the last heartbeat the core acknowledged, and the core folds every report between two Probe
@@ -89,7 +93,7 @@ import { AppError } from '../errors/app-error.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 20;
+export const PROTOCOL_VERSION = 21;
 
 /**
  * The oldest peer version this build still understands.
@@ -557,6 +561,15 @@ export interface ProbeHealthReport {
    */
   memoryLimitUsagePercent?: number;
   memoryLimitMb?: number;
+  /**
+   * Log lines the probe dropped since it started: refused at its output's bound while the journal
+   * was not reading, or lost to an output that closed (`P-216` part 3). **A running total**, so a
+   * report the core never got loses nothing; the core records the growth between two readings.
+   * Since protocol 21.
+   */
+  logDropped?: number;
+  /** Bytes of log the output holds that its reader has not taken yet. Since protocol 21. */
+  logBacklogBytes?: number;
 }
 
 export type ProbeToCoreMessage =
@@ -908,6 +921,8 @@ const PROBE_HEALTH_SCHEMA = {
     // No maximum: past `memory.high` the working set stands above the ceiling while it is throttled.
     memoryLimitUsagePercent: { type: 'number', minimum: 0 },
     memoryLimitMb: { type: 'number', minimum: 0 },
+    logDropped: { type: 'integer', minimum: 0 },
+    logBacklogBytes: { type: 'integer', minimum: 0 },
   },
 } as const;
 

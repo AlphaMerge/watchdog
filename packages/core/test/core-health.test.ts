@@ -504,6 +504,66 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
     });
   });
 
+  describe('the log lines a reading counts (P-216 part 3)', () => {
+    function logged(): {
+      own: { droppedLines: number; droppedBytes: number; backlogBytes: number };
+      local: { current: { droppedLines: number; uptimeSeconds: number } | null };
+      service: CoreHealthService;
+    } {
+      const own = { droppedLines: 0, droppedBytes: 0, backlogBytes: 0 };
+      const local: { current: { droppedLines: number; uptimeSeconds: number } | null } = {
+        current: null,
+      };
+      const service = new CoreHealthService({
+        vouching: everyVoucherHolds,
+        db,
+        logger: silent,
+        sources: {
+          ...sources(),
+          log: () => ({ ...own }),
+          localProbeLog: () => Promise.resolve(local.current),
+        },
+        ingest: () => Promise.resolve(),
+        process: fakeProcess({ cpuUs: [], elapsedNs: [], uptime: 1_000 }),
+      });
+      return { own, local, service };
+    }
+
+    it('counts the core’s own drops per reading, from its first, and clears', async () => {
+      const { own, service } = logged();
+      own.droppedLines = 40;
+      own.backlogBytes = 8 * 1024 * 1024;
+      const first = await service.read();
+      // The meter started with the process, so the first reading's total is all new.
+      assert.equal(first['logDropped'], 40);
+      assert.equal(first['logBacklog'], 8);
+      own.droppedLines = 55;
+      assert.equal((await service.read())['logDropped'], 15);
+      assert.equal((await service.read())['logDropped'], 0, 'a count, not a total, so it clears');
+    });
+
+    it('counts the local probe’s drops with its own: one journal, one alarm (M-21)', async () => {
+      const { own, local, service } = logged();
+      // A probe running from before this core: its total may be on record already, so its part
+      // gaps once and the core's own stands.
+      own.droppedLines = 3;
+      local.current = { droppedLines: 500, uptimeSeconds: 9_000 };
+      assert.equal((await service.read())['logDropped'], 3);
+      own.droppedLines = 5;
+      local.current = { droppedLines: 740, uptimeSeconds: 9_030 };
+      assert.equal((await service.read())['logDropped'], 2 + 240);
+      // The probe restarted: its new total is all new.
+      local.current = { droppedLines: 12, uptimeSeconds: 20 };
+      assert.equal((await service.read())['logDropped'], 12);
+    });
+
+    it('gaps with no log to read, and never reads the gap as zero', async () => {
+      const service = build();
+      assert.equal((await service.read())['logDropped'], null);
+      assert.equal((await service.read())['logBacklog'], null);
+    });
+  });
+
   describe('rollup lag', () => {
     it('is a gap when no tier has ever run, not an infinite lag', async () => {
       // A core that started a minute ago has not fallen behind. Reporting the age of the epoch

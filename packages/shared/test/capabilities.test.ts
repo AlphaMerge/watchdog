@@ -45,6 +45,7 @@ describe('what a protocol version can do', () => {
       memoryLimit: false,
       poolMemory: false,
       memorySinceLastReport: false,
+      logOutput: false,
     });
   });
 
@@ -210,6 +211,8 @@ describe('the health a peer can be sent', () => {
     poolCeiling: 77,
     poolMemoryCap: 77,
     poolHeldBack: 179,
+    logDropped: 1_204,
+    logBacklogBytes: 8_388_000,
   };
 
   it('leaves the machine’s memory and the limit out for a core older than protocol 17', () => {
@@ -237,8 +240,16 @@ describe('the health a peer can be sent', () => {
     assert.equal(sent.memoryLimitUsagePercent, 55.2);
   });
 
+  it('leaves the log output’s counts out for a core at 20, and keeps 19’s pool fields', () => {
+    // `P-216` part 3, stripped on its own like every version before it.
+    const sent = healthForPeer(health, 20);
+    assert.equal('logDropped' in sent, false);
+    assert.equal('logBacklogBytes' in sent, false);
+    assert.equal(sent.poolHeldBack, 179);
+  });
+
   it('sends everything to a core that knows it', () => {
-    assert.deepEqual(healthForPeer(health, 19), health);
+    assert.deepEqual(healthForPeer(health, 21), health);
     assert.deepEqual(healthForPeer(health, PROTOCOL_VERSION), health);
   });
 
@@ -257,6 +268,8 @@ describe('the health a peer can be sent', () => {
       poolCeiling: 19,
       poolMemoryCap: 19,
       poolHeldBack: 19,
+      logDropped: 21,
+      logBacklogBytes: 21,
     };
     // The rest predate `P-178`, and a core older than that refuses a newer probe at the handshake,
     // in words, so it is never sent a heartbeat at all. Pinned by count, so that a new field is
@@ -294,5 +307,7 @@ describe('the health a peer can be sent', () => {
       ),
     );
     assert.equal(capabilitiesFor(20).memorySinceLastReport, true);
+    assert.equal(versionFor('logOutput'), 21);
+    assert.ok(missingCapabilities(20).includes('report the log lines it could not write'));
   });
 });

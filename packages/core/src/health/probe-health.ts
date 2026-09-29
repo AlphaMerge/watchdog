@@ -1,6 +1,7 @@
 import { PROBE_HEALTH_CHANNELS, PROBE_HEALTH_COUNTERS } from '@ms/sensors';
 import {
   capabilitiesFor,
+  DeltaMeter,
   describeError,
   describeSkew,
   explainSkew,
@@ -88,6 +89,8 @@ export interface ProbeHealthServiceOptions {
    */
   readonly targets?: ProbeHealthTargets;
   readonly now?: () => Date;
+  /** How long this core has been running, in seconds. Injectable so a test can start it late. */
+  readonly uptime?: () => number;
 }
 
 export interface ProbeHealthStats {
@@ -200,6 +203,9 @@ export class ProbeHealthService {
   readonly #ingest: (results: readonly CheckResult[]) => Promise<void>;
   readonly #vouching: VoucherCheck;
   readonly #now: () => Date;
+  readonly #uptime: () => number;
+  /** One baseline per probe for its log's drops, taken by records only (`P-216` part 3). */
+  readonly #logMeters = new Map<number, DeltaMeter>();
 
   #sweeps = 0;
   #evaluated = 0;
@@ -216,6 +222,7 @@ export class ProbeHealthService {
     this.#vouching = options.vouching;
     this.#targets = options.targets ?? new ProbeHealthTargets();
     this.#now = options.now ?? ((): Date => new Date());
+    this.#uptime = options.uptime ?? ((): number => process.uptime());
   }
 
   /** Which probe each of these sensors reported on at the last sweep (`M-22`). */
@@ -242,9 +249,10 @@ export class ProbeHealthService {
    */
   read(
     probeObjectId: number,
-    options: { readonly local?: boolean } = {},
+    /** `link` is the sweep's, read once for the reading and the record alike. */
+    options: { readonly local?: boolean; readonly link?: ProbeLink } = {},
   ): { reading: ProbeHealthReading; message: string } {
-    const link = this.#sources.link(probeObjectId);
+    const link = options.link ?? this.#sources.link(probeObjectId);
     if (!link.connected) {
       // **The whole reason this is core-evaluated.** Everything else is a gap rather than a zero:
       // the probe's numbers are not zero, they are unknown, and a scheduler lag of 0 ms on a
@@ -378,6 +386,11 @@ export class ProbeHealthService {
       // Absent below protocol 18 and wherever the probe has no ceiling to be near (`P-210`).
       memoryLimitUsage: health?.memoryLimitUsagePercent ?? null,
       memoryLimit: health?.memoryLimitMb ?? null,
+      // A count per record, so only a record takes one (`#recorded`). What `read` has is a running
+      // total, which would warn for ever after one stall.
+      logDropped: null,
+      logBacklog:
+        health?.logBacklogBytes === undefined ? null : round(health.logBacklogBytes / MB, 2),
     };
 
     return {
@@ -433,6 +446,8 @@ export class ProbeHealthService {
     // Taken once per probe per sweep, and shared: two sensors reporting on one probe record the
     // same lows, and the second must not find the fold already emptied by the first (`P-219`).
     const folds = new Map<number, MemoryFold | undefined>();
+    // The same for the log's drops: the second sensor would otherwise read a count of zero.
+    const logs = new Map<number, number | null>();
     for (const row of sensors) {
       const sensorId = Number(row.id);
       // Not read and nothing recorded: a gap, and Unknown laid over it by the check (`A-29`).
@@ -467,13 +482,16 @@ export class ProbeHealthService {
       // later, exactly as late as the lost mark.
       if (this.#delivery?.awaitingFirstConnect?.(probeId) === true) continue;
       try {
-        const { reading, message } = this.read(probeId, { local: local.has(probeId) });
+        const link = this.#sources.link(probeId);
+        const { reading, message } = this.read(probeId, { local: local.has(probeId), link });
         results.push({
           sensorId,
           at,
           outcome: 'ok',
           durationMs: 0,
-          channels: readingsFrom(this.#recorded(probeId, reading, folds, local.has(probeId))),
+          channels: readingsFrom(
+            this.#recorded(probeId, link, reading, { folds, logs }, local.has(probeId)),
+          ),
           message,
         });
         this.#evaluated += 1;
@@ -516,15 +534,28 @@ export class ProbeHealthService {
    */
   #recorded(
     probeId: number,
-    reading: ProbeHealthReading,
-    folds: Map<number, MemoryFold | undefined>,
+    link: ProbeLink,
+    latest: ProbeHealthReading,
+    taken: {
+      folds: Map<number, MemoryFold | undefined>;
+      logs: Map<number, number | null>;
+    },
     local: boolean,
   ): ProbeHealthReading {
+    if (!taken.logs.has(probeId)) taken.logs.set(probeId, this.#logDropped(probeId, link));
+    const reading: ProbeHealthReading = {
+      ...latest,
+      // **Not the local probe's to report** (`P-216` part 3, `M-21`'s rule): it writes to the core's
+      // journal, and a journal that stops reading makes both drop at once. Core Health counts the
+      // local probe's lines with its own, so here it gaps. Taken all the same, so the baseline
+      // stays current if the flag is lowered.
+      logDropped: local ? null : (taken.logs.get(probeId) ?? null),
+    };
+    const folds = taken.folds;
     const take = this.#sources.takeMemory;
     if (take === undefined) return reading;
     if (!folds.has(probeId)) folds.set(probeId, take(probeId));
     const fold = folds.get(probeId);
-    const link = this.#sources.link(probeId);
     const folded = link.connected
       ? capabilitiesFor(link.protocolVersion).memorySinceLastReport
       : fold !== undefined;
@@ -542,6 +573,29 @@ export class ProbeHealthService {
       memoryLimitUsage: fold?.memoryLimitUsagePercent ?? null,
       memoryLimit: fold?.memoryLimitMb ?? null,
     };
+  }
+
+  /**
+   * Log lines this probe dropped since the last record (`P-216` part 3), from the running total on
+   * its latest heartbeat.
+   *
+   * **A count per record, not the total and not a counter's rate.** A total warns for ever after
+   * one stall; a rate gaps on the first reading after the probe restarts, which is the reading
+   * that covers the stall that restarted it. After a restart the new total is all new. A probe
+   * this core meets already running gaps once, because the core before this one may have
+   * recorded what it holds; one that started after this core counts in full.
+   */
+  #logDropped(probeId: number, link: ProbeLink): number | null {
+    if (!link.connected) return null;
+    const total = link.health?.logDropped;
+    const uptime = link.health?.uptimeSeconds;
+    if (total === undefined || uptime === undefined) return null;
+    let meter = this.#logMeters.get(probeId);
+    if (meter === undefined) {
+      meter = new DeltaMeter();
+      this.#logMeters.set(probeId, meter);
+    }
+    return meter.take(total, uptime, uptime < this.#uptime());
   }
 }
 

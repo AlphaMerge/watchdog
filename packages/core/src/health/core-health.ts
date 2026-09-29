@@ -1,11 +1,13 @@
 import { CORE_HEALTH_CHANNELS, CORE_HEALTH_COUNTERS } from '@ms/sensors';
 import {
   CpuMeter,
+  DeltaMeter,
   describeError,
   type ChannelReading,
   type CheckResult,
   type AvailableMemoryLow,
   type Logger,
+  type LogOutputStats,
 } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
 import { storedVoucher, type VoucherCheck } from '../objects/vouching.js';
@@ -117,6 +119,22 @@ export interface CoreHealthSources {
    */
   limitMemory: () => AvailableMemoryLow | null;
   /**
+   * The core's log output (`P-216` part 3): lines it dropped since the core started, and what it
+   * holds that the journal has not taken. Absent under `logPretty`, and the channels gap.
+   */
+  log?: () => LogOutputStats;
+  /**
+   * The same running total from the probe beside the core (`probe_config.is_local`), from its
+   * latest heartbeat, or null when there is none or it does not report one.
+   *
+   * **One journal, one alarm** (`M-21`'s rule). On a single host both services write to the same
+   * journald, and a journal that stops reading makes both drop at once: Probe Health and Core
+   * Health warning together would be two alarms for one stall. Core Health owns it, as it owns the
+   * machine's memory, and its `logDropped` counts the local probe's lines with its own; the local
+   * probe's `logDropped` gaps. A probe on its own host keeps its own.
+   */
+  localProbeLog?: (q: Queryable) => Promise<{ droppedLines: number; uptimeSeconds: number } | null>;
+  /**
    * `CredentialVault.setsWithUndeclaredKeys` — the credential sets written before writes were
    * checked against their kind that hold a key it does not declare (`A-43`). Counted at every
    * reading rather than once at start-up, so it falls as the sets are re-entered.
@@ -164,6 +182,17 @@ export type CoreHealthReading = Readonly<Record<string, number | null>>;
 
 const HEALTH_TYPE = 'ms.core.health';
 
+/**
+ * One reader's baselines (`CpuMeter`'s reason, `P-216` part 3): CPU and the log's drops are both
+ * the difference between two readings, and each reading consumes the one before. The sweep, the
+ * route and a scrape each hold their own, so none shortens another's interval.
+ */
+export class CoreHealthMeters {
+  readonly cpu = new CpuMeter();
+  readonly log = new DeltaMeter();
+  readonly localProbeLog = new DeltaMeter();
+}
+
 const MB = 1024 * 1024;
 
 export class CoreHealthService {
@@ -184,8 +213,8 @@ export class CoreHealthService {
    * sample: every reading honest, the history noisier for being watched. Two baselines keep the
    * sensor's history a thirty-second average whatever anyone is doing to the route.
    */
-  readonly #sweepCpu = new CpuMeter();
-  readonly #liveCpu = new CpuMeter();
+  readonly #sweepMeters = new CoreHealthMeters();
+  readonly #liveMeters = new CoreHealthMeters();
 
   #sweeps = 0;
   #evaluated = 0;
@@ -225,7 +254,7 @@ export class CoreHealthService {
    * broken.
    */
   async read(
-    meter: CpuMeter = this.#liveCpu,
+    meters: CoreHealthMeters = this.#liveMeters,
     /**
      * Whether an unreachable database is a gap rather than a failure (`P-126`).
      *
@@ -238,12 +267,12 @@ export class CoreHealthService {
      */
     degradeOnDatabaseError = false,
   ): Promise<CoreHealthReading> {
-    return (await this.#read(meter, degradeOnDatabaseError)).reading;
+    return (await this.#read(meters, degradeOnDatabaseError)).reading;
   }
 
   /** The reading, and the parked backfill's error, which is words and not a channel. */
   async #read(
-    meter: CpuMeter,
+    meters: CoreHealthMeters,
     degradeOnDatabaseError: boolean,
   ): Promise<{ reading: CoreHealthReading; parkedError: string | null }> {
     const now = this.#now();
@@ -256,16 +285,18 @@ export class CoreHealthService {
     const disk = this.#sources.disk();
     const machine = this.#sources.machineMemory();
     const limit = this.#sources.limitMemory();
+    const log = this.#sources.log?.();
 
     const memory = this.#process.memoryUsage();
     const queues = await this.#queues(now, degradeOnDatabaseError);
+    const uptime = this.#process.uptime();
 
     const discards = this.#sources.ingestionDiscards();
     const reading: CoreHealthReading = {
       ingestQueue: ingestion.queuedRows,
       writeLatency: ingestion.writeMs.p95,
       ingestRefused: ingestion.refusedRows,
-      cpu: this.#cpuPercent(meter),
+      cpu: this.#cpuPercent(meters.cpu),
       memory: round(memory.rss / MB, 1),
       heap: round(memory.heapUsed / MB, 1),
       // Gaps, not zeros, where the platform cannot say: a zero is this channel's error limit.
@@ -274,7 +305,7 @@ export class CoreHealthService {
       // Gaps where the core has no ceiling to be near: no limit, cgroup v1, or not Linux.
       memoryLimitUsage: limit === null ? null : round(100 - limit.availablePercent, 1),
       memoryLimit: limit === null ? null : round(limit.totalBytes / MB, 1),
-      uptime: Math.round(this.#process.uptime()),
+      uptime: Math.round(uptime),
       rollupLag: queues.rollup,
       backfillQueue: queues.backfill,
       backfillParked: queues.parked.count,
@@ -318,6 +349,8 @@ export class CoreHealthService {
       resultsPastDated: discards.discardedPastTime,
       reactionsDeferred: ingestion.deferredReactions,
       credentialsToReenter: queues.credentials,
+      logDropped: logDropped(meters, log, queues.localProbeLog, uptime),
+      logBacklog: log === undefined ? null : round(log.backlogBytes / MB, 2),
     };
     return { reading, parkedError: queues.parked.lastError };
   }
@@ -363,7 +396,7 @@ export class CoreHealthService {
     let reading: CoreHealthReading;
     let parkedError: string | null;
     try {
-      ({ reading, parkedError } = await this.#read(this.#sweepCpu, false));
+      ({ reading, parkedError } = await this.#read(this.#sweepMeters, false));
     } catch (error: unknown) {
       // **The sensor fails rather than the sweep**, and it fails with a message. A Core Health
       // sensor that silently stopped reporting is the failure this whole ticket exists to make
@@ -439,6 +472,7 @@ export class CoreHealthService {
     parked: { count: number | null; lastError: string | null };
     reap: number | null;
     credentials: number | null;
+    localProbeLog: { droppedLines: number; uptimeSeconds: number } | null;
   }> {
     try {
       return await this.#db.tx(async (q) => ({
@@ -448,6 +482,7 @@ export class CoreHealthService {
         parked: await parkedBackfill(q),
         reap: await count(q, 'SELECT count(*)::int AS n FROM channel_reap'),
         credentials: await this.#sources.credentialsToReenter(q),
+        localProbeLog: (await this.#sources.localProbeLog?.(q)) ?? null,
       }));
     } catch (error: unknown) {
       if (!degrade) throw error;
@@ -462,6 +497,7 @@ export class CoreHealthService {
         parked: { count: null, lastError: null },
         reap: null,
         credentials: null,
+        localProbeLog: null,
       };
     }
   }
@@ -540,6 +576,35 @@ function describe(reading: CoreHealthReading, parkedError: string | null = null)
     parts.push(parkedError === null ? what : `${what}, the last failing with: ${parkedError}`);
   }
   return parts.join(', ');
+}
+
+/**
+ * Log lines dropped since the last reading: the core's own, and the local probe's (`P-216` part 3).
+ *
+ * **A count per reading, not the running total** — a total would warn for ever after one stall —
+ * and not a counter channel's rate, which gaps on the first reading after a restart and so misses
+ * the lines dropped in the stall that caused it. The core's own first reading is its whole total:
+ * the meter started with the process. The local probe's counts in full only when it started after
+ * this core did; a probe running from before gaps its part for one reading, since the core before
+ * this one may have recorded it. A gap in one part leaves the other; a gap in both is a gap.
+ */
+function logDropped(
+  meters: CoreHealthMeters,
+  own: LogOutputStats | undefined,
+  local: { droppedLines: number; uptimeSeconds: number } | null,
+  uptime: number,
+): number | null {
+  const mine = own === undefined ? null : meters.log.take(own.droppedLines, uptime, true);
+  const theirs =
+    local === null
+      ? null
+      : meters.localProbeLog.take(
+          local.droppedLines,
+          local.uptimeSeconds,
+          local.uptimeSeconds < uptime,
+        );
+  if (mine === null && theirs === null) return null;
+  return (mine ?? 0) + (theirs ?? 0);
 }
 
 /** How many backfills are parked, and the error of the one that failed last (`P-226`). */

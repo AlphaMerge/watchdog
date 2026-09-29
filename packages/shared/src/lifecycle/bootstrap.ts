@@ -4,7 +4,8 @@ import { loadConfig, type ConfigSources } from '../config/load.js';
 import type { ServiceConfig } from '../config/schema.js';
 import { ConfigError, describeError } from '../errors/app-error.js';
 import { createLogger, type Logger } from '../logging/logger.js';
-import { EX_CONFIG } from './exit.js';
+import { LogOutput } from '../logging/output.js';
+import { EX_CONFIG, exitWithLine } from './exit.js';
 import { Lifecycle } from './lifecycle.js';
 
 export interface BootstrapOptions<T> {
@@ -25,6 +26,12 @@ export interface BootstrappedService<T> {
   logger: Logger;
   lifecycle: Lifecycle;
   sources: ConfigSources;
+  /**
+   * Where the logger writes, for Core Health and Probe Health to read what it dropped and holds
+   * (`P-216` part 3). Absent under `logPretty`, which is development's and goes through pino's
+   * own transport.
+   */
+  logOutput: LogOutput | undefined;
 }
 
 /**
@@ -50,17 +57,23 @@ export function bootstrap<T extends { service: ServiceConfig }>(
   } catch (error) {
     // No logger yet — this is the one place a service writes to stderr directly, because a
     // configuration failure must be readable in `journalctl` before logging is configured.
+    // Written synchronously and waited for (`P-216` part 3): `process.stderr.write` on a stalled
+    // journal queues the line, and the exit discards it.
     const described = describeError(error);
-    process.stderr.write(
+    exitWithLine(
+      EX_CONFIG,
       `${error instanceof ConfigError ? 'Configuration error' : 'Startup failed'}: ${described.message}\n`,
     );
-    process.exit(EX_CONFIG);
   }
 
+  // Before the logger, so the first line it writes is already bounded and flushed on exit.
+  const logOutput = config.service.logPretty ? undefined : new LogOutput();
+  logOutput?.flushOnExit();
   const logger = createLogger({
     name: config.service.name,
     level: config.service.logLevel,
     pretty: config.service.logPretty,
+    ...(logOutput === undefined ? {} : { destination: logOutput }),
   });
 
   const lifecycle = new Lifecycle({
@@ -88,5 +101,5 @@ export function bootstrap<T extends { service: ServiceConfig }>(
     'starting',
   );
 
-  return { config, logger, lifecycle, sources };
+  return { config, logger, lifecycle, sources, logOutput };
 }

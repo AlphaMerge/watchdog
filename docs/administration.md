@@ -382,6 +382,7 @@ alarm.
 | `memoryAvailable` | What the core's *machine* has left — `MemAvailable` on Linux, the lowest of the last 30 s. Warns below 20%, errors below 10%: `P-206` watched a machine go from 8.5% to a kernel kill in six seconds. On the default installation the local probe's copy reads the same machine; this is the one that matters when every probe is remote and nothing else is watching the database host. A gap where the machine claims more available than total, as a probe's does. **On a single-host install this is the one that alarms** (`M-21`): the local probe's own `memoryAvailable` gaps, so a squeeze is one sensor Down rather than two |
 | `memoryLimitUsage` | The core's working set against its own ceiling — `MemoryMax=8G` in `ms-core.service`. Warns above 80%, and the warning is the one to act on: at 100% the kernel kills the core. See [a service at its memory ceiling](#a-service-at-its-memory-ceiling). A gap where there is no limit, on cgroup v1 and on Windows |
 | `evictedChunks` | **Any value above zero is an error.** Data was dropped early to stay on disk |
+| `logDropped` | **Any value above zero is a warning.** Log lines the core could not write since the last reading, because the journal stopped taking them and 8 MiB were already waiting. With a local probe, its lines too: one journal, one alarm. See [a journal that is not keeping up](#a-journal-that-is-not-keeping-up). `logBacklog` beside it is what is waiting, in MB, with no limit |
 | `notifyOldest` | Notifications queued and undelivered. 15 minutes warns; an hour means nobody is being told anything |
 | `alarmOverdue` | The alarm sweep is not running. Everything downstream of it is silently stale |
 | `probesDown` | Probes not connected. Their sensors are not being checked |
@@ -400,6 +401,7 @@ alarm.
 | `sessionsEvicted` | Sessions closed for being idle. Climbing in step with the sessions opened means `idleMs` is shorter than your scan interval, so every check pays a handshake it need not — expensive on SSH |
 | `spoolStalled` | **Any value above zero is an error.** The link is up and the spool is not moving — results are accumulating for a reason nothing else reports |
 | `spoolDropped` | **Any value above zero is an error.** Results were lost because the spool filled |
+| `logDropped` | **Any value above zero is a warning.** Log lines the probe could not write since the last record — see [a journal that is not keeping up](#a-journal-that-is-not-keeping-up). **A gap on the local probe**, whose lines Core Health counts, and on a probe older than protocol 21. `logBacklog` is what is waiting, in MB, on every probe |
 | `memoryAvailable` | What the probe's *machine* has left, which `memory` — the probe's own share — cannot tell you. The probe `P-206` lost was the largest process on its VM, and was killed because a lint run and PostgreSQL had taken the rest. Warns below 20%, errors below 10%. Read every 2 s on the probe's own timer, because the fall from 8.5% to a kill took six, and each record is the lowest since the record before — see [what a record's memory channels cover](#what-a-records-memory-channels-cover). A gap for a probe older than protocol 17, on any platform but Linux and Windows, and where the machine claims more available than it has in total — a container whose `/proc/meminfo` is virtualised (`lxcfs`, OpenVZ) can (`P-224`). The machine's figure, not the probe's own ceiling — that is the next row. **A gap on the local probe** (`M-21`): its machine is the core's, and Core Health's `memoryAvailable` above carries the same reading with the same limits, so one squeeze on a single-host install is one alarm, on Core Health. The local probe's message still names the figure when it is below 20%. Only a probe flagged local at approval is treated this way; one on the core's host that is not flagged still reports both |
 | `memoryLimitUsage` | The probe's working set against the ceiling its own unit sets — `MemoryMax=6G` in `ms-probe.service`, whatever the machine has left. Warns above 80%. **Act on the warning**: at 100% the kernel kills the probe, and what follows is a link that drops, not a reading — see [a service at its memory ceiling](#a-service-at-its-memory-ceiling). Measured against the working set, not `memory.current`, because page cache fills a cgroup to its ceiling harmlessly. A gap where there is no limit, on cgroup v1 (RHEL 8 by default) and on Windows. `memoryLimit` beside it is the ceiling in MB |
 | `clockJumps` | The host's clock moved. Scheduling is monotonic, but data is wall-clock |
@@ -645,6 +647,37 @@ is its own.
 much memory the probe may use. If it is more than memory holds, the probe logs *workerPoolSize
 allows more workers than memory holds* once per episode and grows past it anyway, and
 `poolMemoryCap` shows the number it would have stopped at.
+
+### A journal that is not keeping up
+
+**A service never waits for its log** (`P-216`). Both write to standard output, which systemd
+hands to the journal. When the journal stops taking lines — journald stalled, a disk full under
+it, a host starved of CPU — the lines wait in the service, up to 8 MiB each, and past that they are
+dropped and counted. `logDropped` on Core Health and Probe Health warns on the first one. Before
+this a stalled journal made the service hold everything it logged, for as long as the stall
+lasted, and said nothing.
+
+When a service exits it writes what is waiting first, and waits up to two seconds for a stalled
+journal to take it, so the line that says why it stopped is the last one in the journal, not lost.
+That covers a stop, a crash, and a configuration it refuses (exit 78); it cannot cover a
+`SIGKILL`.
+
+**On a single host both services share one journal**, so a stall makes both drop at once. Core
+Health counts the local probe's lines with its own, and the local probe's `logDropped` gaps: one
+journal, one alarm. A probe on a host of its own has its own journal and its own warning.
+
+What to look at, in order:
+
+- **`journalctl --disk-usage` and the disk under `/var/log/journal`.** A full disk stops the
+  journal.
+- **`systemctl status systemd-journald`.** A journald that is itself starved or restarting.
+- **The host's load.** A machine that cannot schedule journald cannot schedule the services
+  either; `schedulerLag` and the watchdog restarts will be saying so too.
+
+A refused check is logged once per episode, not once per check: the first line names the sensor,
+its type and the queue's bound, then *still refusing checks at a full queue* every 30 s with the
+count, and *no longer refusing checks* once 30 s pass without one. `refused` on Probe Health has
+every one.
 
 ### A core that is still starting
 

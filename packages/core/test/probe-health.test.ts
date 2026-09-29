@@ -708,6 +708,98 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
     });
   });
 
+  describe('the log lines a record counts (P-216 part 3)', () => {
+    /** One service across sweeps, so each record's count is against the one before. */
+    function recorder(uptime = 10_000): {
+      link: { current: ProbeLink };
+      sweep: () => Promise<Map<number, Record<string, number>>>;
+    } {
+      const link = { current: connected() };
+      const results: CheckResult[] = [];
+      const service = new ProbeHealthService({
+        vouching: everyVoucherHolds,
+        db,
+        logger: silent,
+        sources: { link: () => link.current },
+        ingest: (batch) => {
+          results.push(...batch);
+          return Promise.resolve();
+        },
+        now: () => new Date('2026-08-28T00:00:25Z'),
+        uptime: () => uptime,
+      });
+      return {
+        link,
+        sweep: async () => {
+          results.length = 0;
+          await service.sweep();
+          return new Map(
+            results.map((result) => [
+              result.sensorId,
+              Object.fromEntries(
+                result.channels
+                  .filter((channel) => channel.key.startsWith('log'))
+                  .map((channel) => [channel.key, channel.value]),
+              ),
+            ]),
+          );
+        },
+      };
+    }
+
+    const reporting = (logDropped: number, uptimeSeconds: number, logBacklogBytes = 0): ProbeLink =>
+      connected({ health: { ...FULL, logDropped, logBacklogBytes, uptimeSeconds } });
+
+    it('records the lines dropped since the last record, for every sensor on the probe', async () => {
+      // A probe running from before this core: its total may already be on record, so a gap.
+      const r = recorder(1_000);
+      r.link.current = reporting(400, 5_000, 3 * 1024 * 1024);
+      const first = await r.sweep();
+      assert.deepEqual(first.get(sensorId), { logBacklog: 3 });
+      r.link.current = reporting(460, 5_030);
+      const second = await r.sweep();
+      assert.equal(second.get(sensorId)?.['logDropped'], 60);
+      // Taken once per probe per sweep: the second sensor must not read zero.
+      assert.equal(second.get(orphanId)?.['logDropped'], 60);
+      r.link.current = reporting(460, 5_060);
+      assert.equal((await r.sweep()).get(sensorId)?.['logDropped'], 0, 'and clears');
+    });
+
+    it('counts a probe that restarted in full, which is the stall that restarted it', async () => {
+      const r = recorder(1_000);
+      r.link.current = reporting(400, 5_000);
+      await r.sweep();
+      r.link.current = reporting(900, 12);
+      assert.equal((await r.sweep()).get(sensorId)?.['logDropped'], 900);
+    });
+
+    it('counts a probe that started after this core did in full on its first record', async () => {
+      const r = recorder(10_000);
+      r.link.current = reporting(25, 40);
+      assert.equal((await r.sweep()).get(sensorId)?.['logDropped'], 25);
+    });
+
+    it('gaps a probe too old to report it, and one that is gone', async () => {
+      const r = recorder();
+      assert.deepEqual((await r.sweep()).get(sensorId), {});
+      r.link.current = { connected: false };
+      assert.deepEqual((await r.sweep()).get(sensorId), {});
+    });
+
+    it('leaves the local probe’s drops to Core Health, and keeps its backlog (M-21)', async () => {
+      // One journal on a single host: both services drop at once when it stops reading, and two
+      // sensors warning for one stall is the second alarm. Core Health counts these lines.
+      await db.query('UPDATE probe_config SET is_local = true WHERE object_id = $1', [probeId]);
+      try {
+        const r = recorder(10_000);
+        r.link.current = reporting(25, 40, 1024 * 1024);
+        assert.deepEqual((await r.sweep()).get(sensorId), { logBacklog: 1 });
+      } finally {
+        await db.query('UPDATE probe_config SET is_local = false WHERE object_id = $1', [probeId]);
+      }
+    });
+  });
+
   describe('a probe that is not answering', () => {
     it('reports the link down and every other channel as a gap', () => {
       // **The reading this sensor exists for.** The probe's numbers are not zero, they are

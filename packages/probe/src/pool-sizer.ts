@@ -81,6 +81,9 @@ export function poolSizer(deps: PoolSizerDeps): PoolSizer {
   // — a pool told to change its ceiling should simply do it.
   let belowStreak = 0;
   let timer: NodeJS.Timeout | undefined;
+  // Set while the workload is past what a probe may derive, so the log says so once per episode
+  // rather than every thirty-second pass (`P-216` part 3): `P-216c` logged it 37 times in one run.
+  let beyondCap = false;
 
   const size = (): void => {
     if (!enabled) return;
@@ -93,9 +96,18 @@ export function poolSizer(deps: PoolSizerDeps): PoolSizer {
       // Visible rather than silent (`WORKFLOW.MD` §5). The pool will also saturate and raise
       // `poolUsage` on Probe Health, which is the alarm an operator already has a trigger on;
       // this names the number that was refused so the log says what to do about it.
-      deps.logger.warn(
+      if (!beyondCap) {
+        beyondCap = true;
+        deps.logger.warn(
+          { required: Math.ceil(demand.required), cap: options.max },
+          'workload needs more workers than a probe may derive for itself; set workerPoolSize',
+        );
+      }
+    } else if (beyondCap) {
+      beyondCap = false;
+      deps.logger.info(
         { required: Math.ceil(demand.required), cap: options.max },
-        'workload needs more workers than a probe may derive for itself; set workerPoolSize',
+        'workload fits the workers a probe may derive for itself again',
       );
     }
     // **Raise now, lower slowly** (`P-40`). Since `P-39` a lowered ceiling sheds workers at once,

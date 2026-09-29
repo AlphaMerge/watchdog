@@ -477,6 +477,27 @@ const CHANNELS: readonly ChannelDef[] = [
   // The ceiling itself, so "92% of its limit" says of what.
   { key: 'memoryLimit', name: 'Memory limit', unit: 'MB' },
   { key: 'uptime', name: 'Uptime', unit: 's' },
+  // **Log lines the probe could not write since the last record** (`P-216` part 3): refused at its
+  // output's eight-megabyte bound while the journal was not reading, or lost to an output that
+  // closed. A count per record, from a running total on the heartbeat, for Core Health's reasons.
+  // Since protocol 21; a gap from an older probe.
+  //
+  // **Not the local probe's to report** (`M-21`'s rule). It writes to the core's journal, and a
+  // journal that stops reading makes both services drop at once: two sensors warning for one
+  // stall. Core Health counts the local probe's lines with its own, and here the channel gaps.
+  {
+    key: 'logDropped',
+    name: 'Log lines dropped',
+    unit: 'lines',
+    limits: {
+      upperWarning: 0,
+      warningMessage:
+        "log lines are being dropped: the probe's journal is not keeping up with what it writes",
+    },
+  },
+  // What the output holds that the journal has not taken, up to the bound. No limit, on the local
+  // probe too: `logDropped` is the alarm.
+  { key: 'logBacklog', name: 'Log waiting to be written', unit: 'MB' },
 ];
 
 export const probeHealth: SensorType = {

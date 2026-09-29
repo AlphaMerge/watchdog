@@ -53,6 +53,10 @@ matter.
 - **The backlog has no bound.** SonicBoom's `maxLength` is 0, so a journal stalled for an hour at
   that rate would hold about 40 MB in the probe, and a day about 1 GB, with nothing counted and
   nothing on Probe Health. Here it held 2 MB for five minutes and let it go.
+- **An exit could lose the write in flight** (found while fixing the two above, `P-216` part 3).
+  SonicBoom writes asynchronously, and while the output pushes back it holds one chunk in a write
+  it is retrying, which its exit flush skips, so an exit then could lose that chunk and write the
+  lines after it: the last lines missing or out of order, exactly when a crash wrote them.
 
 The sizer's *workload needs more workers than a probe may derive for itself* warning also came
 once per 30 s pass, 37 times, where *memory is holding the check pool back* came once per probe

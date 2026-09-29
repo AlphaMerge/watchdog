@@ -1009,6 +1009,8 @@ cost: **light** · evaluated by the core, never by a probe
 | `resultsPastDated` | Results refused as too old | results | 64-bit counter → rate |
 | `reactionsDeferred` | Alarm reactions waiting on a catch-up | sensors | — |
 | `credentialsToReenter` | Credential sets to re-enter | sets | default limits: warn above 0 |
+| `logDropped` | Log lines dropped | lines | default limits: warn above 0 |
+| `logBacklog` | Log waiting to be written | MB | — |
 
 Takes no parameters.
 
@@ -1084,6 +1086,8 @@ cost: **light** · evaluated by the core, never by a probe
 | `memoryLimitUsage` | Memory used of its limit | % | default limits: warn above 80, error above 100 |
 | `memoryLimit` | Memory limit | MB | — |
 | `uptime` | Uptime | s | — |
+| `logDropped` | Log lines dropped | lines | default limits: warn above 0 |
+| `logBacklog` | Log waiting to be written | MB | — |
 
 | Parameter | Type | Default | Bounds | |
 | --- | --- | --- | --- | --- |

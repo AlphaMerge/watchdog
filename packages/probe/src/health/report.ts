@@ -3,6 +3,7 @@ import {
   CpuMeter,
   MemorySampler,
   type AvailableMemoryLow,
+  type LogOutputStats,
   type ProbeHealthReport,
 } from '@ms/shared';
 import type { PoolStats } from '../runner/pool.js';
@@ -79,6 +80,11 @@ export interface ProbeHealthSources {
    * for the same reason `process` is.
    */
   memory?: MemoryReadings;
+  /**
+   * The log output (`P-216` part 3): what it dropped since the probe started, and what it holds.
+   * Absent under `logPretty`, which writes through pino's own transport, so both channels gap.
+   */
+  log?: () => LogOutputStats;
   /** Injectable so a test does not measure the test runner. */
   process?: {
     cpuUsage: () => NodeJS.CpuUsage;
@@ -179,6 +185,7 @@ export class ProbeHealthReporter {
     const flows = this.#sources.flowListener?.();
     const spool = this.#sources.spool?.();
     const drain = this.#sources.drain?.();
+    const log = this.#sources.log?.();
     const cpu = this.#cpu.percent(this.#process.cpuUsage(), this.#process.hrtime());
     // The lowest headroom is the highest usage, so both are the lowest of what they cover.
     const { machine, limit } = this.#memoryFor(heartbeat);
@@ -293,6 +300,11 @@ export class ProbeHealthReporter {
             memoryLimitUsagePercent: Math.round((100 - limit.availablePercent) * 10) / 10,
             memoryLimitMb: Math.round((limit.totalBytes / MB) * 10) / 10,
           }),
+      // A running total, not a count since the last report: a report the core never got loses
+      // nothing, and the core records the growth between two of its readings.
+      ...(log === undefined
+        ? {}
+        : { logDropped: log.droppedLines, logBacklogBytes: log.backlogBytes }),
     };
   }
 

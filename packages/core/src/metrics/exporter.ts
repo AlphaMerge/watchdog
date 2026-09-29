@@ -1,8 +1,7 @@
 import { Counter, Gauge, Registry, collectDefaultMetrics } from '@prometheus-io/client';
 import type { Logger } from '@ms/shared';
-import { CpuMeter } from '@ms/shared';
 import type { Database } from '../db/pool.js';
-import type { CoreHealthService } from '../health/core-health.js';
+import { CoreHealthMeters, type CoreHealthService } from '../health/core-health.js';
 import type { ProbeHealthService } from '../health/probe-health.js';
 
 /**
@@ -553,8 +552,8 @@ export class MetricsExporter {
   readonly #probeGauges = new Map<string, Gauge<string>>();
   readonly #probeCounters = new Map<string, Counter<string>>();
   readonly #info: Gauge<string>;
-  /** Its own CPU baseline, so a scrape does not shorten the recorded sensor's window. */
-  readonly #cpu = new CpuMeter();
+  /** Its own baselines, so a scrape does not shorten the recorded sensor's window. */
+  readonly #meters = new CoreHealthMeters();
   /** The last absolute value seen per counter, keyed by metric and probe, for delta export. */
   readonly #lastCounter = new Map<string, number>();
 
@@ -617,7 +616,7 @@ export class MetricsExporter {
   async #refresh(): Promise<void> {
     const core = this.#options.coreHealth();
     if (core !== undefined) {
-      const reading = await core.read(this.#cpu);
+      const reading = await core.read(this.#meters);
       for (const metric of CORE_METRICS) {
         this.#set(metric, reading[metric.key] ?? null, {});
       }

@@ -3,6 +3,7 @@ import { pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { describeError, type CheckResult, type Logger } from '@ms/shared';
 import type { MemoryCapReading } from './memory-cap.js';
+import { RefusalLog } from './refusal-log.js';
 import type { CheckPhase, CheckRequest, ResultMeta, SessionCounters } from './types.js';
 
 /** Latencies kept for the percentiles Probe Health reports (P-13). */
@@ -228,6 +229,8 @@ export interface CheckPoolOptions {
    */
   durationWindowMs?: number;
   queueMaxLength?: number;
+  /** How often a refusal episode is summarised in the log (`P-216` part 3). Injectable for tests. */
+  refusalSummaryMs?: number;
   /**
    * How long a check has to honour its abort before the worker is terminated.
    *
@@ -494,6 +497,8 @@ export class CheckPool {
   #timedOut = 0;
   #deferred = 0;
   #refused = 0;
+  /** Refusals logged once per episode, with a count every thirty seconds (`P-216` part 3). */
+  readonly #refusals: RefusalLog;
   #discarded = 0;
   #crashes = 0;
 
@@ -514,6 +519,9 @@ export class CheckPool {
     this.#onResult = options.onResult;
     this.#memoryCap = options.memoryCap;
     this.#enforceMemoryCap = options.enforceMemoryCap ?? true;
+    this.#refusals = new RefusalLog(this.#logger, 'check queue is full, refusing a check', {
+      ...(options.refusalSummaryMs === undefined ? {} : { summaryMs: options.refusalSummaryMs }),
+    });
   }
 
   /** Workers held right now, which since `P-18` is not the same as the configured maximum. */
@@ -660,6 +668,7 @@ export class CheckPool {
    */
   async stop(options: { drainMs?: number } = {}): Promise<void> {
     this.#stopped = true;
+    this.#refusals.stop();
     if (this.#shrinkTimer !== undefined) clearInterval(this.#shrinkTimer);
     this.#shrinkTimer = undefined;
     if (this.#overCeilingTimer !== undefined) clearTimeout(this.#overCeilingTimer);
@@ -752,10 +761,12 @@ export class CheckPool {
     }
     if (verdict === 'queue-full') {
       this.#refused += 1;
-      this.#logger.warn(
-        { sensorId: request.sensorId, queued: this.#queue.length },
-        'check queue is full, refusing a check',
-      );
+      this.#refusals.refused({
+        sensorId: request.sensorId,
+        sensorType: request.sensorType,
+        queued: this.#queue.length,
+        queueMax: this.#queueMax,
+      });
       return 'queue-full';
     }
 

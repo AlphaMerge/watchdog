@@ -3,6 +3,7 @@ import { runProgram, type CheckResult, type Logger } from '@ms/shared';
 // From `types.js`, never from `check-child.js`: that module is an entry point with top-level
 // `await` on stdin, and importing it here once made the probe sit waiting for its own stdin.
 import { RESULT_MARKER } from './types.js';
+import { RefusalLog } from './refusal-log.js';
 import type { CheckPhase, CheckRequest, ResultMeta, SubmitOutcome } from './index.js';
 
 /**
@@ -69,6 +70,8 @@ export interface ProcessRunnerOptions {
   /** Node processes that may run at once. Far smaller than the worker pool's, and it must be. */
   maxConcurrent?: number;
   queueMaxLength?: number;
+  /** How often a refusal episode is summarised in the log (`P-216` part 3). Injectable for tests. */
+  refusalSummaryMs?: number;
   /** Heap ceiling handed to the child as `--max-old-space-size`. */
   memoryLimitMb?: number;
   /** POSIX only, and only when this process has the privilege. Both or neither. */
@@ -150,6 +153,8 @@ export class ProcessRunner {
   #timedOut = 0;
   #deferred = 0;
   #refused = 0;
+  /** Refusals logged once per episode, with a count every thirty seconds (`P-216` part 3). */
+  readonly #refusals: RefusalLog;
   #crashed = 0;
   readonly #waits: number[] = [];
   readonly #runs: number[] = [];
@@ -167,6 +172,13 @@ export class ProcessRunner {
       options.registryModule ?? join(import.meta.dirname, 'catalogue-registry.js');
     this.#childModule = options.childModule ?? join(import.meta.dirname, 'check-child.js');
     this.#onResult = options.onResult;
+    this.#refusals = new RefusalLog(
+      this.#logger,
+      'process-runner queue is full, refusing a check',
+      {
+        ...(options.refusalSummaryMs === undefined ? {} : { summaryMs: options.refusalSummaryMs }),
+      },
+    );
   }
 
   /** Fire and forget, exactly like `CheckPool.submit`: the wheel must never wait for a check. */
@@ -209,10 +221,12 @@ export class ProcessRunner {
     }
     if (verdict === 'queue-full') {
       this.#refused += 1;
-      this.#logger.warn(
-        { sensorId: request.sensorId, queued: this.#queue.length },
-        'process-runner queue is full, refusing a check',
-      );
+      this.#refusals.refused({
+        sensorId: request.sensorId,
+        sensorType: request.sensorType,
+        queued: this.#queue.length,
+        queueMax: this.#queueMax,
+      });
       return 'queue-full';
     }
 
@@ -435,6 +449,7 @@ export class ProcessRunner {
    */
   async stop(options: { drainMs?: number } = {}): Promise<void> {
     this.#stopped = true;
+    this.#refusals.stop();
     // Answered rather than emptied. Truncating the array left every queued check accepted and
     // never settled — counted in nothing, and its sensor stuck in `#active` — which is the drop
     // without a count `CLAUDE.md` rules out. They never started, so `pool-stopped` is the truth.

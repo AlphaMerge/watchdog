@@ -126,6 +126,20 @@ describe('the derived pool ceiling (P-34, P-40, P-44)', () => {
     assert.ok(Number(h.warnings[0]['required']) > 256, 'the number that was refused is named');
   });
 
+  it('says it once while the workload stays past the cap, and again after it came back (P-216)', () => {
+    // `P-216c`: once per thirty-second pass was 37 lines in one run, each the same.
+    let count = 20_000;
+    const pool = fakePool(64, { 'icmp.ping': 3_000 });
+    const h = harness({ assignments: () => sensors(count) }, pool);
+    for (let pass = 0; pass < 5; pass += 1) h.sizer.size();
+    assert.equal(h.warnings.length, 1, 'once per episode');
+    count = 100;
+    h.sizer.size();
+    count = 20_000;
+    h.sizer.size();
+    assert.equal(h.warnings.length, 2, 'a new episode says it again');
+  });
+
   it('recomputes on its own timer, and stops when told', async () => {
     // **Waited for, not slept through** (`P-96`). This asserted `>= 2` ticks after a fixed
     // `delay(40)` at a 5 ms interval, which is a claim about how responsive the event loop is

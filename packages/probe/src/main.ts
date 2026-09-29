@@ -2,6 +2,7 @@
 import {
   bootstrap,
   describeBuild,
+  exitWithLine,
   probeConfigSchema,
   runConfigCheck,
   type ProbeConfig,
@@ -87,7 +88,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const { config, logger, lifecycle } = bootstrap<ProbeConfig>({
+  const { config, logger, lifecycle, logOutput } = bootstrap<ProbeConfig>({
     schema: probeConfigSchema,
     version: VERSION,
     build: BUILD,
@@ -454,6 +455,8 @@ async function main(): Promise<void> {
     // the difference is the whole of `615c9f3` — a full spool and a healthy link read identically
     // without it.
     drain: () => drain.stats(),
+    // What the log dropped and holds while the journal was not reading (`P-216` part 3).
+    ...(logOutput === undefined ? {} : { log: () => logOutput.stats() }),
   });
   // Memory is read every two seconds whether or not a heartbeat is due, or connected (`P-218`).
   health.start();
@@ -546,6 +549,6 @@ async function main(): Promise<void> {
 
 main().catch((error: unknown) => {
   const { status, line } = startFailure(error);
-  process.stderr.write(line);
-  process.exit(status);
+  // Waited for, so a stalled journal cannot discard the one line that says why (`P-216` part 3).
+  exitWithLine(status, line);
 });

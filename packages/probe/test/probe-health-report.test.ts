@@ -221,6 +221,22 @@ describe('the probe’s own health report', () => {
     );
   });
 
+  it('carries what the log output dropped as a running total, and what it holds (P-216)', () => {
+    const report = new ProbeHealthReporter({
+      scheduler: () => WHEEL,
+      pool: () => POOL,
+      log: () => ({ droppedLines: 1_204, droppedBytes: 180_000, backlogBytes: 8_388_000 }),
+    }).report();
+    assert.equal(report.logDropped, 1_204);
+    assert.equal(report.logBacklogBytes, 8_388_000);
+  });
+
+  it('says nothing about a log it cannot read, rather than zero dropped', () => {
+    const report = reporter({}).report();
+    assert.equal('logDropped' in report, false);
+    assert.equal('logBacklogBytes' in report, false);
+  });
+
   it('says how far memory lets the pool grow, and how much it holds back (P-236)', () => {
     const report = reporter({}).report();
     assert.equal(report.poolCeiling, 50);

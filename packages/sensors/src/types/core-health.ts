@@ -413,6 +413,26 @@ const CHANNELS: readonly ChannelDef[] = [
         'a credential set holds keys its kind does not declare; re-enter it (the core log says which)',
     },
   },
+  // **Log lines the core could not write since the last reading** (`P-216` part 3): refused at its
+  // output's eight-megabyte bound while the journal was not reading, or lost to an output that
+  // closed. A count per reading, not a running total and not a counter's rate: a total would warn
+  // for ever after one stall, and a rate gaps on the first reading after a restart, which is the
+  // one covering the stall that caused it. **With a local probe it counts that probe's lines too**:
+  // both write to one journal, and a journal that stops reading is one alarm, Core Health's, as
+  // the machine's memory is (`M-21`). The local probe's own channel gaps.
+  {
+    key: 'logDropped',
+    name: 'Log lines dropped',
+    unit: 'lines',
+    limits: {
+      upperWarning: 0,
+      warningMessage:
+        'log lines are being dropped: the journal is not keeping up with what the services write',
+    },
+  },
+  // What the output holds that the journal has not taken, up to the bound. No limit:
+  // `logDropped` is the alarm, and this is how close the next stall is to it.
+  { key: 'logBacklog', name: 'Log waiting to be written', unit: 'MB' },
 ];
 
 export const coreHealth: SensorType = {

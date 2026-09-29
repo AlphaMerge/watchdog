@@ -1,4 +1,5 @@
 import { ConfigError, describeError } from '../errors/app-error.js';
+import { writeLineSync } from '../logging/output.js';
 
 /**
  * `EX_CONFIG` from `sysexits.h`: the service refused to start with what it was given.
@@ -26,4 +27,17 @@ export function startFailure(error: unknown): { status: number; line: string } {
   return error instanceof ConfigError
     ? { status: EX_CONFIG, line: `Configuration error: ${message}\n` }
     : { status: 1, line: `fatal: ${message}\n` };
+}
+
+/**
+ * Writes the line to standard error and exits with the status: the end of every start-up failure.
+ *
+ * **The line is waited for** (`P-216` part 3). `process.stderr.write` on a pipe the journal has
+ * stopped reading queues the line and returns, and `process.exit` a moment later discards it:
+ * `systemctl status` then says the unit exited 78 and nothing about why. This writes it
+ * synchronously, waiting up to two seconds for a stalled journal, and exits either way.
+ */
+export function exitWithLine(status: number, line: string): never {
+  writeLineSync(2, line);
+  process.exit(status);
 }

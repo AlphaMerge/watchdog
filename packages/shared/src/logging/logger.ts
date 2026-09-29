@@ -1,4 +1,4 @@
-import { pino, type Logger, type LoggerOptions } from 'pino';
+import { pino, type DestinationStream, type Logger, type LoggerOptions } from 'pino';
 import { currentCorrelation } from './correlation.js';
 import type { LogLevel } from '../config/schema.js';
 
@@ -9,7 +9,11 @@ export interface LoggerFactoryOptions {
   level: LogLevel;
   /** Development only. Production logs are structured JSON on stdout, collected by the unit. */
   pretty?: boolean;
-  destination?: NodeJS.WritableStream;
+  /**
+   * Where lines go. A service passes its `LogOutput` (`P-216` part 3); left out, pino's own, which
+   * is what a test or a one-off command wants.
+   */
+  destination?: DestinationStream;
 }
 
 /**
