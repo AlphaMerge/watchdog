@@ -14393,13 +14393,44 @@ because each is a decision rather than a defect:
       first assertion and left a-ping forced. It now cleans up in a `finally`, and the rerun
       fails the partition test alone.
 
-- [ ] **A-32 — An object's ETag does not change when the caller's view does** · S · A-12 · Can
+- [x] **A-32 — An object's ETag does not change when the caller's view does** · S · A-12 · Can
       wait. Filed 2026-09-28 from `A-12`'s triage (M1, low). `GET /objects/:id` answers 304 on a
       tag made from the object's version and, with `include`, its ancestors' versions. Nothing in
       it says what the caller may see, so a grant or a hole that changes what their answer holds
       (its path, the names of inherited sources) can be answered "not modified" from a stale
       view. **Fix:** fold `access_epoch` and the principal into the tag for a restricted caller,
       and send `Cache-Control: private`.
+
+      **A-32 outcome.**
+      - **One tag function for the render and the 304.** `detailTag` in `routes/objects.ts`
+        builds the validator both paths send, so they cannot disagree. A caller who sees
+        everything gets the tag it always had: `W/"<version>"`, or with `?include=` the version
+        and the chain digest. A restricted caller gets the chain part salted with what the
+        answer was rendered for, through `viewedChain` in `preconditions.ts`. It is folded into
+        the one hex part rather than added beside it, because `If-Match` reads a tag as a version
+        and at most one hex part, and a restricted caller's tag has to stay one it can send back.
+      - **What the salt holds, and why each part:**
+        - the access epoch, which moves with every grant, membership and move;
+        - the principal (account, role and token scope, the key the stream already uses), so one
+          account's tag never matches a copy cached for another;
+        - the count of children the caller can see. The ticket did not name it, but creating a
+          sensor moves no epoch, and the count is the one part of the answer that changes with
+          neither the object nor a grant.
+      - **`Cache-Control: private, max-age=0, must-revalidate`** on the answer and on the 304,
+        the form the other per-caller routes send. A shared cache behind a cookie could
+        otherwise hand one account's copy to another.
+      - **Inherited sources.** The ticket named their names as view-dependent. A source is an
+        object id and a depth (`ms:settingSource`), with no name, and `service.settings` takes no
+        visibility, so it does not vary by caller. The chain digest already covers it.
+      - **Tests** (`object-visibility.test.ts`, as the watcher and operator accounts): a hole
+        carved under a device, a grant that lengthens the trimmed path with
+        `?include=ancestors`, and a sensor added under the device each turn a 304 into a 200
+        with the new answer. The two accounts in one team, with the same view, get different
+        tags. An administrator's tag keeps its old form, and a restricted tag is accepted as
+        `If-Match` on a PATCH. The route's description says what the tag covers. Mutation 6/6:
+        the view left out of the tag, and each of its three parts left out on its own (each is
+        killed by exactly the case that needs it), the 304 path keeping the old tag, and the
+        answer sent without `Cache-Control`.
 
 - [ ] **A-33 — Visibility for a root-readable account is never tested with nested holes, or
       measured with many** · M · A-12 · Can wait, and needs a booked `test:perf` slot. Filed

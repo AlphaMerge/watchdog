@@ -1275,6 +1275,8 @@ Creates many objects at once, under one `parentId`, with nodes naming their pare
 
 ### `GET /api/v1/objects/{id}`
 
+One object. Send the `ETag` back as `If-None-Match` for a 304 when nothing in the answer has changed: the tag covers what it inherits with `?include=`, and, for an account that does not see everything, what its grants decide, so a grant that changes the answer changes the tag. The answer is `Cache-Control: private`.
+
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
 | `include` | query | string |  |

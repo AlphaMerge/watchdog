@@ -28,7 +28,7 @@ import { SENSOR_STATES } from '../../state/tables.js';
 import type { ChannelLimitsPatch } from '../../state/limits.js';
 import type { ChannelProcessing } from '../../objects/types.js';
 import { decodeCursor } from '../pagination.js';
-import { etagFor, optionalIfMatch, requireIfMatch } from '../preconditions.js';
+import { etagFor, optionalIfMatch, requireIfMatch, viewedChain } from '../preconditions.js';
 import {
   INSTALLATION,
   READS,
@@ -40,11 +40,17 @@ import {
   onQueryObject,
   onSubtree,
   reachOf,
+  sightOf,
   toAcknowledge,
   visibilityOf,
   writerFor,
 } from '../authorization.js';
-import { atLeast, type AccessService, type SubtreeAccess } from '../../auth/access.js';
+import {
+  atLeast,
+  type AccessService,
+  type SubtreeAccess,
+  type Visibility,
+} from '../../auth/access.js';
 import { AuthError } from '../../auth/errors.js';
 
 /** An outcome for an id the caller may not change, in the shape the route already returns. */
@@ -308,6 +314,13 @@ const countsResponse = {
 };
 
 const INCLUDE_TOKENS = ['settings', 'channels', 'credentials', 'ancestors'] as const;
+
+/**
+ * An object's answer is the caller's own (`A-32`): what it holds depends on their grants, and it
+ * may be revalidated but never stored by a shared cache, which could otherwise hand one account's
+ * copy to another behind the same proxy. The form the other per-caller routes send.
+ */
+const PRIVATE = 'private, max-age=0, must-revalidate';
 type IncludeToken = (typeof INCLUDE_TOKENS)[number];
 
 /** A listing's expansions. `path` is `ancestors` per row, named for what a row renders. */
@@ -352,9 +365,10 @@ export async function objectRoutes(
 
     // **A count of the children the reader can see** (`A-12`). Asked separately, and only when
     // something is hidden, so the common case pays nothing for it.
-    if (!visibility.everything) {
-      body['childCount'] = await service.visibleChildCount(id, visibility);
-    }
+    const childCount = visibility.everything
+      ? undefined
+      : await service.visibleChildCount(id, visibility);
+    if (childCount !== undefined) body['childCount'] = childCount;
     if (include.has('settings')) body['settings'] = await service.settings(id);
     if (include.has('channels') && object.kind === 'sensor') {
       body['channels'] = await service.channels(id);
@@ -362,15 +376,44 @@ export async function objectRoutes(
     if (include.has('credentials')) body['credentials'] = await service.credentials(id, true);
     if (include.has('ancestors')) body['ancestors'] = await service.ancestors(id, visibility);
 
-    // A response carrying inherited content needs a validator that covers what it inherited,
-    // or the next conditional request gets a 304 built from this object's version alone.
-    const chain = include.size === 0 ? undefined : await validatorFor(id);
-    await reply.status(status).header('ETag', etagFor(object.version, chain)).send(body);
+    await reply
+      .status(status)
+      .header('ETag', await detailTag(request, object, include, visibility, childCount))
+      .header('cache-control', PRIVATE)
+      .send(body);
   };
 
   /** Undefined rather than null, so `etagFor` falls back to the plain version tag. */
   const validatorFor = async (id: number): Promise<string | undefined> =>
     (await service.chainValidator(id, validatorSalt)) ?? undefined;
+
+  /**
+   * The validator for this caller's answer about an object: the render and the 304 build it here,
+   * so that they cannot disagree.
+   *
+   * A response carrying inherited content needs a validator that covers what it inherited, or the
+   * next conditional request gets a 304 built from this object's version alone (`S-13`).
+   *
+   * **A restricted caller's answer also holds what their grants decide** (`A-32`): the count of
+   * the children they can see and, with `?include=ancestors`, a path trimmed to what they can
+   * read. Neither moves the object's version or its chain, so a grant or a hole that changed them
+   * was answered "not modified". The access epoch moves with every grant, membership and move.
+   * The principal keeps one account's tag from matching a copy cached for another. The count
+   * changes with neither: a sensor created under a device moves no epoch. A caller who sees
+   * everything gets none of this, and the tag it always had.
+   */
+  const detailTag = async (
+    request: FastifyRequest,
+    object: { id: number; version: number },
+    include: ReadonlySet<IncludeToken>,
+    visibility: Visibility,
+    childCount: number | undefined,
+  ): Promise<string> => {
+    const chain = include.size === 0 ? undefined : await validatorFor(object.id);
+    if (visibility.everything) return etagFor(object.version, chain);
+    const view = `${sightOf(request).key}@${String(visibility.epoch)}#${String(childCount)}`;
+    return etagFor(object.version, viewedChain(chain, view));
+  };
 
   // ── 1. list ──────────────────────────────────────────────────────────────────────────────
   app.get<{ Querystring: ListQuery }>(
@@ -613,6 +656,11 @@ export async function objectRoutes(
       config: onObject('read'),
       schema: {
         tags: ['objects'],
+        description:
+          'One object. Send the `ETag` back as `If-None-Match` for a 304 when nothing in the ' +
+          'answer has changed: the tag covers what it inherits with `?include=`, and, for an ' +
+          'account that does not see everything, what its grants decide, so a grant that ' +
+          'changes the answer changes the tag. The answer is `Cache-Control: private`.',
         params: idParams,
         querystring: {
           type: 'object',
@@ -638,10 +686,13 @@ export async function objectRoutes(
       // that (S-13), and it covers a re-parenting as well as an edit.
       if (ifNoneMatch !== undefined) {
         const object = await service.get(id);
-        const chain = include.size === 0 ? undefined : await validatorFor(id);
-        const current = etagFor(object.version, chain);
+        const visibility = await visibilityOf(request);
+        const childCount = visibility.everything
+          ? undefined
+          : await service.visibleChildCount(id, visibility);
+        const current = await detailTag(request, object, include, visibility, childCount);
         if (ifNoneMatch === current) {
-          await reply.status(304).header('ETag', current).send();
+          await reply.status(304).header('ETag', current).header('cache-control', PRIVATE).send();
           return;
         }
       }

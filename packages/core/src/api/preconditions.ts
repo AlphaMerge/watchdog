@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { isExactBuild, type BuildIdentity } from '@ms/shared';
 import { ObjectError } from '../objects/errors.js';
 import type { Precondition } from '../objects/types.js';
@@ -21,6 +22,21 @@ import type { Precondition } from '../objects/types.js';
  */
 export function etagFor(version: number, chain?: string): string {
   return chain === undefined ? `W/"${String(version)}"` : `W/"${String(version)}-${chain}"`;
+}
+
+/**
+ * The chain part of a tag, for a caller who does not see everything (`A-32`).
+ *
+ * A restricted caller's answer holds things their grants decide, and neither the object's version
+ * nor its chain moves with a grant. So `view` names what the answer was rendered for, and it is
+ * folded into the chain part rather than added beside it: `If-Match` reads a tag as a version
+ * and at most one hex part, and a restricted caller's tag has to stay one it can send back.
+ * md5 for the reason `ObjectRepository.chainValidator` gives.
+ */
+export function viewedChain(chain: string | undefined, view: string): string {
+  return createHash('md5')
+    .update(`${chain ?? ''}|${view}`)
+    .digest('hex');
 }
 
 /**

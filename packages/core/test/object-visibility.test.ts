@@ -1901,6 +1901,99 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
     });
   });
 
+  describe('an object’s answer is the caller’s own (A-32)', () => {
+    /**
+     * A restricted caller's answer about one object holds what their grants decide, and neither
+     * the object's version nor its chain moves with a grant. Each case here was a 304 before
+     * `A-32`: a tag the caller already held, served back over an answer that had changed.
+     */
+    const PRIVATE = 'private, max-age=0, must-revalidate';
+    const detail = (login: string, id: number, tag?: string, include?: string) =>
+      app.inject({
+        method: 'GET',
+        url: `/api/v1/objects/${String(id)}${include === undefined ? '' : `?include=${include}`}`,
+        headers: { ...as(login), ...(tag === undefined ? {} : { 'if-none-match': tag }) },
+      });
+    const tagOf = (response: { headers: Record<string, unknown> }): string =>
+      String(response.headers['etag']);
+
+    it('stops answering 304 once a hole changes what it counts', async () => {
+      const first = await detail('watcher', deviceId);
+      assert.equal(first.statusCode, 200, first.body);
+      assert.equal(first.headers['cache-control'], PRIVATE);
+      assert.equal(first.json<{ childCount: number }>().childCount, 2, 'a-ping and a-held');
+      const unchanged = await detail('watcher', deviceId, tagOf(first));
+      assert.equal(unchanged.statusCode, 304, 'nothing has changed yet');
+      assert.equal(unchanged.headers['cache-control'], PRIVATE);
+
+      await access.grant(heldId, teamId, 'none', actorNamed('visibility'));
+      try {
+        const carved = await detail('watcher', deviceId, tagOf(first));
+        assert.equal(carved.statusCode, 200, 'a 304 would keep counting a-held');
+        assert.equal(carved.json<{ childCount: number }>().childCount, 1);
+      } finally {
+        await access.revoke(heldId, teamId, actorNamed('visibility'));
+      }
+    });
+
+    it('stops answering 304 once a grant lengthens the path it shows', async () => {
+      const ancestorsOf = (response: { body: string }): number[] =>
+        (JSON.parse(response.body) as { ancestors: { id: number }[] }).ancestors.map(
+          (one) => one.id,
+        );
+      const first = await detail('watcher', pingId, undefined, 'ancestors');
+      assert.equal(first.statusCode, 200, first.body);
+      assert.deepEqual(ancestorsOf(first), [branchId, deviceId], 'trimmed to the branch');
+
+      await access.grant(probeId, teamId, 'read', actorNamed('visibility'));
+      try {
+        const granted = await detail('watcher', pingId, tagOf(first), 'ancestors');
+        assert.equal(granted.statusCode, 200, 'a 304 would keep a path without the probe');
+        assert.deepEqual(ancestorsOf(granted), [probeId, branchId, deviceId]);
+      } finally {
+        await access.revoke(probeId, teamId, actorNamed('visibility'));
+      }
+    });
+
+    it('stops answering 304 once a child it can see is added, which moves no grant', async () => {
+      const first = await detail('watcher', deviceId);
+      const added = await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name: 'a-added',
+        sensorType: 'icmp.ping',
+      });
+      try {
+        const grown = await detail('watcher', deviceId, tagOf(first));
+        assert.equal(grown.statusCode, 200, 'a 304 would keep the count at two');
+        assert.equal(grown.json<{ childCount: number }>().childCount, 3);
+      } finally {
+        await harness.service.delete(testActor, added.id, { kind: 'leafOnly' }, { kind: 'none' });
+      }
+    });
+
+    it('never answers one account with a tag rendered for another', async () => {
+      // The same team and the same view: only the principal tells the two tags apart.
+      const watcher = await detail('watcher', deviceId);
+      const operator = await detail('operator', deviceId, tagOf(watcher));
+      assert.equal(operator.statusCode, 200);
+      assert.notEqual(tagOf(operator), tagOf(watcher));
+    });
+
+    it('keeps the tag an administrator always had, and takes a restricted one as If-Match', async () => {
+      assert.match(tagOf(await detail('admin', deviceId)), /^W\/"\d+"$/);
+      const operator = await detail('operator', deviceId);
+      assert.match(tagOf(operator), /^W\/"\d+-[0-9a-f]{32}"$/);
+      const patched = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/objects/${String(deviceId)}`,
+        headers: { ...as('operator'), 'if-match': tagOf(operator) },
+        payload: { kind: 'device', comments: 'edited from a restricted tag (A-32)' },
+      });
+      assert.equal(patched.statusCode, 200, patched.body);
+    });
+  });
+
   describe('grants change while sockets stay open', () => {
     it('sends a socket back to the start when its view changes, and not otherwise', async () => {
       const branch = await app.injectWS('/api/v1/stream', { headers: as('watcher') });
