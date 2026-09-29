@@ -18,6 +18,7 @@ export type ObjectErrorCode =
   | 'OBJECT_CLONE_TOO_LARGE'
   | 'OBJECT_VERSION_CONFLICT'
   | 'OBJECT_PRECONDITION_REQUIRED'
+  | 'OBJECT_CREDENTIALS_WITHHELD'
   | 'CREDENTIAL_VAULT_UNAVAILABLE';
 
 export const OBJECT_ERROR_STATUS: Readonly<Record<ObjectErrorCode, number>> = {
@@ -40,6 +41,9 @@ export const OBJECT_ERROR_STATUS: Readonly<Record<ObjectErrorCode, number>> = {
   OBJECT_CLONE_TOO_LARGE: 409,
   OBJECT_VERSION_CONFLICT: 412,
   OBJECT_PRECONDITION_REQUIRED: 428,
+  // The sensor is fine and so is the caller; who vouched for sending it its credentials is not
+  // (`A-41`), and the message says how to change that.
+  OBJECT_CREDENTIALS_WITHHELD: 409,
   // 503 rather than 500: the request is fine and the core is running, it simply has no vault
   // configured — an operator fixes it in the configuration file, not by retrying.
   CREDENTIAL_VAULT_UNAVAILABLE: 503,

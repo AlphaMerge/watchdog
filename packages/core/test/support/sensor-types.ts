@@ -48,8 +48,9 @@ const snmpTraffic: SensorType = {
   category: 'SNMP',
   costHint: 'medium',
   credentialKinds: ['snmp'],
-  // To the device the sensor is on, and nowhere a parameter chooses (`A-40`).
-  secretDestinations: { community: [] },
+  // The parameter to the device the sensor is on, and nowhere a parameter chooses (`A-40`); the
+  // inherited set to that device's `port` (`A-41`), as the real SNMP types declare it.
+  secretDestinations: { community: [], 'kind:snmp': ['port'] },
   paramsSchema: {
     type: 'object',
     additionalProperties: false,

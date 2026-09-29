@@ -25,6 +25,7 @@ import { LoggingAuditSink } from './objects/audit.js';
 import { PauseRepository } from './objects/pause-repository.js';
 import { ReachabilitySync } from './probes/reachability-sync.js';
 import {
+  credentialAdoptionAuditSinks,
   discoveryAuditSinks,
   grantAuditSinks,
   identityAuditSinks,
@@ -37,6 +38,7 @@ import {
 import { ObjectRepository } from './objects/repository.js';
 import { catalogueSensorTypeGate, logSensorTypes } from './objects/sensor-type-gate.js';
 import { SensorVouching } from './objects/vouching.js';
+import { CredentialVouching } from './objects/credential-vouching.js';
 import {
   applyDeclaredLimits,
   declaredChannelLookup,
@@ -102,8 +104,7 @@ import { SqlTimeSeriesStore, type TimeSeriesStore } from './timeseries/store.js'
 import { Housekeeper } from './timeseries/housekeeper.js';
 import { ProbeEndpoint } from './transport/probe-endpoint.js';
 import { DiscoveryService } from './discovery/service.js';
-import { ProvisionService, type ProvisionReport } from './discovery/provision.js';
-import { DiscoveryError } from './discovery/errors.js';
+import { ProvisionService, provisionRun, type ProvisionReport } from './discovery/provision.js';
 import { RediscoveryService } from './discovery/rediscovery.js';
 import { ProbeRegistry } from './probes/registry.js';
 import { AccountService } from './auth/accounts.js';
@@ -533,6 +534,20 @@ async function serve(): Promise<void> {
     dependencies: dependencyPauses,
   });
   vouchingRef = vouching;
+  // Who stands behind where each sensor's inherited credentials go (`A-41`), held through the set
+  // `A-29` withholds with. Every configuration a probe is sent asks it.
+  const credentialVouching = new CredentialVouching({
+    db,
+    logger,
+    sensorTypes: sensorTypeGate,
+    rights: (principal, objectIds, q) => objectAccess.resolveManyFor(principal, objectIds, q),
+    vouching,
+    audit: new CompositeAuditSink(credentialAdoptionAuditSinks(auditSinks)),
+  });
+  // Before anything is sent, and before the API can write: the installation vouches for every set
+  // in use when this build first starts, so the upgrade withholds nothing (migration 060), and a
+  // release that moves where a type sends a kind carries over only what it can show did not move.
+  await credentialVouching.adopt();
 
   // One instance, because `D-07` reads a schedule's definition through it as well: a rediscovery
   // may be constrained by a permission window, and what an evaluator needs is the definition
@@ -879,6 +894,8 @@ async function serve(): Promise<void> {
     // appears in a probe's assignment list (`T-21`).
     coreEvaluated: (sensorType) =>
       catalogue.has(sensorType) && catalogue.declaration(sensorType).evaluatedBy === 'core',
+    // Only while whoever vouched for it can still write where it is stored (`A-41`).
+    credentialCheck: credentialVouching,
   });
 
   // On-demand queries (`R-09`), reaching the endpoint through the same closure discovery uses
@@ -913,32 +930,27 @@ async function serve(): Promise<void> {
     recordDevice: (runId, address, deviceId) => discovery.recordDevice(runId, address, deviceId),
   });
 
-  const provision = async (runId: number, actor: Actor): Promise<ProvisionReport> => {
-    const run = await discovery.get(runId);
-    if (run === null) {
-      throw new DiscoveryError(
-        'DISCOVERY_RUN_NOT_FOUND',
-        `there is no discovery run ${String(runId)}`,
-        {
-          context: { runId },
+  const provision = (runId: number, actor: Actor): Promise<ProvisionReport> =>
+    provisionRun(
+      {
+        discovery,
+        provisioner,
+        existing: async (groupId) => {
+          const [devices, sensors] = await Promise.all([
+            devicesInGroup(db, groupId),
+            sensorsInGroup(db, groupId),
+          ]);
+          return { devices, sensors };
         },
-      );
-    }
-    const [hosts, existingDevices, existingSensors] = await Promise.all([
-      discovery.hosts(runId, 65_536),
-      devicesInGroup(db, run.groupId),
-      sensorsInGroup(db, run.groupId),
-    ]);
-    const report = await provisioner.provision({
-      run,
-      hosts,
-      existingDevices,
-      existingSensors,
+        vouchers: {
+          authRequired: config.api.requireAuthentication,
+          ruleWriter: async (ruleId) => (await rediscoveryRef?.writerOf(ruleId)) ?? null,
+          rights: (principal, objectIds, q) => objectAccess.resolveManyFor(principal, objectIds, q),
+        },
+      },
+      runId,
       actor,
-    });
-    await discovery.recordProvisioning(runId, report);
-    return report;
-  };
+    );
 
   // Scheduled rediscovery (`D-07`). Off by default in the strongest sense: there is no schedule
   // until somebody creates one, and a new one is created disabled with auto-provisioning

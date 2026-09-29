@@ -79,7 +79,9 @@ export function queryRoutes(app: FastifyInstance, options: QueryRoutesOptions): 
           'that is the answer somebody pressed the button to get. The error statuses are for ' +
           'the query failing rather than the check: 503 the probe is not connected or is ' +
           'already running as many of these as it will, 504 it did not answer in time, 409 it ' +
-          'is too old to be asked at all.\n\n' +
+          'is too old to be asked at all — or, as `OBJECT_CREDENTIALS_WITHHELD`, the sensor is ' +
+          'not being sent its credentials because nobody who may still write where they are ' +
+          'stored vouches for where it sends them (`A-41`); the message says what fixes it.\n\n' +
           'A **paused** sensor can still be checked. A pause stops the monitoring; it does not ' +
           'stop an operator asking whether the thing they just fixed is working, which is ' +
           'exactly when a sensor is most likely to be paused.',

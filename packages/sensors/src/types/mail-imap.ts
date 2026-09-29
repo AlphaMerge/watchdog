@@ -18,6 +18,8 @@ export const mailImap: SensorType = {
   category: 'Mail',
   costHint: 'light',
   credentialKinds: ['mail'],
+  // Where the set goes besides the host (`A-41`): a port, and whether it is encrypted and checked.
+  secretDestinations: { 'kind:mail': ['port', 'security', 'verifyTls'] },
 
   paramsSchema: {
     type: 'object',

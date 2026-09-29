@@ -132,8 +132,12 @@ export class SensorVouching implements VoucherCheck {
 
   /** Every withheld sensor, with its sentence. What `SensorStateService` lays over the facts. */
   readonly #withheld = new Map<number, string>();
-  /** Which sweep withholds which sensors, so one sweep's answer never clears another's. */
-  readonly #byOwner = new Map<string, Set<number>>();
+  /**
+   * Which sweep withholds which sensors, and in what words, so one sweep's answer never clears
+   * another's. A sensor moving between probes is withheld by one probe's check and released by
+   * the other's, in either order (`A-41`).
+   */
+  readonly #byOwner = new Map<string, ReadonlyMap<number, string>>();
 
   /** Resolved at `#epoch`; dropped whole when it moves. */
   #epoch: string | null = null;
@@ -269,18 +273,22 @@ export class SensorVouching implements VoucherCheck {
    * look at now — deleted, paused — is let go, and the set cannot grow stale.
    */
   async settle(owner: string, refused: ReadonlyMap<number, string>): Promise<number> {
-    const before = this.#byOwner.get(owner) ?? new Set<number>();
-    const entered = [...refused.keys()].filter((id) => !before.has(id));
-    const left = [...before].filter((id) => !refused.has(id));
-    const reworded = [...refused].filter(
-      ([id, message]) => before.has(id) && this.#withheld.get(id) !== message,
-    );
+    const before = this.#byOwner.get(owner) ?? new Map<number, string>();
+    this.#byOwner.set(owner, new Map(refused));
 
-    for (const id of left) this.#withheld.delete(id);
-    for (const [id, message] of refused) this.#withheld.set(id, message);
-    this.#byOwner.set(owner, new Set(refused.keys()));
-
-    const changed = [...entered, ...left, ...reworded.map(([id]) => id)];
+    const entered: number[] = [];
+    const left: number[] = [];
+    const changed: number[] = [];
+    for (const id of new Set([...before.keys(), ...refused.keys()])) {
+      const was = this.#withheld.get(id);
+      const now = this.#heldBy(id);
+      if (now === undefined) this.#withheld.delete(id);
+      else this.#withheld.set(id, now);
+      if (was === now) continue;
+      changed.push(id);
+      if (was === undefined) entered.push(id);
+      else if (now === undefined) left.push(id);
+    }
     if (changed.length === 0 || this.#states === undefined) return 0;
 
     try {
@@ -312,6 +320,15 @@ export class SensorVouching implements VoucherCheck {
       );
       return 0;
     }
+  }
+
+  /** The words of the first sweep still withholding this sensor, or undefined if none is. */
+  #heldBy(sensorId: number): string | undefined {
+    for (const held of this.#byOwner.values()) {
+      const message = held.get(sensorId);
+      if (message !== undefined) return message;
+    }
+    return undefined;
   }
 
   async #readableFor(

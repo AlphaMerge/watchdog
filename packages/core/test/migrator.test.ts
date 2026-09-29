@@ -670,6 +670,174 @@ describe(
       }
     });
 
+    it('marks the credentials in use as not yet vouched for, and asks the audit log who wrote each rule (060, 061)', async () => {
+      // `A-41` records who vouched for sending each sensor its inherited credentials. SQL cannot
+      // ask the catalogue which types use which kinds, so 060 records nothing and marks the
+      // installation for the core's boot step instead; 061 names each rediscovery rule's last
+      // writer, who vouches for what its runs provision.
+      const fresh = await createScratchDatabase('credential_voucher');
+      try {
+        await migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id < 60),
+        ).up();
+        const since = MIGRATIONS.filter((one) => one.id >= 60);
+        const q = fresh.db;
+        const [root] = await q.query<{ id: string }>(`SELECT id FROM object WHERE kind = 'root'`);
+        const insert = async (kind: string, name: string, parent: string): Promise<string> => {
+          const [row] = await q.query<{ id: string }>(
+            'INSERT INTO object (parent_id, kind, name) VALUES ($1, $2, $3) RETURNING id::text',
+            [parent, kind, name],
+          );
+          return row?.id ?? assert.fail('no row');
+        };
+        const probe = await insert('probe', 'probe', root?.id ?? '');
+        const group = await insert('group', 'group', probe);
+        const [person] = await q.query<{ id: string }>(
+          `INSERT INTO user_account (login, password_hash, role)
+           VALUES ('operator', 'x', 'readwrite') RETURNING id::text`,
+        );
+        const operator = person?.id ?? assert.fail('no account');
+        const [issued] = await q.query<{ id: string }>(
+          `INSERT INTO api_token (user_id, name, token_hash, prefix)
+           VALUES ($1, 'script', repeat('a', 64), 'ms_') RETURNING id::text`,
+          [operator],
+        );
+        const token = issued?.id ?? assert.fail('no token');
+        const rule = async (name: string): Promise<string> => {
+          const [row] = await q.query<{ id: string }>(
+            `INSERT INTO discovery_schedule (group_id, probe_id, name, range_text, cadence)
+             VALUES ($1, $2, $3, '192.0.2.0/28', 'daily') RETURNING id::text`,
+            [group, probe, name],
+          );
+          return row?.id ?? assert.fail('no rule');
+        };
+        const audit = async (
+          id: string,
+          seconds: number,
+          action: string,
+          actor: { kind: string; ref: string },
+        ): Promise<void> => {
+          await q.query(
+            `INSERT INTO audit_log (at, action, object_id, object_kind, actor_kind, actor_ref, summary)
+             VALUES (now() - make_interval(secs => $1), $2, $3, NULL, $4, $5, $6)`,
+            [
+              1_000 - seconds,
+              action,
+              group,
+              actor.kind,
+              actor.ref,
+              JSON.stringify({ scheduleId: Number(id), name: 'rule' }),
+            ],
+          );
+        };
+        const theOperator = { kind: 'user', ref: operator };
+        const theSystem = { kind: 'system', ref: 'discovery' };
+
+        const written = await rule('written by an account');
+        const edited = await rule('created by the system, edited by an account');
+        const reclaimed = await rule('created by an account, edited by the system');
+        const system = await rule('created by the system');
+        const gone = await rule('created by an account since deleted');
+        const scripted = await rule('created through a token');
+        const unrecorded = await rule('with no audit entry at all');
+        await audit(written, 1, 'discovery.schedule.created', theOperator);
+        await audit(edited, 1, 'discovery.schedule.created', theSystem);
+        await audit(edited, 2, 'discovery.schedule.updated', theOperator);
+        await audit(reclaimed, 1, 'discovery.schedule.created', theOperator);
+        await audit(reclaimed, 2, 'discovery.schedule.updated', theSystem);
+        await audit(system, 1, 'discovery.schedule.created', theSystem);
+        await audit(gone, 1, 'discovery.schedule.created', { kind: 'user', ref: '9000000' });
+        await audit(scripted, 1, 'discovery.schedule.created', { kind: 'token', ref: token });
+
+        const all = migrator(fresh.db, MIGRATIONS);
+        await all.up();
+
+        const writers = await q.query<{ id: string; by: string; account: string | null }>(
+          `SELECT id::text AS id, written_by AS by, written_by_user::text AS account
+           FROM discovery_schedule ORDER BY id`,
+        );
+        assert.deepEqual(
+          writers.map(({ id, by, account }) => [id, by, account]),
+          [
+            [written, 'account', operator],
+            [edited, 'account', operator],
+            // The last word is the system's, which is the installation's.
+            [reclaimed, 'installation', null],
+            [system, 'installation', null],
+            [gone, 'installation', null],
+            // A token writes as its owner, and vouches as its owner.
+            [scripted, 'account', operator],
+            [unrecorded, 'installation', null],
+          ],
+        );
+        await assert.rejects(
+          q.query(`UPDATE discovery_schedule SET written_by_user = $2 WHERE id = $1`, [
+            system,
+            operator,
+          ]),
+          /discovery_schedule_writer_is_an_account/,
+          'the installation is nobody in particular',
+        );
+
+        // Nothing recorded, and the mark set, for the boot step to act on.
+        assert.deepEqual(
+          await q.query('SELECT count(*)::int AS n FROM sensor_credential_voucher'),
+          [{ n: 0 }],
+        );
+        assert.deepEqual(await q.query('SELECT pending, recipe FROM credential_voucher_adoption'), [
+          { pending: true, recipe: '' },
+        ]);
+        await assert.rejects(
+          q.query(
+            'INSERT INTO credential_voucher_adoption (only_row, pending) VALUES (false, true)',
+          ),
+          /check/i,
+          'one row, and only one',
+        );
+
+        // An account deleted since goes NULL, and the rule stays an account's: it vouches for
+        // nothing.
+        await q.query('DELETE FROM user_account WHERE id = $1', [operator]);
+        assert.deepEqual(
+          await q.query(
+            `SELECT written_by AS by, written_by_user AS account FROM discovery_schedule
+             WHERE id = $1`,
+            [written],
+          ),
+          [{ by: 'account', account: null }],
+        );
+
+        await all.down(since.length);
+        assert.equal(await tableExists(q, 'sensor_credential_voucher'), false);
+        assert.equal(await tableExists(q, 'credential_voucher_adoption'), false);
+        // The recipe goes with its table: a downgrade and a later upgrade compares against the
+        // empty one again, and carries nothing over it cannot show is where it was.
+        assert.deepEqual(
+          await q.query(
+            `SELECT column_name AS name FROM information_schema.columns
+             WHERE column_name = 'recipe' AND table_schema = current_schema()`,
+          ),
+          [],
+        );
+        assert.deepEqual(
+          await q.query(
+            `SELECT column_name AS name FROM information_schema.columns
+             WHERE table_name = 'discovery_schedule' AND column_name LIKE 'written%'`,
+          ),
+          [],
+        );
+
+        const again = await all.up();
+        assert.deepEqual(
+          again.applied.map((one) => one.id),
+          since.map((one) => one.id),
+        );
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('applies the real migration set forward and all the way back', async () => {
       const fresh = await createScratchDatabase('roundtrip');
       try {

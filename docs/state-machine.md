@@ -47,7 +47,7 @@ operator to guess whether that was the target, a threshold someone edited, or a 
 | `dependency` | A master object went Down                                       |
 | `parent`     | An ancestor was paused, cascading down                          |
 | `probe`      | The probe owning this sensor is unreachable                     |
-| `access`     | The account that vouched for this sensor can no longer read what it names (`A-29`) |
+| `access`     | The account that vouched for this sensor can no longer read what it names (`A-29`), or write where its credentials are stored (`A-41`) |
 | `simulated`  | An operator forced an error to test a notification chain        |
 
 ---
@@ -63,7 +63,7 @@ eye. Evaluated **in this order**, first match wins:
 | 1 | Any pause source active               | `paused`            | the first active source (§3)     |
 | 2 | Simulated error set (`M-14`)          | `down` → §2.4       | `simulated`                      |
 | 3 | Owning probe unreachable *or* connected and not delivering | `unknown` | `probe`               |
-| 3a | Its voucher may no longer read what it names (`A-29`) | `unknown` | `access`             |
+| 3a | Its voucher may no longer read what it names (`A-29`), or write where its credentials are stored (`A-41`) | `unknown` | `access` |
 | 4 | No reading since creation or resume   | `unknown`           | `scan`                           |
 | 5 | Otherwise                             | worst of §2.1, §2.2 | whichever produced the worst     |
 
@@ -124,6 +124,17 @@ object it cannot read.
 - **Like `probeReachable`, the fact is not persisted.** It is re-derived every sweep from the
   voucher stored on the sensor and the grants as they are now, so a grant restored, an account
   re-enabled or an edit by somebody who can read it clears it at the next sweep.
+
+**The same row holds a sensor whose credentials nobody still vouches for** (`A-41`). A sensor sent
+an inherited credential set is sent it only while the account that vouched for where it goes can
+still write the object the set is stored on. When it cannot — or has been deleted or disabled, or
+the sensor now sends the set somewhere nobody vouched for — the probe's configuration leaves the
+sensor out, and it reads `unknown`/`access` with a sentence saying so and what fixes it, never
+naming where the set is stored. Everything above holds for it: Unknown rather than Down from a
+failed login, notified only through a trigger on Unknown, and re-derived, here at every
+configuration a probe is built — which a grant, group or account change now pushes. The two
+checks share one set of withheld sensors, each under its own name (the credential check under
+one per probe), so one releasing a sensor never releases what another still holds.
 
 ### 2.1 Query state — did the check run?
 
@@ -445,7 +456,7 @@ can check the model against `WORKFLOW.MD §4`'s diagram.
 | any                 | `paused`            | Any pause source becomes active                    | first active (§3)      |
 | `paused`            | `unknown`           | Last pause source cleared                          | `scan`                 |
 | any                 | `unknown`           | Owning probe became unreachable                    | `probe`                |
-| any but `paused`, or `down` (`simulated`) | `unknown` | The sensor's voucher lost read on what it names, or was deleted or disabled (`A-29`) | `access` |
+| any but `paused`, or `down` (`simulated`) | `unknown` | The sensor's voucher lost read on what it names (`A-29`) or write where its credentials are stored (`A-41`), or was deleted or disabled | `access` |
 | `unknown` (`access`) | `up` / `warning` / `down` / `unknown` | Vouched for again: its last reading decides, as when a probe returns, until the next one | `scan` / `limit` / `lookup` |
 | any but `paused`    | `down`              | Simulated error set                                | `simulated`            |
 | `up`/`warning`/`down` | itself            | The reason changed, not the state                  | `scan` / `limit` / `lookup` |
@@ -467,7 +478,7 @@ same documents, which is why the diagram not drawing it is an omission rather th
 | `down_acknowledged` → `paused`     | Same                                                                |
 | any → `unknown` on probe loss      | §12: a probe's sensors go Unknown, not Down — we do not know        |
 | any → `down` on simulated error    | `PLAN.md` Phase 3: a simulated error state for testing chains       |
-| any → `unknown` on a lost voucher  | `A-29`: a sensor that republishes another object's data stops when its voucher could not read it |
+| any → `unknown` on a lost voucher  | `A-29`: a sensor that republishes another object's data stops when its voucher could not read it; `A-41`: a sensor is not sent credentials its voucher could not send |
 
 Nothing in the diagram is missing from the table.
 
@@ -555,7 +566,7 @@ is waiting for one task to set it:
 | `simulated_error`        | ~~`M-14`~~ | Live: `POST`/`DELETE /objects/:id/simulate-error`. The sensor keeps being scanned, so lifting the force returns it to the truth with no scan in between |
 | The channel verdict (§2.2) | ~~`M-04`, `M-06`~~ | Live: limits and lookups both produce one, and **persisted** in `sensor_runtime.channel_state/cause` since `P-85`. It was left out on the reasoning that a remembered breach is "a verdict on a measurement nobody took" — but the same row stores the state that verdict decided, so dropping the premise only meant every re-decide without a reading reached a different answer from the same row, and layer 5 read half its inputs. A resume clears it; a failed scan stores none. |
 | `probeReachable`         | `R-05`, `P-232` | Always true, and **not persisted**: it is a fact about a live connection, and restoring it from a table would record thousands of "probe unreachable" transitions on every core restart — an alarm storm generated by the restart itself. False for a lost probe's sensors, and for the sensors a probe's clock has frozen (below). |
-| `vouchedFor`             | `A-29`  | Live: the core's three evaluators re-check each sensor's voucher every sweep and lay the answer over the loaded facts, as `probeReachable` is. Not persisted, for the same reason, and because the grants it depends on can change without the sensor changing at all. |
+| `vouchedFor`             | `A-29`, `A-41` | Live: the core's three evaluators re-check each sensor's voucher every sweep, and every probe configuration re-checks who vouched for each sensor's credentials, and lay the answer over the loaded facts, as `probeReachable` is. Not persisted, for the same reason, and because the grants it depends on can change without the sensor changing at all. |
 
 Two further notes for whoever picks those up:
 

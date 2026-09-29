@@ -581,4 +581,46 @@ describe('scheduled rediscovery', { skip: available ? false : 'no database' }, (
       assert.equal(schedule.description, 'every Sunday at 03:30');
     });
   });
+
+  describe('who stands behind a rule (`A-41`)', () => {
+    it('is whoever last wrote it: an account, or the installation for the system', async () => {
+      // Its runs provision the addresses it names, and the group's credentials go to them, so
+      // somebody has to vouch for sending them there.
+      const [person] = await db.query<{ id: string }>(
+        `INSERT INTO user_account (login, password_hash, role)
+         VALUES ('rule-writer', 'x', 'readwrite') RETURNING id::text`,
+      );
+      const writer = { kind: 'user' as const, userId: Number(person?.id), login: 'rule-writer' };
+      const byAccount = { kind: 'account', userId: writer.userId };
+
+      const created = await rediscovery.create(
+        {
+          groupId,
+          probeId,
+          name: 'Written by a person',
+          range: '10.0.0.0/29',
+          cadence: 'daily',
+          timezone: 'UTC',
+        },
+        writer,
+      );
+      assert.deepEqual(await rediscovery.writerOf(created.id), byAccount);
+
+      await rediscovery.update(created.id, 1, { name: 'Renamed by the system' }, testActor);
+      assert.deepEqual(await rediscovery.writerOf(created.id), { kind: 'installation' });
+
+      await rediscovery.update(created.id, 2, { name: 'Back' }, writer);
+      assert.deepEqual(await rediscovery.writerOf(created.id), byAccount);
+
+      // An edit that changes nothing writes nothing, and keeps who wrote it.
+      await rediscovery.update(created.id, 3, { name: 'Back' }, testActor);
+      assert.deepEqual(await rediscovery.writerOf(created.id), byAccount);
+
+      // A token's account is not on the actor, and one nobody can name vouches for nothing.
+      await rediscovery.update(created.id, 3, { name: 'Scripted' }, { kind: 'token', tokenId: 1 });
+      assert.deepEqual(await rediscovery.writerOf(created.id), { kind: 'account', userId: null });
+
+      assert.equal(await rediscovery.writerOf(9_000_000), null);
+    });
+  });
 });

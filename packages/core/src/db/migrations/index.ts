@@ -57,6 +57,8 @@ import { migration056 } from './056-skipped-recipients.js';
 import { migration057 } from './057-rediscovery-version.js';
 import { migration058 } from './058-backfill-channels.js';
 import { migration059 } from './059-sensor-voucher.js';
+import { migration060 } from './060-credential-voucher.js';
+import { migration061 } from './061-rediscovery-writer.js';
 import { migration043 } from './043-request-settled-at.js';
 
 /**
@@ -125,6 +127,8 @@ export const MIGRATIONS: readonly Migration[] = [
   migration057,
   migration058,
   migration059,
+  migration060,
+  migration061,
 ];
 
 export type { Migration } from './types.js';

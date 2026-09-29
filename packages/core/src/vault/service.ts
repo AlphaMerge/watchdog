@@ -61,6 +61,8 @@ export interface ResolvedSecret {
    * The owning object and the update time change on every rotation and reveal nothing.
    */
   readonly stamp: string;
+  /** The object the set is stored on, which is who has to stand behind where it goes (`A-41`). */
+  readonly ownerId: number;
 }
 
 /** What a write did, for the audit entry — kinds and field *names*, never a value. */
@@ -310,6 +312,7 @@ export class CredentialVault {
           // What changes when a credential is rotated, and the only part of a credential that
           // may be hashed into a configuration fingerprint — see `ProbeConfigService`.
           stamp: `${String(record.ownerId)}@${record.updatedAt}`,
+          ownerId: record.ownerId,
         });
       }
       if (forSensor.size > 0) out.set(sensorId, forSensor);

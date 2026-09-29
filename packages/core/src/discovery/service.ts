@@ -43,6 +43,12 @@ export interface DiscoveredHost {
   fingerprint: Fingerprint | null;
 }
 
+/**
+ * Why a run a deleted rule started creates nothing (`A-41`): nobody stands behind the addresses
+ * it found any more.
+ */
+export const RULE_DELETED = 'its rule was deleted';
+
 export interface DiscoveryRunRow {
   id: number;
   groupId: number;
@@ -75,6 +81,11 @@ export interface DiscoveryRunRow {
    * rather than a surprise.
    */
   scheduleId: number | null;
+  /**
+   * The account that started the run, or null for the system and for an installation with no
+   * accounts (`A-20`). It vouches for where the run's credentials go (`A-41`).
+   */
+  createdBy: number | null;
   snmpCommunity: string;
   devicesCreated: number;
   devicesMatched: number;
@@ -510,24 +521,29 @@ export class DiscoveryService {
     // A cancelled run goes back to `queued` only if the operator did not ask for the cancel —
     // which is the shutdown case, and is why the probe reports `cancelled` on stop. The
     // difference is recorded in `status` before the message arrives: `cancel()` sets it, so a
-    // run still `running` here was stopped by something other than the operator.
-    await this.#db.query(
+    // run still `running` here was stopped by something other than the operator. A run the core
+    // failed (`fail()`) keeps its status and its reason: a sweep that finished after its rule was
+    // deleted must not come back `done` and be provisioned (`A-41`).
+    const ended = await this.#db.query<{ status: DiscoveryRunRow['status'] }>(
       `UPDATE discovery_run
        SET cursor = GREATEST(cursor, $2),
            status = CASE
              WHEN status = 'cancelled' THEN 'cancelled'
+             WHEN status = 'failed' THEN 'failed'
              WHEN $3 = 'done' THEN 'done'
              WHEN $3 = 'failed' THEN 'failed'
              ELSE 'queued'
            END,
-           message = $4,
-           finished_at = CASE WHEN $3 = 'cancelled' AND status <> 'cancelled' THEN NULL
+           message = CASE WHEN status = 'failed' THEN message ELSE $4 END,
+           finished_at = CASE WHEN status = 'failed' THEN finished_at
+                              WHEN $3 = 'cancelled' AND status <> 'cancelled' THEN NULL
                               ELSE now() END
-       WHERE id = $1 AND probe_id = $5`,
+       WHERE id = $1 AND probe_id = $5
+       RETURNING status`,
       [runId, cursor, ending, message, from],
     );
     this.#logger.info({ runId, ending, cursor }, 'discovery run ended');
-    if (ending === 'done') await this.#announceFinished(runId);
+    if (ending === 'done' && ended[0]?.status !== 'failed') await this.#announceFinished(runId);
   }
 
   /**
@@ -592,13 +608,17 @@ export class DiscoveryService {
     if (rows.length === 0) {
       // Nothing left to identify. Recorded here rather than waiting for the probe to say so,
       // because a batch of zero would otherwise be a run that stayed `identifying` for ever.
-      await this.#db.query(
+      const done = await this.#db.query(
         `UPDATE discovery_run SET status = 'done', finished_at = now()
-         WHERE id = $1 AND status = 'identifying'`,
+         WHERE id = $1 AND status = 'identifying'
+         RETURNING id`,
         [run.id],
       );
-      this.#logger.info({ runId: run.id }, 'discovery run finished');
       this.#offers.delete(run.id);
+      // Only a run this statement finished is announced: one failed or cancelled meanwhile is
+      // over for another reason, and announcing it would provision what nobody stands behind.
+      if (done.length === 0) return;
+      this.#logger.info({ runId: run.id }, 'discovery run finished');
       await this.#announceFinished(run.id);
       return;
     }
@@ -766,6 +786,58 @@ export class DiscoveryService {
     this.#dispatch(run.probeId, { kind: 'cancel', runId });
     this.#dispatch(run.probeId, { kind: 'identify-cancel', runId });
     return run;
+  }
+
+  /**
+   * Ends a run for a reason the core found, and says which (`A-41`).
+   *
+   * A run whose rule was deleted fails with "its rule was deleted": nobody stands behind the
+   * addresses it found any more, so nothing is created from them. `failed` is terminal — a probe
+   * that reports the sweep done afterwards changes nothing — so this is also what stops a run
+   * that is still going, and the probe is told to stop it as a cancel tells it. A run that had
+   * already failed writes no second entry. Null when there is no such run.
+   */
+  async fail(runId: number, reason: string, actor: Actor): Promise<DiscoveryRunRow | null> {
+    this.#offers.delete(runId);
+    const ended = await this.#db.tx(async (q) => {
+      const before = await q.query<{ status: DiscoveryRunRow['status'] }>(
+        `SELECT status FROM discovery_run WHERE id = $1 FOR UPDATE`,
+        [runId],
+      );
+      const was = before[0]?.status;
+      if (was === undefined || was === 'failed') return null;
+      const rows = await q.query<Record<string, unknown>>(
+        `UPDATE discovery_run SET status = 'failed', message = $2, finished_at = now()
+         WHERE id = $1
+         RETURNING *`,
+        [runId, reason],
+      );
+      const row = rows[0];
+      if (row === undefined) return null;
+      const failed = read(row);
+      await this.#audit.record(
+        q,
+        actor,
+        [
+          {
+            action: 'discovery.failed',
+            objectId: failed.groupId,
+            runId,
+            range: failed.range,
+            reason,
+          },
+        ],
+        new Date(),
+      );
+      return { run: failed, going: was === 'queued' || was === 'running' || was === 'identifying' };
+    });
+    if (ended === null) return null;
+    this.#logger.info({ runId, reason }, 'discovery run failed');
+    if (ended.going) {
+      this.#dispatch(ended.run.probeId, { kind: 'cancel', runId });
+      this.#dispatch(ended.run.probeId, { kind: 'identify-cancel', runId });
+    }
+    return ended.run;
   }
 
   async get(runId: number): Promise<DiscoveryRunRow | null> {
@@ -955,6 +1027,7 @@ function read(row: Record<string, unknown>): DiscoveryRunRow {
     identified: Number(row['identified'] ?? 0),
     identifyCursor: Number(row['identify_cursor'] ?? 0),
     scheduleId: row['schedule_id'] == null ? null : Number(row['schedule_id']),
+    createdBy: row['created_by'] == null ? null : Number(row['created_by']),
     devicesCreated: Number(row['devices_created'] ?? 0),
     devicesMatched: Number(row['devices_matched'] ?? 0),
     sensorsCreated: Number(row['sensors_created'] ?? 0),

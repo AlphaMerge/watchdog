@@ -5,7 +5,7 @@ import type { Credential } from '../auth/credentials.js';
 import { AuthError } from '../auth/errors.js';
 import { atLeast, lower, Reach, Visibility } from '../auth/access.js';
 import type { Queryable } from '../db/pool.js';
-import type { Writer } from '../objects/sensor-reads.js';
+import { INSTALLATION_VOUCHES, type Writer } from '../objects/sensor-reads.js';
 
 /**
  * Who may call a route (`A-11`).
@@ -364,7 +364,11 @@ export async function writerFor(request: FastifyRequest): Promise<Writer> {
   }
   // What it can see is resolved only if the write names something, and then inside the write's
   // transaction (`P-235`): most writes name nothing, and this was a query on every one of them.
+  const layerOff = (sights.get(request)?.fresh ?? EVERYONE) === EVERYONE;
   return {
+    // With the layer off the installation vouches for where credentials go, as for everything
+    // else (`A-41`): an account's grants are not what decides anything then.
+    ...(layerOff ? { credentials: INSTALLATION_VOUCHES } : {}),
     kind: 'user',
     userId: principal.userId,
     login: principal.login,
@@ -375,6 +379,10 @@ export async function writerFor(request: FastifyRequest): Promise<Writer> {
         const sight = sights.get(request);
         return sight === undefined ? Promise.resolve(Visibility.EVERYTHING) : sight.within(q);
       },
+      // Where a write sends inherited credentials needs `write` on where they are stored
+      // (`A-41`): the bar a route naming that object holds this caller to, token scope included.
+      writes: async (q, objectIds) =>
+        new Set((await reachOf(request, 'write').split(q, objectIds)).reached),
     },
   };
 }

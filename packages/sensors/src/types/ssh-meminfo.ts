@@ -21,6 +21,8 @@ export const sshMeminfo: SensorType = {
   category: 'SSH',
   costHint: 'medium',
   credentialKinds: ['ssh'],
+  // Where the set goes besides the host (`A-41`): the port.
+  secretDestinations: { 'kind:ssh': ['port'] },
 
   paramsSchema: sshParamsSchema({}, []),
 

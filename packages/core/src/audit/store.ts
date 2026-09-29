@@ -691,6 +691,14 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         diff: [],
       };
 
+    case 'discovery.failed':
+      return {
+        ...base,
+        objectKind: null,
+        summary: { runId: mutation.runId, range: mutation.range, reason: mutation.reason },
+        diff: [],
+      };
+
     case 'discovery.schedule.created':
       return {
         ...base,
@@ -945,6 +953,19 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         objectKind: null,
         summary: { credentialKind: mutation.credentialKind },
         diff: [{ field: `credential.${mutation.credentialKind}`, before: null, after: null }],
+      };
+
+    case 'credential.adopted':
+      return {
+        ...base,
+        objectKind: null,
+        summary: {
+          credentialKind: mutation.credentialKind,
+          installation: mutation.installation,
+          carried: mutation.carried,
+          withheld: mutation.withheld,
+        },
+        diff: [],
       };
 
     case 'object.paused':

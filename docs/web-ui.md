@@ -237,7 +237,13 @@ generated from the type's `paramsSchema`, which is what keeps adding a sensor ty
 A secret parameter shows as set, never as its value, and a save that leaves it alone keeps it —
 unless the save changes where the type sends it, such as a script's program, arguments,
 environment or working directory, or an SNMP sensor's port. Then it is cleared unless entered again, and the sensor's
-**Changes** tab says which (`A-40`).
+**Changes** tab says which (`A-40`). Giving its device a new host, or moving it to another probe or
+another device, clears it the same way (`A-41`).
+
+A save that would send a group's inherited credentials somewhere new — a device's host, an SNMP
+sensor's port, a device moved under the group — needs `write` on the group, and is otherwise
+refused with a message naming the kind and the group (`A-41`). A sensor whose credentials nobody
+still vouches for reads **Unknown** on its **Overview**, with a sentence saying what to do.
 
 On the **Settings** tab, each row is a toggle rather than a plain input, because the source is the
 half that matters: "60 seconds" is not the same fact as "60 seconds, because the group two levels

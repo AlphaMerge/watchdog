@@ -96,6 +96,8 @@ export const SNMP_SECRET_DESTINATIONS: Readonly<Record<string, readonly string[]
   community: ['port'],
   authKey: ['port'],
   privKey: ['port'],
+  // And the inherited set, to the same listener (`A-41`).
+  'kind:snmp': ['port'],
 };
 
 /** The transport parameters: where to send, how long to wait, how hard to try. */

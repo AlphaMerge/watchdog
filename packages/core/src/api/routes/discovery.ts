@@ -536,7 +536,13 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
             'within the target group, and only sensors that are not already there are created — ' +
             'so running this twice creates nothing the second time. That matters because a ' +
             'discovery is re-run: on a schedule, or by an operator who has configured a ' +
-            'credential and wants the sensors it unlocks.',
+            'credential and wants the sensors it unlocks.\n\n' +
+            '**A run whose rule was deleted creates nothing** (`A-41`): the account that wrote ' +
+            'the rule vouched for sending the group’s credentials to the addresses it found, and ' +
+            'deleting the rule withdraws that. With accounts on, the run is failed with the ' +
+            'reason “its rule was deleted”, recorded in the audit log, and this answers 409 ' +
+            '`DISCOVERY_RUN_FAILED` with the same sentence. Start a new run to provision those ' +
+            'addresses.',
           params: idParams,
           response: {
             200: {

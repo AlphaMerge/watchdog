@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { SensorAssignment } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
+import type { CredentialVouching, SensorBeingSent } from '../objects/credential-vouching.js';
+import { ObjectError } from '../objects/errors.js';
 import type { CredentialKind, InheritanceResolver } from '../settings/inheritance.js';
 import type { CredentialVault } from '../vault/service.js';
 
@@ -53,6 +55,13 @@ export interface ProbeConfigOptions {
    * catalogue to do so. `main.ts` supplies the real answer.
    */
   coreEvaluated?: (sensorType: string) => boolean;
+  /**
+   * Whether each sensor may still be sent its inherited credentials (`A-41`).
+   *
+   * Absent in a test that is not about that, which then sends every set it resolves — the
+   * behaviour before `A-41`. `main.ts` always supplies it.
+   */
+  credentialCheck?: Pick<CredentialVouching, 'refusals' | 'withhold'>;
 }
 
 /**
@@ -69,6 +78,7 @@ export class ProbeConfigService {
   readonly #vault: CredentialVault | undefined;
   readonly #credentialKindsFor: (sensorType: string) => readonly string[];
   readonly #coreEvaluated: (sensorType: string) => boolean;
+  readonly #credentialCheck: ProbeConfigOptions['credentialCheck'];
 
   constructor(options: ProbeConfigOptions) {
     this.#db = options.db;
@@ -76,6 +86,7 @@ export class ProbeConfigService {
     this.#vault = options.vault;
     this.#credentialKindsFor = options.credentialKindsFor ?? (() => []);
     this.#coreEvaluated = options.coreEvaluated ?? ((): boolean => false);
+    this.#credentialCheck = options.credentialCheck;
   }
 
   /** The probe object a connected GID owns, or null while the GID is unclaimed. */
@@ -140,7 +151,19 @@ export class ProbeConfigService {
     // in the SQL, and asked of the catalogue rather than matched on an id, for the reason the
     // probe reads `listener` from it: a hardcoded `core.factory` here would be a second rule to
     // keep in step by hand the day there is a second such type.
-    const assignable = rows.filter((row) => !this.#coreEvaluated(row.sensor_type));
+    const evaluatedHere = rows.filter((row) => !this.#coreEvaluated(row.sensor_type));
+    if (evaluatedHere.length === 0) return EMPTY_ASSIGNMENTS;
+
+    const resolved = await this.#credentialsFor(evaluatedHere);
+    // A sensor whose credentials nobody still vouches for is not configured at all, rather than
+    // sent without them: it would fail to log in and go Down, which is an alarm about the wrong
+    // thing. It is held Unknown with the reason instead (`A-41`).
+    const withheld =
+      (await this.#credentialCheck?.withhold(
+        probeObjectId,
+        beingSent(evaluatedHere, resolved.owners),
+      )) ?? new Map<number, string>();
+    const assignable = evaluatedHere.filter((row) => !withheld.has(Number(row.sensor_id)));
     if (assignable.length === 0) return EMPTY_ASSIGNMENTS;
 
     const sensorIds = assignable.map((row) => Number(row.sensor_id));
@@ -151,7 +174,8 @@ export class ProbeConfigService {
       this.#resolver.resolveForObjects<number>(sensorIds, 'scan.timeoutMs'),
     ]);
 
-    const { values: credentials, stamps } = await this.#credentialsFor(assignable);
+    const credentials = resolved.values;
+    const stamps = new Map([...resolved.stamps].filter(([id]) => !withheld.has(id)));
 
     const sensors: SensorAssignment[] = assignable.map((row) => {
       const sensorId = Number(row.sensor_id);
@@ -229,6 +253,17 @@ export class ProbeConfigService {
       this.#resolver.resolveForObjects<number>([sensorId], 'scan.timeoutMs'),
       this.#credentialsFor([{ sensor_id: String(sensorId), sensor_type: row.sensor_type }]),
     ]);
+    // Asked, and not held: pressing the button changes nothing about the sensor (`A-41`).
+    const refused = await this.#credentialCheck?.refusals(
+      Number(row.probe_id),
+      beingSent([{ sensor_id: String(sensorId), ...row }], credentials.owners),
+    );
+    const withheld = refused?.get(sensorId);
+    if (withheld !== undefined) {
+      throw new ObjectError('OBJECT_CREDENTIALS_WITHHELD', withheld, {
+        context: { objectId: sensorId, phase: 'check-now' },
+      });
+    }
     const forSensor = credentials.values.get(sensorId);
 
     return {
@@ -259,7 +294,8 @@ export class ProbeConfigService {
     rows: readonly { sensor_id: string; sensor_type: string }[],
   ): Promise<ResolvedCredentials> {
     const stamps = new Map<number, string>();
-    if (this.#vault === undefined) return { values: new Map(), stamps };
+    const owners = new Map<number, Map<string, number>>();
+    if (this.#vault === undefined) return { values: new Map(), stamps, owners };
 
     const byKindSet = new Map<string, { kinds: string[]; sensorIds: number[] }>();
     for (const row of rows) {
@@ -270,7 +306,7 @@ export class ProbeConfigService {
       bucket.sensorIds.push(Number(row.sensor_id));
       byKindSet.set(key, bucket);
     }
-    if (byKindSet.size === 0) return { values: new Map(), stamps };
+    if (byKindSet.size === 0) return { values: new Map(), stamps, owners };
 
     const out = new Map<number, Record<string, Record<string, unknown>>>();
     for (const { kinds, sensorIds } of byKindSet.values()) {
@@ -278,6 +314,7 @@ export class ProbeConfigService {
       for (const [sensorId, byKind] of resolved) {
         const values: Record<string, Record<string, unknown>> = {};
         const marks: string[] = [];
+        const ownedBy = new Map<string, number>();
         // Sorted, so the same credentials in a different map order fingerprint the same.
         for (const kind of [...byKind.keys()].sort()) {
           const entry = byKind.get(kind);
@@ -285,12 +322,14 @@ export class ProbeConfigService {
           if (entry === undefined) continue;
           values[kind] = entry.values;
           marks.push(`${kind}=${entry.stamp}`);
+          ownedBy.set(kind, entry.ownerId);
         }
         out.set(sensorId, values);
         stamps.set(sensorId, marks.join('|'));
+        owners.set(sensorId, ownedBy);
       }
     }
-    return { values: out, stamps };
+    return { values: out, stamps, owners };
   }
 }
 
@@ -317,6 +356,36 @@ interface ResolvedCredentials {
   values: Map<number, Record<string, Record<string, unknown>>>;
   /** Rotation markers, keyed by sensor. Never contents — see `fingerprint`. */
   stamps: Map<number, string>;
+  /** The object each sensor's set of each kind is stored on (`A-41`). */
+  owners: Map<number, Map<string, number>>;
+}
+
+/** The sensors being sent a set, as the credential check asks about them (`A-41`). */
+function beingSent(
+  rows: readonly {
+    sensor_id: string;
+    sensor_type: string;
+    params: Record<string, unknown> | null;
+    host: string | null;
+    ip_version: string | null;
+  }[],
+  owners: ReadonlyMap<number, ReadonlyMap<string, number>>,
+): SensorBeingSent[] {
+  const sent: SensorBeingSent[] = [];
+  for (const row of rows) {
+    const sensorId = Number(row.sensor_id);
+    const ownedBy = owners.get(sensorId);
+    if (ownedBy === undefined || ownedBy.size === 0) continue;
+    sent.push({
+      sensorId,
+      sensorType: row.sensor_type,
+      params: row.params ?? {},
+      host: row.host ?? '',
+      ipVersion: row.ip_version ?? 'auto',
+      owners: ownedBy,
+    });
+  }
+  return sent;
 }
 
 /**

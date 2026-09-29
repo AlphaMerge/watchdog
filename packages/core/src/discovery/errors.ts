@@ -14,6 +14,7 @@ export type DiscoveryErrorCode =
   | 'DISCOVERY_PROBE_INVALID'
   | 'DISCOVERY_SCHEDULE_CHANGED'
   | 'DISCOVERY_PRECONDITION_REQUIRED'
+  | 'DISCOVERY_RUN_FAILED'
   | 'DISCOVERY_FAILED';
 
 export const DISCOVERY_ERROR_STATUS: Readonly<Record<DiscoveryErrorCode, number>> = {
@@ -32,6 +33,9 @@ export const DISCOVERY_ERROR_STATUS: Readonly<Record<DiscoveryErrorCode, number>
   DISCOVERY_SCHEDULE_CHANGED: 412,
   // An edit that did not say which version it was made against.
   DISCOVERY_PRECONDITION_REQUIRED: 428,
+  // Provisioning a run that cannot be provisioned, and has been failed with the reason (`A-41`):
+  // its rule was deleted, so nobody stands behind what it found. The run says the same sentence.
+  DISCOVERY_RUN_FAILED: 409,
   DISCOVERY_FAILED: 500,
 };
 

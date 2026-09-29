@@ -893,16 +893,8 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       assert.equal(allowed.statusCode, 201, 'a clone inside the grant should still work');
     });
 
-    it('applies a bulk selection normally when the authorisation layer is switched off', async () => {
-      // **The one check that does not live in the hook, and so did not stand down with it**
-      // (`R10`). Every other bar in `A-11` is the `preValidation` hook, which returns early when
-      // `auth.required` is false. The bulk partition is a call in a handler, and it was gated
-      // only on whether an `AccessService` was passed — which it always is. `AccessService`
-      // treats a role as a ceiling and never as a grant, so on an installation with the layer
-      // off, an ordinary `readwrite` account in the built-in `Users` group had every single id
-      // in a selection refused, while `POST /objects/:id/pause` on any one of those ids
-      // succeeded. Forty sensors selected, forty refusals, and nothing anywhere saying why.
-      await db.query('DELETE FROM object_access');
+    /** The same routes with the authorisation layer switched off (`auth.required: false`). */
+    async function layerOff(): Promise<ApiServer> {
       const open = new ApiServer({
         config: {
           host: '127.0.0.1',
@@ -930,14 +922,103 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
         },
       });
       await open.build('9.9.9', harness.service);
-      try {
-        const login = await open.app.inject({
-          method: 'POST',
-          url: '/api/v1/auth/login',
-          payload: { login: 'readwrite', password: 'correct-horse-battery' },
+      return open;
+    }
+
+    /** Logs a role in on a server, for one that does not share the matrix's sessions. */
+    async function cookieOn(server: ApiServer, login: string): Promise<string> {
+      const response = await server.app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/login',
+        payload: { login, password: 'correct-horse-battery' },
+      });
+      assert.equal(response.statusCode, 200);
+      return String(response.headers['set-cookie']).split(';')[0] ?? '';
+    }
+
+    it('sends a set only where its owner’s writer vouched, and the installation vouches with the layer off (A-41)', async () => {
+      // An operator with `write` on one device under a probe that stores the SNMP community must
+      // not be able to point the device at a machine of their own and be sent it.
+      await db.query('DELETE FROM object_access');
+      await access.grant(deviceId, teamId, 'write', actorNamed('matrix'));
+      await harness.service.setCredential(testActor, probeId, 'snmp', {
+        version: 'v2c',
+        community: PLANTED_SECRET,
+      });
+      const repoint = async (
+        target: FastifyInstance,
+        headers: Record<string, string>,
+        host: string,
+      ): Promise<{ statusCode: number; body: string }> => {
+        const read = await target.inject({
+          method: 'GET',
+          url: `/api/v1/objects/${String(deviceId)}`,
+          headers,
         });
-        assert.equal(login.statusCode, 200);
-        const cookie = String(login.headers['set-cookie']).split(';')[0] ?? '';
+        return target.inject({
+          method: 'PATCH',
+          url: `/api/v1/objects/${String(deviceId)}`,
+          headers: { ...headers, 'if-match': String(read.headers.etag) },
+          payload: { kind: 'device', host },
+        });
+      };
+      try {
+        const refused = await repoint(app, asRole('readwrite'), '203.0.113.9');
+        assert.equal(refused.statusCode, 403);
+        assert.match(refused.body, /bringing the snmp credentials on probe /);
+        assert.ok(!refused.body.includes(PLANTED_SECRET));
+
+        const open = await layerOff();
+        try {
+          const cookie = await cookieOn(open, 'readwrite');
+          const moved = await repoint(open.app, { cookie }, '203.0.113.9');
+          assert.equal(moved.statusCode, 200, moved.body);
+          // As the installation, not as the account: with the layer off its grants decide
+          // nothing, and a record in its name would withhold the set once the layer is back on.
+          assert.deepEqual(
+            await db.query(
+              `SELECT vouched_by AS by, vouched_by_user AS account FROM sensor_credential_voucher
+               WHERE sensor_id = $1 AND kind = 'snmp'`,
+              [sensorId],
+            ),
+            [{ by: 'installation', account: null }],
+          );
+          // And the community in the sensor's own parameters did not follow it there.
+          const sensor = await open.app.inject({
+            method: 'GET',
+            url: `/api/v1/objects/${String(sensorId)}`,
+            headers: { cookie },
+          });
+          assert.deepEqual(sensor.json<{ redactedParams: string[] }>().redactedParams, []);
+          await repoint(open.app, { cookie }, '127.0.0.1');
+        } finally {
+          await open.app.close();
+        }
+      } finally {
+        await harness.service.clearCredential(testActor, probeId, 'snmp');
+        // Back as the rest of the matrix expects it: planted, where it was.
+        await harness.service.update(
+          testActor,
+          sensorId,
+          { kind: 'sensor', params: { community: PLANTED_SECRET, port: 161 } },
+          { kind: 'none' },
+        );
+      }
+    });
+
+    it('applies a bulk selection normally when the authorisation layer is switched off', async () => {
+      // **The one check that does not live in the hook, and so did not stand down with it**
+      // (`R10`). Every other bar in `A-11` is the `preValidation` hook, which returns early when
+      // `auth.required` is false. The bulk partition is a call in a handler, and it was gated
+      // only on whether an `AccessService` was passed — which it always is. `AccessService`
+      // treats a role as a ceiling and never as a grant, so on an installation with the layer
+      // off, an ordinary `readwrite` account in the built-in `Users` group had every single id
+      // in a selection refused, while `POST /objects/:id/pause` on any one of those ids
+      // succeeded. Forty sensors selected, forty refusals, and nothing anywhere saying why.
+      await db.query('DELETE FROM object_access');
+      const open = await layerOff();
+      try {
+        const cookie = await cookieOn(open, 'readwrite');
 
         const response = await open.app.inject({
           method: 'POST',

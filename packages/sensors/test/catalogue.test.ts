@@ -384,6 +384,64 @@ describe('where a secret is sent (A-40)', () => {
     }
   });
 
+  it('refuses a type that uses a credential kind without saying where the set goes (A-41)', () => {
+    const credentialed = (secretDestinations?: Readonly<Record<string, readonly string[]>>) =>
+      variant({
+        credentialKinds: ['ssh'],
+        ...(secretDestinations === undefined ? {} : { secretDestinations }),
+        paramsSchema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { port: { type: 'integer', default: 22 } },
+        },
+      });
+    refused(credentialed(), /uses the "ssh" credential kind but does not say where it is sent/);
+    refused(
+      credentialed({ 'kind:ssh': [], 'kind:snmp': [] }),
+      /where "kind:snmp" is sent, but it does not use that credential kind/,
+    );
+    refused(credentialed({ 'kind:ssh': ['portt'] }), /has no property "portt"/);
+    assert.doesNotThrow(() => new SensorCatalogue().register(credentialed({ 'kind:ssh': [] })));
+  });
+
+  it('gives a sensor’s destination for a kind as its declared fields, sorted (A-41)', () => {
+    const c = standardCatalogue();
+    assert.deepEqual(
+      c.credentialDestination('http.advanced', 'http', {
+        verifyTls: false,
+        scheme: 'https',
+        port: 8443,
+        path: '/not-a-destination',
+      }),
+      [
+        ['port', 8443],
+        ['scheme', 'https'],
+        ['verifyTls', false],
+      ],
+    );
+    assert.deepEqual(c.credentialDestination('ssh.load', 'snmp', { port: 22 }), [], 'not its kind');
+    assert.deepEqual(
+      c.credentialDestination('windows.cpu', 'windows', { host: '' }),
+      [
+        ['authentication', null],
+        ['host', ''],
+      ],
+      'a field left out reads as null rather than disappearing',
+    );
+  });
+
+  it('has every shipped type that uses a credential kind say where it goes (A-41)', () => {
+    const c = standardCatalogue();
+    for (const id of c.ids()) {
+      for (const kind of c.declaration(id).credentialKinds ?? []) {
+        assert.ok(
+          Object.hasOwn(c.type(id).secretDestinations ?? {}, `kind:${kind}`),
+          `${id} uses ${kind}`,
+        );
+      }
+    }
+  });
+
   it('reads a destination left out at its default as unchanged, the way it was stored', () => {
     const c = new SensorCatalogue().register(withSecret({ token: ['url'], 'auth.key': [] }));
     const stored = { url: '', token: 't', timeoutMs: 5_000 };

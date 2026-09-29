@@ -708,6 +708,13 @@ export async function objectRoutes(
       config: onObject('write'),
       schema: {
         tags: ['objects'],
+        description:
+          'Changes what it is given and keeps the rest. **Where a sensor sends its inherited ' +
+          "credentials** — a device's host or address family, or a sensor parameter its type " +
+          'says chooses the listener — **needs `write` on the object those credentials are ' +
+          'stored on** (`A-41`), and is otherwise refused with 403 naming the kind and that ' +
+          "object, never the secret. A device's new host also clears the secrets held in its " +
+          "sensors' own parameters, which the audit lists; enter them again.",
         params: idParams,
         body: { $ref: 'ms:updateObject' },
         response: { 200: { $ref: 'ms:objectDetail' } },
@@ -1780,7 +1787,8 @@ export async function objectRoutes(
           'a value to rotate it, or `null` to remove it. **`values` is checked against the ' +
           'kind**, and a field it does not declare is refused with 400 naming it: a secret ' +
           'sent under a mistyped name would otherwise be stored as a public field. The ' +
-          'response carries no secret.',
+          'response carries no secret. **Storing a set here vouches for sending it** wherever ' +
+          'the sensors beneath that now inherit it send it (`A-41`).',
         params: credentialKindParams,
         body: {
           type: 'object',
@@ -1794,7 +1802,7 @@ export async function objectRoutes(
     async (request, reply) => {
       await reply.send(
         await service.setCredential(
-          actorFor(request),
+          await writerFor(request),
           request.params.id,
           request.params.kind,
           request.body.values,
@@ -1815,7 +1823,10 @@ export async function objectRoutes(
           'Removes the credential set defined *on this object*. It does not leave the object ' +
           'without credentials: whatever an ancestor defines comes back into force, and the ' +
           'response says which, so removing a device-level community string tells you the ' +
-          "group's one is now in use rather than leaving it to be discovered.",
+          "group's one is now in use rather than leaving it to be discovered. **403** when the " +
+          'set that comes back into force would reach a sensor somewhere nobody with `write` on ' +
+          'where it is stored vouched for, and you do not have that `write` either (`A-41`); ' +
+          'the set stays.',
         params: credentialKindParams,
         response: {
           200: {
@@ -1835,7 +1846,7 @@ export async function objectRoutes(
     },
     async (request, reply) => {
       const outcome = await service.clearCredential(
-        actorFor(request),
+        await writerFor(request),
         request.params.id,
         request.params.kind,
         optionalIfMatch(request.headers['if-match']),

@@ -1,8 +1,10 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import {
+  credentialAdoptionAuditSinks,
   discoveryAuditSinks,
   grantAuditSinks,
+  identityAuditSinks,
   libraryAuditSinks,
   mapAuditSinks,
   probeAuditSinks,
@@ -125,12 +127,22 @@ describe('what each audited service tells', () => {
     assert.deepEqual(mapAuditSinks(all).map(all.named), ['database', 'logging']);
   });
 
-  it('keeps an object grant to the record alone, although it is on the tree', () => {
+  it('pushes configuration on a grant or an identity change, and nothing else', () => {
     // What a grant changes is who is shown a branch, and that is resolved when they ask; the
-    // epoch that invalidates a cached answer moves with the grant's own statement (`A-12`). A
-    // configuration push here would send every probe a change none of them scans for (`A-17`).
+    // epoch that invalidates a cached answer moves with the grant's own statement (`A-12`). But
+    // a sensor is sent its inherited credentials only while its voucher can write where they are
+    // stored, so a revoked grant or a disabled account has to reach the probes (`A-41`).
     const all = sinks();
-    assert.deepEqual(grantAuditSinks(all).map(all.named), ['database', 'logging']);
+    assert.deepEqual(grantAuditSinks(all).map(all.named), [
+      'database',
+      'logging',
+      'configNotifier',
+    ]);
+    assert.deepEqual(identityAuditSinks(all).map(all.named), [
+      'database',
+      'logging',
+      'configNotifier',
+    ]);
   });
 
   it('keeps probe trust and discovery to the record alone', () => {
@@ -140,5 +152,11 @@ describe('what each audited service tells', () => {
     const all = sinks();
     assert.deepEqual(probeAuditSinks(all).map(all.named), ['database', 'logging']);
     assert.deepEqual(discoveryAuditSinks(all).map(all.named), ['database', 'logging']);
+  });
+
+  it('keeps the boot step that adopts credential vouchers to the record alone (A-41)', () => {
+    // It runs before any probe is served and changes nothing an alarm chain reads.
+    const all = sinks();
+    assert.deepEqual(credentialAdoptionAuditSinks(all).map(all.named), ['database', 'logging']);
   });
 });

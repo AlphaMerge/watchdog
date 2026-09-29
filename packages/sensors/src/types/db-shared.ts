@@ -342,6 +342,9 @@ export function databaseSensor(
     category: 'Database',
     costHint: 'medium',
     credentialKinds: ['database'],
+    // Where the set goes besides the host (`A-41`): a port, and whether it is encrypted and
+    // checked.
+    secretDestinations: { 'kind:database': ['encrypt', 'port', 'verifyTls'] },
     paramsSchema: {
       type: 'object',
       additionalProperties: false,

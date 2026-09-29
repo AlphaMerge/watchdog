@@ -15767,45 +15767,137 @@ because each is a decision rather than a defect:
       cleared anyway; each of the three audit records; and the script secret's empty default put
       back.
 
-- [ ] **A-41 — A device credential goes to whatever host a device writer names** · L · A-05,
+- [x] **A-41 — A device credential goes to whatever host a device writer names** · L · A-05,
       A-29, A-40 · Found 2026-09-29 by `A-40`'s inventory. Credential sets are inherited: an
-      administrator sets SNMP, SSH or WMI credentials on a group, and every device beneath uses
-      them. A user with `write` on one of those devices may change its host, and at its next
+      administrator sets SNMP, SSH or database credentials on a group, and every device beneath
+      uses them. A user with `write` on one of those devices may change its host, and at its next
       connection the probe sends the inherited credentials to the new host. The same happens when a
       writer creates a device under the group, moves one there, or clones one into it. No read
-      returns the secret, and none needs to: the new host receives it.
+      returns the secret, and none needs to: the new host receives it. Split in two
+      (WatchDog, 2026-09-29): this ticket is the voucher; `A-41b` is allowed targets.
+
+      **The inventory, checked mechanically.** Every `writeOnly` sensor parameter, every place a
+      sealed credential is opened, and every column that stores a secret maps to a row. It found
+      three destinations the first pass had not named. A sensor's `port` chooses the listener an
+      inherited set is sent to. `DELETE /objects/:id/credentials/:kind` hands everything beneath to
+      the ancestor's set of that kind. And a rediscovery rule records no writer to vouch with.
+      A discovery run's community is fixed once it starts, so nothing carries it anywhere.
 
       Decided (WatchDog, 2026-09-29):
-      - **Tier A: the voucher.** A write that brings an inherited credential to a new destination
-        needs `write` on the object the credential set belongs to. The write can be a host change,
-        a create, a move or a clone. The check is continuous, the way `A-29`'s is, so a grant
-        taken away later stops the credential being sent. The 403 names the credential kind and
-        the object it belongs to, never the secret.
-      - **B1: allowed targets.** A credential set may carry the targets it may be sent to: hosts,
-        CIDR ranges and, for SSH, host key fingerprints. Changing the targets clears the secret
-        unless it is sent again. A host inside the targets passes Tier A without `write` on the
-        owner, which is how an administrator delegates.
-      - **Devices a discovery rule provisions** are vouched for by the rule's writer.
-      - **Secrets in sensor parameters.** SNMP types that carry a community, `authKey` or
-        `privKey` in their parameters rather than a credential set get the same rule: a sensor
-        whose device changes keeps no secret its writer could not have set.
-      - **Between probes.** Moving a device to another probe sends its credentials to that probe.
-        The documentation says so. Whether this needs a rule of its own is part of the design.
-      - `administration.md` says, in so many words, that `write` on the object a credential set
-        belongs to is trust with that credential, unless the set has allowed targets.
-      - Core Health counts credential sets with no allowed targets, and the UI flags them.
+      - **The rule.** A credential set reaches a destination only through a voucher who has
+        `write` on the object the set is stored on (its owner). The installation vouches for what
+        it does itself, and for everything when authorisation is off.
+      - **A destination is the probe, the device's host, and the sensor fields the type names**
+        in `secretDestinations` under `kind:<id>` (`'kind:ssh': ['port']`). The catalogue requires
+        one for every entry in `credentialKinds`; `[]` means the host alone. The probe is part of
+        it because the same private address behind another probe is another machine, so moving a
+        device across probes is a new destination and needs no rule of its own.
+      - **Checked on every write that brings a set somewhere new**, in the write's transaction:
+        a device's host change, create, move or clone; a sensor's create, move or clone, or an
+        update to a destination field; a subtree move that changes which ancestor's set applies;
+        a set deleted, exposing an ancestor's; and a set written, whose writer vouches for
+        everything beneath that resolves to it. The 403 names the kind and the owner, never the
+        secret: "bringing the ssh credentials on group 'Datacentre' (#12) to 10.0.0.9:22 needs
+        write on that group".
+      - **Continuous**, through `A-29`'s withheld path. Each (sensor, kind) records its owner, a
+        fingerprint of its destination and its voucher (migration 060). A probe's configuration
+        sends a set only while all three still hold and the voucher still has `write` on the
+        owner. Otherwise the set is withheld and the sensor held Unknown with the reason — never a
+        Down from a failed login. Grant, group and account changes now push configuration, so a
+        revoked grant stops the next push.
+      - **The upgrade changes nothing.** Migration 060 marks the installation's existing sensors as
+        not yet vouched for, and a boot step records the installation as voucher for every
+        (sensor, kind) that resolves, before the probe endpoint serves a configuration. It runs in
+        one transaction that clears the mark, so a crash halfway runs it again whole.
+      - **Secrets in a sensor's own parameters** (SNMP communities and keys, a script's secret)
+        follow `A-40`'s rule: a device host change, or a move or clone to another probe, clears
+        them unless they are sent again, and the audit lists them. Renumbering a device means
+        entering its SNMP communities again; `administration.md` says so as the price.
+      - **Discovery.** A run's `created_by` vouches for what it provisions. A rediscovery rule
+        records its last writer (migration 061), and its runs vouch as that writer.
+      - `administration.md` says that `write` on the object a credential set belongs to is trust
+        with that credential, until `A-41b` lets a set name where it may go.
 
-      **Before the design is final:** check the inventory mechanically. Every `writeOnly` field in
-      every sensor type's `paramsSchema`, every call that unseals a vaulted credential, and every
-      column in the migrations that stores a secret has to map to a row of the inventory. Anything
-      unmapped is listed, and a route that was not read is marked "not verified". The first pass,
-      made landing `A-40`, found one destination the inventory had not named: a sensor's `port`
-      chooses the listener an inherited credential set is sent to on the device's host. So a sensor
-      write that changes it brings the set to a new destination too.
+      **Done when** a device writer without `write` on the set's owner cannot bring the set to a
+      new destination by any of the writes above, and the probe is never sent it; a grant taken
+      away stops the next configuration carrying it; and a **scenario test** shows the upgrade
+      (migration, then the boot step, including one aborted halfway and completed on the next
+      boot) changes no sensor state and queues no notification.
 
-      **Done when** a device writer without `write` on the credential set's owner cannot bring the
-      credential to a new host by editing, creating, moving or cloning a device, and the probe is
-      never sent it; a host inside the allowed targets can; and each of those has a test.
+      **Outcome.** All of it, through one module: `objects/credential-vouching.ts`. A
+      (sensor, kind) whose kind resolves to a set records its owner, a fingerprint of where it is
+      sent, and who vouched (migration 060). Every write in the list re-reads that in its own
+      transaction: the installation's record is kept; a writer with `write` on the owner is
+      recorded; an unchanged pair is kept for one without; and a changed pair is refused with
+      403, naming the kind, the owner and where it would go. Each probe's configuration asks again
+      and leaves out a sensor whose voucher lost `write`, was disabled or deleted, or no longer
+      matches. It reads Unknown/`access` through `A-29`'s set, and "check now" answers 409
+      `OBJECT_CREDENTIALS_WITHHELD`. Grant and identity changes now push configuration.
+      - **The catalogue requires a `kind:<id>` entry for every credential kind a type uses**, and
+        refuses one for a kind it does not. Declared on all twenty shipped credentialed types: the
+        SNMP port, each HTTP type's port, scheme and TLS check, each mail server's port and
+        security, the SSH port, the database port and encryption, and the Windows host override
+        and authentication.
+      - **Secrets in a sensor's own parameters** are cleared, one audit entry each, when the
+        device's host or address family changes, or when a device or sensor moves or is cloned to
+        another probe or onto another device.
+      - **Discovery.** A run vouches as its `created_by`, and a scheduled one as its rule's last
+        writer (`written_by`, migration 061, backfilled from the audit log as 059 was). **A run
+        whose rule was deleted creates nothing.** Deleting a rule fails the rule's runs that are
+        still going. Each gets "its rule was deleted" on the run and in the audit log
+        (`discovery.failed`), and its probe is told to stop. A run that had already finished
+        fails the same way when anybody asks to provision it (409 `DISCOVERY_RUN_FAILED`). The
+        re-check is `provisionRun`, moved out of `main.ts` so that it is tested.
+        `DiscoveryService.fail` is the step `P-241` can reuse for a group that moved. `failed`
+        is now terminal: a probe that reports the sweep done afterwards changes nothing, and
+        nothing is announced. With authorisation off the installation vouches, as it does for
+        every write. A sensor a run cannot vouch for is one of its problems, and the rest of the
+        device is made.
+      - **The boot step also re-fingerprints, and only what it can show did not move.** It
+        stores what every type declares, as written. When a release changes a declaration, a
+        record is carried over only if its stored fingerprint equals what the old declaration
+        computes from the sensor's values now. A record that matches neither stays withheld. All
+        of this happens in the upgrade transaction, and each kind gets one `credential.adopted`
+        audit entry counting the pairs recorded as the installation's, carried, and left
+        withheld. Without re-fingerprinting, adding a field to `kind:http` would withhold every
+        HTTP sensor at once. Without the continuity check, the same release would adopt a record
+        somebody had moved.
+      - **`SensorVouching.settle` keeps each owner's words.** A sensor moving between probes is
+        withheld by one probe's check and released by the other's. In the wrong order, one owner
+        released what another still held.
+      - `credential-upgrade-scenario.test.ts` migrates an installation with Up sensors and
+        triggers on Down and Unknown. It boots once into a failure after the rows are written,
+        then boots again, and asserts no state moved and nothing was queued. It also shows that
+        without the boot step the same configuration withholds all three sensors and pages three
+        times, so the assertions can fail.
+      - **Mutants: 69, 68 killed.** The survivor walks up to a sensor's probe farthest-first, which
+        changes nothing: a probe's parent is always the root, so every sensor has exactly one
+        probe above it. Not mutated: the guard on identification's last batch announcing a run
+        that failed meanwhile, which only a race reaches, and `main.ts`'s wiring. For the
+        adoption sinks that wiring is pinned by `audit-composition.test.ts`.
+
+- [ ] **A-41b — A credential set says where it may go** · M · A-41, P-219, P-216 · Split from
+      `A-41` (WatchDog, 2026-09-29). With `A-41` alone, whoever may write the object a set is
+      stored on may send it anywhere they can put a device. This lets an administrator bound that,
+      and delegate within the bound.
+      - **`allowedTargets`**, a declared field in every kind's schema (host names, `*.suffix`
+        patterns, addresses, CIDR ranges), and **`hostKeys`** for ssh. Declared rather than a
+        column, so `A-43`'s checks, the audit, the reads and the generated form carry them with no
+        new route. Each kind's secrets are bound to them through `secretDestinations`, so
+        changing the targets clears the secret unless it is sent again (`A-40`'s rule).
+      - **A restricted set reaches any destination inside its targets and none outside, whoever
+        asks, including the owner's writer.** Widening the targets needs the secret again.
+      - **The probe checks too** (protocol 22, after `P-219`'s 20 and `P-216`'s 21 have landed). A
+        named host and a CIDR target cannot be decided by the core, which does not resolve names;
+        the probe checks the address it resolved, and an ssh host key, before using the set.
+        **Until a probe speaks 22, a restricted set it would have to decide is withheld from it,
+        not sent.** Fail closed.
+      - Core Health counts sets with no targets, and the UI flags them. `administration.md`'s
+        sentence becomes: `write` on a set's owner is trust with it unless the set has targets.
+
+      **Done when** a device inside the targets receives the set whoever wrote it, one outside
+      does not whoever wrote it, a probe that has not upgraded is not sent a set it cannot check,
+      and a probe that has refuses one whose resolved address or host key is outside.
 
 - [ ] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

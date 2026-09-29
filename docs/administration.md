@@ -276,6 +276,54 @@ They are encrypted at rest with the **vault key**, at `/var/lib/ms-core/vault.ke
 Credentials are inherited like every other setting: set the SNMP community once on a group, and
 every device beneath it uses it. That is the point — rotating one is one edit, not four hundred.
 
+**An inherited set goes only where somebody who may write its owner vouched for** (`A-41`). The
+owner is the object the set is stored on. Where a sensor sends it is the probe, the device's host
+and address family, and whichever of the sensor's parameters its type says choose the listener
+(the port, for SNMP). Without this, anybody with `write` on one device under the group could
+point it at a machine of their own and be sent the group's community at the next scan. So:
+
+- **A write that brings a set somewhere new is refused unless its writer has `write` on the
+  owner.** That covers changing a device's host or address family, creating, moving or cloning a
+  device or a sensor under the set, changing a sensor's port, and deleting a set so that an
+  ancestor's takes over. The 403 names the kind and the owner, never the secret.
+- **Writing a set vouches for everything beneath that it reaches.** Whoever may write the group
+  may send its credentials anywhere under it; that is what storing them there means.
+- **What was vouched for is checked again at every configuration a probe is sent.** A sensor
+  whose voucher has lost `write` on the owner, or been disabled or deleted, is not sent to its
+  probe at all, and reads **Unknown** with a message saying why and what to do — not Down from a
+  failed login. A grant, group or account change pushes configuration, so the next one stops
+  carrying it. Saving the sensor again, as an account with `write` on the owner, sends it again.
+- **A discovery run** vouches as the account that started it, and a scheduled rediscovery as the
+  account that last wrote its rule. A sensor it cannot vouch for is left out of the device and
+  listed among the run's problems; the rest is made. **Deleting a rule fails its runs** with
+  "its rule was deleted": one still going is stopped, and one that finished creates nothing when
+  somebody asks to provision it (409 `DISCOVERY_RUN_FAILED`). Nobody stands behind those
+  addresses any more; start a new run to provision them.
+- **Upgrading changes nothing.** The first start of this version records the installation as
+  voucher for every set in use, in one transaction, before any probe is configured. A later
+  release that changes which parameters a type says choose the listener moves every such
+  fingerprint at once. Its first start carries a record over only when the old rule, applied to
+  the sensor as it is now, gives the fingerprint that was recorded. A record that fails that
+  check stays withheld until somebody vouches for it again. The audit log gets one
+  `credential.adopted` entry per kind, with how many were carried and how many were left
+  withheld.
+
+**`write` on the object a set is stored on is trust with that set.** Anyone with it may send the
+set to any address they can put a device at, as they always could. Store a set as low in the
+tree as its devices allow, and grant `write` there with that in mind. `A-41b` will let a set name
+the addresses it may go to.
+
+**Secrets in a sensor's own parameters stay with its device** (`A-41`, by `A-40`'s rule). An SNMP
+community or key, or a script's secret, set on the sensor rather than inherited, is cleared when
+the device's host or address family changes, when the sensor or its device moves or is cloned to
+another probe, and when a sensor moves or is cloned onto another device — each with an audit entry
+naming what was cleared. The price is that **renumbering a device means entering those again**;
+an inherited set carries over, because its owner's writer vouches for it.
+
+**Between probes**, a set goes with the device. Moving a device to another probe sends its
+credentials to that probe, which is why that probe is part of where they go: the same private
+address behind another probe is another machine, and needs its own voucher.
+
 **A credential set holds only the fields its kind declares** (`A-43`). A write naming any other
 field is refused with a 400 that names it, and nothing is stored. Before this, a secret sent
 under a mistyped name (`comunity` for `community`) was stored as a *public* field, in the clear,

@@ -313,6 +313,13 @@ export interface SensorType {
    * `[]` says no parameter chooses it — it goes to the device the sensor is on, and nowhere
    * else — which is what a credential the sensor holds for its own device should say. Each
    * destination is a dotted path to a plain property that is not itself `writeOnly`.
+   *
+   * **And one `kind:<id>` entry for every kind in `credentialKinds`** (`A-41`): the parameters
+   * that choose where an inherited credential set of that kind is sent, beside the device's host
+   * and the probe. `'kind:ssh': ['port']`. The core fingerprints that destination, and a write
+   * that moves it needs a voucher with `write` on the object the set is stored on. Name every
+   * parameter that decides who can receive the credential — a port, an override of the host, and
+   * whatever turns encryption or its verification off — since each is a listener of its own.
    */
   readonly secretDestinations?: Readonly<Record<string, readonly string[]>>;
   /**

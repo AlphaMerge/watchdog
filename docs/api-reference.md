@@ -311,7 +311,7 @@ The credential kinds this build can use, with the JSON Schema a form is generate
 
 ### `PUT /api/v1/objects/{id}/credentials/{kind}`
 
-Stores the credential set of this kind on this object, where everything below it inherits it (`CAPABILITIES.MD §10`). **A secret this omits is kept**, exactly as a sensor's `writeOnly` parameter is: a read never returns the value, so a client cannot send it back, and replacing the whole record would delete the community string every time somebody corrected the SNMP version beside it. Send the field with a value to rotate it, or `null` to remove it. **`values` is checked against the kind**, and a field it does not declare is refused with 400 naming it: a secret sent under a mistyped name would otherwise be stored as a public field. The response carries no secret.
+Stores the credential set of this kind on this object, where everything below it inherits it (`CAPABILITIES.MD §10`). **A secret this omits is kept**, exactly as a sensor's `writeOnly` parameter is: a read never returns the value, so a client cannot send it back, and replacing the whole record would delete the community string every time somebody corrected the SNMP version beside it. Send the field with a value to rotate it, or `null` to remove it. **`values` is checked against the kind**, and a field it does not declare is refused with 400 naming it: a secret sent under a mistyped name would otherwise be stored as a public field. The response carries no secret. **Storing a set here vouches for sending it** wherever the sensors beneath that now inherit it send it (`A-41`).
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -328,7 +328,7 @@ Stores the credential set of this kind on this object, where everything below it
 
 ### `DELETE /api/v1/objects/{id}/credentials/{kind}`
 
-Removes the credential set defined *on this object*. It does not leave the object without credentials: whatever an ancestor defines comes back into force, and the response says which, so removing a device-level community string tells you the group's one is now in use rather than leaving it to be discovered.
+Removes the credential set defined *on this object*. It does not leave the object without credentials: whatever an ancestor defines comes back into force, and the response says which, so removing a device-level community string tells you the group's one is now in use rather than leaving it to be discovered. **403** when the set that comes back into force would reach a sensor somewhere nobody with `write` on where it is stored vouched for, and you do not have that `write` either (`A-41`); the set stays.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -448,7 +448,7 @@ Recorded immediately and sent to the probe as well, so a cancel works even while
 
 Create the devices and sensors this run found
 
-**Idempotent.** Devices are matched on address, then reverse name, then short name within the target group, and only sensors that are not already there are created — so running this twice creates nothing the second time. That matters because a discovery is re-run: on a schedule, or by an operator who has configured a credential and wants the sensors it unlocks.
+**Idempotent.** Devices are matched on address, then reverse name, then short name within the target group, and only sensors that are not already there are created — so running this twice creates nothing the second time. That matters because a discovery is re-run: on a schedule, or by an operator who has configured a credential and wants the sensors it unlocks. **A run whose rule was deleted creates nothing** (`A-41`): the account that wrote the rule vouched for sending the group’s credentials to the addresses it found, and deleting the rule withdraws that. With accounts on, the run is failed with the reason “its rule was deleted”, recorded in the audit log, and this answers 409 `DISCOVERY_RUN_FAILED` with the same sentence. Start a new run to provision those addresses.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -1286,6 +1286,8 @@ One object. Send the `ETag` back as `If-None-Match` for a 304 when nothing in th
 
 ### `PATCH /api/v1/objects/{id}`
 
+Changes what it is given and keeps the rest. **Where a sensor sends its inherited credentials** — a device's host or address family, or a sensor parameter its type says chooses the listener — **needs `write` on the object those credentials are stored on** (`A-41`), and is otherwise refused with 403 naming the kind and that object, never the secret. A device's new host also clears the secrets held in its sensors' own parameters, which the audit lists; enter them again.
+
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
 | `id` | path | integer | **required** |
@@ -1820,7 +1822,7 @@ Historic channel data for a sensor. The resolution is snapped up to a supported 
 
 Run this sensor’s check now and return what it said
 
-Asks the probe that owns the sensor to run **exactly** the check a scheduled scan would run — the same parameters, the same credentials, the same target — and hands back the result. **Nothing is stored**: a reading taken outside the schedule is not history, and ten presses of the button would otherwise draw ten spikes into a channel whose interval is a minute. `stored` says so on every response. A check that *fails* is a 200 carrying `outcome: "error"` and the reason, because that is the answer somebody pressed the button to get. The error statuses are for the query failing rather than the check: 503 the probe is not connected or is already running as many of these as it will, 504 it did not answer in time, 409 it is too old to be asked at all. A **paused** sensor can still be checked. A pause stops the monitoring; it does not stop an operator asking whether the thing they just fixed is working, which is exactly when a sensor is most likely to be paused.
+Asks the probe that owns the sensor to run **exactly** the check a scheduled scan would run — the same parameters, the same credentials, the same target — and hands back the result. **Nothing is stored**: a reading taken outside the schedule is not history, and ten presses of the button would otherwise draw ten spikes into a channel whose interval is a minute. `stored` says so on every response. A check that *fails* is a 200 carrying `outcome: "error"` and the reason, because that is the answer somebody pressed the button to get. The error statuses are for the query failing rather than the check: 503 the probe is not connected or is already running as many of these as it will, 504 it did not answer in time, 409 it is too old to be asked at all — or, as `OBJECT_CREDENTIALS_WITHHELD`, the sensor is not being sent its credentials because nobody who may still write where they are stored vouches for where it sends them (`A-41`); the message says what fixes it. A **paused** sensor can still be checked. A pause stops the monitoring; it does not stop an operator asking whether the thing they just fixed is working, which is exactly when a sensor is most likely to be paused.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |

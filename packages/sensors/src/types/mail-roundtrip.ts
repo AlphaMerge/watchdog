@@ -29,6 +29,10 @@ export const mailRoundTrip: SensorType = {
   // A send, then polling a mailbox until it arrives. The most expensive check in the catalogue.
   costHint: 'heavy',
   credentialKinds: ['mail'],
+  // Where the set goes besides the host (`A-41`): both servers' ports, protocols and encryption.
+  secretDestinations: {
+    'kind:mail': ['readPort', 'readSecurity', 'readWith', 'smtpPort', 'smtpSecurity', 'verifyTls'],
+  },
 
   paramsSchema: {
     type: 'object',

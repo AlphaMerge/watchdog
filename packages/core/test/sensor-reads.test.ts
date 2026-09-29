@@ -13,6 +13,7 @@ import {
   type WrittenReads,
   type Writer,
 } from '../src/objects/sensor-reads.js';
+import { storedAccountWrites } from '../src/objects/credential-vouching.js';
 import type { ObjectKind } from '../src/objects/types.js';
 import {
   createScratchDatabase,
@@ -34,7 +35,12 @@ import { actorNamed, buildHarness, testActor, type Harness } from './support/tre
 
 // ── the rules, without a database ────────────────────────────────────────────────────────────
 
-const ACCOUNT: Voucher = { kind: 'account', userId: 7, sees: Visibility.EVERYTHING };
+const ACCOUNT: Voucher = {
+  kind: 'account',
+  userId: 7,
+  sees: Visibility.EVERYTHING,
+  writes: () => Promise.resolve(new Set()),
+};
 
 const naming = (objectId: number, expects: 'sensor' | 'probe' = 'sensor'): WrittenReads => ({
   named: [{ sensorName: 'Sum', param: 'channels[0].formula', objectId, expects }],
@@ -325,6 +331,7 @@ describe(
           kind: 'account',
           userId: operator.id,
           sees: operatorSees,
+          writes: storedAccountWrites((p, ids, q) => access.resolveManyFor(p, ids, q), operator.id),
         },
       };
       deferred = {
@@ -336,6 +343,7 @@ describe(
             deferredOn.push(q);
             return access.visibilityFor({ userId: operator.id, role: 'readwrite' }, q);
           },
+          writes: storedAccountWrites((p, ids, q) => access.resolveManyFor(p, ids, q), operator.id),
         },
       };
 
@@ -358,6 +366,7 @@ describe(
           kind: 'account',
           userId: root.id,
           sees: await access.visibilityFor({ userId: root.id, role: 'admin' }),
+          writes: storedAccountWrites((p, ids, q) => access.resolveManyFor(p, ids, q), root.id),
         },
       };
     });

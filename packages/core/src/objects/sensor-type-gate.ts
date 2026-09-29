@@ -96,6 +96,33 @@ export interface SensorTypeGate {
 
   /** What a sensor of this type, with these stored params, reads (`A-29`). */
   reads(sensorType: string, params: Record<string, unknown>): SensorReads;
+
+  /**
+   * The types with a `writeOnly` parameter (`A-41`), so that a write which changes where a
+   * sensor sends things can find the secrets it has to clear without reading every sensor.
+   */
+  secretTypes(): readonly string[];
+
+  /** The credential kinds a sensor of this type is sent from the vault (`A-05`). */
+  credentialKinds(sensorType: string): readonly string[];
+
+  /**
+   * The types that are sent any credential kind (`A-41`), so that a write can ask the database
+   * about just those — and skip asking at all for a ping or a factory.
+   */
+  credentialedTypes(): readonly string[];
+
+  /**
+   * Where a sensor of this type, with these stored params, sends the set of this kind, beyond
+   * its device's host: the fields its type names, sorted, and their values (`A-41`). `declared`
+   * reads the fields an earlier release named instead.
+   */
+  credentialDestination(
+    sensorType: string,
+    kind: string,
+    params: Record<string, unknown>,
+    declared?: readonly string[],
+  ): readonly (readonly [string, unknown])[];
 }
 
 export type { ChannelRecord };
@@ -161,6 +188,22 @@ export function catalogueSensorTypeGate(catalogue: SensorCatalogue): SensorTypeG
       return type.references !== undefined || type.requires !== undefined;
     });
     if (catalogue.sealed) sealedReadingTypes = found;
+    return found;
+  };
+  let sealedSecretTypes: readonly string[] | undefined;
+  const secretTypes = (): readonly string[] => {
+    if (sealedSecretTypes !== undefined) return sealedSecretTypes;
+    const found = catalogue.ids().filter((id) => catalogue.writeOnlyPaths(id).length > 0);
+    if (catalogue.sealed) sealedSecretTypes = found;
+    return found;
+  };
+  let sealedCredentialedTypes: readonly string[] | undefined;
+  const credentialKinds = (sensorType: string): readonly string[] =>
+    catalogue.has(sensorType) ? (catalogue.declaration(sensorType).credentialKinds ?? []) : [];
+  const credentialedTypes = (): readonly string[] => {
+    if (sealedCredentialedTypes !== undefined) return sealedCredentialedTypes;
+    const found = catalogue.ids().filter((id) => credentialKinds(id).length > 0);
+    if (catalogue.sealed) sealedCredentialedTypes = found;
     return found;
   };
   return {
@@ -235,6 +278,21 @@ export function catalogueSensorTypeGate(catalogue: SensorCatalogue): SensorTypeG
         references: type.references?.(params) ?? [],
         ...(type.requires === undefined ? {} : { requires: type.requires }),
       };
+    },
+
+    secretTypes,
+    credentialKinds,
+    credentialedTypes,
+
+    credentialDestination(
+      sensorType: string,
+      kind: string,
+      params: Record<string, unknown>,
+      declared?: readonly string[],
+    ): readonly (readonly [string, unknown])[] {
+      // An unregistered type is sent nothing, so it has nowhere to send it.
+      if (!catalogue.has(sensorType)) return [];
+      return catalogue.credentialDestination(sensorType, kind, params, declared);
     },
 
     redact(sensorType: string, params: Record<string, unknown>): RedactedParams {

@@ -11,9 +11,10 @@ import {
 } from '../schedules/cadence.js';
 import type { Database, Queryable } from '../db/pool.js';
 import type { Actor, AuditSink, RediscoveryScheduleAudit } from '../objects/audit.js';
+import { storedVoucher, type StoredVoucher } from '../objects/vouching.js';
 import { DiscoveryError } from './errors.js';
 import { requireGroupProbe } from './scope.js';
-import type { DiscoveryService } from './service.js';
+import { RULE_DELETED, type DiscoveryService } from './service.js';
 
 /**
  * Rediscovery schedules (`D-07`).
@@ -184,8 +185,9 @@ export class RediscoveryService {
         `INSERT INTO discovery_schedule
          (group_id, probe_id, name, enabled, range_text, level, templates, snmp_community,
           timeout_ms, concurrency, rate_per_second, cadence, cadence_minute, cadence_weekday,
-          timezone, auto_provision, schedule_id, next_run_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+          timezone, auto_provision, schedule_id, next_run_at, written_by, written_by_user)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+               $19, $20)
        RETURNING *`,
         [
           input.groupId,
@@ -206,6 +208,7 @@ export class RediscoveryService {
           input.autoProvision ?? false,
           input.scheduleId ?? null,
           next,
+          ...writtenBy(actor),
         ],
       );
       const row = rows[0];
@@ -370,7 +373,7 @@ export class RediscoveryService {
              snmp_community = $7, timeout_ms = $8, concurrency = $9, rate_per_second = $10,
              cadence = $11, cadence_minute = $12, cadence_weekday = $13, timezone = $14,
              auto_provision = $15, schedule_id = $16, next_run_at = $17, last_problem = '',
-             version = version + 1, updated_at = now()
+             written_by = $18, written_by_user = $19, version = version + 1, updated_at = now()
          WHERE id = $1 RETURNING *`,
         [
           id,
@@ -390,6 +393,7 @@ export class RediscoveryService {
           next.autoProvision,
           next.scheduleId,
           nextRunAt,
+          ...writtenBy(actor),
         ],
       );
       const row = rows[0];
@@ -413,6 +417,19 @@ export class RediscoveryService {
       );
       return updated;
     });
+  }
+
+  /**
+   * Who stands behind the addresses this rule's runs provision (`A-41`): the account that last
+   * wrote it, or the installation. Null when there is no such rule.
+   */
+  async writerOf(id: number): Promise<StoredVoucher | null> {
+    const [row] = await this.#db.query<{ written_by: string; written_by_user: string | null }>(
+      `SELECT written_by, written_by_user::text AS written_by_user
+       FROM discovery_schedule WHERE id = $1`,
+      [id],
+    );
+    return row === undefined ? null : storedVoucher(row.written_by, row.written_by_user);
   }
 
   async get(id: number): Promise<RediscoverySchedule | null> {
@@ -441,7 +458,20 @@ export class RediscoveryService {
   }
 
   async remove(id: number, actor: Actor): Promise<boolean> {
-    return this.#db.tx(async (q) => {
+    // **The rule's runs still going fail with it** (`A-41`). The foreign key forgets which rule a
+    // run came from, and a run nobody stands behind must not be provisioned — so they are read
+    // before the row goes, and failed once it has, with the reason. A core that stops between the
+    // two leaves a run that finishes and is never provisioned, because its rule is gone; with
+    // accounts on it fails with the same reason when anybody asks to provision it (`provisionRun`).
+    let going: number[] = [];
+    const deleted = await this.#db.tx(async (q) => {
+      going = (
+        await q.query<{ id: string }>(
+          `SELECT id::text AS id FROM discovery_run
+           WHERE schedule_id = $1 AND status IN ('queued', 'running', 'identifying')`,
+          [id],
+        )
+      ).map((run) => Number(run.id));
       const rows = await q.query<Record<string, unknown>>(
         `DELETE FROM discovery_schedule WHERE id = $1 RETURNING *`,
         [id],
@@ -464,6 +494,10 @@ export class RediscoveryService {
       );
       return true;
     });
+    if (deleted) {
+      for (const runId of going) await this.#discovery.fail(runId, RULE_DELETED, actor);
+    }
+    return deleted;
   }
 
   /**
@@ -629,6 +663,24 @@ export class RediscoveryService {
 }
 
 /** A cadence the calendar can fire, or the refusal that says which value is wrong (`D-07`). */
+/**
+ * Who stands behind a rule's addresses from this write on (`A-41`, migration 061): the account
+ * that wrote it, or the installation for the system and for an installation with no accounts.
+ */
+function writtenBy(actor: Actor): [string, number | null] {
+  switch (actor.kind) {
+    case 'user':
+      return ['account', actor.userId];
+    // A token's account is not on the actor; an account nobody can name vouches for nothing,
+    // which is the safe reading of one that cannot be traced.
+    case 'token':
+      return ['account', null];
+    case 'system':
+    case 'anonymous':
+      return ['installation', null];
+  }
+}
+
 function requireCadence(spec: CadenceSpec): void {
   const problems = cadenceProblems(spec);
   if (problems.length > 0) {

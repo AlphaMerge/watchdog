@@ -1,10 +1,20 @@
 import type { Fingerprint, Logger } from '@ms/shared';
 import type { DeviceTemplateCatalogue } from '../device-templates/catalogue.js';
 import type { SensorSpec } from '../device-templates/definition.js';
+import type { AccessPrincipal, AccessRight } from '../auth/access.js';
+import type { Queryable } from '../db/pool.js';
 import type { Actor } from '../objects/audit.js';
-import { asInstallation } from '../objects/sensor-reads.js';
+import { storedAccountWrites } from '../objects/credential-vouching.js';
+import { asInstallation, type CredentialVoucher } from '../objects/sensor-reads.js';
 import type { ObjectService } from '../objects/service.js';
-import type { DiscoveredHost, DiscoveryRunRow } from './service.js';
+import type { StoredVoucher } from '../objects/vouching.js';
+import { DiscoveryError } from './errors.js';
+import {
+  RULE_DELETED,
+  type DiscoveredHost,
+  type DiscoveryRunRow,
+  type DiscoveryService,
+} from './service.js';
 
 /**
  * Turning what a discovery found into devices and sensors (`D-04`).
@@ -26,6 +36,104 @@ import type { DiscoveredHost, DiscoveryRunRow } from './service.js';
  * device says `web01.example.com` — and it is *only* consulted when nothing else matched,
  * because two sites can each have a `web01`.
  */
+
+export interface RunVoucherOptions {
+  authRequired: boolean;
+  ruleWriter: (ruleId: number) => Promise<StoredVoucher | null>;
+  rights: (
+    principal: AccessPrincipal,
+    objectIds: readonly number[],
+    q: Queryable,
+  ) => Promise<ReadonlyMap<number, AccessRight>>;
+}
+
+/**
+ * Who vouches for sending credentials to the addresses a run found (`A-41`).
+ *
+ * The account that started it; else the account that last wrote the rule that started it; and,
+ * with the authorisation layer off, the installation, as for every other write. Null for a run
+ * with neither: its rule was deleted, which the column's `ON DELETE SET NULL` would otherwise make
+ * look operator-started. Nobody stands behind such a run, and `provisionRun` fails it rather than
+ * create anything — otherwise deleting a rule would be a way for its writer to hand the run the
+ * installation's word. A run started by hand before `A-20` recorded who started it reads the same.
+ */
+export async function runVoucher(
+  run: Pick<DiscoveryRunRow, 'createdBy' | 'scheduleId'>,
+  options: RunVoucherOptions,
+): Promise<CredentialVoucher | null> {
+  if (!options.authRequired) return { kind: 'installation' };
+  let stored: StoredVoucher;
+  if (run.createdBy !== null) stored = { kind: 'account', userId: run.createdBy };
+  else if (run.scheduleId !== null) {
+    // A rule nobody on record wrote vouches for nothing; it is still a rule, and the run is not
+    // failed for it — each sensor it cannot vouch for is one of the run's problems.
+    stored = (await options.ruleWriter(run.scheduleId)) ?? { kind: 'account', userId: null };
+  } else return null;
+  if (stored.kind === 'installation') return stored;
+  return {
+    kind: 'account',
+    userId: stored.userId,
+    writes: storedAccountWrites(options.rights, stored.userId),
+  };
+}
+
+export interface RunProvisioning {
+  discovery: Pick<DiscoveryService, 'get' | 'hosts' | 'recordProvisioning' | 'fail'>;
+  provisioner: Pick<ProvisionService, 'provision'>;
+  /** The devices already in a group and their sensors, so a re-run creates nothing twice. */
+  existing: (
+    groupId: number,
+  ) => Promise<{ devices: readonly ExistingDevice[]; sensors: readonly ExistingSensor[] }>;
+  vouchers: RunVoucherOptions;
+}
+
+/**
+ * Provisions what a run found, or fails the run with the reason it cannot be (`D-04`, `A-41`).
+ *
+ * Re-checks who stands behind the run when asked rather than when the run started: a rule
+ * deleted after its run finished, whose run an operator then asks to provision, creates nothing.
+ * The run fails with "its rule was deleted", recorded in the audit, and the caller is refused with
+ * the same sentence — the pattern `P-241` uses for a group that moved.
+ */
+export async function provisionRun(
+  options: RunProvisioning,
+  runId: number,
+  actor: Actor,
+): Promise<ProvisionReport> {
+  const run = await options.discovery.get(runId);
+  if (run === null) {
+    throw new DiscoveryError(
+      'DISCOVERY_RUN_NOT_FOUND',
+      `there is no discovery run ${String(runId)}`,
+      {
+        context: { runId },
+      },
+    );
+  }
+  const credentials = await runVoucher(run, options.vouchers);
+  if (credentials === null) {
+    await options.discovery.fail(runId, RULE_DELETED, actor);
+    throw new DiscoveryError(
+      'DISCOVERY_RUN_FAILED',
+      `discovery run ${String(runId)} created nothing: ${RULE_DELETED}`,
+      { context: { runId } },
+    );
+  }
+  const [hosts, existing] = await Promise.all([
+    options.discovery.hosts(runId, 65_536),
+    options.existing(run.groupId),
+  ]);
+  const report = await options.provisioner.provision({
+    run,
+    hosts,
+    existingDevices: existing.devices,
+    existingSensors: existing.sensors,
+    actor,
+    credentials,
+  });
+  await options.discovery.recordProvisioning(runId, report);
+  return report;
+}
 
 export interface ProvisionOptions {
   objects: ObjectService;
@@ -72,6 +180,11 @@ export interface ProvisionInput {
   /** The sensors those devices already have. */
   existingSensors: readonly ExistingSensor[];
   actor: Actor;
+  /**
+   * Who vouches for sending inherited credentials to the addresses this run found (`A-41`): the
+   * account that started it, or that last wrote the rule that did.
+   */
+  credentials: CredentialVoucher;
 }
 
 export class ProvisionService {
@@ -120,8 +233,10 @@ export class ProvisionService {
 
     const credentials = await this.#credentialsFor(input.run.groupId);
     // What a template names, the installation stands behind: the template is a file somebody with
-    // the server's file system put there (`A-29`). The audit still says who started the run.
-    const writer = asInstallation(input.actor);
+    // the server's file system put there (`A-29`). The audit still says who started the run. Where
+    // the credentials go is another matter: the addresses are the run's, not the template's, so
+    // whoever chose them vouches for sending the group's credentials there (`A-41`).
+    const writer = { ...asInstallation(input.actor), credentials: input.credentials };
     // Empty means every template, which is what almost every run wants (`D-06`).
     const only = new Set(input.run.templates);
 

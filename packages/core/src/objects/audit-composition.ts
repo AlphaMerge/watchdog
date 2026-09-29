@@ -97,14 +97,15 @@ export function libraryAuditSinks(all: AuditSinkSet): AuditSink[] {
 /**
  * Granting or revoking a group's right on an object (`A-17`).
  *
- * **The record and nothing else**, though the grant is on the tree. What somebody is shown is
- * resolved when they ask, and the visibility epoch that tells every cached answer it is stale is
- * bumped by the grant's own statement (`A-12`, migration 052) — so no probe, cache, schedule or
- * alarm chain holds anything a grant leaves stale. The configuration push above all would be
- * wrong here: a grant changes who may look at a sensor, never what a probe scans.
+ * **The record and the configuration push** (`A-41`). What somebody is shown is resolved when
+ * they ask, and the visibility epoch that tells every cached answer it is stale is bumped by the
+ * grant's own statement (`A-12`, migration 052) — so no cache, schedule or alarm chain holds
+ * anything a grant leaves stale. A probe does: a sensor is sent its inherited credentials only
+ * while whoever vouched for it can still write where they are stored, so a revoked grant has to
+ * reach the next configuration rather than wait for some unrelated edit to push one.
  */
 export function grantAuditSinks(all: AuditSinkSet): AuditSink[] {
-  return [all.database, all.logging];
+  return [all.database, all.logging, all.configNotifier];
 }
 
 /**
@@ -131,15 +132,28 @@ export function discoveryAuditSinks(all: AuditSinkSet): AuditSink[] {
 }
 
 /**
+ * The boot step that records who vouches for the credential sets in use (`A-41`).
+ *
+ * **The record and nothing else.** It runs before the probe endpoint serves a configuration and
+ * before the API can write, so there is nothing to push to and nothing cached to invalidate; and
+ * it changes no state an alarm chain reads, which is its whole point.
+ */
+export function credentialAdoptionAuditSinks(all: AuditSinkSet): AuditSink[] {
+  return [all.database, all.logging];
+}
+
+/**
  * Changing an account, a user group, a membership, a password, a second factor or an API token
  * (`A-18`).
  *
- * **The record and nothing else**, for a grant's reason: who may see what is resolved when they
- * ask, and a membership's own statement bumps the visibility epoch that tells every cached answer
- * it is stale (`A-12`, migration 052). No probe scans anything an identity change touches.
+ * **The record and the configuration push**, for a grant's reasons: who may see what is resolved
+ * when they ask, and a membership's own statement bumps the visibility epoch that tells every
+ * cached answer it is stale (`A-12`, migration 052) — but a disabled, deleted or demoted account
+ * may have vouched for sending a sensor its credentials, and the next configuration has to stop
+ * carrying them (`A-41`). A push that finds nothing changed sends nothing.
  */
 export function identityAuditSinks(all: AuditSinkSet): AuditSink[] {
-  return [all.database, all.logging];
+  return [all.database, all.logging, all.configNotifier];
 }
 
 /** Editing the trigger library, which changes who is notified and not what is scanned. */

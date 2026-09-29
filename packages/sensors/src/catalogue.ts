@@ -243,6 +243,27 @@ export class SensorCatalogue {
   }
 
   /**
+   * Where a sensor of this type sends an inherited credential set of `kind`, beside its device's
+   * host and its probe (`A-41`): each declared field with its stored value, sorted by field, so
+   * two sensors with the same destination fingerprint the same. Empty for a kind the type does
+   * not use, and for one it uses with the host alone.
+   *
+   * `declared` reads other fields than this release declares: what an earlier release did, so the
+   * core can tell a record the declaration moved from one somebody moved (`A-41`).
+   */
+  credentialDestination(
+    id: string,
+    kind: string,
+    params: Readonly<Record<string, unknown>>,
+    declared?: readonly string[],
+  ): readonly (readonly [string, unknown])[] {
+    const fields = declared ?? this.#destinations.get(id)?.[`kind:${kind}`] ?? [];
+    return [...fields]
+      .sort()
+      .map((field) => [field, readAtPath(params, field.split('.')) ?? null] as const);
+  }
+
+  /**
    * A patch with every `writeOnly` value it does not mention taken from what is stored.
    *
    * **The rule this exists for is the mirror of redaction.** A read never returns a credential,
@@ -435,8 +456,26 @@ function assertSecretsSayWhereTheyGo(type: SensorType, writeOnly: readonly strin
       );
     }
   }
+  // An inherited credential set is a secret too, one the sensor never holds (`A-41`).
+  const kinds = (type.credentialKinds ?? []).map((kind) => `kind:${kind}`);
+  for (const key of kinds) {
+    if (!Object.hasOwn(declared, key)) {
+      throw new SensorTypeError(
+        'BAD_SENSOR_TYPE',
+        `${where} uses the "${key.slice('kind:'.length)}" credential kind but does not say ` +
+          `where it is sent: name the parameters that choose it as "${key}" in ` +
+          '`secretDestinations`, or `[]` if the device’s host alone decides',
+      );
+    }
+  }
   for (const [path, destinations] of Object.entries(declared)) {
-    if (!writeOnly.includes(path)) {
+    if (path.startsWith('kind:') && !kinds.includes(path)) {
+      throw new SensorTypeError(
+        'BAD_SENSOR_TYPE',
+        `${where} says where "${path}" is sent, but it does not use that credential kind`,
+      );
+    }
+    if (!path.startsWith('kind:') && !writeOnly.includes(path)) {
       throw new SensorTypeError(
         'BAD_SENSOR_TYPE',
         `${where} says where "${path}" is sent, but "${path}" is not a writeOnly parameter`,

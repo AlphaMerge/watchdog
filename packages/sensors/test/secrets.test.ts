@@ -28,6 +28,7 @@ function leaky(behaviour: (context: CheckContext) => Promise<CheckExecution>): S
     ...snmpType,
     id: 'test.leaky',
     credentialKinds: ['ssh'],
+    secretDestinations: { ...snmpType.secretDestinations, 'kind:ssh': [] },
     execute: behaviour,
   };
   return new SensorCatalogue().register(type).seal();

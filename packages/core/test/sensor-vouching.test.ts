@@ -13,6 +13,7 @@ import { AlarmEngine } from '../src/notifications/engine.js';
 import { AlarmScheduler } from '../src/notifications/scheduler.js';
 import { TriggerSync } from '../src/notifications/sync.js';
 import { TemplateService } from '../src/notifications/templates.js';
+import { storedAccountWrites } from '../src/objects/credential-vouching.js';
 import type { Writer } from '../src/objects/sensor-reads.js';
 import { catalogueSensorTypeGate } from '../src/objects/sensor-type-gate.js';
 import {
@@ -126,6 +127,7 @@ describe(
           kind: 'account',
           userId: person.id,
           sees: await access.visibilityFor({ userId: person.id, role: person.role }),
+          writes: storedAccountWrites((p, ids, q) => access.resolveManyFor(p, ids, q), person.id),
         },
       };
     }

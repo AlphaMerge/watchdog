@@ -3,16 +3,23 @@ import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { classify, type Evidence } from '@ms/shared';
 import { DeviceTemplateCatalogue, type DeviceTemplate } from '../src/device-templates/index.js';
+import { DiscoveryError } from '../src/discovery/errors.js';
 import {
   ProvisionService,
+  provisionRun,
+  runVoucher,
   type ExistingDevice,
   type ExistingSensor,
+  type RunProvisioning,
 } from '../src/discovery/provision.js';
+import { RediscoveryService } from '../src/discovery/rediscovery.js';
 import {
   DiscoveryService,
   type DiscoveredHost,
   type DiscoveryRunRow,
+  type DispatchMessage,
 } from '../src/discovery/service.js';
+import type { Actor } from '../src/objects/audit.js';
 import type { Database } from '../src/db/pool.js';
 import {
   createScratchDatabase,
@@ -35,6 +42,69 @@ import { buildHarness, testActor } from './support/tree.js';
  */
 
 const available = await databaseAvailable();
+
+describe('who vouches for where a run sends credentials (A-41)', () => {
+  const rights = (): Promise<Map<number, 'none'>> => Promise.resolve(new Map<number, 'none'>());
+  const writerOfRule = (ruleId: number) => (asked: number) => {
+    assert.equal(asked, ruleId);
+    return Promise.resolve({ kind: 'account' as const, userId: 42 });
+  };
+
+  it('is the account that started it', async () => {
+    const voucher = await runVoucher(
+      { createdBy: 7, scheduleId: 3 },
+      { authRequired: true, ruleWriter: writerOfRule(3), rights },
+    );
+    assert.equal(voucher?.kind === 'account' && voucher.userId, 7);
+  });
+
+  it('is the rule’s last writer for a run a rule started', async () => {
+    const voucher = await runVoucher(
+      { createdBy: null, scheduleId: 3 },
+      { authRequired: true, ruleWriter: writerOfRule(3), rights },
+    );
+    assert.equal(voucher?.kind === 'account' && voucher.userId, 42);
+    const byInstallation = await runVoucher(
+      { createdBy: null, scheduleId: 3 },
+      {
+        authRequired: true,
+        ruleWriter: () => Promise.resolve({ kind: 'installation' }),
+        rights,
+      },
+    );
+    assert.deepEqual(byInstallation, { kind: 'installation' });
+  });
+
+  it('is nobody for a rule nobody on record wrote', async () => {
+    const voucher = await runVoucher(
+      { createdBy: null, scheduleId: 3 },
+      { authRequired: true, ruleWriter: () => Promise.resolve(null), rights },
+    );
+    assert.ok(voucher?.kind === 'account');
+    assert.equal(voucher.userId, null);
+    assert.deepEqual([...(await voucher.writes({} as never, [1, 2]))], [], 'vouches for nothing');
+  });
+
+  it('is not anybody for a run whose rule is gone, so deleting one hands nothing over', async () => {
+    const voucher = await runVoucher(
+      { createdBy: null, scheduleId: null },
+      {
+        authRequired: true,
+        ruleWriter: () => assert.fail('there is no rule to ask about'),
+        rights,
+      },
+    );
+    assert.equal(voucher, null);
+  });
+
+  it('is the installation with the authorisation layer off, as every write is', async () => {
+    const voucher = await runVoucher(
+      { createdBy: 7, scheduleId: 3 },
+      { authRequired: false, ruleWriter: writerOfRule(3), rights },
+    );
+    assert.deepEqual(voucher, { kind: 'installation' });
+  });
+});
 
 /**
  * Templates over the *harness's* sensor types, not the shipped ones.
@@ -213,6 +283,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
       existingDevices: held.devices,
       existingSensors: held.sensors,
       actor: testActor,
+      credentials: { kind: 'installation' },
     });
   };
 
@@ -536,6 +607,37 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
       assert.match(report.problems[0]?.problem ?? '', /^snmp\.traffic: /);
     });
 
+    it('refuses the sensors whose credentials its voucher cannot send there, and makes the rest', async () => {
+      // `A-41`: the addresses are the run's, so whoever chose them vouches for sending the group's
+      // credentials to them — and one who cannot write where they are stored does not.
+      credentials = new Set(['snmp']);
+      await harness.service.setCredential(testActor, groupId, 'snmp', {
+        version: 'v2c',
+        community: 'dc-secret',
+      });
+      const record = await run();
+      const report = await provisioner.provision({
+        run: record,
+        hosts: [host('10.0.0.1', { sysDescr: 'Linux web01 5.15' })],
+        existingDevices: [],
+        existingSensors: [],
+        actor: testActor,
+        credentials: { kind: 'account', userId: 7, writes: () => Promise.resolve(new Set()) },
+      });
+
+      assert.equal(report.devicesCreated, 1);
+      assert.ok(!(report.devices[0]?.sensors ?? []).some((name) => name.startsWith('Traffic')));
+      assert.ok((report.devices[0]?.sensors ?? []).includes('Ping'), 'the rest were made');
+      assert.ok(report.problems.length >= 2);
+      for (const { problem } of report.problems) {
+        assert.match(
+          problem,
+          /^snmp\.traffic: bringing the snmp credentials on group "Datacentre"/,
+        );
+        assert.doesNotMatch(problem, /dc-secret/);
+      }
+    });
+
     it('records the host and carries on with the rest', async () => {
       // A run that reported success while skipping a machine is worse than one that reported
       // the failure. One transaction for the lot would also roll back work that was fine.
@@ -761,6 +863,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
         existingDevices: [],
         existingSensors: [],
         actor: testActor,
+        credentials: { kind: 'installation' },
       });
       assert.equal(report.mastersSet, 1);
       const device = report.devices[0];
@@ -804,6 +907,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
         existingDevices: [],
         existingSensors: [],
         actor: testActor,
+        credentials: { kind: 'installation' },
       });
       assert.equal(report.mastersSet, 0);
       assert.deepEqual(report.problems, [], 'and it is not an error');
@@ -817,6 +921,204 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
       // `test.generic` and `test.linux` both mark their Ping; `plan` deduplicates to one spec.
       const report = await provision([host('10.0.0.1', { sysDescr: 'Linux one 5.15' })], record);
       assert.equal(report.mastersSet, 1);
+    });
+  });
+
+  describe('a run whose rule was deleted (A-41)', () => {
+    // Nobody stands behind the addresses such a run found: its rule's writer vouched for sending
+    // the group's credentials there, and deleting the rule withdraws that. So it creates nothing,
+    // and it says why — the run fails with the reason, and the audit records it.
+    let sent: DispatchMessage[] = [];
+    let clock = new Date('2026-08-31T00:00:00Z');
+    let authRequired = true;
+    let writer: Actor;
+    let runs: DiscoveryService;
+    let rules: RediscoveryService;
+
+    const unattended: Actor = { kind: 'anonymous', remoteAddress: 'scheduled-rediscovery' };
+
+    /** What `main.ts` gives `provisionRun`, over this file's tree. */
+    const wiring = (): RunProvisioning => ({
+      discovery: runs,
+      provisioner,
+      existing,
+      vouchers: {
+        authRequired,
+        ruleWriter: (ruleId) => rules.writerOf(ruleId),
+        rights: () => Promise.resolve(new Map<number, 'none'>()),
+      },
+    });
+
+    beforeEach(async () => {
+      sent = [];
+      clock = new Date('2026-08-31T00:00:00Z');
+      authRequired = true;
+      const [person] = await db.query<{ id: string }>(
+        `INSERT INTO user_account (login, password_hash, role)
+         VALUES ('rule-writer-' || $1, 'x', 'readwrite') RETURNING id::text`,
+        [String(process.hrtime.bigint())],
+      );
+      writer = { kind: 'user', userId: Number(person?.id), login: 'rule-writer' };
+      runs = new DiscoveryService({
+        db,
+        audit: new DatabaseAuditSink(),
+        logger: silentLogger,
+        dispatch: (_probe, message) => {
+          sent.push(message);
+          return { kind: 'sent' };
+        },
+        onFinished: async (runId) => {
+          await rules.runFinished(runId);
+        },
+      });
+      rules = new RediscoveryService({
+        db,
+        audit: new DatabaseAuditSink(),
+        logger: silentLogger,
+        discovery: runs,
+        windowFor: () => Promise.resolve(null),
+        provision: async (runId) => {
+          await provisionRun(wiring(), runId, unattended);
+        },
+        now: () => clock,
+      });
+    });
+
+    /** A rule that has fired, and its run, which has swept two live hosts and not finished. */
+    const firing = async (autoProvision: boolean): Promise<{ ruleId: number; runId: number }> => {
+      const rule = await rules.create(
+        {
+          groupId,
+          probeId,
+          name: 'Nightly',
+          range: '10.0.0.0/29',
+          cadence: 'daily',
+          cadenceMinute: 3 * 60,
+          timezone: 'UTC',
+          level: 'ping',
+          autoProvision,
+          enabled: true,
+        },
+        writer,
+      );
+      clock = new Date('2026-08-31T03:00:00Z');
+      assert.equal(await rules.tick(), 1);
+      const runId = (await rules.get(rule.id))?.lastRunId ?? assert.fail('the rule started no run');
+      await runs.progress(
+        probeId,
+        runId,
+        6,
+        [
+          { address: '10.0.0.1', rttMs: 1 },
+          { address: '10.0.0.2', rttMs: 1 },
+        ],
+        0,
+      );
+      return { ruleId: rule.id, runId };
+    };
+
+    const count = async (sql: string, values: unknown[] = []): Promise<number> => {
+      const [row] = await db.query<{ n: string }>(sql, values);
+      return Number(row?.n);
+    };
+    const objectsInGroup = (): Promise<number> =>
+      count(
+        `WITH RECURSIVE below AS (
+           SELECT id FROM object WHERE parent_id = $1
+           UNION ALL SELECT o.id FROM object o JOIN below b ON o.parent_id = b.id
+         )
+         SELECT count(*)::text AS n FROM below`,
+        [groupId],
+      );
+    const failures = async (runId: number): Promise<Record<string, unknown>[]> =>
+      (
+        await db.query<{ summary: Record<string, unknown> }>(
+          `SELECT summary FROM audit_log
+           WHERE action = 'discovery.failed' AND (summary->>'runId')::bigint = $1`,
+          [runId],
+        )
+      ).map((row) => row.summary);
+
+    it('provisions what its rule found while the rule is there', async () => {
+      // What the cases below would see if deleting the rule changed nothing.
+      const { runId } = await firing(true);
+      await runs.finished(probeId, runId, 'done', 8, '');
+      assert.equal((await runs.get(runId))?.status, 'done');
+      assert.equal(await objectsInGroup(), 4, 'two devices, each with its Ping');
+    });
+
+    it('creates nothing, pages nobody, and fails with the reason when the rule goes mid-run', async () => {
+      const requests = await count('SELECT count(*)::text AS n FROM notification_request');
+      const { ruleId, runId } = await firing(true);
+      assert.equal(await rules.remove(ruleId, writer), true);
+      assert.ok(
+        sent.some((message) => message.kind === 'cancel' && message.runId === runId),
+        'the probe is told to stop',
+      );
+
+      // It had not heard yet, and reports the sweep done.
+      await runs.finished(probeId, runId, 'done', 8, '');
+
+      const ended = await runs.get(runId);
+      assert.ok(ended !== null);
+      assert.equal(ended.status, 'failed');
+      assert.equal(ended.message, 'its rule was deleted');
+      assert.equal(await objectsInGroup(), 0, 'not one object');
+      // Nothing exists that could go Unknown, and nothing was asked to page.
+      assert.equal(await count('SELECT count(*)::text AS n FROM notification_request'), requests);
+      assert.deepEqual(await failures(runId), [
+        { runId, range: '10.0.0.0/29', reason: 'its rule was deleted' },
+      ]);
+    });
+
+    it('fails a finished run whose rule is gone when it is asked to provision, and creates nothing', async () => {
+      const { ruleId, runId } = await firing(false);
+      await runs.finished(probeId, runId, 'done', 8, '');
+      assert.equal(await rules.remove(ruleId, writer), true);
+      assert.equal((await runs.get(runId))?.status, 'done', 'a finished run is left finished');
+
+      // An operator with write on the group asks for it anyway.
+      await assert.rejects(
+        provisionRun(wiring(), runId, writer),
+        (error: unknown) =>
+          error instanceof DiscoveryError &&
+          error.code === 'DISCOVERY_RUN_FAILED' &&
+          error.status === 409 &&
+          error.message.includes('its rule was deleted'),
+      );
+      const ended = await runs.get(runId);
+      assert.ok(ended !== null);
+      assert.equal(ended.status, 'failed');
+      assert.equal(ended.message, 'its rule was deleted');
+      assert.equal(await objectsInGroup(), 0);
+
+      // Asking again is refused the same way and records nothing twice.
+      await assert.rejects(provisionRun(wiring(), runId, writer), /its rule was deleted/);
+      assert.equal((await failures(runId)).length, 1);
+    });
+
+    it('keeps a run it failed failed, and unprovisioned, when its probe reports it done', async () => {
+      // `failed` is terminal whatever the reason and whether or not the rule is still there: a
+      // run the core ended must not come back `done` and be provisioned by its rule.
+      const { runId } = await firing(true);
+      await runs.fail(runId, 'its group moved to another probe', writer);
+      await runs.finished(probeId, runId, 'done', 8, '');
+      const ended = await runs.get(runId);
+      assert.ok(ended !== null);
+      assert.equal(ended.status, 'failed');
+      assert.equal(ended.message, 'its group moved to another probe');
+      assert.equal(await objectsInGroup(), 0);
+    });
+
+    it('with the authorisation layer off, provisions it as the installation, as before', async () => {
+      authRequired = false;
+      const { ruleId, runId } = await firing(false);
+      await runs.finished(probeId, runId, 'done', 8, '');
+      assert.equal(await rules.remove(ruleId, writer), true);
+      const report = await provisionRun(wiring(), runId, writer);
+      assert.equal(report.devicesCreated, 2);
+      assert.equal((await runs.get(runId))?.status, 'done');
+      assert.deepEqual(await failures(runId), []);
     });
   });
 });

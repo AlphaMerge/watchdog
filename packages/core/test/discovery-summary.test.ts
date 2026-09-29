@@ -27,6 +27,7 @@ const RUN: DiscoveryRunRow = {
   identified: 18,
   identifyCursor: 18,
   scheduleId: null,
+  createdBy: null,
   snmpCommunity: '',
   devicesCreated: 11,
   devicesMatched: 7,

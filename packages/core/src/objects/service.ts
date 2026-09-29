@@ -31,6 +31,7 @@ import { versionConflict } from './repository.js';
 import type { ObjectRepository } from './repository.js';
 import type { CredentialVault } from '../vault/service.js';
 import type { ChannelDraft, SensorTypeGate } from './sensor-type-gate.js';
+import { vouch as vouchForCredentials } from './credential-vouching.js';
 import {
   actorOf,
   assertMayName,
@@ -1355,13 +1356,14 @@ export class ObjectService {
    * installation has ever held, readable through the history API.
    */
   async setCredential(
-    actor: Actor,
+    writer: Writer,
     id: ObjectId,
     kind: string,
     values: Readonly<Record<string, unknown>>,
     pre: Precondition = { kind: 'none' },
   ): Promise<CredentialView> {
     const vault = this.#requireVault();
+    const actor = actorOf(writer);
     return this.#db.tx(async (q) => {
       const object = await this.#repo.get(q, id);
       if (object === null) throw notFound(id);
@@ -1370,6 +1372,9 @@ export class ObjectService {
       }
 
       const summary = await vault.write(q, id, kind, values);
+      // Whoever may write where a set is stored vouches for everything beneath that it now
+      // reaches (`A-41`): the sensors that inherited another set of this kind until now.
+      await this.#checkCredentials(q, writer, [id], { sayWhich: true, kinds: [kind] });
       await this.#audit.record(
         q,
         actor,
@@ -1413,12 +1418,13 @@ export class ObjectService {
    * finding out from a sensor that kept working.
    */
   async clearCredential(
-    actor: Actor,
+    writer: Writer,
     id: ObjectId,
     kind: string,
     pre: Precondition = { kind: 'none' },
   ): Promise<{ removed: boolean; nowInherited: CredentialView | null }> {
     const vault = this.#requireVault();
+    const actor = actorOf(writer);
     return this.#db.tx(async (q) => {
       const object = await this.#repo.get(q, id);
       if (object === null) throw notFound(id);
@@ -1427,7 +1433,10 @@ export class ObjectService {
       }
 
       const removed = await vault.clear(q, id, kind);
+      // What an ancestor stores now reaches everything this set did, and the remover has to be
+      // able to vouch for sending it there (`A-41`).
       if (removed) {
+        await this.#checkCredentials(q, writer, [id], { sayWhich: true, kinds: [kind] });
         await this.#audit.record(
           q,
           actor,
@@ -1590,6 +1599,10 @@ export class ObjectService {
           sayWhich: false,
           types: [normalised.sensorType],
         });
+        await this.#checkCredentials(q, writer, [id], {
+          sayWhich: false,
+          types: [normalised.sensorType],
+        });
         await this.#repo.createChannels(
           q,
           id,
@@ -1708,6 +1721,10 @@ export class ObjectService {
       // level to lose.
       await this.#repo.createChannelsFor(q, drafts);
       await this.#checkReads(q, writer, sensors, { sayWhich: true, types: [...sensorTypes] });
+      await this.#checkCredentials(q, writer, sensors, {
+        sayWhich: true,
+        types: [...sensorTypes],
+      });
 
       const now = new Date();
       if (await this.#pauses.anyActive(q, now)) {
@@ -1814,6 +1831,91 @@ export class ObjectService {
     );
   }
 
+  /**
+   * Refuses a write that brings an inherited credential set somewhere new, unless its writer has
+   * `write` on where the set is stored, and records who vouched (`A-41`).
+   *
+   * Beside `#checkReads` and for the same reasons: after the write, in its transaction, so every
+   * path asks about the tree as it now is and a refusal takes the write back with it.
+   */
+  async #checkCredentials(
+    q: Queryable,
+    writer: Writer,
+    under: readonly ObjectId[],
+    options: { sayWhich: boolean; types?: readonly string[]; kinds?: readonly string[] },
+  ): Promise<void> {
+    await vouchForCredentials(q, this.#sensorTypes, writer, under, options);
+  }
+
+  /**
+   * Where the sensors at or under an object send what their own parameters hold (`A-41`): the
+   * probe, and the host of the device they are on. Compared, never read.
+   *
+   * A group or a device carries its devices' hosts with it, so only the probe can change; a sensor
+   * can land on another device.
+   */
+  async #whereSent(q: Queryable, object: ObjectDetail, probeId: ObjectId | null): Promise<string> {
+    const device =
+      object.kind === 'device'
+        ? object
+        : object.kind === 'sensor'
+          ? await this.#repo.get(q, object.parentId)
+          : null;
+    return JSON.stringify([
+      probeId,
+      device?.kind === 'device' ? [device.host, device.ipVersion] : null,
+    ]);
+  }
+
+  /**
+   * Clears the secrets held in the parameters of every sensor at or under these objects, because a
+   * write has changed where they are sent and could not send them again (`A-41`, by `A-40`'s rule).
+   *
+   * A device's host is not one of its sensors' parameters, so its sensors cannot bind a community
+   * to it the way `A-40` binds one to a port: the write that moves them has to clear it. One audit
+   * entry per sensor, naming what it lost. Renumbering a device means entering them again.
+   */
+  async #clearSecretsSentElsewhere(
+    q: Queryable,
+    actor: Actor,
+    under: readonly ObjectId[],
+  ): Promise<void> {
+    const sensors = await this.#repo.sensorsOfTypesAtOrUnder(
+      q,
+      under,
+      this.#sensorTypes.secretTypes(),
+    );
+    const entries: Mutation[] = [];
+    for (const sensor of sensors) {
+      const { params, redacted } = this.#sensorTypes.redact(sensor.sensorType, sensor.params);
+      if (redacted.length === 0) continue;
+      const before = await this.#repo.get(q, sensor.id);
+      /* c8 ignore next -- listed by the query above, in this transaction */
+      if (before === null) continue;
+      const after = await this.#repo.update(
+        q,
+        sensor.id,
+        { kind: 'sensor', params },
+        { kind: 'none' },
+      );
+      entries.push({
+        action: 'object.updated',
+        objectId: sensor.id,
+        kind: 'sensor',
+        before: this.#redact(before),
+        after: this.#redact(after),
+        changedParams: changedParamKeys(before, after),
+        secretsCleared: redacted,
+      });
+    }
+    if (entries.length === 0) return;
+    await this.#audit.record(q, actor, entries, new Date());
+    this.#logger.info(
+      { under, sensors: entries.length },
+      'a write changed where these sensors send their secrets; cleared',
+    );
+  }
+
   /** A node's input as `create` would have normalised it, with its parent id filled in. */
   #normalisedFor(node: TreeNodeInput, parentId: ObjectId): CreateObjectInput {
     const withParent = { ...node, parentId } as CreateObjectInput;
@@ -1883,7 +1985,20 @@ export class ObjectService {
       // writer is the one standing behind the sensor from here on (`A-29`). A rename does not.
       if (after.kind === 'sensor' && patch.kind === 'sensor' && patch.params !== undefined) {
         await this.#checkReads(q, writer, [id], { sayWhich: false, types: [after.sensorType] });
+        // And for where it sends its inherited credentials, which a parameter can choose — and
+        // saving it is how a sensor withheld for its voucher's lost grant is vouched for again.
+        await this.#checkCredentials(q, writer, [id], {
+          sayWhich: false,
+          types: [after.sensorType],
+        });
       }
+
+      // A device pointed somewhere else takes every sensor's credentials with it (`A-41`).
+      const repointed =
+        before.kind === 'device' &&
+        after.kind === 'device' &&
+        (before.host !== after.host || before.ipVersion !== after.ipVersion);
+      if (repointed) await this.#checkCredentials(q, writer, [id], { sayWhich: true });
 
       // Computed on the real values, because a rotated secret redacts to the same absence on
       // both sides and would otherwise look like no change at all.
@@ -1915,6 +2030,8 @@ export class ObjectService {
           'an edit changed where these secrets are sent without sending them again; cleared',
         );
       }
+      // After the device's own entry, so its history reads in the order it happened.
+      if (repointed) await this.#clearSecretsSentElsewhere(q, actor, [id]);
 
       return safeAfter;
     });
@@ -2046,6 +2163,7 @@ export class ObjectService {
       const beforeSettings = await bound.resolveAll(id);
       const beforeCredentials = await bound.resolveCredentials(id);
       const fromProbe = await this.#repo.nearestProbe(q, id);
+      const sentFrom = await this.#whereSent(q, object, fromProbe?.id ?? null);
 
       const fromParentId = object.parentId;
       await this.#repo.reparent(q, id, targetParentId, pre);
@@ -2053,6 +2171,9 @@ export class ObjectService {
       // The moved sensors have a new audience, and a Probe Health sensor with no `probeId` may
       // have a new probe, so the mover vouches for what every one of them reads (`A-29`).
       await this.#checkReads(q, writer, [id], { sayWhich: object.kind !== 'sensor' });
+      // And for where their inherited credentials now go: another probe, another device, or
+      // another ancestor's set (`A-41`).
+      await this.#checkCredentials(q, writer, [id], { sayWhich: object.kind !== 'sensor' });
 
       // The resolver is bound to this transaction, so it sees the uncommitted parent. Through
       // the pool it would read the pre-move chain and report that nothing changed.
@@ -2104,6 +2225,9 @@ export class ObjectService {
         ],
         new Date(),
       );
+      if (sentFrom !== (await this.#whereSent(q, moved, toProbe?.id ?? null))) {
+        await this.#clearSecretsSentElsewhere(q, actor, [id]);
+      }
 
       return {
         object: this.#redact(moved),
@@ -2169,6 +2293,10 @@ export class ObjectService {
 
       // A copy names what its source named, now in front of whoever reads where it landed.
       await this.#checkReads(q, writer, [cloneRoot.id], { sayWhich: source.kind !== 'sensor' });
+      // And is sent the credentials of wherever it landed (`A-41`).
+      await this.#checkCredentials(q, writer, [cloneRoot.id], {
+        sayWhich: source.kind !== 'sensor',
+      });
 
       // S-03: a clone arrives manually paused. It carries its source's configuration and none
       // of its credentials, so scanning immediately would mean a burst of authentication
@@ -2227,6 +2355,18 @@ export class ObjectService {
         ],
         new Date(),
       );
+      // The copy's own secrets stay only where the source's were being sent.
+      const sentFrom = await this.#whereSent(
+        q,
+        source,
+        (await this.#repo.nearestProbe(q, id))?.id ?? null,
+      );
+      const sentTo = await this.#whereSent(
+        q,
+        cloneRoot,
+        (await this.#repo.nearestProbe(q, cloneRoot.id))?.id ?? null,
+      );
+      if (sentFrom !== sentTo) await this.#clearSecretsSentElsewhere(q, actor, [cloneRoot.id]);
 
       return {
         object: this.#redact(cloneRoot),

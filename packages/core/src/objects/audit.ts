@@ -297,6 +297,23 @@ export type Mutation =
   | { action: 'credential.deleted'; objectId: ObjectId; credentialKind: string }
   | {
       /**
+       * A boot recorded who vouches for one kind's sets, after an upgrade (`A-41`). One entry per
+       * kind, never one per sensor: the first boot after migration 060 records the installation
+       * for every pair in use, and a release that changes where a type says it sends a kind moves
+       * every such fingerprint at once.
+       */
+      action: 'credential.adopted';
+      objectId: null;
+      credentialKind: string;
+      /** Pairs nobody had vouched for, recorded as the installation's: the first boot only. */
+      installation: number;
+      /** Pairs the new recipe moved, whose record matched the old one: carried, voucher kept. */
+      carried: number;
+      /** Pairs whose record matched neither recipe: left withheld until somebody vouches. */
+      withheld: number;
+    }
+  | {
+      /**
        * A report was rendered through somebody's visibility scope (`E-08`).
        *
        * **The auditable fact is the act-as, not the render.** `§6` lets a report run under a named
@@ -569,6 +586,17 @@ export type Mutation =
       objectId: ObjectId;
       runId: number;
       range: string;
+    }
+  | {
+      /**
+       * A discovery run was ended for a reason the core found, rather than one the probe reported
+       * (`A-41`): its rule was deleted, so nobody stands behind the addresses it found.
+       */
+      action: 'discovery.failed';
+      objectId: ObjectId;
+      runId: number;
+      range: string;
+      reason: string;
     }
   | {
       /**
@@ -1035,6 +1063,14 @@ function summarise(mutation: Mutation): Record<string, unknown> {
         objectId: mutation.objectId,
         credentialKind: mutation.credentialKind,
       };
+    case 'credential.adopted':
+      return {
+        action: mutation.action,
+        credentialKind: mutation.credentialKind,
+        installation: mutation.installation,
+        carried: mutation.carried,
+        withheld: mutation.withheld,
+      };
     case 'sensor.acknowledged':
       return {
         action: mutation.action,
@@ -1193,6 +1229,14 @@ function summarise(mutation: Mutation): Record<string, unknown> {
         objectId: mutation.objectId,
         runId: mutation.runId,
         range: mutation.range,
+      };
+    case 'discovery.failed':
+      return {
+        action: mutation.action,
+        objectId: mutation.objectId,
+        runId: mutation.runId,
+        range: mutation.range,
+        reason: mutation.reason,
       };
     case 'discovery.schedule.created':
     case 'discovery.schedule.deleted':

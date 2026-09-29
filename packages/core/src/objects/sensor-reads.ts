@@ -19,7 +19,34 @@ import type { ObjectId, ObjectKind } from './types.js';
  * is off, where there is nobody to hide anything from.
  */
 export type Voucher =
-  | { readonly kind: 'account'; readonly userId: number; readonly sees: Sees }
+  | {
+      readonly kind: 'account';
+      readonly userId: number;
+      readonly sees: Sees;
+      /** Which objects the account may write, for where a write sends credentials (`A-41`). */
+      readonly writes: Writes;
+    }
+  | { readonly kind: 'installation' };
+
+/**
+ * Which of some objects an account may write, asked on the connection of the write that needs it
+ * (`A-41`): the bar the route that names each one would hold it to, role and token scope included.
+ */
+export type Writes = (
+  q: Queryable,
+  objectIds: readonly ObjectId[],
+) => Promise<ReadonlySet<ObjectId>>;
+
+/**
+ * Who stands behind sending an inherited credential set to where a write sends it (`A-41`).
+ *
+ * Usually the write's own voucher. A discovery run is the exception: the installation stands
+ * behind what its templates name, but not behind the addresses somebody chose to scan, so the
+ * account that started the run — or last wrote the rule that started it — vouches for where the
+ * credentials go. `userId: null` is an account since deleted, which vouches for nothing.
+ */
+export type CredentialVoucher =
+  | { readonly kind: 'account'; readonly userId: number | null; readonly writes: Writes }
   | { readonly kind: 'installation' };
 
 /**
@@ -46,9 +73,13 @@ export const INSTALLATION_VOUCHES: Voucher = { kind: 'installation' };
  * not always: a discovery run writes what an administrator's template says, so it vouches as the
  * installation, and the audit still names who started it.
  */
-export type Writer =
+export type Writer = (
   | Extract<Actor, { kind: 'system' | 'anonymous' }>
-  | (Extract<Actor, { kind: 'user' | 'token' }> & { readonly voucher: Voucher });
+  | (Extract<Actor, { kind: 'user' | 'token' }> & { readonly voucher: Voucher })
+) & {
+  /** Who vouches for where inherited credentials go, when it is not the voucher (`A-41`). */
+  readonly credentials?: CredentialVoucher;
+};
 
 /**
  * An actor writing what the installation stands behind, with the audit still naming them.
@@ -67,6 +98,11 @@ export function voucherOf(writer: Writer): Voucher {
   return writer.kind === 'user' || writer.kind === 'token' ? writer.voucher : INSTALLATION_VOUCHES;
 }
 
+/** Who vouches for where a write sends inherited credentials (`A-41`). */
+export function credentialVoucherOf(writer: Writer): CredentialVoucher {
+  return writer.credentials ?? voucherOf(writer);
+}
+
 /** The writer as the audit records them: who, and nothing about what they can see. */
 export function actorOf(writer: Writer): Actor {
   switch (writer.kind) {
@@ -74,9 +110,12 @@ export function actorOf(writer: Writer): Actor {
       return { kind: 'user', userId: writer.userId, login: writer.login };
     case 'token':
       return { kind: 'token', tokenId: writer.tokenId };
+    // Rebuilt rather than returned, so that nothing a writer carries besides who they are — a
+    // credential voucher (`A-41`) — reaches the audit.
     case 'system':
+      return { kind: 'system', component: writer.component };
     case 'anonymous':
-      return writer;
+      return { kind: 'anonymous', remoteAddress: writer.remoteAddress };
   }
 }
 

@@ -303,6 +303,26 @@ Four rules follow from how the redactor works:
 
   Err towards naming a parameter. The cost of naming one too many is a secret re-entered; the
   cost of one too few is a secret sent somewhere its owner never chose.
+- **Say where an inherited set is sent, too** (`A-41`). Every kind in `credentialKinds` needs a
+  `kind:<id>` entry naming the parameters that choose where the core's set of that kind goes,
+  beside the device's host and the probe, which are always part of it. The catalogue refuses a
+  type that uses a kind and leaves it out, and one that names a kind it does not use. The core
+  fingerprints the result: a write that changes it needs `write` on the object the set is stored
+  on, and a probe is sent the set only while somebody who had that vouched for where it goes.
+  `[]` says the host alone chooses it.
+
+  ```ts
+  // ssh.*: the host, and the port the sensor connects to on it.
+  secretDestinations: { 'kind:ssh': ['port'] },
+  // mail.roundtrip: two servers' ports, how each is secured, and which protocol reads it back.
+  secretDestinations: {
+    'kind:mail': ['readPort', 'readSecurity', 'readWith', 'smtpPort', 'smtpSecurity', 'verifyTls'],
+  },
+  ```
+
+  Changing what a shipped type names changes every fingerprint of that type without anything
+  having moved. The core notices at start-up and fingerprints what it had recorded again, keeping
+  whoever vouched, so an upgrade does not withhold them.
 
 The form (`U-08`) follows from the same annotation: a `writeOnly` parameter renders as
 "set, write-only" with Replace and Clear, never as a filled input, and is omitted from the save
@@ -330,6 +350,7 @@ All of these fail at startup, loudly, rather than at runtime:
 | `paramsSchema` compiles                        | a broken schema would fail on the first sensor, not the first boot |
 | no `writeOnly` inside a combinator             | it could not be reliably redacted                               |
 | every `writeOnly` has a `secretDestinations` entry, naming visible properties | a secret stays with where it is sent (`A-40`) |
+| every kind in `credentialKinds` has a `kind:<id>` entry, and no other kind does | an inherited set goes only where somebody vouched (`A-41`) |
 | at most one `isPrimary` channel                | the one-primary-per-sensor index                                |
 | no repeated channel key                        | `(sensor_id, key)` is unique                                    |
 | the schema validates its own declared defaults | a `default` a `pattern` rejects is a field nobody can fill in   |

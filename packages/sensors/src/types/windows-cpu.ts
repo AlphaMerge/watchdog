@@ -25,6 +25,9 @@ export const windowsCpu: SensorType = {
   category: 'Windows',
   costHint: 'medium',
   credentialKinds: ['windows'],
+  // Where the set goes besides the host (`A-41`): another machine, or Basic, which sends the
+  // password itself.
+  secretDestinations: { 'kind:windows': ['authentication', 'host'] },
 
   paramsSchema: {
     type: 'object',
