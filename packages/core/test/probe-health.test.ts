@@ -281,6 +281,34 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.doesNotMatch(message, /memory holds/);
     });
 
+    it('leaves the machine to Core Health on the local probe, and keeps its own limit (M-21)', () => {
+      // The local probe's machine is the core's: its pair gaps, so one squeeze is one alarm, on
+      // Core Health. Its own cgroup is not the machine's and Core Health cannot see it.
+      const { reading } = build(() => connected()).read(probeId, { local: true });
+      assert.equal(reading['memoryAvailable'], null);
+      assert.equal(reading['memoryAvailableBytes'], null);
+      assert.equal(reading['memoryLimitUsage'], 55.2);
+      assert.equal(reading['memoryLimit'], 4_096);
+      assert.equal(reading['poolMemoryCap'], 90);
+      assert.equal(reading['poolHeldBack'], 0);
+      assert.equal(reading['memory'], 210.4, 'what the probe holds is its own');
+    });
+
+    it('names a low machine in words on the local probe, and nothing when it is fine (M-21)', () => {
+      const low = build(() => connected({ health: { ...FULL, memoryAvailablePercent: 8 } })).read(
+        probeId,
+        { local: true },
+      );
+      assert.match(low.message, /its machine has 8% memory available, which Core Health reports/u);
+      const fine = build(() => connected()).read(probeId, { local: true });
+      assert.doesNotMatch(fine.message, /its machine has/u);
+      const remote = build(() =>
+        connected({ health: { ...FULL, memoryAvailablePercent: 8 } }),
+      ).read(probeId);
+      assert.equal(remote.reading['memoryAvailable'], 8, 'a remote probe still reports its own');
+      assert.doesNotMatch(remote.message, /its machine has/u);
+    });
+
     it('gaps the limit for a probe with no ceiling or too old to say, never reading it as zero', () => {
       const { memoryLimitUsagePercent: _a, memoryLimitMb: _b, ...older } = FULL;
       const { reading } = build(() => connected({ health: older })).read(probeId);

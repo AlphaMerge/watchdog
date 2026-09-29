@@ -77,6 +77,9 @@ const CHANNELS: readonly ChannelDef[] = [
   // carries the same pair, and on the default installation — a local probe beside the core — the
   // two read the same machine. This one is for the core that has no probe beside it: every probe
   // remote, and the host running PostgreSQL, which is the largest tenant of memory there is.
+  //
+  // **This one owns the machine where both could report it** (`M-21`): the local probe's pair
+  // gaps, so one squeeze on a single-host install is one sensor Down, and it is this one.
   // `MemAvailable` on Linux, the lowest in the last thirty seconds, a gap where the platform
   // cannot say; `packages/shared/src/process/machine-memory.ts` says why for each.
   {

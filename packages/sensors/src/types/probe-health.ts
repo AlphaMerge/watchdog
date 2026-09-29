@@ -410,6 +410,14 @@ const CHANNELS: readonly ChannelDef[] = [
   //
   // The machine's, not the probe's cgroup: a probe at its own unit's ceiling is killed with plenty
   // available here, and that is `memoryLimitUsage` below (`P-210`, `P-213`).
+  //
+  // **Not the local probe's to report** (`M-21`). The probe flagged `is_local` shares the core's
+  // machine, and Core Health declares this pair with the same limits: both reading one squeeze
+  // would be two sensors Down for one condition. **Core Health owns it**, because it is the only
+  // watch on a core with no probe beside it. On the local probe both channels gap, and the message
+  // names the machine's figure in words when it is low. Only these two: the probe's own cgroup —
+  // `memoryLimitUsage`, `poolMemoryCap`, `poolHeldBack` — is not the machine's, and Core Health
+  // cannot see it. A probe on the core's host that is not flagged local still reports both.
   {
     key: 'memoryAvailable',
     name: 'Memory available',

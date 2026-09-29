@@ -225,8 +225,18 @@ export class ProbeHealthService {
     };
   }
 
-  /** Every channel for one probe, read now. Public so the API can answer without a sensor. */
-  read(probeObjectId: number): { reading: ProbeHealthReading; message: string } {
+  /**
+   * Every channel for one probe, read now. Public so the API can answer without a sensor.
+   *
+   * `local` is the probe beside the core (`probe_config.is_local`), whose machine is the core's:
+   * its machine-wide channels gap, because Core Health owns that reading (`M-21`). The sweep
+   * passes it; the API does not, because it raises no alarm and the operator asking should see
+   * what the probe reports.
+   */
+  read(
+    probeObjectId: number,
+    options: { readonly local?: boolean } = {},
+  ): { reading: ProbeHealthReading; message: string } {
     const link = this.#sources.link(probeObjectId);
     if (!link.connected) {
       // **The whole reason this is core-evaluated.** Everything else is a gap rather than a zero:
@@ -350,8 +360,14 @@ export class ProbeHealthService {
       uptime: health?.uptimeSeconds ?? null,
       // Absent from a probe older than protocol 17 and from one whose platform cannot say, and
       // either way a gap: a zero here would be the error limit firing on nothing (`P-208`).
-      memoryAvailable: health?.memoryAvailablePercent ?? null,
-      memoryAvailableBytes: health?.memoryAvailableMb ?? null,
+      //
+      // **A gap for the local probe too, whatever it sent** (`M-21`). Its machine is the core's,
+      // both read the same `/proc/meminfo` the same way, and Core Health carries the same limits,
+      // so one squeeze would be two sensors Down in the same sweep. Core Health owns it: it is the
+      // only watch on a core with no local probe. The probe's own cgroup channels below are not
+      // the machine's and stay.
+      memoryAvailable: options.local === true ? null : (health?.memoryAvailablePercent ?? null),
+      memoryAvailableBytes: options.local === true ? null : (health?.memoryAvailableMb ?? null),
       // Absent below protocol 18 and wherever the probe has no ceiling to be near (`P-210`).
       memoryLimitUsage: health?.memoryLimitUsagePercent ?? null,
       memoryLimit: health?.memoryLimitMb ?? null,
@@ -359,7 +375,10 @@ export class ProbeHealthService {
 
     return {
       reading,
-      message: describe(reading, skew, health !== undefined, health?.poolSize),
+      message: describe(reading, skew, health !== undefined, health?.poolSize, {
+        local: options.local === true,
+        machineAvailablePercent: health?.memoryAvailablePercent,
+      }),
     };
   }
 
@@ -391,6 +410,16 @@ export class ProbeHealthService {
       this.#targets.publish(reportsOn);
       return 0;
     }
+
+    // The probe beside the core, whose machine Core Health owns (`M-21`). Read per sweep, not
+    // per sensor: at most one, and a flag an approval can raise at any time.
+    const local = new Set(
+      (
+        await this.#db.query<{ object_id: string }>(
+          'SELECT object_id::text AS object_id FROM probe_config WHERE is_local',
+        )
+      ).map((row) => Number(row.object_id)),
+    );
 
     const at = this.#now().toISOString();
     const results: CheckResult[] = [];
@@ -428,7 +457,7 @@ export class ProbeHealthService {
       // later, exactly as late as the lost mark.
       if (this.#delivery?.awaitingFirstConnect?.(probeId) === true) continue;
       try {
-        const { reading, message } = this.read(probeId);
+        const { reading, message } = this.read(probeId, { local: local.has(probeId) });
         results.push({
           sensorId,
           at,
@@ -513,6 +542,12 @@ function skewCode(
   }
 }
 
+/**
+ * Below this the local probe's message names its machine's memory (`M-21`): Probe Health's own
+ * warning limit, which the local probe's channel no longer applies.
+ */
+const MACHINE_LOW_PERCENT = 20;
+
 function poolUsage(busy: number | undefined, size: number | undefined): number | null {
   // A pool of zero is not 0% used — it is a pool that does not exist, and dividing by it would
   // report either a gap or Infinity depending on the numerator.
@@ -535,6 +570,14 @@ function describe(
    * sentence beside it rather than as a channel of its own.
    */
   poolSize?: number,
+  /**
+   * The local probe's machine, which its channels leave to Core Health (`M-21`). Named in words
+   * when it is low, so the probe's sensor says why things may be slow without a second alarm.
+   */
+  machine: { local: boolean; machineAvailablePercent: number | undefined } = {
+    local: false,
+    machineAvailablePercent: undefined,
+  },
 ): string {
   const parts: string[] = [];
   const scheduled = reading['scheduled'];
@@ -584,6 +627,10 @@ function describe(
     parts.push(
       `memory holds the pool at ${String(ceiling)} workers, ${String(heldBack)} short of its ceiling`,
     );
+  }
+  const available = machine.machineAvailablePercent;
+  if (machine.local && available !== undefined && available < MACHINE_LOW_PERCENT) {
+    parts.push(`its machine has ${String(available)}% memory available, which Core Health reports`);
   }
   const spool = reading['spoolDepth'];
   if (spool !== null && spool !== undefined && spool > 0) {

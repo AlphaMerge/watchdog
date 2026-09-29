@@ -4849,7 +4849,7 @@ because each is a decision rather than a defect:
       mutant added the address to the data only, and the response schema's
       `additionalProperties: false` stripped it.
 
-- [ ] **M-21 — one memory squeeze on a single-host install raises two alarms** · S · P-208, M-17 ·
+- [x] **M-21 — one memory squeeze on a single-host install raises two alarms** · S · P-208, M-17 ·
       Found by review. Core Health's and Probe Health's `memoryAvailable` both carry
       `lowerWarning: 20, lowerError: 10`, and on the default installation, a local probe beside the
       core, both read the same `/proc/meminfo`. `administration.md`'s *What to watch* recommends an
@@ -4861,6 +4861,26 @@ because each is a decision rather than a defect:
       scenario test shows one alarm for one squeeze on a single-host install, and the choice is
       written where the channels are declared: which sensor owns a machine-wide reading when both
       read the same machine, and what the other does.
+
+      **Landed** (2026-09-29). **Core Health owns the machine where both could report it**,
+      because it is the only watch on a core with no probe beside it. On the probe flagged
+      `is_local` (`R-01`, set at approval), Probe Health's `memoryAvailable` and
+      `memoryAvailableBytes` gap, and its message names the machine's figure in words below 20%.
+      The flag rather than a machine id, because `boot_id` is shared by every container on a host
+      and an address proves nothing, which is migration 030's reasoning. A gap rather than a
+      per-instance limit, because limits live on each channel row and the declared-limits sweep
+      would either need a special case or overrule an operator's edit. **Only the machine-wide
+      pair**: the probe's own cgroup, `memoryLimitUsage` and `P-236`'s pool channels, stays live,
+      because Core Health cannot see it. The API's `/probes/:id/health` still returns what the probe
+      sent: it raises no alarm. `single-host-memory-scenario.test.ts` goes the whole way — both
+      sweeps, ingestion, the declared limits, the state machine — and shows the following.
+      - A squeeze is one sensor Down, Core Health.
+      - The local probe near its own limit still warns.
+      - A remote probe's machine stays its own.
+      - Unflagging the local probe gives back the second alarm.
+
+      A mutation that ignores the flag fails it. What it does not cover, and `administration.md`
+      says so: a probe on the core's host that is not flagged local still reports both.
 
 - [ ] **P-216 — under host starvation the dev probe grew past 4.7 GiB and went silent after its
       queue filled** · M · P-206, P-207 · Seen 2026-09-28, on the dev VM, with ms-server's probe at
