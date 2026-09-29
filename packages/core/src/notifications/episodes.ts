@@ -42,14 +42,22 @@ export interface ProbeEpisode {
 }
 
 /**
- * An episode that has ended, and how (`M-24`).
+ * How an episode ended, for the alarm that asks (`M-24`, `M-29`).
  *
- * `emptied` is an episode that ended while its cause went on: the probe is still lost, silent or
- * behind, but every sensor it held was moved off it or deleted. Its recovery must not say the
- * probe is answering again.
+ * - `resolved`: the probe is answering again, or its clock has caught up.
+ * - `emptied`: its cause went on, and the probe is still lost, silent or behind, but every sensor
+ *   it held was moved off it or deleted.
+ * - `retargeted`: it goes on, but not for this alarm. The Probe Health asking reports on another
+ *   probe now, and holds none of its sensors.
+ *
+ * Only `resolved` is a return. The other two leave the probe at fault, and their recovery must
+ * not say it is answering again.
  */
+export type EpisodeEnding = 'resolved' | 'emptied' | 'retargeted';
+
+/** An episode that has ended, and how (`M-24`). */
 export interface EndedEpisode extends ProbeEpisode {
-  readonly emptied: boolean;
+  readonly ending: EpisodeEnding;
 }
 
 /** Where the engine learns which probe holds which sensors, and which sensors are its alarm. */
@@ -70,7 +78,11 @@ export interface ProbeEpisodes {
   alarmsFor(probeObjectId: number): readonly number[];
   /** The episode this probe-alarm sensor stands for, while its probe's sensors are held. */
   episodeOf(alarmSensorId: number): ProbeEpisode | undefined;
-  /** The last episode of this probe-alarm sensor's probe that has ended, for a recovery's words. */
+  /**
+   * The last episode of this probe-alarm sensor's probe that has ended, for a recovery's words.
+   * For one moved to another probe since it last stood for an episode, that episode, which it
+   * stands for no longer: `retargeted` while it goes on (`M-29`).
+   */
   endedEpisodeOf(alarmSensorId: number): EndedEpisode | undefined;
   /**
    * The sensors this probe-alarm sensor's probe holds now, so that when the alarm stops being
@@ -159,21 +171,25 @@ export function episodeMessage(episode: ProbeEpisode, probeName: string): string
 
 /**
  * What the recovery of an episode alarm says. An episode that was emptied rather than resolved
- * says so, because its probe is still at fault (`M-24`).
+ * says so, because its probe is still at fault (`M-24`), and so does one whose Probe Health was
+ * moved to another probe (`M-29`).
  */
 export function episodeEndedMessage(episode: EndedEpisode, probeName: string): string {
-  if (episode.emptied) {
-    const none = 'but none of its sensors are held now: they were moved off it or deleted';
-    switch (episode.kind) {
-      case 'lost':
-        return `probe ${probeName} is still lost, ${none}`;
-      case 'silent':
-        return `probe ${probeName} is still sending no results, ${none}`;
-      case 'frozen':
-        return `probe ${probeName}'s clock is still behind, ${none}`;
-    }
+  if (episode.ending === 'resolved') {
+    return episode.kind === 'frozen'
+      ? `probe ${probeName}'s clock has caught up: its sensors are no longer held`
+      : `probe ${probeName} is answering again: its sensors are no longer held`;
   }
-  return episode.kind === 'frozen'
-    ? `probe ${probeName}'s clock has caught up: its sensors are no longer held`
-    : `probe ${probeName} is answering again: its sensors are no longer held`;
+  const why =
+    episode.ending === 'emptied'
+      ? 'but none of its sensors are held now: they were moved off it or deleted'
+      : 'but this Probe Health reports on another probe now, and holds none of its sensors';
+  switch (episode.kind) {
+    case 'lost':
+      return `probe ${probeName} is still lost, ${why}`;
+    case 'silent':
+      return `probe ${probeName} is still sending no results, ${why}`;
+    case 'frozen':
+      return `probe ${probeName}'s clock is still behind, ${why}`;
+  }
 }

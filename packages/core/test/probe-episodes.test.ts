@@ -38,11 +38,14 @@ function world(): {
   frozen: Map<number, FrozenProbe>;
   /** The factories held for their inputs' probe, each with the sensors it lacks (`M-26`). */
   factories: Map<number, readonly number[]>;
+  /** Which probe each Probe Health reports on: `HEALTH` on `PROBE` unless moved. */
+  targets: Map<number, number>;
   index: ProbeEpisodeIndex;
 } {
   const lost = new Map<number, LostProbe>();
   const frozen = new Map<number, FrozenProbe>();
   const factories = new Map<number, readonly number[]>();
+  const targets = new Map([[HEALTH, PROBE]]);
   const carrier = (probes: ReadonlyMap<number, { sensorIds: Iterable<number> }>, id: number) => {
     for (const [probe, held] of probes) if ([...held.sensorIds].includes(id)) return probe;
     return undefined;
@@ -57,15 +60,15 @@ function world(): {
       carrierOf: (id) => carrier(frozen, id),
     }),
     alarms: () => ({
-      reportingOn: (probe) => (probe === PROBE ? [HEALTH] : []),
-      reportsOn: (id) => (id === HEALTH ? PROBE : undefined),
+      reportingOn: (probe) => [...targets].filter(([, on]) => on === probe).map(([id]) => id),
+      reportsOn: (id) => targets.get(id),
     }),
     factories: () => ({
       unreached: () => new Set(factories.keys()),
       inputsOf: (id) => factories.get(id),
     }),
   });
-  return { lost, frozen, factories, index };
+  return { lost, frozen, factories, targets, index };
 }
 
 describe('the episode index (`M-22`)', () => {
@@ -159,14 +162,51 @@ describe('the episode index (`M-22`)', () => {
     index.episodeOf(HEALTH);
     lost.set(PROBE, { sensorIds: [], reason: 'link', since: T1 });
     assert.equal(index.episodeOf(HEALTH), undefined);
-    assert.equal(index.endedEpisodeOf(HEALTH)?.emptied, true);
+    assert.equal(index.endedEpisodeOf(HEALTH)?.ending, 'emptied');
     assert.deepEqual(index.heldFor(HEALTH), []);
 
     // And one that ended because the probe came back is not.
     lost.set(PROBE, { sensorIds: [3], reason: 'link', since: T2 });
     index.episodeOf(HEALTH);
     lost.delete(PROBE);
-    assert.equal(index.endedEpisodeOf(HEALTH)?.emptied, false);
+    assert.equal(index.endedEpisodeOf(HEALTH)?.ending, 'resolved');
+  });
+
+  it('ends the episode a Probe Health stood for, for it, once it is moved to another probe (`M-29`)', () => {
+    const { lost, targets, index } = world();
+    lost.set(PROBE, { sensorIds: [1, 2], reason: 'link', since: T1 });
+    assert.equal(index.episodeOf(HEALTH)?.probeObjectId, PROBE);
+    targets.set(HEALTH, OTHER);
+    assert.equal(index.episodeOf(HEALTH), undefined, 'its new probe has none');
+    assert.deepEqual(index.endedEpisodeOf(HEALTH), {
+      probeObjectId: PROBE,
+      kind: 'lost',
+      since: T1,
+      held: 2,
+      ending: 'retargeted',
+    });
+
+    // Withheld, it reports on nothing, and is not moved: a pause's reaction decides it (`M-24`).
+    targets.delete(HEALTH);
+    assert.equal(index.endedEpisodeOf(HEALTH), undefined);
+
+    // And once the probe it stood for is back, that episode ended as any does.
+    targets.set(HEALTH, OTHER);
+    lost.delete(PROBE);
+    assert.equal(index.endedEpisodeOf(HEALTH)?.ending, 'resolved');
+  });
+
+  it('moves nothing for a Probe Health that stood for no episode, or is moved back (`M-29`)', () => {
+    const { lost, targets, index } = world();
+    lost.set(PROBE, { sensorIds: [1], reason: 'link', since: T1 });
+    targets.set(HEALTH, OTHER);
+    assert.equal(index.endedEpisodeOf(HEALTH), undefined, 'never asked while it stood for one');
+
+    targets.set(HEALTH, PROBE);
+    assert.equal(index.episodeOf(HEALTH)?.probeObjectId, PROBE);
+    targets.set(HEALTH, OTHER);
+    targets.set(HEALTH, PROBE);
+    assert.equal(index.endedEpisodeOf(HEALTH), undefined, 'back where it stood, nothing ended');
   });
 
   it('files an end it is first told of through the ended question', () => {
@@ -265,14 +305,14 @@ describe('what a trigger sees, and what can stand in for a probe (`M-22`)', () =
       episodeMessage({ ...lost, kind: 'frozen' }, 'Site A'),
       /clock reads earlier .*312 sensors are Unknown until it catches up/u,
     );
-    const ended = { ...lost, emptied: false };
+    const ended = { ...lost, ending: 'resolved' as const };
     assert.equal(
       episodeEndedMessage(ended, 'Site A'),
       'probe Site A is answering again: its sensors are no longer held',
     );
     assert.match(episodeEndedMessage({ ...ended, kind: 'frozen' }, 'Site A'), /caught up/u);
     // Emptied: the probe is as much at fault as it was, and the words must not say otherwise.
-    const emptied = { ...lost, emptied: true };
+    const emptied = { ...lost, ending: 'emptied' as const };
     assert.equal(
       episodeEndedMessage(emptied, 'Site A'),
       'probe Site A is still lost, but none of its sensors are held now: they were moved off it ' +
@@ -283,6 +323,17 @@ describe('what a trigger sees, and what can stand in for a probe (`M-22`)', () =
       /still sending no/u,
     );
     assert.match(episodeEndedMessage({ ...emptied, kind: 'frozen' }, 'Site A'), /still behind/u);
+    // Retargeted: at fault as it was, and no longer this Probe Health's to speak for (`M-29`).
+    const retargeted = { ...lost, ending: 'retargeted' as const };
+    assert.equal(
+      episodeEndedMessage(retargeted, 'Site A'),
+      'probe Site A is still lost, but this Probe Health reports on another probe now, and ' +
+        'holds none of its sensors',
+    );
+    assert.match(
+      episodeEndedMessage({ ...retargeted, kind: 'frozen' }, 'Site A'),
+      /clock is still behind, but this Probe Health reports on another probe/u,
+    );
   });
 });
 
@@ -315,6 +366,10 @@ describe('an episode alarm the view cannot decide (`M-24`)', () => {
     readonly since?: Date;
     /** Why Probe Health reads its state, `lookup` unless said (paused: none). */
     readonly cause?: SensorStateCause | null;
+    /** Probe Health was moved to another probe while the episode went on (`M-29`). */
+    readonly retargeted?: boolean;
+    /** Probe Health's held return, in seconds (`M-18`): none unless said. */
+    readonly hold?: number;
   }
 
   function over(fixture: Fixture): {
@@ -324,11 +379,12 @@ describe('an episode alarm the view cannot decide (`M-24`)', () => {
     advanced: AlarmAdvance[];
     armed: AlarmInsert[];
   } {
-    const { lost, index } = world();
+    const { lost, targets, index } = world();
     lost.set(PROBE, { sensorIds: [1, 2], reason: 'link', since: T1 });
     index.episodeOf(HEALTH);
     // Emptied by a tree change whose re-evaluation of Probe Health never landed.
     if (fixture.emptied) lost.set(PROBE, { sensorIds: [], reason: 'link', since: T1 });
+    if (fixture.retargeted === true) targets.set(HEALTH, OTHER);
     const cause = fixture.cause ?? (fixture.state === 'paused' ? null : 'lookup');
     const suppressed = fixture.suppressed ?? false;
     const row: AlarmRow | null =
@@ -425,7 +481,13 @@ describe('an episode alarm the view cannot decide (`M-24`)', () => {
         Promise.resolve(new Map(ids.map((id) => [id, [trigger]]))),
     } as unknown as TriggerRepository;
     return {
-      engine: new AlarmEngine({ logger: silent, alarms, triggers, episodes: index }),
+      engine: new AlarmEngine({
+        logger: silent,
+        alarms,
+        triggers,
+        episodes: index,
+        recoveryHolds: () => fixture.hold ?? 0,
+      }),
       requests,
       cleared,
       advanced,
@@ -466,6 +528,31 @@ describe('an episode alarm the view cannot decide (`M-24`)', () => {
           assert.deepEqual(requests, [], `${state}/${phase}`);
           assert.deepEqual(cleared, [900], `${state}/${phase}`);
         }
+      });
+    }
+  });
+
+  describe('whose Probe Health was moved to another probe while the episode went on (`M-29`)', () => {
+    const RETARGETED =
+      'probe Site A is still lost, but this Probe Health reports on another probe now, and ' +
+      'holds none of its sensors';
+    for (const [name, run] of [
+      ['the reaction', react],
+      ['the sweep', sweep],
+    ] as const) {
+      it(`is recovered by ${name} at once, hold or not, in words that say the probe is still lost`, async () => {
+        // It reads its new probe, Up, and the probe it stood for is no more answering than it was.
+        const { engine, requests, cleared, advanced } = over({
+          state: 'up',
+          phase: 'notified',
+          emptied: false,
+          retargeted: true,
+          hold: 300,
+        });
+        await run(engine);
+        assert.deepEqual(said(requests), [['recovery', 12, RETARGETED]]);
+        assert.deepEqual(cleared, [900]);
+        assert.deepEqual(advanced, [], 'not held as a return');
       });
     }
   });

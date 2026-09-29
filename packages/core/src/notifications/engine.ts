@@ -1004,7 +1004,8 @@ export class AlarmEngine {
    * without the hold a trigger on Unknown paged at every kill. Held, a loss inside the hold is a
    * new episode and the same alarm: the view reads it as Unknown and `reconcile` resumes the
    * chain. An **emptied** episode is not a return, its probe is still at fault and nothing
-   * flaps, so it recovers at once, as before.
+   * flaps, so it recovers at once, as before. Nor is one whose Probe Health was **retargeted**
+   * to another probe (`M-29`), which recovers at once in words that say so.
    */
   #episodeDecision(
     alarm: AlarmRow | null,
@@ -1034,7 +1035,7 @@ export class AlarmEngine {
       // check. Not asked of a held return above, where Probe Health resumed and awaiting its
       // first reading would read as a relapse, and only a new episode is one.
       if (alarm.state !== null && stillStanding(alarm.state, sensor.state)) return undefined;
-      if (!ended.emptied && settings.recoveryHoldSeconds > 0) {
+      if (ended.ending === 'resolved' && settings.recoveryHoldSeconds > 0) {
         // No end time is kept for an episode, and this runs in the transaction that ended it.
         return { kind: 'recovering', since: now, confirmAt: recoveryConfirmAt(now, settings) };
       }

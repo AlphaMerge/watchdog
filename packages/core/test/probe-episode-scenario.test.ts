@@ -1348,10 +1348,15 @@ describe(
       );
     }
 
-    it('a Probe Health retargeted during a loss: the sensors it held notify one by one, as for a pause (`M-27`)', async () => {
+    it('a Probe Health retargeted during a loss: the sensors it held notify one by one, as for a pause (`M-27`)', async (t) => {
       // Still live, and still a row, so neither a pause's reaction nor a delete's reached what it
       // held: they stayed held, with no alarm, under a trigger that heard of the probe only from
-      // it, until each was next re-decided.
+      // it, until each was next re-decided. Returns are held (`M-18`), and its own recovery is
+      // not one (`M-29`).
+      holding = true;
+      t.after(() => {
+        holding = false;
+      });
       const made = await probeWith('retargeted-mid-loss', { health: true });
       const elsewhere = await bareProbe('retargeted-to');
       await trigger(made.probe, 'unknown', 'email');
@@ -1368,9 +1373,14 @@ describe(
       assert.equal((await alarmsOn(made.pings)).length, PINGS, 'one alarm armed per sensor');
       await fire();
       assert.deepEqual(await queued(moved, made.pings), { 'email:unknown:initial': PINGS });
-      // It reads its new probe now, which answers, and its own alarm recovers with it: in that
-      // probe's words, not the episode's, which is `M-29`.
+      // It reads its new probe now, which answers, and its own alarm recovers at once, saying the
+      // probe it stood for is still lost, not in its new probe's words (`M-29`).
       assert.deepEqual(await queued(moved, [health]), { 'email:unknown:recovery': 1 });
+      assert.deepEqual(await messages(moved, health), [
+        'probe retargeted-mid-loss is still lost, but this Probe Health reports on another probe ' +
+          'now, and holds none of its sensors',
+      ]);
+      assert.deepEqual(await alarmsOn([health]), [], 'over, not held as a return');
 
       const lift = await mark();
       await find(made);

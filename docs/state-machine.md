@@ -687,7 +687,11 @@ Two further notes for whoever picks those up:
   reaches it (`M-27`). The health sweep that sees it report on another probe publishes the new
   targets and then re-decides everything the old probe holds, before its own results go in, and
   the same follows. A failed re-decision is asked again at the next sweep. Its own episode alarm
-  recovers with it, since it reads its new probe now, in that probe's words (`M-29`).
+  recovers too, because it reads its new probe now. The recovery goes out at once, not held as
+  a return, and says the probe it stood for is still lost, silent or behind (`M-29`). The episode
+  index remembers which probe each Probe Health last stood for in an episode, and asks through
+  that probe once the Probe Health has moved. It remembers only since the core started, so one
+  moved before anything asked after a restart recovers in its new probe's words.
 - **A return is held before an alarm is over, and a relapse inside the hold is the same alarm**
   (`M-18`). This is the alarm engine's, not the state machine's: the sensor reads Up at the
   return, in `sensor_state` and everywhere else, and only the alarm waits. How long comes from

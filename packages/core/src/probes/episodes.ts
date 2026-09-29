@@ -59,11 +59,19 @@ export interface EpisodeSources {
  * still there, by the start that cause carries, and a new one when none is. It also remembers
  * the last one that ended, so the recovery can say which episode it closes. One entry of each per
  * probe, at most.
+ *
+ * **And the probe each probe-alarm sensor last stood for in an episode** (`M-29`), one entry per
+ * Probe Health, at most. A Probe Health moved to another probe during an episode asks about the
+ * new one from the next health sweep, which has no episode to end, so its episode alarm would
+ * recover as any sensor does, in the new probe's words. Asked through the probe it stood for, it
+ * closes that episode, which it no longer stands for, in words that say the probe is still at
+ * fault. Remembered only from a question asked since this core started.
  */
 export class ProbeEpisodeIndex implements ProbeEpisodes {
   readonly #sources: EpisodeSources;
   readonly #current = new Map<number, { episode: ProbeEpisode; causes: readonly number[] }>();
   readonly #ended = new Map<number, EndedEpisode>();
+  readonly #stoodFor = new Map<number, number>();
 
   constructor(sources: EpisodeSources) {
     this.#sources = sources;
@@ -91,12 +99,23 @@ export class ProbeEpisodeIndex implements ProbeEpisodes {
 
   episodeOf(alarmSensorId: number): ProbeEpisode | undefined {
     const probe = this.#sources.alarms()?.reportsOn(alarmSensorId);
-    return probe === undefined ? undefined : this.#episode(probe);
+    if (probe === undefined) return undefined;
+    const episode = this.#episode(probe);
+    if (episode !== undefined) this.#stoodFor.set(alarmSensorId, probe);
+    return episode;
   }
 
   endedEpisodeOf(alarmSensorId: number): EndedEpisode | undefined {
     const probe = this.#sources.alarms()?.reportsOn(alarmSensorId);
+    // Reporting on nothing, withheld or deleted, it is not retargeted: a pause's reaction and a
+    // delete's decide its alarm (`M-24`, `M-25`).
     if (probe === undefined) return undefined;
+    const stood = this.#stoodFor.get(alarmSensorId);
+    if (stood !== undefined && stood !== probe) {
+      // Moved since it stood for an episode (`M-29`): that one ends for it, however it goes on.
+      const going = this.#episode(stood);
+      return going === undefined ? this.#ended.get(stood) : { ...going, ending: 'retargeted' };
+    }
     // Observed first, so an episode that ended since the last question is filed as ended.
     this.#episode(probe);
     return this.#ended.get(probe);
@@ -150,7 +169,7 @@ export class ProbeEpisodeIndex implements ProbeEpisodes {
       // or behind as it was, and its sensors were moved off it or deleted (`M-24`).
       this.#ended.set(probeObjectId, {
         ...previous.episode,
-        emptied: held.size === 0 && causes.length > 0,
+        ending: held.size === 0 && causes.length > 0 ? 'emptied' : 'resolved',
       });
       this.#current.delete(probeObjectId);
     }

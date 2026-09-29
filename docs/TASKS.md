@@ -6460,7 +6460,7 @@ because each is a decision rather than a defect:
         against all three sets, and every set taken back when the write fails.
       Mutations 11/11.
 
-- [ ] **M-29 — a Probe Health retargeted mid-loss recovers its own episode alarm in the new
+- [x] **M-29 — a Probe Health retargeted mid-loss recovers its own episode alarm in the new
       probe's words while the old one is still lost** · S · M-27, M-24 · Found finishing `M-27`.
       A Probe Health moved or edited to report on another probe during a loss reads that probe
       from the next health sweep. When that probe answers, the Probe Health goes Up, and its
@@ -6477,6 +6477,23 @@ because each is a decision rather than a defect:
         lost, silent or behind, and that its sensors now notify one by one, as `M-24`'s emptied
         episode says why;
       - `M-27`'s scenario asserts the words. Mutants as usual.
+
+      **Done.** The episode index remembers which probe each Probe Health last stood for in an
+      episode. Once the Probe Health reports on another probe, `endedEpisodeOf` asks through that
+      remembered probe. While that probe's episode goes on, the answer is the episode, ended for
+      this Probe Health as `retargeted`. Once it has ended, the answer is the episode as it ended.
+      `EndedEpisode.emptied` became `ending`: `resolved`, `emptied` or `retargeted`. Only
+      `resolved` is a return that `M-18` holds. The recovery says *probe … is still lost, but this
+      Probe Health reports on another probe now, and holds none of its sensors*. It does not say
+      the sensors notify one by one: another live Probe Health may still hold them behind its own
+      alarm. A Probe Health withheld or deleted reports on nothing and is not retargeted, so a
+      pause's reaction and a delete's decide it, as before. Nothing is persisted, so a Probe
+      Health moved before anything asked after a restart still recovers in its new probe's words.
+
+      Tests: `M-27`'s scenario, now with held returns on, asserts one recovery at once and its
+      words. In `probe-episodes`: the index ends the episode for a moved Probe Health, not for
+      one withheld, never asked or moved back; the words for each kind; and the reaction and the
+      sweep recover it at once under a hold. Mutations 8/8.
 
 - [x] **M-24 — `M-22`'s episode and its held set are not linked in every direction** · M · M-22,
       M-17 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `M-24`).
