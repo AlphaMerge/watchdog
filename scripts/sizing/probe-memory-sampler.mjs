@@ -8,7 +8,8 @@
 // and every live worker's V8 heap as the worker itself reports it.
 //
 // For `P-216` it also records what a starved probe's main thread is doing: the log's backlog (the
-// bytes pino's SonicBoom holds because stdout would not take them), the event loop's delay, and
+// bytes its `LogOutput` holds because stdout would not take them, and the lines it dropped past its
+// bound), the event loop's delay, and
 // the time spent in garbage collection. A line that stops arriving is evidence too: this runs on
 // the main thread, so a blocked loop stops it, and the harness samples `/proc` from outside.
 import { appendFileSync, readFileSync } from 'node:fs';
@@ -36,24 +37,10 @@ if (out && isProbe) {
   wt.Worker = Tracked;
   syncBuiltinESMExports();
 
-  // Every SonicBoom the probe builds. SonicBoom assigns `write` per instance, so the constructor is
-  // what is wrapped, in the module cache, before pino (loaded after this file) requires it.
-  // Resolved from the probe's own entry point, because this file lives outside the app's tree.
-  const booms = new Set();
-  try {
-    const appRequire = createRequire(process.argv[1] ?? import.meta.url);
-    const path = appRequire.resolve('sonic-boom');
-    const SonicBoom = appRequire(path);
-    class TrackedBoom extends SonicBoom {
-      constructor(...args) {
-        super(...args);
-        booms.add(this);
-      }
-    }
-    appRequire.cache[path].exports = TrackedBoom;
-  } catch {
-    // No SonicBoom to find; `logBacklogBytes` stays null.
-  }
+  // The probe's log output (`P-216` part 3), which registers itself on `globalThis` because an
+  // installed release is a bundle and this file cannot import it. Read at each sample, since it
+  // is built after this file loads.
+  const logOutput = () => globalThis[Symbol.for('ms.logOutput')]?.stats?.() ?? null;
   const loop = monitorEventLoopDelay({ resolution: 20 });
   loop.enable();
   let gcMs = 0;
@@ -101,9 +88,8 @@ if (out && isProbe) {
         : 0,
       vmAvailableMiB: Math.round(kb(meminfo, 'MemAvailable') / 1024),
       vmSwapFreeMiB: Math.round(kb(meminfo, 'SwapFree') / 1024),
-      logBacklogBytes: booms.size === 0 ? null : [...booms].reduce((sum, b) => sum + b._len, 0),
-      logBacklogChunks:
-        booms.size === 0 ? null : [...booms].reduce((sum, b) => sum + b._bufs.length, 0),
+      logBacklogBytes: logOutput()?.backlogBytes ?? null,
+      logDroppedLines: logOutput()?.droppedLines ?? null,
       loopDelayMaxMs: Math.round(loop.max / 1e6),
       loopDelayP99Ms: Math.round(loop.percentile(99) / 1e6),
       gcMs: Math.round(gcMs),

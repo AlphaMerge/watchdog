@@ -100,13 +100,22 @@ export function createServiceNotifier(logger: Logger, env = process.env): Servic
 }
 
 /**
- * The watchdog interval systemd expects, derived from `WATCHDOG_USEC`. systemd's own advice is
- * to notify at half the configured interval.
+ * How many pings each `WatchdogSec` holds (`P-243`).
+ *
+ * **Six, not systemd's advised two.** The ping is a timer on the main thread, and a timer is late
+ * by however long the thread was held. At half the interval, one late ping uses the whole margin:
+ * `P-216c` held both services' main threads for 7–15 s under CPU starvation at the memory limit,
+ * and the probe's timer fired 30.4 s after its last ping against `WatchdogSec=30`. At a sixth the
+ * longest gap is the longest block plus 5 s. The ping stays on the main thread deliberately: one
+ * sent from anywhere else goes on while the thread it vouches for is hung.
  */
+export const WATCHDOG_PINGS_PER_INTERVAL = 6;
+
+/** How often to ping the watchdog, from `WATCHDOG_USEC`, or `null` when there is none. */
 export function watchdogIntervalMs(env = process.env): number | null {
   const usec = env['WATCHDOG_USEC'];
   if (usec === undefined) return null;
   const parsed = Number.parseInt(usec, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return null;
-  return Math.max(1_000, Math.floor(parsed / 1000 / 2));
+  return Math.max(1_000, Math.floor(parsed / 1000 / WATCHDOG_PINGS_PER_INTERVAL));
 }

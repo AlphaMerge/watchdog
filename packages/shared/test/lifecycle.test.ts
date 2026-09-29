@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { pino } from 'pino';
 import { Lifecycle } from '../src/lifecycle/lifecycle.js';
-import type { ServiceNotifier } from '../src/lifecycle/systemd.js';
+import { watchdogIntervalMs, type ServiceNotifier } from '../src/lifecycle/systemd.js';
 
 const silentLogger = pino({ level: 'silent' });
 
@@ -181,5 +181,21 @@ describe('Lifecycle.waitForShutdown', () => {
       ['hook-done', 'wait-resolved'],
       'waitForShutdown must not resolve while hooks are still draining',
     );
+  });
+});
+
+describe('watchdogIntervalMs (P-243)', () => {
+  it('pings six times a WatchdogSec, so one blocked stretch cannot use the whole margin', () => {
+    // `P-216c`: at half of 30 s, a main thread held for 15 s made the gap 30.4 s and systemd
+    // killed the probe. At a sixth the gap is the block plus 5 s.
+    assert.equal(watchdogIntervalMs({ WATCHDOG_USEC: '30000000' }), 5_000);
+    assert.equal(watchdogIntervalMs({ WATCHDOG_USEC: '180000000' }), 30_000);
+  });
+
+  it('never pings more than once a second, and not at all without a watchdog', () => {
+    assert.equal(watchdogIntervalMs({ WATCHDOG_USEC: '2000000' }), 1_000);
+    assert.equal(watchdogIntervalMs({}), null);
+    assert.equal(watchdogIntervalMs({ WATCHDOG_USEC: '0' }), null);
+    assert.equal(watchdogIntervalMs({ WATCHDOG_USEC: 'soon' }), null);
   });
 });

@@ -237,7 +237,7 @@ if (process.env.MS_PREFLIGHT === '1') {
   }
   const lastSample = samples.length > 0 ? JSON.parse(samples.at(-1)) : null;
   if (lastSample !== null && lastSample.logBacklogBytes === null) {
-    problems.push("the sampler did not find the probe's SonicBoom");
+    problems.push("the sampler did not find the probe's log output");
   }
   if (probeProcess(probeUnit.pid) === null) problems.push("the probe's /proc is unreadable");
   // The target must hang, not refuse and not answer, or the pool never fills. The first connect or

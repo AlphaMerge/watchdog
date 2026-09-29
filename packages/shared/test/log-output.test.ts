@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { LogOutput, writeLineSync } from '../src/logging/output.js';
+import { LogOutput, PROCESS_LOG_OUTPUT, writeLineSync } from '../src/logging/output.js';
 import { DeltaMeter } from '../src/process/delta-meter.js';
 
 /** An output the test opens and closes: `EAGAIN` while stalled, `take` bytes a write otherwise. */
@@ -143,6 +143,21 @@ describe('LogOutput (P-216 part 3)', () => {
     assert.equal(output.stats().backlogBytes, 0);
     assert.equal(said.length, 1);
     assert.match(said[0] ?? '', /EPIPE/);
+  });
+
+  it('is findable by a sampler loaded into the process, when it is the process’s own', () => {
+    // `probe-memory-sampler.mjs` reads the backlog through this; an installed release is a bundle
+    // it cannot import. One built for a test's own output is not the process's and stays hidden.
+    const registry = globalThis as Record<symbol, unknown>;
+    const before = registry[PROCESS_LOG_OUTPUT];
+    new LogOutput({ write: fakeOutput().write });
+    assert.equal(registry[PROCESS_LOG_OUTPUT], before);
+    const own = new LogOutput();
+    try {
+      assert.equal(registry[PROCESS_LOG_OUTPUT], own);
+    } finally {
+      registry[PROCESS_LOG_OUTPUT] = before;
+    }
   });
 
   it('writes one line synchronously, waiting a bounded time for a stalled descriptor', () => {

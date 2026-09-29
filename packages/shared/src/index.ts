@@ -33,6 +33,7 @@ export {
   LOG_BACKLOG_MAX_BYTES,
   LOG_EXIT_FLUSH_MS,
   LogOutput,
+  PROCESS_LOG_OUTPUT,
   writeLineSync,
 } from './logging/output.js';
 export type { LogOutputOptions, LogOutputStats } from './logging/output.js';

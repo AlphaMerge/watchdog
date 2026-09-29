@@ -12,6 +12,13 @@ export const LOG_BACKLOG_MAX_BYTES = 8 * 1024 * 1024;
 /** How long an exit waits for a stalled output to take what is held, before giving up on it. */
 export const LOG_EXIT_FLUSH_MS = 2_000;
 
+/**
+ * Where a process's own `LogOutput` — the one on its standard output — can be found by a sampler
+ * loaded into it (`scripts/sizing/probe-memory-sampler.mjs`), which cannot import it: an installed
+ * release is a bundle. Read-only use; nothing in the services reads it.
+ */
+export const PROCESS_LOG_OUTPUT = Symbol.for('ms.logOutput');
+
 /** How often a stalled output is tried again. */
 const RETRY_MS = 100;
 
@@ -90,6 +97,7 @@ export class LogOutput {
       // mode, so the first write here cannot hold the thread. Measured in the dev container: a
       // pipe and a socket both read `O_NONBLOCK` after, and a regular file does not need it.
       void process.stdout;
+      (globalThis as Record<symbol, unknown>)[PROCESS_LOG_OUTPUT] = this;
     }
   }
 
