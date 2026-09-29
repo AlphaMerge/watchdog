@@ -203,10 +203,16 @@ describe('a pool bounded by memory (P-236)', () => {
     await pool.start();
     for (let id = 1; id <= 30; id += 1) pool.submit(request(id, 60_000));
     await until(() => pool.stats().size === 5, 'the pool to grow to what memory allows');
-    // Long enough for a growth step that ignored the cap to have landed.
+    // A worker that has started has not necessarily taken a check yet, and until it has, the
+    // queue still holds that check: wait for the state, not for time (`P-234`). Under load the
+    // queue read 26–28 after a fixed 300 ms.
+    await until(() => pool.stats().busy === 5, 'every worker to take a check');
+    // A lower bound, so it can only make the test harder to pass: long enough for a growth step
+    // that ignored the cap to have landed.
     await sleep(300);
     const stats = pool.stats();
     assert.equal(stats.size, 5);
+    assert.equal(stats.busy, 5);
     assert.equal(stats.queued, 25, 'the rest wait for a worker rather than getting one');
     assert.equal(stats.ceiling, 5);
     assert.equal(stats.memoryCap, 5);
