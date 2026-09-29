@@ -203,9 +203,13 @@ describe(
         credentialCheckFailures: 0,
       }),
       probes: () => ({ probesDown: 0, probesSilent: 0 }),
-      alarms: () => ({ fired: 0, nextWakeAt: null }),
+      alarms: () => ({ fired: 0, overdueMs: 0 }),
       queries: () => ({ refused: 0 }),
-      ingestionDiscards: () => ({ discardedFutureTime: 0, discardedPastTime: 0 }),
+      ingestionDiscards: () => ({
+        discardedFutureTime: 0,
+        discardedPastTime: 0,
+        discardedUnreadableTime: 0,
+      }),
       credentialsToReenter: () => Promise.resolve(0),
       delivery: () => Promise.resolve({ pending: 0, failed: 0, oldestPendingAgeMs: 0 }),
     });

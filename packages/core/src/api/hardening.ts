@@ -462,7 +462,14 @@ export interface RateLimitOptions {
   /** Requests allowed per window. */
   max?: number;
   windowMs?: number;
+  /**
+   * Monotonic milliseconds, which the windows are timed on (`P-247`). A window is a duration, and
+   * on the wall clock a backward step of an hour kept every client's window open for that hour:
+   * past the limit, the NOC's own UI answered 429 for the length of the step.
+   */
   now?: () => number;
+  /** The wall clock, only for `x-ratelimit-reset`, which a client reads as a Unix time. */
+  wallNow?: () => number;
 }
 
 const DEFAULT_MAX = 1_200;
@@ -471,7 +478,8 @@ const DEFAULT_WINDOW_MS = 60_000;
 export function registerRateLimit(app: FastifyInstance, options: RateLimitOptions): void {
   const max = options.max ?? DEFAULT_MAX;
   const windowMs = options.windowMs ?? DEFAULT_WINDOW_MS;
-  const now = options.now ?? Date.now;
+  const now = options.now ?? ((): number => performance.now());
+  const wallNow = options.wallNow ?? Date.now;
 
   /**
    * Fixed windows rather than a sliding log.
@@ -513,7 +521,11 @@ export function registerRateLimit(app: FastifyInstance, options: RateLimitOption
     const remaining = Math.max(0, max - bucket.count);
     void reply.header('x-ratelimit-limit', String(max));
     void reply.header('x-ratelimit-remaining', String(remaining));
-    void reply.header('x-ratelimit-reset', String(Math.ceil(bucket.resetAt / 1000)));
+    // A Unix time for the client, from how long the window has left on the monotonic clock.
+    void reply.header(
+      'x-ratelimit-reset',
+      String(Math.ceil((wallNow() + (bucket.resetAt - at)) / 1000)),
+    );
 
     if (bucket.count > max) {
       const retryAfter = Math.max(1, Math.ceil((bucket.resetAt - at) / 1000));

@@ -439,6 +439,28 @@ describe('the webhook transport', () => {
     assert.equal(result.retryable, false);
   });
 
+  // `P-247`: the deadline is a duration. On the wall clock, a forward step while the name was
+  // being resolved timed out a delivery that had not started.
+  it('keeps its deadline across a forward step of the wall clock', async () => {
+    const realNow = Date.now;
+    const stepping = new WebhookTransport({
+      config: config(),
+      logger: silent,
+      resolve: () => {
+        const ahead = realNow() + 3_600_000;
+        Date.now = (): number => ahead;
+        return toLoopback();
+      },
+    });
+    try {
+      const result = await stepping.send(message({ settings: { url: url() } }));
+      assert.ok(result.ok, result.ok ? '' : result.error);
+      assert.equal(seen.length, 1);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
   it('refuses a name that resolves to cloud metadata', async () => {
     // The attack the default policy exists for: a name whose DNS answer points at
     // 169.254.169.254, which hands out IAM credentials to anything that asks.

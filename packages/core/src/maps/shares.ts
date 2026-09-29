@@ -55,6 +55,10 @@ export interface ShareRateLimitOptions {
   readonly windowMs?: number;
   /** How many keys are tracked at once. */
   readonly maxKeys?: number;
+  /**
+   * Monotonic milliseconds (`P-247`): a window is a duration, and on the wall clock a backward
+   * step kept a wall display's share refused for the length of the step.
+   */
   readonly now?: () => number;
 }
 
@@ -70,7 +74,7 @@ export class ShareRateLimit {
     this.#perWindow = options.perWindow ?? 60;
     this.#windowMs = options.windowMs ?? 60_000;
     this.#maxKeys = options.maxKeys ?? 10_000;
-    this.#now = options.now ?? Date.now;
+    this.#now = options.now ?? ((): number => performance.now());
   }
 
   /** True when this request may proceed. Counts it when it may. */

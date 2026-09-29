@@ -62,6 +62,12 @@ export interface SweepDeps {
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /** Injected so a test can assert that progress arrives *during* a run, not only at its end. */
   readonly progressIntervalMs?: number;
+  /**
+   * Monotonic milliseconds, which the rate, the progress interval and the time spent standing
+   * down are all timed on (`P-247`). On the wall clock, a backward step of an hour refilled the
+   * bucket by minus an hour's worth, and the run slept the hour with no progress sent.
+   */
+  readonly now?: () => number;
 }
 
 /**
@@ -194,14 +200,15 @@ export class SweepRunner {
   async #run(run: Run): Promise<void> {
     const { job, range, controller } = run;
     const sleep = this.#deps.sleep ?? defaultSleep;
+    const clock = this.#deps.now ?? ((): number => performance.now());
     const inFlight = new Set<Promise<void>>();
     // A token bucket rather than a delay per address: a fixed delay makes the *floor* the rate,
     // so a network that answers instantly runs at exactly the limit and one that times out runs
     // far below it. The bucket lets a slow patch be made up for by a fast one and still averages
     // what was asked for.
     let allowance = job.ratePerSecond;
-    let lastRefill = Date.now();
-    let lastProgress = Date.now();
+    let lastRefill = clock();
+    let lastProgress = clock();
     const progressEvery = this.#deps.progressIntervalMs ?? DEFAULT_PROGRESS_INTERVAL_MS;
     let ending: SweepEnding = 'done';
     let message = '';
@@ -224,7 +231,7 @@ export class SweepRunner {
       const failed = run.failed;
       run.failed = 0;
       this.#deps.onProgress(job.runId, run.cursor, found, failed);
-      lastProgress = Date.now();
+      lastProgress = clock();
     };
 
     try {
@@ -236,15 +243,15 @@ export class SweepRunner {
         // a discovery run that makes it later has traded a one-off convenience for the thing
         // this system exists to do.
         while (this.#deps.queueDepth() > 0 && !stopped()) {
-          const waitedFrom = Date.now();
+          const waitedFrom = clock();
           await sleep(YIELD_MS, controller.signal);
-          this.#yieldedMs += Date.now() - waitedFrom;
-          if (Date.now() - lastProgress >= progressEvery) flush();
+          this.#yieldedMs += clock() - waitedFrom;
+          if (clock() - lastProgress >= progressEvery) flush();
         }
         if (stopped()) break;
 
         if (job.ratePerSecond > 0) {
-          const now = Date.now();
+          const now = clock();
           allowance = Math.min(
             job.ratePerSecond,
             allowance + ((now - lastRefill) / 1_000) * job.ratePerSecond,
@@ -271,7 +278,7 @@ export class SweepRunner {
         inFlight.add(attempt);
         void attempt.finally(() => inFlight.delete(attempt));
 
-        if (Date.now() - lastProgress >= progressEvery) flush();
+        if (clock() - lastProgress >= progressEvery) flush();
       }
 
       // Whatever is still in the air belongs to this run, cancelled or not: an address whose

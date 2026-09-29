@@ -73,7 +73,9 @@ export class GuardedHttpClient {
     const contentType = request.contentType ?? 'application/json';
     const secretHeaders = request.secretHeaders ?? {};
 
-    const deadline = Date.now() + request.timeoutMs;
+    // Monotonic (`P-247`): a deadline is a duration, and on the wall clock a forward step timed
+    // out a delivery that had not started, and a backward one let it run for the step.
+    const deadline = performance.now() + request.timeoutMs;
     const origin = request.url;
     let target = request.url;
 
@@ -81,7 +83,7 @@ export class GuardedHttpClient {
       const guard = await this.#check(target);
       if (guard !== null) return guard;
 
-      const remaining = deadline - Date.now();
+      const remaining = deadline - performance.now();
       if (remaining <= 0) {
         return {
           ok: false,

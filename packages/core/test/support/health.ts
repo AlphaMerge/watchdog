@@ -45,7 +45,7 @@ export function fixedCoreHealth(
         credentialCheckFailures: 0,
       }),
       probes: () => ({ probesDown: 1, probesSilent: 2 }),
-      alarms: () => ({ fired: 6, nextWakeAt: null }),
+      alarms: () => ({ fired: 6, overdueMs: 0 }),
       ...(options.reporting === false
         ? {}
         : {
@@ -58,7 +58,11 @@ export function fixedCoreHealth(
             }),
           }),
       queries: () => ({ refused: 2 }),
-      ingestionDiscards: () => ({ discardedFutureTime: 0, discardedPastTime: 0 }),
+      ingestionDiscards: () => ({
+        discardedFutureTime: 0,
+        discardedPastTime: 0,
+        discardedUnreadableTime: 0,
+      }),
       delivery: () => Promise.resolve({ pending: 9, failed: 4, oldestPendingAgeMs: 125_000 }),
       credentialsToReenter: () => Promise.resolve(0),
     },

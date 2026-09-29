@@ -130,6 +130,12 @@ export interface ResultStats {
   discardedOnError: number;
   /** Readings whose timestamp was not a date. */
   discardedInvalidTime: number;
+  /**
+   * Results whose timestamp was not a date, dropped whole (`P-247`). The count of results, where
+   * `discardedInvalidTime` counts their readings: a failed check carries none, and was counted
+   * nowhere.
+   */
+  discardedUnreadableTime: number;
   /** Batches whose `sentAt` could not be read, so staleness fell back to the core's clock. */
   discardedInvalidSentAt: number;
   /** Results stamped further ahead of this core's clock than `maxFutureSkewMs` (`P-99`). */
@@ -208,6 +214,7 @@ export class IngestionService {
   #readingsReceived = 0;
   #discardedOnError = 0;
   #discardedInvalidTime = 0;
+  #discardedUnreadableTime = 0;
   #discardedFutureTime = 0;
   #discardedPastTime = 0;
   /**
@@ -254,6 +261,7 @@ export class IngestionService {
       readingsReceived: this.#readingsReceived,
       discardedOnError: this.#discardedOnError,
       discardedInvalidTime: this.#discardedInvalidTime,
+      discardedUnreadableTime: this.#discardedUnreadableTime,
       discardedInvalidSentAt: this.#discardedInvalidSentAt,
       discardedFutureTime: this.#discardedFutureTime,
       discardedPastTime: this.#discardedPastTime,
@@ -530,16 +538,34 @@ export class IngestionService {
     const all = this.#believable(source, offered);
 
     const withReadings: CheckResult[] = [];
+    const unreadable: CheckResult[] = [];
     for (const result of all) {
+      // **Before the outcome, and counted as results** (`P-247`). Counted only as readings, a
+      // failed check with a time nobody can read, which carries none, was dropped below with
+      // every counter at zero: the one result a batch most needs to carry, gone without a trace.
+      if (Number.isNaN(Date.parse(result.at))) {
+        unreadable.push(result);
+        this.#discardedInvalidTime += result.channels.length;
+        continue;
+      }
       if (result.outcome === 'error') {
         this.#discardedOnError += result.channels.length;
         continue;
       }
-      if (Number.isNaN(Date.parse(result.at))) {
-        this.#discardedInvalidTime += result.channels.length;
-        continue;
-      }
       if (result.channels.length > 0) withReadings.push(result);
+    }
+    if (unreadable.length > 0) {
+      this.#discardedUnreadableTime += unreadable.length;
+      // Once a batch, as `#believable` logs: a build that cannot write a time writes none.
+      this.#logger.warn(
+        {
+          source,
+          count: unreadable.length,
+          sensorIds: unreadable.slice(0, 5).map((result) => result.sensorId),
+          at: unreadable[0]?.at,
+        },
+        'results whose time cannot be read were dropped; the probe is sending malformed timestamps',
+      );
     }
 
     // **In time order, because a counter is a fold over time** (`P-106`). The state machine
@@ -656,7 +682,8 @@ export class IngestionService {
     // Every result, whatever its outcome: a check that failed has no readings and is precisely
     // the one the state machine exists for. One that cannot be read is dropped, because a result
     // that cannot be ordered against the last one cannot be folded into a machine that is a fold
-    // over time. The ones no clock could have produced have already gone, in `#believable`.
+    // over time; it was counted above. The ones no clock could have produced have already gone,
+    // in `#believable`.
     const results: SensorResult[] = [];
     for (const result of all) {
       const at = Date.parse(result.at);
@@ -696,7 +723,7 @@ export class IngestionService {
    *
    * Discarded rather than clamped. Clamping would write a reading at a time nobody measured it,
    * and `CLAUDE.md` is explicit that a value the system cannot stand behind is a gap. An
-   * unreadable timestamp is not judged here; the callers count it their own way.
+   * unreadable timestamp is not judged here; `#prepare` counts it (`P-247`).
    */
   #believable(source: string, offered: readonly CheckResult[]): readonly CheckResult[] {
     const now = this.#now().getTime();
@@ -733,7 +760,9 @@ export class IngestionService {
           aheadMs: future.earliest - now,
           allowedMs: this.#maxFutureSkewMs,
         },
-        'results stamped too far in the future to be believed were refused; check the probe host clock',
+        // "Or the core's": a core whose own clock is behind refuses every probe (`P-247`), and Core
+        // Health's `clockBehind` is what says which.
+        "results stamped too far in the future to be believed were refused; check the probe host's clock, or the core's if every probe is refused",
       );
     }
     if (past.count > 0) {

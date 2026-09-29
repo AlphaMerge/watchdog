@@ -12,6 +12,7 @@ import {
 import type { Database, Queryable } from '../db/pool.js';
 import { storedVoucher, type VoucherCheck } from '../objects/vouching.js';
 import { ROLLUP_TIERS } from '../timeseries/tiers.js';
+import { CORE_CLOCK_BEHIND_SECONDS, judgeCoreClock, type CoreClockVerdict } from './core-clock.js';
 
 /**
  * The Core Health sensor's readings (`P-12`).
@@ -51,8 +52,11 @@ export interface CoreHealthSources {
   };
   /** `ProbeReachability.stats()` — probes the core is not currently connected to. */
   probes: () => { probesDown: number; probesSilent: number };
-  /** `AlarmScheduler.stats` — steps fired, and when it next means to look (`P-22`). */
-  alarms: () => { fired: number; nextWakeAt: Date | null };
+  /**
+   * `AlarmScheduler.stats` — steps fired, and how far past its wake the scheduler is (`P-22`),
+   * measured on the monotonic clock its timer runs on (`P-247`).
+   */
+  alarms: () => { fired: number; overdueMs: number };
   /** `ProbeQueryService.stats()` — on-demand checks turned away at the bound (`R-09`). */
   queries: () => { refused: number };
   /**
@@ -91,7 +95,19 @@ export interface CoreHealthSources {
    * describe a batch that was rejected and will be re-offered, while this one describes data
    * that is gone and a probe host that needs its clock fixed.
    */
-  ingestionDiscards: () => { discardedFutureTime: number; discardedPastTime: number };
+  ingestionDiscards: () => {
+    discardedFutureTime: number;
+    discardedPastTime: number;
+    /** Results whose timestamp could not be read at all, dropped whole (`P-247`). */
+    discardedUnreadableTime: number;
+  };
+  /**
+   * The clock offsets of the connected probes that are not the local one, in milliseconds as
+   * `ProbeLink.clockOffsetMs` carries them (`remoteClockOffsets`), from which Core Health judges
+   * whether its own clock is the one behind (`P-247`). Absent, and the channel gaps, where there
+   * are no probes to compare with.
+   */
+  probeClocks?: (q: Queryable) => Promise<readonly (number | null)[]>;
   /**
    * `ApiServer.hostStats()` — requests refused for a `Host` this core does not answer to, since
    * it started (`A-47`). Absent where there is no API to refuse them, and the channel gaps.
@@ -309,6 +325,7 @@ export class CoreHealthService {
     const uptime = this.#process.uptime();
     const dropped =
       takenLogDropped === undefined ? await this.#takeLogDropped(meters) : takenLogDropped;
+    const coreClock = await this.#coreClock();
 
     const discards = this.#sources.ingestionDiscards();
     const reading: CoreHealthReading = {
@@ -355,8 +372,10 @@ export class CoreHealthService {
       probesSilent: probes.probesSilent,
       // Never negative: a wake that is still ahead is not "minus forty seconds overdue", it is
       // on time. A scheduler that has never armed anything has no wake at all, which is also on
-      // time — a gap here would read as "unknown" for a state that is simply quiet.
-      alarmOverdue: overdueSeconds(alarms.nextWakeAt, now),
+      // time — a gap here would read as "unknown" for a state that is simply quiet. The
+      // scheduler's own figure, on its timer's clock, so a wall-clock step is not lateness
+      // (`P-247`).
+      alarmOverdue: Math.round(alarms.overdueMs / 1_000),
       alarmsFired: alarms.fired,
       queriesRefused: queries.refused,
       reportsDeferred: reports === null ? null : reports.deferred,
@@ -366,6 +385,9 @@ export class CoreHealthService {
       reportFormatsRefused: reports === null ? null : reports.formatsRefused,
       resultsFutureDated: discards.discardedFutureTime,
       resultsPastDated: discards.discardedPastTime,
+      resultsUnreadableTime: discards.discardedUnreadableTime,
+      // Seconds behind every remote probe, two or more of them (`P-247`); a gap with fewer.
+      clockBehind: coreClock.behindSeconds,
       reactionsDeferred: ingestion.deferredReactions,
       credentialsToReenter: queues.credentials,
       logDropped: dropped,
@@ -464,6 +486,20 @@ export class CoreHealthService {
    * The log lines dropped since these meters were last taken, the core's and the local probe's.
    * The local probe's part is a gap where the database cannot say which probe that is.
    */
+  /** Whether this core's clock is behind every remote probe's (`P-247`), or a gap. */
+  async #coreClock(): Promise<CoreClockVerdict> {
+    if (this.#sources.probeClocks === undefined) return { behindSeconds: null, owned: false };
+    try {
+      return judgeCoreClock(await this.#sources.probeClocks(this.#db));
+    } catch (error: unknown) {
+      this.#logger.warn(
+        { err: describeError(error) },
+        "core health could not read the probes' clocks; clockBehind is a gap",
+      );
+      return { behindSeconds: null, owned: false };
+    }
+  }
+
   async #takeLogDropped(meters: CoreHealthMeters): Promise<number | null> {
     let local: LocalProbeLog | null = null;
     try {
@@ -603,6 +639,10 @@ function describe(reading: CoreHealthReading, parkedError: string | null = null)
   if (overdue !== null && overdue !== undefined && overdue > 0) {
     parts.push(`alarm sweep ${String(overdue)} s overdue`);
   }
+  const behind = reading['clockBehind'];
+  if (behind !== null && behind !== undefined && behind > CORE_CLOCK_BEHIND_SECONDS) {
+    parts.push(`this core's clock is ${String(Math.round(behind))} s behind every probe's`);
+  }
   const down = reading['probesDown'];
   if (down !== null && down !== undefined && down > 0) parts.push(`${String(down)} probes down`);
   const silent = reading['probesSilent'];
@@ -671,12 +711,6 @@ async function parkedBackfill(q: Queryable): Promise<{ count: number; lastError:
 async function count(q: Queryable, sql: string): Promise<number> {
   const rows = await q.query<{ n: number }>(sql);
   return rows[0]?.n ?? 0;
-}
-
-/** How late the next sweep is, in whole seconds. Zero when it is still ahead, or unarmed. */
-function overdueSeconds(nextWakeAt: Date | null, now: Date): number {
-  if (nextWakeAt === null) return 0;
-  return Math.max(0, Math.round((now.getTime() - nextWakeAt.getTime()) / 1_000));
 }
 
 function round(value: number, places: number): number {

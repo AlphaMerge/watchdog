@@ -1007,6 +1007,8 @@ cost: **light** · evaluated by the core, never by a probe
 | `reportFormatsRefused` | Report formats refused | formats | 64-bit counter → rate |
 | `resultsFutureDated` | Results refused as future-dated | results | 64-bit counter → rate |
 | `resultsPastDated` | Results refused as too old | results | 64-bit counter → rate |
+| `resultsUnreadableTime` | Results dropped for an unreadable time | results | 64-bit counter → rate; default limits: warn above 0 |
+| `clockBehind` | Clock behind the probes | s | default limits: warn above 60, error above 900 |
 | `reactionsDeferred` | Alarm reactions waiting on a catch-up | sensors | — |
 | `credentialsToReenter` | Credential sets to re-enter | sets | default limits: warn above 0 |
 | `logDropped` | Log lines dropped | lines | default limits: warn above 0 |

@@ -367,6 +367,32 @@ describe('the identification pass', () => {
     assert.ok(h.runner.stats().yieldedMs >= 0);
   });
 
+  // `P-247`: on the wall clock, a backward step while standing down sent no progress for the step.
+  it('keeps reporting progress while standing down across a backward step of the wall clock', async () => {
+    const h = harness({
+      progressIntervalMs: 20,
+      sleep: () =>
+        new Promise<void>((resolve) => {
+          setTimeout(resolve, 5);
+        }),
+    });
+    h.queue.depth = 2;
+    // Replaced before the pass starts, so a default that captured it would hold this one.
+    const realNow = Date.now;
+    let wall = realNow();
+    Date.now = (): number => wall;
+    try {
+      h.runner.start(JOB);
+      wall -= 3_600_000;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.ok(h.progress.length > 0, 'progress is timed on the clock that measures it');
+    } finally {
+      Date.now = realNow;
+      h.queue.depth = 0;
+    }
+    await h.done;
+  });
+
   it('never has more hosts in flight than it was told', async () => {
     let inFlight = 0;
     let peak = 0;

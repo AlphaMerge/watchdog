@@ -180,6 +180,13 @@ export class LoginThrottle {
    * Every count comes from one query: a login attempt is on the critical path of every session
    * this system issues, and two round trips to answer "may I try" is one too many.
    */
+  /*
+   * **An attempt stamped after now is clamped to now** (`P-247`). The stamps are wall-clock on
+   * purpose, since they outlive the process, and a backward step of the clock left every failure
+   * before it that far in the future: counted for the step and fifteen minutes more, and an
+   * address blocked for as long. The rows this check reads are rewritten to now in the same round
+   * trip, and read as now meanwhile, so a block after a step lasts what it would have.
+   */
   async check(login: string, remoteAddress: string): Promise<ThrottleVerdict> {
     const now = this.#now();
     const key = addressKey(remoteAddress);
@@ -192,11 +199,16 @@ export class LoginThrottle {
       last_login_fail: Date | null;
       known: boolean;
     }>(
-      `SELECT
-         count(*) FILTER (WHERE address_key = $2)          AS by_address,
-         count(*) FILTER (WHERE lower(login) = lower($1))  AS by_login,
-         max(at)  FILTER (WHERE address_key = $2)          AS last_address_fail,
-         max(at)  FILTER (WHERE lower(login) = lower($1))  AS last_login_fail,
+      `WITH clamped AS (
+         UPDATE login_attempt SET at = $5
+         WHERE at > $5 AND (address_key = $2 OR lower(login) = lower($1))
+         RETURNING 1
+       )
+       SELECT
+         count(*) FILTER (WHERE address_key = $2)                   AS by_address,
+         count(*) FILTER (WHERE lower(login) = lower($1))           AS by_login,
+         max(least(at, $5)) FILTER (WHERE address_key = $2)         AS last_address_fail,
+         max(least(at, $5)) FILTER (WHERE lower(login) = lower($1)) AS last_login_fail,
          EXISTS (
            SELECT 1 FROM login_attempt k
            WHERE lower(k.login) = lower($1) AND k.address_key = $2 AND k.succeeded
@@ -204,7 +216,7 @@ export class LoginThrottle {
          ) AS known
        FROM login_attempt
        WHERE succeeded = false AND at >= $3`,
-      [login, key, since, knownSince],
+      [login, key, since, knownSince, now],
     );
 
     const row = rows[0];

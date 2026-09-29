@@ -70,6 +70,7 @@ import { NotificationDispatcher } from './notifications/dispatcher.js';
 import { DeliveryHealthReader } from './notifications/health.js';
 import { TemplateActivation } from './notifications/activation.js';
 import { ProbeDeliveryWatch } from './probes/delivery-watch.js';
+import { remoteClockOffsets } from './health/core-clock.js';
 import { CoreHealthService } from './health/core-health.js';
 import { ProbeHealthService, ProbeHealthTargets } from './health/probe-health.js';
 import { MetricsExporter } from './metrics/exporter.js';
@@ -1337,6 +1338,18 @@ async function serve(): Promise<void> {
         return dropped === undefined || uptimeSeconds === undefined
           ? null
           : { droppedLines: dropped, uptimeSeconds, session: link.connectedAt.getTime() };
+      },
+      // The remote probes' clocks, to say whether this core's own is the one behind (`P-247`).
+      // The local probe reads this core's clock, so it is left out, as Probe Health leaves it.
+      probeClocks: async (q) => {
+        const rows = await q.query<{ object_id: string }>(
+          'SELECT object_id::text AS object_id FROM probe_config WHERE is_local',
+        );
+        return remoteClockOffsets(
+          probeEndpoint.connectedProbeIds(),
+          new Set(rows.map((row) => Number(row.object_id))),
+          (probeObjectId) => probeEndpoint.linkFor(probeObjectId),
+        );
       },
       queries: () => probeQueries.stats(),
       ingestionDiscards: () => ingestion.stats(),
