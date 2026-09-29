@@ -245,6 +245,12 @@ place_unit() {
   fi
 }
 
+# The unit both services name in OnFailure= (`H-23`), which starts one the start limit stopped for
+# crashing again after a cool-down. One template, whichever services this host runs.
+install -d -m 0755 "${UNIT_DIR}"
+cmp -s "${UNITS}/ms-recover@.service" "${UNIT_DIR}/ms-recover@.service" 2>/dev/null \
+  || install -m 0644 "${UNITS}/ms-recover@.service" "${UNIT_DIR}/ms-recover@.service"
+
 for svc in "${components[@]}"; do
   user="ms-${svc}"
 
@@ -341,6 +347,26 @@ for svc in ${kept_units[@]+"${kept_units[@]}"}; do
         rm ${LEGACY_UNIT_DIR}/ms-${svc}.service
         systemctl daemon-reload && systemctl restart ms-${svc}
 KEPT
+done
+
+# **A RestartSec below a second turns ms-recover off** (`H-23`). It tells a crash loop the start
+# limit stopped from a stop or a refusal by how long the unit waited between its process exiting
+# and failing: RestartSec for the one, under a millisecond for the others. Read from systemd, raw,
+# so an operator's drop-in counts; unreadable is not a finding.
+for svc in "${components[@]}"; do
+  restart_usec="$(busctl get-property org.freedesktop.systemd1 \
+    "/org/freedesktop/systemd1/unit/ms_2d${svc}_2eservice" \
+    org.freedesktop.systemd1.Service RestartUSec 2>/dev/null || true)"
+  restart_usec="${restart_usec#t }"
+  case "${restart_usec}" in '' | *[!0-9]*) continue ;; esac
+  if [ "${restart_usec}" -lt 1000000 ]; then
+    cat >&2 <<SHORT
+==> warning: ms-${svc}.service waits less than a second before a restart (RestartSec, in a drop-in?).
+    At that, ms-recover cannot tell a crash loop from a stop, so if the start limit stops
+    ms-${svc} for crashing, nothing starts it again. See "When a service keeps crashing" in
+    docs/administration.md.
+SHORT
+  fi
 done
 
 # --- will the configuration this installation already has load under the new build? ---------

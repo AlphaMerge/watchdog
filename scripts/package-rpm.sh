@@ -156,6 +156,7 @@ cp -a opt usr %{buildroot}/
 %defattr(-,root,root,-)
 /opt/ms
 $(for svc in "${services[@]}"; do printf '/usr/lib/systemd/system/ms-%s.service\n' "${svc}"; done)
+/usr/lib/systemd/system/ms-recover@.service
 
 %pre
 # **Stopped before the new files go in, on an upgrade** (\$1 = 2) (\`H-21\`). rpm renames each new

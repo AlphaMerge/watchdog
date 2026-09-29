@@ -570,6 +570,11 @@ after the crossing. At 80% there is still room for one such surge; past about 86
   that connects for a few seconds each round can be seen Up between two outages. Five rounds are
   enough for that to happen once, so expect one alarm or two; before the start limit it was one
   every round, 36–45 an hour. Bringing it to one is `M-18`.
+- **Then it is started again after a cool-down** (`H-23`): 10 minutes, doubling on each retry that
+  crashes again, to 4 hours. A probe whose cause has gone, a burst of work that has passed, comes
+  back by itself; before `H-23` it stayed `failed` until somebody reset it, which for a remote
+  probe meant a visit. See [When a service keeps crashing](#when-a-service-keeps-crashing),
+  including what it costs in alarms until `M-18`.
 - **Raising the ceiling, then starting it again, ends it.** If the unit is already `failed`:
 
   ```
@@ -586,9 +591,9 @@ after the crossing. At 80% there is still room for one such surge; past about 86
   start the services themselves), run `systemctl reset-failed ms-core ms-probe` before the next
   start rather than waiting ten minutes. It clears the count and changes nothing else.
 - **The core behaves the same way, and says nothing while it does.** A core killed at its ceiling
-  on every start ends in `failed` too, and since the core is what raises alarms, nothing in this
-  system reports it. Only the host's own monitoring, or a check from another machine, will notice;
-  this project ships neither.
+  on every start ends in `failed` too, and is started again on the same schedule. Between retries,
+  since the core is what raises alarms, nothing in this system reports it. Only the host's own
+  monitoring, or a check from another machine, will notice; this project ships neither.
 
 To raise a ceiling, set it with `systemctl`, which applies it at once, keeps it across reboots and
 leaves the shipped unit file alone for the next upgrade to replace:
@@ -741,7 +746,7 @@ is the one place that says which is which. The code that decides is
 | PostgreSQL refuses the password (including none configured), the user, the database name or its permission | Stops, exit 78, no restart                      | `Configuration error: PostgreSQL at … refused …`      |
 | PostgreSQL's certificate untrusted, expired or for another name, or TLS on where the server has none        | Stops, exit 78, no restart                      | `Configuration error: …`                              |
 | The schema is behind with `autoMigrate` off, newer than this build, or an applied migration was edited      | Stops, exit 78, no restart                      | `Configuration error: …`                              |
-| Anything else — a port in use, a missing permission, a crash, a failure nobody has classified               | Exits 1; systemd restarts it, up to the limit   | `fatal: …`; after five in ten minutes, `failed`       |
+| Anything else — a port in use, a missing permission, a crash, a failure nobody has classified | Exits 1; systemd restarts it, up to the limit; then it is started again after a cool-down | `fatal: …`; after five in ten minutes, `failed` until [the retry](#when-a-service-keeps-crashing) |
 
 **After exit 78, fix the cause and start the service**: `sudo systemctl start ms-core` works,
 because the refusal used one start of the five. After a unit is `failed` with *start request
@@ -752,6 +757,58 @@ clear the count first:
 sudo systemctl reset-failed ms-core ms-probe
 sudo systemctl start ms-core ms-probe
 ```
+
+### When a service keeps crashing
+
+**A service the start limit stopped is started again** (`H-23`). Both units name
+`ms-recover@.service` in `OnFailure=`, so when one enters `failed`, `/opt/ms/bin/ms-recover`
+looks at why:
+
+- **Stopped by the start limit** — five starts inside ten minutes, *start request repeated too
+  quickly* — it schedules one start after a cool-down: 10 minutes, then 20, 40, 80 and 160, and
+  every 4 hours after that for as long as the service keeps crashing. The count starts again once
+  the service has stayed up for an hour after a retry. The first cool-down is the start limit's own
+  ten minutes, so a retry never lands in the window that just filled.
+- **Anything else is left for you.** A configuration the service refused (`Configuration error:`,
+  exit 78) is never restarted, so it never reaches the limit and fails differently; starting it
+  again would read the same file and refuse again. A stop you asked for is yours, even one that
+  timed out and left the unit `failed`. A unit you have disabled is left down too.
+
+**If you change `RestartSec` in a drop-in, keep it at a second or more.** `ms-recover` tells a
+crash loop the start limit stopped from a stop or a refusal by how long systemd waited between the
+service's process exiting and the unit failing: `RestartSec` for the one, under two milliseconds
+for the others, on every distribution this supports. Below a second it cannot tell them apart, so
+it leaves the service down and says why in the journal, and `ms-setup` warns about it when it
+installs.
+
+Each decision is one line in the journal, with the time of the next start and how to cancel it:
+
+```
+journalctl -u 'ms-recover*'
+systemctl list-timers 'ms-recover-*'
+```
+
+**To keep a crashing service down while you work on it**, disable it, or cancel the pending
+start. When it is fixed, `reset-failed` and start it, and enable it again if you disabled it:
+
+```
+sudo systemctl stop ms-recover-ms-probe-retry.timer    # this retry only
+sudo systemctl disable ms-probe                        # no more until you enable it
+```
+
+**Until `M-18`, a service that keeps crashing re-alarms at each retry.** Each retry is a new loop
+of up to five starts, and a probe that connects for a few seconds each round can be seen Up
+between two outages, which is an alarm or two a loop. A probe that never stops crashing therefore
+raises 4–11 alarms on its first day, over ten loops, and up to 6 on each day after, over six
+(`probe-restart-scenario.test.ts`, over every phase), where the start limit alone raised one or
+two in total. That breaks *one outage, one alarm*, and it is accepted for now because the
+alternative is worse: a remote probe that stays down until somebody travels to it. Each pair at
+least says something true, that it came back and died again. `M-18`'s flap suppression is what
+makes it one.
+
+**Why not `RestartSteps=`.** systemd 254 can back off by itself, but Debian 12 and RHEL 9 ship
+252, and it backs off only while the start limit is not hit, which would mean giving up the limit
+and the alarm bound it buys.
 
 ### What a stop does
 

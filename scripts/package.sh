@@ -210,6 +210,12 @@ chmod +x "${stage}/deploy/setup.sh" "${stage}/deploy/place-release.sh"
 # install.sh then copied whatever `docs` sat beside the directory it was unpacked in.
 rm -rf "${stage}/docs"
 cp -R "${repo_root}/docs" "${stage}/docs"
+# What starts a service again after the start limit stopped it for crashing (`H-23`): the unit
+# both services name in OnFailure=, and the script it runs. A probe host needs it as much as a
+# core does, more: nobody is there to start it by hand.
+cp "${repo_root}/deploy/systemd/ms-recover@.service" "${stage}/deploy/systemd/ms-recover@.service"
+cp "${repo_root}/deploy/recover.sh" "${stage}/bin/ms-recover"
+chmod +x "${stage}/bin/ms-recover"
 for svc in "${services[@]}"; do
   cp "${repo_root}/deploy/systemd/ms-${svc}.service" "${stage}/deploy/systemd/ms-${svc}.service"
   cp "${repo_root}/deploy/winsw/ms-${svc}.xml" "${stage}/deploy/winsw/ms-${svc}.xml"

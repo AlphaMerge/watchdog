@@ -17507,7 +17507,7 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       migration 059's enum, rebuilt under a hypertable, survives a dump and a restore; and
       smoke-install passed.
 
-- [ ] **H-23 — a probe that crash-loops is left failed for good** · S–M · H-21, P-215, P-222 ·
+- [x] **H-23 — a probe that crash-loops is left failed for good** · S–M · H-21, P-215, P-222 ·
       Found by `P-216b`: six OOM kills in ten minutes hit `StartLimitBurst=5` within
       `StartLimitIntervalSec=600`, and `ms-probe` stayed `failed` with nothing to bring it back.
       For a remote probe that is an outage until someone visits the site. `P-222`'s reasoning
@@ -17521,6 +17521,115 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       exited 78 does not, on the systemd the supported distros ship. A smoke test asserts both:
       a unit killed repeatedly comes back, and an exit-78 unit stays down. The design goes to
       WatchDog before it is built.
+
+      **Done.** Both units name `ms-recover@.service` in `OnFailure=`. When a unit enters `failed`,
+      `/opt/ms/bin/ms-recover` (`deploy/recover.sh`) starts it again **only if the start limit
+      stopped it**:
+      - **How it tells: not by `Result=`, which the design used and smoke-install proved wrong.**
+        A crash loop that runs into the limit keeps the crash's own result (`signal`), and
+        `start-limit-hit` appears only when a start somebody asked for is refused. The unit tests
+        had stubbed `systemctl show` with the value the design expected, so they passed, and the
+        first two smoke runs failed.
+      - **What marks the loop instead.** systemd was restarting the unit, and the restart it
+        scheduled never ran: the unit failed `RestartSec` after its process exited. Measured,
+        none inferred: ms-probe on Debian 12 (systemd 252), and a unit with its restart settings
+        on Rocky 9 (252-el9) and Ubuntu 24.04 (255).
+        - A crash loop failed 5.02, 5.15 and 5.07 s after its process exited, with
+          `Result=signal` and `NRestarts=5` on all three.
+        - A configuration refused with exit 78 failed within 0.3 ms of its exit.
+        - An operator's `systemctl stop` that timed out failed within 1.5 ms.
+      - **The rule.** Exit 78 is asked first, and is always left for a person, as `P-222`
+        decided. Then it acts on `start-limit-hit`, or on a unit with `NRestarts` > 0 that failed
+        at least half its own `RestartSec` after its process exited. That wait is read raw from
+        systemd over `busctl`, so an operator's drop-in counts. Both timestamps are the monotonic
+        pair, since NTP stepping the clock at boot is exactly when this runs.
+      - **`RestartSec` below a second.** At that, a refused restart cannot be told from a stop,
+        so the unit is left alone and the journal says exactly why. `ms-setup` warns about such a
+        drop-in when it installs.
+      - **Where the numbers live.** They are in the script's header, and the tests' fixtures are
+        the records themselves, named for their distribution and systemd.
+      - **What it does.** It schedules one start after a cool-down: 10 minutes, doubling on each
+        retry that crashes again, to a cap of 4 hours. The count starts again once the service
+        has stayed up for an hour after a retry. The first cool-down equals
+        `StartLimitIntervalSec`, so a retry never lands in the window that just filled.
+      - **What it leaves alone.** A stop the operator asked for, even one that timed out and left
+        the unit `failed`. A unit the operator disabled. When the retry is due, it checks again,
+        and does nothing to a unit somebody has since started, reconfigured, stopped or disabled.
+      - **How it schedules.** Through `systemd-run --collect --on-active`. A static `.timer`
+        would have a fixed delay, and with the default `RemainAfterElapse=yes` an elapsed timer
+        ignores the next start, so the second retry would silently never happen.
+      - **Not `RestartSteps=`.** It needs systemd 254, and Debian 12 and RHEL 9 ship 252, which
+        warn about it on every reload. It also backs off only while the start limit is not hit,
+        so it would cost `P-215`'s limit and its alarm bound.
+      - **The core gets the same treatment.** A failed core is silent, since it is what raises
+        alarms.
+      - **Shipping.** The template and the script ship in both tarballs and both packages, and
+        `ms-setup` places the template.
+
+      **Alarms: accepted as an interim, not as the design.** Each retry is a new loop of up to
+      five starts, and each loop is an alarm or two (`P-215`). The pure suite of
+      `probe-restart-scenario.test.ts` now plays the retries against the sweep at every phase.
+      A probe that never stops crashing raises 4–11 alarms on its first day, over ten loops, and
+      up to 6 on each later day, over six. The start limit alone raised 1–2 in total. That breaks
+      *one outage, one alarm*. The test asserts it as today's bound, labelled as interim until
+      `M-18`, whose done-when now includes it. The same suite shows what it buys: a loop whose
+      cause goes away is back at the next retry, where the limit alone left it `failed` for good.
+      `administration.md` says so plainly, in **When a service keeps crashing**.
+
+      **Tests.**
+      - `deploy-scripts.test.ts` runs the script against stub `systemctl`, `busctl` and
+        `systemd-run`, answering with the measured records, in fifteen cases:
+        - the first retry: ten minutes, one timer, and it replaces any timer left before it;
+        - a crash loop retried, and a refusal and a stop left alone, on each distribution;
+        - a refused start retried;
+        - exit 78 left alone, even after a start the limit refused;
+        - a stop after earlier crashes, and a unit systemd was not restarting, left alone;
+        - a longer `RestartSec` from a drop-in, which still counts as a loop, and a two-second
+          stop under it, which does not;
+        - `RestartSec` below a second left alone, saying why;
+        - the wall clock stepped an hour either way, with no change to the verdict;
+        - an unreadable record left alone;
+        - disabled;
+        - the doubling to the cap;
+        - the reset after an hour;
+        - the due retry clearing the limit before it starts;
+        - the due retry leaving a unit that is active, reconfigured, stopped or disabled;
+        - unit names other than ms-core and ms-probe refused.
+      - Static checks cover both units' `OnFailure=`, the template's `ExecStart`, `package.sh`,
+        `setup.sh` and the rpm's `%files`. `ms-setup`'s own test covers its warning.
+      - smoke-install, on real systemd with a 15 s cool-down in a drop-in: ms-probe is killed
+        until the start limit stops it and must come back after the cool-down, and a probe given a
+        configuration it refuses must still be down with nothing scheduled after twice the
+        cool-down. **It passed on the release built from this change.** The start limit stopped
+        the probe after six kills, with `Result=signal`, and it started again 16 s later. The
+        refused configuration was still down 35 s later, with nothing scheduled. The first two
+        runs failed on the first half, and that is how the classifier was found wrong. The loop
+        now waits for `failed` rather than for a result.
+      - smoke-packages, because `package.sh` stages `bin/ms-recover` and the rpm lists the
+        template. Passed: the deb on Debian and the rpm on Rocky each install, upgrade and
+        remove cleanly, and both carry `/opt/ms/bin/ms-recover` and
+        `/usr/lib/systemd/system/ms-recover@.service`.
+
+      **Mutations caught: 21 of 21.** Each mutant was applied alone and run against the suite.
+      - **The first set, 11 mutants against the first design.** Nine were caught first time. The
+        two that were not were a due retry without `reset-failed` and a retry that never stops
+        the old timer. Both exposed ordering asserts that compared `indexOf` positions: a line
+        that never ran is at -1, which counts as "before" anything. Both asserts now require the
+        line to be there first.
+      - **The set rerun against the revised classifier, plus ten new mutants.** Each new one
+        takes out a part of the rule:
+        - exit 78 asked first;
+        - the `NRestarts` guard;
+        - the gap;
+        - the unreadable-record guards, twice;
+        - `RestartSec` read from the unit, and not assumed to be five seconds;
+        - the sub-second refusal;
+        - half of `RestartSec`, and not a fixed second;
+        - the monotonic timestamps, and not the wall-clock pair;
+        - `ms-setup`'s warning.
+
+        A mutant setting a millisecond threshold was left out, because every measured case
+        agrees with it and with a second: pinning it would have meant inventing a record.
 
 ---
 

@@ -98,8 +98,41 @@ case "$1" in
   restart)
     [ "\${FAIL_RESTART:-}" = "$svc" ] && exit 1
     exit 0 ;;
+  # \`show UNIT -p Prop --value\` answers from SHOW_ms_probe_Result and the like.
+  show)
+    var="SHOW_\${svc//-/_}_$4"
+    echo "\${!var:-}"
+    exit 0 ;;
+  is-enabled)
+    var="ENABLED_\${svc//-/_}"
+    state="\${!var:-enabled}"
+    echo "$state"
+    [ "$state" = enabled ]
+    exit ;;
+  # Failed when is-active would say so; the unit is the last argument, after any --quiet.
+  is-failed)
+    unit="\${*: -1}"
+    var="STATE_\${unit%.service}"
+    var="\${var//-/_}"
+    [ "\${!var:-inactive}" = failed ]
+    exit ;;
 esac
 exit 0
+`,
+  'systemd-run': `
+echo "systemd-run $*" >> "$STUB_LOG"
+exit 0
+`,
+  // \`get-property org.freedesktop.systemd1 PATH IFACE PROP\` answers from BUS_ms_probe_RestartUSec
+  // and the like: the shipped five seconds unless told otherwise, and unreadable when set empty.
+  busctl: `
+unit="\${3##*/}"
+unit="\${unit//_2d/_}"
+unit="\${unit%_2eservice}"
+var="BUS_\${unit}_$5"
+value="\${!var-5000000}"
+[ -n "$value" ] || exit 1
+echo "t $value"
 `,
   // Root for `-u`, and no `postgres` account, so nothing reaches for runuser.
   id: `
@@ -600,6 +633,392 @@ describe('placing a release', { skip: linux ? false : 'Linux only' }, () => {
   });
 });
 
+describe(
+  'ms-recover: a service the start limit stopped comes back (`H-23`)',
+  {
+    skip: linux ? false : 'Linux only',
+  },
+  () => {
+    /**
+     * What systemd recorded, read with `systemctl show`, after each way a unit with the shipped
+     * restart settings can fail (`H-23`): `ms-probe` itself on Debian 12, and a unit with its
+     * restart settings on Rocky 9 and Ubuntu 24.04. **On all three, a crash loop that runs into the
+     * limit keeps the crash's own result**, never `start-limit-hit`. What marks it is the wait:
+     * RestartSec (5 s) between the process exiting and the unit failing, where a refused
+     * configuration or a stop fails the unit within two milliseconds.
+     */
+    const measured = {
+      /** systemd 252.39-1~deb12u2. */
+      debian12: {
+        /** ms-probe killed six times, the sixth restart refused by the limit. */
+        crashLoop: {
+          Result: 'signal',
+          ExecMainCode: '2',
+          ExecMainStatus: '9',
+          NRestarts: '5',
+          ExecMainExitTimestampMonotonic: '63741842021',
+          StateChangeTimestampMonotonic: '63746861027',
+        },
+        /** Started by hand six times in ten minutes, stopping cleanly each time. */
+        manualStartRefused: {
+          Result: 'start-limit-hit',
+          ExecMainCode: '1',
+          ExecMainStatus: '0',
+          NRestarts: '0',
+          ExecMainExitTimestampMonotonic: '63807000194',
+          StateChangeTimestampMonotonic: '63807075689',
+        },
+        /** A configuration it refused: exit 78, never restarted. */
+        configRefused: {
+          Result: 'exit-code',
+          ExecMainCode: '1',
+          ExecMainStatus: '78',
+          NRestarts: '0',
+          ExecMainExitTimestampMonotonic: '63766603985',
+          StateChangeTimestampMonotonic: '63766604144',
+        },
+        /** `systemctl stop` of a probe that ignored its stop signal, killed at TimeoutStopSec. */
+        stopTimedOut: {
+          Result: 'timeout',
+          ExecMainCode: '2',
+          ExecMainStatus: '9',
+          NRestarts: '0',
+          ExecMainExitTimestampMonotonic: '63781143054',
+          StateChangeTimestampMonotonic: '63781143224',
+        },
+      },
+      /** systemd 252-67.el9_8.6.rocky.0.1. */
+      rocky9: {
+        crashLoop: {
+          Result: 'signal',
+          ExecMainCode: '2',
+          ExecMainStatus: '9',
+          NRestarts: '5',
+          ExecMainExitTimestamp: 'Tue 2026-09-29 01:14:03 UTC',
+          ExecMainExitTimestampMonotonic: '64290960361',
+          StateChangeTimestamp: 'Tue 2026-09-29 01:14:08 UTC',
+          StateChangeTimestampMonotonic: '64296114805',
+        },
+        configRefused: {
+          Result: 'exit-code',
+          ExecMainCode: '1',
+          ExecMainStatus: '78',
+          NRestarts: '0',
+          ExecMainExitTimestamp: 'Tue 2026-09-29 01:14:10 UTC',
+          ExecMainExitTimestampMonotonic: '64298008085',
+          StateChangeTimestamp: 'Tue 2026-09-29 01:14:10 UTC',
+          StateChangeTimestampMonotonic: '64298008369',
+        },
+        stopTimedOut: {
+          Result: 'timeout',
+          ExecMainCode: '2',
+          ExecMainStatus: '9',
+          NRestarts: '0',
+          ExecMainExitTimestamp: 'Tue 2026-09-29 01:14:15 UTC',
+          ExecMainExitTimestampMonotonic: '64303598388',
+          StateChangeTimestamp: 'Tue 2026-09-29 01:14:15 UTC',
+          StateChangeTimestampMonotonic: '64303598578',
+        },
+      },
+      /** systemd 255.4-1ubuntu8.17. */
+      ubuntu2404: {
+        crashLoop: {
+          Result: 'signal',
+          ExecMainCode: '2',
+          ExecMainStatus: '9',
+          NRestarts: '5',
+          ExecMainExitTimestamp: 'Tue 2026-09-29 01:14:46 UTC',
+          ExecMainExitTimestampMonotonic: '64334031542',
+          StateChangeTimestamp: 'Tue 2026-09-29 01:14:51 UTC',
+          StateChangeTimestampMonotonic: '64339098017',
+        },
+        configRefused: {
+          Result: 'exit-code',
+          ExecMainCode: '1',
+          ExecMainStatus: '78',
+          NRestarts: '0',
+          ExecMainExitTimestamp: 'Tue 2026-09-29 01:14:52 UTC',
+          ExecMainExitTimestampMonotonic: '64340541791',
+          StateChangeTimestamp: 'Tue 2026-09-29 01:14:52 UTC',
+          StateChangeTimestampMonotonic: '64340541910',
+        },
+        stopTimedOut: {
+          Result: 'timeout',
+          ExecMainCode: '2',
+          ExecMainStatus: '9',
+          NRestarts: '0',
+          ExecMainExitTimestamp: 'Tue 2026-09-29 01:14:58 UTC',
+          ExecMainExitTimestampMonotonic: '64346095283',
+          StateChangeTimestamp: 'Tue 2026-09-29 01:14:58 UTC',
+          StateChangeTimestampMonotonic: '64346096756',
+        },
+      },
+    } satisfies Record<string, Record<string, Record<string, string>>>;
+    const distros = Object.entries(measured);
+
+    /** The stub's `systemctl show` answers for ms-probe. */
+    function shows(properties: Record<string, string>): NodeJS.ProcessEnv {
+      return Object.fromEntries(
+        Object.entries(properties).map(([name, value]) => [`SHOW_ms_probe_${name}`, value]),
+      );
+    }
+
+    /** A crash loop's record under a RestartSec of `restartUsec`, failed `gapUsec` after exit. */
+    function loopAfter(restartUsec: number, gapUsec: number): NodeJS.ProcessEnv {
+      const exited = 70_000_000_000;
+      return {
+        ...shows({
+          ...measured.debian12.crashLoop,
+          ExecMainExitTimestampMonotonic: String(exited),
+          StateChangeTimestampMonotonic: String(exited + gapUsec),
+        }),
+        BUS_ms_probe_RestartUSec: String(restartUsec),
+      };
+    }
+
+    /** A host where ms-probe has just failed, and what systemd says about it. */
+    function failedProbe(env: NodeJS.ProcessEnv = {}): {
+      box: Sandbox;
+      recover: (argv: readonly string[], extra?: NodeJS.ProcessEnv) => SpawnSyncReturns<string>;
+      state: string;
+    } {
+      const box = sandbox();
+      const stateDir = join(box.dir, 'run-ms-recover');
+      const base: NodeJS.ProcessEnv = {
+        STATE_ms_probe: 'failed',
+        ...shows(measured.debian12.crashLoop),
+        MS_RECOVER_STATE_DIR: stateDir,
+        MS_RECOVER_NOW: '100000',
+        MS_RECOVER_SELF: '/opt/ms/bin/ms-recover',
+        ...env,
+      };
+      return {
+        box,
+        recover: (argv, extra = {}) =>
+          box.run([script('recover.sh'), ...argv], { ...base, ...extra }),
+        state: join(stateDir, 'ms-probe'),
+      };
+    }
+
+    /** The cool-down the last `systemd-run` in the log was given, in seconds. */
+    function scheduled(log: string): number | undefined {
+      const runs = [...log.matchAll(/^systemd-run .*--on-active=(\d+) /gm)];
+      const last = runs.at(-1);
+      return last === undefined ? undefined : Number(last[1]);
+    }
+
+    /** Asserts ms-recover left ms-probe alone, saying `why`. */
+    function leftAlone(env: NodeJS.ProcessEnv, why: RegExp): void {
+      const { box, recover, state } = failedProbe(env);
+      const result = recover(['ms-probe']);
+      assert.equal(result.status, 0, result.stderr);
+      assert.doesNotMatch(box.logged(), /systemd-run/, JSON.stringify(env));
+      assert.match(result.stdout, why, JSON.stringify(env));
+      assert.equal(existsSync(state), false);
+    }
+
+    it('schedules one retry of a crash loop the start limit stopped, after ten minutes', () => {
+      const { box, recover, state } = failedProbe();
+      const result = recover(['ms-probe']);
+      assert.equal(result.status, 0, result.stderr);
+
+      const log = box.logged();
+      assert.equal(scheduled(log), 600);
+      assert.match(log, /--unit=ms-recover-ms-probe-retry /);
+      assert.match(log, /--collect /);
+      assert.match(log, / \/opt\/ms\/bin\/ms-recover --now ms-probe$/m);
+      // A retry left from an earlier failure is replaced, never doubled up.
+      const stop = log.indexOf('systemctl stop ms-recover-ms-probe-retry.timer');
+      assert.ok(stop >= 0 && stop < log.indexOf('systemd-run'), log);
+      assert.match(result.stdout, /starting it again in 10 min, at \d\d:\d\d \(attempt 1\)/);
+      assert.match(result.stdout, /systemctl disable ms-probe\.service/);
+      assert.equal(readFileSync(state, 'utf8').trim(), '1');
+    });
+
+    it('tells a crash loop from a refusal and a stop on each distro measured', () => {
+      for (const [distro, records] of distros) {
+        const { box, recover } = failedProbe(shows(records.crashLoop));
+        assert.equal(recover(['ms-probe']).status, 0);
+        assert.equal(scheduled(box.logged()), 600, `${distro}: the crash loop`);
+        leftAlone(shows(records.configRefused), /refused its configuration \(exit 78\)/);
+        leftAlone(shows(records.stopTimedOut), /not a crash loop, so it is left alone/);
+      }
+    });
+
+    it('schedules a retry of a start the limit refused, too', () => {
+      const { box, recover } = failedProbe(shows(measured.debian12.manualStartRefused));
+      assert.equal(recover(['ms-probe']).status, 0);
+      assert.equal(scheduled(box.logged()), 600);
+    });
+
+    it('leaves a unit that refused its configuration alone, even after a refused start', () => {
+      // RestartPreventExitStatus=78, so it is never restarted and a person has to fix the file
+      // (`P-222`). Asked first, so what came after the refusal changes nothing.
+      leftAlone(
+        shows({ ...measured.debian12.crashLoop, ExecMainCode: '1', ExecMainStatus: '78' }),
+        /refused its configuration \(exit 78\): not a crash loop/,
+      );
+    });
+
+    it('leaves a stop, or a unit systemd was not restarting, alone', () => {
+      for (const record of [
+        // The operator's stop is theirs, even after earlier crashes.
+        { ...measured.debian12.stopTimedOut, NRestarts: '3' },
+        // Failed long after it exited, but systemd was not restarting it.
+        { ...measured.debian12.crashLoop, NRestarts: '0' },
+      ]) {
+        leftAlone(shows(record), /not a crash loop, so it is left alone/);
+      }
+    });
+
+    it('reads the wait from the unit’s own RestartSec, never assuming five seconds', () => {
+      // An operator's drop-in with a longer RestartSec: its loops still wait that long.
+      const { box, recover } = failedProbe(loopAfter(30_000_000, 30_051_000));
+      assert.equal(recover(['ms-probe']).status, 0);
+      assert.equal(scheduled(box.logged()), 600);
+      // Under it, two seconds between exit and failure is not a refused restart. A stop that took
+      // that long to kill what the process left behind, after crashes the day before.
+      leftAlone(loopAfter(30_000_000, 2_000_000), /not a crash loop, so it is left alone/);
+    });
+
+    it('says why it cannot tell under a RestartSec below a second, and leaves it', () => {
+      leftAlone(
+        loopAfter(500_000, 500_000),
+        /RestartSec is below 1 s: a refused restart cannot be told/,
+      );
+      leftAlone(loopAfter(0, 0), /RestartSec is below 1 s/);
+    });
+
+    it('goes by the monotonic clock, whatever NTP did to the wall clock between', () => {
+      // Stepped back an hour between the exit and the failure: the wall clock says the unit
+      // failed before its process exited. Still the loop.
+      const stepped = {
+        ...measured.ubuntu2404.crashLoop,
+        StateChangeTimestamp: 'Tue 2026-09-29 00:14:51 UTC',
+      };
+      const { box, recover } = failedProbe(shows(stepped));
+      assert.equal(recover(['ms-probe']).status, 0);
+      assert.equal(scheduled(box.logged()), 600);
+      // Stepped forward an hour: the wall clock says the stop waited an hour. Still the stop.
+      leftAlone(
+        shows({
+          ...measured.ubuntu2404.stopTimedOut,
+          StateChangeTimestamp: 'Tue 2026-09-29 02:14:58 UTC',
+        }),
+        /not a crash loop, so it is left alone/,
+      );
+    });
+
+    it('leaves a unit whose record it cannot read alone', () => {
+      for (const env of [
+        shows({ ...measured.debian12.crashLoop, ExecMainExitTimestampMonotonic: '' }),
+        shows({ ...measured.debian12.crashLoop, NRestarts: 'n/a' }),
+        { BUS_ms_probe_RestartUSec: '' },
+      ]) {
+        leftAlone(env, /record of it cannot be read, so it is left alone/);
+      }
+    });
+
+    it('leaves a unit the operator disabled down', () => {
+      const { box, recover } = failedProbe({ ENABLED_ms_probe: 'disabled' });
+      const result = recover(['ms-probe']);
+      assert.equal(result.status, 0, result.stderr);
+      assert.doesNotMatch(box.logged(), /systemd-run/);
+      assert.match(result.stdout, /it is disabled, so it is left down/);
+    });
+
+    it('doubles the cool-down on each retry that crashes again, to four hours', () => {
+      const { box, recover } = failedProbe();
+      const delays: (number | undefined)[] = [];
+      for (let failure = 0; failure < 7; failure += 1) {
+        // A minute after each retry it has crashed five times again: well inside the hour.
+        const now = String(100_000 + failure * 60);
+        assert.equal(recover(['ms-probe'], { MS_RECOVER_NOW: now }).status, 0);
+        delays.push(scheduled(box.logged()));
+        assert.equal(recover(['--now', 'ms-probe'], { MS_RECOVER_NOW: now }).status, 0);
+      }
+      assert.deepEqual(delays, [600, 1_200, 2_400, 4_800, 9_600, 14_400, 14_400]);
+    });
+
+    it('starts from ten minutes again once the service stayed up for an hour', () => {
+      const { box, recover, state } = failedProbe();
+      mkdirSync(join(box.dir, 'run-ms-recover'), { recursive: true });
+      // Four retries in, the last of them at 100,000 s after boot.
+      writeFileSync(state, '4 100000\n');
+      assert.equal(recover(['ms-probe'], { MS_RECOVER_NOW: '103599' }).status, 0);
+      assert.equal(
+        scheduled(box.logged()),
+        9_600,
+        'a minute short of the hour: still the same loop',
+      );
+      assert.equal(recover(['ms-probe'], { MS_RECOVER_NOW: '103600' }).status, 0);
+      assert.equal(scheduled(box.logged()), 600, 'an hour up: a new problem, not the old one');
+    });
+
+    it('when due, clears the start limit and starts the unit, without waiting on it', () => {
+      const { box, recover } = failedProbe();
+      const result = recover(['--now', 'ms-probe']);
+      assert.equal(result.status, 0, result.stderr);
+      const log = box.logged();
+      const reset = log.indexOf('systemctl reset-failed ms-probe.service');
+      const start = log.indexOf('systemctl start --no-block ms-probe.service');
+      // Both, and in that order: a start without the reset is refused by the limit that stopped it.
+      assert.ok(reset >= 0 && start >= 0, log);
+      assert.ok(reset < start, log);
+    });
+
+    it('when due, does nothing to a unit somebody has since started, reconfigured or stopped', () => {
+      for (const env of [
+        { STATE_ms_probe: 'active' },
+        shows(measured.debian12.configRefused),
+        shows(measured.debian12.stopTimedOut),
+        { ENABLED_ms_probe: 'disabled' },
+      ]) {
+        const { box, recover } = failedProbe(env);
+        const result = recover(['--now', 'ms-probe']);
+        assert.equal(result.status, 0, result.stderr);
+        assert.doesNotMatch(box.logged(), /reset-failed|start --no-block/, JSON.stringify(env));
+      }
+    });
+
+    it('acts on ms-core and ms-probe and nothing else, because it runs as root', () => {
+      const { box, recover } = failedProbe();
+      for (const name of ['sshd', 'ms-core; reboot', '../ms-probe', '']) {
+        const result = recover([name]);
+        assert.equal(result.status, 2, name);
+      }
+      assert.doesNotMatch(box.logged(), /systemd-run|reset-failed/);
+    });
+  },
+);
+
+describe('what starts a crashed service again, and who ships it (`H-23`)', () => {
+  const unit = (name: string): string =>
+    readFileSync(join(repoRoot, 'deploy', 'systemd', name), 'utf8');
+
+  it('is named by both services, for their failures', () => {
+    for (const svc of ['ms-core', 'ms-probe']) {
+      assert.match(unit(`${svc}.service`), /^OnFailure=ms-recover@%N\.service$/m, svc);
+      // What keeps exit 78 out of it: never restarted, so it cannot reach the start limit.
+      assert.match(unit(`${svc}.service`), /^RestartPreventExitStatus=78$/m, svc);
+    }
+  });
+
+  it('runs the script the release puts in bin', () => {
+    assert.match(unit('ms-recover@.service'), /^ExecStart=\/opt\/ms\/bin\/ms-recover %i$/m);
+    const pkg = readFileSync(join(repoRoot, 'scripts', 'package.sh'), 'utf8');
+    assert.match(pkg, /deploy\/recover\.sh" "\$\{stage\}\/bin\/ms-recover"/);
+    assert.match(pkg, /deploy\/systemd\/ms-recover@\.service"/);
+  });
+
+  it('is installed by every installer and listed by the rpm', () => {
+    const setup = readFileSync(script('setup.sh'), 'utf8');
+    assert.match(setup, /"\$\{UNIT_DIR\}\/ms-recover@\.service"/);
+    const rpm = readFileSync(join(repoRoot, 'scripts', 'package-rpm.sh'), 'utf8');
+    assert.match(rpm, /^\/usr\/lib\/systemd\/system\/ms-recover@\.service$/m);
+  });
+});
+
 describe('the units an earlier release left in /etc', () => {
   it('are each one setup.sh knows as stock', () => {
     // `scripts/smoke/legacy-units` is what the smoke tests plant as "left by an earlier
@@ -649,6 +1068,11 @@ describe(
           readFileSync(join(repoRoot, 'deploy', 'systemd', `ms-${svc}.service`)),
         );
       }
+      // What both units name in OnFailure= (`H-23`), shipped whichever of them a host runs.
+      writeFileSync(
+        join(prefix, 'deploy', 'systemd', 'ms-recover@.service'),
+        readFileSync(join(repoRoot, 'deploy', 'systemd', 'ms-recover@.service')),
+      );
       if (core !== null) writeFileSync(join(conf, 'core.json'), core);
       return { prefix, conf };
     }
@@ -695,7 +1119,8 @@ describe(
         'the edited unit was touched',
       );
       assert.match(result.stderr, /ms-core\.service was edited, so it was kept/);
-      for (const svc of ['ms-core', 'ms-probe']) {
+      assert.doesNotMatch(result.stderr, /waits less than a second/);
+      for (const svc of ['ms-core', 'ms-probe', 'ms-recover@']) {
         assert.equal(
           sha256(join(box.dir, 'usr-lib-units', `${svc}.service`)),
           sha256(join(repoRoot, 'deploy', 'systemd', `${svc}.service`)),
@@ -711,6 +1136,19 @@ describe(
       assert.ok(at('systemctl daemon-reload') < at('systemctl enable ms-probe.service'));
       assert.ok(at('systemctl enable ms-core.service') < at('systemctl restart ms-core.service'));
       assert.ok(!log.includes('disable ms-core.service'), 'the kept unit was disabled');
+    });
+
+    it('warns of a drop-in that restarts too soon for ms-recover to tell a crash loop (`H-23`)', () => {
+      const box = sandbox();
+      const { prefix, conf } = installation(box, null);
+      const result = setup(box, prefix, conf, ['--components', 'core,probe'], {
+        STATE_ms_core: 'active',
+        STATE_ms_probe: 'active',
+        BUS_ms_probe_RestartUSec: '500000',
+      });
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+      assert.match(result.stderr, /ms-probe\.service waits less than a second before a restart/);
+      assert.doesNotMatch(result.stderr, /ms-core\.service waits less than a second/);
     });
 
     it('on a refusal, has reloaded the units, starts nothing, and says what is running', () => {

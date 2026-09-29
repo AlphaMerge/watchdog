@@ -25,10 +25,15 @@ After=ms-core.service
 # start** (P-222): a listen address not assigned yet is waited for in the process, five minutes a
 # round, and a refused configuration exits 78, which is not restarted. The table is in
 # docs/administration.md, "What a start failure does". After raising the ceiling,
-# `systemctl reset-failed ms-probe` and start it. RestartSteps= would back off
-# instead of stopping, but needs systemd 254; Debian 12 and RHEL 9 ship 252.
+# `systemctl reset-failed ms-probe` and start it.
+# **And a probe the limit stopped is started again** (H-23), because a remote one would otherwise
+# stay down until somebody visited: ms-recover@ tries after 10 minutes, doubling to 4 hours, for
+# as long as it keeps crashing. Exit 78 fails differently and is never retried. RestartSteps=
+# would back off instead, but needs systemd 254; Debian 12 and RHEL 9 ship 252. To keep it down,
+# `systemctl disable ms-probe`.
 StartLimitIntervalSec=600
 StartLimitBurst=5
+OnFailure=ms-recover@%N.service
 
 [Service]
 Type=notify

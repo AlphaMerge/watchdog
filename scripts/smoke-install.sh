@@ -473,6 +473,90 @@ docker exec "${container}" su postgres -c "psql -d monitoring -c \"DELETE FROM s
 docker exec "${container}" systemctl start ms-core
 sleep 2
 
+echo "==> asserting a probe stopped for crashing comes back, and one refused its file does not"
+# `H-23`, on a real systemd. The shipped cool-down is ten minutes; a drop-in shortens it for this
+# box only, the way no operator would, so the test takes seconds.
+cooldown=15
+docker exec "${container}" mkdir -p /etc/systemd/system/ms-recover@.service.d
+docker exec "${container}" bash -c "printf '[Service]\nEnvironment=MS_RECOVER_BASE_SEC=${cooldown}\n' \
+  > /etc/systemd/system/ms-recover@.service.d/smoke.conf"
+docker exec "${container}" systemctl daemon-reload
+for svc in ms-core ms-probe; do
+  named="$(docker exec "${container}" systemctl show "${svc}" -p OnFailure --value)"
+  [ "${named}" = "ms-recover@${svc}.service" ] || {
+    echo "    FAILED — ${svc} names '${named}' in OnFailure=, not ms-recover@${svc}.service" >&2
+    failed=1
+  }
+done
+is_active() { [ "$(docker exec "${container}" systemctl is-active ms-probe 2>/dev/null || true)" = active ]; }
+wait_active() {
+  for _ in $(seq 1 "$1"); do is_active && return 0; sleep 1; done
+  return 1
+}
+# Killed the way the kernel kills it at its ceiling, until the start limit stops it: after a
+# reset, the sixth start inside ten minutes is refused. Only this test's starts are counted.
+# **Watched for `failed`, not for `Result=start-limit-hit`**: on systemd 252 a loop that runs into
+# the limit keeps the crash's own result, `signal` here, and `recover.sh` has the measurements.
+# Checked 7 s after each kill: the refusal comes 5 s after it and the retry 15 s after that.
+state() { docker exec "${container}" systemctl is-active ms-probe 2>/dev/null || true; }
+docker exec "${container}" systemctl reset-failed ms-probe
+kills=0
+trace=''
+for _ in $(seq 1 10); do
+  [ "$(state)" = failed ] && break
+  wait_active 30 || true
+  trace="${trace}      $(date +%T) before kill $((kills + 1)): $(docker exec "${container}" systemctl show ms-probe \
+    -p ActiveState -p SubState -p NRestarts -p Result -p MainPID | tr '\n' ' ')"$'\n'
+  docker exec "${container}" systemctl kill -s KILL ms-probe 2>&1 | sed 's/^/        kill: /' || true
+  kills=$((kills + 1))
+  sleep 7
+done
+result="$(docker exec "${container}" systemctl show ms-probe -p Result --value)"
+if [ "$(state)" != failed ]; then
+  echo "    FAILED — ${kills} kills did not trip the start limit ($(state), result: ${result})" >&2
+  printf '%s' "${trace}" >&2
+  docker exec "${container}" systemctl status ms-probe --no-pager -n 0 >&2 || true
+  docker exec "${container}" journalctl -u ms-probe --no-pager -n 40 -o short-precise >&2 || true
+  failed=1
+else
+  echo "    stopped by the start limit after ${kills} kills (result: ${result})"
+  stopped_at="$(date +%s)"
+  if wait_active $((cooldown * 4)); then
+    echo "    started again $(($(date +%s) - stopped_at)) s later, after a ${cooldown} s cool-down"
+  else
+    echo "    FAILED — still $(docker exec "${container}" systemctl is-active ms-probe 2>/dev/null || true) $((cooldown * 4)) s after the start limit stopped it" >&2
+    docker exec "${container}" journalctl -u 'ms-recover*' --no-pager -n 20 >&2 || true
+    failed=1
+  fi
+fi
+# A configuration it refuses exits 78, which is not restarted and so never reaches the limit.
+# Starting it again would refuse again, so it must stay down: that is a person's to fix.
+docker exec "${container}" cp /etc/ms/probe.json /tmp/probe.json.good
+docker exec "${container}" bash -c 'echo "{\"probe\": {\"spoolBatchMaxRows\": \"lots\"}}" > /etc/ms/probe.json'
+docker exec "${container}" systemctl reset-failed ms-probe
+docker exec "${container}" systemctl restart ms-probe 2>/dev/null || true
+sleep $((cooldown * 2 + 5))
+result="$(docker exec "${container}" systemctl show ms-probe -p Result --value)"
+code="$(docker exec "${container}" systemctl show ms-probe -p ExecMainStatus --value)"
+if is_active; then
+  echo "    FAILED — a probe that refused its configuration was started again" >&2
+  failed=1
+elif [ "${result}" != exit-code ] || [ "${code}" != 78 ]; then
+  echo "    FAILED — a refused configuration ended as result=${result} exit=${code}, not exit-code 78" >&2
+  failed=1
+elif docker exec "${container}" systemctl list-timers --all --no-legend 'ms-recover-*' | grep -q .; then
+  echo "    FAILED — a retry was scheduled for a probe that refused its configuration" >&2
+  failed=1
+else
+  echo "    refused its configuration (exit 78): still down $((cooldown * 2 + 5)) s later, nothing scheduled"
+fi
+docker exec "${container}" cp /tmp/probe.json.good /etc/ms/probe.json
+docker exec "${container}" rm -rf /etc/systemd/system/ms-recover@.service.d
+docker exec "${container}" systemctl daemon-reload
+docker exec "${container}" systemctl reset-failed ms-probe
+docker exec "${container}" systemctl start ms-probe
+wait_active 30 || { echo "    FAILED — ms-probe did not start again on its own configuration" >&2; failed=1; }
+
 echo "==> asserting graceful stop"
 for svc in ms-core ms-probe; do
   docker exec "${container}" systemctl stop "${svc}"

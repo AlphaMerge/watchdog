@@ -20,7 +20,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
-import { shippedUnit, startLimitOf } from './support/units.js';
+import { shippedRecovery, shippedUnit, startLimitOf, type Recovery } from './support/units.js';
 import { everyVoucherHolds } from './support/vouching.js';
 
 const available = await databaseAvailable();
@@ -215,6 +215,175 @@ describe('how many alarms a restart loop can raise, over every phase', () => {
       const { most } = everyPhase({ ...connectedFor(connectedMs), limit: SHIPPED_LIMIT }, HOUR);
       assert.ok(most <= 4, `connected ${String(connectedMs / 1000)} s a round: ${String(most)}`);
     }
+  });
+});
+
+/** Read from `deploy/recover.sh`, so editing its schedule re-runs this arithmetic (`H-23`). */
+const SHIPPED_RECOVERY: Recovery = shippedRecovery();
+
+const DAY = 24 * HOUR;
+
+/** One start: the link is down for the loop's `upFromMs` of it, then up until it ends. */
+interface Round {
+  readonly start: number;
+  readonly lengthMs: number;
+}
+
+/**
+ * The loop under `H-23`: each time the start limit stops the unit, `ms-recover` starts it again
+ * after a cool-down that doubles to its cap, and `reset-failed` clears the limit's count.
+ *
+ * Rounds rather than starts, because between a failure and its retry the link is down, where
+ * `linkUpAt` above would take the next start as the end of the round before it. From `clearsAtMs`
+ * the cause has gone, and the next start stays up.
+ */
+function roundsWithRecovery(
+  loop: RestartLoop,
+  limit: StartLimit,
+  recovery: Recovery,
+  horizonMs: number,
+  clearsAtMs = Number.POSITIVE_INFINITY,
+): { rounds: Round[]; failures: number[] } {
+  const rounds: Round[] = [];
+  const failures: number[] = [];
+  let counted: number[] = [];
+  let at = 0;
+  let round = 0;
+  while (at < horizonMs) {
+    if (counted.filter((start) => start > at - limit.intervalMs).length >= limit.burst) {
+      let delay = recovery.baseMs;
+      for (let retry = 0; retry < failures.length && delay < recovery.capMs; retry += 1) delay *= 2;
+      failures.push(at);
+      at += Math.min(delay, recovery.capMs);
+      counted = [];
+      continue;
+    }
+    counted.push(at);
+    if (at >= clearsAtMs) {
+      rounds.push({ start: at, lengthMs: Number.POSITIVE_INFINITY });
+      break;
+    }
+    const lengthMs = loop.roundsMs[round % loop.roundsMs.length] ?? 1;
+    rounds.push({ start: at, lengthMs });
+    at += lengthMs;
+    round += 1;
+  }
+  return { rounds, failures };
+}
+
+function linkUpInRounds(rounds: readonly Round[], upFromMs: number, ms: number): boolean {
+  if (ms < 0) return true;
+  for (const { start, lengthMs } of rounds) {
+    if (ms >= start && ms < start + lengthMs) return ms - start >= upFromMs;
+  }
+  return false; // Between a failure and its retry, the unit is `failed` and the link is down.
+}
+
+/** The outages the sweep sees in `[fromMs, toMs)`, with the loop and its retries under way. */
+function outagesWithRecovery(
+  loop: RestartLoop,
+  fromMs: number,
+  toMs: number,
+  offsetMs: number,
+): number {
+  const { rounds } = roundsWithRecovery(loop, SHIPPED_LIMIT, SHIPPED_RECOVERY, toMs + HOUR);
+  let outages = 0;
+  let wasUp = linkUpInRounds(rounds, loop.upFromMs, fromMs + offsetMs - SWEEP_MS);
+  for (let ms = fromMs + offsetMs; ms < toMs; ms += SWEEP_MS) {
+    const up = linkUpInRounds(rounds, loop.upFromMs, ms);
+    if (wasUp && !up) outages += 1;
+    wasUp = up;
+  }
+  return outages;
+}
+
+/** Every phase, as `everyPhase` takes them: the loop begun at each round, the sweep at each second. */
+function everyPhaseWithRecovery(
+  loop: RestartLoop,
+  fromMs: number,
+  toMs: number,
+): { least: number; most: number } {
+  const counts: number[] = [];
+  for (let first = 0; first < loop.roundsMs.length; first += 1) {
+    const rotated = {
+      ...loop,
+      roundsMs: [...loop.roundsMs.slice(first), ...loop.roundsMs.slice(0, first)],
+    };
+    for (let offset = 0; offset < SWEEP_MS; offset += 1_000) {
+      counts.push(outagesWithRecovery(rotated, fromMs, toMs, offset));
+    }
+  }
+  return { least: Math.min(...counts), most: Math.max(...counts) };
+}
+
+/** How many loops of up to `burst` starts begin in `[fromMs, toMs)`: the first, and each retry. */
+function loopsBetween(loop: RestartLoop, fromMs: number, toMs: number): number {
+  const { failures } = roundsWithRecovery(loop, SHIPPED_LIMIT, SHIPPED_RECOVERY, toMs + HOUR);
+  const starts = [0, ...failures.map((failedAt, retry) => failedAt + cooldownMs(retry))];
+  return starts.filter((start) => start >= fromMs && start < toMs).length;
+}
+
+function cooldownMs(retry: number): number {
+  let delay = SHIPPED_RECOVERY.baseMs;
+  for (let n = 0; n < retry && delay < SHIPPED_RECOVERY.capMs; n += 1) delay *= 2;
+  return Math.min(delay, SHIPPED_RECOVERY.capMs);
+}
+
+/**
+ * `H-23`: the start limit stops a crash loop, and `ms-recover` starts it again after a cool-down.
+ *
+ * **What it buys.** A probe whose cause goes away comes back by itself. Before `H-23` it stayed
+ * `failed` until somebody reset it, which for a remote probe means a visit.
+ *
+ * **What it costs, for now.** Each retry is a new loop of up to five starts, and `P-215`'s
+ * arithmetic above gives each loop one or two alarms. So a probe that never stops crashing
+ * re-alarms at every retry: the bounds below are asserted as **today's**, and they break
+ * `CLAUDE.md`'s *one outage, one alarm*. **Interim, until `M-18`**, whose flap suppression is to
+ * make each of these outages one alarm, and whose done-when extends this scenario to say so.
+ */
+describe('a crash loop that `ms-recover` retries (`H-23`)', () => {
+  it('comes back by itself once the cause has gone, where the start limit alone never did', () => {
+    const loop = { ...MEASURED, limit: SHIPPED_LIMIT };
+    const clearsAtMs = 30 * 60_000;
+    const { rounds } = roundsWithRecovery(loop, SHIPPED_LIMIT, SHIPPED_RECOVERY, DAY, clearsAtMs);
+    const back = rounds.find((round) => round.lengthMs === Number.POSITIVE_INFINITY);
+    assert.ok(back !== undefined, 'never came back');
+    // At the first retry after the cause went, and no later.
+    assert.ok(back.start >= clearsAtMs);
+    assert.ok(
+      rounds.every((round) => round.start < clearsAtMs || round === back),
+      'a retry after the cause had gone that did not stay up',
+    );
+    assert.ok(linkUpInRounds(rounds, loop.upFromMs, DAY), 'and it is still up a day later');
+    // Without it: the same loop is `failed` from its sixth start for as long as anyone looks.
+    const starts = startsOf(loop, DAY);
+    assert.equal(starts.length, SHIPPED_LIMIT.burst);
+    assert.equal(linkUpAt(loop, starts, DAY), false);
+  });
+
+  it('re-alarms at each retry of a loop that never ends: today’s bound, interim until M-18', () => {
+    const loop = { ...MEASURED, limit: SHIPPED_LIMIT };
+    // The first day: the first loop and every retry the doubling cool-down fits into it.
+    const dayOneLoops = loopsBetween(loop, 0, DAY);
+    const dayOne = everyPhaseWithRecovery(loop, 0, DAY);
+    // Any later day, at the cap.
+    const laterLoops = loopsBetween(loop, DAY, 2 * DAY);
+    const later = everyPhaseWithRecovery(loop, DAY, 2 * DAY);
+
+    process.stdout.write(
+      `\n    a crash loop that never ends, retried by ms-recover (the measured loop, every phase):\n` +
+        `      first day  ${String(dayOneLoops)} loops, ${String(dayOne.least)}–${String(dayOne.most)} alarms\n` +
+        `      a later day ${String(laterLoops)} loops, ${String(later.least)}–${String(later.most)} alarms\n`,
+    );
+
+    // The schedule, pinned: 10, 20, 40, 80, 160 minutes and then every 4 hours.
+    assert.equal(dayOneLoops, 10);
+    assert.equal(laterLoops, 6);
+    // One or two a loop, as P-215 measured each loop: never more.
+    assert.ok(dayOne.most <= 2 * dayOneLoops, `day one: ${notifications(dayOne.most)}`);
+    assert.ok(later.most <= 2 * laterLoops, `a later day: ${notifications(later.most)}`);
+    // And not one outage, one alarm: pinned so that nobody reads this as fixed before M-18 is.
+    assert.ok(dayOne.least > 1, `day one at least ${notifications(dayOne.least)}`);
   });
 });
 

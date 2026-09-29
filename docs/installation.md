@@ -288,7 +288,9 @@ Migrations run on startup and are reversible. A build started against a database
 
 ### The units are the release's
 
-The systemd units live in `/usr/lib/systemd/system`, and every upgrade replaces them. **Do not
+The systemd units live in `/usr/lib/systemd/system`, and every upgrade replaces them: `ms-core`,
+`ms-probe`, and `ms-recover@`, which starts either of them again after it stopped for crashing
+([When a service keeps crashing](administration.md#when-a-service-keeps-crashing)). **Do not
 edit them.** Put every change — the database password as an encrypted credential, a different
 memory ceiling — in a drop-in, which no upgrade touches:
 
@@ -334,7 +336,7 @@ From a tarball install:
 
 ```bash
 sudo systemctl disable --now ms-core ms-probe
-sudo rm -rf /opt/ms /usr/lib/systemd/system/ms-{core,probe}.service
+sudo rm -rf /opt/ms /usr/lib/systemd/system/ms-{core,probe}.service /usr/lib/systemd/system/ms-recover@.service
 sudo systemctl daemon-reload
 ```
 

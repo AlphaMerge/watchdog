@@ -31,6 +31,12 @@ sudo systemctl reset-failed ms-core
 sudo systemctl start ms-core
 ```
 
+**A core that stopped for crashing, rather than for a refusal, is started again by itself**, after a
+cool-down of 10 minutes that doubles to 4 hours (`H-23`); `journalctl -u 'ms-recover*'` says when.
+If you are working on it and do not want it starting under you, `sudo systemctl disable ms-core`
+first. [When a service keeps crashing](administration.md#when-a-service-keeps-crashing) has the
+rest.
+
 **"the database has N migration(s) this build does not know"**, or with `autoMigrate` on **"the
 database schema is newer than this build"** — the database was migrated by a newer `ms-core`, and
 the message names the newest migration it has. Install the matching release. Do not migrate backwards; the refusal is what

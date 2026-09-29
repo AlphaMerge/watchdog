@@ -60,3 +60,25 @@ export function startLimitOf(unit: UnitFile): {
   }
   return { intervalMs: spanMs(interval), burst: Number(burst), restartMs: spanMs(restart) };
 }
+
+/** When `ms-recover` starts a unit the start limit stopped again (`H-23`). */
+export interface Recovery {
+  /** The first cool-down, which doubles on each retry that crashes again. */
+  readonly baseMs: number;
+  readonly capMs: number;
+}
+
+/**
+ * Read from `deploy/recover.sh`'s own defaults, so editing the script re-runs the arithmetic built
+ * on it, as editing a unit re-runs the start limit's.
+ */
+export function shippedRecovery(): Recovery {
+  const repoRoot = join(import.meta.dirname, '..', '..', '..', '..', '..');
+  const text = readFileSync(join(repoRoot, 'deploy', 'recover.sh'), 'utf8');
+  const seconds = (name: string): number => {
+    const match = new RegExp(`^\\w+="\\$\\{${name}:-(\\d+)\\}"$`, 'm').exec(text);
+    if (match?.[1] === undefined) throw new Error(`recover.sh sets no default for ${name}`);
+    return Number(match[1]) * 1_000;
+  };
+  return { baseMs: seconds('MS_RECOVER_BASE_SEC'), capMs: seconds('MS_RECOVER_CAP_SEC') };
+}
