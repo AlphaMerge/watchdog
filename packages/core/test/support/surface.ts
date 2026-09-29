@@ -114,6 +114,8 @@ export function baseOptions(stamp: BuildStamp, required: boolean): ApiServerOpti
       allowedOrigins: [],
       requireAuthentication: required,
     },
+    // `notifications.publicUrl`, one of the core's names (`A-47`); unset, as on a fresh install.
+    publicUrl: '',
     logger: silent,
     version: stamp.version,
     build: stamp,

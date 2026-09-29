@@ -376,6 +376,23 @@ export interface CoreConfig {
      */
     trustedProxies: string[];
     /**
+     * The names this core answers to, beyond the ones it already knows (`A-47`).
+     *
+     * **A request whose `Host` is a name this core has not been told is refused with 421**,
+     * whether or not authentication is on. That is the defence against DNS rebinding: a page on
+     * `http://evil.example:8080` whose name the attacker re-points at this machine sends
+     * `Host: evil.example:8080`, and without a list of its own names the core cannot tell that
+     * from itself. An address in `Host` always passes, because an address cannot be re-pointed,
+     * and so do `localhost`, the host of `notifications.publicUrl` and the host of every
+     * `allowedOrigins` entry. List here any other name a browser reaches this core by — the
+     * machine's own name, or a proxy that forwards `Host` as the browser sent it.
+     *
+     * Names only: no scheme, no port, no path. A fresh install writes the machine's
+     * `hostname -f`; an upgraded one that is reached by a name nowhere else in this file is
+     * refused until the name is added, and the refusal says so.
+     */
+    allowedHosts: string[];
+    /**
      * Whether the API refuses a request that does not reach the bar its route declares
      * (`A-11`, `R11`).
      *
@@ -827,6 +844,7 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
         'webRoot',
         'allowedOrigins',
         'trustedProxies',
+        'allowedHosts',
         'requireAuthentication',
       ],
       properties: {
@@ -839,6 +857,8 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
         // Not by pattern either: an address, a CIDR range or `loopback`, checked by
         // `trustedProxyProblem` below, which names the entry.
         trustedProxies: { type: 'array', default: [], items: { type: 'string', minLength: 1 } },
+        // Checked by `allowedHostProblem` below, which names the entry.
+        allowedHosts: { type: 'array', default: [], items: { type: 'string', minLength: 1 } },
         requireAuthentication: { type: 'boolean', default: true },
       },
     },
@@ -1156,6 +1176,10 @@ export function ruleProblems<T>(schema: JSONSchemaType<T>, config: T): readonly 
   return rules === undefined ? [] : rules(config);
 }
 
+/** The widest `api.trustedProxies` range accepted, per family (`A-47`). */
+export const PROXY_FLOOR_V4 = 16;
+export const PROXY_FLOOR_V6 = 48;
+
 /**
  * What is wrong with one `api.trustedProxies` entry, or `undefined` when it is usable (`A-36`).
  *
@@ -1178,10 +1202,48 @@ export function trustedProxyProblem(entry: string): string | undefined {
   const family = isIP(address);
   const widest = family === 6 ? 128 : 32;
   const range = bits === undefined || (/^\d{1,3}$/.test(bits) && Number(bits) <= widest);
-  if (family !== 0 && extra === undefined && range) return undefined;
+  if (family === 0 || extra !== undefined || !range) {
+    return (
+      `api.trustedProxies: "${entry}" is not an address, a CIDR range or "loopback" — name the ` +
+      'proxy, as in "127.0.0.1", "10.0.4.7" or "10.0.4.0/28"'
+    );
+  }
+  // **The same ranges written out are refused as the presets are** (`A-47`): `0.0.0.0/0`,
+  // `10.0.0.0/8` and `::/0` are where the browsers are, just as `uniquelocal` is.
+  const floor = family === 6 ? PROXY_FLOOR_V6 : PROXY_FLOOR_V4;
+  if (bits !== undefined && Number(bits) < floor) {
+    return (
+      `api.trustedProxies: "${entry}" is wider than /${String(floor)}, the widest range this ` +
+      `accepts for IPv${String(family)} — a range that wide is where the browsers are too, so ` +
+      "list the proxy's own address or a narrower range"
+    );
+  }
+  return undefined;
+}
+
+/** Dot-separated labels of letters, digits and inner hyphens, each at most 63 long. */
+const HOST_NAME =
+  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+
+/**
+ * What is wrong with one `api.allowedHosts` entry, or `undefined` when it is usable (`A-47`).
+ *
+ * A name as a browser's `Host` would carry it without the port: letters, digits, hyphens and
+ * dots. An address is refused here because it needs no listing — every address passes — and a
+ * URL or a `host:port` because neither is ever what `Host` is compared with.
+ */
+export function allowedHostProblem(entry: string): string | undefined {
+  const name = entry.toLowerCase().replace(/\.$/, '');
+  if (isIP(name.replace(/^\[(.*)\]$/, '$1')) !== 0) {
+    return (
+      `api.allowedHosts: "${entry}" is an address, and every address is answered already — ` +
+      'this list is for names'
+    );
+  }
+  if (name.length <= 253 && HOST_NAME.test(name)) return undefined;
   return (
-    `api.trustedProxies: "${entry}" is not an address, a CIDR range or "loopback" — name the ` +
-    'proxy, as in "127.0.0.1", "10.0.4.7" or "10.0.4.0/28"'
+    `api.allowedHosts: "${entry}" is not a host name — give the name alone, as in ` +
+    '"monitoring.example.com", with no scheme, port or path'
   );
 }
 
@@ -1189,6 +1251,10 @@ RULES.set(coreConfigSchema, (config: CoreConfig): readonly string[] => {
   const problems: string[] = [];
   for (const entry of config.api.trustedProxies) {
     const problem = trustedProxyProblem(entry);
+    if (problem !== undefined) problems.push(problem);
+  }
+  for (const entry of config.api.allowedHosts) {
+    const problem = allowedHostProblem(entry);
     if (problem !== undefined) problems.push(problem);
   }
   const { idleTimeoutMinutes, absoluteTimeoutHours } = config.sessions;

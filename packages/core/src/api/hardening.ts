@@ -1,5 +1,7 @@
+import { isIP } from 'node:net';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { trustedProxyProblem, type Logger } from '@ms/shared';
+import { addressKey } from '../auth/address-key.js';
 import { AuthError } from '../auth/errors.js';
 
 /**
@@ -83,6 +85,136 @@ export function registerSecurityHeaders(
     if (request.protocol === 'https') void reply.header('strict-transport-security', HSTS);
     done(null, payload);
   });
+}
+
+/**
+ * The names this core answers to (`A-47`).
+ *
+ * **DNS rebinding is why.** A page on `http://evil.example:8080` whose name the attacker then
+ * re-points at this machine is, to the browser, same-origin with every request it sends here: it
+ * reads every answer, opens the stream, and — with authentication off — writes. Its `Origin` and
+ * its `Host` are both `evil.example:8080`, so comparing the two, which is what the write guard and
+ * the stream's check do, proves nothing. Only a list of the core's own names can tell it apart.
+ *
+ * **An address always passes**: nobody can re-point one, so a page that reached the core by
+ * address is on the core's own origin. That also covers a core bound to `0.0.0.0` and reached by
+ * whichever of the machine's addresses. Names pass when they are `localhost` or under it, the host
+ * of `notifications.publicUrl`, the host of an `api.allowedOrigins` entry, or listed in
+ * `api.allowedHosts`. Ports are not compared: a proxy forwards `Host` without the core's port.
+ *
+ * A request with no `Host` at all passes. Every browser sends one, so its absence is a client that
+ * a rebound page cannot be.
+ */
+export class HostAllowList {
+  readonly #names: ReadonlySet<string>;
+  #refused = 0;
+
+  constructor(options: {
+    allowedHosts?: readonly string[];
+    allowedOrigins?: readonly string[];
+    publicUrl?: string;
+  }) {
+    const names = new Set<string>();
+    for (const entry of options.allowedHosts ?? []) names.add(normaliseName(entry));
+    for (const url of [...(options.allowedOrigins ?? []), options.publicUrl ?? '']) {
+      const host = hostOfUrl(url);
+      if (host !== null) names.add(host);
+    }
+    this.#names = names;
+  }
+
+  /** Whether a request with this `Host` header is one this core answers. */
+  allows(header: string | undefined): boolean {
+    if (header === undefined || header === '') return true;
+    const name = nameInHost(header);
+    // Strictly: `127.0.0.1.evil.example` is a name under somebody else's domain, not an address.
+    if (isIP(name) !== 0) return true;
+    if (name === 'localhost' || name.endsWith('.localhost')) return true;
+    return this.#names.has(name);
+  }
+
+  /** Counts a refusal, for Core Health. */
+  refuse(): void {
+    this.#refused += 1;
+  }
+
+  /** Every `Host` refused since this process started. */
+  stats(): { refused: number } {
+    return { refused: this.#refused };
+  }
+}
+
+/**
+ * Refuses, first and whether or not authentication is on, a request whose `Host` is not one of
+ * this core's names (`A-47`).
+ *
+ * **421 Misdirected Request**, which says exactly this: the request reached a server that is not
+ * the one it names. The body names the setting and the `Host` seen, because the one person who
+ * meets this legitimately is an operator reaching the core by a name nobody listed, and the
+ * refusal is the fix. Each name is logged once, so a scanner cannot fill the log.
+ */
+export function registerHostCheck(
+  app: FastifyInstance,
+  options: { hosts: HostAllowList; logger: Logger },
+): void {
+  const logged = new Set<string>();
+  app.addHook('onRequest', (request: FastifyRequest, _reply: FastifyReply, done) => {
+    const header = request.headers.host;
+    if (options.hosts.allows(header)) {
+      done();
+      return;
+    }
+    options.hosts.refuse();
+    const seen = (header ?? '').slice(0, 255);
+    const name = nameInHost(seen);
+    if (logged.size < 100 && !logged.has(name)) {
+      logged.add(name);
+      options.logger.warn(
+        { host: seen, method: request.method, path: request.url },
+        'refusing a request for a name this core does not answer to; if it is one of this ' +
+          "core's names, add it to api.allowedHosts",
+      );
+    }
+    done(
+      new AuthError(
+        'HOST_NOT_ALLOWED',
+        `this core does not answer to "${name}": if that is one of its names, add it to ` +
+          'api.allowedHosts',
+        { host: seen, setting: 'api.allowedHosts' },
+      ),
+    );
+  });
+}
+
+/** The name in a `Host` header: lower case, without a port, brackets or a trailing dot. */
+function nameInHost(header: string): string {
+  const text = header.trim().toLowerCase();
+  let name: string;
+  if (text.startsWith('[')) {
+    // An address only if nothing but a port follows the bracket: `[::1].evil.example` is not one.
+    const end = text.indexOf(']');
+    const rest = end === -1 ? '' : text.slice(end + 1);
+    name = end !== -1 && /^(?::\d*)?$/.test(rest) ? text.slice(1, end) : text;
+  } else {
+    const colon = text.lastIndexOf(':');
+    name = colon === -1 ? text : text.slice(0, colon);
+  }
+  return name.replace(/\.$/, '');
+}
+
+function normaliseName(name: string): string {
+  return name.trim().toLowerCase().replace(/\.$/, '');
+}
+
+/** The host of a configured URL, or null for an empty or unparseable one. */
+function hostOfUrl(url: string): string | null {
+  if (url === '') return null;
+  try {
+    const host = new URL(url).hostname;
+    return host === '' ? null : normaliseName(host.replace(/^\[(.*)\]$/, '$1'));
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -365,7 +497,10 @@ export function registerRateLimit(app: FastifyInstance, options: RateLimitOption
 
   app.addHook('onRequest', (request: FastifyRequest, reply: FastifyReply, done) => {
     const principal = request.principal;
-    const key = principal === undefined ? `ip:${request.ip}` : `user:${String(principal.userId)}`;
+    // An IPv6 client is its /64 (`A-47`): one connection hands out a whole prefix, and keying on
+    // the exact address gave it that many buckets.
+    const key =
+      principal === undefined ? `ip:${addressKey(request.ip)}` : `user:${String(principal.userId)}`;
     const at = now();
 
     let bucket = buckets.get(key);

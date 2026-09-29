@@ -1072,6 +1072,7 @@ async function serve(): Promise<void> {
 
   const api = new ApiServer({
     config: config.api,
+    publicUrl: config.notifications.publicUrl,
     logger,
     version: VERSION,
     build: BUILD,
@@ -1337,6 +1338,7 @@ async function serve(): Promise<void> {
       },
       queries: () => probeQueries.stats(),
       ingestionDiscards: () => ingestion.stats(),
+      hosts: () => api.hostStats(),
       // Gaps in the v1 profile, which has no reporting to count (`H-12`).
       ...(v2.reporting === undefined ? {} : { reports: v2.reporting.stats }),
     },

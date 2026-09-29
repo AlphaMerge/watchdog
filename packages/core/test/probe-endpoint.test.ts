@@ -23,6 +23,7 @@ import {
   type ProbeQuerySink,
   type ResultReceiver,
 } from '../src/transport/probe-endpoint.js';
+import { HostAllowList } from '../src/api/hardening.js';
 import { fingerprint, type ProbeAssignments } from '../src/probes/config.js';
 
 const silentLogger = pino({ level: 'silent' });
@@ -92,7 +93,8 @@ function generateCerts(dir: string): void {
     ]);
   };
 
-  issue('core', 'ms-core', 'DNS:localhost,IP:127.0.0.1');
+  // `ms-core.unlisted.example`: a name the core's API has not been told it answers to (`A-47`).
+  issue('core', 'ms-core', 'DNS:localhost,DNS:ms-core.unlisted.example,IP:127.0.0.1');
   issue('probe', 'ms-probe', null);
   // A second CA, to prove an untrusted client certificate is refused.
   run([
@@ -187,7 +189,7 @@ class TestProbe {
     dir: string,
     port: number,
     certName = 'probe',
-    options: { wedged?: boolean } = {},
+    options: { wedged?: boolean; servername?: string } = {},
   ): Promise<TestProbe> {
     // A wedged peer is one that never answers our FIN. `allowHalfOpen` is a `net.Socket` option
     // rather than a TLS one, so the socket is built first and handed to `connect` — which is also
@@ -201,7 +203,7 @@ class TestProbe {
       cert: await readIfPresent(join(dir, `${certName}.crt`)),
       key: await readIfPresent(join(dir, `${certName}.key`)),
       ca: await readIfPresent(join(dir, 'ca.crt')),
-      servername: 'localhost',
+      servername: options.servername ?? 'localhost',
       rejectUnauthorized: true,
     });
 
@@ -315,6 +317,30 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
       assert.equal(endpoint.connectedProbes.length, 1);
       assert.equal(endpoint.connectedProbes[0]?.displayName, 'Test probe');
 
+      probe.close();
+    } finally {
+      await endpoint.stop();
+    }
+  });
+
+  it('welcomes a probe that dialled the core by a name its API does not answer to (A-47)', async () => {
+    // The Host allow-list is the API listener's. A probe speaks TLS here, with no `Host` to
+    // check, and a probe configured with the core's name must go on connecting whatever the API's
+    // `allowedHosts` says — the name below is one it would refuse.
+    const name = 'ms-core.unlisted.example';
+    assert.equal(new HostAllowList({}).allows(`${name}:8080`), false);
+    const endpoint = new ProbeEndpoint({
+      config: endpointConfig(dir),
+      logger: silentLogger,
+      coreVersion: '9.9.9',
+    });
+    const address = await endpoint.start();
+    try {
+      const probe = await TestProbe.connect(dir, address.port, 'probe', { servername: name });
+      probe.send(hello());
+      const welcome = await probe.waitFor((m) => m.type === 'welcome');
+      assert.equal(welcome.type, 'welcome');
+      assert.equal(endpoint.connectedProbes.length, 1);
       probe.close();
     } finally {
       await endpoint.stop();

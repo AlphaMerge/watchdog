@@ -124,7 +124,10 @@ the installation:
 
 The idle timeout may be 5 minutes to 30 days, and the absolute one 1 hour to 90 days.
 `config check` refuses an idle timeout longer than the absolute one, since the absolute one would
-then always arrive first. A logout, a password change (which ends the account's other sessions),
+then always arrive first. **Lowering either applies to the sessions already open**: after a
+restart, a session idle for longer than the new idle timeout is refused at its next request and
+its open pages are signed out within seconds, even though it was last used under the longer one
+(`A-47`). A logout, a password change (which ends the account's other sessions),
 a revoked token and a disabled account each take effect on the next request. The browser keeps
 the cookie for as long as the absolute timeout allows. The core decides when the session ends.
 
@@ -176,6 +179,30 @@ requirement — that applies to cookie-authenticated writes, because a cookie is
 attaches on its own. The exemption is for a request a token actually authenticated. HTTP Basic or
 Negotiate credentials that an authenticating proxy forwards are something a browser also attaches
 on its own, so a write carrying them is checked like any other.
+
+### Wrong passwords
+
+Nothing locks an account: anybody who knew an operator's login could otherwise lock them out
+during the outage they are investigating. Instead:
+
+- **An address that fails 20 times in 15 minutes is refused**, whatever it is trying, for 15
+  minutes after its last failure. An IPv6 address counts as its **/64**, because one connection
+  is handed a whole /64 and a client rotating through it is still one client. The API's rate limit
+  counts the same way.
+- **Each failure against a login closes it for a moment**: half a second per recent failure, up to
+  five seconds. An attempt that arrives sooner is answered 429 with `Retry-After`, without its
+  password being checked. A person who waits for the answer never meets this: a failure's answer
+  arrives only once the delay has passed.
+- **One attempt per login is checked at a time.** Another arriving meanwhile gets 429 with
+  `Retry-After: 1`, so a burst sent at once is one guess.
+- **An address that signed in as a login in the last 30 days skips that login's delay** (`A-47`).
+  Somebody failing as an operator every few seconds keeps the delay closed for everybody else,
+  which is a lockout by another route. The operator signs in from where they always do, while that
+  goes on. Somebody guessing from that same address, such as an office network, is still held to
+  its 20 failures. An operator signing in from somewhere new waits like anybody.
+
+`AUTH_THROTTLED` answers say which of these it was. A login made before the upgrade to `A-47`
+does not make its address known; the first one after it does.
 
 ### Two-factor authentication
 
@@ -453,6 +480,7 @@ alarm.
 | `evictedChunks` | **Any value above zero is an error.** Data was dropped early to stay on disk |
 | `logDropped` | **Any value above zero is a warning.** Log lines the core could not write since the last reading, because the journal stopped taking them and 8 MiB were already waiting. With a local probe, its lines too: one journal, one alarm. See [a journal that is not keeping up](#a-journal-that-is-not-keeping-up). `logBacklog` beside it is what is waiting, in MB, with no limit |
 | `notifyOldest` | Notifications queued and undelivered. 15 minutes warns; an hour means nobody is being told anything |
+| `hostsRefused` | Requests refused since the last reading because their `Host` is not one of the core's names. No limit, since scanners send these all day. A step up after a DNS or proxy change is somebody reaching the core by a name nobody listed. See [the names the core answers to](#the-names-the-core-answers-to) |
 | `alarmOverdue` | The alarm sweep is not running. Everything downstream of it is silently stale |
 | `probesDown` | Probes not connected. Their sensors are not being checked |
 
@@ -1094,6 +1122,40 @@ Covered in [`docs/installation.md`](installation.md#upgrading). The two things w
 
 ---
 
+## The names the core answers to
+
+The API answers a request only if its `Host` is one of the core's names (`A-47`). Anything else
+gets **421 Misdirected Request**, before any other check, whether or not authentication is on.
+The answer names the `Host` it saw and the setting to change:
+
+```json
+{ "api": { "allowedHosts": ["monitoring.example.com", "ms01"] } }
+```
+
+- **Every address is answered**, IPv4 and IPv6, and so are `localhost` and anything under
+  `.localhost`. An SSH tunnel, a browser on the core's own host and `curl` by address need
+  nothing.
+- **A name is answered if it is in `api.allowedHosts`**, or is the host of
+  `notifications.publicUrl` or of an entry in `api.allowedOrigins`. Case and a trailing dot do not
+  matter, and neither does the port. An entry is a name alone: no scheme, port, path or wildcard.
+  An address in the list is refused at startup, since it is answered already.
+- **A fresh install lists the machine's own name.** `ms-setup` writes `hostname -f` into
+  `api.allowedHosts` when it installs a core, unless that is an address or `localhost`.
+- **The probe endpoint is not affected.** Probes speak TLS to their own port, whatever name they
+  were given for the core.
+
+**Why.** With authentication off, a web page whose name the attacker re-points at the core's
+address is, to the browser, on the same origin as the core. Its `Origin` and `Host` agree, so the
+origin checks pass it, and it could read the tree, stream it live and change configuration. That
+is DNS rebinding. The one thing such a page cannot choose is a `Host` that is one of the core's
+names.
+
+**Upgrading.** An installation reached in a browser by a name that is not in any of the three
+places gets 421 after this upgrade, on the UI and the API alike. **Before upgrading, add every name
+people use to reach the core to `api.allowedHosts`.** The core also warns once at startup when
+neither `api.allowedHosts` nor `notifications.publicUrl` is set, and logs each refused name once.
+Core Health counts refusals in `hostsRefused`.
+
 ## Reverse proxies
 
 The API listens on loopback by default. Behind a proxy, two settings tell the core about it:
@@ -1123,7 +1185,9 @@ While the list is empty, the core logs a warning, once, the first time a request
 
 **List the proxy, not the network the browsers are on.** A browser inside a trusted range can write
 its own `X-Forwarded-For` and be counted as whatever address it names, which defeats the throttle.
-For that reason `uniquelocal` and `linklocal` are refused. The proxy has to send both headers,
+For that reason `uniquelocal` and `linklocal` are refused, and so is any range wider than **/16**
+for IPv4 or **/48** for IPv6 — `0.0.0.0/0`, `10.0.0.0/8` and `::/0` are those names written out
+(`A-47`). The refusal names the floor. The proxy has to send both headers,
 and forward the live stream's WebSocket. In nginx:
 
 ```nginx

@@ -293,6 +293,21 @@ The same comparison refuses the live stream's handshake, so the same setting fix
 data loads but never updates on its own. The core logs `refusing a cross-origin stream` with the
 two values it compared.
 
+## Every page answers 421
+
+The browser reached the core by a name the core has not been told is one of its own (`A-47`). The
+answer names the `Host` it saw. Add that name, without scheme or port, to `api.allowedHosts`, run
+`config check` and restart the core:
+
+```json
+{ "api": { "allowedHosts": ["monitoring.example.com"] } }
+```
+
+The host of `notifications.publicUrl` and of each `api.allowedOrigins` entry counts too, and every
+address and `localhost` is answered already, so an SSH tunnel or a browser pointed at the address
+still works while you fix it. The core logs `refusing a request for a name this core does not
+answer to` once per name, and Core Health's `hostsRefused` counts them. Probes are unaffected.
+
 ## Everybody's login is refused after one person's wrong passwords
 
 Or the session cookie is not `Secure` behind an HTTPS proxy. Both mean the core sees the proxy

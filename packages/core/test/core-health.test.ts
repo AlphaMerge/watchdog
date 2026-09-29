@@ -621,6 +621,29 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
     });
   });
 
+  describe('the requests refused for a Host the core does not answer to (A-47)', () => {
+    it('counts them per reading, from the first, and clears', async () => {
+      const hosts = { refused: 7 };
+      const service = new CoreHealthService({
+        vouching: everyVoucherHolds,
+        db,
+        logger: silent,
+        sources: { ...sources(), hosts: () => ({ ...hosts }) },
+        ingest: () => Promise.resolve(),
+        process: fakeProcess({ cpuUs: [], elapsedNs: [], uptime: 1_000 }),
+      });
+      // The total started with this process, as the meter did: all of it is new.
+      assert.equal((await service.read())['hostsRefused'], 7);
+      hosts.refused = 10;
+      assert.equal((await service.read())['hostsRefused'], 3);
+      assert.equal((await service.read())['hostsRefused'], 0, 'a count, not a total');
+    });
+
+    it('gaps where there is no API to refuse them', async () => {
+      assert.equal((await build().read())['hostsRefused'], null);
+    });
+  });
+
   describe('rollup lag', () => {
     it('is a gap when no tier has ever run, not an infinite lag', async () => {
       // A core that started a minute ago has not fallen behind. Reporting the age of the epoch

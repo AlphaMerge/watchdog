@@ -1011,6 +1011,7 @@ cost: **light** · evaluated by the core, never by a probe
 | `credentialsToReenter` | Credential sets to re-enter | sets | default limits: warn above 0 |
 | `logDropped` | Log lines dropped | lines | default limits: warn above 0 |
 | `logBacklog` | Log waiting to be written | MB | — |
+| `hostsRefused` | Requests refused for an unknown Host | requests | — |
 
 Takes no parameters.
 

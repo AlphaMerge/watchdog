@@ -16529,7 +16529,7 @@ because each is a decision rather than a defect:
       - the unchecked writes are checked, with the outcome listing them.
       Tests in `object-visibility.test.ts`. Mutants as usual.
 
-- [ ] **A-47 — Host, throttle, proxy range and idle timeout: four gaps in `A-36` and `A-38`** · M
+- [x] **A-47 — Host, throttle, proxy range and idle timeout: four gaps in `A-36` and `A-38`** · M
       · A-36, A-38 · Found in review round four (`findings/2026-09-29-review-round-4.md`,
       `A-47`).
       - **Medium, DNS rebinding** (`hardening.ts:215`). The Origin check compares Origin with the
@@ -16553,6 +16553,72 @@ because each is a decision rather than a defect:
       - a proxy range wider than a floor is refused, with the floor stated;
       - `live()` applies the current idle timeout.
       Tests per the findings doc. Mutants as usual.
+
+      **Outcome (2026-09-29).** Migration 062.
+      - **Host.** `registerHostCheck` is the API listener's first `onRequest` hook, whether
+        authentication is on or off. It answers every IP literal (a strict `isIP` on the name, so
+        `127.0.0.1.evil.example` is a name), `localhost` and `*.localhost`, the host of
+        `notifications.publicUrl`, the host of each `api.allowedOrigins` entry, and the new
+        `api.allowedHosts`. Names are compared lower-cased without a trailing dot, and ports are
+        not compared. Anything else gets **421** `HOST_NOT_ALLOWED`, whose body names the Host seen
+        and `api.allowedHosts`. Each name is logged once, up to a hundred. The probe endpoint is
+        TLS on its own port and is not touched: a test connects a probe by a name the API
+        refuses. With neither `allowedHosts` nor `publicUrl` set, startup warns once, naming both.
+        `ms-setup` writes `hostname -f` into `allowedHosts` on a fresh core install, unless it is
+        an address or `localhost`. Core Health's new `hostsRefused` is the count since the last
+        reading. An entry that is an address, or not a plain name, is refused at startup.
+        **Deviation, agreed:** the Origin check (`refusalFor`) still compares host and port with
+        `Host`, or an `allowedOrigins` entry. It does not take the whole answered set as
+        origins, which would let any other port on an answered name write. Tested with auth off:
+        `http://localhost:3000` against `localhost:8080`, and `http://10.9.9.9:3000` against
+        `10.9.9.9:8080`, are both refused.
+      - **Throttle.** `admit()` replaces check-then-sleep. It reads the counts and takes the
+        login's one verification together. An attempt inside the login's delay since its last
+        failure is refused 429 with `Retry-After` before argon2. A second attempt while one is
+        being verified gets `Retry-After: 1`. So does an attempt whose counts were read before a
+        failure it did not see, since a failure landing while an admission was deciding turns it
+        away. The slot goes back once a failure is recorded and before its answer is waited out.
+        The answer still sleeps exactly as long as the gate it closes, so a person who waits never
+        meets the gate.
+        **Targeted lockout.** An attacker failing as an operator every few seconds holds that
+        login's gate shut. An `address_key` that signed in successfully as that login in the last
+        30 days skips the delay, though not the one-in-flight rule. The attacker is not at the
+        victim's desk, so the victim signs in from where they always do. What that costs: an
+        attacker at such an address, such as a shared NAT, guesses without the delay but is held to
+        that address's 20 failures in 15 minutes, which is the ceiling everybody had before and is
+        far below the unlimited guessing the gate replaces. The victim signing in from somewhere
+        new waits like anybody. Successes are kept for those 30 days. IPv6 counts as its /64
+        (`addressKey`; `::ffff:a.b.c.d` is IPv4) in the throttle and the rate limit alike. Rows
+        from before 062 keep a NULL key and are not counted.
+      - **Proxy floor.** `trustedProxies` refuses any range wider than /16 for IPv4 or /48 for
+        IPv6, naming the floor. `0.0.0.0/0`, `::/0` and `10.0.0.0/8` are refused;
+        `10.0.4.0/28`, `127.0.0.1` and `loopback` are accepted.
+      - **Idle.** `live()` has `last_seen_at + idle > now`, bound in `resolve` and `lapsed`, so a
+        lowered idle timeout reaches sessions extended under the old one.
+      Docs: `administration.md` (the names the core answers to, with an upgrade note; wrong
+      passwords; the proxy floor; lowered timeouts; `hostsRefused`), `installation.md`,
+      `troubleshooting.md` (every page answers 421), the regenerated API and sensor references.
+      Tests: `host-check` (new), `address-key` (new), `hardening`, `accounts`, `auth-api`,
+      `core-health`, `migrator` (062 up and down), `probe-endpoint`, `deploy-scripts`,
+      shared `config`.
+      - **Found on the way.** Fastify types `request.ip` as a string, but it is `undefined` for a
+        socket that has already closed, and under `injectWS`. The rate limiter used to build the
+        key `ip:undefined` from it. `addressKey` threw on it and answered 500, so it now treats
+        "no address" as `''`.
+      - **Mutants: 47, 45 killed on the first pass.** Two survived, and each got a test:
+        - Known addresses counting failures as well as successes. The victim test now asks
+          about an address that has only failed as that login.
+        - The route giving the slot back before the failure is recorded. A throttle whose
+          failure recording is held shows the second attempt is turned away unverified.
+
+        Two changes were left out as equivalent: `Math.max(1, …)` on a `Retry-After` that is
+        already at least 1, and dropping the deciding map's cleanup, which changes memory and
+        nothing else.
+      - **Full suite:** core 3,689 tests, 3,688 passing. The failure was `candidate-surface`: its
+        harness must pass `ApiServer` exactly what `main.ts` passes, and now passes `publicUrl`
+        too. Re-run green with `fingerprint-check`, which uses the same harness. Shared 313,
+        simulators 24, sensors 1,029 (10 skipped: the MySQL and SQL Server simulators were not
+        running), probe 379, web 46 files, all passing.
 
 - [ ] **A-48 — a program template's secret arguments follow a change of its visible arguments** ·
       S · A-40 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `A-48`).

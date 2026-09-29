@@ -246,7 +246,31 @@ describe('which proxies are believed (A-36)', () => {
   });
 
   it('takes addresses, ranges and loopback', () => {
-    const entries = ['loopback', '10.0.4.7', '10.0.4.0/28', '::1', 'fd00::/8'];
+    const entries = ['loopback', '10.0.4.7', '10.0.4.0/28', '127.0.0.1', '::1', 'fd00:1:2::/48'];
+    assert.deepEqual(load(entries).config.api.trustedProxies, entries);
+  });
+
+  it('refuses a range as wide as where the browsers are, naming the floor (A-47)', () => {
+    // `uniquelocal` spelt out: every browser on the network could write its own X-Forwarded-For.
+    for (const [entry, floor] of [
+      ['0.0.0.0/0', 16],
+      ['10.0.0.0/8', 16],
+      ['172.16.0.0/15', 16],
+      ['::/0', 48],
+      ['fd00::/8', 48],
+      ['2001:db8::/47', 48],
+    ] as const) {
+      const error = captureError(() => load([entry]));
+      assert.ok(error instanceof ConfigError, entry);
+      assert.ok(
+        error.message.includes(`api.trustedProxies: "${entry}" is wider than /${String(floor)}`),
+        `${entry}: ${error.message}`,
+      );
+    }
+  });
+
+  it('takes a range at the floor exactly', () => {
+    const entries = ['10.1.0.0/16', '2001:db8:1::/48'];
     assert.deepEqual(load(entries).config.api.trustedProxies, entries);
   });
 
@@ -264,6 +288,60 @@ describe('which proxies are believed (A-36)', () => {
     const error = captureError(() => load(['uniquelocal']));
     assert.ok(error instanceof ConfigError);
     assert.match(error.message, /"uniquelocal" names every private address/);
+  });
+});
+
+describe('the names the core answers to (A-47)', () => {
+  const load = (allowedHosts: unknown) =>
+    loadConfig({
+      schema: coreConfigSchema,
+      env: {},
+      argv: ['--config', tempFile('core.json', JSON.stringify({ api: { allowedHosts } }))],
+    });
+
+  it('is none unless it is set', () => {
+    const { config } = loadConfig({ schema: coreConfigSchema, env: {}, argv: [] });
+    assert.deepEqual(config.api.allowedHosts, []);
+  });
+
+  it('takes names, a single label and one with a trailing dot', () => {
+    const entries = ['monitoring.example.com', 'ms01', 'MS.Example.COM.', 'x-1.a-b.example'];
+    assert.deepEqual(load(entries).config.api.allowedHosts, entries);
+  });
+
+  it('refuses an address, which needs no listing, and says so', () => {
+    for (const entry of ['10.0.0.5', '::1', '[::1]']) {
+      const error = captureError(() => load([entry]));
+      assert.ok(error instanceof ConfigError, entry);
+      assert.ok(
+        error.message.includes(`api.allowedHosts: "${entry}" is an address`),
+        `${entry}: ${error.message}`,
+      );
+    }
+  });
+
+  it('refuses what a Host header is never compared with, naming every entry', () => {
+    const bad = [
+      'https://ms.example.com',
+      'ms.example.com:8080',
+      'ms.example.com/ui',
+      '*.example.com',
+      '-ms.example.com',
+      'ms_01.example.com',
+      ' ms.example.com',
+      `${'a'.repeat(64)}.example.com`,
+      // Every label fine, and 255 long: more than a name may be.
+      Array.from({ length: 4 }, () => 'a'.repeat(63)).join('.'),
+    ];
+    const error = captureError(() => load([...bad, 'fine.example.com']));
+    assert.ok(error instanceof ConfigError);
+    for (const entry of bad) {
+      assert.ok(
+        error.message.includes(`api.allowedHosts: "${entry}" is not a host name`),
+        `${entry}: ${error.message}`,
+      );
+    }
+    assert.equal(error.message.includes('fine.example.com'), false, 'and not the one that is fine');
   });
 });
 

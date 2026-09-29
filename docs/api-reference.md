@@ -124,7 +124,7 @@ Configuration history across the whole installation, newest first — the object
 
 Exchange a login and password for a session
 
-Every failure answers 401 with the same code and the same sentence. Distinguishing "no such account" from "wrong password" would let a caller test which logins exist, and a login is half a credential — so which it was goes to the core log instead.
+Every failure answers 401 with the same code and the same sentence. Distinguishing "no such account" from "wrong password" would let a caller test which logins exist, and a login is half a credential — so which it was goes to the core log instead. An attempt turned away before its password is checked answers 429 `AUTH_THROTTLED` with `Retry-After`: its address has failed too often (an IPv6 address counts as its /64), the account has failed and its delay has not passed, or another attempt at the same account is being checked. An address that has signed in as that account in the last 30 days skips the delay (`A-47`).
 
 **Body**
 

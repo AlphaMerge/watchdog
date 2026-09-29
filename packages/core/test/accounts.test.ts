@@ -5,7 +5,7 @@ import { Migrator } from '../src/db/migrator.js';
 import { MIGRATIONS } from '../src/db/migrations/index.js';
 import { AccountService } from '../src/auth/accounts.js';
 import { SessionService } from '../src/auth/sessions.js';
-import { LoginThrottle } from '../src/auth/throttle.js';
+import { LoginThrottle, type LoginThrottleConfig } from '../src/auth/throttle.js';
 import { AccessService } from '../src/auth/access.js';
 import { sessionIdFor } from '../src/auth/passwords.js';
 import type { Database } from '../src/db/pool.js';
@@ -333,6 +333,40 @@ describe('accounts and sessions', { skip: available ? false : 'no database' }, (
       clock = new Date(clock.getTime() + 45_000);
       assert.equal(await capped.resolve(token), null, 'past two minutes from creation');
     });
+
+    it('applies an idle timeout lowered since a session was last used (A-47)', async () => {
+      // The wall-display recipe set it to three days; set back to twelve hours, a tab nobody has
+      // touched since has to lapse at twelve hours, not whenever three days would have run out.
+      const HOUR = 3_600_000;
+      let clock = new Date('2026-09-29T09:00:00.000Z');
+      const options = { db, logger: silentLogger, absoluteTimeoutMs: 30 * 24 * HOUR };
+      const generous = new SessionService({
+        ...options,
+        idleTimeoutMs: 3 * 24 * HOUR,
+        now: () => clock,
+      });
+      const account = await makeAccount();
+      const idle = await generous.start(account, context);
+      const used = await generous.start(account, context);
+      assert.ok(await generous.resolve(idle.token), 'extended under the old timeout');
+      assert.ok(await generous.resolve(used.token));
+
+      const lowered = new SessionService({
+        ...options,
+        idleTimeoutMs: 12 * HOUR,
+        now: () => clock,
+      });
+      const asked = [{ id: sessionIdFor(idle.token), userId: account.id }];
+
+      clock = new Date(clock.getTime() + 11 * HOUR);
+      assert.deepEqual(await lowered.lapsed(asked), new Map(), 'inside twelve hours');
+      assert.ok(await lowered.resolve(used.token), 'and a session in use goes on');
+
+      clock = new Date(clock.getTime() + 2 * HOUR);
+      assert.deepEqual(await lowered.lapsed(asked), new Map([[asked[0]?.id, 'expired']]));
+      assert.equal(await lowered.resolve(idle.token), null, 'thirteen hours idle is past twelve');
+      assert.ok(await lowered.resolve(used.token), 'two hours idle is not');
+    });
   });
 
   describe('login throttling', () => {
@@ -342,17 +376,25 @@ describe('accounts and sessions', { skip: available ? false : 'no database' }, (
       // **Locking is a denial of service.** Anybody who knows an operator's login could lock
       // them out of their own monitoring system by failing to log in as them — during the
       // outage they are trying to investigate.
+      let clock = new Date('2026-09-29T09:00:00.000Z');
       const throttle = new LoginThrottle({
         db,
         logger: silentLogger,
+        now: () => clock,
         sleep: () => Promise.resolve(),
       });
       for (let attempt = 0; attempt < 5; attempt += 1) {
         await throttle.record('ops', addressOf(attempt), false);
       }
+      // Five failures: a gate of 2.5 s from the last, which an attempt inside it meets unverified
+      // (`A-47`), from anywhere.
+      const early = await throttle.check('ops', addressOf(99));
+      assert.deepEqual(early, { refused: true, why: 'login', retryAfterSeconds: 3 });
+
+      clock = new Date(clock.getTime() + 2_500);
       const verdict = await throttle.check('ops', addressOf(99));
       assert.equal(verdict.refused, false, 'the account is never locked by somebody else');
-      assert.ok(verdict.delayMs > 0, 'but every attempt against it is slowed');
+      assert.equal(verdict.delayMs, 3_000, 'but a sixth failure closes it for longer');
     });
 
     it('refuses an address that keeps failing, whatever it is guessing at', async () => {
@@ -380,8 +422,9 @@ describe('accounts and sessions', { skip: available ? false : 'no database' }, (
         sleep: () => Promise.resolve(),
       });
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        await throttle.record('ops', '198.51.100.7', false);
+        await throttle.record(`guess-${String(attempt)}`, '198.51.100.7', false);
       }
+      assert.equal((await throttle.check('ops', '198.51.100.7')).refused, true);
       assert.equal((await throttle.check('ops', '198.51.100.8')).refused, false);
     });
 
@@ -436,6 +479,299 @@ describe('accounts and sessions', { skip: available ? false : 'no database' }, (
         sleep: () => Promise.resolve(),
       });
       assert.equal((await afterRestart.check('ops', '203.0.113.9')).refused, true);
+    });
+
+    describe('the gate, one verification at a time, and the known address (A-47)', () => {
+      let clock: Date;
+      const make = (config: Partial<LoginThrottleConfig> = {}, database: Database = db) =>
+        new LoginThrottle({
+          db: database,
+          logger: silentLogger,
+          config,
+          now: () => clock,
+          sleep: () => Promise.resolve(),
+        });
+
+      beforeEach(() => {
+        clock = new Date('2026-09-29T09:00:00.000Z');
+      });
+
+      /** Where the clock is now plus `ms`. */
+      const advance = (ms: number): void => {
+        clock = new Date(clock.getTime() + ms);
+      };
+
+      it('closes the gate for as long as a failure’s answer is waited out, and no longer', async () => {
+        const slept: number[] = [];
+        const throttle = new LoginThrottle({
+          db,
+          logger: silentLogger,
+          now: () => clock,
+          sleep: (ms) => {
+            slept.push(ms);
+            return Promise.resolve();
+          },
+        });
+        const first = await throttle.admit('ops', '198.51.100.1');
+        assert.ok(first.admitted);
+        await throttle.record('ops', '198.51.100.1', false);
+        first.release();
+        await throttle.waitOut(first);
+        assert.deepEqual(slept, [500]);
+
+        advance(499);
+        assert.deepEqual(await throttle.admit('ops', '198.51.100.2'), {
+          admitted: false,
+          why: 'login',
+          retryAfterSeconds: 1,
+        });
+        advance(1);
+        const second = await throttle.admit('ops', '198.51.100.2');
+        assert.ok(second.admitted, 'a client that waited for its answer finds the gate open');
+        assert.equal(second.delayMs, 1_000);
+        second.release();
+      });
+
+      it('never grows the gate past its ceiling', async () => {
+        const throttle = make();
+        for (let n = 0; n < 40; n += 1) await throttle.record('ops', addressOf(n), false);
+        assert.deepEqual(await throttle.check('ops', addressOf(99)), {
+          refused: true,
+          why: 'login',
+          retryAfterSeconds: 5,
+        });
+        advance(5_000);
+        const verdict = await throttle.check('ops', addressOf(99));
+        assert.deepEqual(verdict, { refused: false, delayMs: 5_000 });
+      });
+
+      it('lets one attempt per login be verified at a time, whatever its spelling', async () => {
+        const throttle = make();
+        const held = await throttle.admit('ops', '198.51.100.1');
+        assert.ok(held.admitted);
+        assert.deepEqual(await throttle.admit('OPS', '203.0.113.1'), {
+          admitted: false,
+          why: 'in-flight',
+          retryAfterSeconds: 1,
+        });
+        const other = await throttle.admit('admin', '198.51.100.1');
+        assert.ok(other.admitted, 'another login is not held up');
+        other.release();
+
+        held.release();
+        const next = await throttle.admit('ops', '203.0.113.1');
+        assert.ok(next.admitted, 'given back');
+        held.release();
+        assert.deepEqual(
+          await throttle.admit('ops', '203.0.113.2'),
+          { admitted: false, why: 'in-flight', retryAfterSeconds: 1 },
+          'and giving it back twice does not give back the one another attempt took since',
+        );
+        next.release();
+      });
+
+      /**
+       * A throttle whose next reading of the counts is held after it returns, so a test can record
+       * an attempt between the counts being read and the slot being taken.
+       */
+      const pausing = (): {
+        throttle: LoginThrottle;
+        pauseNext: () => { counted: Promise<void>; resume: () => void };
+      } => {
+        let paused: { reached: () => void; hold: Promise<void> } | undefined;
+        const database = {
+          query: async (text: string, values?: readonly unknown[]) => {
+            const rows = await db.query(text, values);
+            const pause = paused;
+            if (pause !== undefined && text.includes('AS by_login')) {
+              paused = undefined;
+              pause.reached();
+              await pause.hold;
+            }
+            return rows;
+          },
+        } as unknown as Database;
+        return {
+          throttle: make({}, database),
+          pauseNext: () => {
+            let reached: () => void = () => undefined;
+            let resume: () => void = () => undefined;
+            const counted = new Promise<void>((resolve) => {
+              reached = resolve;
+            });
+            const hold = new Promise<void>((resolve) => {
+              resume = resolve;
+            });
+            paused = { reached, hold };
+            return { counted, resume };
+          },
+        };
+      };
+
+      it('turns away an attempt whose counts were read before a failure it did not see', async () => {
+        // The window between reading the counts and taking the slot: B reads no failures, A fails
+        // and gives the slot back, and B would take it with the gate A just closed in its face.
+        const { throttle, pauseNext } = pausing();
+        const a = await throttle.admit('ops', '198.51.100.1');
+        assert.ok(a.admitted);
+        const { counted, resume } = pauseNext();
+        const b = throttle.admit('ops', '198.51.100.2');
+        await counted;
+        await throttle.record('ops', '198.51.100.1', false);
+        a.release();
+        resume();
+        assert.deepEqual(await b, { admitted: false, why: 'in-flight', retryAfterSeconds: 1 });
+
+        // And the next one reads the failure, so it meets the gate.
+        assert.deepEqual(await throttle.admit('ops', '198.51.100.2'), {
+          admitted: false,
+          why: 'login',
+          retryAfterSeconds: 1,
+        });
+      });
+
+      it('lets an attempt in that was deciding while a success was recorded', async () => {
+        const { throttle, pauseNext } = pausing();
+        const a = await throttle.admit('ops', '198.51.100.1');
+        assert.ok(a.admitted);
+        const { counted, resume } = pauseNext();
+        const b = throttle.admit('ops', '198.51.100.2');
+        await counted;
+        await throttle.record('ops', '198.51.100.1', true);
+        a.release();
+        resume();
+        const admitted = await b;
+        assert.ok(admitted.admitted, 'a success closes no gate');
+        admitted.release();
+      });
+
+      it('lets the address that logged in as a login skip its gate while an attacker fails', async () => {
+        const throttle = make();
+        await throttle.record('ops', '203.0.113.50', true);
+        advance(60_000);
+        // An attacker keeps the gate shut from everywhere else.
+        for (let n = 0; n < 30; n += 1) {
+          await throttle.record('ops', addressOf(n), false);
+          advance(100);
+          const attacker = await throttle.admit('ops', addressOf(n + 100));
+          assert.equal(attacker.admitted, false, `attacker ${String(n)}`);
+          const victim = await throttle.admit('ops', '203.0.113.50');
+          assert.ok(victim.admitted, `the victim, round ${String(n)}`);
+          assert.equal(victim.delayMs, 0, 'and does not wait out a mistyped password either');
+          victim.release();
+        }
+        const elsewhere = await throttle.admit('ops', '203.0.113.51');
+        assert.equal(
+          elsewhere.admitted,
+          false,
+          'from somewhere new, the victim waits like anybody',
+        );
+        const failedFrom = await throttle.admit('ops', addressOf(29));
+        assert.equal(
+          failedFrom.admitted,
+          false,
+          'and an address that has only failed as the login is not one it logged in from',
+        );
+      });
+
+      it('still holds the known address to one verification at a time, and to its failures', async () => {
+        const throttle = make({ maxPerAddress: 3 });
+        await throttle.record('ops', '203.0.113.50', true);
+        const attacker = await throttle.admit('ops', '198.51.100.1');
+        assert.ok(attacker.admitted);
+        assert.deepEqual(await throttle.admit('ops', '203.0.113.50'), {
+          admitted: false,
+          why: 'in-flight',
+          retryAfterSeconds: 1,
+        });
+        attacker.release();
+
+        // Somebody guessing from the known address is held by that address's limit.
+        for (let n = 0; n < 3; n += 1)
+          await throttle.record(`guess-${String(n)}`, '203.0.113.50', false);
+        assert.deepEqual(await throttle.admit('ops', '203.0.113.50'), {
+          admitted: false,
+          why: 'address',
+          retryAfterSeconds: 900,
+        });
+      });
+
+      it('knows an address for thirty days, for that login, from its /64', async () => {
+        const throttle = make();
+        await throttle.record('ops', '2001:db8:5:6::1', true);
+        await throttle.record('ops', addressOf(1), false);
+        const sameSubnet = await throttle.check('ops', '2001:db8:5:6:ffff::9');
+        assert.deepEqual(sameSubnet, { refused: false, delayMs: 0 }, 'the /64 is the address');
+        assert.equal((await throttle.check('admin', '2001:db8:5:6::1')).refused, false);
+        await throttle.record('admin', addressOf(2), false);
+        assert.equal(
+          (await throttle.check('admin', '2001:db8:5:6::1')).refused,
+          true,
+          'known for the login it logged in as, not for another',
+        );
+
+        advance(30 * 24 * 3_600_000 - 1_000);
+        await throttle.record('ops', addressOf(3), false);
+        assert.deepEqual(await throttle.check('ops', '2001:db8:5:6::1'), {
+          refused: false,
+          delayMs: 0,
+        });
+        advance(2_000);
+        await throttle.record('ops', addressOf(4), false);
+        assert.equal(
+          (await throttle.check('ops', '2001:db8:5:6::1')).refused,
+          true,
+          'and not after thirty days',
+        );
+      });
+
+      it('refuses a /64 whose addresses have each failed once', async () => {
+        const throttle = make();
+        for (let n = 1; n <= 20; n += 1) {
+          await throttle.record(`guess-${String(n)}`, `2001:db8:7:8::${n.toString(16)}`, false);
+        }
+        assert.deepEqual(await throttle.check('anything', '2001:db8:7:8:abcd::1'), {
+          refused: true,
+          why: 'address',
+          retryAfterSeconds: 900,
+        });
+        assert.equal((await throttle.check('anything', '2001:db8:7:9::1')).refused, false);
+      });
+
+      it('counts an IPv4-mapped address as the IPv4 address it is', async () => {
+        const throttle = make({ maxPerAddress: 3 });
+        await throttle.record('guess-1', '::ffff:198.51.100.20', false);
+        await throttle.record('guess-2', '198.51.100.20', false);
+        await throttle.record('guess-3', '::ffff:198.51.100.20', false);
+        assert.equal((await throttle.check('x', '198.51.100.20')).refused, true);
+        assert.equal((await throttle.check('x', '::ffff:198.51.100.21')).refused, false);
+      });
+
+      it('records the key beside the address', async () => {
+        const throttle = make();
+        await throttle.record('ops', '2001:db8:5:6::1', false);
+        await throttle.record('ops', '::ffff:192.0.2.1', true);
+        const rows = await db.query<{ remote_address: string; address_key: string }>(
+          'SELECT remote_address, address_key FROM login_attempt ORDER BY id',
+        );
+        assert.deepEqual(
+          rows.map((row) => [row.remote_address, row.address_key]),
+          [
+            ['2001:db8:5:6::1', '2001:db8:5:6::/64'],
+            ['::ffff:192.0.2.1', '192.0.2.1'],
+          ],
+        );
+      });
+
+      it('prunes a success only once it no longer makes its address known', async () => {
+        const throttle = make({ windowMs: 60_000 });
+        await throttle.record('ops', '203.0.113.50', true);
+        await throttle.record('ops', '203.0.113.50', false);
+        advance(10 * 60_000);
+        assert.equal(await throttle.prune(), 1, 'the failure goes');
+        advance(30 * 24 * 3_600_000);
+        assert.equal(await throttle.prune(), 1, 'and the success, thirty days on');
+      });
     });
 
     it('prunes attempts old enough to be irrelevant', async () => {

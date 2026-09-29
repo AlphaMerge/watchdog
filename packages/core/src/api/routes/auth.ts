@@ -4,7 +4,7 @@ import type { Logger } from '@ms/shared';
 import type { AccountService } from '../../auth/accounts.js';
 import { AuthError } from '../../auth/errors.js';
 import type { SessionService } from '../../auth/sessions.js';
-import type { LoginThrottle } from '../../auth/throttle.js';
+import type { Admission, LoginThrottle } from '../../auth/throttle.js';
 import type { TotpService } from '../../auth/totp.js';
 import { SESSION_COOKIE, actorFor, sessionTokenFrom } from '../authentication.js';
 import { PUBLIC, READS, SELF, notAudited } from '../authorization.js';
@@ -23,6 +23,13 @@ export interface AuthRoutesOptions {
   requireAuthentication: boolean;
   logger: Logger;
 }
+
+/** What a throttled login is told, by what throttled it (`A-47`). */
+const THROTTLED: Readonly<Record<Extract<Admission, { admitted: false }>['why'], string>> = {
+  address: 'too many failed logins from this address; try again later',
+  login: 'too many failed logins for this account; try again in a few seconds',
+  'in-flight': 'another login attempt for this account is being checked; try again in a second',
+};
 
 const principalSchema = {
   type: 'object',
@@ -114,7 +121,12 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
         description:
           'Every failure answers 401 with the same code and the same sentence. Distinguishing ' +
           '"no such account" from "wrong password" would let a caller test which logins exist, ' +
-          'and a login is half a credential — so which it was goes to the core log instead.',
+          'and a login is half a credential — so which it was goes to the core log instead. ' +
+          'An attempt turned away before its password is checked answers 429 `AUTH_THROTTLED` ' +
+          'with `Retry-After`: its address has failed too often (an IPv6 address counts as its ' +
+          '/64), the account has failed and its delay has not passed, or another attempt at the ' +
+          'same account is being checked. An address that has signed in as that account in the ' +
+          'last 30 days skips the delay (`A-47`).',
         body: {
           type: 'object',
           additionalProperties: false,
@@ -137,80 +149,95 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
       },
     },
     async (request, reply) => {
-      const { login, password } = request.body;
-      const address = request.ip;
+      const admission = await throttle.admit(request.body.login, request.ip);
+      if (!admission.admitted) {
+        void reply.header('Retry-After', String(admission.retryAfterSeconds));
+        throw new AuthError('AUTH_THROTTLED', THROTTLED[admission.why], {
+          retryAfterSeconds: admission.retryAfterSeconds,
+        });
+      }
+      try {
+        return await loginWith(request, reply, admission);
+      } finally {
+        admission.release();
+      }
+    },
+  );
 
-      const verdict = await throttle.check(login, address);
-      if (verdict.refused) {
-        void reply.header('Retry-After', String(verdict.retryAfterSeconds));
+  /**
+   * The rest of a login, holding its account's one verification (`A-47`). A failure gives it back
+   * once recorded and before its answer is waited out, so the wait holds nobody else up.
+   */
+  const loginWith = async (
+    request: FastifyRequest<{ Body: { login: string; password: string; code?: string } }>,
+    reply: FastifyReply,
+    admission: Extract<Admission, { admitted: true }>,
+  ): Promise<{ userId: number; login: string; role: string; mustChangePassword: boolean }> => {
+    const { login, password } = request.body;
+    const address = request.ip;
+
+    const outcome = await accounts.authenticate(login, password);
+    if (outcome.kind !== 'ok') {
+      await throttle.record(login, address, false);
+      admission.release();
+      // **The delay is spent before answering, not before verifying.** Delaying the check
+      // would leave the same number of verifications running at once and slow nothing down
+      // except the honest user; delaying the *answer* is what costs a guessing run its rate.
+      await throttle.waitOut(admission);
+      logger.warn({ login, remoteAddress: address, reason: outcome.reason }, 'login rejected');
+      throw new AuthError('AUTH_REJECTED', 'that login and password were not accepted');
+    }
+
+    // **The second factor is checked after the password and before the session.** After,
+    // because an account that does not exist must not be told whether it would have needed a
+    // code — that is the same enumerator the password path is careful about. Before the
+    // session, because a session issued and then withheld is a session that exists.
+    if (totp !== undefined && (await totp.isRequired(outcome.account.id))) {
+      if (!(await totp.isEnrolled(outcome.account.id))) {
+        // Required but not enrolled. Refusing outright would lock out everybody the policy was
+        // just switched on for; a client is told to walk them through setup instead.
+        await throttle.record(login, address, true);
+        logger.warn({ login }, 'a group requires MFA and this account has not enrolled');
         throw new AuthError(
-          'AUTH_THROTTLED',
-          'too many failed logins from this address; try again later',
-          { retryAfterSeconds: verdict.retryAfterSeconds },
+          'MFA_REQUIRED',
+          'a group this account belongs to requires multi-factor authentication, and it has ' +
+            'not been set up yet',
+          { enrolled: 'false' },
         );
       }
 
-      const outcome = await accounts.authenticate(login, password);
-      if (outcome.kind !== 'ok') {
+      const code = request.body.code;
+      if (code === undefined || code === '') {
+        throw new AuthError('MFA_REQUIRED', 'this account needs a second factor', {
+          enrolled: 'true',
+        });
+      }
+      if (!(await totp.verify(outcome.account.id, code))) {
+        // Counted as a failed login: a code is guessable in a way a password is not — six
+        // digits is a million tries — so the throttle has to see these too.
         await throttle.record(login, address, false);
-        // **The delay is spent before answering, not before verifying.** Delaying the check
-        // would leave the same number of verifications running at once and slow nothing down
-        // except the honest user; delaying the *answer* is what costs a guessing run its rate.
-        await throttle.waitOut(verdict);
-        logger.warn({ login, remoteAddress: address, reason: outcome.reason }, 'login rejected');
-        throw new AuthError('AUTH_REJECTED', 'that login and password were not accepted');
+        admission.release();
+        await throttle.waitOut(admission);
+        logger.warn({ login, remoteAddress: address }, 'login rejected: second factor');
+        throw new AuthError('MFA_CODE_INVALID', 'that code was not accepted');
       }
+    }
 
-      // **The second factor is checked after the password and before the session.** After,
-      // because an account that does not exist must not be told whether it would have needed a
-      // code — that is the same enumerator the password path is careful about. Before the
-      // session, because a session issued and then withheld is a session that exists.
-      if (totp !== undefined && (await totp.isRequired(outcome.account.id))) {
-        if (!(await totp.isEnrolled(outcome.account.id))) {
-          // Required but not enrolled. Refusing outright would lock out everybody the policy was
-          // just switched on for; a client is told to walk them through setup instead.
-          await throttle.record(login, address, true);
-          logger.warn({ login }, 'a group requires MFA and this account has not enrolled');
-          throw new AuthError(
-            'MFA_REQUIRED',
-            'a group this account belongs to requires multi-factor authentication, and it has ' +
-              'not been set up yet',
-            { enrolled: 'false' },
-          );
-        }
+    await throttle.record(login, address, true);
+    // The cookie lives as long as the session could (`A-38`); the server ends it sooner.
+    const { token, lastsUntil } = await sessions.start(outcome.account, {
+      remoteAddress: address,
+      userAgent: request.headers['user-agent'] ?? '',
+    });
+    setSessionCookie(request, reply, token, lastsUntil);
 
-        const code = request.body.code;
-        if (code === undefined || code === '') {
-          throw new AuthError('MFA_REQUIRED', 'this account needs a second factor', {
-            enrolled: 'true',
-          });
-        }
-        if (!(await totp.verify(outcome.account.id, code))) {
-          // Counted as a failed login: a code is guessable in a way a password is not — six
-          // digits is a million tries — so the throttle has to see these too.
-          await throttle.record(login, address, false);
-          await throttle.waitOut(verdict);
-          logger.warn({ login, remoteAddress: address }, 'login rejected: second factor');
-          throw new AuthError('MFA_CODE_INVALID', 'that code was not accepted');
-        }
-      }
-
-      await throttle.record(login, address, true);
-      // The cookie lives as long as the session could (`A-38`); the server ends it sooner.
-      const { token, lastsUntil } = await sessions.start(outcome.account, {
-        remoteAddress: address,
-        userAgent: request.headers['user-agent'] ?? '',
-      });
-      setSessionCookie(request, reply, token, lastsUntil);
-
-      return {
-        userId: outcome.account.id,
-        login: outcome.account.login,
-        role: outcome.account.role,
-        mustChangePassword: outcome.account.mustChangePassword,
-      };
-    },
-  );
+    return {
+      userId: outcome.account.id,
+      login: outcome.account.login,
+      role: outcome.account.role,
+      mustChangePassword: outcome.account.mustChangePassword,
+    };
+  };
 
   app.post(
     '/auth/logout',

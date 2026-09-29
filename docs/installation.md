@@ -199,6 +199,11 @@ reverse proxy in front of it and set `api.allowedOrigins` to the origin browsers
 (`administration.md` → Reverse proxies). Changing `api.host` to `0.0.0.0` also works and is your
 decision to make deliberately.
 
+**The core answers only to its own names** (`A-47`): every address, `localhost`, and the names in
+`api.allowedHosts`. The installer puts the machine's `hostname -f` there. Any other name a browser
+uses to reach the core, including the proxy's public one, goes in that list too, or it gets 421
+(`administration.md` → The names the core answers to).
+
 ## 5. The local probe
 
 The probe dials **out** to the core, never the other way round, so nothing needs to be opened
@@ -285,6 +290,13 @@ running before.
 
 Migrations run on startup and are reversible. A build started against a database migrated by a
 *newer* build refuses to start; install the matching release rather than migrating backwards.
+
+**From a release before `A-47`**, check two things first. An `api.trustedProxies` range wider
+than /16 for IPv4 or /48 for IPv6 is now refused, so the configuration check above stops there
+until it names the proxy. And a browser that reaches the core by a name gets 421 unless that name
+is in `api.allowedHosts`, or is the host of `notifications.publicUrl` or of an `api.allowedOrigins`
+entry. An upgrade does not add the machine's name, since it never rewrites your configuration.
+List them before upgrading (`administration.md` → The names the core answers to).
 
 ### The units are the release's
 

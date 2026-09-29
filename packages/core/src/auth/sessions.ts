@@ -139,7 +139,7 @@ export class SessionService {
        FROM user_account a
        WHERE s.id = $1
          AND a.id = s.user_id
-         AND ${live('s', 'a', '$2', '$4')}
+         AND ${live('s', 'a', '$2', '$4', '$3')}
        RETURNING s.id, s.user_id::text AS user_id, a.login, a.role, a.must_change_password,
                  a.may_acknowledge, a.disabled`,
       [
@@ -192,12 +192,13 @@ export class SessionService {
        LEFT JOIN user_session s ON s.id = c.id AND s.user_id = c.user_id
        -- COALESCE: an answer Postgres cannot give is not "still signed in".
        WHERE NOT COALESCE(s.id IS NOT NULL AND a.id IS NOT NULL
-                          AND ${live('s', 'a', '$3', '$4')}, false)`,
+                          AND ${live('s', 'a', '$3', '$4', '$5')}, false)`,
       [
         sessions.map((session) => session.id),
         sessions.map((session) => session.userId),
         this.#now(),
         `${String(Math.round(this.#absoluteMs / 1000))} seconds`,
+        `${String(Math.round(this.#idleMs / 1000))} seconds`,
       ],
     );
     return new Map(rows.map((row) => [row.id, row.lapse]));
@@ -265,12 +266,15 @@ export class SessionService {
  * Whether session row `s` of account row `a` still authenticates at `now`: under both timeouts,
  * and the account not disabled. One text, used by `resolve` and `lapsed` alike (`A-34`).
  *
- * The absolute ceiling is checked here as well as being folded into `expires_at` on every use,
- * because a ceiling lowered in configuration applies to sessions that were extended under the old
- * one.
+ * Both timeouts are checked here as well as being folded into `expires_at` on every use, because a
+ * timeout lowered in configuration applies to sessions that were extended under the old one — the
+ * absolute ceiling since `A-34`, the idle timeout since `A-47`. Without the idle term, a tab left
+ * open after the timeout was lowered from three days to twelve hours stayed signed in, and its
+ * stream kept streaming, for up to three days more.
  */
-function live(s: string, a: string, now: string, absolute: string): string {
+function live(s: string, a: string, now: string, absolute: string, idle: string): string {
   return `${s}.expires_at > ${now}
          AND ${s}.created_at + ${absolute}::interval > ${now}
+         AND ${s}.last_seen_at + ${idle}::interval > ${now}
          AND ${a}.disabled = false`;
 }

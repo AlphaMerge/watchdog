@@ -5,9 +5,11 @@ import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastif
 import { pino } from 'pino';
 import type { Logger } from '@ms/shared';
 import {
+  HostAllowList,
   proxyTrust,
   registerCsrfGuard,
   registerForwardedHeaderNotice,
+  registerHostCheck,
   registerRateLimit,
   registerSecurityHeaders,
   registerUpgradeOriginCheck,
@@ -415,8 +417,14 @@ describe('which proxies are believed (A-36)', () => {
   });
 
   it('accepts an address, a range and loopback', () => {
-    const entries = ['127.0.0.1', '10.0.4.7', '10.0.4.0/28', '::1', 'fd00::/8', 'loopback'];
+    const entries = ['127.0.0.1', '10.0.4.7', '10.0.4.0/28', '::1', 'fd00:1:2::/48', 'loopback'];
     assert.deepEqual(proxyTrust(entries), entries);
+  });
+
+  it('refuses a range as wide as where the browsers are, as loading the file does (A-47)', () => {
+    assert.throws(() => proxyTrust(['0.0.0.0/0']), /"0\.0\.0\.0\/0" is wider than \/16/);
+    assert.throws(() => proxyTrust(['::/0']), /"::\/0" is wider than \/48/);
+    assert.throws(() => proxyTrust(['10.0.0.0/8']), /"10\.0\.0\.0\/8" is wider than \/16/);
   });
 
   it('names the setting and the entry it cannot use', () => {
@@ -513,6 +521,200 @@ describe('a proxy that is not believed (A-36)', () => {
   });
 });
 
+describe('the names this core answers to (A-47)', () => {
+  const capture = (): { logger: Logger; warnings: () => string[] } => {
+    const lines: string[] = [];
+    const logger = pino(
+      { level: 'warn' },
+      {
+        write: (line: string) => {
+          lines.push(line);
+        },
+      },
+    ) as unknown as Logger;
+    return {
+      logger,
+      warnings: () => lines.map((line) => (JSON.parse(line) as { host?: string }).host ?? ''),
+    };
+  };
+
+  const withCheck = async (
+    hosts: HostAllowList,
+    logger: Logger = silent,
+  ): Promise<FastifyInstance> =>
+    build((instance) => {
+      registerHostCheck(instance, { hosts, logger });
+      registerSecurityHeaders(instance);
+    });
+
+  it('answers every address, localhost, and a request that names no host at all', () => {
+    const hosts = new HostAllowList({});
+    for (const header of [
+      '127.0.0.1:8080',
+      '10.9.9.9',
+      '[::1]:8080',
+      '[2001:db8::1]',
+      'localhost:8080',
+      'LOCALHOST',
+      'localhost.',
+      'ui.localhost:5173',
+      '',
+      undefined,
+    ]) {
+      assert.equal(hosts.allows(header), true, String(header));
+    }
+  });
+
+  it('refuses any other name, including one built to look like an address', () => {
+    const hosts = new HostAllowList({});
+    for (const header of [
+      'evil.example:8080',
+      'evil.example',
+      '127.0.0.1.evil.example',
+      '127.0.0.1.nip.io:8080',
+      'localhost.evil.example',
+      'evillocalhost',
+      '[::1].evil.example',
+    ]) {
+      assert.equal(hosts.allows(header), false, header);
+    }
+  });
+
+  it('answers the names it is given, from each of the three places, whatever the case or port', () => {
+    const hosts = new HostAllowList({
+      allowedHosts: ['Monitoring.Example.com.', 'ms01'],
+      allowedOrigins: ['https://ui.example.com:8443'],
+      publicUrl: 'https://alerts.example.com/ms/',
+    });
+    for (const header of [
+      'monitoring.example.com',
+      'MONITORING.EXAMPLE.COM.:8080',
+      'ms01:8080',
+      'ui.example.com',
+      'ui.example.com:9999',
+      'alerts.example.com:443',
+    ]) {
+      assert.equal(hosts.allows(header), true, header);
+    }
+    for (const header of ['example.com', 'sub.monitoring.example.com', 'ms02', 'ms01.evil']) {
+      assert.equal(hosts.allows(header), false, header);
+    }
+  });
+
+  it('takes nothing from a URL that is empty or does not parse', () => {
+    const hosts = new HostAllowList({ allowedOrigins: ['not a url'], publicUrl: '' });
+    assert.equal(hosts.allows('not a url'), false);
+    assert.equal(hosts.allows('evil.example'), false);
+  });
+
+  it('refuses a rebound page with 421, before anything else runs, naming the setting', async () => {
+    const app = await withCheck(new HostAllowList({}));
+    try {
+      for (const method of ['GET', 'POST'] as const) {
+        const response = await app.inject({
+          method,
+          url: '/api/v1/thing',
+          headers: { host: 'evil.example:8080', origin: 'http://evil.example:8080' },
+        });
+        assert.equal(response.statusCode, 421, method);
+        const body = response.json<{
+          error: { code: string; message: string; context: Record<string, string> };
+        }>();
+        assert.equal(body.error.code, 'HOST_NOT_ALLOWED');
+        assert.match(body.error.message, /"evil\.example".*api\.allowedHosts/);
+        assert.deepEqual(body.error.context, {
+          host: 'evil.example:8080',
+          setting: 'api.allowedHosts',
+        });
+        // The refusal is an answer like any other, and carries the headers every answer does.
+        assert.ok(response.headers['content-security-policy'] !== undefined);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('lets an address and a listed name through to the route', async () => {
+    const app = await withCheck(new HostAllowList({ allowedHosts: ['ms.example.com'] }));
+    try {
+      for (const host of ['127.0.0.1:8080', 'ms.example.com:8080']) {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/api/v1/thing',
+          headers: { host },
+        });
+        assert.equal(response.statusCode, 200, host);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('counts every refusal, and logs each name once', async () => {
+    const hosts = new HostAllowList({});
+    const { logger, warnings } = capture();
+    const app = await withCheck(hosts, logger);
+    try {
+      for (const host of ['a.example', 'a.example:8080', 'A.EXAMPLE', 'b.example', '127.0.0.1']) {
+        await app.inject({ url: '/api/v1/thing', headers: { host } });
+      }
+      assert.deepEqual(hosts.stats(), { refused: 4 });
+      assert.deepEqual(warnings(), ['a.example', 'b.example']);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('stops logging new names at a hundred, and goes on counting them', async () => {
+    const hosts = new HostAllowList({});
+    const { logger, warnings } = capture();
+    const app = await withCheck(hosts, logger);
+    try {
+      for (let n = 0; n < 105; n += 1) {
+        await app.inject({ url: '/api/v1/thing', headers: { host: `n${String(n)}.example` } });
+      }
+      assert.equal(warnings().length, 100);
+      assert.deepEqual(hosts.stats(), { refused: 105 });
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe('the CSRF guard, on a name the Host check let through (A-47)', () => {
+  // The Host check makes the Host header one of this core's names; the guard still compares the
+  // whole host and port, so another port on an answered name is another origin.
+  let app: FastifyInstance;
+
+  before(async () => {
+    app = await build((instance) => {
+      registerCsrfGuard(instance, { logger: silent });
+    });
+  });
+
+  after(async () => {
+    await app.close();
+  });
+
+  it('refuses a write from another port on localhost', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/thing',
+      headers: { origin: 'http://localhost:3000', host: 'localhost:8080' },
+    });
+    assert.equal(response.statusCode, 403);
+  });
+
+  it('refuses a write from another port on the same address', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/thing',
+      headers: { origin: 'http://10.9.9.9:3000', host: '10.9.9.9:8080' },
+    });
+    assert.equal(response.statusCode, 403);
+  });
+});
+
 describe('rate limiting', () => {
   let app: FastifyInstance;
   let clock = 0;
@@ -553,6 +755,29 @@ describe('rate limiting', () => {
     const first = await get();
     assert.equal(first.headers['x-ratelimit-limit'], '3');
     assert.equal(first.headers['x-ratelimit-remaining'], '2');
+  });
+
+  it('counts an IPv6 client as its /64, so rotating through it is one client (A-47)', async () => {
+    for (let n = 0; n < 3; n += 1) {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/thing',
+        remoteAddress: `2001:db8:1:2::${String(n + 1)}`,
+      });
+      assert.equal(response.statusCode, 200);
+    }
+    const rotated = await app.inject({
+      method: 'GET',
+      url: '/api/v1/thing',
+      remoteAddress: '2001:db8:1:2:ffff::9',
+    });
+    assert.equal(rotated.statusCode, 429);
+    const neighbour = await app.inject({
+      method: 'GET',
+      url: '/api/v1/thing',
+      remoteAddress: '2001:db8:1:3::1',
+    });
+    assert.equal(neighbour.statusCode, 200, 'the next /64 is somebody else');
   });
 
   it('starts a fresh window once the old one has passed', async () => {

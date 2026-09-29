@@ -11,6 +11,7 @@
     "port": 8080,
     "webRoot": "/opt/ms/web",
     "allowedOrigins": [],
+    "allowedHosts": [],
     "trustedProxies": []
   },
   "sessions": {

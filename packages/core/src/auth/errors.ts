@@ -17,6 +17,7 @@ export type AuthErrorCode =
   | 'AUTH_REQUIRED'
   | 'AUTH_FORBIDDEN'
   | 'AUTH_THROTTLED'
+  | 'HOST_NOT_ALLOWED'
   | 'ACCOUNT_EXISTS'
   | 'ACCOUNT_NOT_FOUND'
   | 'ACCOUNT_LOGIN_INVALID'
@@ -47,6 +48,9 @@ const STATUS: Readonly<Record<AuthErrorCode, number>> = {
   // the same answer, which is what distinguishes this from a 401.
   AUTH_FORBIDDEN: 403,
   AUTH_THROTTLED: 429,
+  // 421 Misdirected Request (`A-47`): the request reached a server that is not the one its `Host`
+  // names — what a DNS-rebinding page's requests are.
+  HOST_NOT_ALLOWED: 421,
   ACCOUNT_EXISTS: 409,
   ACCOUNT_NOT_FOUND: 404,
   ACCOUNT_LOGIN_INVALID: 400,

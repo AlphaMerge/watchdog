@@ -311,15 +311,27 @@ for svc in "${components[@]}"; do
         writeFileSync(cfgPath, `${JSON.stringify(cfg, null, 2)}\n`);
       ' "${CONFDIR}/probe.json" "${enrolment}" "${display_name}"
     else
-      # Wire the generated access key into a freshly installed configuration.
+      # Wire the generated access key into a freshly installed configuration. A core also gets
+      # this machine's own name in api.allowedHosts (`A-47`): the core answers only to its
+      # addresses, localhost and the names it is given, and the name an operator types first is
+      # the one the machine calls itself. Anything that is not a plain name is left out rather
+      # than written somewhere the core would refuse to start over it.
       node -e '
         const { readFileSync, writeFileSync } = require("node:fs");
-        const [path, key, svc] = process.argv.slice(1);
+        const { isIP } = require("node:net");
+        const [path, key, svc, host] = process.argv.slice(1);
         const cfg = JSON.parse(readFileSync(path, "utf8"));
-        if (svc === "core") cfg.probeEndpoint.accessKeys = [key];
-        else cfg.core.accessKey = key;
+        if (svc === "core") {
+          cfg.probeEndpoint.accessKeys = [key];
+          const name = (host || "").trim().toLowerCase().replace(/\.$/, "");
+          const label = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
+          const plain = new RegExp(`^${label}(?:\\.${label})*$`).test(name);
+          if (plain && isIP(name) === 0 && name !== "localhost" && !name.endsWith(".localhost")) {
+            cfg.api.allowedHosts = [name];
+          }
+        } else cfg.core.accessKey = key;
         writeFileSync(path, JSON.stringify(cfg, null, 2) + "\n");
-      ' "${CONFDIR}/${svc}.json" "${access_key}" "${svc}"
+      ' "${CONFDIR}/${svc}.json" "${access_key}" "${svc}" "$(hostname -f 2>/dev/null || hostname)"
     fi
   fi
 

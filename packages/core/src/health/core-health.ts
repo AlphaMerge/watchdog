@@ -93,6 +93,11 @@ export interface CoreHealthSources {
    */
   ingestionDiscards: () => { discardedFutureTime: number; discardedPastTime: number };
   /**
+   * `ApiServer.hostStats()` — requests refused for a `Host` this core does not answer to, since
+   * it started (`A-47`). Absent where there is no API to refuse them, and the channel gaps.
+   */
+  hosts?: () => { refused: number };
+  /**
    * The last housekeeping pass's view of the disk (`S-17`).
    *
    * Read from the *report* rather than measured here, and that is deliberate: the number Core
@@ -191,14 +196,15 @@ export interface LocalProbeLog {
 }
 
 /**
- * One reader's baselines (`CpuMeter`'s reason, `P-216` part 3): CPU and the log's drops are both
- * the difference between two readings, and each reading consumes the one before. The sweep, the
- * route and a scrape each hold their own, so none shortens another's interval.
+ * One reader's baselines (`CpuMeter`'s reason, `P-216` part 3): CPU, the log's drops and refused
+ * `Host`s are each the difference between two readings, and each reading consumes the one before.
+ * The sweep, the route and a scrape each hold their own, so none shortens another's interval.
  */
 export class CoreHealthMeters {
   readonly cpu = new CpuMeter();
   readonly log = new DeltaMeter();
   localProbeLog: { readonly meter: DeltaMeter; readonly session: number } | undefined;
+  readonly hosts = new DeltaMeter();
 }
 
 const MB = 1024 * 1024;
@@ -296,6 +302,7 @@ export class CoreHealthService {
     const machine = this.#sources.machineMemory();
     const limit = this.#sources.limitMemory();
     const log = this.#sources.log?.();
+    const hosts = this.#sources.hosts?.();
 
     const memory = this.#process.memoryUsage();
     const queues = await this.#queues(now, degradeOnDatabaseError);
@@ -363,6 +370,9 @@ export class CoreHealthService {
       credentialsToReenter: queues.credentials,
       logDropped: dropped,
       logBacklog: log === undefined ? null : round(log.backlogBytes / MB, 2),
+      // Since the last reading, and the whole count on the first: the total started with this
+      // process, as the meter did.
+      hostsRefused: hosts === undefined ? null : meters.hosts.take(hosts.refused, uptime, true),
     };
     return { reading, parkedError: queues.parked.lastError };
   }

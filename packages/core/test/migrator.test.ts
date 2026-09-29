@@ -838,6 +838,71 @@ describe(
       }
     });
 
+    it('keys login attempts by what their address counts as, leaving older rows uncounted (062)', async () => {
+      // `A-47`: an IPv6 client is its /64. Rows from before the upgrade keep a NULL key, which
+      // nothing counts; the column and its index go on the way back down.
+      const fresh = await createScratchDatabase('login_address_key');
+      try {
+        await migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id < 62),
+        ).up();
+        const q = fresh.db;
+        await q.query(
+          `INSERT INTO login_attempt (login, remote_address, succeeded)
+           VALUES ('ops', '2001:db8::1', false), ('ops', 'not an address', true)`,
+        );
+        const since = MIGRATIONS.filter((one) => one.id >= 62);
+        const all = migrator(fresh.db, MIGRATIONS);
+        await all.up();
+        assert.deepEqual(
+          await q.query('SELECT remote_address, address_key FROM login_attempt ORDER BY id'),
+          [
+            { remote_address: '2001:db8::1', address_key: null },
+            { remote_address: 'not an address', address_key: null },
+          ],
+          'an upgrade over a row that is not an address does not fail',
+        );
+        await assert.rejects(
+          q.query(
+            `INSERT INTO login_attempt (login, remote_address, address_key, succeeded)
+             VALUES ('ops', '', repeat('a', 65), false)`,
+          ),
+          /check/i,
+        );
+        const index = async (): Promise<unknown[]> =>
+          q.query(
+            `SELECT indexname FROM pg_indexes
+             WHERE tablename = 'login_attempt' AND indexname = 'login_attempt_address_key_idx'`,
+          );
+        assert.equal((await index()).length, 1);
+
+        await all.down(since.length);
+        assert.deepEqual(
+          await q.query(
+            `SELECT column_name AS name FROM information_schema.columns
+             WHERE table_name = 'login_attempt' AND column_name = 'address_key'
+               AND table_schema = current_schema()`,
+          ),
+          [],
+        );
+        assert.deepEqual(await index(), []);
+        assert.equal(
+          (await q.query('SELECT id FROM login_attempt')).length,
+          2,
+          'and the attempts themselves stay',
+        );
+
+        const again = await all.up();
+        assert.deepEqual(
+          again.applied.map((one) => one.id),
+          since.map((one) => one.id),
+        );
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('applies the real migration set forward and all the way back', async () => {
       const fresh = await createScratchDatabase('roundtrip');
       try {

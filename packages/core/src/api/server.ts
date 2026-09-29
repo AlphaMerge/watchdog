@@ -33,9 +33,11 @@ import {
   type RouteAccess,
 } from './authorization.js';
 import {
+  HostAllowList,
   proxyTrust,
   registerCsrfGuard,
   registerForwardedHeaderNotice,
+  registerHostCheck,
   registerRateLimit,
   registerSecurityHeaders,
   registerUpgradeOriginCheck,
@@ -120,14 +122,20 @@ import { STATE_SCHEMAS } from './schemas/state.js';
 import { SHARED_SCHEMAS } from './schemas/objects.js';
 
 /**
- * The listener's settings. `trustedProxies` may be left out, and is then empty: a server built for
- * a route test is not behind a proxy, and saying so in every one of them would be noise.
+ * The listener's settings. `trustedProxies` and `allowedHosts` may be left out, and are then empty:
+ * a server built for a route test is not behind a proxy and is reached by address, and saying so
+ * in every one of them would be noise.
  */
-export type ApiListenerConfig = Omit<CoreConfig['api'], 'trustedProxies'> &
-  Partial<Pick<CoreConfig['api'], 'trustedProxies'>>;
+export type ApiListenerConfig = Omit<CoreConfig['api'], 'trustedProxies' | 'allowedHosts'> &
+  Partial<Pick<CoreConfig['api'], 'trustedProxies' | 'allowedHosts'>>;
 
 export interface ApiServerOptions {
   config: ApiListenerConfig;
+  /**
+   * `notifications.publicUrl`, whose host is one of this core's names (`A-47`). Absent in the
+   * route tests.
+   */
+  publicUrl?: string;
   logger: Logger;
   version: string;
   /**
@@ -309,6 +317,8 @@ export class ApiServer {
   readonly #app: FastifyInstance;
   readonly #config: ApiListenerConfig;
   readonly #logger: Logger;
+  /** The names this core answers to (`A-47`). */
+  readonly #hosts: HostAllowList;
   readonly #history: HistoryService;
   readonly #stateLog: StateLogService;
   readonly #alarms: AlarmService;
@@ -380,6 +390,20 @@ export class ApiServer {
   constructor(options: ApiServerOptions) {
     this.#config = options.config;
     this.#logger = options.logger.child({ component: 'api' });
+    this.#hosts = new HostAllowList({
+      allowedHosts: options.config.allowedHosts ?? [],
+      allowedOrigins: options.config.allowedOrigins,
+      ...(options.publicUrl === undefined ? {} : { publicUrl: options.publicUrl }),
+    });
+    if ((options.config.allowedHosts ?? []).length === 0 && (options.publicUrl ?? '') === '') {
+      // Not a refusal: by address and as `localhost` still works, and a name in `allowedOrigins`
+      // counts. It is the one line an operator reaching the core by name will need.
+      this.#logger.warn(
+        'neither api.allowedHosts nor notifications.publicUrl is set, so this core answers only ' +
+          'to its addresses and to localhost: a browser that reaches it by name is refused ' +
+          'with 421 until that name is in api.allowedHosts',
+      );
+    }
     this.#history = options.history;
     // Built here rather than injected: it is a query over one table with no configuration, and
     // a second constructor argument for it would be ceremony (`M-15`).
@@ -583,8 +607,16 @@ export class ApiServer {
     ])
       this.#app.addSchema(schema);
 
+    // **A name this core does not answer to is refused before anything else looks at the request**
+    // (`A-47`), on this listener only — the probe endpoint is TLS, and has no `Host`. A page whose
+    // name was rebound to this core's address is same-origin with it to the browser: its `Origin`
+    // and `Host` agree, so every origin check below passes it, and with authentication off it
+    // could read and write everything. What it cannot make agree is its name with this list.
+    registerHostCheck(this.#app, { hosts: this.#hosts, logger: this.#logger });
+
     // **Security headers on everything, including the app shell and the error pages** (`A-09`).
-    // Registered first so nothing can answer without them.
+    // Registered first among the rest so nothing else can answer without them; they are sent on
+    // the Host check's refusal too, being added as the answer leaves.
     // The tile provider's origin, and nothing else, joins `img-src` (`ADR-004`). A template
     // that does not parse adds nothing rather than breaking the policy.
     const tileOrigin = originOf(this.#mapTiles?.urlTemplate ?? '');
@@ -1067,6 +1099,11 @@ export class ApiServer {
     await this.#app.ready();
     this.#assertEveryRouteDeclaresItsResponses();
     this.#assertEveryRouteDeclaresItsAccess();
+  }
+
+  /** Requests refused for a `Host` this core does not answer to, since it started (`A-47`). */
+  hostStats(): { refused: number } {
+    return this.#hosts.stats();
   }
 
   async start(): Promise<AddressInfo> {

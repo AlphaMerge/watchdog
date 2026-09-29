@@ -1183,6 +1183,31 @@ describe(
       assert.ok(box.logged().includes('systemctl reset-failed ms-core.service'));
     });
 
+    it('lists the machine’s own name in a fresh core’s api.allowedHosts, and never an address (A-47)', () => {
+      for (const [said, expected] of [
+        ['MS-Core.Example.Net.', ['ms-core.example.net']],
+        ['ms01', ['ms01']],
+        ['10.0.0.5', []],
+        ['localhost', []],
+        ['not_a_name', []],
+      ] as const) {
+        const box = sandbox();
+        // What `hostname -f` says on this machine, which is what an operator's browser will use.
+        writeFileSync(join(box.bin, 'hostname'), `#!/usr/bin/env bash\necho '${said}'\n`, {
+          mode: 0o755,
+        });
+        const { prefix, conf } = installation(box, null);
+        const result = setup(box, prefix, conf, ['--components', 'core', '--no-start']);
+        assert.equal(result.status, 0, `${said}: ${result.stdout}${result.stderr}`);
+        const core = JSON.parse(readFileSync(join(conf, 'core.json'), 'utf8')) as {
+          api: { allowedHosts?: string[] };
+          probeEndpoint: { accessKeys: string[] };
+        };
+        assert.deepEqual(core.api.allowedHosts, expected, said);
+        assert.equal(core.probeEndpoint.accessKeys.length, 1, 'and the access key, as before');
+      }
+    });
+
     it('backs up a probe configuration before a new enrolment rewrites it', () => {
       const box = sandbox();
       const { prefix, conf } = installation(box, null);

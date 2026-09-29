@@ -433,6 +433,11 @@ const CHANNELS: readonly ChannelDef[] = [
   // What the output holds that the journal has not taken, up to the bound. No limit:
   // `logDropped` is the alarm, and this is how close the next stall is to it.
   { key: 'logBacklog', name: 'Log waiting to be written', unit: 'MB' },
+  // **Requests refused for a `Host` this core does not answer to** (`A-47`), since the last
+  // reading. No limit: a scanner produces these all day, and so does the one operator whose name
+  // for the core is not in `api.allowedHosts` yet — who is told why in the answer itself. What the
+  // line is for is the second case showing up as a step, when a DNS name or a proxy changes.
+  { key: 'hostsRefused', name: 'Requests refused for an unknown Host', unit: 'requests' },
 ];
 
 export const coreHealth: SensorType = {

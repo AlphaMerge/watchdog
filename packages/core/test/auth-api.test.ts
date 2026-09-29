@@ -33,6 +33,50 @@ import { testCatalogue } from './support/sensor-types.js';
 
 const available = await databaseAvailable();
 
+/** An account service that counts the passwords it was asked to verify (`A-47`). */
+class CountingAccounts extends AccountService {
+  verified = 0;
+
+  override async authenticate(
+    login: string,
+    password: string,
+  ): ReturnType<AccountService['authenticate']> {
+    this.verified += 1;
+    return super.authenticate(login, password);
+  }
+}
+
+/**
+ * A throttle that can hold the recording of the next failure, so a test can send an attempt in the
+ * moment between one failing and its failure being on record (`A-47`).
+ */
+class PausingThrottle extends LoginThrottle {
+  #hold: { reached: () => void; until: Promise<void> } | undefined;
+
+  holdNextFailure(): { reached: Promise<void>; resume: () => void } {
+    let reached: () => void = () => undefined;
+    let resume: () => void = () => undefined;
+    const arrived = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const until = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    this.#hold = { reached, until };
+    return { reached: arrived, resume };
+  }
+
+  override async record(login: string, remoteAddress: string, succeeded: boolean): Promise<void> {
+    const hold = this.#hold;
+    if (hold !== undefined && !succeeded) {
+      this.#hold = undefined;
+      hold.reached();
+      await hold.until;
+    }
+    await super.record(login, remoteAddress, succeeded);
+  }
+}
+
 describe('authentication over HTTP', { skip: available ? false : 'no database' }, () => {
   let scratch: ScratchDatabase;
   let db: Database;
@@ -44,6 +88,13 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
   let proxied: FastifyInstance;
   /** Behind a reverse proxy on this host, which it believes (`A-36`). */
   let behind: FastifyInstance;
+  /** With the per-login gate on, and the verifications counted (`A-47`). */
+  let gated: FastifyInstance;
+  let counting: CountingAccounts;
+  let gatedThrottle: LoginThrottle;
+  /** The same, with a failure's recording held on request. */
+  let pausedApp: FastifyInstance;
+  let pausing: PausingThrottle;
   let tokens: TokenService;
 
   before(async () => {
@@ -56,9 +107,14 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
       db,
       logger: silent,
       // The delay is real and is asserted in the service's own tests; making a route test wait
-      // it out would be measuring `setTimeout`.
+      // it out would be measuring `setTimeout`. Its gate is off here (`A-47`), so a test that
+      // fails twenty times in a row reaches the address limit it is about; `gated` below has it.
+      config: { perAccountDelayMs: 0 },
       sleep: () => Promise.resolve(),
     });
+    counting = new CountingAccounts({ audit: new DatabaseAuditSink(), db, logger: silent });
+    gatedThrottle = new LoginThrottle({ db, logger: silent, sleep: () => Promise.resolve() });
+    pausing = new PausingThrottle({ db, logger: silent, sleep: () => Promise.resolve() });
 
     tokens = new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent });
 
@@ -66,6 +122,7 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
       required: boolean,
       allowedOrigins: string[] = [],
       trustedProxies: string[] = [],
+      over: { accounts?: AccountService; throttle?: LoginThrottle } = {},
     ): Promise<FastifyInstance> => {
       const server = new ApiServer({
         config: {
@@ -73,6 +130,8 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
           port: 0,
           webRoot: '',
           allowedOrigins,
+          // The name these tests send as `Host` where one matters (`A-47`).
+          allowedHosts: ['core.test'],
           trustedProxies,
           requireAuthentication: true,
         },
@@ -84,9 +143,9 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
         audit: new AuditRepository(),
         catalogue: testCatalogue(),
         auth: {
-          accounts,
+          accounts: over.accounts ?? accounts,
           sessions,
-          throttle,
+          throttle: over.throttle ?? throttle,
           groups: new GroupService({ audit: new DatabaseAuditSink(), db, logger: silent }),
           access: new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent }),
           tokens,
@@ -103,6 +162,8 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
     guarded = await build(true);
     proxied = await build(false, ['http://ui.test']);
     behind = await build(false, [], ['loopback']);
+    gated = await build(false, [], [], { accounts: counting, throttle: gatedThrottle });
+    pausedApp = await build(false, [], [], { accounts: counting, throttle: pausing });
   });
 
   after(async () => {
@@ -680,6 +741,97 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
    * A core behind a reverse proxy it believes (`A-36`). `inject` arrives from `127.0.0.1`, which
    * `loopback` lists — the proxy on the same host that `installation.md` describes.
    */
+  describe('the login gate, over HTTP (A-47)', () => {
+    const attempt = (login: string, password: string, remoteAddress: string) =>
+      gated.inject({
+        method: 'POST',
+        url: '/api/v1/auth/login',
+        payload: { login, password },
+        remoteAddress,
+      });
+
+    it('verifies one of fifty attempts sent at once, and turns the rest away unverified', async () => {
+      // Each used to get a full verification: the delay was a sleep before the answer, which
+      // slows nobody who does not wait for it. From fifty addresses in one /64, as one client
+      // rotating through its prefix would send them.
+      counting.verified = 0;
+      const responses = await Promise.all(
+        Array.from({ length: 50 }, (_, n) =>
+          attempt('ops', 'not-the-password', `2001:db8:9:9::${(n + 1).toString(16)}`),
+        ),
+      );
+      assert.equal(counting.verified, 1, 'one password was checked');
+      const statuses = responses.map((response) => response.statusCode);
+      assert.equal(statuses.filter((status) => status === 401).length, 1);
+      assert.equal(statuses.filter((status) => status === 429).length, 49);
+      for (const response of responses.filter((one) => one.statusCode === 429)) {
+        assert.equal(response.headers['retry-after'], '1');
+        const body = response.json<{ error: { code: string; message: string } }>();
+        assert.equal(body.error.code, 'AUTH_THROTTLED');
+        assert.match(body.error.message, /being checked|for this account/);
+      }
+    });
+
+    it('lets the operator in from where they log in, while somebody fails as them', async () => {
+      assert.equal((await attempt('ops', 'correct-horse-battery', '203.0.113.50')).statusCode, 200);
+      // Ten failures shut the gate for five seconds, from anywhere else.
+      for (let n = 0; n < 10; n += 1) {
+        await gatedThrottle.record('ops', `198.51.100.${String(n + 1)}`, false);
+      }
+      counting.verified = 0;
+      for (let round = 0; round < 5; round += 1) {
+        const attack = await attempt('ops', 'not-the-password', `198.51.100.${String(round + 20)}`);
+        assert.equal(attack.statusCode, 429, `the attacker, round ${String(round)}`);
+        assert.equal(
+          (await attempt('ops', 'correct-horse-battery', '203.0.113.50')).statusCode,
+          200,
+          `the operator, round ${String(round)}`,
+        );
+      }
+      assert.equal(counting.verified, 5, 'only the operator’s passwords were checked');
+      const elsewhere = await attempt('ops', 'correct-horse-battery', '203.0.113.51');
+      assert.equal(elsewhere.statusCode, 429, 'from somewhere new they wait like anybody');
+      assert.match(elsewhere.body, /for this account/);
+    });
+
+    it('holds the slot until a failure is on record, so nobody is let in on counts that miss it', async () => {
+      // Given back first, the slot would go to an attempt whose counts were read before the
+      // failure landed, and whose admission ended before it did: a verification the gate owed.
+      counting.verified = 0;
+      const { reached, resume } = pausing.holdNextFailure();
+      const first = pausedApp.inject({
+        method: 'POST',
+        url: '/api/v1/auth/login',
+        payload: { login: 'ops', password: 'not-the-password' },
+        remoteAddress: '198.51.100.70',
+      });
+      await reached;
+      const second = await pausedApp.inject({
+        method: 'POST',
+        url: '/api/v1/auth/login',
+        payload: { login: 'ops', password: 'correct-horse-battery' },
+        remoteAddress: '198.51.100.71',
+      });
+      resume();
+      assert.equal((await first).statusCode, 401);
+      assert.equal(second.statusCode, 429, second.body);
+      assert.match(second.body, /being checked/);
+      assert.equal(counting.verified, 1, 'the second password was never checked');
+    });
+
+    it('refuses a /64 that has failed twenty times, whichever of its addresses asks', async () => {
+      for (let n = 1; n <= 20; n += 1) {
+        const guess = await attempt(`guess-${String(n)}`, 'x', `2001:db8:a:b::${n.toString(16)}`);
+        assert.equal(guess.statusCode, 401);
+      }
+      const next = await attempt('ops', 'correct-horse-battery', '2001:db8:a:b:ffff::1');
+      assert.equal(next.statusCode, 429);
+      assert.match(next.body, /from this address/);
+      const neighbour = await attempt('ops', 'correct-horse-battery', '2001:db8:a:c::1');
+      assert.equal(neighbour.statusCode, 200, 'the next /64 is somebody else');
+    });
+  });
+
   describe('behind a reverse proxy', () => {
     const through = (address: string, extra: Record<string, string> = {}) => ({
       'x-forwarded-for': address,
@@ -692,6 +844,11 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
     };
     const fail = (instance: FastifyInstance, headers: Record<string, string>) =>
       login(instance, { login: 'ops', password: 'not-the-password' }, headers);
+    /** Refused for its address's failures — not by the login's gate, or anything else. */
+    const assertAddressRefused = (response: { statusCode: number; body: string }): void => {
+      assert.equal(response.statusCode, 429, response.body);
+      assert.match(response.body, /from this address/);
+    };
 
     it('marks the cookie Secure and sends HSTS when the proxy says the browser used HTTPS', async () => {
       const response = await login(
@@ -731,7 +888,7 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
       // would be everybody's login refused for fifteen minutes by one person's wrong passwords.
       for (let attempt = 0; attempt < 20; attempt += 1) await fail(behind, through('203.0.113.5'));
 
-      assert.equal((await fail(behind, through('203.0.113.5'))).statusCode, 429);
+      assertAddressRefused(await fail(behind, through('203.0.113.5')));
       const neighbour = await login(
         behind,
         { login: 'ops', password: 'correct-horse-battery' },
@@ -753,13 +910,13 @@ describe('authentication over HTTP', { skip: available ? false : 'no database' }
       // What it writes comes before what the proxy appends, and only the proxy is believed.
       for (let attempt = 0; attempt < 20; attempt += 1)
         await fail(behind, through(`198.51.100.${String(attempt)}, 203.0.113.5`));
-      assert.equal((await fail(behind, through('203.0.113.5'))).statusCode, 429);
+      assertAddressRefused(await fail(behind, through('203.0.113.5')));
 
       // Nor with no proxy listed, where the header is not read at all.
       await db.query('DELETE FROM login_attempt');
       for (let attempt = 0; attempt < 20; attempt += 1)
         await fail(app, through(`198.51.100.${String(attempt)}`));
-      assert.equal((await fail(app, through('198.51.100.200'))).statusCode, 429);
+      assertAddressRefused(await fail(app, through('198.51.100.200')));
     });
   });
 });
