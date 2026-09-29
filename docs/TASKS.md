@@ -14923,13 +14923,45 @@ because each is a decision rather than a defect:
         killed by exactly the case that needs it), the 304 path keeping the old tag, and the
         answer sent without `Cache-Control`.
 
-- [ ] **A-33 — Visibility for a root-readable account is never tested with nested holes, or
+- [x] **A-33 — Visibility for a root-readable account is never tested with nested holes, or
       measured with many** · M · A-12 · Can wait, and needs a booked `test:perf` slot. Filed
       2026-09-28 from `A-12`'s triage (T10 and M3, low). Across 40 seeds the agreement test made
       a hole inside a hole zero times and a re-opened hole zero times, and the only `NOT IN`
       performance case has 10 holes. **Fix:** fixed grant sets for each shape, and one measured
       principal with several hundred carve-outs under `EXPLAIN`. Switch to `NOT EXISTS` only if
       the plan degrades, after checking its null semantics.
+
+      **A-33 outcome** (`docs/findings/2026-09-29-visibility-carve-outs.md`). No code changed;
+      nothing was wrong. The tests that say so are new.
+      - **Nine fixed shapes** in `access-rights.test.ts`: a hole, a hole inside a hole, a hole
+        re-opened, a hole inside a re-opened hole, re-opened then carved then re-opened again, a
+        double hole re-opened at its deepest by the other group, a hole re-opened by the other
+        group, a `none` the other group reads through, and a `none` for a group the account is
+        not in. Each is checked two ways. First, the SQL condition, `sees`,
+        `whereChildOfVisible` and `trim` agree with `resolveManyFor` on every object; that check
+        is now one function the randomised test shares. Second, the condition's rows match a
+        hand-written list of what is seen. The condition carries `NOT IN` exactly when something
+        is hidden.
+      - **Four hundred carve-outs measured.** A seventh `test:perf` principal reads the root with
+        400 devices carved out and 40 of those holes re-opened on a sensor (16,040 of 20,000
+        sensors seen). It is inside every budget by at least 3.9 times; the closest is the counts,
+        at 63.6 ms against 250. Resolving costs 3–4 ms here against about 1 ms elsewhere, because
+        this principal has 440 boundaries to read.
+      - **Every walk hashed, on every path, found by name.** The test records each read path's
+        statements separately, including those inside `db.tx`, where the alarm list reads. It
+        runs `EXPLAIN (ANALYZE, VERBOSE)` on each and requires every walk of the `exception` CTE
+        to be referenced and hashed, and at least as many walks as the text holds. `VERBOSE` is
+        there because the alarm list's second walk sits in a select list, and only a verbose plan
+        prints its reference. At 64 kB of `work_mem`, every walk of every statement is seen
+        re-read, so the check is not vacuous. `NOT IN` stays.
+      - **The alarm list walks three times where twice would do.** Inlining `sighted` copies its
+        step walk into both `FILTER (WHERE visible)` aggregates. It costs a few ms of 40, so it
+        gets no ticket. The fix, `sighted AS MATERIALIZED`, is recorded in the findings for
+        whoever next edits `state/alarms.ts`.
+      - Mutation 4/4 against the shapes: the walk crossing a re-opening grant, the walk stopping
+        only at holes, any hole on the path winning, and a trimmed path never re-opening. **The
+        randomised test passes two of the four** (the walk stopping only at holes, and the
+        trimmed path never re-opening), which is the gap this ticket was filed for.
 
 - [x] **A-34 — An open state stream outlives logout, token revocation and account disable** · M ·
       A-01, A-06, A-30 · Found 2026-09-28 while scoping V2-07. Every ordinary request resolves its
