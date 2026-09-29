@@ -19,7 +19,7 @@ import {
   maxResultAgeMs,
   TIME_REFUSAL_WINDOW_MS,
 } from '../src/ingestion/service.js';
-import { SensorStateService } from '../src/state/service.js';
+import { SensorStateService, type PolicySource } from '../src/state/service.js';
 import { writeStateHistory } from '../src/state/runtime.js';
 import { resolveAcknowledgement } from '../src/state/acknowledgement.js';
 import type { SensorState, SensorStateCause } from '../src/state/tables.js';
@@ -604,6 +604,59 @@ describe(
         });
         try {
           assert.deepEqual(await statesFor(1), ['down']);
+        } finally {
+          await harness.service.clearSetting(testActor, deviceId, 'scan.retryWarnings', {
+            kind: 'none',
+          });
+        }
+      });
+
+      it('uses a policy a forget overtook for its own batch, and does not keep it (`P-240`)', async () => {
+        // An edit's second forget runs once the edit has committed, and a resolve that began
+        // before then may have read the old setting. This batch must still use what it read:
+        // the default instead is `P-86`'s false transition. The cache must not keep it, or the
+        // edit is inert until the next one. `clear` is a delete's, and counts the same.
+        await harness.service.setSetting(testActor, deviceId, 'scan.retryWarnings', 0, {
+          kind: 'none',
+        });
+        try {
+          for (const [index, overtake] of (['forgetPolicies', 'clear'] as const).entries()) {
+            const overtaking: { states?: SensorStateService } = {};
+            const settings: PolicySource = {
+              resolveForObjects: async (ids, key) => {
+                const answer = await harness.resolver.resolveForObjects(ids, key);
+                overtaking.states?.[overtake]();
+                return answer;
+              },
+            };
+            const states = new SensorStateService({
+              db,
+              logger: silent,
+              settings,
+              pauses: new PauseRepository(),
+            });
+            overtaking.states = states;
+            const ingestor = new Ingestor({ db, logger: silent, config: CONFIG });
+            const service = new IngestionService({
+              db,
+              logger: silent,
+              ingestor,
+              states,
+              resolver: new ChannelResolver({ logger: silent, lookups }),
+            });
+            await deliver(service, ingestor, [failing(index)], `b${String(index + 1)}`);
+            // Down at the first failure, and the second changes nothing.
+            assert.deepEqual(
+              (await history()).map((row) => row.state),
+              ['down'],
+              `${overtake}: the batch fell back to the default instead of the policy it resolved`,
+            );
+            assert.equal(
+              states.stats().cachedPolicies,
+              0,
+              `${overtake}: a resolve it overtook was kept`,
+            );
+          }
         } finally {
           await harness.service.clearSetting(testActor, deviceId, 'scan.retryWarnings', {
             kind: 'none',

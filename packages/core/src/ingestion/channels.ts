@@ -99,6 +99,12 @@ export class ChannelResolver {
   readonly #cache = new Map<string, ResolvedChannel>();
   /** Lookup ids already complained about, so a missing one is one log line and not one a scan. */
   readonly #missingLookups = new Set<string>();
+  /**
+   * Counts forgets, so a read that one overtook is not cached (`P-240`). The second forget runs
+   * after the edit commits, and a read that began before it would otherwise put the old limits
+   * back after it — the edit then inert until the next one.
+   */
+  #generation = 0;
 
   constructor(options: ChannelResolverOptions) {
     this.#logger = options.logger.child({ component: 'channel-resolver' });
@@ -119,6 +125,7 @@ export class ChannelResolver {
 
   /** Forgets everything. For tests, and for whatever invalidates channels in a later phase. */
   clear(): void {
+    this.#generation += 1;
     this.#cache.clear();
   }
 
@@ -134,6 +141,9 @@ export class ChannelResolver {
    * 15,000 channels, so this is microseconds on a path nobody is timing.
    */
   forget(sensorId: number): number {
+    // Any sensor's, for every read in flight: which sensors a read covers is not worth tracking
+    // for an event this rare, and a read that is not cached costs one query next time.
+    this.#generation += 1;
     const prefix = `${String(sensorId)}:`;
     let dropped = 0;
     for (const key of this.#cache.keys()) {
@@ -230,6 +240,7 @@ export class ChannelResolver {
       return { ids, created: 0, droppedReadings: 0, droppedSensors: 0 };
     }
 
+    const generation = this.#generation;
     const wanted = [...missing.values()];
     const sensorIds = wanted.map((row) => row.sensorId);
     const keys = wanted.map((row) => row.key);
@@ -306,7 +317,7 @@ export class ChannelResolver {
         counterBits: row.counter_bits === 32 || row.counter_bits === 64 ? row.counter_bits : null,
       };
       ids.set(cacheKey, channel);
-      this.#remember(cacheKey, channel);
+      if (this.#generation === generation) this.#remember(cacheKey, channel);
     }
 
     let droppedReadings = 0;

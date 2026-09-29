@@ -20,12 +20,18 @@ export interface ForgetsOwners {
   clear(): void;
 }
 
+/** Runs the second pass of a clear. */
+type Later = (run: () => void) => void;
+
 export interface ResultCacheInvalidatorOptions {
   channels: ChannelResolver | ForgetsChannels;
   sensors?: ForgetsSensors;
   owners?: ForgetsOwners;
   logger: Logger;
-  /** How long after the transaction to invalidate a second time. See below. */
+  /**
+   * How long after the mutation to invalidate a second time, when its `Queryable` cannot say
+   * when it committed. See below.
+   */
   settleMs?: number;
 }
 
@@ -46,9 +52,22 @@ export interface ResultCacheInvalidatorOptions {
  * **Invalidated twice, deliberately.** The sink runs inside the transaction, before it commits.
  * A results batch that resolves the same channel in that window would read the pre-commit value
  * and cache it again, and the cache would then hold the old thresholds for ever — the failure
- * this class exists to prevent, reintroduced by the fix. So it forgets immediately, and again a
- * moment after the transaction can be expected to have settled. Forgetting is idempotent and
- * costs one query on the next batch, so doing it twice is free; doing it once is a race.
+ * this class exists to prevent, reintroduced by the fix. So it forgets immediately, and again
+ * once the transaction has committed. Forgetting is idempotent and costs one query on the next
+ * batch, so doing it twice is free; doing it once is a race.
+ *
+ * **The second time is after the commit, not after a delay** (`P-240`). It used to be a timer,
+ * 250 ms after the sink ran, on the grounds that a transaction could be expected to have settled
+ * by then. A move need not have: the sinks after this one do tree-wide work inside the same
+ * transaction, and a batch that read the committed, pre-move tree after the timer and before the
+ * commit cached the old owner with nothing left to clear it. The probe the sensors were moved to
+ * was then refused as `moved`, silently, until the next move anywhere. `afterCommit` is `U-02`'s
+ * hook and `probes/notifier.ts` defers to it for the same reason. The timer remains for a
+ * `Queryable` without it, which is a caller outside a transaction.
+ *
+ * **A read in flight across the second clear is not cached either.** Each cache counts its
+ * clears and keeps what a read brought back only if none happened while it ran, so a read that
+ * began before the commit cannot put the old value back after it.
  */
 export class ResultCacheInvalidator implements AuditSink {
   readonly #channels: ForgetsChannels;
@@ -66,9 +85,10 @@ export class ResultCacheInvalidator implements AuditSink {
     this.#settleMs = options.settleMs ?? 250;
   }
 
-  record(_q: Queryable, _actor: Actor, mutations: readonly Mutation[], _at: Date): Promise<void> {
+  record(q: Queryable, _actor: Actor, mutations: readonly Mutation[], _at: Date): Promise<void> {
     // Nothing here awaits or touches the database: this runs inside the caller's transaction,
     // and a mutation must not get slower because a cache needed clearing.
+    const later = this.#afterCommitOf(q);
     for (const mutation of mutations) {
       // Any change to a channel, by prefix rather than by listing the actions. Every
       // `channel.*` mutation carries the sensor's id, and the alternative — three names to keep
@@ -78,7 +98,7 @@ export class ResultCacheInvalidator implements AuditSink {
       // never about a channel; the guard is what makes the prefix test type-safe as well as
       // correct.
       if (mutation.action.startsWith('channel.') && mutation.objectId !== null) {
-        this.#forgetSensor(mutation.objectId);
+        this.#forgetSensor(mutation.objectId, later);
       } else if (
         mutation.action === 'setting.set' ||
         mutation.action === 'setting.reverted' ||
@@ -89,11 +109,11 @@ export class ResultCacheInvalidator implements AuditSink {
         // affected subtree resolved: working out which sensors those are means walking the tree
         // inside the mutation's own transaction, and re-resolving them costs one query for the
         // whole next batch. The precise version would cost more than the imprecise one.
-        this.#forgetPolicies();
+        this.#forgetPolicies(later);
         // And which probe may report a sensor is exactly what a move changes (`P-228`). All of
         // it, for the same reason: a group's move carries every sensor beneath it, and working
         // out which those are is a walk inside the mover's transaction.
-        if (mutation.action === 'object.moved') this.#forgetOwners();
+        if (mutation.action === 'object.moved') this.#forgetOwners(later);
       } else if (mutation.action === 'object.deleted') {
         // A subtree delete can destroy thousands of sensors, and forgetting them one at a time
         // would be a scan of the whole cache per sensor inside a transaction. Dropping the lot
@@ -101,61 +121,79 @@ export class ResultCacheInvalidator implements AuditSink {
         // is not. Without it, a spooled result for a deleted sensor resolves to a channel id
         // that no longer exists and writes an orphaned reading instead of being counted as a
         // drop.
-        this.#forgetEverything();
+        this.#forgetEverything(later);
       }
     }
     return Promise.resolve();
   }
 
-  /** Stops the deferred pass. For a shutdown that must not keep a timer alive. */
+  /** Stops the second pass. For a shutdown that must not keep a timer alive. */
   stop(): void {
     this.#stopped = true;
   }
 
-  #forgetSensor(sensorId: number): void {
+  #forgetSensor(sensorId: number, later: Later): void {
     const dropped = this.#channels.forget(sensorId);
     if (dropped > 0) {
       this.#logger.debug({ sensorId, channels: dropped }, 'forgot a sensor’s cached channels');
     }
-    this.#later(() => {
+    later(() => {
       this.#channels.forget(sensorId);
     });
   }
 
-  #forgetPolicies(): void {
+  #forgetPolicies(later: Later): void {
     this.#sensors?.forgetPolicies();
-    this.#later(() => {
+    later(() => {
       this.#sensors?.forgetPolicies();
     });
   }
 
-  #forgetOwners(): void {
+  #forgetOwners(later: Later): void {
     this.#owners?.clear();
-    this.#later(() => {
+    later(() => {
       this.#owners?.clear();
     });
   }
 
-  #forgetEverything(): void {
+  #forgetEverything(later: Later): void {
     this.#channels.clear();
     this.#sensors?.clear();
     // A deleted sensor has no owner, and a result for one must read as `unknown` rather than as
     // the probe it used to be under (`P-228`).
     this.#owners?.clear();
-    this.#later(() => {
+    later(() => {
       this.#channels.clear();
       this.#sensors?.clear();
       this.#owners?.clear();
     });
   }
 
-  #later(run: () => void): void {
-    if (this.#stopped) return;
-    const timer = setTimeout(() => {
-      if (!this.#stopped) run();
-    }, this.#settleMs);
-    // Never a reason to hold the process open: a cache in a process that is exiting is about to
-    // stop existing anyway.
-    timer.unref();
+  /**
+   * When the second pass runs: once `q`'s transaction has committed, and never if it rolls back,
+   * since a rollback changed nothing a cache could hold. A timer only for a `Queryable` that
+   * cannot tell.
+   */
+  #afterCommitOf(q: Queryable): Later {
+    const run = (fn: () => void): void => {
+      if (!this.#stopped) fn();
+    };
+    if (q.afterCommit !== undefined) {
+      const afterCommit = q.afterCommit.bind(q);
+      return (fn) => {
+        afterCommit(() => {
+          run(fn);
+        });
+      };
+    }
+    return (fn) => {
+      if (this.#stopped) return;
+      const timer = setTimeout(() => {
+        run(fn);
+      }, this.#settleMs);
+      // Never a reason to hold the process open: a cache in a process that is exiting is about
+      // to stop existing anyway.
+      timer.unref();
+    };
   }
 }

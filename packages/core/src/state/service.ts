@@ -211,6 +211,12 @@ export class SensorStateService {
    * policies for no reason at all.
    */
   readonly #policies = new Map<number, FailurePolicy>();
+  /**
+   * Counts the times `#policies` was emptied, so a resolve that one overtook is used for its own
+   * batch and not cached (`P-240`). The second forget runs after the edit or the move commits,
+   * and a resolve that began before it read the old setting.
+   */
+  #policyGeneration = 0;
 
   #resultsApplied = 0;
   #resultsStale = 0;
@@ -247,6 +253,7 @@ export class SensorStateService {
   /** For tests, and for whatever invalidates a sensor's configuration in a later phase. */
   clear(): void {
     this.#cache.clear();
+    this.#policyGeneration += 1;
     this.#policies.clear();
   }
 
@@ -261,6 +268,7 @@ export class SensorStateService {
    * imprecise one.
    */
   forgetPolicies(): void {
+    this.#policyGeneration += 1;
     this.#policies.clear();
   }
 
@@ -288,7 +296,7 @@ export class SensorStateService {
       else existing.push(result);
     }
 
-    await this.#warm([...bySensor.keys()]);
+    const resolved = await this.#warm([...bySensor.keys()]);
 
     const transitions: StateTransition[] = [];
     const runtimes: RuntimeWrite[] = [];
@@ -323,7 +331,7 @@ export class SensorStateService {
             message: result.message,
             channel: result.channels?.verdict ?? null,
           },
-          this.#policies.get(sensorId) ?? this.#fallback,
+          resolved.get(sensorId) ?? this.#policies.get(sensorId) ?? this.#fallback,
         );
         this.#resultsApplied += 1;
         moved = true;
@@ -744,11 +752,19 @@ export class SensorStateService {
     };
   }
 
-  async #warm(sensorIds: readonly number[]): Promise<void> {
+  /**
+   * Loads what `decide` needs that is not cached, and returns the policies it resolved.
+   *
+   * **Returned as well as cached**, because a forget may overtake the resolve, and then the
+   * answer is not cached (`P-240`). It is still the best this batch has, and the batch must use
+   * it: falling back to the default policy is `P-86`'s false transition.
+   */
+  async #warm(sensorIds: readonly number[]): Promise<ReadonlyMap<number, FailurePolicy>> {
     const runtimes = sensorIds.filter((id) => !this.#cache.has(id));
     const policies =
       this.#settings === undefined ? [] : sensorIds.filter((id) => !this.#policies.has(id));
-    if (runtimes.length === 0 && policies.length === 0) return;
+    if (runtimes.length === 0 && policies.length === 0) return new Map();
+    const generation = this.#policyGeneration;
 
     // Concurrently: they are independent reads of different tables, and a cold batch should
     // cost one round trip's latency rather than two.
@@ -764,9 +780,15 @@ export class SensorStateService {
     ]);
 
     for (const [id, runtime] of loaded) this.#remember(id, runtime);
+    const fresh = new Map<number, FailurePolicy>();
     for (const [id, setting] of resolved) {
-      remember(this.#policies, id, this.#policyFrom(setting.value), this.#maxCached);
+      const policy = this.#policyFrom(setting.value);
+      fresh.set(id, policy);
+      if (this.#policyGeneration === generation) {
+        remember(this.#policies, id, policy, this.#maxCached);
+      }
     }
+    return fresh;
   }
 
   #remember(sensorId: number, runtime: SensorRuntime): void {

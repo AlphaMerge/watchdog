@@ -6250,7 +6250,7 @@ because each is a decision rather than a defect:
       - two probes' sets holding one sensor: settling one leaves it frozen, with no thaw issued.
       Mutants as usual.
 
-- [ ] **P-240 — the ownership cache can keep a moved sensor's old probe** · S · P-228 · Found in
+- [x] **P-240 — the ownership cache can keep a moved sensor's old probe** · S · P-228 · Found in
       review round four (`findings/2026-09-29-review-round-4.md`, `P-240`). Medium.
       `ResultCacheInvalidator.record` clears the ownership cache at once and again on a
       250 ms timer (`invalidation.ts:66`). The timer is not tied to the move's commit. If a
@@ -6265,6 +6265,53 @@ because each is a decision rather than a defect:
       `probes/notifier.ts` does, and the timer is kept only for a `Queryable` without it. Test
       with a stub `afterCommit` and fake timers: an admit between the move and its commit
       caches the old owner, and the post-commit clear takes it out. Mutants as usual.
+
+      **Done.** `ResultCacheInvalidator` still clears inside the mutation's transaction, and now
+      clears a second time from `q.afterCommit`, as `probes/notifier.ts` does:
+      - **All three clears.** That covers the owners on a move, the policies on a setting change
+        or a move, and a sensor's channels, and everything on a delete.
+      - **The 250 ms timer remains only for a `Queryable` without `afterCommit`**, which is a
+        caller outside a transaction.
+      - **Rollback.** A transaction that rolls back runs no second pass, which is `tx`'s contract,
+        and changes nothing a cache could hold.
+
+      **One step further than the ticket: a read in flight across the second clear.** The
+      ownership cache already had the guard, and the channel and policy caches did not.
+      - **The race.** A channel or policy read that began before the commit, and finished after
+        the post-commit clear, put the old value back. That is the same silent failure, in a
+        narrower window. The timer had it too.
+      - **The fix.** `ChannelResolver` and `SensorStateService` now count their clears, and keep a
+        read only if none happened while it ran.
+      - **Returned even when not cached.** A policy read a clear overtook is still returned to
+        the batch that asked for it. Falling back to the default policy there would be `P-86`'s
+        false transition.
+
+      **Tests.**
+      - `cache-invalidation.test.ts` needs no database: a stub `Queryable` collects the commit
+        hooks, and `node:test`'s fake timers stand in for the clock. It covers:
+        - each cache cleared at the commit, and not by a timer, with a second of sinks between;
+        - nothing a second time for a rollback;
+        - the timer for a caller with no transaction;
+        - no second pass after `stop()`;
+        - the finding's own sequence against a real `SensorOwnership`: A's batch between the old
+          timer and the commit caches A, and after the commit B is admitted, where it used to be
+          refused as `moved`;
+        - a channel read overtaken by a forget, and by a clear: used for its batch, and not
+          cached.
+      - `state-ingestion.test.ts`: a policy resolve overtaken by `forgetPolicies` and by `clear`
+        is used for its batch (Down at the first failure under `retryWarnings = 0`), and not
+        cached.
+
+      **Mutations caught: 15 of 15.** Each was applied alone, built, and run against its own tests.
+      - Four take out a part of the invalidator: the commit hook, the hook's body, `stop()`
+        and the timer fallback.
+      - Four take out a second pass, one each: channels, policies, owners, everything.
+      - Seven take out a part of the new guards: the channel cache's count on a clear and on a
+        forget, and its check before caching; the policy cache's count on a forget and on a
+        clear, and its check before caching; and the batch using what it resolved.
+
+      The first version of "always the timer" did not compile, because removing the check also
+      removed TypeScript's narrowing, so it was rewritten to fall through to the timer.
 
 - [ ] **P-241 — two probe-ownership edges: history read through an ancestor, and discovery after
       its group moves** · S · P-228 · Found in review round four
