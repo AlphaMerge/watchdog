@@ -419,10 +419,20 @@ protocol 20 the probe's heartbeats split time between them exactly:
 
 - **Each heartbeat reports the lowest since the last one the core acknowledged.** A heartbeat
   lost as the link dropped is carried by the next, and an outage by the first after it.
-- **Each record takes every heartbeat since the record before.** So every reading lands in exactly
-  one record, whatever the heartbeat interval. A squeeze is never missed between records and never
-  counted twice. It does show in two records when it lasted across the moment between them,
-  because it was low in both.
+- **Each record takes every heartbeat since the record before.** So every reading lands in a
+  record, whatever the heartbeat interval, and a squeeze is never missed between records. It shows
+  in two when it lasted across the moment between them, because it was low in both.
+- **Delivery is at least once, so a reading can land in two records** (`P-245`). The probe sends
+  a low again until the core's acknowledgement of it arrives. If that acknowledgement is lost as
+  the link drops, or is still unread because the probe stalled for a heartbeat interval or more,
+  the next heartbeat carries the low again and the next record repeats it. A Warning or Down it
+  caused then lasts one record longer, or comes back for one record. A low that did not happen is
+  never recorded.
+- **A heartbeat no record takes is let go** (`P-245`). That is one that arrived while the probe
+  had no Probe Health sensor, while its sensor was withheld or named no probe, while the core was
+  still waiting for the probe after a start, or during a sweep that failed. Those channels are a
+  gap for that span. A low from then is never carried into a later record, which would give it
+  a time it did not happen at.
 - **A low arrives up to one heartbeat late**, in the record after the heartbeat that carried it.
   This is not a fault.
 - **At a heartbeat longer than 30 s, every other record has no heartbeat of its own**, and those

@@ -12,6 +12,7 @@ import {
   ProbeHealthService,
   ProbeHealthTargets,
   readingsFrom,
+  type ProbeHealthServiceOptions,
   type ProbeHealthSources,
 } from '../src/health/probe-health.js';
 import { ChannelResolver } from '../src/ingestion/channels.js';
@@ -599,25 +600,25 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       memoryLimitMb: 4_096,
     };
 
-    /** One sweep; what it recorded of memory for each sensor, and what it took from the fold. */
+    /** One sweep; what it recorded of memory for each sensor, and how often it drained the folds. */
     async function swept(
       link: ProbeLink,
-      takeMemory?: (probeObjectId: number) => MemoryFold | undefined,
-    ): Promise<{ memory: Map<number, Record<string, number>>; taken: number[] }> {
+      folds?: ReadonlyMap<number, MemoryFold>,
+    ): Promise<{ memory: Map<number, Record<string, number>>; drained: number }> {
       const results: CheckResult[] = [];
-      const taken: number[] = [];
+      let drained = 0;
       await new ProbeHealthService({
         vouching: everyVoucherHolds,
         db,
         logger: silent,
         sources: {
           link: () => link,
-          ...(takeMemory === undefined
+          ...(folds === undefined
             ? {}
             : {
-                takeMemory: (probeObjectId: number) => {
-                  taken.push(probeObjectId);
-                  return takeMemory(probeObjectId);
+                drainMemory: () => {
+                  drained += 1;
+                  return folds;
                 },
               }),
         },
@@ -637,12 +638,12 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
           ),
         ]),
       );
-      return { memory, taken };
+      return { memory, drained };
     }
 
-    it('records a protocol-20 probe’s lows since the last record, taken once for all its sensors', async () => {
+    it('records a protocol-20 probe’s lows since the last record, drained once for all its sensors', async () => {
       // Two sensors report on this probe. The second must not find the fold already emptied.
-      const { memory, taken } = await swept(connected(), () => FOLD);
+      const { memory, drained } = await swept(connected(), new Map([[probeId, FOLD]]));
       const expected = {
         memoryAvailable: 8.5,
         memoryAvailableBytes: 700,
@@ -651,11 +652,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       };
       assert.deepEqual(memory.get(sensorId), expected);
       assert.deepEqual(memory.get(orphanId), expected, 'the sensor naming it records the same');
-      assert.deepEqual(
-        taken.filter((id) => id === probeId),
-        [probeId],
-        'taken once in the sweep',
-      );
+      assert.equal(drained, 1, 'drained once in the sweep');
       // What a scrape or the API reads is still the latest report.
       const { reading } = build(() => connected()).read(probeId);
       assert.equal(reading['memoryAvailable'], 23.4);
@@ -664,12 +661,12 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
     it('gaps them when a protocol-20 probe reported nothing since the last record', async () => {
       // At a heartbeat longer than thirty seconds, every other record has no report of its own;
       // repeating the last one would be a reading presented as new that nobody took.
-      const { memory } = await swept(connected(), () => undefined);
+      const { memory } = await swept(connected(), new Map());
       assert.deepEqual(memory.get(sensorId), {});
     });
 
     it('records a probe below 20 by its latest report, its last thirty seconds, as before', async () => {
-      const { memory } = await swept(connected({ protocolVersion: 19 }), () => undefined);
+      const { memory } = await swept(connected({ protocolVersion: 19 }), new Map());
       assert.deepEqual(memory.get(sensorId), {
         memoryAvailable: 23.4,
         memoryAvailableBytes: 1_860,
@@ -679,9 +676,12 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
     });
 
     it('records what a dropped probe reported before it dropped, once', async () => {
-      const { memory } = await swept({ connected: false }, () => ({ memoryAvailablePercent: 8.5 }));
+      const { memory } = await swept(
+        { connected: false },
+        new Map([[probeId, { memoryAvailablePercent: 8.5 }]]),
+      );
       assert.deepEqual(memory.get(sensorId), { memoryAvailable: 8.5 });
-      const after = await swept({ connected: false }, () => undefined);
+      const after = await swept({ connected: false }, new Map());
       assert.deepEqual(after.memory.get(sensorId), {}, 'and a gap once it has been recorded');
     });
 
@@ -696,14 +696,14 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       await db.query('UPDATE probe_config SET is_local = true WHERE object_id = $1', [probeId]);
       try {
         const own = { memoryLimitUsage: 91, memoryLimit: 4_096 };
-        const { memory } = await swept(connected(), () => FOLD);
+        const { memory } = await swept(connected(), new Map([[probeId, FOLD]]));
         assert.deepEqual(memory.get(sensorId), own);
-        const dropped = await swept({ connected: false }, () => FOLD);
+        const dropped = await swept({ connected: false }, new Map([[probeId, FOLD]]));
         assert.deepEqual(dropped.memory.get(sensorId), own, 'and once it has dropped');
       } finally {
         await db.query('UPDATE probe_config SET is_local = false WHERE object_id = $1', [probeId]);
       }
-      const remote = await swept(connected(), () => FOLD);
+      const remote = await swept(connected(), new Map([[probeId, FOLD]]));
       assert.equal(remote.memory.get(sensorId)?.['memoryAvailable'], 8.5, 'the control');
     });
   });
@@ -798,6 +798,130 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
         await db.query('UPDATE probe_config SET is_local = false WHERE object_id = $1', [probeId]);
       }
     });
+  });
+
+  describe('a low no record takes (P-245)', () => {
+    /** The endpoint's folds as a sweep sees them: lows folded in by probe, drained whole. */
+    class Folds {
+      readonly #folds = new Map<number, MemoryFold>();
+      drains = 0;
+      fold(probe: number, memoryAvailablePercent: number): void {
+        const was = this.#folds.get(probe)?.memoryAvailablePercent ?? memoryAvailablePercent;
+        this.#folds.set(probe, {
+          memoryAvailablePercent: Math.min(was, memoryAvailablePercent),
+        });
+      }
+      readonly drain = (): ReadonlyMap<number, MemoryFold> => {
+        this.drains += 1;
+        const all = new Map(this.#folds);
+        this.#folds.clear();
+        return all;
+      };
+    }
+
+    const sweeper = (
+      folds: Folds,
+      over: Partial<ProbeHealthServiceOptions> = {},
+      link: () => ProbeLink = () => connected(),
+    ): ProbeHealthService =>
+      new ProbeHealthService({
+        vouching: everyVoucherHolds,
+        db,
+        logger: silent,
+        ingest: () => Promise.resolve(),
+        now: () => new Date('2026-08-28T00:00:25Z'),
+        ...over,
+        sources: { link, drainMemory: folds.drain },
+      });
+
+    const rows = (sensors: readonly Record<string, unknown>[]): Database =>
+      ({
+        query: () => Promise.resolve(sensors),
+        tx: () => Promise.resolve({}),
+      }) as unknown as Database;
+
+    /** Each way a sweep can pass a probe by without recording it. */
+    const unrecorded: [string, (folds: Folds) => Promise<unknown>][] = [
+      ['no Probe Health sensor at all', (folds) => sweeper(folds, { db: rows([]) }).sweep()],
+      [
+        'sensors, but none on this probe',
+        (folds) =>
+          sweeper(folds, { db: rows([{ id: '98', params: {}, probe_id: '424242' }]) }).sweep(),
+      ],
+      [
+        'its sensors withheld (A-29)',
+        (folds) =>
+          sweeper(folds, {
+            vouching: {
+              refusals: () =>
+                Promise.resolve(
+                  new Map([
+                    [sensorId, 'withheld'],
+                    [orphanId, 'withheld'],
+                  ]),
+                ),
+              settle: () => Promise.resolve(0),
+            },
+          }).sweep(),
+      ],
+      [
+        'a sensor that resolves to no probe',
+        (folds) => sweeper(folds, { db: rows([{ id: '99', params: {}, probe_id: null }]) }).sweep(),
+      ],
+      [
+        'the boot grace (M-22)',
+        (folds) =>
+          sweeper(folds, {
+            delivery: { verdictFor: () => null, awaitingFirstConnect: () => true },
+          }).sweep(),
+      ],
+      [
+        'a sweep that failed',
+        (folds) =>
+          assert.rejects(
+            sweeper(folds, {
+              db: {
+                query: () => Promise.reject(new Error('the database went away')),
+              } as unknown as Database,
+            }).sweep(),
+          ),
+      ],
+    ];
+
+    /** What the next ordinary sweep records for the probe's own sensor. */
+    async function recorded(folds: Folds): Promise<number | undefined> {
+      const results: CheckResult[] = [];
+      await sweeper(folds, {
+        ingest: (batch) => {
+          results.push(...batch);
+          return Promise.resolve();
+        },
+      }).sweep();
+      const mine = results.find((result) => result.sensorId === sensorId);
+      return (
+        mine?.channels.find((channel) => channel.key === 'memoryAvailable')?.value ?? undefined
+      );
+    }
+
+    it('the control: a low since the last sweep is recorded, however many reports came after', async () => {
+      const folds = new Folds();
+      folds.fold(probeId, 4);
+      folds.fold(probeId, 60);
+      assert.equal(await recorded(folds), 4);
+    });
+
+    for (const [name, pass] of unrecorded) {
+      it(`lets a low go when the sweep records nothing of its probe: ${name}`, async () => {
+        // Monday's 4% under a probe nobody was recording, and Thursday's first record with 60%
+        // free. Carried over, it was a fresh Down for a squeeze three days over.
+        const folds = new Folds();
+        folds.fold(probeId, 4);
+        await pass(folds);
+        assert.equal(folds.drains, 1, 'drained by the sweep that recorded nothing');
+        folds.fold(probeId, 60);
+        assert.equal(await recorded(folds), 60);
+      });
+    }
   });
 
   describe('a probe that is not answering', () => {

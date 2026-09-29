@@ -306,7 +306,7 @@ export type ProbeLink =
     };
 
 /**
- * A probe's memory lows over every heartbeat since Probe Health last recorded it (`P-219`).
+ * A probe's memory lows over every heartbeat since Probe Health's last sweep (`P-219`).
  *
  * The lowest available and the highest limit usage the reports carried, and the ceiling as last
  * reported, which is a size rather than a low. Each field is absent when no report carried it, and
@@ -493,7 +493,7 @@ export class ProbeEndpoint {
   readonly #logger: Logger;
   readonly #sessions = new Map<string, ProbeSession>();
   /**
-   * Memory lows since Probe Health last recorded each probe, by probe object (`P-219`).
+   * Memory lows since Probe Health's last sweep, by probe object (`P-219`).
    *
    * **Beside the session, not in it**, because a link that drops between two records has already
    * had its last reports acknowledged: the probe has let go of those lows, and a fold that died
@@ -1555,17 +1555,24 @@ export class ProbeEndpoint {
   }
 
   /**
-   * The memory lows this probe reported since the last call, and start again (`P-219`).
+   * Every probe's memory lows since the last call, and start again (`P-219`).
    *
-   * **Probe Health's sweep calls this, and nothing else may.** A scrape or an API read takes the
-   * latest report from `linkFor`; one that took this would empty the fold and leave the record a
-   * gap where the low belonged. Undefined when nothing was folded: a probe below protocol 20,
-   * which reports a window and is recorded by its latest report, or one that sent nothing since.
+   * **Probe Health's sweep calls this, once a sweep, and nothing else may.** A scrape or an API
+   * read takes the latest report from `linkFor`; one that took this would empty the fold and leave
+   * the record a gap where the low belonged. A probe is absent when nothing was folded: one below
+   * protocol 20, which reports a window and is recorded by its latest report, or one that sent
+   * nothing since.
+   *
+   * **All of them, whether the sweep records them or not** (`P-245`). Taken probe by probe where
+   * a record was written, a fold was kept for as long as nothing recorded its probe — no Probe
+   * Health sensor on it yet, or one withheld — and the first record after gave it a low from days
+   * before, stamped now: a Down for a squeeze long over. Drained whole, a fold holds only the lows
+   * since the last sweep.
    */
-  takeMemory(probeObjectId: number): MemoryFold | undefined {
-    const fold = this.#memoryFolds.get(probeObjectId);
-    this.#memoryFolds.delete(probeObjectId);
-    return fold;
+  drainMemory(): Map<number, MemoryFold> {
+    const folds = new Map(this.#memoryFolds);
+    this.#memoryFolds.clear();
+    return folds;
   }
 
   #foldMemory(session: ProbeSession, health: ProbeHealthReport): void {

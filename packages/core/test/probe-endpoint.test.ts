@@ -1641,7 +1641,7 @@ describe(
         await probe.waitFor((m) => m.type === 'heartbeat-ack' && m.seq === seq);
       };
 
-      it('folds every report of a protocol-20 probe until the sweep takes them, then starts again', async () => {
+      it('folds every report of a protocol-20 probe until the sweep drains them, then starts again', async () => {
         await withProbe(new StubSource(), async (probe, endpoint) => {
           await waitUntil(() => endpoint.linkFor(7).connected);
           await beat(probe, 1, {
@@ -1661,14 +1661,22 @@ describe(
             memoryLimitUsagePercent: 50,
             memoryLimitMb: 2_048,
           });
-          assert.deepEqual(endpoint.takeMemory(7), {
-            memoryAvailablePercent: 12,
-            memoryAvailableMb: 960,
-            memoryLimitUsagePercent: 70,
-            // A size, not a low: the ceiling as last reported.
-            memoryLimitMb: 2_048,
-          });
-          assert.equal(endpoint.takeMemory(7), undefined, 'taken once, and then nothing since');
+          assert.deepEqual(
+            endpoint.drainMemory(),
+            new Map([
+              [
+                7,
+                {
+                  memoryAvailablePercent: 12,
+                  memoryAvailableMb: 960,
+                  memoryLimitUsagePercent: 70,
+                  // A size, not a low: the ceiling as last reported.
+                  memoryLimitMb: 2_048,
+                },
+              ],
+            ]),
+          );
+          assert.equal(endpoint.drainMemory().size, 0, 'drained once, and then nothing since');
           const link = endpoint.linkFor(7);
           assert.ok(link.connected);
           assert.equal(
@@ -1687,7 +1695,7 @@ describe(
           await beat(probe, 1, { memoryAvailablePercent: 8.5 });
           probe.close();
           await waitUntil(() => !endpoint.linkFor(7).connected);
-          assert.deepEqual(endpoint.takeMemory(7), { memoryAvailablePercent: 8.5 });
+          assert.deepEqual(endpoint.drainMemory().get(7), { memoryAvailablePercent: 8.5 });
         });
       });
 
@@ -1697,7 +1705,7 @@ describe(
           async (probe, endpoint) => {
             await waitUntil(() => endpoint.linkFor(7).connected);
             await beat(probe, 1, { memoryAvailablePercent: 12 });
-            assert.equal(endpoint.takeMemory(7), undefined);
+            assert.equal(endpoint.drainMemory().size, 0);
           },
           { protocolVersion: 19 },
         );

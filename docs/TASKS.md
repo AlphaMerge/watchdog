@@ -5613,6 +5613,16 @@ because each is a decision rather than a defect:
       - a dropped probe's fold ignored (1);
       - the fold laid over the local probe's machine pair (1).
 
+      **Amended by `P-245`** (review round 4b). Two claims above did not hold.
+      - **"Each reading in exactly one record" is at least one.** Suppose the core folded and
+        acknowledged a heartbeat, but the probe never read the ack: it was lost as the link
+        dropped, or still unread after a stall of a heartbeat interval. The next heartbeat then
+        carries that low again, and the next record repeats it. Exactly once would need each low
+        tagged with its seq on the wire, and a probe process identity the core does not have.
+        That is a protocol version to save one record of a low that did happen.
+      - **The fold was taken probe by probe, where a record was written.** So a probe that no
+        sweep recorded kept its lows for days. `drainMemory` now empties every fold once a sweep.
+
 - [x] **P-226 — a backfill after a long replay rebuilt every channel's history from one channel's** ·
       M · S-06, R-03 · Found in the round-3 review. A backfill cleared its window **for every
       channel** and rebuilt it from raw. A probe replaying twenty days into a core keeping seven
@@ -6462,7 +6472,7 @@ because each is a decision rather than a defect:
       the entry says which of the two it is and which fix, and the test shows one alarm for one
       saturation.
 
-- [ ] **P-245 — `P-219`'s memory fold outlives its record window, and is folded twice** · S ·
+- [x] **P-245 — `P-219`'s memory fold outlives its record window, and is folded twice** · S ·
       P-219 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `P-245`).
       - **Medium** (`probe-endpoint.ts:1567`), found by two areas. `#foldMemory` keeps a running
         minimum per probe, and only a Probe Health record takes it. A probe with no Probe Health,
@@ -6477,6 +6487,43 @@ because each is a decision rather than a defect:
       idempotent per heartbeat seq, on protocol 23 (allocated if you take it), or accepted as
       at-least-once with the reason in the entry and administration.md. Tests for each of the
       four ways into the stale fold. Mutants as usual.
+
+      **P-245 outcome.**
+      - **The endpoint's `drainMemory()` replaces `takeMemory(probe)`.** It takes every probe's
+        fold at once and empties them all. Probe Health's sweep calls it first, before anything
+        that can skip a record, and shares the result among the sensors on each probe.
+      - **So a fold holds only the lows since the last sweep.** A low no record takes is let go,
+        and is a gap. That covers every way the sweep can pass a probe by: no sensor on it, no
+        sensors at all, a withheld sensor, one naming no probe, `M-22`'s boot grace, and a sweep
+        that failed, which the findings did not list.
+      - **The double count is accepted as at-least-once, and protocol 23 is not taken.** A low is
+        folded twice only when the probe never read the ack for its heartbeat. The next record
+        then repeats a low that did happen, so a Warning or Down lasts one record longer, or
+        comes back for one record.
+        - Exactly once would need each unacknowledged low on the wire with its seq. The core
+          would keep the highest seq it folded, and would need a probe process identity to reset
+          that after a restart, because the seq starts again. The protocol has no such identity.
+        - That is two protocol changes to save one record, in a case that needs a lost or unread
+          ack to meet a low near a limit.
+        - `administration.md` says it, and says what a heartbeat no record takes becomes.
+          `P-219`'s outcome is amended where it claimed exactly once.
+
+      **Tests.**
+      - `probe-health.test.ts` 7, in a table: a fold of 4% and a sweep that records nothing of
+        the probe, then a report of 60% and an ordinary sweep, which records 60 and not 4. There
+        is one row for each way in above, and each asserts the skipping sweep drained. The
+        control: 4 then 60 with no sweep between records 4.
+      - The 6 `P-219` fold tests are moved to the drain. They take a map, and "taken once for its
+        two sensors" is "drained once in the sweep".
+      - `probe-endpoint.test.ts`: the fold test drains a map, and a second drain is empty.
+
+      Mutation 3/3, each alone against its own file:
+      - the drain after the no-sensor early return (2 rows: no sensors, and the failed sweep);
+      - the drain on the first record written, as the take was (5 rows);
+      - a drain that does not empty (the endpoint's fold test).
+
+      The "none on this probe" row survives both sweep mutants. A per-probe take is the only
+      mutant it would kill, and a drain with no arguments has no way to express one.
 
 - [ ] **P-246 — syslog and flow sensors compare the sender's address with a hostname** · S ·
       T-20, B-04 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `P-246`).

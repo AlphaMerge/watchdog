@@ -51,11 +51,12 @@ export interface ProbeHealthSources {
    */
   frozenSensors?: (probeObjectId: number) => number;
   /**
-   * The memory lows a probe at protocol 20 reported since the last call, from the endpoint's
-   * `takeMemory` (`P-219`). Taken by the sweep and by nothing else. Absent on a build without it,
-   * and then every probe is recorded by its latest report, as below 20.
+   * The memory lows every probe at protocol 20 reported since the last call, by probe, from the
+   * endpoint's `drainMemory` (`P-219`). Drained by the sweep, once a sweep, and by nothing else
+   * (`P-245`). Absent on a build without it, and then every probe is recorded by its latest
+   * report, as below 20.
    */
-  takeMemory?: (probeObjectId: number) => MemoryFold | undefined;
+  drainMemory?: () => ReadonlyMap<number, MemoryFold>;
 }
 
 export interface ProbeHealthServiceOptions {
@@ -412,6 +413,13 @@ export class ProbeHealthService {
    */
   async sweep(): Promise<number> {
     this.#sweeps += 1;
+    // **Every fold, every sweep, before anything can skip a record** (`P-245`). A low this sweep
+    // does not record is let go, and is a gap: its probe had no sensor yet, its sensor was
+    // withheld or names no probe, the core had just started (`M-22`), there are no sensors at
+    // all, or the sweep failed. Taken only where a record was written, a fold kept every low of
+    // that time and gave the first record after it a squeeze long over, stamped now. Shared by
+    // every sensor on one probe: two sensors reporting on it record the same lows (`P-219`).
+    const folds = this.#sources.drainMemory?.();
     const sensors = await readHealthSensors(this.#db);
     // Settled even when there are none, so a sensor withheld last sweep and deleted since is let
     // go rather than held Unknown for ever.
@@ -443,10 +451,8 @@ export class ProbeHealthService {
 
     const at = this.#now().toISOString();
     const results: CheckResult[] = [];
-    // Taken once per probe per sweep, and shared: two sensors reporting on one probe record the
-    // same lows, and the second must not find the fold already emptied by the first (`P-219`).
-    const folds = new Map<number, MemoryFold | undefined>();
-    // The same for the log's drops: the second sensor would otherwise read a count of zero.
+    // The log's drops are taken once per probe per sweep, and shared like the folds: the second
+    // sensor on a probe would otherwise read a count of zero (`P-216` part 3).
     const logs = new Map<number, number | null>();
     for (const row of sensors) {
       const sensorId = Number(row.id);
@@ -537,7 +543,7 @@ export class ProbeHealthService {
     link: ProbeLink,
     latest: ProbeHealthReading,
     taken: {
-      folds: Map<number, MemoryFold | undefined>;
+      folds: ReadonlyMap<number, MemoryFold> | undefined;
       logs: Map<number, number | null>;
     },
     local: boolean,
@@ -552,9 +558,7 @@ export class ProbeHealthService {
       logDropped: local ? null : (taken.logs.get(probeId) ?? null),
     };
     const folds = taken.folds;
-    const take = this.#sources.takeMemory;
-    if (take === undefined) return reading;
-    if (!folds.has(probeId)) folds.set(probeId, take(probeId));
+    if (folds === undefined) return reading;
     const fold = folds.get(probeId);
     const folded = link.connected
       ? capabilitiesFor(link.protocolVersion).memorySinceLastReport
