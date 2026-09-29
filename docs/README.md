@@ -167,6 +167,7 @@ measurement is not a claim.
 - [The budgets after the review panel's twenty fixes](findings/2026-09-04-perf-budgets-after-the-panel.md) (`P-80`–`P-83`)
 - [The first run that skipped nothing: every criterion at full size](findings/2026-09-08-perf-budgets-full-criteria.txt) (`P-15`, `P-07`, `P-30`)
 - [Review round four: the night's security and alarm-volume commits, 22 defects](findings/2026-09-29-review-round-4.md) (`S-21`, `A-44`–`A-47`, `P-239`–`P-242`, `M-23`)
+- [Review round 4b: the landings since round four, and round four's gaps, 19 defects](findings/2026-09-29-review-round-4b.md) (`N-18`, `A-48`–`A-50`, `M-24`, `P-245`–`P-247`)
 
 ---
 

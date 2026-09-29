@@ -2974,6 +2974,24 @@ because each is a decision rather than a defect:
       dropping to zero and a simulated outage queueing nothing at all; then the fence down, the
       trigger back, and the outage arriving in MailHog.
 
+- [ ] **N-18 — a webhook subject outside Latin-1 fails the delivery, every retry** · S · N-08 ·
+      Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `N-18`). **High.**
+      `webhook.ts:77` puts the rendered subject in the `x-ms-subject` header with only CR and LF
+      removed. Node's `http.request` refuses a header value with any character above U+00FF, and
+      throws `ERR_INVALID_CHAR` synchronously. So an alarm fails before it is sent, and fails
+      again on every retry, whenever the subject holds any of these:
+      - a Cyrillic or CJK device name;
+      - an emoji in a sensor name;
+      - an em dash, which our own sensors' messages carry, and which `%lastvalue` and
+        `%previousstate` render when they have no value.
+
+      **Done when** no subject can fail a delivery. A subject outside printable ASCII travels
+      percent-encoded as UTF-8, flagged by `x-ms-subject-encoding: utf-8-percent`, and a
+      pure-ASCII subject is unchanged. The body already carries the full text. Also sweep every
+      other place a rendered value becomes a header value, including the other delivery
+      methods, and list each in the outcome. Tests: subjects with Cyrillic, CJK, an emoji, an em
+      dash and U+00FF itself, delivered to a test receiver and decoded back. Mutants as usual.
+
 ## Phase 5 — Web UI
 
 - [x] **U-01 — Frontend scaffold** · M · F-01 · React 19 + TypeScript + Vite 8, routing, design
@@ -5848,6 +5866,34 @@ because each is a decision rather than a defect:
       then fail raises no new alarm; factory B withheld leaves factory C not Down and not
       notifying. Mutants as usual.
 
+- [ ] **M-24 — `M-22`'s episode and its held set are not linked in every direction** · M · M-22,
+      M-17 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `M-24`).
+      - **Medium, lost alarms** (`reachability.ts:238`, `:326`). A probe that is lost while
+        carrying no sensors, and then gains some by a move, create or clone, holds them behind a
+        Probe Health alarm that is never armed. `lost()` returns before re-evaluating the probe
+        alarm when its held set is empty, and `resync` re-evaluates only the moved sensors. A
+        root trigger on Unknown only then hears nothing for the whole outage, or when the probe
+        comes back.
+      - **Low** (`engine.ts:503`). An episode that ends because the lost probe's devices were
+        moved away is cleared silently at the next repeat or escalation, or deleted with the
+        probe, and no all-clear goes out.
+      - **Low** (`episodes.ts:83`). Acknowledging Probe Health does not stop the episode alarm's
+        escalation or repeats: the view turns `down_acknowledged` into `unknown`.
+      - **Low** (`engine.ts:653`). Pausing Probe Health mid-loss cancels the episode alarm, and
+        the carried sensors stay held with no route to any trigger.
+
+      **Done when:**
+      - `resync`, `lost()` and `#online` re-evaluate a probe's alarms whenever its held set
+        changes, including to or from empty;
+      - an episode alarm whose episode has ended recovers with the episode-ended message, and is
+        never cleared silently;
+      - acknowledgement parks the episode alarm as it parks any other;
+      - pausing Probe Health mid-loss either re-decides the carried sensors unheld, or
+        administration.md and state-machine §7 say it stays silent. The entry says which, and
+        why.
+      One scenario test per case, per `M-17`, in `probe-episode-scenario.test.ts`, with each
+      asserted alarm asserted present first. Mutants as usual.
+
 - [x] **P-228 — any probe could report on any other probe's work** · M · R-01, R-04, R-09, D-01 ·
       Found reviewing ingestion's inputs. Nothing tied what a probe sent to what it had been given.
       The only check on a result was that its id named a sensor, so any approved probe could store
@@ -6215,6 +6261,60 @@ because each is a decision rather than a defect:
       scenario test drives a saturated, capped probe through Probe Health's sweep and ingestion,
       the entry says which of the two it is and which fix, and the test shows one alarm for one
       saturation.
+
+- [ ] **P-245 — `P-219`'s memory fold outlives its record window, and is folded twice** · S ·
+      P-219 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `P-245`).
+      - **Medium** (`probe-endpoint.ts:1567`), found by two areas. `#foldMemory` keeps a running
+        minimum per probe, and only a Probe Health record takes it. A probe with no Probe Health,
+        a withheld one, or one created days later therefore records a low from days before as
+        its first reading, which is a fresh Down.
+      - **Low** (`probe/src/health/report.ts:333`). A low the core already folded is folded
+        again when its ack has not reached the probe (a lost ack, or a stalled loop), so one
+        squeeze lands in two records.
+
+      **Done when** every sweep drains every fold, so a fold only ever holds the lows since the
+      last sweep, including on the no-sensor early return. The double count is either made
+      idempotent per heartbeat seq, on protocol 23 (allocated if you take it), or accepted as
+      at-least-once with the reason in the entry and administration.md. Tests for each of the
+      four ways into the stale fold. Mutants as usual.
+
+- [ ] **P-246 — syslog and flow sensors compare the sender's address with a hostname** · S ·
+      T-20, B-04 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `P-246`).
+      Medium. `syslog.ts:229` and `flow.ts:344` match `item.source` against the device's host
+      as literal strings. A device addressed by name therefore matches nothing, for ever:
+      - syslog.receiver stays Up at zero messages, so its limits can never fire;
+      - a flow sensor goes Down on every scan with "no flows arrived".
+      The SNMP-trap type already resolves the host (`addressesFor`, `snmp-trap.ts:242`).
+
+      **Done when** one resolver in `packages/sensors/src/support` serves all three types:
+      cached, skipping literal addresses, normalising `::ffff:` sources, and refusing with "did
+      not resolve" when a name resolves to nothing. Tests against the simulator harness, for a
+      device by name and by address, and for IPv4 and IPv6 senders. Mutants as usual.
+
+- [ ] **P-247 — the core's own clock: blamed on the probes, and four durations on the wall
+      clock** · M · P-231, P-232 · Found in review round 4b
+      (`findings/2026-09-29-review-round-4b.md`, `P-247`).
+      - **Medium** (`ingestion/service.ts:703`). A core whose clock is more than 15 minutes slow
+        refuses every probe's results as future-dated. Every sensor freezes in its last state,
+        and each of N Probe Health sensors warns twice that its probe's clock is at fault. One
+        fault, 2N warnings, all naming the wrong machine.
+      - **Low** (`ingestion/service.ts:659`). A result whose timestamp cannot be parsed and that
+        carries no readings, which is every failed check, is dropped and counted nowhere.
+      - **Low.** Three durations are timed on the wall clock: Core Health's `alarmOverdue`
+        (`scheduler.ts:280`), the API and public-share rate limiters (`hardening.ts:342`,
+        `shares.ts:73`), and the probe's discovery token bucket (`discovery/sweep.ts:247`). A
+        clock step reads as a stalled sweep, locks clients out, or freezes a discovery run.
+      - **Critic, unverified.** The login throttle's persisted timestamps keep an address blocked
+        across a backward step. Clamp future-dated values to now. Also check the four sites the
+        findings doc lists.
+
+      **Done when:**
+      - Core Health owns "the core's clock is behind" when the connected probes agree (two or
+        more), and the Probe Health clock warnings stand down while it does, as `M-21` does for
+        memory, with a scenario test;
+      - unparseable timestamps are counted on Core Health;
+      - every duration listed runs on a monotonic clock, or says why it can't.
+      Mutants as usual.
 
 - [x] **P-223 — the core's unlabelled metrics export a gap as zero** · S · P-14, H-12 · Found
       2026-09-28 in the round-2 review of `H-12`. The exporter's rule is that a gap is an absent
@@ -15460,6 +15560,53 @@ because each is a decision rather than a defect:
       - a proxy range wider than a floor is refused, with the floor stated;
       - `live()` applies the current idle timeout.
       Tests per the findings doc. Mutants as usual.
+
+- [ ] **A-48 — a program template's secret arguments follow a change of its visible arguments** ·
+      S · A-40 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `A-48`).
+      Medium. `PROGRAM_METHOD` (`methods.ts:253`) treats only `path` as the destination of
+      `secretArgs`. A template editor who has never seen the key changes
+      `--gateway https://sms.example/api` to their own URL, leaves the secret out of the PUT,
+      and test-sends. The stored key goes to the new gateway, and the audit records no secret
+      cleared.
+
+      **Done when** `secretArgs`' destination is `path` and `args`, so any change to either
+      clears them unless they are sent again. The route description and the `update()` comment
+      say so. Test: an args-only edit clears the secret, and the audit names it. Mutants as
+      usual.
+
+- [ ] **A-49 — four answers that still reveal what the reader cannot see** · S · A-32, A-31,
+      A-12 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `A-49`). All low.
+      - **ETag moves when a hidden ancestor changes** (`routes/objects.ts:412`). With
+        `?include=`, a restricted caller's tag covers the whole ancestor chain. An identical
+        body under a new tag says a hidden object was just edited, and when.
+      - **ETag misses the child count** (`routes/objects.ts:413`). An all-seeing caller gets
+        304 with a stale `childCount` after a child is created or deleted.
+      - **`GET /objects/:id/access/effective`** (`routes/access.ts:85`) answers for hidden ids
+        with the carve-out's id, which lists every object inside a hole.
+      - **Template preview renders `%host`** of a device hidden from the caller
+        (`templates.ts:498`).
+
+      **Done when:**
+      - a restricted caller's chain digest covers only the ancestors the view keeps, except
+        for the settings and credentials includes, which carry them by design;
+      - every caller's tag covers the child count;
+      - a non-admin's own "none" answers exactly as an unused id does;
+      - the preview hides `%host` with `%device`.
+      Tests in `object-visibility.test.ts`. Mutants as usual.
+
+- [ ] **A-50 — a debug log line carries a probe's decrypted credentials** · S · A-05 · Found in
+      review round 4b (`findings/2026-09-29-review-round-4b.md`, `A-50`). Medium.
+      `MessageConnection.send` (`shared/src/protocol/connection.ts:83`) logs the whole message at
+      debug when the connection is closed. A config push racing a disconnect, with `logLevel:
+      debug` set to diagnose that very flapping link, therefore writes every assignment's SNMP
+      community, SSH key, database password and `writeOnly` parameter to the log. pino's redact
+      paths stop at depth 3, and never reach `message.sensors[i].credentials`.
+
+      **Done when** that line logs the message type only, and the config push returns after its
+      await if the session closed. A test asserts that a log captured at debug, over a push that
+      races a close, contains no credential value. The critic's sweep found no other payload
+      log. Say in the outcome whether redact paths should be made depth-free as defence in
+      depth. Mutants as usual.
 
 ### Panel round two — notifications, schedules, triggers
 
