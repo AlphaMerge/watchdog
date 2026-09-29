@@ -226,6 +226,46 @@ export class DependencyPauses {
     return this.#settle(q, now);
   }
 
+  /**
+   * Before sensors are withheld (`A-29`): the Down masters among them keep holding until they are
+   * evaluated again (`M-23`).
+   *
+   * **A withheld master is not a master that recovered.** Withheld, it reads Unknown, which is
+   * not Down, and `holding` let go of everything it held in the same transaction. Its dependents
+   * then paged on their own failures, one each, for an outage nothing had measured the end of: one
+   * grant edit, an alarm per dependent. `P-135` releases a lost probe's masters for the opposite
+   * reason, because their dependents are Unknown with them. A withheld master's dependents are
+   * scanned as before, and will find the same outage.
+   *
+   * In the caller's transaction, before the re-evaluation, while their state still says Down.
+   */
+  async holdWithheld(q: Queryable, sensorIds: readonly number[]): Promise<void> {
+    if (sensorIds.length === 0) return;
+    await this.#repo.holdUntilEvaluated(q, await this.#repo.mastersAmong(q, sensorIds));
+  }
+
+  /**
+   * After sensors are vouched for again (`M-23`): a master that held until it was evaluated again
+   * settles as any master returning from Down does.
+   *
+   * Down again, it holds by being Down. Paused, it lets go, as a paused master always has.
+   * Anything else is a recovery from the Down it was withheld in, so its dependents wait the
+   * configured delay (`WORKFLOW.MD` §5) rather than being released at once. In the caller's
+   * transaction, after the re-evaluation and before the settle.
+   */
+  async returnWithheld(q: Queryable, sensorIds: readonly number[], now: Date): Promise<void> {
+    const held = await this.#repo.heldUntilEvaluated(q, sensorIds);
+    if (held.length === 0) return;
+    await this.#repo.clearDelays(
+      q,
+      held.map((master) => master.sensorId),
+    );
+    const recovered = held
+      .filter((master) => !DOWN_STATES.has(master.state) && master.state !== 'paused')
+      .map((master) => master.sensorId);
+    await this.#repo.markRecoveries(q, await this.#delaysFor(q, recovered), [], now);
+  }
+
   /** Releases the masters whose recovery delay has elapsed, then settles. */
   async releaseElapsed(q: Queryable, now: Date, limit = 200): Promise<DependencyRecompute> {
     const elapsed = await this.#repo.delaysElapsed(q, now, limit);

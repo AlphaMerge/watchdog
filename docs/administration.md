@@ -240,6 +240,16 @@ the system holds each one to the account that stands behind it (`A-29`):
   already sent is held rather than recovered — nobody is told "back to normal" about a sensor that
   simply stopped being looked at. A trigger on **Unknown** does fire, as it does when a probe is
   lost; its template's summary window collects them.
+- **What depends on it is not let go, and not downed** (`M-23`). A dependency master that was
+  Down keeps its dependents paused until it is evaluated again. Its pause view says it is holding,
+  with no release time. Vouched for again, it holds while it is still Down, and releases after the
+  configured dependency delay once it is not. A Sensor Factory whose every channel reads a
+  withheld sensor is withheld too, down the chain, with *"Not evaluated: every channel it computes
+  reads a sensor that is itself not being evaluated…"*, and it names nothing. A factory that can
+  still compute a channel computes it, with a gap for the rest.
+- **One gap remains** (`M-26`). A factory reading a sensor under a probe that is lost, or whose
+  clock is behind, runs out of readings after its maximum age, and goes **Down**. It pages
+  alongside the probe's Probe Health: a known second alarm, until `M-26` makes it Unknown.
 - **To start it again**, save its parameters as an account that can read everything it names —
   an administrator, usually — or give the original account its access back. Either takes effect
   at the next sweep, within thirty seconds. The state log shows the transition with cause `access`.

@@ -163,7 +163,12 @@ export interface DependencyLookup {
     q: Queryable,
     sensorId: number,
     now: Date,
-  ): Promise<{ sensorId: number; state: string; clearAt: Date | null } | null>;
+  ): Promise<{
+    sensorId: number;
+    state: string;
+    clearAt: Date | null;
+    untilEvaluated: boolean;
+  } | null>;
   wouldCycle(
     q: Queryable,
     objectId: ObjectId,
@@ -1194,11 +1199,13 @@ export class ObjectService {
       masterId: assignment.masterId,
       masterName: names?.name ?? '',
       masterState: master.state,
-      // A master never holds itself; that exclusion is what keeps it scanning.
+      // A master never holds itself; that exclusion is what keeps it scanning. One withheld
+      // while Down holds with no release time, until it is evaluated again (`M-23`).
       holding:
         assignment.masterId !== id &&
         (master.state === 'down' ||
           master.state === 'down_acknowledged' ||
+          master.untilEvaluated ||
           (master.clearAt !== null && master.clearAt.getTime() > now.getTime())),
       releasesAt: master.clearAt?.toISOString() ?? null,
       definedOn: assignment.definedOn,

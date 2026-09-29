@@ -143,7 +143,10 @@ describe(
       await access.revoke(sources, team, administrator);
     }
 
-    /** Results into states the way ingestion writes them: decide, write, react (`M-11`). */
+    /**
+     * Results into states the way ingestion writes them: decide, write, then the dependency
+     * reaction and the alarm reaction, in the ingestor's order (`M-11`).
+     */
     async function ingest(results: readonly SensorResult[]): Promise<void> {
       const states = h.states;
       assert.ok(states !== undefined);
@@ -153,6 +156,7 @@ describe(
       await db.tx(async (q) => {
         await writeStateHistory(q, decisions.transitions);
         await writeRuntimes(q, decisions.runtimes);
+        await h.dependencies?.react(q, decisions.transitions, at);
         await engine.react(
           q,
           results.map((result) => result.sensorId),
@@ -754,6 +758,268 @@ describe(
       } finally {
         await restoreSources();
       }
+    });
+
+    // ── and what depends on it (`M-23`) ────────────────────────────────────────────────────
+
+    /** A factory written by `person`, with these channels. */
+    async function factoryOf(
+      person: Person,
+      channels: readonly { key: string; formula: string }[],
+    ): Promise<number> {
+      return (
+        await h.service.create(await as(person), {
+          kind: 'sensor',
+          parentId: sumsDevice,
+          name: `factory-${String(process.hrtime.bigint())}`,
+          sensorType: 'core.factory',
+          params: { channels },
+        })
+      ).id;
+    }
+
+    /** A device of pings under `parentId`, made by the installation. */
+    async function pingsUnder(
+      parentId: number,
+      count: number,
+    ): Promise<{ device: number; pings: number[] }> {
+      const device = (
+        await h.service.create(testActor, {
+          kind: 'device',
+          parentId,
+          name: `pings-${String(process.hrtime.bigint())}`,
+          host: '192.0.2.40',
+        })
+      ).id;
+      const pings: number[] = [];
+      for (let index = 0; index < count; index += 1) {
+        const made = await h.service.create(testActor, {
+          kind: 'sensor',
+          parentId: device,
+          name: `ping-${String(index).padStart(2, '0')}`,
+          sensorType: 'icmp.ping',
+        });
+        pings.push(made.id);
+      }
+      return { device, pings };
+    }
+
+    const failing = (sensorIds: readonly number[]): SensorResult[] =>
+      sensorIds.map((sensorId) => ({
+        sensorId,
+        at: new Date(),
+        outcome: 'error' as const,
+        message: 'no reply',
+      }));
+
+    it('keeps a Down master that is withheld holding its twenty dependents: no alarm for them (M-23)', async () => {
+      // A master withheld while Down let go of everything it held at once, and each dependent
+      // then paged on its own failure: one grant edit, twenty alarms, for an outage that had not
+      // changed and that nothing had measured the end of.
+      const quiet = await pingsUnder(sources, 1);
+      const branch = await pingsUnder(sums, 20);
+      try {
+        const [unmeasured] = quiet.pings;
+        assert.ok(unmeasured !== undefined);
+        const master = await factoryOf(analyst, [
+          { key: 'total', formula: `channel(${String(unmeasured)}, 'rtt')` },
+        ]);
+        await h.service.setDependency(testActor, branch.device, 'object', master, undefined);
+        await stateTrigger('down');
+
+        // Nothing to compute from, twice: Warning, then Down, and the one page it owes.
+        await factory.sweep();
+        await factory.sweep();
+        assert.equal((await runtimeOf(master)).state, 'down');
+        const held = (): Promise<number> =>
+          count(
+            `SELECT count(*)::text AS n FROM sensor_runtime
+             WHERE object_id = ANY($1::bigint[]) AND paused_by_dependency AND state = 'paused'`,
+            [branch.pings],
+          );
+        assert.equal(await held(), 20, 'the outage holds its dependents');
+        await scheduler.sweep(new Date(Date.now() + 60_000));
+        const paged = await requests();
+        assert.equal(paged, 1, 'one outage, one page');
+
+        await revokeSources();
+        try {
+          await factory.sweep();
+          assert.deepEqual(await runtimeOf(master), {
+            state: 'unknown',
+            cause: 'access',
+            message: WITHHELD.lostRead,
+          });
+          assert.equal(await held(), 20, 'withheld, the master still holds them');
+
+          // The branch is still down, and its sensors say so: twice, so a released one would be
+          // Down by now.
+          await ingest(failing(branch.pings));
+          await ingest(failing(branch.pings));
+          assert.equal(await held(), 20);
+          await scheduler.sweep(new Date(Date.now() + 60_000));
+          assert.equal(await requests(), paged, 'and nothing more pages');
+        } finally {
+          await restoreSources();
+        }
+
+        // Vouched for again, and still Down: still holding, still one page.
+        await factory.sweep();
+        assert.equal((await runtimeOf(master)).state, 'down');
+        assert.equal(await held(), 20);
+        await scheduler.sweep(new Date(Date.now() + 60_000));
+        assert.equal(await requests(), paged);
+
+        // It recovers and lets go. Withheld again while Up, it holds nothing: the hold ended
+        // when it was evaluated again, and does not outlive that.
+        await db.query(
+          `INSERT INTO sample (channel_id, time, value)
+           SELECT id, now(), 5 FROM channel WHERE sensor_id = $1 AND key = 'rtt'`,
+          [unmeasured],
+        );
+        await factory.sweep();
+        assert.equal((await runtimeOf(master)).state, 'up');
+        assert.equal(await held(), 0, 'recovered, with no delay configured');
+        await revokeSources();
+        try {
+          await factory.sweep();
+          assert.equal((await runtimeOf(master)).cause, 'access');
+          assert.equal(await held(), 0, 'withheld while Up, it holds nothing');
+        } finally {
+          await restoreSources();
+        }
+      } finally {
+        await db.query(
+          'DELETE FROM object WHERE id = ANY($1::bigint[]) OR parent_id = ANY($1::bigint[])',
+          [[quiet.device, branch.device]],
+        );
+      }
+    });
+
+    it('withholds a factory built on a withheld one, and one built on that, instead of downing them (M-23)', async () => {
+      // The withheld factory's channels gap, which is right, and a factory reading only those had
+      // nothing to compute from, reported an error, went Down and paged: a Down row and an alarm
+      // on every factory downstream of one grant edit, with nothing measured having failed.
+      const [first] = await makeFactories(await as(analyst), 1);
+      assert.ok(first !== undefined);
+      const second = await factoryOf(admin, [
+        { key: 'total', formula: `channel(${String(first)}, 'total') * 8` },
+      ]);
+      const third = await factoryOf(admin, [
+        { key: 'total', formula: `channel(${String(second)}, 'total')` },
+      ]);
+      // One channel still has something to compute from, so it computes it, with a gap.
+      const mixed = await factoryOf(admin, [
+        { key: 'total', formula: `channel(${String(first)}, 'total')` },
+        { key: 'rtt', formula: `channel(${String(sourcePing)}, 'rtt')` },
+      ]);
+      // One gaps on the withheld factory and on something that is simply missing: the missing
+      // one is its own fault, as it always was.
+      const partly = await factoryOf(admin, [
+        { key: 'total', formula: `channel(${String(first)}, 'total')` },
+        { key: 'other', formula: `channel(${String(sourcePing)}, 'never-recorded')` },
+      ]);
+      // And one reads the second's status, which is Unknown from the sweep that withholds it.
+      const watcher = await factoryOf(admin, [
+        { key: 'up', formula: `status(${String(second)}) + 1` },
+      ]);
+      await factory.sweep();
+      for (const id of [first, second, third, mixed, partly, watcher]) {
+        assert.equal((await runtimeOf(id)).state, 'up', `sensor ${String(id)} starts Up`);
+      }
+      await stateTrigger('down');
+      const downs = (): Promise<number> =>
+        count(
+          `SELECT count(*)::text AS n FROM sensor_state
+           WHERE sensor_id = ANY($1::bigint[]) AND state IN ('down', 'warning')`,
+          [[second, third, mixed]],
+        );
+
+      await revokeSources();
+      try {
+        ingested = [];
+        await factory.sweep();
+        assert.equal((await runtimeOf(first)).cause, 'access');
+        for (const id of [second, third]) {
+          assert.deepEqual(await runtimeOf(id), {
+            state: 'unknown',
+            cause: 'access',
+            message: WITHHELD.upstream,
+          });
+        }
+        assert.equal((await runtimeOf(mixed)).state, 'up');
+        assert.deepEqual(
+          ingested.filter((result) => result.sensorId === mixed).map((result) => result.outcome),
+          ['ok'],
+        );
+        assert.ok(
+          !ingested.some((result) => result.sensorId === second || result.sensorId === third),
+        );
+        assert.deepEqual(
+          ingested.filter((result) => result.sensorId === partly).map((result) => result.outcome),
+          ['error'],
+        );
+        assert.deepEqual(
+          ingested.filter((result) => result.sensorId === watcher).map((result) => result.channels),
+          [[{ key: 'up', value: 1 }]],
+          'not up: withheld',
+        );
+        assert.equal(await downs(), 0, 'no Down, and no Warning on the way');
+        await scheduler.sweep(new Date(Date.now() + 60_000));
+        assert.equal(await requests(), 0);
+
+        // A second sweep finds the same, and re-decides nothing.
+        const history = (): Promise<number> =>
+          count(`SELECT count(*)::text AS n FROM sensor_state WHERE sensor_id = $1`, [third]);
+        const recorded = await history();
+        await factory.sweep();
+        assert.equal(await history(), recorded);
+      } finally {
+        await restoreSources();
+      }
+
+      await factory.sweep();
+      for (const id of [first, second, third, mixed]) {
+        assert.equal((await runtimeOf(id)).state, 'up', `sensor ${String(id)} is Up again`);
+      }
+      assert.equal(vouching?.withheld().size, 0);
+    });
+
+    it('withholds a factory over a sensor another sweep withholds, once its readings run out (M-23)', async () => {
+      // A withheld Probe Health or Core Health is withheld by its own sweep, not this one.
+      const reader = await factoryOf(admin, [
+        { key: 'total', formula: `channel(${String(sourcePing)}, 'rtt')` },
+      ]);
+      await factory.sweep();
+      assert.equal((await runtimeOf(reader)).state, 'up');
+
+      await vouching?.settle('elsewhere', new Map([[sourcePing, WITHHELD.lostRead]]));
+      await db.query(
+        'DELETE FROM sample WHERE channel_id IN (SELECT id FROM channel WHERE sensor_id = $1)',
+        [sourcePing],
+      );
+      try {
+        await factory.sweep();
+        assert.deepEqual(await runtimeOf(reader), {
+          state: 'unknown',
+          cause: 'access',
+          message: WITHHELD.upstream,
+        });
+        // Paused, it is not swept, and a sweep with nothing to evaluate still lets it go.
+        await h.service.pause(testActor, reader, { kind: 'indefinite' }, 'maintenance');
+        await factory.sweep();
+        assert.equal(vouching?.withheld().has(reader), false);
+        await h.service.resume(testActor, reader);
+      } finally {
+        await vouching?.settle('elsewhere', NONE_WITHHELD);
+        await db.query(
+          `INSERT INTO sample (channel_id, time, value)
+           SELECT id, now(), 12 FROM channel WHERE sensor_id = $1 AND key = 'rtt'`,
+          [sourcePing],
+        );
+      }
+      await factory.sweep();
+      assert.equal((await runtimeOf(reader)).state, 'up');
     });
 
     // ── and what it notifies ───────────────────────────────────────────────────────────────

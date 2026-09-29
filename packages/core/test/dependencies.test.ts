@@ -916,6 +916,106 @@ describe(
     });
 
     // -------------------------------------------------------------------------------------
+    // A withheld master (`M-23`).
+    // -------------------------------------------------------------------------------------
+
+    /** What the voucher check does to a master it withholds: mark, then re-decide, then settle. */
+    async function withhold(id: number): Promise<void> {
+      await db.tx((q) => pauses.holdWithheld(q, [id]));
+      await setState(id, 'unknown', 'access');
+      await db.tx((q) => pauses.recompute(q, NOW));
+    }
+
+    /** And to one it vouches for again, which re-decides it as `state`. */
+    async function vouchAgain(id: number, state: SensorState, cause: SensorStateCause = 'scan') {
+      await setState(id, state, cause);
+      await db.tx(async (q) => {
+        await pauses.returnWithheld(q, [id], NOW);
+        await pauses.recompute(q, NOW);
+      });
+    }
+
+    it('keeps a master withheld while Down holding, with no release time, until it is evaluated again', async () => {
+      await masterForDevice();
+      await setState(pingId, 'down');
+      await react([{ sensorId: pingId, state: 'down', previousState: 'up' }]);
+      assert.equal((await runtimeOf(httpId)).dependency, true, 'held by the outage');
+
+      await withhold(pingId);
+      assert.equal((await runtimeOf(httpId)).dependency, true, 'still held, withheld');
+      assert.equal((await runtimeOf(snmpId)).dependency, true);
+
+      // Held, and no date to release it: the view says so, and so does the API.
+      const view = await h.service.pauseState(httpId);
+      assert.equal(view.source, 'dependency');
+      assert.deepEqual(
+        [view.dependency?.holding, view.dependency?.releasesAt, view.dependency?.masterState],
+        [true, null, 'unknown'],
+      );
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/v1/objects/${String(httpId)}/pause`,
+      });
+      assert.equal(response.statusCode, 200);
+      const body = response.json<{ dependency: { holding: boolean; releasesAt: unknown } }>();
+      assert.deepEqual([body.dependency.holding, body.dependency.releasesAt], [true, null]);
+    });
+
+    it('lets a withheld master go while it is paused, and holds again if it comes back withheld', async () => {
+      await masterForDevice();
+      await setState(pingId, 'down');
+      await react([{ sensorId: pingId, state: 'down', previousState: 'up' }]);
+      await withhold(pingId);
+
+      await setState(pingId, 'paused', 'user');
+      await db.tx((q) => pauses.recompute(q, NOW));
+      assert.equal((await runtimeOf(httpId)).dependency, false, 'a paused master holds nothing');
+      assert.equal((await h.service.pauseState(httpId)).dependency?.holding, false);
+
+      await setState(pingId, 'unknown', 'access');
+      await db.tx((q) => pauses.recompute(q, NOW));
+      assert.equal((await runtimeOf(httpId)).dependency, true, 'withheld again, held again');
+    });
+
+    it('holds only for a master that was Down when it was withheld', async () => {
+      await masterForDevice();
+      // Up: nothing to hold, and nothing is marked.
+      await setState(pingId, 'up');
+      await withhold(pingId);
+      assert.equal((await runtimeOf(pingId)).clearAt, null);
+      assert.equal((await runtimeOf(httpId)).dependency, false);
+      // Down, but a master of nothing: not marked either.
+      await setState(snmpId, 'down');
+      await db.tx((q) => pauses.holdWithheld(q, [snmpId]));
+      assert.equal((await runtimeOf(snmpId)).clearAt, null);
+    });
+
+    it('settles a master vouched for again as any master returning from Down does', async () => {
+      await h.service.setDependency(testActor, pingId, 'device', undefined, 300);
+      const cases: [SensorState, SensorStateCause, boolean, string][] = [
+        ['down', 'scan', true, 'Down again: held by being Down'],
+        ['paused', 'user', false, 'paused: let go, as a paused master always is'],
+        ['up', 'scan', true, 'recovered: held for the configured delay'],
+      ];
+      for (const [state, cause, held, why] of cases) {
+        await setState(pingId, 'down');
+        await react([{ sensorId: pingId, state: 'down', previousState: 'up' }]);
+        await withhold(pingId);
+        await vouchAgain(pingId, state, cause);
+        assert.equal((await runtimeOf(httpId)).dependency, held, why);
+        const clearAt = (await runtimeOf(pingId)).clearAt;
+        assert.equal(
+          clearAt?.getTime() ?? null,
+          state === 'up' ? NOW.getTime() + 300_000 : null,
+          `${why}: the deadline`,
+        );
+      }
+      // And the delay runs out as any recovery's does.
+      await db.tx((q) => pauses.releaseElapsed(q, new Date(NOW.getTime() + 301_000)));
+      assert.equal((await runtimeOf(httpId)).dependency, false);
+    });
+
+    // -------------------------------------------------------------------------------------
     // Over HTTP.
     // -------------------------------------------------------------------------------------
 

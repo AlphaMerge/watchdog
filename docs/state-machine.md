@@ -121,6 +121,19 @@ object it cannot read.
   than recovered — the sensor has not come back, it has stopped being looked at, and a recovery
   would be a false all-clear. `sensor-vouching.test.ts` revokes the read twenty factories depend
   on and counts the notifications.
+- **What depends on it stays where it was** (`M-23`). A dependency master withheld while Down
+  keeps holding its dependents until it is evaluated again: Unknown is not Down, but letting go
+  would page each dependent on the outage the master can no longer speak for. Its
+  `dependency_clear_at` is `infinity`, which `applyPauses` honours only while it reads
+  `unknown`/`access`. So a pause lets go, as it does for any master, and the hold is back if the
+  master comes back withheld. Vouched for again, it settles as any master returning from Down
+  does: Down holds, paused lets go, and anything else waits `dependency.delaySeconds`. `P-135`
+  releases a lost probe's masters for the opposite reason: their dependents are Unknown with
+  them, and a withheld master's are not. **A factory whose every channel reads a sensor that is
+  not being evaluated is withheld too**, in evaluation order, so the withholding carries down a
+  chain. Its message names nothing. The status of a withheld sensor in a formula reads not-up,
+  which is the formula language's rule for any Unknown. A factory over a lost or frozen probe's
+  sensor still goes Down when its readings run out (`M-26`).
 - **Like `probeReachable`, the fact is not persisted.** It is re-derived every sweep from the
   voucher stored on the sensor and the grants as they are now, so a grant restored, an account
   re-enabled or an edit by somebody who can read it clears it at the next sweep.

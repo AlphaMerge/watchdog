@@ -1,6 +1,11 @@
 import type { CheckResult, Logger } from '@ms/shared';
 import type { Database } from '../db/pool.js';
-import { storedVoucher, type StoredVoucher, type VoucherCheck } from '../objects/vouching.js';
+import {
+  storedVoucher,
+  WITHHELD,
+  type StoredVoucher,
+  type VoucherCheck,
+} from '../objects/vouching.js';
 import {
   FormulaError,
   evaluate,
@@ -46,9 +51,10 @@ export interface FactoryServiceOptions {
   /**
    * Asked before a factory is evaluated, whether whoever vouched for it may still read what its
    * formulas name (`A-29`). Required for `P-111`'s reason: a wiring line that can be deleted with
-   * every test still green is one that will be.
+   * every test still green is one that will be. `withheld` is what every sweep withholds right
+   * now, so a factory reading a withheld Probe Health knows it (`M-23`).
    */
-  readonly vouching: VoucherCheck;
+  readonly vouching: VoucherCheck & { withheld(): ReadonlyMap<number, string> };
   readonly now?: () => Date;
 }
 
@@ -82,11 +88,19 @@ export interface FactoryStats {
 
 const FACTORY_TYPE = 'core.factory';
 
+/**
+ * The sweep that withholds a factory for what it reads rather than for who vouched for it
+ * (`M-23`). Its own owner, settled after the evaluation that finds it, so that the factory
+ * sweep's own set is still settled before anything is read.
+ */
+const UPSTREAM = 'factory-upstream';
+const NOTHING_WITHHELD: ReadonlyMap<number, string> = new Map();
+
 export class FactoryService {
   readonly #db: Database;
   readonly #logger: Logger;
   readonly #ingest: (results: readonly CheckResult[]) => Promise<void>;
-  readonly #vouching: VoucherCheck;
+  readonly #vouching: VoucherCheck & { withheld(): ReadonlyMap<number, string> };
   readonly #now: () => Date;
 
   #sweeps = 0;
@@ -133,12 +147,27 @@ export class FactoryService {
       })),
     );
     await this.#vouching.settle('factory', withheld);
-    if (sensors.length === 0) return 0;
+    if (sensors.length === 0) {
+      await this.#vouching.settle(UPSTREAM, NOTHING_WITHHELD);
+      return 0;
+    }
 
     const cycles = findCycles(sensors);
     const order = evaluationOrder(sensors, cycles);
     const inputs = await this.#readInputs(sensors);
     const at = this.#now().toISOString();
+
+    // **What is not being evaluated right now** (`M-23`), for the factories that read it: this
+    // sweep's refusals, anything another sweep withholds (a Probe Health, Core Health), and each
+    // factory this sweep withholds for what it reads, added in evaluation order so that it carries
+    // down a chain. Factories withheld at the last sweep for what they read are not in it: this
+    // sweep finds out again whether they still are.
+    const factories = new Set(sensors.map((sensor) => sensor.sensorId));
+    const unevaluated = new Set<number>(withheld.keys());
+    for (const id of this.#vouching.withheld().keys()) {
+      if (!factories.has(id)) unevaluated.add(id);
+    }
+    const upstream = new Map<number, string>();
 
     const results: CheckResult[] = [];
     for (const sensor of order) {
@@ -229,6 +258,17 @@ export class FactoryService {
       }
 
       if (readings.length === 0) {
+        // **Withheld for what it reads** (`M-23`). Every channel gapped, and each on a sensor
+        // that is not being evaluated: nothing it is built on has failed, the question stopped
+        // being asked upstream, and an error here would page Down on every factory downstream
+        // of one grant edit. Unknown with a gap instead, as the one it reads is.
+        if (missing.every((key) => readsAny(sensor.parsed.get(key), unevaluated))) {
+          upstream.set(sensor.sensorId, WITHHELD.upstream);
+          unevaluated.add(sensor.sensorId);
+          inputs.up.set(sensor.sensorId, false);
+          this.#withheld += 1;
+          continue;
+        }
         // Every channel gapped. Not a reading of none: the sources this sensor is built on are
         // all missing, which is a fault of its own rather than a quiet period.
         this.#failed += 1;
@@ -261,6 +301,9 @@ export class FactoryService {
       });
     }
 
+    // Before the results, as the factory sweep's own set is, so that a factory let go here is
+    // re-decided before its fresh result is applied.
+    await this.#vouching.settle(UPSTREAM, upstream);
     if (results.length > 0) await this.#ingest(results);
     if (this.#cycles > 0 && cycles.size > 0) {
       // Once a sweep, not once a sensor: a ring of eight would otherwise be eight identical
@@ -408,6 +451,14 @@ export class FactoryService {
     }
     return { channels, up };
   }
+}
+
+/** Whether a formula names any of these sensors. A formula that did not parse names none. */
+function readsAny(node: Node | FormulaError | undefined, ids: ReadonlySet<number>): boolean {
+  if (node === undefined || node instanceof FormulaError) return false;
+  const reads = new Set<number>();
+  referencedSensors(node, reads);
+  return [...reads].some((id) => ids.has(id));
 }
 
 /**

@@ -6024,7 +6024,7 @@ because each is a decision rather than a defect:
       cases: a group trigger beside a probe trigger, a later Unknown of Probe Health's own, and a
       paused Probe Health arming nothing.
 
-- [ ] **M-23 — withholding a sensor releases or downs what depends on it: one grant edit, N
+- [x] **M-23 — withholding a sensor releases or downs what depends on it: one grant edit, N
       alarms** · M · A-29, M-17 · Found in review round four
       (`findings/2026-09-29-review-round-4.md`, `M-23`).
       - **A withheld dependency master lets its dependents go** (`vouching.ts:296`). A master
@@ -6047,6 +6047,37 @@ because each is a decision rather than a defect:
       Scenario tests, per `M-17`: a Down master withheld over 20 Down-triggered dependents that
       then fail raises no new alarm; factory B withheld leaves factory C not Down and not
       notifying. Mutants as usual.
+
+      **Done.** Neither kind of dependent sees a grant edit as an outage now.
+      - **A withheld master keeps holding.** In the voucher check's transaction, before the
+        re-evaluation, a master about to be withheld while Down gets `dependency_clear_at =
+        'infinity'`. `applyPauses` honours that only while the master reads `unknown`/`access`,
+        so a pause or a lost probe lets go as it would for any master, and the hold is back if
+        the master comes back withheld. Vouched for again, the master settles as any master
+        returning from Down does: Down holds, paused lets go, and anything else waits
+        `dependency.delaySeconds`. No migration was needed. The pause view and
+        `GET /objects/:id/pause` say `holding: true, releasesAt: null`, not a date: pg reads
+        `infinity` as a number, so `stateOf` answers it as a flag.
+      - **Withholding carries downstream within the sweep.** A factory whose every channel gapped,
+        each on a sensor that is not being evaluated, is withheld under its own owner,
+        `factory-upstream`, with a message that names nothing. "Not being evaluated" means this
+        sweep's refusals, what another sweep withholds (a Probe Health, Core Health), and each
+        factory withheld this way, added in evaluation order so that the withholding carries
+        down a chain. That owner is settled after the evaluation that finds it and before the
+        results, so the factory sweep's own set is still settled before anything is read. A
+        factory that can still compute a channel computes it, with a gap for the rest. A status
+        formula over a withheld sensor reads not-up, which is the formula language's rule for
+        any Unknown, and is left alone.
+      - **The frozen and lost-probe sibling happens**, and it is `M-26`. After its
+        `maxAgeSeconds`, a factory over such a probe's sensor gaps, reports an error, goes Down
+        and pages beside Probe Health. Until `M-26` lands it is a known second alarm, and
+        administration.md says so.
+
+      Tests: a Down factory master withheld over twenty Down-triggered dependents, which then
+      fail twice, pages nothing more and still holds when vouched for again; a factory chain on a
+      withheld factory, with a mixed one that computes what it can; a factory over a sensor
+      another sweep withholds (all in `sensor-vouching`); the hold's branches, the pause view
+      and the API in `dependencies`. Mutations 19/19.
 
 - [ ] **M-25 — a Probe Health deleted mid-loss leaves the sensors it held held** · S · M-24,
       M-22 · Found finishing `M-24`.
@@ -6072,6 +6103,41 @@ because each is a decision rather than a defect:
       - a sensor still covered through another live Probe Health on the same probe stays held;
       - a scenario test in `probe-episode-scenario.test.ts`, per `M-17`, covers both, with each
         asserted alarm asserted present first. Mutants as usual.
+
+- [ ] **M-26 — a factory over a lost or frozen probe's sensor goes Down beside Probe Health** · M ·
+      M-23, M-22, P-135 · Found in `M-23`, which checked the sibling the review left unchecked.
+      A Sensor Factory reads the latest sample of each channel it names, within its
+      `maxAgeSeconds` (600 s by default). A sensor under a lost or frozen probe records nothing.
+      Once that age runs out, every channel of a factory over it gaps, and the factory reports an
+      error (*none of this Sensor Factory's formulas could be evaluated*). It goes Down and pages
+      beside the probe's Probe Health, which is the one alarm for the outage (`M-22`). Nothing it
+      is built on has failed: it stopped being measured, which is Unknown, not Down. Until this
+      lands it is a known second alarm, one per factory over the probe's sensors, and
+      administration.md says so.
+
+      **The mechanism:**
+      - The factory sweep finds a factory whose every channel gapped on a sensor that reads
+        `unknown`/`probe`. It gives that factory `unknown`/`probe` through a `SensorStateService`
+        overlay that it feeds, setting `probeReachable: false`, so the state machine's row 3
+        decides it.
+      - The overlay settles on crossing, as `SensorVouching.settle` does: the set moves, the
+        sensors that crossed are re-decided in one transaction, and the set goes back if the
+        write fails.
+      - The alarm engine's carrier fallback (`#holds` → `probesAbove`) never treats a
+        core-evaluated sensor as carried. Without that, `M-22` would hold the factory behind the
+        Probe Health of whichever probe it sits under in the tree. That probe has no episode, so
+        a trigger on Unknown would hear nothing: `M-24`'s silence again.
+      - An Unknown sensor's status in a formula reads not-up, the formula language's rule, and
+        stays as it is (decided in `M-23`).
+
+      **Done when:**
+      - a factory whose every channel gapped on sensors under a lost or frozen probe reads
+        `unknown`/`probe`, with a gap, and not Down, and returns to its computed state when they
+        do;
+      - the carrier fallback never treats a core-evaluated sensor as carried, with a test;
+      - a scenario test in `probe-episode-scenario.test.ts`, per `M-17`: one lost probe with a
+        factory over one of its sensors gives exactly one alarm, with each asserted alarm
+        asserted present first. Mutants as usual.
 
 - [x] **M-24 — `M-22`'s episode and its held set are not linked in every direction** · M · M-22,
       M-17 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `M-24`).

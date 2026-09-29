@@ -15,8 +15,17 @@ export interface DependencyFlagChange {
 export interface MasterState {
   readonly sensorId: number;
   readonly state: string;
+  /** When its recovery delay ends. Never a hold with no end: that is `untilEvaluated`. */
   readonly clearAt: Date | null;
+  /** Withheld while Down, and holding until it is evaluated again (`M-23`). */
+  readonly untilEvaluated: boolean;
 }
+
+/**
+ * The deadline of a master withheld while Down (`M-23`): it holds until it is evaluated again,
+ * which no clock can say. `holding` honours it only while the master still reads withheld.
+ */
+const UNTIL_EVALUATED = 'infinity';
 
 /**
  * Everything the dependency graph does in SQL (`M-11`).
@@ -102,6 +111,37 @@ export class DependencyRepository {
         [delayed.map((e) => e.sensorId), now, delayed.map((e) => e.delaySeconds)],
       );
     }
+  }
+
+  /**
+   * Keeps the Down masters among these holding until each is evaluated again (`M-23`).
+   *
+   * For a master about to be withheld (`A-29`). Withheld, it is Unknown, which is not Down, so
+   * without this it would let go of everything it held at once, and each of those would then page
+   * on its own failure: one grant edit, an alarm per dependent, for an outage that has not
+   * changed. The core has stopped asking the master, so nothing can say the outage ended.
+   */
+  async holdUntilEvaluated(q: Queryable, sensorIds: readonly number[]): Promise<void> {
+    if (sensorIds.length === 0) return;
+    await q.query(
+      `UPDATE sensor_runtime SET dependency_clear_at = '${UNTIL_EVALUATED}'
+       WHERE object_id = ANY($1::bigint[]) AND state IN ('down', 'down_acknowledged')`,
+      [sensorIds],
+    );
+  }
+
+  /** Which of these hold until evaluated again, and the state each reads now (`M-23`). */
+  async heldUntilEvaluated(
+    q: Queryable,
+    sensorIds: readonly number[],
+  ): Promise<{ sensorId: number; state: string }[]> {
+    if (sensorIds.length === 0) return [];
+    const rows = await q.query<{ object_id: string; state: string }>(
+      `SELECT object_id::text AS object_id, state::text AS state FROM sensor_runtime
+       WHERE object_id = ANY($1::bigint[]) AND dependency_clear_at = '${UNTIL_EVALUATED}'`,
+      [sensorIds],
+    );
+    return rows.map((row) => ({ sensorId: Number(row.object_id), state: row.state }));
   }
 
   /** Masters whose recovery delay has run out. What the sweep releases. */
@@ -245,7 +285,13 @@ export class DependencyRepository {
         SELECT m.object_id AS master_id, m.object_id AS ground
         FROM sensor_runtime m
         WHERE m.state IN ('down', 'down_acknowledged')
-           OR (m.dependency_clear_at IS NOT NULL AND m.dependency_clear_at > $1)
+           OR (m.dependency_clear_at IS NOT NULL AND m.dependency_clear_at > $1
+               AND m.dependency_clear_at <> '${UNTIL_EVALUATED}')
+           -- A master withheld while Down holds until it is evaluated again (M-23), and only
+           -- while it is still withheld: a pause, or its probe lost, lets go as it would for any
+           -- master, and the hold is there again if it comes back withheld.
+           OR (m.dependency_clear_at = '${UNTIL_EVALUATED}'
+               AND m.state = 'unknown' AND m.cause = 'access')
 
         UNION
 
@@ -418,13 +464,25 @@ export class DependencyRepository {
 
   /** One master's state, for the pause view and for the cycle check. */
   async stateOf(q: Queryable, sensorId: number, now: Date): Promise<MasterState | null> {
-    const rows = await q.query<{ state: string; clear_at: Date | null }>(
-      `SELECT state, dependency_clear_at AS clear_at FROM sensor_runtime WHERE object_id = $1`,
+    // `infinity` is not a date, and pg reads it as the number `Infinity`, so it is answered as
+    // a flag instead of in `clear_at`.
+    const rows = await q.query<{ state: string; clear_at: Date | null; until_evaluated: boolean }>(
+      `SELECT state,
+              CASE WHEN dependency_clear_at = '${UNTIL_EVALUATED}' THEN NULL
+                   ELSE dependency_clear_at END AS clear_at,
+              (dependency_clear_at = '${UNTIL_EVALUATED}' AND state = 'unknown'
+               AND cause = 'access') AS until_evaluated
+       FROM sensor_runtime WHERE object_id = $1`,
       [sensorId],
     );
     const row = rows[0];
     if (row === undefined) return null;
     void now;
-    return { sensorId, state: row.state, clearAt: row.clear_at };
+    return {
+      sensorId,
+      state: row.state,
+      clearAt: row.clear_at,
+      untilEvaluated: row.until_evaluated,
+    };
   }
 }

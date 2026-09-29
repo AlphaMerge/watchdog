@@ -5,7 +5,8 @@ import type { VoucherCheck } from '../../src/objects/vouching.js';
  * vouched. Named for what it claims, as `Visibility.EVERYTHING` is: a test that means "every
  * voucher holds" says so rather than leaving the check out.
  */
-export const everyVoucherHolds: VoucherCheck = {
+export const everyVoucherHolds: VoucherCheck & { withheld(): ReadonlyMap<number, string> } = {
   refusals: () => Promise.resolve(new Map<number, string>()),
   settle: () => Promise.resolve(0),
+  withheld: () => new Map<number, string>(),
 };

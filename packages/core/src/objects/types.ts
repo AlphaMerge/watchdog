@@ -221,7 +221,10 @@ export interface PauseView {
     readonly masterName: string | null;
     readonly masterState: string | null;
     readonly holding: boolean;
-    /** When the recovery delay releases the dependents, or `null` if none is running. */
+    /**
+     * When the recovery delay releases the dependents, or `null` if none is running. `null` too
+     * for a master withheld while Down, which holds until it is evaluated again (`M-23`).
+     */
     readonly releasesAt: string | null;
     readonly definedOn: ObjectId;
   } | null;

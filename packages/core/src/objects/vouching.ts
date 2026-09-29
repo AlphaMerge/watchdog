@@ -43,6 +43,10 @@ export const WITHHELD = {
   lostRead:
     'Not evaluated: the account that vouched for this sensor can no longer read everything it ' +
     'names. Saving the sensor again, as an account that can, vouches for it.',
+  // Not named: whoever reads this sensor may not be able to see the one it reads (`M-23`).
+  upstream:
+    'Not evaluated: every channel it computes reads a sensor that is itself not being ' +
+    'evaluated, because of who vouched for that one. It is evaluated again when that sensor is.',
 } as const;
 
 /**
@@ -64,8 +68,13 @@ export interface WithheldReevaluator {
   ): Promise<number>;
 }
 
-/** Settles `paused_by_dependency` after sensors have moved, as `ProbeReachability` does. */
+/**
+ * Settles `paused_by_dependency` after sensors have moved, as `ProbeReachability` does, and keeps
+ * a master withheld while Down holding what it held (`M-23`).
+ */
 export interface WithheldDependencies {
+  holdWithheld(q: Queryable, sensorIds: readonly number[]): Promise<void>;
+  returnWithheld(q: Queryable, sensorIds: readonly number[], now: Date): Promise<void>;
   recompute(q: Queryable, at: Date): Promise<{ moved: number }>;
 }
 
@@ -309,13 +318,18 @@ export class SensorVouching implements VoucherCheck {
     try {
       const moved = await this.#db.tx(async (q) => {
         const at = this.#now();
+        // **A master withheld while Down keeps holding until it is evaluated again** (`M-23`).
+        // Marked while its state still says Down: Unknown is not Down, and letting go would page
+        // each dependent on the outage the master can no longer speak for.
+        await this.#dependencies?.holdWithheld(q, entered);
         // `access` is the only cause this can speak for; the words themselves come from the set.
         const count = await this.#states?.reevaluate(q, changed, at, {
           message: '',
           sources: ['access'],
         });
-        // A master that has just become Unknown is not Down, so whatever it held is released —
-        // and one that is evaluated again may hold them again (`P-135`'s reasoning).
+        // Vouched for again, a master is evaluated again, and settles as any master returning
+        // from Down does: holding if Down, after the configured delay if not.
+        await this.#dependencies?.returnWithheld(q, left, at);
         await this.#dependencies?.recompute(q, at);
         return count ?? 0;
       });
