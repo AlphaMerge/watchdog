@@ -7038,7 +7038,7 @@ because each is a decision rather than a defect:
           reported out of place but not failed, and another component named.
       - **Docs.** The web UI guide's discovery section, and the provision route's description.
 
-- [ ] **P-242 — an on-demand check runs process-isolated types in the query pool** · S · P-236,
+- [x] **P-242 — an on-demand check runs process-isolated types in the query pool** · S · P-236,
       S-19 · Found in review round four (`findings/2026-09-29-review-round-4.md`, `P-242`).
       - **Medium.** `QueryRunner.run` sends every type to the query worker pool
         (`queries/runner.ts:89`), including the types the dispatch tables run in a child
@@ -7056,6 +7056,37 @@ because each is a decision rather than a defect:
       - the query pool gets `memoryCap` and `abortGraceMs`.
       Test with a configured script directory: the answer carries the script's reading.
       Mutants as usual.
+
+      **Outcome.** The isolated types run in a process on demand, and the second finding was
+      verified first and holds only in half.
+      - **A process runner of the query runner's own.** `QueryRunner` takes the isolated set
+        from `dispatchTables()` and the scheduled process runner's isolation: memory limit, uid,
+        gid and child environment, now one object in `main.ts` that both runners are built from.
+        It runs one at a time behind the pool's queue bound, and a full queue is `busy` with the
+        pool's words. It stops with no drain, as the pool does: the process runner would
+        otherwise wait for a hung script inside a ten-second shutdown hook, `P-227` over again.
+      - **`abortGraceMs`: real.** The query pool used the pool's own two seconds whatever
+        `checkAbortGraceMs` said. The two agree at the default, so only a changed setting showed
+        it. It is passed now.
+      - **`memoryCap`: not passed, and why.** A pool of one never holds fewer than one worker,
+        because the floor is at least one (`pool.ts`, `#ceiling`), so a cap cannot bind it. And
+        that worker is already inside the check pool's budget: `MemoryCap` reads what memory is
+        available from the cgroup, not what the pools add up to, so the query worker's resident
+        memory is counted as used. Passing one would change nothing a test can see.
+
+      **Tests** (`query-runner.test.ts`, with a real script directory and the real catalogue in
+      the child):
+      - the answer carries the script's reading, with nothing in this process's environment to
+        lend it a script directory;
+      - one at a time, and `busy` when the queue is full;
+      - a stop answers a running script at once, `offline`;
+      - a worker whose check ignores its abort is held for the configured grace, five seconds
+        against the pool's own two, asserted as a wait not yet over so load cannot fail it.
+      The `main.ts` wiring is covered by no unit test, as before.
+
+      Mutation 6/6: isolated types sent to the pool; several scripts at once; an unbounded
+      process queue; a stop that waits the script out; the pool keeping its own grace; the
+      child given none of the isolation settings.
 
 - [x] **P-243 — under CPU starvation at the memory limit, a 15 s ping misses a 30 s watchdog** ·
       M · P-220, P-215 · Found by `P-216c` (`docs/findings/2026-09-29-probe-starvation-c.md`).

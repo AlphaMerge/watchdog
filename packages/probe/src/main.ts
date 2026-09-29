@@ -209,13 +209,9 @@ async function main(): Promise<void> {
     run: () => pool.stop({ drainMs: POOL_DRAIN_MS }),
   });
 
-  // Checks that run in a process of their own (`P-03`). Same submit/callback contract as the
-  // pool, same spooling on the way out — the only difference is where the check runs, which is
-  // the sensor type's declaration and not this file's business to decide.
-  const processRunner = new ProcessRunner({
-    logger,
-    maxConcurrent: config.probe.processRunnerMaxConcurrent,
-    queueMaxLength: config.probe.processRunnerQueueMaxLength,
+  // How a check that runs in a process of its own is bounded: the one answer for a scheduled scan
+  // and for a check on demand (`P-242`), so "check now" runs the check a scan would.
+  const isolation = {
     memoryLimitMb: config.probe.processMemoryLimitMb,
     ...(config.probe.processUid > 0 ? { uid: config.probe.processUid } : {}),
     ...(config.probe.processGid > 0 ? { gid: config.probe.processGid } : {}),
@@ -229,6 +225,16 @@ async function main(): Promise<void> {
     ...(config.probe.scriptDir === ''
       ? {}
       : { childEnv: { [SCRIPT_DIR_ENV]: resolve(config.probe.scriptDir) } }),
+  };
+
+  // Checks that run in a process of their own (`P-03`). Same submit/callback contract as the
+  // pool, same spooling on the way out — the only difference is where the check runs, which is
+  // the sensor type's declaration and not this file's business to decide.
+  const processRunner = new ProcessRunner({
+    ...isolation,
+    logger,
+    maxConcurrent: config.probe.processRunnerMaxConcurrent,
+    queueMaxLength: config.probe.processRunnerQueueMaxLength,
     onResult: spoolResult,
   });
   lifecycle.onShutdown({
@@ -373,8 +379,15 @@ async function main(): Promise<void> {
   // On-demand queries (`R-09`). Its own pool of one, beside the scheduled one, because a person
   // watching a spinner should not queue behind whatever was due on the same tick — and because a
   // query must never be able to displace monitoring, however many arrive.
+  //
+  // The operator's abort grace, as the scheduled pool has it, and the isolated types in a process
+  // runner of the query runner's own (`P-242`). No `memoryCap`: a pool of one never holds fewer
+  // than one worker, so a cap could not bind it, and that worker's memory is already inside what
+  // the check pool's cap measures as used — the budget is read from the cgroup, not added up.
   const queries = new QueryRunner({
     logger,
+    abortGraceMs: config.probe.checkAbortGraceMs,
+    isolation: { types: isolated, runner: isolation },
     answer: (message) => {
       coreClient.sendQueryResult(message);
     },

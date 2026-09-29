@@ -1,6 +1,7 @@
 import type { CheckResult, Logger, ProbeQuery, QueryFailure } from '@ms/shared';
-import { CheckPool } from '../runner/pool.js';
-import type { ResultMeta } from '../runner/types.js';
+import { CheckPool, type SubmitOutcome } from '../runner/pool.js';
+import { ProcessRunner, type ProcessRunnerOptions } from '../runner/process-runner.js';
+import type { CheckRequest, ResultMeta } from '../runner/types.js';
 
 /**
  * Runs what the core asked for *now*, and answers on the id it asked with (`R-09`).
@@ -20,6 +21,13 @@ import type { ResultMeta } from '../runner/types.js';
  * **Every path answers.** A query that produced no message would leave the core waiting out a
  * deadline, which looks exactly like a device that will not reply — the one diagnosis this whole
  * mechanism exists to hand back accurately.
+ *
+ * **A type that runs in a process of its own runs in one here too** (`P-242`). "Check now" is
+ * meant to be the check a scheduled scan would run, and for `exe.script` a worker is not that: the
+ * script directory reaches only a child's environment, so a worker answered a false "no script
+ * directory configured", and with one configured it would have run the script as this probe's own
+ * user, outside the child memory limit. So those types go to a process runner of their own,
+ * one at a time behind the same bounded queue, and a full queue is `busy` like the pool's.
  */
 
 export interface QueryRunnerOptions {
@@ -36,12 +44,34 @@ export interface QueryRunnerOptions {
   queueMaxLength?: number;
   /** The registry the pool loads. The tests point it at fixtures; production takes the default. */
   registryModule?: string;
+  /**
+   * How long a check has to honour its abort before its worker is terminated: the operator's
+   * `checkAbortGraceMs`, as the scheduled pool takes it (`P-242`). The pool's default otherwise.
+   */
+  abortGraceMs?: number;
+  /**
+   * The types that run in a process of their own, and how (`P-242`).
+   *
+   * `runner` is the scheduled process runner's own isolation — memory limit, user, group and
+   * child environment — so a check on demand is bounded as a scheduled one is. Its concurrency is
+   * not taken: the query runner runs one at a time, behind `queueMaxLength`. Absent, no type is
+   * isolated and everything runs in the pool, which is what a test with fixtures wants.
+   */
+  isolation?: {
+    readonly types: ReadonlySet<string>;
+    readonly runner: Omit<
+      ProcessRunnerOptions,
+      'logger' | 'onResult' | 'maxConcurrent' | 'queueMaxLength'
+    >;
+  };
 }
 
 export class QueryRunner {
   readonly #logger: Logger;
   readonly #answer: QueryRunnerOptions['answer'];
   readonly #pool: CheckPool;
+  readonly #isolated: ReadonlySet<string>;
+  readonly #processes: ProcessRunner | undefined;
   /**
    * Which query each running check belongs to, keyed by sensor.
    *
@@ -59,10 +89,24 @@ export class QueryRunner {
       size: options.size ?? 1,
       queueMaxLength: options.queueMaxLength ?? 8,
       ...(options.registryModule === undefined ? {} : { registryModule: options.registryModule }),
+      ...(options.abortGraceMs === undefined ? {} : { abortGraceMs: options.abortGraceMs }),
       onResult: (result, meta) => {
         this.#deliver(result, meta);
       },
     });
+    this.#isolated = options.isolation?.types ?? new Set();
+    this.#processes =
+      options.isolation === undefined
+        ? undefined
+        : new ProcessRunner({
+            ...options.isolation.runner,
+            logger: this.#logger,
+            maxConcurrent: 1,
+            queueMaxLength: options.queueMaxLength ?? 8,
+            onResult: (result, meta) => {
+              this.#deliver(result, meta);
+            },
+          });
   }
 
   async start(): Promise<void> {
@@ -79,14 +123,17 @@ export class QueryRunner {
    * code that is wrong when it finally does.
    */
   async stop(): Promise<void> {
-    await this.#pool.stop();
+    // No drain for either, as the pool's default has it: somebody is waiting on each, and "the
+    // probe stopped" now is an answer where a script's full timeout inside a ten-second shutdown
+    // hook is not. The process runner, unlike the pool, would wait for everything without it.
+    await Promise.all([this.#pool.stop(), this.#processes?.stop({ drainMs: 0 })]);
     this.#waiting.clear();
   }
 
   /** Takes one query, or answers immediately why it will not. */
   run(queryId: string, query: ProbeQuery, timeoutMs: number): void {
     const assignment = query.assignment;
-    const outcome = this.#pool.submit({
+    const outcome = this.#submit({
       sensorId: assignment.sensorId,
       sensorType: assignment.sensorType,
       target: assignment.target,
@@ -103,6 +150,14 @@ export class QueryRunner {
     }
     this.#logger.warn({ queryId, outcome }, 'refused an on-demand check');
     this.#answer({ queryId, failure: 'busy', message: REFUSALS[outcome] });
+  }
+
+  /** To the process runner if the type runs in a process of its own, and to the pool if not. */
+  #submit(request: CheckRequest): SubmitOutcome {
+    if (this.#processes !== undefined && this.#isolated.has(request.sensorType)) {
+      return this.#processes.submit(request);
+    }
+    return this.#pool.submit(request);
   }
 
   /**

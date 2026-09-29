@@ -1,6 +1,9 @@
 import { strict as assert } from 'node:assert';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { after, describe, it } from 'node:test';
+import { after, before, describe, it } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { pino } from 'pino';
 import type { CheckResult, ProbeQuery, QueryFailure, SensorAssignment } from '@ms/shared';
 import { QueryRunner } from '../src/queries/runner.js';
@@ -203,5 +206,140 @@ describe('the probe’s query runner', () => {
     assert.equal(answer.failure, 'unsupported');
     // In the registry's own words, which name the type and, from a real one, why it is missing.
     assert.equal(answer.message, 'no such check type: test.does-not-exist');
+  });
+
+  it('holds a worker whose check ignores its abort for the grace it was given', async () => {
+    // The operator's `checkAbortGraceMs`, as the scheduled pool has it (`P-242`). The hung check
+    // is answered at its deadline either way; the grace is how long its worker is held before it
+    // is terminated, and the next check waits for the one worker there is.
+    //
+    // **Longer than the pool's own two seconds, and asserted as a wait that has not ended yet**,
+    // so load can only make it pass for the right reason: a slow machine delays the answer, and
+    // nothing makes it early. Asserting the shorter way — a grace of 100 ms, the next check
+    // answered within a second — failed on a loaded machine, where replacing a worker alone
+    // took most of that second.
+    const answers: Answer[] = [];
+    const runner = new QueryRunner({
+      logger: silent,
+      answer: (message) => answers.push(message),
+      registryModule: FIXTURES,
+      abortGraceMs: 5_000,
+    });
+    runners.push(runner);
+    await runner.start();
+    runner.run('hung', check(assignment(61, 'test.hang', 100)), 100);
+    await until(() => answers.length === 1, 'the hung check to be answered', 5_000);
+    assert.equal(answers[0]?.result?.outcome, 'error');
+
+    runner.run('next', check(assignment(62, 'test.ok')), 30_000);
+    await delay(3_500);
+    assert.equal(answers.length, 1, 'the next check ran before the grace was over');
+    // And then it does run, so the line above is a wait and not a queue that never moves.
+    await until(() => answers.length === 2, 'the next check, once the grace is over', 30_000);
+    assert.equal(answers[1]?.result?.outcome, 'ok');
+  });
+});
+
+/**
+ * A type that runs in a process of its own runs in one on demand too (`P-242`).
+ *
+ * The script directory reaches only a child's environment, so `exe.script` in a worker answered
+ * "no script directory configured" on every probe that had one — the diagnostic endpoint giving
+ * a wrong diagnosis. Nothing here sets `MS_SCRIPT_DIR` in this process, so a reading proves the
+ * check ran where the process runner put it.
+ */
+describe('the probe’s query runner, for a type that runs in a process of its own', () => {
+  let dir = '';
+
+  before(() => {
+    assert.equal(process.env['MS_SCRIPT_DIR'], undefined, 'the test must not lend its own');
+    dir = mkdtempSync(join(tmpdir(), 'ms-query-scripts-'));
+    for (const [name, body] of [
+      ['reading.sh', 'echo "0:42:all good"'],
+      ['slow.sh', 'sleep 2; echo "0:1:done"'],
+      ['hang.sh', 'sleep 60; echo "0:1:done"'],
+    ] as const) {
+      writeFileSync(join(dir, name), `#!/bin/sh\n${body}\n`, 'utf8');
+      chmodSync(join(dir, name), 0o755);
+    }
+  });
+
+  after(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  async function isolatedRunner(queueMaxLength = 8): Promise<{
+    runner: QueryRunner;
+    answers: Answer[];
+  }> {
+    const answers: Answer[] = [];
+    const runner = new QueryRunner({
+      logger: silent,
+      answer: (message) => answers.push(message),
+      // The pool's registry has no `exe.script` at all, so a script that reached it would be
+      // answered `unsupported` rather than with a reading.
+      registryModule: FIXTURES,
+      queueMaxLength,
+      isolation: {
+        types: new Set(['exe.script']),
+        runner: { childEnv: { MS_SCRIPT_DIR: dir } },
+      },
+    });
+    runners.push(runner);
+    await runner.start();
+    return { runner, answers };
+  }
+
+  // Thirty seconds each: a child process and a shell are quick on a quiet machine and not on a
+  // shared one, and a budget is not what these tests are about.
+  const script = (sensorId: number, program: string): SensorAssignment =>
+    assignment(sensorId, 'exe.script', 30_000, { program });
+
+  it('answers with the script’s reading, run with the probe’s script directory', async () => {
+    const { runner, answers } = await isolatedRunner();
+    runner.run('script', check(script(70, 'reading.sh')), 30_000);
+    await until(() => answers.length === 1, 'the script’s answer', 30_000);
+
+    const answer = answers[0];
+    assert.ok(answer !== undefined);
+    assert.equal(answer.failure, undefined, answer.message);
+    assert.equal(answer.result?.outcome, 'ok', answer.result?.message);
+    // The script's own reading; the type adds how long it took beside it.
+    assert.equal(answer.result.channels.find((channel) => channel.key === 'value')?.value, 42);
+  });
+
+  it('runs one at a time and answers busy when its queue is full', async () => {
+    // One running and one waiting; the third has nowhere to go. With more than one at a time, all
+    // three would have started.
+    const { runner, answers } = await isolatedRunner(1);
+    runner.run('a', check(script(71, 'slow.sh')), 30_000);
+    runner.run('b', check(script(72, 'slow.sh')), 30_000);
+    runner.run('c', check(script(73, 'reading.sh')), 30_000);
+
+    await until(() => answers.some((a) => a.queryId === 'c'), 'the refusal');
+    const refused = answers.find((a) => a.queryId === 'c');
+    assert.equal(refused?.failure, 'busy');
+    assert.match(refused.message ?? '', /too many on-demand checks/);
+
+    await until(() => answers.length === 3, 'the other two to finish', 40_000);
+    assert.deepEqual(
+      ['a', 'b'].map((id) => answers.find((a) => a.queryId === id)?.result?.outcome),
+      ['ok', 'ok'],
+    );
+  });
+
+  it('answers a script still running at a stop at once, rather than waiting it out', async () => {
+    // The process runner waits for everything unless told otherwise, and a script's timeout
+    // inside a ten-second shutdown hook is the `P-227` failure over again.
+    const { runner, answers } = await isolatedRunner();
+    runner.run('hung', check(script(74, 'hang.sh')), 30_000);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    const started = performance.now();
+    await runner.stop();
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed < 5_000, `stopping took ${elapsed.toFixed(0)} ms`);
+    assert.equal(answers.length, 1);
+    assert.equal(answers[0]?.failure, 'offline');
   });
 });
