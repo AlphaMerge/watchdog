@@ -166,6 +166,7 @@ measurement is not a claim.
 - [The budgets after four tickets touched the dispatch path](findings/2026-09-04-perf-budgets-after-the-watchdogs.md) (`P-73`–`P-79`)
 - [The budgets after the review panel's twenty fixes](findings/2026-09-04-perf-budgets-after-the-panel.md) (`P-80`–`P-83`)
 - [The first run that skipped nothing: every criterion at full size](findings/2026-09-08-perf-budgets-full-criteria.txt) (`P-15`, `P-07`, `P-30`)
+- [Review round four: the night's security and alarm-volume commits, 22 defects](findings/2026-09-29-review-round-4.md) (`S-21`, `A-44`–`A-47`, `P-239`–`P-242`, `M-23`)
 
 ---
 

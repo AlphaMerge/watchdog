@@ -548,6 +548,29 @@ because each is a decision rather than a defect:
       nothing written), `api-routes.test.ts` 1, `secrets.test.ts` 1 and the probe's
       `catalogue-registry.test.ts` 1. Mutation 3/3: the create check dropped (2 fail), the update
       check dropped (1 fails), the probe's refusal dropped (2 fail).
+
+- [ ] **S-21 — A typographic quote ends `windows.service`'s PowerShell string, and a secret
+      clipped before the scrub keeps its prefix** · S · S-19 · Found in review round four
+      (`findings/2026-09-29-review-round-4.md`, `S-21`).
+      - **High, and it blocks 1.1, not 1.0.** `windows-service.ts:65` and `windows-shared.ts:38`
+        escape a service name by doubling U+0027 only. PowerShell also ends a single-quoted
+        string at U+2018–U+201B, so `x’; Start-Process calc; ’` runs `Start-Process calc` in the
+        probe's PowerShell, as the probe's account and with the check's password in its
+        environment. Anyone who may create a sensor may then run anything as the probe. No other
+        PowerShell site builds a string from a parameter; `ssh-disk-free.ts:55` quotes for `sh`,
+        which does not treat U+2019 as a quote.
+      - **Low.** `exe-script-shared.ts:290` clips stderr to 300 characters before the catalogue
+        scrubs it, so a secret that straddles the cut is not matched and its prefix is kept.
+
+      **Done when** the service name never enters script text: it travels in the environment,
+      as the host and user already do, and a `service` pattern refuses anything else as
+      defence in depth. The scrub runs before any clip, on stdout and stderr, in every type
+      that clips. Tests:
+      - a captured `-EncodedCommand` for names containing each of U+0027 and U+2018–U+201B;
+      - a 40-character secret straddling the 300-character cut, with no substring of four or
+        more characters surviving.
+      Mutants as usual.
+
 - [x] **S-16 — Cheaper create** · S · S-03 · Building a 5,000-object tree serially took 24 of its
       30-second budget; it now takes 21, and the database work per create went from 1.92 ms to
       1.55 ms (`docs/findings/2026-08-25-tree-build-measurement.md`).
@@ -5786,6 +5809,30 @@ because each is a decision rather than a defect:
       cases: a group trigger beside a probe trigger, a later Unknown of Probe Health's own, and a
       paused Probe Health arming nothing.
 
+- [ ] **M-23 — withholding a sensor releases or downs what depends on it: one grant edit, N
+      alarms** · M · A-29, M-17 · Found in review round four
+      (`findings/2026-09-29-review-round-4.md`, `M-23`).
+      - **A withheld dependency master lets its dependents go** (`vouching.ts:296`). A master
+        that was Down holds its dependents `paused_by_dependency`. Withholding it (Unknown,
+        cause `access`) drops it from `applyPauses`' `holding` set, the dependents are released
+        at once, and each one then pages Down on its own error. One grant edit, twenty alarms.
+      - **A withheld factory downs the factory built on it** (`factory/service.ts:160`). The
+        withheld factory's channels leave the sweep's inputs, so a second factory that reads
+        it, vouched by someone else, computes over nothing, goes Down on the next sweep and
+        pages.
+      - **Not checked:** whether a factory reading a sensor under a frozen or lost probe turns
+        that gap into a Down the same way.
+
+      **Done when:**
+      - a withheld master keeps holding what it held until it is evaluated again;
+      - withholding propagates downstream within the sweep, so the second factory reads
+        unknown with a gap and not Down;
+      - the frozen and lost-probe case is fixed or shown not to happen, with the outcome saying
+        which.
+      Scenario tests, per `M-17`: a Down master withheld over 20 Down-triggered dependents that
+      then fail raises no new alarm; factory B withheld leaves factory C not Down and not
+      notifying. Mutants as usual.
+
 - [x] **P-228 — any probe could report on any other probe's work** · M · R-01, R-04, R-09, D-01 ·
       Found reviewing ingestion's inputs. Nothing tied what a probe sent to what it had been given.
       The only check on a result was that its id named a sensor, so any approved probe could store
@@ -6035,6 +6082,77 @@ because each is a decision rather than a defect:
       **Done when** the comparison is robust, for example the median of several sweeps, or a
       margin taken from the measured spread and stated in the test, or it is dropped because the
       absolute budgets already carry the claim. The entry says which, and why.
+
+- [ ] **P-239 — the clock-freeze set is never re-derived after a tree change** · S · P-232,
+      P-103 · Found in review round four (`findings/2026-09-29-review-round-4.md`, `P-239`),
+      by two areas independently.
+      - **Medium.** ClockFreeze holds the frozen sensors per probe and re-derives them only on
+        that probe's own sweep (`clock-freeze.ts:140-142`). A sensor moved off a frozen probe
+        that has since disconnected is never swept again, so it stays Unknown with cause
+        `probe` on its new, healthy probe indefinitely. That is `P-103`'s defect again, in a new
+        overlay.
+      - **Low.** `#settle` deletes a thawed sensor from the global frozen set even when another
+        probe's set still holds it (`clock-freeze.ts:172`).
+
+      **Done when** a ClockFreeze resync runs from an audit sink on every mutation that moves
+      sensors, asserted in `audit-composition.test.ts`. It works from the stored per-probe sets
+      whether or not the probe is connected, thaws what left with the thawed message and the
+      dependency recompute, and rolls back on failure. The global set is the union of the
+      per-probe sets. Tests:
+      - freeze under A, disconnect A, move the device under B: the sensor is no longer frozen;
+      - two probes' sets holding one sensor: settling one leaves it frozen, with no thaw issued.
+      Mutants as usual.
+
+- [ ] **P-240 — the ownership cache can keep a moved sensor's old probe** · S · P-228 · Found in
+      review round four (`findings/2026-09-29-review-round-4.md`, `P-240`). Medium.
+      `ResultCacheInvalidator.record` clears the ownership cache at once and again on a
+      250 ms timer (`invalidation.ts:66`). The timer is not tied to the move's commit. If a
+      move's sinks and commit take longer than 250 ms, an admit from the old probe in between
+      re-reads the pre-move owner and caches it after the second clear. The old probe's results
+      are then accepted, and the new probe's are refused as foreign, until something else
+      clears the cache. At 5,000 sensors, with ScheduleSync's recompute in the sink chain, that
+      is plausible but was not measured. `#forgetSensor` and `#forgetEverything` clear the
+      channel and policy caches on the same timer.
+
+      **Done when** all three clears also run after commit, through `q.afterCommit` as
+      `probes/notifier.ts` does, and the timer is kept only for a `Queryable` without it. Test
+      with a stub `afterCommit` and fake timers: an admit between the move and its commit
+      caches the old owner, and the post-commit clear takes it out. Mutants as usual.
+
+- [ ] **P-241 — two probe-ownership edges: history read through an ancestor, and discovery after
+      its group moves** · S · P-228 · Found in review round four
+      (`findings/2026-09-29-review-round-4.md`, `P-241`). Both low.
+      - **Misclassified as moved** (`ownership.ts:221`). Group G moves from A to B, and a sensor
+        is created under G afterwards. `#formerlyUnder` follows G's move, so A's results for the
+        new sensor are refused as `moved` (no warning) instead of `foreign`. Bound the walk by
+        the sensor's `created_at`.
+      - **Discovery follows the old probe** (`discovery/service.ts:252`). A run started on G
+        under A keeps `probeId = A` after G moves under B, and A's `sweep-finished` then
+        provisions devices into B's branch.
+
+      **Done when** the walk ignores moves older than the sensor, and `pump()` and
+      `provision()` re-check the group's probe and fail the run with the reason "its group
+      moved to another probe". Tests per the findings doc, including the existing moved case
+      still passing. Mutants as usual.
+
+- [ ] **P-242 — an on-demand check runs process-isolated types in the query pool** · S · P-236,
+      S-19 · Found in review round four (`findings/2026-09-29-review-round-4.md`, `P-242`).
+      - **Medium.** `QueryRunner.run` sends every type to the query worker pool
+        (`queries/runner.ts:89`), including the types the dispatch tables run in a child
+        process. So "check now" on `exe.script` runs in a worker without the script directory,
+        and always answers a false "no script directory configured".
+      - **Low, from the critic's spot check.** The query pool is built without `memoryCap` or
+        `abortGraceMs` (`probe/src/main.ts:375-381`, compared with `:187-199`), outside
+        `P-236`'s budget.
+
+      **Done when:**
+      - isolated types go to a query `ProcessRunner`: the same memory limit, uid, gid and child
+        environment, one at a time, a bounded queue, and `busy` when it is full. If that is
+        deferred, the query answers `unsupported` with the reason, and never runs them in a
+        worker.
+      - the query pool gets `memoryCap` and `abortGraceMs`.
+      Test with a configured script directory: the answer carries the script's reading.
+      Mutants as usual.
 
 - [x] **P-223 — the core's unlabelled metrics export a gap as zero** · S · P-14, H-12 · Found
       2026-09-28 in the round-2 review of `H-12`. The exporter's rule is that a gap is an absent
@@ -15137,6 +15255,101 @@ because each is a decision rather than a defect:
       - `null` no longer taking a secret away (three tests).
       The audit summary's own filter is belt and braces behind the check, and no test can tell
       it apart while the check stands.
+
+- [ ] **A-44 — notification rows name accounts, and carry program output, to callers who may see
+      neither** · M · M-19, M-20 · Found in review round four
+      (`findings/2026-09-29-review-round-4.md`, `A-44`).
+      - **Medium.** `POST /templates/:id/test` (`recipients.ts:164`). A non-admin writer adds a
+        `user` or `userGroup` recipient, and the report names the login or group and says
+        whether it may see the sensor. That is an oracle for the account list `M-20` made
+        ADMIN.
+      - **Medium, from the critic's spot check; verify it first.** `GET /notification-requests`
+        (`routes/notifications.ts:211`) is filtered by sensor visibility only, and it serves
+        `skippedRecipients` and `lastError` to every reader of the sensor, with no write needed.
+        `M-19` decided skipped recipients are named in the log. Nothing decided who reads them.
+      - **Low.** An execute-program notification's stdout and stderr, which may echo
+        `secretArgs`, reach the test-send answer, `last_error` and the journal unscrubbed
+        (`delivery/program.ts:302`).
+
+      **Done when:**
+      - the server enforces `M-20`: a non-admin keeps or removes an account or group recipient
+        row but cannot add one;
+      - for a non-admin, the test-send report and the notification log describe skipped account
+        and group recipients by count and reason only;
+      - program output passes one scrub of the substituted `secretArgs`, moved to
+        `@ms/shared`, before it is logged or classified.
+      Tests per the findings doc, one per path. Mutants as usual.
+
+- [ ] **A-45 — `A-29`'s vouching: auth off still records account vouchers, a sight is cached
+      under the wrong epoch, and a failed settle never retries** · M · A-29 · Found in review
+      round four (`findings/2026-09-29-review-round-4.md`, `A-45`).
+      - **Medium** (`authorization.ts:372`). With `requireAuthentication` off, `writerFor` treats
+        only a missing principal as "the layer is off". A logged-in account's write therefore
+        records an *account* voucher. When that account is disabled or deleted, or lacks read on
+        what the sensor names, the sweep withholds the sensor, Core Health included. Migration
+        059's backfill does the same from audit rows.
+      - **Low** (`vouching.ts:335`). Concurrent sweeps can cache a pre-revoke sight under the
+        post-revoke epoch, so a revoked voucher keeps publishing until the next epoch bump.
+      - **Low** (`vouching.ts:281`). A settle that throws has already updated the withheld map,
+        so the next sweep sees no change and never retries. A withheld sensor keeps its old
+        state, Up, or Down with its alarm running.
+      - **Not checked:** other places that read `principal === undefined` as "authentication is
+        off".
+
+      **Done when:**
+      - a layer-off write vouches as the installation, and its audit still names the account;
+      - the rows 059 backfilled as `account` on an auth-off install are re-vouched as the
+        installation at startup, or the upgrade note tells the operator to do it, with the
+        entry saying which and why;
+      - a sight is cached only under its own epoch;
+      - settle restores the maps on failure, and the next sweep retries;
+      - the `principal === undefined` sweep is listed in the outcome, each site fixed or argued.
+      Tests per the findings doc. Mutants as usual.
+
+- [ ] **A-46 — three places still show or count what the reader cannot see** · S · A-26, A-31,
+      A-35 · Found in review round four (`findings/2026-09-29-review-round-4.md`, `A-46`). All
+      low.
+      - **Reorder** (`objects/service.ts:1951`) rewrites hidden siblings' rows, bumping their
+        version, and records indices that count them.
+      - **Object history** (`routes/audit.ts:138`) shows probe-trust entries (address, GID,
+        allow-from, note) to anyone with read on the probe object. `GET /probes` is ADMIN.
+      - **History counts** (`objects/service.ts:590`): `sensorsAffected` and `movedCount` include
+        sensors hidden from the reader.
+      - **Not checked:** settings edits on a container, and bulk operations other than pause,
+        acknowledge and force.
+
+      **Done when:**
+      - reorder moves among visible siblings only and leaves hidden rows untouched, or the
+        materialising write is shown not to bump versions;
+      - probe-trust entries are an administrator's, as grants are;
+      - history counts are dropped or flagged for a reader with holes under the object;
+      - the unchecked writes are checked, with the outcome listing them.
+      Tests in `object-visibility.test.ts`. Mutants as usual.
+
+- [ ] **A-47 — Host, throttle, proxy range and idle timeout: four gaps in `A-36` and `A-38`** · M
+      · A-36, A-38 · Found in review round four (`findings/2026-09-29-review-round-4.md`,
+      `A-47`).
+      - **Medium, DNS rebinding** (`hardening.ts:215`). The Origin check compares Origin with the
+        request's own Host. A rebinding page sends both as its own name and passes, on the
+        stream and, with authentication off, on every write. `/metrics` and the other
+        unauthenticated GETs have no Host check at all.
+      - **Medium, login throttle** (`auth/throttle.ts:90`). The count is keyed on the exact
+        address, and the per-account delay is a sleep that parallel attempts do not wait for.
+        Rotating addresses inside one IPv6 /64 gives unbounded guessing, and behind a trusted
+        proxy that is per browser.
+      - **Low** (`config/schema.ts:1177`). `api.trustedProxies` refuses `uniquelocal` and
+        `linklocal` but accepts `0.0.0.0/0`, `::/0` and `10.0.0.0/8`.
+      - **Low** (`auth/sessions.ts:272`). Lowering `sessions.idleTimeoutMinutes` does not reach
+        sessions already extended under the old value.
+
+      **Done when:**
+      - an `onRequest` hook, first and whether authentication is on or off, refuses a Host
+        outside the bound address, loopback, `notifications.publicUrl` and
+        `api.allowedOrigins`, and the Origin check compares against that set;
+      - the per-login delay is a gate checked before any argon2 work, and IPv6 counts by /64;
+      - a proxy range wider than a floor is refused, with the floor stated;
+      - `live()` applies the current idle timeout.
+      Tests per the findings doc. Mutants as usual.
 
 ### Panel round two — notifications, schedules, triggers
 
