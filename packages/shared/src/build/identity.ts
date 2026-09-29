@@ -42,6 +42,14 @@ export const BUILD_PROFILES: readonly BuildProfile[] = ['v1', 'full'];
 /** Which build this is, and what it was built to contain: everything `build.json` says. */
 export interface BuildStamp extends BuildIdentity {
   readonly profile: BuildProfile;
+  /**
+   * `sha256:<hex>` of the lock the package's dependencies were installed from (`H-20`), which
+   * ships beside them as `app/package-lock.json`; null for a build that was never packaged.
+   *
+   * Without it, two packagings of one commit could carry different dependency versions under an
+   * identical manifest, and did.
+   */
+  readonly lock: string | null;
 }
 
 /** The file `scripts/package.sh` writes into each packaged service, beside its `dist`. */
@@ -59,6 +67,7 @@ export const DEVELOPMENT_VERSION = '0.0.0-dev';
 export const DEVELOPMENT_PROFILE: BuildProfile = 'full';
 
 const COMMIT = /^[0-9a-f]{40}$/;
+const LOCK = /^sha256:[0-9a-f]{64}$/;
 
 function isProfile(value: unknown): value is BuildProfile {
   return BUILD_PROFILES.some((profile) => profile === value);
@@ -81,7 +90,7 @@ export function parseBuildManifest(text: string, source: string): BuildStamp {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error(`${source} is not a build manifest: expected an object`);
   }
-  const { version, commit, dirty, profile } = parsed as Record<string, unknown>;
+  const { version, commit, dirty, profile, lock } = parsed as Record<string, unknown>;
   if (typeof version !== 'string' || version.trim() === '') {
     throw new Error(`${source} has no version`);
   }
@@ -107,7 +116,15 @@ export function parseBuildManifest(text: string, source: string): BuildStamp {
         `(expected one of ${BUILD_PROFILES.join(', ')})`,
     );
   }
-  return { version, commit: named, dirty, profile };
+  // Refused when missing, for the reason a missing profile is (`H-20`): every package written
+  // since has one, so a manifest without it did not come from `package.sh`.
+  if (typeof lock !== 'string' || !LOCK.test(lock)) {
+    throw new Error(
+      `${source} does not say which lock its dependencies were installed from: ` +
+        `${JSON.stringify(lock)} (expected sha256:<64 hex digits>)`,
+    );
+  }
+  return { version, commit: named, dirty, profile, lock };
 }
 
 /**
@@ -138,6 +155,7 @@ export function readBuildStamp(manifest: URL, env: NodeJS.ProcessEnv = process.e
       commit: null,
       dirty: false,
       profile,
+      lock: null,
     };
   }
   return parseBuildManifest(text, path);

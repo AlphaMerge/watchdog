@@ -165,7 +165,13 @@ describe('the plan route (D-12)', () => {
 
   before(async () => {
     // No database: planning is pure, and authentication is off so the handler is reached.
-    const stamp: BuildStamp = { version: '0.0.0-dev', commit: null, dirty: false, profile: 'v1' };
+    const stamp: BuildStamp = {
+      version: '0.0.0-dev',
+      commit: null,
+      dirty: false,
+      profile: 'v1',
+      lock: null,
+    };
     const base = baseOptions(stamp, false);
     server = new ApiServer({ ...base, deviceTemplates: builtIn() });
     await server.build(stamp.version, base.service);

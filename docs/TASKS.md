@@ -17337,7 +17337,7 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       core's module graph and asserts that neither `pdfkit` nor `fontkit` is among the modules it
       loaded, alongside a full one where both are, so that the check can fail.
 
-- [ ] **H-20 — A package can claim an exact commit it is not** · M · H-11 · Found on 2026-09-28
+- [x] **H-20 — A package can claim an exact commit it is not** · M · H-11 · Found on 2026-09-28
       by an independent review of `H-11`…`H-13`, and each of the three confirmed by two
       verifiers. `H-11` exists so that a field-test bug report names exactly one body of code,
       and each of these breaks that:
@@ -17360,6 +17360,129 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       after the build; the staged application installs from the lockfile (`npm ci` against a
       staged lock) and `build.json` records the lock's hash; and each is mutated once — an old
       output behind a newer source, a `git` that errors, a lock changed after staging.
+
+      **Added while it was in progress, by WatchDog.** From round 2 of the same review, and the
+      same family: `smoke-install.sh` ran its `H-12` assertions only when the manifest already
+      said v1, so a `package.sh` whose default had regressed to `full` would print "not a v1
+      build" and pass. The smoke asserts the profile its caller expects, v1 unless told otherwise.
+      And after `npm ci --omit=dev`, every installed package's version is compared with the
+      committed lock and any difference fails the build, and `smoke-install.sh` asserts that the
+      lock hash a tarball records is the lock at the commit it names.
+
+      **Done, and one more defect found: the candidate did not ship the dependencies it was tested
+      with.**
+      - **The drift, measured.** The 2026-09-28 candidate tarball was installed with `npm install`
+        from caret ranges. 29 of its 234 runtime packages were not at the committed lock's version,
+        so no suite had run against them. Among them: `fastify` 5.12.5 (lock 5.12.1), `nodemailer`
+        10.0.12 (10.0.1), `@fastify/static`, `@fastify/swagger`, `ws`, `mysql2`, and two major
+        versions, `@azure/msal-node` 6.0.1 (5.6.0) and `content-disposition` 3.0.0 (2.0.1). Every
+        smoke that passed on it passed on dependencies nobody chose.
+      - **Built from clean.** `package.sh` runs `npm run clean` before `npm run build`. That removes
+        every `dist`, where `tsc -b --clean` removes only the outputs it would write, so a deleted
+        source's output survived it.
+      - **The tree, fingerprinted and failing closed.** `scripts/lib/build-tree.sh`'s
+        `ms_tree_state` prints the commit, whether anything is modified or untracked, and a hash of
+        `git status` plus the content of every modified or untracked file. It writes nothing into
+        the repository: no temporary index and no objects, because the toolchain runs as root.
+        - Any error from `git` is an error. `package.sh`, `smoke-install.sh` and `smoke-packages.sh`
+          all refuse rather than stamp.
+        - `MS_BUILD_DIRTY` is `0` or `1` and nothing else.
+        - `package.sh` asks again after compiling, after the web build, and last before the tarball.
+          A changed fingerprint, even with dirty both times, is refused. The smoke harnesses ask
+          again after the package they built.
+      - **Installed from the committed lock, and checked.** `scripts/lib/stage-lock.mjs`:
+        - Cuts the committed lock down to what the staged workspaces reach, resolved the way Node
+          resolves it, each entry kept exactly as locked.
+        - Moves workspace-nested entries to the top of the app: `ajv` 8 from under core and
+          sensors, where the root's is eslint's 6.
+        - Refuses, naming the package, a path needed for two different packages, a runtime
+          dependency locked as development-only, and a missing one.
+        - `npm ci --omit=dev` installs the result. Then `verify` derives the lock from the
+          committed one again and reads every installed `package.json` against it: another
+          version, a missing non-optional package or a stray fails the build. This is the check
+          WatchDog added, so the drift cannot come back through a later change to that step.
+      - **The lock, stamped and shipped.** `build.json` records `"lock": "sha256:…"` of
+        `app/package-lock.json`, which ships.
+        - `package.sh` checks the shipped file against the stamp last.
+        - The shared parser refuses a manifest without a lock, as it refuses one without a
+          profile.
+        - `GET /api/v1/build` returns it; the runbook and troubleshooting guides say what it is.
+      - **The smoke install asserts what the caller expects.**
+        - The expected profile is v1 unless `--profile full` or `MS_SMOKE_PROFILE=full` says
+          otherwise. It is asserted against what the core serves, and the v1 block runs whenever
+          v1 was expected, not whenever the manifest says v1.
+        - It checks the lock against the commit the package names. It re-derives the staged lock
+          from `git show <commit>:package-lock.json` inside the box, compares that hash, and the
+          shipped file's, with `build.json`. It also runs `verify` against the installed
+          `node_modules`.
+      - **Nothing a Mac's tar added, in either place.** The smoke lists the tarball with the
+        image's GNU tar before it boots anything, and refuses any `._*` or `__MACOSX` entry,
+        naming the count. `verify` refuses such an application tree the same way. A start that
+        fails now prints both services' journals before the run exits; before, `set -e` ended the
+        run with systemd's pointer to a journal in a box the exit trap then removed. The
+        troubleshooting guide names the symptom.
+
+      **Heavy runs**, from a clean commit, all four as they had to come out:
+      - **`package.sh`** ran on a tree with an orphan `dist` file planted, and a `version.js` output
+        marked and dated 2030, newer than its source. The tarball ships neither.
+        - `build.json`: `dirty: false`, `lock: sha256:0ad323b7…`, which is the sha256 of the
+          `app/package-lock.json` beside it.
+        - `verify`: 234 packages, as locked. `fastify` 5.12.1, `nodemailer` 10.0.1,
+          `@azure/msal-node` 5.6.0 and `content-disposition` 2.0.1, the lock's versions.
+      - **`smoke-install.sh` on it:** passed, with the profile asserted as v1 and the lock
+        re-derived from `package-lock.json` at the stamped commit.
+      - **`--profile full` on it:** failed at `profile: FAILED — expected full`.
+      - **The same tarball with `fastify`'s lock entry changed to 5.12.5:** failed at `lock: FAILED
+        — app/package-lock.json is sha256:198c…, and build.json says sha256:0ad3…`, and every other
+        assertion passed. Its first attempt failed for another reason, below.
+      - **A tarball repacked on the Mac:** refused in 7 seconds, before any box was booted, with
+        17,847 entries named.
+
+      **Found while writing it, and filed as rule 23 in the tests-that-passed findings:** `set -e`
+      is off for everything under an `if`, `!`, `&&` or `||`, functions and their subshells
+      included, even where they set it again. The first `ms_tree_state` relied on it. Its own test
+      called it bare and passed. `package.sh` calls it as `if ! state="$(ms_tree_state …)"`, and
+      there it printed a clean state after `git status` had failed. That is the fail-open this
+      ticket removes, restored by the fix for it. The `package.sh` test caught it. Every step now
+      exits on its own failure, and the test calls the function inside an `if`.
+
+      **And a run that had to fail, failing somewhere else, filed as entry 46 and rule 24.** The
+      altered-lock tarball was first made by unpacking and repacking on the Mac. It exited 1. It
+      had never reached the lock. The Mac's `tar` added 17,847 AppleDouble `._*` files, which its
+      own `tar -t` does not list. GNU tar unpacked them, node-gyp-build loaded
+      `._argon2.armv8.glibc.node` ahead of the real one, and the core died at start with "invalid
+      ELF header". That is where the two refusals above came from.
+
+      Tests:
+      - `package-provenance.test.ts`, the pieces:
+        - `ms_tree_state` against throwaway repositories, including from inside a checkout git
+          cannot open, as the toolchain sees a worktree.
+        - `stageLock` and `installedDifferences`, including the committed lock staged for both
+          packages.
+        - `ms_mac_metadata_count` under the smoke's `set -euo pipefail`: a listing with
+          look-alikes, a clean one printing 0 without failing, an unreadable one failing, and a
+          real GNU tar listing. `macMetadataIn` on a tree with a link and a `__MACOSX` directory.
+          `verify` refusing, with the count, before it reads a version.
+      - `package-provenance.test.ts`, `package.sh` run end to end in a sandbox repository with a
+        stub `npm`:
+        - clean before build, and an orphan output gone;
+        - `npm ci`, never `install`;
+        - the stamp;
+        - an untracked file stamped dirty;
+        - edits during the compile, the web build and a probe package's install, each refused;
+        - a `git` whose `status` errors refused before anything is built;
+        - `MS_BUILD_DIRTY=true` refused;
+        - a wrong installed version, a lock changed after staging, and a lock changed after
+          stamping, each failing the build.
+      - `build-identity.test.ts`: the lock field and its refusals.
+      - `conditional-get`, `candidate-surface` and `fingerprint-check`: the lock in the stamp.
+
+      Mutations caught: 30 of 30, each applied alone and run against its own tests.
+      - The three the ticket names are among them: an old output behind a newer source, a `git`
+        that errors, and a lock changed after staging.
+      - Six are on the Mac-metadata refusals.
+      - The smoke's own refusal needs Docker, so a mutant cannot reach it. The Mac-repacked run
+        above is what proves it.
 
 - [x] **H-21 — An upgrade that keeps what the operator did, and a restore that can be followed**
       · L · H-03, H-04, H-05 · Found on 2026-09-28 by review rounds 2 and 3 of the upgrade path,

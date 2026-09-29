@@ -25,6 +25,7 @@ import {
  */
 
 const COMMIT = '0123456789abcdef0123456789abcdef01234567';
+const LOCK = `sha256:${'ab'.repeat(32)}`;
 
 describe('the build manifest', () => {
   const dir = mkdtempSync(join(tmpdir(), 'ms-build-'));
@@ -36,20 +37,33 @@ describe('the build manifest', () => {
   it('reads what the packaging step wrote', () => {
     writeFileSync(
       join(dir, 'exact.json'),
-      JSON.stringify({ version: '1.0.0-rc.1', commit: COMMIT, dirty: false, profile: 'v1' }),
+      JSON.stringify({
+        version: '1.0.0-rc.1',
+        commit: COMMIT,
+        dirty: false,
+        profile: 'v1',
+        lock: LOCK,
+      }),
     );
     assert.deepEqual(readBuildStamp(at('exact.json'), {}), {
       version: '1.0.0-rc.1',
       commit: COMMIT,
       dirty: false,
       profile: 'v1',
+      lock: LOCK,
     });
   });
 
   it('takes the profile from the manifest and never from the environment', () => {
     writeFileSync(
       join(dir, 'v1.json'),
-      JSON.stringify({ version: '1.0.0-rc.1', commit: COMMIT, dirty: false, profile: 'v1' }),
+      JSON.stringify({
+        version: '1.0.0-rc.1',
+        commit: COMMIT,
+        dirty: false,
+        profile: 'v1',
+        lock: LOCK,
+      }),
     );
     // The overlay an operator could set: it must not turn a v1 package into the full one.
     const stamp = readBuildStamp(at('v1.json'), {
@@ -66,6 +80,7 @@ describe('the build manifest', () => {
       commit: null,
       dirty: false,
       profile: DEVELOPMENT_PROFILE,
+      lock: null,
     });
     // A harness may still label a run; that is a version, never a commit.
     assert.deepEqual(readBuildStamp(at('absent.json'), { MS_BUILD_VERSION: '9.9.9' }), {
@@ -73,6 +88,7 @@ describe('the build manifest', () => {
       commit: null,
       dirty: false,
       profile: DEVELOPMENT_PROFILE,
+      lock: null,
     });
   });
 
@@ -91,7 +107,7 @@ describe('the build manifest', () => {
   });
 
   it('refuses what is not a build identity', () => {
-    const v1 = { profile: 'v1' };
+    const v1 = { profile: 'v1', lock: LOCK };
     const cases: [unknown, RegExp][] = [
       [[], /expected an object/],
       [{ commit: COMMIT, dirty: false, ...v1 }, /no version/],
@@ -103,9 +119,21 @@ describe('the build manifest', () => {
       [{ version: '1', commit: COMMIT, ...v1 }, /whether the tree was modified/],
       [{ version: '1', commit: COMMIT, dirty: 'no', ...v1 }, /whether the tree was modified/],
       // A package from before `H-12`, and one naming a profile nobody defined. Neither is `full`.
-      [{ version: '1', commit: COMMIT, dirty: false }, /which profile it was built as/],
-      [{ version: '1', commit: COMMIT, dirty: false, profile: 'v2' }, /profile .* not know: "v2"/],
-      [{ version: '1', commit: COMMIT, dirty: false, profile: null }, /not know: null/],
+      [{ version: '1', commit: COMMIT, dirty: false, lock: LOCK }, /which profile it was built as/],
+      [
+        { version: '1', commit: COMMIT, dirty: false, profile: 'v2', lock: LOCK },
+        /profile .* not know: "v2"/,
+      ],
+      [{ version: '1', commit: COMMIT, dirty: false, profile: null, lock: LOCK }, /not know: null/],
+      // A package from before `H-20`, and locks that are not a sha256 of anything (`H-20`).
+      [{ version: '1', commit: COMMIT, dirty: false, profile: 'v1' }, /which lock .*: undefined/],
+      [{ version: '1', commit: COMMIT, dirty: false, profile: 'v1', lock: null }, /which lock/],
+      [{ ...v1, version: '1', commit: COMMIT, dirty: false, lock: LOCK.slice(7) }, /which lock/],
+      [{ ...v1, version: '1', commit: COMMIT, dirty: false, lock: `${LOCK}0` }, /which lock/],
+      [
+        { ...v1, version: '1', commit: COMMIT, dirty: false, lock: LOCK.toUpperCase() },
+        /which lock/,
+      ],
     ];
     for (const [manifest, error] of cases) {
       assert.throws(
@@ -119,10 +147,16 @@ describe('the build manifest', () => {
   it('accepts an unknown commit, which is an honest answer', () => {
     assert.deepEqual(
       parseBuildManifest(
-        JSON.stringify({ version: '1.0.0', commit: null, dirty: false, profile: 'full' }),
+        JSON.stringify({
+          version: '1.0.0',
+          commit: null,
+          dirty: false,
+          profile: 'full',
+          lock: LOCK,
+        }),
         'm',
       ),
-      { version: '1.0.0', commit: null, dirty: false, profile: 'full' },
+      { version: '1.0.0', commit: null, dirty: false, profile: 'full', lock: LOCK },
     );
   });
 });
@@ -139,15 +173,33 @@ describe('an exact build', () => {
 describe('describing a build', () => {
   it('says what it knows, and says when it does not', () => {
     assert.equal(
-      describeBuild({ version: '1.0.0-rc.1', commit: COMMIT, dirty: false, profile: 'v1' }),
+      describeBuild({
+        version: '1.0.0-rc.1',
+        commit: COMMIT,
+        dirty: false,
+        profile: 'v1',
+        lock: LOCK,
+      }),
       '1.0.0-rc.1 (v1 profile, commit 0123456789ab)',
     );
     assert.equal(
-      describeBuild({ version: '1.0.0-rc.1', commit: COMMIT, dirty: true, profile: 'v1' }),
+      describeBuild({
+        version: '1.0.0-rc.1',
+        commit: COMMIT,
+        dirty: true,
+        profile: 'v1',
+        lock: LOCK,
+      }),
       '1.0.0-rc.1 (v1 profile, commit 0123456789ab, with uncommitted changes)',
     );
     assert.equal(
-      describeBuild({ version: DEVELOPMENT_VERSION, commit: null, dirty: false, profile: 'full' }),
+      describeBuild({
+        version: DEVELOPMENT_VERSION,
+        commit: null,
+        dirty: false,
+        profile: 'full',
+        lock: null,
+      }),
       '0.0.0-dev (full profile, commit unknown)',
     );
   });

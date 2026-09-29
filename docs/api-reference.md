@@ -1172,7 +1172,7 @@ This API, as an OpenAPI 3 document
 
 Which build is serving: its version, the commit it was packaged from, and what it contains
 
-**200** { version, commit, dirty, profile, subsystems }
+**200** { version, commit, dirty, profile, lock, subsystems }
 
 ## notifications
 

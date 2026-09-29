@@ -18,6 +18,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/smoke-names.sh
 . "${repo_root}/scripts/lib/smoke-names.sh"
+# shellcheck source=scripts/lib/build-tree.sh
+. "${repo_root}/scripts/lib/build-tree.sh"
 # Word splitting is what turns the default "deb rpm" into two entries; arguments given on the
 # command line are already separate.
 if [ "$#" -gt 0 ]; then
@@ -64,9 +66,19 @@ version="$(node -p "require('${repo_root}/package.json').version" 2>/dev/null \
 # worktree's repository, whose `.git` names a path on the host (`H-11`). **Asked of a reused
 # staged tree too**: one packaged from an older commit, tested as if it were this one, is the
 # exact claim this check exists to refuse. Empty only where there is no repository to ask.
-build_commit="$(git -C "${repo_root}" rev-parse --verify HEAD 2>/dev/null || true)"
+#
+# **Fails closed** (`H-20`): a `git` that can see the repository and then errors is not a clean
+# tree, and a tree edited while this script built it is refused rather than stamped.
+build_commit=""
 build_dirty=0
-if [ -n "$(git -C "${repo_root}" status --porcelain 2>/dev/null)" ]; then build_dirty=1; fi
+build_state=""
+if git -C "${repo_root}" rev-parse --verify HEAD >/dev/null 2>&1; then
+  build_state="$(ms_tree_state "${repo_root}")" || {
+    echo "git cannot say whether this tree is clean, so no package can be compared with it" >&2
+    exit 1
+  }
+  read -r build_commit build_dirty _ <<<"${build_state}"
+fi
 if [ -d "${repo_root}/build/ms-${version}" ] && [ "${MS_SMOKE_REBUILD:-0}" != "1" ]; then
   echo "==> using the staged tree already at build/ms-${version}"
 else
@@ -79,6 +91,11 @@ else
   else
     "${repo_root}/scripts/dev.sh" \
       "MS_BUILD_COMMIT=${build_commit} MS_BUILD_DIRTY=${build_dirty} ./scripts/package.sh" >/dev/null
+  fi
+  if [ -n "${build_state}" ] && [ "$(ms_tree_state "${repo_root}" || true)" != "${build_state}" ]; then
+    echo "the tree changed while it was being packaged, so the package is not what its stamp" \
+      "says; run this again on a tree nobody is editing" >&2
+    exit 1
   fi
 fi
 

@@ -392,6 +392,7 @@ export class ApiServer {
       commit: null,
       dirty: false,
       profile: DEVELOPMENT_PROFILE,
+      lock: null,
     };
     this.#validatorSalt = validatorSalt(this.#build, randomUUID());
     this.#catalogue = options.catalogue;
@@ -975,7 +976,7 @@ export class ApiServer {
             200: {
               type: 'object',
               additionalProperties: false,
-              required: ['version', 'commit', 'dirty', 'profile', 'subsystems'],
+              required: ['version', 'commit', 'dirty', 'profile', 'lock', 'subsystems'],
               properties: {
                 version: { type: 'string' },
                 commit: {
@@ -996,6 +997,12 @@ export class ApiServer {
                   description:
                     'What the build was packaged to contain: `v1` is the release candidate, ' +
                     'without the v2 subsystems; `full` is everything.',
+                },
+                lock: {
+                  type: ['string', 'null'],
+                  description:
+                    '`sha256:<hex>` of the lock its dependencies were installed from, which ' +
+                    'ships beside them as `app/package-lock.json`; null for a working tree.',
                 },
                 subsystems: {
                   type: 'object',

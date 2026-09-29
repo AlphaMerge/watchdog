@@ -993,6 +993,61 @@ independent rather than one riding on the other. And step 3's first assertion wa
 other direction: it read `hasOwnKey`, which is `hash AND confirmed`, for a claim about issuance
 alone. It failed on the first run, which is the cheap kind of wrong.
 
+### 45. A fail-closed guard, tested the one way it did close (`H-20`, found by the caller's test)
+
+`H-20`'s complaint was that every packaging script read `git status 2>/dev/null` and took empty
+output for a clean tree, so a `git` that errored stamped `dirty: false`. The fix was a shell
+function, `ms_tree_state`, that runs `set -euo pipefail` in a subshell and prints nothing when git
+fails. Its test gave it a `git` that fails `status`, checked for a non-zero exit and empty output,
+and passed. It was run on the host too, and failed closed there as well.
+
+`package.sh` calls it as `if ! tree_state="$(ms_tree_state "${repo_root}")"; then … refuse`. **Bash
+switches `-e` off for everything run as the condition of an `if`, under `!`, or to the left of
+`&&` or `||`, and that includes a function called there and every subshell inside it, even one
+that runs `set -e` again.** In the caller, the failed `git status` was ignored, the function went
+on to print a state with an empty status, and `package.sh` built and stamped the tree clean. That
+is the defect the ticket exists to remove, restored by the fix for it. The function's own test
+called it bare, the one context in which `-e` works, so it could not see this.
+
+What caught it was the next test up: `package.sh`, run end to end in a sandbox repository with the
+same broken `git`, expected a refusal and got a build. The function now exits on each step's
+failure explicitly (`… || exit 1`) and uses only `pipefail`, which the condition context leaves
+alone. Its test calls it the way every caller does, inside an `if`.
+
+**The shape.** Entry 17's (make the helper call exactly what production calls) at the level of
+the shell: the context a function is called in changes its semantics, and the test chose the one
+context no caller uses.
+
+### 46. A run that had to fail, failing somewhere else (`H-20`, found by a log that had nothing in it)
+
+Two of `H-20`'s smoke runs must fail: `--profile full` against a v1 package, and a tarball whose
+`app/package-lock.json` had one entry altered after the stamp. The second was made by unpacking the
+release on the Mac, editing the lock and packing it again. It exited 1, which is what success
+looks like for that run, and it would have been ticked if the lines picked out of its log had not
+come back empty.
+
+It never reached the lock. The Mac's `tar` writes an AppleDouble `._<name>` beside every file that
+has extended attributes, 17,847 of them here, and its own `tar -t` folds them back in and never
+lists them. GNU tar in the box unpacked them as files. node-gyp-build loads the first file in
+`prebuilds/` that matches its pattern, and `._argon2.armv8.glibc.node` sorts ahead of the real one,
+so the core died at start with "invalid ELF header". The smoke's `systemctl start`, under
+`set -e`, then ended the run with a pointer to a journal in a box the exit trap removed. Two
+diagnoses followed, ownership and then AppleDouble, and both were checked with the Mac's `tar -t`,
+which cannot see the cause. Once the smoke printed the journal, it named the file in one line.
+
+Repacked with `COPYFILE_DISABLE=1 --no-mac-metadata --no-xattrs`, the run failed where it had to
+(`lock: FAILED — app/package-lock.json is sha256:198c…, and build.json says sha256:0ad3…`), and
+every other assertion passed. Three changes came out of it:
+- The smoke lists a tarball with the image's GNU tar before booting anything, and refuses one
+  holding any `._*` or `__MACOSX` entry, naming the count.
+- `stage-lock.mjs verify` refuses such an application tree.
+- A start that fails prints both services' journals before the run exits.
+
+**The shape.** Rule 12 (a negative assertion names the reason it expects), broken by a run read by
+hand, and made worse by a bad input built by hand. The tampered tarball was meant to differ from
+the good one in one entry and differed in 17,848, and the tool used to compare them was the one
+tool that could not show it.
+
 ## What actually found them
 
 
@@ -1025,7 +1080,7 @@ Entry 9 was written *inside the guard built to prevent this family*. The panel w
 worked from the code rather than from the intent, and had to defeat three skeptics to report
 anything — and that structure, not more care, is what found them.
 
-## Twenty-two rules this produced
+## Twenty-four rules this produced
 
 1. **Assert on `dist`, not on `src`.** Verify the compiled output after a mutation sweep, and
    before trusting a suite that certifies a fix. Twice in one day an incremental build did not pick
@@ -1106,6 +1161,16 @@ anything — and that structure, not more care, is what found them.
     for the far end to close, and each held a VM container for hours. Every wait on the far end of
     a socket or a process gets a bound of its own, shorter than the test's — `within` in
     `state-stream.test.ts` — so a misbehaving peer fails the test *and* reaches the cleanup.
+23. **Call a shell function in its test the way its callers call it.** Entry 45: `set -e` is off
+    for everything under an `if`, a `!`, or the left side of `&&` or `||`, functions and the
+    subshells inside them included, even where they set it again. A function that relies on it
+    fails closed when called bare and fails open when called as a condition, which is how a guard
+    is always called. Exit explicitly on each failure, and test the function inside an `if`.
+24. **A bad input made by hand differs from the good one only where it is meant to, and that is
+    checked with the tools of whatever reads it.** Entry 46: a tarball altered in one entry
+    gained 17,847 more on the way, the author's `tar` could not list them, and the run that had to
+    fail at the lock failed at start instead. Diff the two with the consumer's tools, and read
+    where a must-fail run stopped, not only that it did.
 
 ## What is still not covered, and is said so on purpose
 

@@ -76,6 +76,13 @@ TimescaleDB repository ([installation, section 1](installation.md#1-the-database
 **The port is in use** — `api.port` defaults to 8080 and `probeEndpoint.port` to 23560, and they
 are separate listeners.
 
+**"invalid ELF header" on a file whose name starts with `._`** — the release was unpacked and packed
+again on a Mac. The Mac's `tar` writes an AppleDouble `._<name>` beside every file that has
+extended attributes, and does not list them itself. On Linux they unpack as files, and Node loads
+`._argon2….node` in place of the real one. Install the release as it was downloaded. If it really
+must be repacked on a Mac, use `COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs`.
+`find /opt/ms -name '._*'` shows whether a tree has them.
+
 ---
 
 ## A sensor is Down and the device is fine
@@ -318,8 +325,9 @@ so a message with none of that is itself a finding worth reporting.
 
 **Say which build it is.** The version alone does not: before `H-11` every build said `0.1.0`.
 Each installed service carries a `build.json` with its version, the commit it was packaged from,
-whether that tree had uncommitted changes, and its profile — `v1` for the release candidate,
-`full` for everything on `main` (`H-12`). The core answers the same at `GET /api/v1/build` (read
+whether that tree had uncommitted changes, its profile (`v1` for the release candidate, `full` for
+everything on `main`, `H-12`), and the hash of the lock its dependencies were installed from
+(`H-20`), which is `/opt/ms/app/package-lock.json`. The core answers the same at `GET /api/v1/build` (read
 scope), with the optional subsystems it actually constructed, and the first `starting` line in the
 journal logs it:
 

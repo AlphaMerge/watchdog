@@ -294,7 +294,9 @@ describe(
       build?: BuildIdentity | BuildStamp,
     ): Promise<FastifyInstance> {
       const stamp: BuildStamp | undefined =
-        build === undefined || 'profile' in build ? build : { ...build, profile: 'full' };
+        build === undefined || 'profile' in build
+          ? build
+          : { ...build, profile: 'full', lock: null };
       const server = new ApiServer({
         config: {
           host: '127.0.0.1',
@@ -380,11 +382,13 @@ describe(
     });
 
     it('says which build is serving, and what it constructed', async () => {
+      const lock = `sha256:${'ab'.repeat(32)}`;
       const serving = await core('0.1.0', {
         version: '0.1.0',
         commit: COMMIT_A,
         dirty: true,
         profile: 'v1',
+        lock,
       });
       const response = await serving.inject({ method: 'GET', url: '/api/v1/build' });
       assert.equal(response.statusCode, 200);
@@ -395,6 +399,7 @@ describe(
         commit: COMMIT_A,
         dirty: true,
         profile: 'v1',
+        lock,
         subsystems: { maps: false, reports: false, libraries: false },
       });
 
@@ -405,6 +410,7 @@ describe(
         commit: null,
         dirty: false,
         profile: 'full',
+        lock: null,
         subsystems: { maps: false, reports: false, libraries: false },
       });
     });

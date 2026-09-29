@@ -175,7 +175,9 @@ curl -s -H "Authorization: Bearer $MS_TOKEN" localhost:8080/api/v1/build
 A `commit` of `null`, or `"dirty": true`, means the build cannot say exactly what code it is.
 Re-cut the candidate rather than field-testing it. So does a `profile` other than `v1`, or a
 `subsystems` with anything `true`: the candidate is the v1 build (`H-12`), and maps, reports and
-libraries are not part of what this test is about.
+libraries are not part of what this test is about. `lock` names the dependency versions the build
+was installed with (`H-20`). A candidate cut before `H-20` has no `lock`, and it shipped
+dependency versions no suite ran against, so re-cut that one too.
 
 The numbers that decide the criterion:
 

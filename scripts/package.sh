@@ -5,8 +5,9 @@
 #   bin/ms-core, bin/ms-probe     launcher scripts
 #   app/{core,probe,shared}/dist  compiled JavaScript
 #   app/*/build.json              which build this is: version, commit, uncommitted changes (H-11),
-#                                 and its profile (H-12)
-#   app/node_modules              production dependencies, including native addons
+#                                 its profile (H-12), and the hash of the lock it installed (H-20)
+#   app/package-lock.json         the committed lock, cut down to what the runtime reaches (H-20)
+#   app/node_modules              production dependencies, including native addons, as locked
 #   bin/ms-backup, bin/ms-restore the backup and restore procedure (H-04)
 #   deploy/systemd/*.service      unit files
 #   deploy/winsw/*.xml            Windows service definitions
@@ -32,6 +33,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/build-tree.sh
+. "${repo_root}/scripts/lib/build-tree.sh"
 version="${MS_BUILD_VERSION:-$(node -p "require('${repo_root}/package.json').version")}"
 
 # Which commit this is (`H-11`). Every build said `0.1.0` until this existed, so nothing could
@@ -39,13 +42,49 @@ version="${MS_BUILD_VERSION:-$(node -p "require('${repo_root}/package.json').ver
 # container cannot reach its repository (its `.git` names a path on the host), so the caller can
 # say it instead with MS_BUILD_COMMIT — and MS_BUILD_DIRTY=1 if that tree had uncommitted changes.
 # When neither works the manifest says the commit is unknown, rather than guessing one.
+#
+# **Fails closed** (`H-20`). A `git` that can see this repository and then cannot say whether its
+# tree is clean stops the build. It used to have its stderr discarded, its empty output read as
+# clean, and `dirty: false` stamped on whatever was there. MS_BUILD_DIRTY is `0` or `1` and nothing
+# else, because `true` used to mean clean. Untracked files count: a new source file nobody added
+# is compiled into `dist` all the same. Ignored files do not: `dist` and `build/` are this
+# script's output.
 commit="${MS_BUILD_COMMIT:-}"
 dirty="${MS_BUILD_DIRTY:-0}"
-if [ -z "${commit}" ] && commit="$(git -C "${repo_root}" rev-parse --verify HEAD 2>/dev/null)"; then
-  # Before `npm run build`, and untracked files count: a new source file nobody added is compiled
-  # into `dist` all the same. Ignored files do not — `dist` and `build/` are this script's output.
-  if [ -n "$(git -C "${repo_root}" status --porcelain 2>/dev/null)" ]; then dirty=1; fi
+case "${dirty}" in
+  0 | 1) ;;
+  *)
+    echo "error: MS_BUILD_DIRTY must be 0 or 1, not '${dirty}'" >&2
+    exit 1
+    ;;
+esac
+tree_state=""
+if [ -z "${commit}" ] && git -C "${repo_root}" rev-parse --verify HEAD >/dev/null 2>&1; then
+  if ! tree_state="$(ms_tree_state "${repo_root}")"; then
+    echo "error: git can see this repository but cannot say whether its tree is clean," \
+      "so this build could not say what it is" >&2
+    exit 1
+  fi
+  read -r commit tree_dirty _ <<<"${tree_state}"
+  if [ "${tree_dirty}" = "1" ]; then dirty=1; fi
 fi
+
+# **Asked again after each step that reads the tree** (`H-20`). A build takes minutes, and an
+# edit made during it is compiled into `dist` or not depending on timing, under a stamp taken
+# before it. Being dirty both times proves nothing, so this compares the fingerprint.
+still_the_stamped_tree() {
+  [ -n "${tree_state}" ] || return 0
+  local now
+  if ! now="$(ms_tree_state "${repo_root}")"; then
+    echo "error: git could not read the tree again after ${1}" >&2
+    exit 1
+  fi
+  if [ "${now}" != "${tree_state}" ]; then
+    echo "error: the tree changed while it was being ${1}, so this package is not what its" \
+      "stamp says; build it again from a tree nobody is editing" >&2
+    exit 1
+  fi
+}
 if [ -n "${commit}" ] && ! [[ "${commit}" =~ ^[0-9a-f]{40}$ ]]; then
   echo "error: the commit must be a full 40-character id, not '${commit}'" >&2
   exit 1
@@ -102,7 +141,14 @@ fi
 rm -rf "${stage}"
 mkdir -p "${stage}" "${repo_root}/release"
 
+# **From clean** (`H-20`). `tsc -b` is incremental and trusts timestamps: a mutation restored
+# without touching its source left an output newer than the source, which `tsc` then called up to
+# date, and `package.sh` shipped the mutant stamped `dirty: false`. It also never deletes the
+# output of a source that has gone. `clean` removes every `dist`, so what ships is compiled from
+# what is there now.
+npm --prefix "${repo_root}" run clean
 npm --prefix "${repo_root}" run build
+still_the_stamped_tree compiled
 
 echo "==> staging application"
 for pkg in "${packages[@]}"; do
@@ -121,19 +167,6 @@ for pkg in "${packages[@]}"; do
   rm -rf "${stage}/app/${pkg}/dist/test"
   find "${stage}/app/${pkg}/dist" \
     \( -name '*.d.ts' -o -name '*.d.ts.map' -o -name '*.tsbuildinfo' \) -delete
-  # Which build this is, beside `dist` where each service's `src/version.ts` reads it (`H-11`). A
-  # file rather than the launcher's environment, because WinSW starts `node.exe` on `main.js`
-  # directly and never runs the launcher.
-  node -e '
-    const [, file, version, commit, dirty, profile] = process.argv;
-    const manifest = {
-      version,
-      commit: commit === "" ? null : commit,
-      dirty: dirty === "1",
-      profile,
-    };
-    require("node:fs").writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
-  ' "${stage}/app/${pkg}/build.json" "${version}" "${commit}" "${dirty}" "${profile}"
 done
 
 echo "==> installing production dependencies"
@@ -162,7 +195,35 @@ writeFileSync(
 );
 NODE
 
-(cd "${stage}/app" && npm install --omit=dev --no-audit --no-fund --silent)
+# **Exactly what the committed lock says** (`H-20`). This was `npm install` from caret ranges with
+# no lock, and the candidate of 2026-09-28 shipped 29 of its 234 runtime packages at versions no
+# suite had run against: `fastify` 5.12.5 for the lock's 5.12.1, and `@azure/msal-node` a major
+# version on. `stage-lock.mjs` cuts the committed lock down to what these workspaces reach, `npm ci`
+# installs that and nothing else, and `verify` then reads every installed version back against the
+# committed lock, so a later change to this step cannot bring the drift back quietly.
+lock="$(node "${repo_root}/scripts/lib/stage-lock.mjs" stage \
+  "${repo_root}/package-lock.json" "${stage}/app" "${packages[@]}")"
+(cd "${stage}/app" && npm ci --omit=dev --no-audit --no-fund --silent)
+node "${repo_root}/scripts/lib/stage-lock.mjs" verify \
+  "${repo_root}/package-lock.json" "${stage}/app" "${packages[@]}"
+
+# Which build this is, beside `dist` where each service's `src/version.ts` reads it (`H-11`). A
+# file rather than the launcher's environment, because WinSW starts `node.exe` on `main.js`
+# directly and never runs the launcher. Written after the install, because it records the lock the
+# install used (`H-20`).
+for pkg in "${packages[@]}"; do
+  node -e '
+    const [, file, version, commit, dirty, profile, lock] = process.argv;
+    const manifest = {
+      version,
+      commit: commit === "" ? null : commit,
+      dirty: dirty === "1",
+      profile,
+      lock,
+    };
+    require("node:fs").writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
+  ' "${stage}/app/${pkg}/build.json" "${version}" "${commit}" "${dirty}" "${profile}" "${lock}"
+done
 
 # The workspace siblings are resolved from node_modules by both services; link the staged
 # copies in. @ms/sensors carries the sensor-type catalogue, which the core reads for schemas and
@@ -194,6 +255,7 @@ if [ "${probe_only}" -eq 0 ]; then
   # `api.webRoot` in core.json points at where install.sh puts this.
   echo "==> staging the web UI"
   npm --prefix "${repo_root}" run build:web
+  still_the_stamped_tree "built into the web UI"
   cp -R "${repo_root}/packages/web/dist" "${stage}/web"
 fi
 
@@ -240,6 +302,17 @@ else
            "${stage}/bin/ms-restore"
 fi
 printf '%s\n' "${version}" > "${stage}/VERSION"
+
+# The lock that ships is the one stamped (`H-20`), checked last, when nothing else will write here.
+shipped="$(node -e '
+  const text = require("node:fs").readFileSync(process.argv[1]);
+  process.stdout.write("sha256:" + require("node:crypto").createHash("sha256").update(text).digest("hex"));
+' "${stage}/app/package-lock.json")"
+if [ "${shipped}" != "${lock}" ]; then
+  echo "error: app/package-lock.json is ${shipped}, and build.json says ${lock}" >&2
+  exit 1
+fi
+still_the_stamped_tree packaged
 
 echo "==> creating ${out}"
 tar -czf "${out}" -C "${repo_root}/build" "${name}-${version}"

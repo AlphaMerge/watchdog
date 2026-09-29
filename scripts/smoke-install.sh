@@ -23,6 +23,10 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "${repo_root}/scripts/lib/api-auth.sh"
 # shellcheck source=scripts/lib/smoke-names.sh
 . "${repo_root}/scripts/lib/smoke-names.sh"
+# shellcheck source=scripts/lib/build-tree.sh
+. "${repo_root}/scripts/lib/build-tree.sh"
+# shellcheck source=scripts/lib/mac-metadata.sh
+. "${repo_root}/scripts/lib/mac-metadata.sh"
 
 # **Ubuntu is named in the exit criterion, so it is a target here** (`PLAN.md` Phase 10: "a clean
 # install on Ubuntu and on Windows Server"). Proving Debian and *assuming* Ubuntu would be
@@ -30,6 +34,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # TimescaleDB repository and a different init layout.
 #
 #     MS_SMOKE_DISTRO=ubuntu scripts/smoke-install.sh
+#
+# `--profile full` (or `MS_SMOKE_PROFILE=full`) expects the full profile; the default is v1, the
+# release candidate, and a package that is not the profile expected fails (`H-20`).
 #
 # `MS_SMOKE_KEEP=1` leaves the box running when the script ends and prints its name — for a
 # measurement that needs a real systemd install to work in (`scripts/sizing/memory-limit-live.sh`,
@@ -43,11 +50,34 @@ esac
 # Per-run (`P-200`): CI and a hand-run share one Docker daemon now.
 container="$(ms_smoke_name "install-${distro}")"
 
+# **Which profile the package must be** (`H-20`): `v1` unless `--profile full` or
+# `MS_SMOKE_PROFILE=full` says otherwise. The v1 assertions used to run only when the installed
+# manifest already said v1, so a `package.sh` whose default had slipped to `full` produced a
+# package that skipped them and still reported "smoke test passed". The expectation comes from the
+# caller now, and a package that is not what was expected fails.
+expected_profile="${MS_SMOKE_PROFILE:-v1}"
+tarball=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --profile)
+      [ "$#" -ge 2 ] || { echo "--profile needs v1 or full" >&2; exit 2; }
+      expected_profile="$2"
+      shift 2
+      ;;
+    --profile=*) expected_profile="${1#--profile=}"; shift ;;
+    -*) echo "unknown option: $1" >&2; exit 2 ;;
+    *) tarball="$1"; shift ;;
+  esac
+done
+case "${expected_profile}" in
+  v1 | full) ;;
+  *) echo "the expected profile must be v1 or full, not '${expected_profile}'" >&2; exit 2 ;;
+esac
+
 # Build unless handed a specific tarball. Reusing whichever one happened to be lying around is
 # how this test silently validated a package built before the change under test — which is worse
 # than not running it, because it reports success.
-if [ "$#" -gt 0 ]; then
-  tarball="$1"
+if [ -n "${tarball}" ]; then
   [ -f "${tarball}" ] || {
     echo "no such tarball: ${tarball}" >&2
     exit 1
@@ -62,16 +92,37 @@ else
   # a `vite build` that cannot load rolldown, minutes into a script that looked like it was
   # working. Set MS_SMOKE_HOST_NPM=1 to use the host's, for a CI runner that is the toolchain.
   # Which commit this is (`H-11`), worked out here: `git` inside the toolchain container cannot
-  # reach a worktree's repository, whose `.git` names a path on the host.
-  build_commit="$(git -C "${repo_root}" rev-parse --verify HEAD 2>/dev/null || true)"
+  # reach a worktree's repository, whose `.git` names a path on the host. **Fails closed**
+  # (`H-20`): a `git` that errors is not a clean tree, and the tree is asked again once the
+  # package is built, because an edit made during a build of several minutes is under a stamp
+  # taken before it.
+  build_commit=""
   build_dirty=0
-  if [ -n "$(git -C "${repo_root}" status --porcelain 2>/dev/null)" ]; then build_dirty=1; fi
+  build_state=""
+  if git -C "${repo_root}" rev-parse --verify HEAD >/dev/null 2>&1; then
+    build_state="$(ms_tree_state "${repo_root}")" || {
+      echo "git cannot say whether this tree is clean, so a package built from it could not" \
+        "say what it is" >&2
+      exit 1
+    }
+    read -r build_commit build_dirty _ <<<"${build_state}"
+  fi
+  # A v1 package is built with `package.sh`'s default, so the default is what is tested.
+  build_profile=""
+  [ "${expected_profile}" = "v1" ] || build_profile="MS_BUILD_PROFILE=${expected_profile}"
   if [ "${MS_SMOKE_HOST_NPM:-0}" = "1" ]; then
-    MS_BUILD_COMMIT="${build_commit}" MS_BUILD_DIRTY="${build_dirty}" \
+    # shellcheck disable=SC2086 # empty, or one NAME=value that has to stay a separate word
+    env ${build_profile} MS_BUILD_COMMIT="${build_commit}" MS_BUILD_DIRTY="${build_dirty}" \
       "${repo_root}/scripts/package.sh" >/dev/null
   else
     "${repo_root}/scripts/dev.sh" \
-      "MS_BUILD_COMMIT=${build_commit} MS_BUILD_DIRTY=${build_dirty} scripts/package.sh" >/dev/null
+      "${build_profile} MS_BUILD_COMMIT=${build_commit} MS_BUILD_DIRTY=${build_dirty} scripts/package.sh" \
+      >/dev/null
+  fi
+  if [ -n "${build_state}" ] && [ "$(ms_tree_state "${repo_root}" || true)" != "${build_state}" ]; then
+    echo "the tree changed while it was being packaged, so the package is not what its stamp" \
+      "says; run this again on a tree nobody is editing" >&2
+    exit 1
   fi
   tarball="$(ls -t "${repo_root}"/release/ms-*.tar.gz 2>/dev/null | head -1)"
   [ -n "${tarball}" ] && [ -f "${tarball}" ] || {
@@ -94,6 +145,19 @@ trap cleanup EXIT
 echo "==> building smoke image"
 docker build -q -t "${image}" -f "${repo_root}/scripts/smoke/${dockerfile}" \
   "${repo_root}/scripts/smoke" >/dev/null
+
+# **Listed by the image's GNU tar, before anything is booted.** A release repacked on a Mac holds
+# an AppleDouble `._<name>` for every file with extended attributes, which the host's tar would
+# not list, and one of them stops the core before any assertion here is reached (`H-20`).
+echo "==> asserting the tarball holds nothing a Mac's tar added"
+mac_entries="$(docker run --rm -i --entrypoint tar "${image}" -tzf - <"${tarball}" \
+  | ms_mac_metadata_count)"
+if [ "${mac_entries}" != "0" ]; then
+  echo "    FAILED — ${mac_entries} entries are ._* or __MACOSX; pack it on Linux, or with" \
+    "COPYFILE_DISABLE=1 --no-mac-metadata --no-xattrs" >&2
+  echo "==> SMOKE TEST FAILED" >&2
+  exit 1
+fi
 
 echo "==> booting a clean systemd box"
 remove_box
@@ -127,7 +191,16 @@ docker cp "${repo_root}/scripts/smoke/configure-core.sh" "${container}:/tmp/conf
 docker exec "${container}" bash /tmp/configure-core.sh
 
 echo "==> starting the services"
-docker exec "${container}" systemctl start ms-core ms-probe
+# A start that fails would otherwise end the run under `set -e` with systemd's pointer to a
+# journal, in a box the exit trap is about to remove.
+if ! docker exec "${container}" systemctl start ms-core ms-probe; then
+  for svc in ms-core ms-probe; do
+    docker exec "${container}" systemctl status "${svc}" --no-pager -l || true
+    docker exec "${container}" journalctl -u "${svc}" --no-pager -n 40 || true
+  done
+  echo "==> SMOKE TEST FAILED" >&2
+  exit 1
+fi
 
 echo "==> asserting both services are active"
 failed=0
@@ -198,13 +271,75 @@ else
   failed=1
 fi
 
+echo "==> asserting the package is the ${expected_profile} profile it was meant to be"
+if matches "\"profile\":\"${expected_profile}\"" printf '%s' "${served}"; then
+  echo "    profile: ${expected_profile}"
+else
+  echo "    profile: FAILED — expected ${expected_profile}, and the core says '${served}'" >&2
+  failed=1
+fi
+
+echo "==> asserting the dependencies are the ones locked at the package's commit"
+# `H-20`. The candidate of 2026-09-28 was installed with `npm install` from caret ranges, and 29 of
+# its 234 runtime packages were versions no suite had run against. `package.sh` installs from the
+# committed lock now and checks what it installed; this asks the installed box the same question,
+# against the lock at the commit the package names, which is the claim its manifest makes. A
+# package built with uncommitted changes is compared with this checkout's lock instead, and says
+# so, because nothing about it is exact.
+stamped_commit="$(printf '%s' "${installed}" | sed -n 's/.*"commit":"\([0-9a-f]\{40\}\)".*/\1/p')"
+stamped_lock="$(printf '%s' "${installed}" | sed -n 's/.*"lock":"\(sha256:[0-9a-f]\{64\}\)".*/\1/p')"
+lock_dir="$(mktemp -d)"
+lock_source=""
+if [ -z "${stamped_lock}" ]; then
+  echo "    lock: FAILED — the package records no lock: '${installed}'" >&2
+  failed=1
+elif matches '"dirty":true' printf '%s' "${installed}"; then
+  cp "${repo_root}/package-lock.json" "${lock_dir}/root-lock.json"
+  lock_source="this checkout's package-lock.json (the package was built with uncommitted changes)"
+elif [ -z "${stamped_commit}" ]; then
+  echo "    lock: FAILED — the package names no commit, so there is no lock to compare it with" >&2
+  failed=1
+elif git -C "${repo_root}" show "${stamped_commit}:package-lock.json" >"${lock_dir}/root-lock.json" 2>/dev/null; then
+  lock_source="package-lock.json at ${stamped_commit:0:12}"
+else
+  echo "    lock: FAILED — this repository has no ${stamped_commit}, so its lock cannot be read" >&2
+  failed=1
+fi
+if [ -n "${lock_source}" ]; then
+  docker cp "${lock_dir}/root-lock.json" "${container}:/tmp/root-lock.json"
+  docker cp "${repo_root}/scripts/lib/stage-lock.mjs" "${container}:/tmp/stage-lock.mjs"
+  workspaces="shared sensors core probe"
+  # shellcheck disable=SC2086 # the workspaces are separate arguments
+  locked="$(docker exec "${container}" node /tmp/stage-lock.mjs hash /tmp/root-lock.json \
+    /opt/ms/app ${workspaces} 2>&1 || true)"
+  shipped="sha256:$(docker exec "${container}" sha256sum /opt/ms/app/package-lock.json 2>/dev/null \
+    | cut -d' ' -f1)"
+  # shellcheck disable=SC2086
+  if ! verified="$(docker exec "${container}" node /tmp/stage-lock.mjs verify /tmp/root-lock.json \
+    /opt/ms/app ${workspaces} 2>&1)"; then
+    echo "    lock: FAILED — against ${lock_source}: ${verified}" >&2
+    failed=1
+  elif [ "${locked}" != "${stamped_lock}" ]; then
+    echo "    lock: FAILED — build.json says ${stamped_lock}, and ${lock_source} gives ${locked}" >&2
+    failed=1
+  elif [ "${shipped}" != "${stamped_lock}" ]; then
+    echo "    lock: FAILED — app/package-lock.json is ${shipped}, and build.json says" \
+      "${stamped_lock}" >&2
+    failed=1
+  else
+    echo "    lock: ${stamped_lock}, from ${lock_source}; ${verified}"
+  fi
+fi
+rm -rf "${lock_dir}"
+
 echo "==> asserting a v1 build carries nothing v1 leaves out"
 # `H-12`. Of the running core, not of the manifest: a stamp that says v1 over a core that built
 # maps anyway is the defect, and only the core can show it. The five withheld types by name, so
 # that putting one back fails here; the three subsystems as the core reports what it built; and
 # two of their routes, because a route that answers is what an operator would actually meet —
-# reports among them, the heavier subsystem and the one with a formatter pool behind it.
-if matches '"profile":"v1"' printf '%s' "${installed}"; then
+# reports among them, the heavier subsystem and the one with a formatter pool behind it. Run
+# whenever v1 was expected, whatever the package says (`H-20`).
+if [ "${expected_profile}" = "v1" ]; then
   types="$(ms_docker_curl "${container}" -sf http://127.0.0.1:8080/api/v1/sensor-types 2>/dev/null || true)"
   carried=""
   for id in flow.netflow windows.cpu windows.memory windows.service windows.volume; do
@@ -232,7 +367,7 @@ if matches '"profile":"v1"' printf '%s' "${installed}"; then
       "/maps and /reports are 404"
   fi
 else
-  echo "    not a v1 build — nothing is withheld"
+  echo "    a full build was expected — nothing is withheld"
 fi
 
 echo "==> asserting the core serves the web UI"

@@ -183,6 +183,7 @@ describe('the release candidate’s surface (`H-13`)', () => {
       commit: '0123456789abcdef0123456789abcdef01234567',
       dirty: false,
       profile: 'v1',
+      lock: `sha256:${'ab'.repeat(32)}`,
     });
     table = readTable(await readFile(join(repoRoot, 'docs', 'runbook-field-test.md'), 'utf8'));
     open = await surfaceServer(stamp, { required: false, v2: 'profile' });
