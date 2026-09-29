@@ -232,6 +232,31 @@ describe(
       assert.deepEqual(ids(fromA.refused.foreign), [t.sensorB]);
     });
 
+    it('keeps a sensor created after its group left the probe foreign to it (`P-241`)', async () => {
+      // The group left A for B, and only then was the sensor created in it, so it was never
+      // under A. The walk used to follow the group's move back to A whenever that move
+      // happened, and read A's results as `moved`, which warns nobody.
+      const t = await tree();
+      await move(t.groupA, t.b);
+      const born = (
+        await h.service.create(testActor, {
+          kind: 'sensor',
+          parentId: t.deviceA,
+          name: `Ping late-${String(serial)}`,
+          sensorType: 'icmp.ping',
+          params: {},
+        })
+      ).id;
+      const fromA = await ownership.admit(db, t.a, [result(born)]);
+      assert.deepEqual(ids(fromA.refused.foreign), [born], 'read as moved, from before it existed');
+      const fromB = await ownership.admit(db, t.b, [result(born)]);
+      assert.deepEqual(ids(fromB.results), [born]);
+      // And a sensor that was in the group when it moved still reads as moved: the bound is
+      // the sensor's own creation, not the time of asking.
+      const lagging = await ownership.admit(db, t.a, [result(t.sensorA)]);
+      assert.deepEqual(ids(lagging.refused.moved), [t.sensorA]);
+    });
+
     it('reads a deleted sensor as unknown rather than as the probe it was under', async () => {
       const t = await tree();
       assert.equal((await ownership.admit(db, t.a, [result(t.directA)])).results.length, 1);

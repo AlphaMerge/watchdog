@@ -6329,6 +6329,21 @@ because each is a decision rather than a defect:
       moved to another probe". Tests per the findings doc, including the existing moved case
       still passing. Mutants as usual.
 
+      **The ownership half has landed; the discovery half waits for `A-41a`.** A-41a adds
+      `DiscoveryService.fail` and a tested `provisionRun`, and makes `failed` terminal, so the
+      re-check will be built on those rather than on a second path (WatchDog, 2026-09-29).
+      - **The bound.** `#formerlyUnder` follows a move, or reads a move's `fromProbeId`, only if
+        the move was made at or after the sensor's `created_at`.
+      - **Tests.** A sensor created in a group after the group left A is `foreign` to A and
+        admitted for B, and a sensor that was in the group when it moved still reads as
+        `moved`. The existing moved cases pass.
+      - **The clock caveat.** The move's time is the core's clock, taken while it holds the tree
+        lock, and `created_at` is the database's at the start of the create's transaction. On
+        one host they are one clock. A create that waited on a move's lock still follows that
+        move, and reads as `moved`, the side that warns nobody.
+      - **Mutations caught: 4 of 4.** Each bound taken out, the comparison reversed, and the
+        time of asking used in place of the sensor's creation.
+
 - [ ] **P-242 — an on-demand check runs process-isolated types in the query pool** · S · P-236,
       S-19 · Found in review round four (`findings/2026-09-29-review-round-4.md`, `P-242`).
       - **Medium.** `QueryRunner.run` sends every type to the query worker pool

@@ -187,6 +187,15 @@ export class SensorOwnership {
    * would read as foreign. The walk goes through the sensor's own move back into the group, and
    * through the group's move back to A.
    *
+   * **Only moves made since the sensor was created** (`P-241`). A group that left A before a
+   * sensor was created in it carried nothing of A's to B: the sensor was never under A, and A's
+   * results for it are foreign. The walk used to follow the group's move back to A whenever it
+   * happened, and read them as `moved`, which warns nobody. The move's time is the core's clock
+   * when it held the tree lock, and `created_at` is the database's at the start of the create's
+   * transaction. On one host they are one clock. The race left is a create that began before a
+   * move committed and waited on its lock: its move is still followed, which reads as `moved`,
+   * the quiet side.
+   *
    * Only ever run for refused results, and cached per probe and sensor until the next move, so a
    * mass move costs one query per batch for the sensors not yet asked about. Bounded by the audit
    * retention (`retention.auditDays`, 730 by default): a move pruned from the log is a move this
@@ -212,10 +221,10 @@ export class SensorOwnership {
       // so it ends by itself when a step finds nothing new — and history can contain a cycle a
       // live tree cannot (X moved under Y, later Y moved under X), which a depth bound would
       // walk round a thousand times.
-      `WITH RECURSIVE was_under (sensor_id, id) AS (
-         SELECT o.id, o.id FROM object o WHERE o.id = ANY($2::bigint[])
+      `WITH RECURSIVE was_under (sensor_id, id, born) AS (
+         SELECT o.id, o.id, o.created_at FROM object o WHERE o.id = ANY($2::bigint[])
          UNION
-         SELECT w.sensor_id, parent.id
+         SELECT w.sensor_id, parent.id, w.born
          FROM was_under w
          CROSS JOIN LATERAL (
            SELECT o.parent_id AS id FROM object o
@@ -224,7 +233,7 @@ export class SensorOwnership {
            SELECT (d.entry->>'before')::bigint
            FROM audit_log a CROSS JOIN LATERAL jsonb_array_elements(a.diff) AS d(entry)
            WHERE a.object_id = w.id AND a.action = 'object.moved'
-             AND d.entry->>'field' = 'parentId'
+             AND d.entry->>'field' = 'parentId' AND a.at >= w.born
          ) AS parent
        )
        SELECT DISTINCT w.sensor_id::text AS sensor_id
@@ -232,7 +241,7 @@ export class SensorOwnership {
        WHERE w.id = $1
           OR EXISTS (SELECT 1 FROM audit_log a
                      WHERE a.object_id = w.id AND a.action = 'object.moved'
-                       AND a.summary->>'fromProbeId' = $1::text)`,
+                       AND a.summary->>'fromProbeId' = $1::text AND a.at >= w.born)`,
       [probeObjectId, missing],
     );
     const found = new Set(rows.map((row) => Number(row.sensor_id)));
