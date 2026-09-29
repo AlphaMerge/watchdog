@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { PROTOCOL_VERSION, type CheckResult, type IngestionConfig } from '@ms/shared';
 import { CompositeAuditSink, DatabaseAuditSink } from '../src/audit/store.js';
+import { Reach, Visibility } from '../src/auth/access.js';
 import type { Database } from '../src/db/pool.js';
 import { ProbeHealthService, ProbeHealthTargets } from '../src/health/probe-health.js';
 import { ChannelResolver } from '../src/ingestion/channels.js';
@@ -19,6 +20,7 @@ import { ClockFreeze } from '../src/probes/clock-freeze.js';
 import { ProbeDeliveryWatch } from '../src/probes/delivery-watch.js';
 import { ProbeEpisodeIndex } from '../src/probes/episodes.js';
 import { ProbeReachability } from '../src/probes/reachability.js';
+import { ReachabilitySync } from '../src/probes/reachability-sync.js';
 import { readSensorState, writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
 import type { SensorResult } from '../src/state/service.js';
 import type { SensorState } from '../src/state/tables.js';
@@ -86,6 +88,7 @@ describe(
     let templates: TemplateService;
     let scheduler: AlarmScheduler;
     let channels: ChannelResolver;
+    let triggerSync: TriggerSync;
 
     /** The world: each probe's link, which outlives a core restart. */
     const links = new Map<number, { connected: boolean; offsetMs: number | null }>();
@@ -136,6 +139,7 @@ describe(
       alarmsFor: (probe) => now().index.alarmsFor(probe),
       episodeOf: (id) => now().index.episodeOf(id),
       endedEpisodeOf: (id) => now().index.endedEpisodeOf(id),
+      heldFor: (id) => now().index.heldFor(id),
     };
     const none: ReadonlySet<number> = new Set();
 
@@ -334,6 +338,7 @@ describe(
       state: SensorState,
       method: 'email' | 'webhook',
       latencySeconds = 0,
+      chain: { escalationLatencySeconds?: number; repeatMinutes?: number } = {},
     ): Promise<void> {
       const template = await templates.create(testActor, {
         name: `${state} ${method} ${String(process.hrtime.bigint())}`,
@@ -354,8 +359,64 @@ describe(
           initialLatencySeconds: latencySeconds,
           initialTemplateId: template.id,
           recoveryTemplateId: template.id,
+          ...chain,
+          ...(chain.escalationLatencySeconds === undefined
+            ? {}
+            : { escalationTemplateId: template.id }),
         },
       });
+    }
+
+    /** A probe carrying nothing but its Probe Health, which is core-evaluated and never held. */
+    async function bareProbe(name: string): Promise<{ probe: number; health: number }> {
+      const probe = (await h.service.create(testActor, { kind: 'probe', parentId: h.rootId, name }))
+        .id;
+      links.set(probe, { connected: true, offsetMs: 0 });
+      const made = await h.service.createTree(testActor, {
+        parentId: probe,
+        nodes: [
+          { kind: 'device', name: `${name}-box`, host: '192.0.2.1', ref: 'box' },
+          {
+            kind: 'sensor' as const,
+            name: `${name}-health`,
+            sensorType: 'ms.probe.health',
+            params: {},
+            parentRef: 'box',
+            ref: 'health',
+          },
+        ],
+      } as never);
+      const health = made.objects.find((one) => one.ref === 'health')?.id;
+      assert.ok(health !== undefined);
+      return { probe, health };
+    }
+
+    /**
+     * A tree change with `ReachabilitySync` in its transaction, as production composes it: the
+     * lost set follows the tree before the triggers are reconciled (`P-103`, `P-111`).
+     */
+    async function withTreeSync<T>(change: () => Promise<T>): Promise<T> {
+      const previous = h.audit.also;
+      h.audit.also = new CompositeAuditSink([
+        new ReachabilitySync({ reachability: () => core?.reachability, logger: silent }),
+        triggerSync,
+      ]);
+      try {
+        return await change();
+      } finally {
+        h.audit.also = previous;
+      }
+    }
+
+    /** The alarm rows standing on these sensors, as the sweep would find them. */
+    async function alarmsOn(
+      sensors: readonly number[],
+    ): Promise<{ suppressed: boolean; phase: string }[]> {
+      return db.query<{ suppressed: boolean; phase: string }>(
+        `SELECT suppressed, phase::text AS phase FROM notification_alarm
+         WHERE sensor_id = ANY($1::bigint[]) ORDER BY id`,
+        [sensors],
+      );
     }
 
     async function mark(): Promise<number> {
@@ -416,11 +477,11 @@ describe(
         unreachableSensors: () => core?.reachability.unreachableSensors() ?? none,
         clockFrozenSensors: () => core?.freeze.frozenSensors() ?? none,
       });
-      const sync = new TriggerSync({ engine, logger: silent });
-      h.audit.also = sync;
+      triggerSync = new TriggerSync({ engine, logger: silent });
+      h.audit.also = triggerSync;
       triggers = new TriggerService({
         db,
-        audit: new CompositeAuditSink([new DatabaseAuditSink(), sync]),
+        audit: new CompositeAuditSink([new DatabaseAuditSink(), triggerSync]),
         logger: silent,
       });
       templates = new TemplateService({
@@ -888,6 +949,144 @@ describe(
         'email:down:recovery': 1,
         'email:unknown:recovery': 1,
         'email:up:initial': 1,
+      });
+    });
+
+    it('sensors moved under a probe lost while it carried nothing: one episode alarm, not silence (`M-24`)', async () => {
+      // Lost with nothing held, so no episode began and nothing re-decided its Probe Health. The
+      // sensors that arrived were held behind that alarm, which was never armed: a trigger on
+      // Unknown heard nothing for the whole outage, and nothing when it ended.
+      const bare = await bareProbe('bare-site');
+      await trigger(bare.probe, 'unknown', 'email');
+      await healthSweep();
+      links.set(bare.probe, { connected: false, offsetMs: null });
+      assert.equal(await now().reachability.lost(bare.probe), 0, 'nothing held');
+      await healthSweep();
+      await fire();
+      assert.deepEqual(await alarmsOn([bare.health]), [], 'no episode, so no alarm yet');
+
+      const donor = await probeWith('donor-site', { health: false });
+      await settle(donor);
+      const step = await mark();
+      await withTreeSync(() => h.service.move(testActor, donor.site, bare.probe, { kind: 'none' }));
+      assert.equal((await alarmsOn([bare.health])).length, 1, 'the episode alarm is armed');
+      await fire();
+      assert.deepEqual(await queued(step, donor.pings), {}, 'held behind the probe’s alarm');
+      assert.deepEqual(await queued(step, [bare.health]), { 'email:unknown:initial': 1 });
+      assert.deepEqual(await messages(step, bare.health), [
+        `probe bare-site is lost: the ${String(PINGS)} sensors it carries are Unknown, held as this one alarm`,
+      ]);
+
+      const lift = await mark();
+      links.set(bare.probe, { connected: true, offsetMs: 0 });
+      await now().reachability.found(bare.probe);
+      await healthSweep();
+      await fire();
+      assert.deepEqual(await queued(lift, [bare.health]), { 'email:unknown:recovery': 1 });
+    });
+
+    it('a lost probe whose sensors are all moved away: its episode alarm recovers, in words that say why (`M-24`)', async () => {
+      // The remedy for a dead probe is to move its devices to a live one. That ends the episode
+      // while the probe is still lost and Probe Health still Down, which the view no longer
+      // covers, and the alarm was suspended and later stood down silently: its recipients were
+      // told the sensors were held and never told they were not.
+      const made = await probeWith('emptied', { health: true });
+      await trigger(made.probe, 'unknown', 'email', 0, { repeatMinutes: 30 });
+      await settle(made);
+      const health = healthOf(made);
+      const step = await mark();
+      await lose(made);
+      assert.deepEqual(await queued(step, [health]), { 'email:unknown:initial': 1 });
+      assert.equal((await alarmsOn([health])).length, 1, 'the episode alarm stands');
+
+      const live = (
+        await h.service.create(testActor, { kind: 'probe', parentId: h.rootId, name: 'emptied-to' })
+      ).id;
+      links.set(live, { connected: true, offsetMs: 0 });
+      const moved = await mark();
+      await withTreeSync(() => h.service.move(testActor, made.site, live, { kind: 'none' }));
+      // At the move, not at the next repeat, so nothing that happens to the probe afterwards,
+      // deleting it included, can take the all-clear away with it.
+      assert.deepEqual(await alarmsOn([health]), [], 'recovered by the move, so gone');
+      await fire();
+      assert.deepEqual(await queued(moved, [health]), { 'email:unknown:recovery': 1 });
+      assert.deepEqual(await messages(moved, health), [
+        'probe emptied is still lost, but none of its sensors are held now: they were moved off it or deleted',
+      ]);
+      await scheduler.sweep(new Date(Date.now() + 31 * MINUTE));
+      assert.deepEqual(await queued(moved, [health]), { 'email:unknown:recovery': 1 }, 'once');
+      assert.deepEqual(await queued(moved, made.pings), {}, 'nothing was sent for them');
+    });
+
+    it('an acknowledged Probe Health stops the episode alarm’s escalation and repeats, and its lapse resumes them (`M-24`)', async () => {
+      const made = await probeWith('acknowledged', { health: true });
+      await trigger(made.probe, 'unknown', 'email', 0, {
+        escalationLatencySeconds: 1800,
+        repeatMinutes: 15,
+      });
+      await settle(made);
+      const health = healthOf(made);
+      const step = await mark();
+      await lose(made);
+      assert.deepEqual(await queued(step, [health]), { 'email:unknown:initial': 1 });
+      assert.deepEqual(await alarmsOn([health]), [{ suppressed: false, phase: 'notified' }]);
+
+      await h.service.acknowledge(
+        testActor,
+        health,
+        { kind: 'indefinite' },
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+        'on it',
+      );
+      assert.deepEqual(await alarmsOn([health]), [{ suppressed: true, phase: 'notified' }]);
+      const quiet = await mark();
+      await healthSweep();
+      await scheduler.sweep(new Date(Date.now() + 61 * MINUTE));
+      assert.deepEqual(await queued(quiet, [health]), {}, 'no escalation and no repeat');
+
+      await h.service.clearAcknowledgement(
+        testActor,
+        health,
+        Visibility.EVERYTHING,
+        Reach.EVERYTHING,
+      );
+      assert.deepEqual(await alarmsOn([health]), [{ suppressed: false, phase: 'notified' }]);
+      const resumed = await mark();
+      await scheduler.sweep(new Date(Date.now() + 61 * MINUTE));
+      assert.deepEqual(
+        await queued(resumed, [health]),
+        { 'email:unknown:escalation': 1 },
+        'the escalation it was putting off',
+      );
+    });
+
+    it('a Probe Health paused during a loss: the sensors it held notify one by one, as a pause before the loss does (`M-24`)', async () => {
+      // The pause cancels the episode alarm, as a pause cancels any alarm, and the sensors held
+      // behind it are re-decided with it, unheld. Which came first, the pause or the loss, no
+      // longer decides whether the trigger hears anything.
+      const made = await probeWith('paused-mid-loss', { health: true });
+      await trigger(made.probe, 'unknown', 'email');
+      await settle(made);
+      const health = healthOf(made);
+      const step = await mark();
+      await lose(made);
+      assert.deepEqual(await queued(step, [health]), { 'email:unknown:initial': 1 });
+      assert.deepEqual(await queued(step, made.pings), {});
+      assert.equal((await alarmsOn([health])).length, 1, 'the episode alarm stands');
+
+      const paused = await mark();
+      await h.service.pause(testActor, health, { kind: 'indefinite' }, 'maintenance');
+      assert.deepEqual(await alarmsOn([health]), [], 'the pause cancelled it');
+      assert.equal((await alarmsOn(made.pings)).length, PINGS, 'one alarm armed per sensor');
+      await fire();
+      assert.deepEqual(await queued(paused, made.pings), { 'email:unknown:initial': PINGS });
+      assert.deepEqual(await queued(paused, [health]), {}, 'a pause says nothing');
+
+      const lift = await mark();
+      await find(made);
+      assert.deepEqual(await queued(lift, made.pings), {
+        'email:unknown:recovery': PINGS - DOWN_PINGS,
       });
     });
   },

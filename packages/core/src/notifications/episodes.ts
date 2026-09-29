@@ -41,6 +41,17 @@ export interface ProbeEpisode {
   readonly held: number;
 }
 
+/**
+ * An episode that has ended, and how (`M-24`).
+ *
+ * `emptied` is an episode that ended while its cause went on: the probe is still lost, silent or
+ * behind, but every sensor it held was moved off it or deleted. Its recovery must not say the
+ * probe is answering again.
+ */
+export interface EndedEpisode extends ProbeEpisode {
+  readonly emptied: boolean;
+}
+
 /** Where the engine learns which probe holds which sensors, and which sensors are its alarm. */
 export interface ProbeEpisodes {
   /** The probe whose loss or clock holds this sensor Unknown, while one does. */
@@ -50,7 +61,12 @@ export interface ProbeEpisodes {
   /** The episode this probe-alarm sensor stands for, while its probe's sensors are held. */
   episodeOf(alarmSensorId: number): ProbeEpisode | undefined;
   /** The last episode of this probe-alarm sensor's probe that has ended, for a recovery's words. */
-  endedEpisodeOf(alarmSensorId: number): ProbeEpisode | undefined;
+  endedEpisodeOf(alarmSensorId: number): EndedEpisode | undefined;
+  /**
+   * The sensors this probe-alarm sensor's probe holds now, so that when the alarm stops being
+   * live they can be re-decided unheld (`M-24`).
+   */
+  heldFor(alarmSensorId: number): readonly number[];
 }
 
 interface Standing {
@@ -84,6 +100,22 @@ export function seenBy(watched: SensorState, actual: SensorState, episode: boole
   return episode && watched === 'unknown' ? 'unknown' : actual;
 }
 
+/**
+ * Whether a trigger watching `watched` sees an episode on a Probe Health that has been
+ * acknowledged (`M-24`).
+ *
+ * The view turns the sensor's `down_acknowledged` into Unknown for the trigger on Unknown, and an
+ * acknowledgement has to survive that: it stops the episode alarm's chain as it stops any other
+ * (`WORKFLOW.MD` §6), and its lapse resumes it where it stopped.
+ */
+export function acknowledgedEpisode(
+  watched: SensorState,
+  actual: SensorState,
+  episode: boolean,
+): boolean {
+  return episode && watched === 'unknown' && actual === 'down_acknowledged';
+}
+
 function sensors(count: number): string {
   return count === 1 ? '1 sensor' : `${String(count)} sensors`;
 }
@@ -109,8 +141,22 @@ export function episodeMessage(episode: ProbeEpisode, probeName: string): string
   }
 }
 
-/** What the recovery of an episode alarm says. */
-export function episodeEndedMessage(episode: ProbeEpisode, probeName: string): string {
+/**
+ * What the recovery of an episode alarm says. An episode that was emptied rather than resolved
+ * says so, because its probe is still at fault (`M-24`).
+ */
+export function episodeEndedMessage(episode: EndedEpisode, probeName: string): string {
+  if (episode.emptied) {
+    const none = 'but none of its sensors are held now: they were moved off it or deleted';
+    switch (episode.kind) {
+      case 'lost':
+        return `probe ${probeName} is still lost, ${none}`;
+      case 'silent':
+        return `probe ${probeName} is still sending no results, ${none}`;
+      case 'frozen':
+        return `probe ${probeName}'s clock is still behind, ${none}`;
+    }
+  }
   return episode.kind === 'frozen'
     ? `probe ${probeName}'s clock has caught up: its sensors are no longer held`
     : `probe ${probeName} is answering again: its sensors are no longer held`;

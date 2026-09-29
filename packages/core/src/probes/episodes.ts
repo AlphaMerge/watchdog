@@ -1,4 +1,4 @@
-import type { ProbeEpisode, ProbeEpisodes } from '../notifications/episodes.js';
+import type { EndedEpisode, ProbeEpisode, ProbeEpisodes } from '../notifications/episodes.js';
 import type { OfflineReason } from './reachability.js';
 
 /** What `ProbeReachability` holds for one probe. */
@@ -53,7 +53,7 @@ export interface EpisodeSources {
 export class ProbeEpisodeIndex implements ProbeEpisodes {
   readonly #sources: EpisodeSources;
   readonly #current = new Map<number, { episode: ProbeEpisode; causes: readonly number[] }>();
-  readonly #ended = new Map<number, ProbeEpisode>();
+  readonly #ended = new Map<number, EndedEpisode>();
 
   constructor(sources: EpisodeSources) {
     this.#sources = sources;
@@ -72,7 +72,7 @@ export class ProbeEpisodeIndex implements ProbeEpisodes {
     return probe === undefined ? undefined : this.#episode(probe);
   }
 
-  endedEpisodeOf(alarmSensorId: number): ProbeEpisode | undefined {
+  endedEpisodeOf(alarmSensorId: number): EndedEpisode | undefined {
     const probe = this.#sources.alarms()?.reportsOn(alarmSensorId);
     if (probe === undefined) return undefined;
     // Observed first, so an episode that ended since the last question is filed as ended.
@@ -80,12 +80,27 @@ export class ProbeEpisodeIndex implements ProbeEpisodes {
     return this.#ended.get(probe);
   }
 
-  /** The probe's episode now, and what it is remembered as. */
-  #episode(probeObjectId: number): ProbeEpisode | undefined {
+  heldFor(alarmSensorId: number): readonly number[] {
+    const probe = this.#sources.alarms()?.reportsOn(alarmSensorId);
+    return probe === undefined ? [] : [...this.#held(probe).held];
+  }
+
+  /** What holds a probe's sensors, and which sensors: the lost set and the frozen set, joined. */
+  #held(probeObjectId: number): {
+    lost: LostProbe | undefined;
+    frozen: FrozenProbe | undefined;
+    held: ReadonlySet<number>;
+  } {
     const lost = this.#sources.lost()?.heldBy(probeObjectId);
     const frozen = this.#sources.frozen()?.frozenBy(probeObjectId);
     const held = new Set<number>(lost?.sensorIds ?? []);
     for (const id of frozen?.sensorIds ?? []) held.add(id);
+    return { lost, frozen, held };
+  }
+
+  /** The probe's episode now, and what it is remembered as. */
+  #episode(probeObjectId: number): ProbeEpisode | undefined {
+    const { lost, frozen, held } = this.#held(probeObjectId);
 
     const causes = [lost?.since, frozen?.since]
       .filter((at): at is Date => at !== undefined)
@@ -94,7 +109,12 @@ export class ProbeEpisodeIndex implements ProbeEpisodes {
     const continues =
       previous !== undefined && held.size > 0 && causes.some((at) => previous.causes.includes(at));
     if (previous !== undefined && !continues) {
-      this.#ended.set(probeObjectId, previous.episode);
+      // Emptied, when a cause is still there and nothing is held: the probe is as lost, silent
+      // or behind as it was, and its sensors were moved off it or deleted (`M-24`).
+      this.#ended.set(probeObjectId, {
+        ...previous.episode,
+        emptied: held.size === 0 && causes.length > 0,
+      });
       this.#current.delete(probeObjectId);
     }
     if (held.size === 0) return undefined;

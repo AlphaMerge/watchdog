@@ -4,13 +4,22 @@ import type { SensorState, SensorStateCause } from '../state/tables.js';
 import { STATE_TRIGGER, THRESHOLD_TRIGGER, triggerKinds } from '../triggers/definition.js';
 import type { EffectiveTrigger } from '../triggers/repository.js';
 import { TriggerRepository } from '../triggers/repository.js';
-import { fire, reconcile, stillStanding, type Alarm, type StateTriggerSettings } from './chain.js';
 import {
+  fire,
+  reconcile,
+  stillStanding,
+  type Alarm,
+  type Reconciliation,
+  type StateTriggerSettings,
+} from './chain.js';
+import {
+  acknowledgedEpisode,
   episodeEndedMessage,
   episodeMessage,
   isCarried,
   isLive,
   seenBy,
+  type EndedEpisode,
   type ProbeEpisode,
   type ProbeEpisodes,
 } from './episodes.js';
@@ -107,7 +116,7 @@ interface Seen {
   /** The episode this sensor stands for, when it is a live probe-alarm sensor. */
   readonly episode: ProbeEpisode | undefined;
   /** The last episode it stood for that has ended. A recovery closing it says so. */
-  readonly ended: ProbeEpisode | undefined;
+  readonly ended: EndedEpisode | undefined;
   readonly names: ReadonlyMap<number, string>;
 }
 
@@ -241,20 +250,31 @@ export class AlarmEngine {
     // One at a time, deliberately. `q` is always a transaction's client here — the method
     // contract above says so — and a client is one wire: `Promise.all` bought no parallelism,
     // only pg's "already executing a query" deprecation, which `N-15`'s scenario test surfaced.
-    const standing = await this.#alarms.standingOf(q, sensorIds);
-    // Which of these a probe holds, and under which triggers (`M-22`). The probe's own alarm is
-    // not added to the batch: whatever moves an episode, lost or found, frozen or thawed,
-    // re-evaluates it in the same transaction as the sensors it carries.
+    const asked = await this.#alarms.standingOf(q, sensorIds);
+    // **The link back from a probe alarm to what it holds** (`M-24`). A probe alarm in this batch
+    // that is not live, paused or withheld, is no route to anybody, so the sensors its probe
+    // holds are re-decided here with it, unheld, and notify one by one: the same answer as a
+    // Probe Health paused before the loss. The other direction needs nothing: whatever moves an
+    // episode, lost or found, frozen or thawed, or the tree, re-evaluates the probe's alarm in
+    // the same transaction as the sensors it carries, and the sweep parks what a resumed alarm
+    // holds again.
+    const released = this.#released(sensorIds, asked);
+    const ids = released.length === 0 ? sensorIds : [...sensorIds, ...released];
+    const standing =
+      released.length === 0
+        ? asked
+        : new Map([...asked, ...(await this.#alarms.standingOf(q, released))]);
+    // Which of these a probe holds, and under which triggers (`M-22`).
     const holds = await this.#holds(q, standing.values());
-    const names = await this.#episodeNames(q, sensorIds);
-    const existing = await this.#alarms.alarmsFor(q, sensorIds);
-    const effective = await this.#triggers.effectiveForMany(q, sensorIds);
+    const names = await this.#episodeNames(q, ids);
+    const existing = await this.#alarms.alarmsFor(q, ids);
+    const effective = await this.#triggers.effectiveForMany(q, ids);
 
     // Only the channels some threshold trigger in this batch actually names, and only when
     // there is one. An installation with no threshold triggers never touches the hypertable.
     const values = await this.#alarms.currentValues(
       q,
-      sensorIds,
+      ids,
       channelKeysIn(effective),
       now,
       this.#valueLookbackMs,
@@ -266,7 +286,7 @@ export class AlarmEngine {
     const requests: RequestInsert[] = [];
     const result: AlarmReaction = { ...EMPTY };
 
-    for (const sensorId of sensorIds) {
+    for (const sensorId of ids) {
       const sensor = standing.get(sensorId);
       // No runtime row means no sensor, or one that has never been decided. Either way there is
       // nothing to reconcile against, and any alarm for it went with the object's cascade.
@@ -493,14 +513,39 @@ export class AlarmEngine {
         isLive({ state: alarm.currentState, cause: alarm.currentCause })
           ? this.#episodes.episodeOf(alarm.sensorId)
           : undefined;
+      // **Acknowledged: parked, not fired** (`M-24`). The view reads an acknowledged Probe Health
+      // as Unknown for this trigger, and the acknowledgement stops the chain all the same.
+      if (acknowledgedEpisode(settings.state, alarm.currentState, episode !== undefined)) {
+        this.#park(alarm, parked);
+        continue;
+      }
       const current = seenBy(settings.state, alarm.currentState, episode !== undefined);
 
       // The alarm fell due for a state the sensor is no longer in. `react` should have stood it
       // down already, and does in every path that goes through a transaction — but the sweep is
       // the last thing between a stale row and a page at 3 a.m., so it checks rather than
-      // assumes. Standing it down silently is right: nothing recovered that anybody was told
-      // about, or `react` would have sent the recovery when it cleared it.
+      // assumes. Standing it down silently is right for everything but one alarm: nothing
+      // recovered that anybody was told about, or `react` would have sent the recovery.
       if (alarm.state === null || !stillStanding(alarm.state, current)) {
+        // **The one: an episode alarm whose episode has ended** (`M-24`). Its recipients were
+        // told the probe's sensors are held, and whatever ended the episode may not have reached
+        // `react` for this sensor, so the all-clear goes out here rather than nowhere.
+        const ended =
+          episode === undefined && alarm.currentState !== 'paused'
+            ? this.#episodes?.endedEpisodeOf(alarm.sensorId)
+            : undefined;
+        if (ended !== undefined && closes(alarm, ended) && alarm.phase !== 'pending') {
+          requests.push({
+            at: now,
+            sensorId: alarm.sensorId,
+            triggerId: alarm.triggerId,
+            triggerKind: STATE_TRIGGER.id,
+            templateId: settings.recoveryTemplateId,
+            reason: 'recovery',
+            state: alarm.currentState,
+            message: episodeEndedMessage(ended, probeName(names, ended.probeObjectId)),
+          });
+        }
         clear.push(alarm.id);
         continue;
       }
@@ -650,7 +695,9 @@ export class AlarmEngine {
     const current = seenBy(settings.state, sensor.state, seen.episode !== undefined);
     const since = onEpisode ? seen.episode.since : sensor.since;
     const armFrom = options.armFrom === 'now' ? now : since;
-    const decision = reconcile(view, current, armFrom, settings, now, seen.held);
+    const decision =
+      this.#episodeDecision(alarm, view, sensor, settings, seen) ??
+      reconcile(view, current, armFrom, settings, now, seen.held);
 
     switch (decision.kind) {
       case 'idle':
@@ -738,6 +785,61 @@ export class AlarmEngine {
         out.result.armed += 1;
         return;
     }
+  }
+
+  /**
+   * What an episode alarm owes that `reconcile` cannot see through the view (`M-24`), or undefined
+   * to let `reconcile` decide.
+   *
+   * **An episode that has ended is recovered, whatever Probe Health reads.** The view is gone, so
+   * `reconcile` would see Probe Health's own state, still Down when the episode ended because its
+   * sensors were moved off a probe that is still lost, and suspend the alarm, and the sweep would
+   * later stand it down silently. Its recipients were told the probe's sensors are held, and are
+   * owed the word that they are not: a recovery in the episode-ended words, or nothing for an alarm
+   * that was never sent. A pause is left to `reconcile`, which cancels, as it does any alarm.
+   *
+   * **An acknowledged Probe Health stops the episode alarm's chain.** The view reads it as Unknown
+   * for this trigger, which would hide the acknowledgement from `reconcile`; stopping here is what
+   * an acknowledgement does to any chain, and its lapse takes `reconcile`'s `resume` branch.
+   */
+  #episodeDecision(
+    alarm: AlarmRow | null,
+    view: Alarm | null,
+    sensor: SensorStanding,
+    settings: StateTriggerSettings,
+    seen: Seen,
+  ): Reconciliation | undefined {
+    if (settings.state !== 'unknown') return undefined;
+    if (seen.episode === undefined) {
+      const ended = seen.ended;
+      if (alarm === null || ended === undefined || sensor.state === 'paused') return undefined;
+      if (!closes(alarm, ended)) return undefined;
+      return alarm.phase === 'pending' ? { kind: 'cancel' } : { kind: 'recover' };
+    }
+    if (!acknowledgedEpisode(settings.state, sensor.state, true)) return undefined;
+    if (view === null) return { kind: 'idle' };
+    if (view.state !== settings.state) return undefined;
+    return view.suppressed ? { kind: 'hold' } : { kind: 'suppress' };
+  }
+
+  /**
+   * The sensors to re-decide unheld because the probe alarm in this batch that stood for them is
+   * not live (`M-24`): paused, or withheld for want of a voucher (`A-29`). Those already in the
+   * batch are not repeated.
+   */
+  #released(sensorIds: readonly number[], standing: ReadonlyMap<number, Held>): number[] {
+    const episodes = this.#episodes;
+    if (episodes === undefined) return [];
+    const inBatch = new Set(sensorIds);
+    const released = new Set<number>();
+    for (const sensorId of sensorIds) {
+      const row = standing.get(sensorId);
+      if (row === undefined || isLive(row)) continue;
+      for (const held of episodes.heldFor(sensorId)) {
+        if (!inBatch.has(held)) released.add(held);
+      }
+    }
+    return [...released];
   }
 
   /**
@@ -984,15 +1086,22 @@ function probeName(names: ReadonlyMap<number, string>, probeObjectId: number): s
 }
 
 /**
- * The words of a recovery that closes an episode alarm, or undefined for any other (`M-22`).
+ * Whether this alarm is the one that stood for an episode that has ended (`M-22`).
  *
  * Known by its `since`: an episode alarm is armed from the episode's start, so an alarm on
  * Unknown armed at exactly that instant is the one that stood for it.
  */
+function closes(
+  alarm: { readonly state: SensorState | null; readonly since: Date },
+  ended: ProbeEpisode,
+): boolean {
+  return alarm.state === 'unknown' && alarm.since.getTime() === ended.since.getTime();
+}
+
+/** The words of a recovery that closes an episode alarm, or undefined for any other (`M-22`). */
 function recoveryMessage(alarm: AlarmRow, seen: Seen): string | undefined {
   const ended = seen.ended;
-  if (ended === undefined || alarm.state !== 'unknown') return undefined;
-  if (alarm.since.getTime() !== ended.since.getTime()) return undefined;
+  if (ended === undefined || !closes(alarm, ended)) return undefined;
   return episodeEndedMessage(ended, probeName(seen.names, ended.probeObjectId));
 }
 

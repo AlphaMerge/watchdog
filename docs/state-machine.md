@@ -643,6 +643,23 @@ Two further notes for whoever picks those up:
   cause `access` (`A-29`), is never held**, for three reasons. No sensor stands for it as one
   alarm. It is bounded by what one account wrote, not by what one probe carries. And the trigger
   over those sensors reaches the people who can fix them.
+- **The episode and the set it holds move together, in every direction** (`M-24`). Whatever
+  changes a probe's held set re-decides the probe's alarm in the same transaction, to or from
+  empty included: a loss, a return, a freeze, a thaw, and a tree change that moves, creates,
+  clones or deletes sensors under a lost or frozen probe. An episode ends when its set empties
+  as well as when its probe returns. One that ends while its probe is still at fault, because
+  every sensor it held was moved off it or deleted, is filed as **emptied**, and its alarm
+  recovers in words that say the probe is still lost, silent or behind. Nothing stands an
+  episode alarm down silently: the sweep sends that recovery itself if the re-decision never
+  reached it, and cancels an alarm that was never sent. **An acknowledged Probe Health parks the
+  episode alarm**, since the view would otherwise hide the acknowledgement from the chain, and
+  the lapse resumes it where it stopped. **A Probe Health paused or withheld during the loss**
+  cancels the episode alarm, as a pause cancels any alarm, and re-decides the sensors it held
+  unheld, so from then on they notify one by one. Which came first, the pause or the loss, no
+  longer decides whether a trigger hears anything, and holding still never takes the last route
+  away. The link runs from Probe Health's own re-decision, so it is only as prompt as that. **A
+  Probe Health deleted during the loss is the gap**: nothing is left in any batch to stand for
+  what it held, and those sensors stay held until each is next re-decided.
 - **State never bumps `object.version`.** `sensor_runtime` has no `object_touch_owner` trigger,
   and state is deliberately absent from `GET /objects/:id`, whose ETag is built from
   configuration versions. A scan is not a configuration change, and if it were, `R-04` would

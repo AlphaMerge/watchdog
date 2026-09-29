@@ -16,16 +16,31 @@ const STARTED = new Date('2026-09-29T10:00:00.000Z');
  * that only ever exercised the happy path.
  */
 
+/** A query that answers the subtree read with the sensors this map puts under each probe. */
+function treeOf(under: ReadonlyMap<number, readonly number[]>) {
+  return {
+    query: (_sql: string, params: readonly unknown[]) =>
+      Promise.resolve((under.get(Number(params[0])) ?? []).map((id) => ({ id: String(id) }))),
+  };
+}
+
 function reachabilityOver(
-  options: { txFails?: boolean; sensorIds?: number[]; probeAlarms?: readonly number[] } = {},
+  options: {
+    txFails?: boolean;
+    sensorIds?: number[];
+    under?: ReadonlyMap<number, readonly number[]>;
+    probeAlarms?: readonly number[] | ((probeObjectId: number) => readonly number[]);
+  } = {},
 ) {
   // Mutable, so one instance can succeed at marking a probe lost and then fail at clearing it —
   // which is the only way to reach `#online`'s rollback at all.
   const failing = { now: options.txFails === true };
   const reevaluated: number[][] = [];
   const db = {
-    query: () =>
-      Promise.resolve((options.sensorIds ?? [1, 2, 3]).map((id) => ({ id: String(id) }))),
+    query:
+      options.under === undefined
+        ? () => Promise.resolve((options.sensorIds ?? [1, 2, 3]).map((id) => ({ id: String(id) })))
+        : treeOf(options.under).query,
     // The body runs and *then* the commit fails, which is the realistic shape — a deadlock,
     // a statement timeout, a failover mid-transaction. Rejecting before calling `fn` would
     // model a pool that could not hand out a connection, and would let the assertion below
@@ -49,7 +64,10 @@ function reachabilityOver(
     // This file drives the marking with a stub database; the dependency settle is exercised
     // against a real one in `probe-offline.test.ts`.
     dependencies: { recompute: () => Promise.resolve({ moved: 0 }) },
-    probeAlarms: () => options.probeAlarms ?? [],
+    probeAlarms: (probeObjectId) =>
+      typeof options.probeAlarms === 'function'
+        ? options.probeAlarms(probeObjectId)
+        : (options.probeAlarms ?? []),
     now: () => STARTED,
   });
   return { service, reevaluated, failing };
@@ -156,5 +174,52 @@ describe('what reachability records', () => {
       [1, 2, 3, 70],
       [1, 2, 3, 70],
     ]);
+  });
+
+  it('re-evaluates the probe’s alarm when the tree changes what it holds, even to or from nothing (`M-24`)', async () => {
+    // Lost while carrying nothing: no episode, so nothing to re-decide.
+    const { service, reevaluated } = reachabilityOver({ sensorIds: [], probeAlarms: [70] });
+    await service.lost(7, 'link');
+    assert.deepEqual(reevaluated, []);
+
+    const under: number[] = [4, 5];
+    const q = {
+      query: () => Promise.resolve(under.map((id) => ({ id: String(id) }))),
+    } as unknown as Parameters<ProbeReachability['resync']>[0];
+    // Sensors arrive: an episode begins, and the alarm that stands for it is decided with them.
+    await service.resync(q);
+    assert.deepEqual(reevaluated, [[4, 5, 70]]);
+    // The same sensors in another order: nothing moved, so nothing is re-decided.
+    under.splice(0, 2, 5, 4);
+    await service.resync(q);
+    assert.equal(reevaluated.length, 1);
+    // All of them leave: the episode ended, and its alarm is owed the all-clear.
+    under.splice(0);
+    await service.resync(q);
+    assert.deepEqual(new Set(reevaluated[1]), new Set([4, 5, 70]));
+
+    // Found with nothing held: the alarm is still re-decided, the last chance to recover it.
+    await service.found(7);
+    assert.deepEqual(reevaluated[2], [70]);
+  });
+
+  it('re-evaluates both probes’ alarms when a sensor moves from one lost probe to another (`M-24`)', async () => {
+    // Nothing crosses the lost boundary, so no sensor has anything to re-decide, and both
+    // episodes change: one empties and the other begins.
+    const under = new Map<number, number[]>([
+      [7, [1]],
+      [8, []],
+    ]);
+    const { service, reevaluated } = reachabilityOver({
+      under,
+      probeAlarms: (probeObjectId) => [probeObjectId * 10],
+    });
+    await service.lost(7, 'link');
+    await service.lost(8, 'link');
+    assert.deepEqual(reevaluated, [[1, 70]], 'the empty one began nothing');
+    under.set(7, []).set(8, [1]);
+    await service.resync(treeOf(under) as unknown as Parameters<ProbeReachability['resync']>[0]);
+    assert.deepEqual(reevaluated[1], [70, 80]);
+    assert.equal(service.carrierOf(1), 8);
   });
 });

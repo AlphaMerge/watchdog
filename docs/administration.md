@@ -558,9 +558,21 @@ hears about the probe once, from that sensor, and not once per sensor the probe 
 | On Up, covering Probe Health | Nothing | One notification, for Probe Health, not one per sensor |
 | Not covering Probe Health, such as a team's trigger on a group below the probe | One per sensor, as before | One per sensor |
 | Any, on a probe with no Probe Health, or one that is paused or withheld (`A-29`) | One per sensor, as before | One per sensor |
+| Any, when Probe Health is paused or withheld during the loss | The one alarm is cancelled, and from then on one per sensor, as if it had been paused first (`M-24`) | One per sensor |
 
 A sensor that was Down before its probe went resumes where it was: no second page, and no
 recovery until it really recovers.
+
+- **Acknowledging Probe Health** stops the one alarm's escalation and repeats, as acknowledging
+  any sensor stops its alarm's. When the acknowledgement lapses or is cleared, they resume where
+  they stopped (`M-24`).
+- **Moving a lost probe's devices to a live probe**, or deleting them, ends the one alarm on
+  Unknown with a recovery that says why: *probe Site A is still lost, but none of its sensors are
+  held now: they were moved off it or deleted*. The alarm on Down stands: Probe Health is still
+  Down (`M-24`).
+- **A probe lost while it carries nothing** raises nothing on Unknown: there is nothing held. When
+  sensors are moved, created or cloned under it, they are held from that moment and the one
+  alarm is raised for them, as if they had been there all along (`M-24`).
 
 - **A trigger covers a sensor when it applies to it**: on the sensor itself or on anything above
   it. A trigger on the root covers every probe's Probe Health.

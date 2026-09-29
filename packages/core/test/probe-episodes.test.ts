@@ -1,6 +1,8 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
+import { AlarmEngine } from '../src/notifications/engine.js';
 import {
+  acknowledgedEpisode,
   episodeEndedMessage,
   episodeMessage,
   isCarried,
@@ -8,7 +10,16 @@ import {
   seenBy,
 } from '../src/notifications/episodes.js';
 import { ProbeEpisodeIndex, type FrozenProbe, type LostProbe } from '../src/probes/episodes.js';
-import { V1_STATES } from '../src/state/tables.js';
+import type {
+  AlarmAdvance,
+  AlarmInsert,
+  AlarmRepository,
+  AlarmRow,
+  RequestInsert,
+} from '../src/notifications/repository.js';
+import { V1_STATES, type SensorState } from '../src/state/tables.js';
+import type { TriggerRepository } from '../src/triggers/repository.js';
+import { silent } from './support/tree.js';
 
 /**
  * The episode index (`M-22`): which probe holds which sensors, which sensor is its alarm, and
@@ -134,6 +145,23 @@ describe('the episode index (`M-22`)', () => {
     assert.equal(index.endedEpisodeOf(HEALTH)?.since.getTime(), T1.getTime());
   });
 
+  it('files an episode whose sensors all left, while its probe is still lost, as emptied (`M-24`)', () => {
+    const { lost, index } = world();
+    lost.set(PROBE, { sensorIds: [1, 2], reason: 'link', since: T1 });
+    assert.deepEqual(index.heldFor(HEALTH), [1, 2]);
+    index.episodeOf(HEALTH);
+    lost.set(PROBE, { sensorIds: [], reason: 'link', since: T1 });
+    assert.equal(index.episodeOf(HEALTH), undefined);
+    assert.equal(index.endedEpisodeOf(HEALTH)?.emptied, true);
+    assert.deepEqual(index.heldFor(HEALTH), []);
+
+    // And one that ended because the probe came back is not.
+    lost.set(PROBE, { sensorIds: [3], reason: 'link', since: T2 });
+    index.episodeOf(HEALTH);
+    lost.delete(PROBE);
+    assert.equal(index.endedEpisodeOf(HEALTH)?.emptied, false);
+  });
+
   it('files an end it is first told of through the ended question', () => {
     const { lost, index } = world();
     lost.set(PROBE, { sensorIds: [1], reason: 'link', since: T1 });
@@ -152,6 +180,7 @@ describe('the episode index (`M-22`)', () => {
     assert.deepEqual(index.alarmsFor(PROBE), []);
     assert.equal(index.episodeOf(HEALTH), undefined);
     assert.equal(index.endedEpisodeOf(HEALTH), undefined);
+    assert.deepEqual(index.heldFor(HEALTH), []);
   });
 });
 
@@ -165,6 +194,19 @@ describe('what a trigger sees, and what can stand in for a probe (`M-22`)', () =
           watched === 'unknown' ? 'unknown' : actual,
           `${watched}/${actual}, in an episode`,
         );
+      }
+    }
+  });
+
+  it('sees an acknowledgement through the view only on the trigger the view is for (`M-24`)', () => {
+    for (const watched of V1_STATES) {
+      for (const actual of V1_STATES) {
+        assert.equal(
+          acknowledgedEpisode(watched, actual, true),
+          watched === 'unknown' && actual === 'down_acknowledged',
+          `${watched}/${actual}`,
+        );
+        assert.equal(acknowledgedEpisode(watched, actual, false), false);
       }
     }
   });
@@ -199,10 +241,249 @@ describe('what a trigger sees, and what can stand in for a probe (`M-22`)', () =
       episodeMessage({ ...lost, kind: 'frozen' }, 'Site A'),
       /clock reads earlier .*312 sensors are Unknown until it catches up/u,
     );
+    const ended = { ...lost, emptied: false };
     assert.equal(
-      episodeEndedMessage(lost, 'Site A'),
+      episodeEndedMessage(ended, 'Site A'),
       'probe Site A is answering again: its sensors are no longer held',
     );
-    assert.match(episodeEndedMessage({ ...lost, kind: 'frozen' }, 'Site A'), /caught up/u);
+    assert.match(episodeEndedMessage({ ...ended, kind: 'frozen' }, 'Site A'), /caught up/u);
+    // Emptied: the probe is as much at fault as it was, and the words must not say otherwise.
+    const emptied = { ...lost, emptied: true };
+    assert.equal(
+      episodeEndedMessage(emptied, 'Site A'),
+      'probe Site A is still lost, but none of its sensors are held now: they were moved off it ' +
+        'or deleted',
+    );
+    assert.match(
+      episodeEndedMessage({ ...emptied, kind: 'silent' }, 'Site A'),
+      /still sending no/u,
+    );
+    assert.match(episodeEndedMessage({ ...emptied, kind: 'frozen' }, 'Site A'), /still behind/u);
+  });
+});
+
+/**
+ * What the engine does with an episode alarm where the view cannot decide for it (`M-24`): an
+ * episode that ended while its probe stayed at fault, and an acknowledged Probe Health. The
+ * repository and the triggers are maps holding one alarm under one trigger on Unknown.
+ */
+describe('an episode alarm the view cannot decide (`M-24`)', () => {
+  const SETTINGS = {
+    state: 'unknown',
+    initialLatencySeconds: 0,
+    initialTemplateId: 11,
+    recoveryTemplateId: 12,
+    repeatMinutes: 30,
+  };
+  const EMPTIED =
+    'probe Site A is still lost, but none of its sensors are held now: they were moved off it ' +
+    'or deleted';
+
+  interface Fixture {
+    /** Probe Health's state. */
+    readonly state: SensorState;
+    /** The alarm's phase, or null for no alarm. */
+    readonly phase: AlarmRow['phase'] | null;
+    readonly suppressed?: boolean;
+    /** The episode ended while its probe stayed lost: its sensors were moved off it. */
+    readonly emptied: boolean;
+  }
+
+  function over(fixture: Fixture): {
+    engine: AlarmEngine;
+    requests: RequestInsert[];
+    cleared: number[];
+    advanced: AlarmAdvance[];
+    armed: AlarmInsert[];
+  } {
+    const { lost, index } = world();
+    lost.set(PROBE, { sensorIds: [1, 2], reason: 'link', since: T1 });
+    index.episodeOf(HEALTH);
+    // Emptied by a tree change whose re-evaluation of Probe Health never landed.
+    if (fixture.emptied) lost.set(PROBE, { sensorIds: [], reason: 'link', since: T1 });
+    const cause = fixture.state === 'paused' ? null : 'lookup';
+    const suppressed = fixture.suppressed ?? false;
+    const row: AlarmRow | null =
+      fixture.phase === null
+        ? null
+        : {
+            id: 900,
+            sensorId: HEALTH,
+            triggerId: 5,
+            kind: 'state',
+            state: 'unknown',
+            channelKey: null,
+            observed: null,
+            since: T1,
+            phase: fixture.phase,
+            nextDueAt: suppressed ? null : T3,
+            repeats: 0,
+            suppressed,
+          };
+    const requests: RequestInsert[] = [];
+    const cleared: number[] = [];
+    const advanced: AlarmAdvance[] = [];
+    const armed: AlarmInsert[] = [];
+    const alarms = {
+      anyWork: () => Promise.resolve(true),
+      standingOf: (_q: unknown, ids: readonly number[]) =>
+        Promise.resolve(
+          new Map(
+            ids
+              .filter((id) => id === HEALTH)
+              .map((id) => [
+                id,
+                {
+                  sensorId: id,
+                  state: fixture.state,
+                  cause,
+                  since: T1,
+                  message: 'no heartbeat',
+                  consecutiveFailures: 1,
+                },
+              ]),
+          ),
+        ),
+      alarmsFor: () => Promise.resolve(new Map(row === null ? [] : [[HEALTH, [row]]])),
+      currentValues: () => Promise.resolve(new Map()),
+      due: () =>
+        Promise.resolve(
+          row === null
+            ? []
+            : [
+                {
+                  ...row,
+                  triggerSettings: SETTINGS,
+                  currentState: fixture.state,
+                  currentCause: cause,
+                  message: 'no heartbeat',
+                },
+              ],
+        ),
+      probesAbove: () => Promise.resolve(new Map()),
+      namesOf: () => Promise.resolve(new Map([[PROBE, 'Site A']])),
+      queue: (_q: unknown, queued: readonly RequestInsert[]) => {
+        requests.push(...queued);
+        return Promise.resolve(queued.length);
+      },
+      advance: (_q: unknown, rows: readonly AlarmAdvance[]) => {
+        advanced.push(...rows);
+        return Promise.resolve();
+      },
+      clear: (_q: unknown, ids: readonly number[]) => {
+        cleared.push(...ids);
+        return Promise.resolve(ids.length);
+      },
+      arm: (_q: unknown, rows: readonly AlarmInsert[]) => {
+        armed.push(...rows);
+        return Promise.resolve(rows.length);
+      },
+    } as unknown as AlarmRepository;
+    const trigger = {
+      id: 5,
+      objectId: 1,
+      kind: 'state',
+      settings: SETTINGS,
+      enabled: true,
+      createdAt: T1,
+      updatedAt: T1,
+      inherited: true,
+      depth: 3,
+      definedOn: { objectId: 1, name: 'Root' },
+    };
+    const triggers = {
+      effectiveForMany: (_q: unknown, ids: readonly number[]) =>
+        Promise.resolve(new Map(ids.map((id) => [id, [trigger]]))),
+    } as unknown as TriggerRepository;
+    return {
+      engine: new AlarmEngine({ logger: silent, alarms, triggers, episodes: index }),
+      requests,
+      cleared,
+      advanced,
+      armed,
+    };
+  }
+
+  const react = (engine: AlarmEngine): Promise<unknown> =>
+    engine.react({} as never, [HEALTH], new Date(T3.getTime() + 60_000));
+  const sweep = (engine: AlarmEngine): Promise<unknown> =>
+    engine.sweep({} as never, new Date(T3.getTime() + 60_000));
+  const said = (requests: readonly RequestInsert[]): unknown[] =>
+    requests.map((request) => [request.reason, request.templateId, request.message]);
+
+  describe('whose episode ended while its probe stayed lost', () => {
+    for (const [name, run] of [
+      ['the reaction', react],
+      ['the sweep', sweep],
+    ] as const) {
+      it(`is recovered by ${name} in words that say why, never stood down silently`, async () => {
+        const { engine, requests, cleared } = over({
+          state: 'down',
+          phase: 'notified',
+          emptied: true,
+        });
+        await run(engine);
+        assert.deepEqual(said(requests), [['recovery', 12, EMPTIED]]);
+        assert.deepEqual(cleared, [900]);
+      });
+
+      it(`is cancelled by ${name}, saying nothing, when it was never sent or Probe Health is paused`, async () => {
+        for (const [state, phase] of [
+          ['down', 'pending'],
+          ['paused', 'notified'],
+        ] as const) {
+          const { engine, requests, cleared } = over({ state, phase, emptied: true });
+          await run(engine);
+          assert.deepEqual(requests, [], `${state}/${phase}`);
+          assert.deepEqual(cleared, [900], `${state}/${phase}`);
+        }
+      });
+    }
+  });
+
+  describe('on an acknowledged Probe Health, while the episode goes on', () => {
+    it('is not armed by the reaction', async () => {
+      const { engine, armed, requests } = over({
+        state: 'down_acknowledged',
+        phase: null,
+        emptied: false,
+      });
+      await react(engine);
+      assert.deepEqual(armed, []);
+      assert.deepEqual(requests, []);
+    });
+
+    it('is suppressed by the reaction, once: a suppressed one is held as it stands', async () => {
+      const once = over({ state: 'down_acknowledged', phase: 'notified', emptied: false });
+      await react(once.engine);
+      assert.deepEqual(
+        once.advanced.map((row) => [row.id, row.suppressed, row.nextDueAt]),
+        [[900, true, null]],
+      );
+      const again = over({
+        state: 'down_acknowledged',
+        phase: 'notified',
+        suppressed: true,
+        emptied: false,
+      });
+      await react(again.engine);
+      assert.deepEqual(again.advanced, []);
+      assert.deepEqual([...again.requests, ...again.cleared], []);
+    });
+
+    it('is parked by the sweep, not fired, when it falls due', async () => {
+      const { engine, requests, cleared, advanced } = over({
+        state: 'down_acknowledged',
+        phase: 'notified',
+        emptied: false,
+      });
+      await sweep(engine);
+      assert.deepEqual(requests, [], 'no repeat');
+      assert.deepEqual(cleared, []);
+      assert.deepEqual(
+        advanced.map((row) => [row.id, row.suppressed, row.nextDueAt]),
+        [[900, true, null]],
+      );
+    });
   });
 });

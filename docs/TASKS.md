@@ -5976,7 +5976,7 @@ because each is a decision rather than a defect:
       then fail raises no new alarm; factory B withheld leaves factory C not Down and not
       notifying. Mutants as usual.
 
-- [ ] **M-24 — `M-22`'s episode and its held set are not linked in every direction** · M · M-22,
+- [x] **M-24 — `M-22`'s episode and its held set are not linked in every direction** · M · M-22,
       M-17 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `M-24`).
       - **Medium, lost alarms** (`reachability.ts:238`, `:326`). A probe that is lost while
         carrying no sensors, and then gains some by a move, create or clone, holds them behind a
@@ -6003,6 +6003,46 @@ because each is a decision rather than a defect:
         why.
       One scenario test per case, per `M-17`, in `probe-episode-scenario.test.ts`, with each
       asserted alarm asserted present first. Mutants as usual.
+
+      **Done.** The held set and the probe's alarm now move together in every direction.
+      - **`resync` re-decides the alarm of every probe whose held set changed**, to or from empty
+        included, in one batch with the sensors that crossed. Sensors that arrive under a probe
+        lost while it carried nothing begin an episode, and its one alarm is raised. A sensor
+        moved from one lost probe to another re-decides both alarms, although no sensor crosses
+        the boundary. `#online` re-decides the alarm even for an empty set: it is the last chance
+        to recover an alarm that a failed re-evaluation left standing. `lost()` with nothing held
+        still returns early, because no episode begins, so there is no alarm to decide. The next
+        arrival begins one, through `resync`. `ClockFreeze` needed nothing: `#settle` already
+        re-decides the alarm on any change to its set, `resync`'s included (`P-239`).
+      - **An episode alarm whose episode has ended recovers**, in the reaction and in the sweep,
+        whatever Probe Health reads. The index files an episode that ended while its cause went
+        on as `emptied`, and the recovery says so: *probe Site A is still lost, but none of its
+        sensors are held now: they were moved off it or deleted*. A pending alarm is cancelled
+        instead, and a paused Probe Health is left to the pause, which cancels silently. The sweep
+        sends the recovery itself rather than stand the alarm down, so a failed re-evaluation
+        costs a delay, not the all-clear. Deleting the probe afterwards loses nothing, because
+        the recovery goes out at the move.
+      - **Acknowledgement parks the episode alarm.** `acknowledgedEpisode` is the one place the
+        view meets an acknowledgement. The reaction suppresses a standing alarm, holds one it has
+        already suppressed, and arms nothing. The sweep parks one that falls due. The lapse takes
+        `reconcile`'s `resume` branch.
+      - **Pausing Probe Health mid-loss re-decides the carried sensors unheld**, so they notify one
+        by one. This was chosen over documenting the silence, for two reasons. It is what a pause
+        before the loss already does, so the order of the pause and the loss no longer decides
+        whether a trigger hears anything. And it keeps `M-22`'s rule that holding never takes the
+        last route away. When a probe alarm in a reaction's batch is not live (paused, or
+        withheld per `A-29`), the reaction adds its probe's held set to the batch. It does this in
+        that direction only: re-reacting everything a probe carries on every reaction of a live
+        Probe Health would buy nothing.
+      - **The gap is a Probe Health deleted mid-loss.** Nothing is left in any batch to stand for
+        what it held, so those sensors stay held until each is next re-decided. State-machine §7
+        records it, and it is offered as a ticket rather than grown into this one.
+
+      Tests: four scenarios in `probe-episode-scenario` (an arrival under an empty lost probe, an
+      emptied episode with a repeat, acknowledgement and its lapse, a pause mid-loss), the
+      reaction and the sweep against map repositories in `probe-episodes`, and `resync` and
+      `found` in `probe-reachability-marks`. Mutations 21/21: the first pass's five survivors are
+      what the map-repository cases and the two-probe case are for.
 
 - [x] **P-228 — any probe could report on any other probe's work** · M · R-01, R-04, R-09, D-01 ·
       Found reviewing ingestion's inputs. Nothing tied what a probe sent to what it had been given.

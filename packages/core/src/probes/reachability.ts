@@ -200,12 +200,13 @@ export class ProbeReachability {
     if (this.#byProbe.size === 0) return 0;
 
     const before = new Set(this.#unreachable);
+    // The probes whose held set this changes, to or from empty included (`M-24`).
+    const touched = new Set<number>();
     for (const [probeObjectId, held] of this.#byProbe) {
       try {
-        this.#byProbe.set(probeObjectId, {
-          ...held,
-          sensorIds: await this.#sensorsUnder(probeObjectId, q),
-        });
+        const sensorIds = await this.#sensorsUnder(probeObjectId, q);
+        if (!sameMembers(sensorIds, held.sensorIds)) touched.add(probeObjectId);
+        this.#byProbe.set(probeObjectId, { ...held, sensorIds });
       } catch (error) {
         // Leave this probe's snapshot as it was, for the reason `lost` gives: one probe the
         // database will not answer for must not discard the overlay for the others.
@@ -232,10 +233,16 @@ export class ProbeReachability {
       ...[...before].filter((id) => !this.#unreachable.has(id)),
       ...[...this.#unreachable].filter((id) => !before.has(id)),
     ];
-    if (changed.length === 0) return 0;
+    if (changed.length === 0 && touched.size === 0) return 0;
+    // **And the alarm of every probe whose held set changed** (`M-24`), with them. Sensors that
+    // arrive under a probe lost while it carried nothing are held behind its Probe Health, and
+    // that alarm was never re-decided, so a trigger on Unknown heard nothing for the outage. A
+    // probe whose last sensors were moved off it has an episode that ended, and its alarm is owed
+    // the all-clear.
+    const alarms = [...touched].flatMap((probeObjectId) => this.#probeAlarms(probeObjectId));
 
     try {
-      const moved = await this.#states.reevaluate(q, changed, this.#now(), {
+      const moved = await this.#states.reevaluate(q, [...changed, ...alarms], this.#now(), {
         message: 'the probe carrying this sensor changed',
       });
       // In the same transaction: a master that has just become Unknown is not Down, so anything
@@ -323,6 +330,8 @@ export class ProbeReachability {
     this.#byProbe.set(probeObjectId, { sensorIds, reason, since: this.#now() });
     this.#hold(probeObjectId, sensorIds);
     this.#outages += 1;
+    // Nothing held, so no episode begins and there is no alarm to re-decide. Sensors that arrive
+    // later begin one, and `resync` re-decides the probe's alarm with them (`M-24`).
     if (sensorIds.length === 0) return 0;
 
     // **The overlay is in place before the re-evaluation runs**, which is what makes this one
@@ -406,7 +415,11 @@ export class ProbeReachability {
     const sensorIds = entry.sensorIds;
     this.#byProbe.delete(probeObjectId);
     this.#release(sensorIds);
-    if (sensorIds.length === 0) return 0;
+    // An empty set still re-decides the probe's alarm (`M-24`): an episode emptied by a tree
+    // change whose own re-evaluation did not land left an alarm that this is the last chance to
+    // recover.
+    const alarms = this.#probeAlarms(probeObjectId);
+    if (sensorIds.length === 0 && alarms.length === 0) return 0;
 
     // The mirror of `lost`'s rollback, and it was missing (`P-90`). The overlay is dropped
     // before the write, so a rejected transaction left the database holding `unknown`/`probe`
@@ -421,12 +434,9 @@ export class ProbeReachability {
     let moved: number;
     try {
       moved = await this.#db.tx(async (q) => {
-        const count = await this.#states.reevaluate(
-          q,
-          [...sensorIds, ...this.#probeAlarms(probeObjectId)],
-          this.#now(),
-          { message: 'the probe carrying this sensor is answering again' },
-        );
+        const count = await this.#states.reevaluate(q, [...sensorIds, ...alarms], this.#now(), {
+          message: 'the probe carrying this sensor is answering again',
+        });
         // And the other direction: a master that is Down again holds what it should.
         await this.#dependencies.recompute(q, this.#now());
         return count;
@@ -489,4 +499,11 @@ export class ProbeReachability {
     );
     return rows.map((row) => Number(row.id));
   }
+}
+
+/** Whether two lists of sensor ids hold the same sensors, whatever the order. */
+function sameMembers(a: readonly number[], b: readonly number[]): boolean {
+  if (a.length !== b.length) return false;
+  const members = new Set(b);
+  return a.every((id) => members.has(id));
 }
