@@ -168,6 +168,7 @@ if [ -n "${MS_START_WHEN:-}" ]; then
 fi
 
 echo "==> measuring into ${out_dir}"
+started="$(docker exec "${box}" date +%s)"
 status=0
 docker exec -e MS_TOKEN="${token}" -e MS_BOX_LIMIT_MIB="${limit_mib}" -e MS_TARGET_PORT="${target_port}" \
   ${MS_STAGES:+-e MS_STAGES="${MS_STAGES}"} \
@@ -176,7 +177,19 @@ docker exec -e MS_TOKEN="${token}" -e MS_BOX_LIMIT_MIB="${limit_mib}" -e MS_TARG
   "${box}" node /tmp/probe-starvation.mjs >"${out_dir}/run.jsonl" || status=$?
 
 # Whatever the run managed, the probe's own samples are evidence, and so is how much output
-# reached the reader.
+# reached the reader. PID 1's journal, the units' journals, the kernel's OOM lines and the probe's
+# own output are copied from here too, not only by the run: `P-216b`'s run died before it read
+# them, and the box they were in was gone a second later.
+docker exec "${box}" bash -c "
+  journalctl _PID=1 --no-pager -o short-unix --since @${started} | gzip >/tmp/pid1.log.gz
+  journalctl -u ms-probe -u ms-core -u ms-stdout-reader --no-pager -o short-unix --since @${started} \
+    | gzip >/tmp/units.log.gz
+  dmesg 2>/dev/null | grep -i -E 'oom|killed process' >/tmp/oom.log || true
+  gzip -c /var/lib/ms-starvation/probe-output.log >/tmp/probe-output.log.gz 2>/dev/null || true
+" || true
+for file in pid1.log.gz units.log.gz oom.log probe-output.log.gz; do
+  docker cp "${box}:/tmp/${file}" "${out_dir}/${file}" 2>/dev/null || true
+done
 docker cp "${box}:/var/lib/ms-probe/memory.ndjson" "${out_dir}/probe-memory.ndjson" 2>/dev/null || true
 docker exec "${box}" bash -c 'ls -la /var/lib/ms-starvation/; ls -la /var/lib/ms-probe/*.heapsnapshot 2>/dev/null' \
   >"${out_dir}/files.txt" 2>&1 || true

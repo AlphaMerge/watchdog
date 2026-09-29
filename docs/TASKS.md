@@ -4893,6 +4893,53 @@ because each is a decision rather than a defect:
       against a main heap of 55 MiB or less. **Next**: the sensors aim at `blackhole.pl`, a local
       port that never answers, and the balloon is sized against anonymous memory.
 
+      **Second run: the probe killed itself before the stages could** (2026-09-28,
+      `docs/findings/2026-09-29-probe-starvation-b.md`). Against `blackhole.pl` every check waits
+      out its timeout, the pool grew to 98–110 workers and 3.7–4.0 GiB, and the kernel killed the
+      probe for its 4 GiB box six times in six minutes, the first nine seconds into the baseline
+      with no hog and no balloon. The start limit then left it failed for good. That growth is
+      `P-236`. This ticket's own question, whether a stalled log makes a live probe grow, is still
+      open: the stall began five minutes after the probe had stopped. **Next**: `P-216c`, the same
+      harness after `P-236`, on a probe that stays up. The harness no longer signals pid 0, which
+      is how this run killed itself and lost PID 1's journal and the probe's output.
+
+- [ ] **P-236 — under checks that hang to their timeout, the pool grows past the memory it has and
+      the probe is OOM-killed** · M · P-34, P-210 · Found by `P-216b`
+      (`docs/findings/2026-09-29-probe-starvation-b.md`). The pool sizer (`P-34`) derives its
+      ceiling from Little's law on measured durations and knows nothing about memory: with 5,000
+      `port.tcp` checks each waiting out a 5 s timeout it wants about 540 workers and is clamped to
+      `autoPoolCeilingMax()`, 256, and `#grow()` goes there in one step while the queue is non-empty.
+      At 35–40 MiB a worker that is about 9.5 GiB, past the shipped `MemoryMax=6G`. In a 4 GiB box
+      the probe died at 98–110 workers, six times, and the start limit left it failed. **Probe
+      Health read 95% of its memory limit (`P-210`) and nothing acted on it.**
+
+      - **A memory cap on the ceiling.** `memoryCap = held + floor((available − reserve) /
+        perWorker)`. `available` is `readLimitMemory()`, the tightest cgroup level against its
+        working set. `reserve` is the larger of 256 MiB and 10% of the limit, for the main thread,
+        the spool, the log's backlog and workers' heaps growing after they start. `perWorker` is a
+        measured constant in `measured.ts`, 40 MiB, citing the finding. It corrects itself,
+        because `available` is read again at every step.
+      - **Where there is no cgroup limit** (cgroup v1, Windows under WinSW), `available` is the
+        machine's (`P-208`). The probe then competes with whatever else runs there and `reserve` is
+        its only protection, so `administration.md` recommends `MemoryMax` for exactly that case.
+      - **Applied twice.** The sizer takes `min(derived, memoryCap)` every 30 s, and `#grow()` clamps
+        each step to the live headroom, since growth is immediate and the sizer is not. Below the
+        reserve, spare idle workers are retired down to `minSize` through the over-ceiling path,
+        never one in the middle of a check (`P-26`). An explicit `workerPoolSize` is the operator's
+        word and is honoured, with a warning when it exceeds the cap.
+      - **Past the cap, nothing new.** Checks wait in the bounded queue and are refused and counted
+        as now, and scheduler lag and `checkWait` rise: saturation that shows, not a death.
+      - **When the cap binds, one log line per episode**, with derived, cap, available and
+        perWorker, not one per sizer pass.
+      - **On Probe Health**: `poolCeiling`, `poolMemoryCap`, and `poolHeldBack` (derived less
+        effective). Probe protocol **19**, allocated 2026-09-29.
+
+      **Done when** table tests cover the cap's arithmetic (a limit, a gap, the no-limit fallback,
+      under the reserve), a pool test drops the headroom mid-growth, and a scenario test with a
+      sensor type that only ends on abort shows the pool stopping at the cap, refusals counted,
+      `poolHeldBack` above zero, and no worker retired mid-check. Acceptance is `P-216c`: the same
+      4 GiB box, and the probe stays up with `NRestarts` 0.
+
 - [ ] **P-220 — under host load systemd's watchdog kills idle services, and each kill now counts
       toward `P-215`'s start limit** · M · P-215 · Seen in `P-215`'s rerun, at load 24.67 on 8 CPUs
       with other sessions' suites beside it: the probe, scheduling no sensors, killed at *Watchdog
@@ -18590,3 +18637,21 @@ cross-references in order to record a scope move would trade one kind of stalene
 **Whoever picks this up starts by re-running the diff above.** It was byte-identical on
 2026-08-27 and again on 2026-09-04. If the two have drifted by then, that changes the answer on
 its own and the argument for waiting is void.
+
+### (unnumbered) — A check worker that runs more than one check at a time
+
+Filed 2026-09-29 by `P-216b`, without a number; the scheduler allocates one. **Not v1: it changes
+the runner contract, and needs an ADR.**
+
+A worker runs one check at a time, so an I/O-bound check holds a whole worker for as long as it
+waits. `P-216b` measured what that costs: a `port.tcp` check against a port that never answers
+holds 35–40 MiB for its 5 s timeout, and 5,000 of them a minute wanted about 540 workers, about
+20 GiB, to wait on sockets that one event loop could hold by the thousand
+(`docs/findings/2026-09-29-probe-starvation-b.md`). `P-236` bounds the pool by memory, which stops
+the probe dying; it does not make waiting cheap. A worker that runs several asynchronous checks at
+once would, by about an order of magnitude for checks that mostly wait.
+
+What an ADR has to settle: which checks may share a worker (`costHint`, or a new declaration on
+`SensorType`), how `ctx.signal` and a timeout abandon one check without taking its neighbours, what
+a worker crash now costs, and how `P-34`'s sizing counts a worker that holds more than one check.
+

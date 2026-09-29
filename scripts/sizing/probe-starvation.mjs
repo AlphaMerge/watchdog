@@ -383,6 +383,15 @@ function stall(on) {
 }
 
 async function heapSnapshot(pid) {
+  // **Never pid 0.** A failed unit's `MainPID` is 0, and `kill(0, …)` signals this script's own
+  // process group: `P-216b` ended there, killed by its own SIGUSR2 (exit 140) with the probe
+  // already given up on by the start limit, and took the PID 1 journal with it.
+  if (!Number.isInteger(pid) || pid <= 1) return { skipped: 'the probe is not running', pid };
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    return { skipped: 'the probe is not running', pid, error: String(error) };
+  }
   const before = new Set(sh('bash', ['-c', 'ls /var/lib/ms-probe/ 2>/dev/null']).split('\n'));
   process.kill(pid, 'SIGUSR2');
   for (let waited = 0; waited < 180; waited += 1) {
@@ -408,62 +417,71 @@ async function heapSnapshot(pid) {
 const kills = [];
 const previous = Object.fromEntries(UNITS.map((name) => [name, unit(name)]));
 let lastOutput = outputBytes();
-for (const [index, stage] of STAGES.entries()) {
-  hog(stage.cpu);
-  const balloonMiB = balloon(stage.leaveMiB);
-  stall(stage.stall);
-  emit({ kind: 'stage', index, ...stage, loops: stage.cpu * cpus, balloonMiB });
-  const until = Date.now() + stage.seconds * 1_000;
-  let tick = 0;
-  while (Date.now() < until) {
-    const now = Object.fromEntries(UNITS.map((name) => [name, unit(name)]));
-    for (const name of UNITS) {
-      if (
-        now[name].restarts !== previous[name].restarts ||
-        now[name].result !== previous[name].result
-      ) {
-        const event = { kind: 'unit-event', index, unit: name, ...now[name] };
-        kills.push(event);
-        emit(event);
+// Whatever a stage does, the hog, the balloon and the stall are undone and PID 1's journal is
+// read: those records are the evidence of what killed what, and a run that loses them has to
+// be taken again (`P-216b`).
+let stagesFailed = null;
+try {
+  for (const [index, stage] of STAGES.entries()) {
+    hog(stage.cpu);
+    const balloonMiB = balloon(stage.leaveMiB);
+    stall(stage.stall);
+    emit({ kind: 'stage', index, ...stage, loops: stage.cpu * cpus, balloonMiB });
+    const until = Date.now() + stage.seconds * 1_000;
+    let tick = 0;
+    while (Date.now() < until) {
+      const now = Object.fromEntries(UNITS.map((name) => [name, unit(name)]));
+      for (const name of UNITS) {
+        if (
+          now[name].restarts !== previous[name].restarts ||
+          now[name].result !== previous[name].result
+        ) {
+          const event = { kind: 'unit-event', index, unit: name, ...now[name] };
+          kills.push(event);
+          emit(event);
+        }
       }
+      const output = outputBytes();
+      const line = {
+        kind: 'tick',
+        index,
+        load: loadavg(),
+        psi: {
+          cpu: psi('/proc/pressure/cpu'),
+          memory: psi('/proc/pressure/memory'),
+          io: psi('/proc/pressure/io'),
+        },
+        box: boxMemory(),
+        probe: probeProcess(now['ms-probe'].pid),
+        outputBytesPerS: output !== null && lastOutput !== null ? output - lastOutput : null,
+        balloon: unit(BALLOON).state,
+        core: {
+          pingAgeMs: pingAgeMs(now['ms-core'].pingUs),
+          state: now['ms-core'].state,
+          restarts: now['ms-core'].restarts,
+        },
+        probeUnit: {
+          pingAgeMs: pingAgeMs(now['ms-probe'].pingUs),
+          state: now['ms-probe'].state,
+          restarts: now['ms-probe'].restarts,
+        },
+      };
+      lastOutput = output;
+      if (tick % 5 === 0) line.health = await probeHealth();
+      emit(line);
+      Object.assign(previous, now);
+      tick += 1;
+      await sleep(1_000);
     }
-    const output = outputBytes();
-    const line = {
-      kind: 'tick',
-      index,
-      load: loadavg(),
-      psi: {
-        cpu: psi('/proc/pressure/cpu'),
-        memory: psi('/proc/pressure/memory'),
-        io: psi('/proc/pressure/io'),
-      },
-      box: boxMemory(),
-      probe: probeProcess(now['ms-probe'].pid),
-      outputBytesPerS: output !== null && lastOutput !== null ? output - lastOutput : null,
-      balloon: unit(BALLOON).state,
-      core: {
-        pingAgeMs: pingAgeMs(now['ms-core'].pingUs),
-        state: now['ms-core'].state,
-        restarts: now['ms-core'].restarts,
-      },
-      probeUnit: {
-        pingAgeMs: pingAgeMs(now['ms-probe'].pingUs),
-        state: now['ms-probe'].state,
-        restarts: now['ms-probe'].restarts,
-      },
-    };
-    lastOutput = output;
-    if (tick % 5 === 0) line.health = await probeHealth();
-    emit(line);
-    Object.assign(previous, now);
-    tick += 1;
-    await sleep(1_000);
+    // The peak is the end of the last stalled stage: snapshot there, before the log drains.
+    const last = STAGES.findLastIndex((one) => one.stall);
+    if (HEAP_SNAPSHOT && index === last) {
+      emit({ kind: 'heap-snapshot', ...(await heapSnapshot(unit('ms-probe').pid)) });
+    }
   }
-  // The peak is the end of the last stalled stage: snapshot there, before the log drains.
-  const last = STAGES.findLastIndex((one) => one.stall);
-  if (HEAP_SNAPSHOT && index === last) {
-    emit({ kind: 'heap-snapshot', ...(await heapSnapshot(unit('ms-probe').pid)) });
-  }
+} catch (error) {
+  stagesFailed = error;
+  emit({ kind: 'stage-error', error: error instanceof Error ? error.stack : String(error) });
 }
 hog(0);
 balloon(null);
@@ -525,3 +543,4 @@ if (existsSync(PID1_LOG)) {
   }
 }
 emit({ kind: 'summary', stages: STAGES.length, kills: kills.length });
+if (stagesFailed !== null) process.exitCode = 1;
