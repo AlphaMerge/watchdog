@@ -42,10 +42,12 @@ fi
 npx tsc -b packages/core packages/probe
 
 # Which commit this is, where the services read it (`H-11`), so the start line names it rather
-# than calling itself a working tree.
+# than calling itself a working tree — and the lock its modules came from, which the manifest
+# must name since `H-20` or the services refuse to load it.
+lock="sha256:$(sha256sum package-lock.json | cut -d' ' -f1)"
 for pkg in core probe; do
-  printf '{"version":"0.0.0-dev","commit":"%s","dirty":false,"profile":"full"}\n' "${commit}" \
-    >"packages/${pkg}/build.json"
+  printf '{"version":"0.0.0-dev","commit":"%s","dirty":false,"profile":"full","lock":"%s"}\n' \
+    "${commit}" "${lock}" >"packages/${pkg}/build.json"
 done
 
 echo "${commit}" >.built-commit

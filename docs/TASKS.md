@@ -17830,7 +17830,9 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
         this clone last fetched it (`git archive`, so nothing uncommitted reaches it) into a
         Docker volume, `ms-server-build`. `scripts/lib/ms-server-build.sh` builds it in the
         toolchain container, with the modules reinstalled only when the lock file changes.
-        It stamps `build.json` with the commit, so the start line names it.
+        It stamps `build.json` with the commit, so the start line names it, and with the lock's
+        sha256. `H-20`, which landed the next hour, made the manifest parser require the lock,
+        and a build without it failed at load.
       - **Measured:** 44 s from an empty volume, about 30 s after a new commit, and 2 s when
         origin/main has not moved. A build that fails leaves the old one unmarked and starts
         nothing.
