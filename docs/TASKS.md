@@ -6766,7 +6766,7 @@ because each is a decision rather than a defect:
       Test with a configured script directory: the answer carries the script's reading.
       Mutants as usual.
 
-- [ ] **P-243 — under CPU starvation at the memory limit, a 15 s ping misses a 30 s watchdog** ·
+- [x] **P-243 — under CPU starvation at the memory limit, a 15 s ping misses a 30 s watchdog** ·
       M · P-220, P-215 · Found by `P-216c` (`docs/findings/2026-09-29-probe-starvation-c.md`).
       With load 72 on 8 CPUs and the box at 4,096 of 4,096 MiB, both services' main threads were
       held for 7–15 s at a time: sampler gaps up to 15.0 s, single blocks of 7.4 s, and GC up to
@@ -6793,6 +6793,24 @@ because each is a decision rather than a defect:
       under the same conditions: no watchdog kill of either service across three runs, and the
       pings sent against those received in the findings. If the answer is the kill, the findings
       show the restart helped. The core's 25.6 s is part of the acceptance, not only the probe's.
+
+      **Done: the margin.** Both services ping every `WatchdogSec`/6, which is 5 s against the
+      shipped 30, still from the main thread. The longest gap becomes the longest block plus
+      5 s, rather than plus 15.
+      - **Not off the main thread:** a watchdog that pings through a hung loop cannot see what
+        it exists for.
+      - **Not the kill:** the restart relieved nothing, and it counts toward `P-215`'s limit.
+
+      Three runs of the `P-216` harness from one `d247b02` tarball: 0 kills. PID 1 received
+      688 of 688 core pings and 689 of 689 probe pings, with no gap past 6.2 s against 30.
+
+      **Milder than `P-216c`:** blocks up to 5.0 s against 7–15, and memory `some` up to 2.80%
+      against 3.37%. So this shows the cadence holds under that stress, not under `P-216c`'s.
+      The harness was not made harsher to force a kill.
+
+      The stalled-log stage no longer stresses the log now that `P-216` part 3 summarises
+      refusals. The runs predate `P-244`'s reserve.
+      (`findings/2026-09-29-watchdog-cadence.md`)
 
 - [x] **P-244 — the memory cap holds a saturated probe over `memoryLimitUsage`'s warning** · S ·
       P-236, M-21 · Found by `P-216c`. The cap keeps back 10% of the limit, so a saturated probe

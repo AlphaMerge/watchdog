@@ -37,6 +37,10 @@ The stalled stdout is the obvious suspect, and the evidence says otherwise.
   at its limit, with 48 busy loops competing for the CPU, is the likely reading, and the core
   shows the same pattern with no pool and no stalled log.
 
+**Answered by `P-243`:** both services now ping every 5 s, a sixth of `WatchdogSec`, and three
+reruns of this harness killed nothing, with no gap past 6.2 s. Those reruns were milder than this
+one, with blocks of up to 5 s rather than 7–15 s (`2026-09-29-watchdog-cadence.md`).
+
 So **`P-220`'s question has an answer after all**: CPU starvation alone did not kill (`P-220`),
 and CPU starvation with the memory at the box's limit did. A 15 s ping interval against a 30 s
 limit leaves room for one late ping. Main-thread blocks of 7–15 s used that room up.
