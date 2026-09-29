@@ -24,6 +24,16 @@ export const MIN_SCRUBBED_LENGTH = 4;
 
 export const SCRUBBED = '••••••';
 
+/**
+ * What a type scrubs somebody else's words with before it clips them (`S-21`): the catalogue's,
+ * or nothing where a test called the type directly.
+ */
+export function scrubberOf(context: {
+  readonly scrub?: ((text: string) => string) | undefined;
+}): (text: string) => string {
+  return context.scrub ?? ((text: string): string => text);
+}
+
 /** Replaces every secret with the marker. Longest first, so one secret inside another goes too. */
 export function scrubSecrets(text: string, secrets: readonly string[]): string {
   let out = text;

@@ -1,4 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
+import { scrubberOf } from '../support/secrets.js';
 import { SCRIPT_SCHEMA, SCRIPT_SECRET_DESTINATIONS, runScript } from './exe-script-shared.js';
 
 /**
@@ -77,7 +78,7 @@ export const exeScriptAdvanced: SensorType = {
         : 'value';
 
     const run = await runScript(context);
-    const output = parseAdvanced(run.stdout, primary);
+    const output = parseAdvanced(run.stdout, primary, scrubberOf(context));
 
     const readings = output.channels
       // `runtime` is this sensor's own, so a script cannot overwrite it with something else.

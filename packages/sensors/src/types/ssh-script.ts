@@ -1,4 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
+import { scrubberOf } from '../support/secrets.js';
 import { sshParamsSchema } from '../support/ssh/schema.js';
 
 /**
@@ -119,6 +120,7 @@ export const sshScript: SensorType = {
   },
 
   async execute(context: CheckContext): Promise<CheckExecution> {
+    const scrub = scrubberOf(context);
     const { sshCheck, hostKeyNote, parseScriptOutput, clip } =
       await import('../support/ssh/index.js');
 
@@ -135,14 +137,14 @@ export const sshScript: SensorType = {
 
       if (result.code !== 0) {
         // The script's own words, because it knows what went wrong and this type does not.
-        const said = clip(result.stderr.trim() === '' ? result.stdout : result.stderr);
+        const said = clip(scrub(result.stderr.trim() === '' ? result.stdout : result.stderr));
         throw new Error(
           `${command} exited ${String(result.code ?? -1)} on ${context.target.host}` +
             (said === '' ? '' : `: ${said}`),
         );
       }
 
-      const output = parseScriptOutput(result.stdout);
+      const output = parseScriptOutput(result.stdout, scrub);
       const notes: string[] = [];
 
       const readings: { key: string; value: number }[] = [];

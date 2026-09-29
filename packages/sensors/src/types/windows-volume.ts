@@ -86,7 +86,7 @@ export const windowsVolume: SensorType = {
       context,
       'Win32_LogicalDisk',
       ['DeviceID', 'VolumeName', 'Size', 'FreeSpace', 'DriveType'],
-      filter,
+      { wql: filter },
     );
 
     const readings: { key: string; value: number }[] = [];

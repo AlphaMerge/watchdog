@@ -1,4 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
+import { scrubberOf } from '../support/secrets.js';
 import { sshParamsSchema } from '../support/ssh/schema.js';
 
 /**
@@ -47,6 +48,7 @@ export const sshDiskFree: SensorType = {
   },
 
   async execute(context: CheckContext): Promise<CheckExecution> {
+    const scrub = scrubberOf(context);
     const { sshCheck, hostKeyNote, parseDf, clip } = await import('../support/ssh/index.js');
     const { percentOf, humanBytes } = await import('../support/snmp/mibs.js');
 
@@ -61,7 +63,7 @@ export const sshDiskFree: SensorType = {
       if (result.code !== 0) {
         throw new Error(
           `df could not read ${path} on ${context.target.host}: ` +
-            clip(result.stderr.trim() === '' ? result.stdout : result.stderr),
+            clip(scrub(result.stderr.trim() === '' ? result.stdout : result.stderr)),
         );
       }
 
@@ -69,7 +71,7 @@ export const sshDiskFree: SensorType = {
       if (row === undefined) {
         throw new Error(
           `df reported nothing for ${path} on ${context.target.host} — its output was ` +
-            `"${clip(result.stdout)}"`,
+            `"${clip(scrub(result.stdout))}"`,
         );
       }
 

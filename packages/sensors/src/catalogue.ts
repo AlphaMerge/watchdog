@@ -202,7 +202,12 @@ export class SensorCatalogue {
     const secrets = secretsOfCheck(this.writeOnlyPaths(id), context.params, context.credentials);
     let execution: CheckExecution;
     try {
-      execution = await type.execute(context);
+      // The same scrub, handed to the type for what it clips (`S-21`): a secret cut in two
+      // before this point is two strings this scrub no longer finds.
+      execution = await type.execute({
+        ...context,
+        scrub: (text: string) => scrubSecrets(text, secrets),
+      });
     } catch (error: unknown) {
       throw scrubbedError(error, secrets);
     }

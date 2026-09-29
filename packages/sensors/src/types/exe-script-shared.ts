@@ -1,4 +1,5 @@
 import type { CheckContext, JsonSchema } from '../contract.js';
+import { scrubberOf } from '../support/secrets.js';
 import { ScriptError } from '../support/script/resolve.js';
 
 /**
@@ -153,6 +154,9 @@ export async function runScript(context: CheckContext): Promise<ScriptRun> {
   const { runProgram } = await import('@ms/shared');
 
   const program = typeof context.params['program'] === 'string' ? context.params['program'] : '';
+  // What the program printed is its words, and a secret it was handed may be in them: scrubbed
+  // before `tail` cuts it, so no half of one survives the cut (`S-21`).
+  const scrub = scrubberOf(context);
   // The environment first: a refused variable is a sensor to correct, and says so before
   // anything on disk is looked at.
   const env = readEnv(context);
@@ -181,17 +185,17 @@ export async function runScript(context: CheckContext): Promise<ScriptRun> {
   if (run.outcome === 'timeout') {
     throw new ScriptError(
       `${program} was still running after ${String(timeoutMs)} ms and was ` +
-        `${run.hardKilled ? 'killed' : 'stopped'}${tail(run.stderr)}`,
+        `${run.hardKilled ? 'killed' : 'stopped'}${tail(scrub(run.stderr))}`,
     );
   }
   if (run.outcome === 'signalled') {
-    throw new ScriptError(`${program} was killed by ${run.signal}${tail(run.stderr)}`);
+    throw new ScriptError(`${program} was killed by ${run.signal}${tail(scrub(run.stderr))}`);
   }
   if (run.code !== 0) {
     // The exit code is the program's own answer and the message is where it said why. Both,
     // because "exit 1" alone is not a diagnosis (CLAUDE.md).
     throw new ScriptError(
-      `${program} exited with code ${String(run.code)}${tail(run.stderr) || tail(run.stdout)}`,
+      `${program} exited with code ${String(run.code)}${tail(scrub(run.stderr)) || tail(scrub(run.stdout))}`,
     );
   }
   if (run.truncated) {

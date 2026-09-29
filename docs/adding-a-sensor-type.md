@@ -337,6 +337,18 @@ left alone, and a secret you encode (a Basic `Authorization` header, a URL-encod
 is not recognised. If your type builds one of those, scrub it yourself before it reaches a
 message, as `http.transaction` does.
 
+**Scrub before you clip** (`S-21`). The catalogue's scrub looks for whole values, so a secret your
+type cuts in two is two strings it no longer finds, and the half before the cut stays in the
+message. A type that cuts somebody else's words to fit a message, such as the last lines of
+stderr or the first 200 characters of a document, cuts `scrubberOf(context)(text)`, never `text`.
+`context.scrub` is the catalogue's scrub; `scrubberOf` reads it and does nothing when a test
+calls your type directly.
+
+**A value an operator typed never goes into a script** (`S-21`). Quoting it is a bet on every
+character the interpreter treats as a quote, and PowerShell ends a single-quoted string at four
+more than U+0027. A Windows type filters with `queryCim(…, { field, equals })`, which carries the
+value in `MS_WIN_MATCH`, where the script reads it as a variable.
+
 ---
 
 ## What the catalogue checks when you register

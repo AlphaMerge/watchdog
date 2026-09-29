@@ -31,6 +31,15 @@ export const ENV_HOST = 'MS_WIN_HOST';
 export const ENV_USER = 'MS_WIN_USER';
 export const ENV_PASSWORD = 'MS_WIN_PASSWORD';
 export const ENV_AUTH = 'MS_WIN_AUTH';
+/**
+ * A value an operator typed that a query filters on (`S-21`), such as a service name.
+ *
+ * **In the environment, never in the script**, for a reason besides the credential's: a value
+ * spliced into PowerShell has to be quoted, and PowerShell ends a single-quoted string at U+2018
+ * to U+201B as well as at U+0027. Doubling U+0027 alone let `x’; Start-Process calc; ’` run
+ * `Start-Process calc` as the probe's account. A variable's value is never parsed as code.
+ */
+export const ENV_MATCH = 'MS_WIN_MATCH';
 
 export interface ScriptOptions {
   /**
@@ -149,7 +158,10 @@ export type Envelope =
  * one will — and so is a module. Taking the first would let anything that printed a plausible
  * line ahead of the real answer decide what this sensor reports.
  */
-export function readEnvelope(stdout: string): Envelope {
+export function readEnvelope(
+  stdout: string,
+  scrub: (text: string) => string = (said) => said,
+): Envelope {
   let found: string | null = null;
   for (const line of stdout.split('\n')) {
     const at = line.indexOf(RESULT_MARKER);
@@ -158,7 +170,7 @@ export function readEnvelope(stdout: string): Envelope {
   if (found === null) {
     throw new WindowsError(
       'PowerShell printed no result line — the interpreter started and the script did not ' +
-        `finish${quote(stdout)}`,
+        `finish${quote(scrub(stdout))}`,
     );
   }
 
@@ -168,11 +180,11 @@ export function readEnvelope(stdout: string): Envelope {
   } catch (error) {
     throw new WindowsError(
       `PowerShell's result line is not JSON: ${error instanceof Error ? error.message : 'unknown'}` +
-        quote(found),
+        quote(scrub(found)),
     );
   }
   if (!isRecord(parsed)) {
-    throw new WindowsError(`PowerShell's result line is not an object${quote(found)}`);
+    throw new WindowsError(`PowerShell's result line is not an object${quote(scrub(found))}`);
   }
 
   if (parsed['ok'] === true) return { ok: true, data: parsed['data'] };

@@ -2,6 +2,7 @@ import { platform } from 'node:os';
 import {
   ENV_AUTH,
   ENV_HOST,
+  ENV_MATCH,
   ENV_PASSWORD,
   ENV_USER,
   WindowsError,
@@ -84,6 +85,10 @@ export interface PowerShellOptions {
     readonly authentication?: Authentication;
   };
   readonly depth?: number;
+  /** A value the snippet reads as `$env:MS_WIN_MATCH` rather than finding in its text (`S-21`). */
+  readonly match?: string;
+  /** The check's scrub, applied to what PowerShell printed before it is cut (`S-21`). */
+  readonly scrub?: (text: string) => string;
 }
 
 export interface PowerShellRun {
@@ -120,6 +125,7 @@ export async function runPowerShell(
     environment[ENV_PASSWORD] = options.credential.password;
     environment[ENV_AUTH] = options.credential.authentication ?? 'Default';
   }
+  if (options.match !== undefined) environment[ENV_MATCH] = options.match;
 
   const script = buildScript(snippet, {
     host: options.host,
@@ -133,6 +139,7 @@ export async function runPowerShell(
     );
   }
 
+  const scrub = options.scrub ?? ((text: string): string => text);
   const run = await runProgram({
     file,
     args: ['-NoProfile', '-NonInteractive', '-NoLogo', '-EncodedCommand', encoded],
@@ -152,11 +159,11 @@ export async function runPowerShell(
   if (run.outcome === 'timeout') {
     throw new WindowsError(
       `PowerShell was still running after ${String(options.timeoutMs)} ms and was ` +
-        `${run.hardKilled ? 'killed' : 'stopped'}${tail(run.stderr)}`,
+        `${run.hardKilled ? 'killed' : 'stopped'}${tail(scrub(run.stderr))}`,
     );
   }
   if (run.outcome === 'signalled') {
-    throw new WindowsError(`PowerShell was killed by ${run.signal}${tail(run.stderr)}`);
+    throw new WindowsError(`PowerShell was killed by ${run.signal}${tail(scrub(run.stderr))}`);
   }
   if (run.truncated) {
     throw new WindowsError(
@@ -170,11 +177,11 @@ export async function runPowerShell(
   // itself failing, and its stderr is all there is to say why.
   let envelope: Envelope;
   try {
-    envelope = readEnvelope(run.stdout);
+    envelope = readEnvelope(run.stdout, scrub);
   } catch (error) {
     if (run.code !== 0) {
       throw new WindowsError(
-        `PowerShell exited with code ${String(run.code)}${tail(run.stderr) || tail(run.stdout)}`,
+        `PowerShell exited with code ${String(run.code)}${tail(scrub(run.stderr)) || tail(scrub(run.stdout))}`,
       );
     }
     throw error;

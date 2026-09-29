@@ -55,6 +55,12 @@ before(() => {
   script('base-env.sh', 'echo "0:1:${LANG:-unset}|${TZ:-unset}|${NODE_OPTIONS:-absent}"');
   script('pwd.sh', 'echo "0:1:$(pwd -P)"');
   script('leak.sh', 'echo "request failed with $MS_SECRET" >&2; exit 2');
+  // The secret across the cut each quote makes: 300 characters of stderr, 120 of stdout (`S-21`).
+  script(
+    'across-stderr.sh',
+    'pad=$(printf "%280s" "" | tr " " p); echo "$pad$MS_SECRET" >&2; exit 1',
+  );
+  script('across-stdout.sh', 'pad=$(printf "%100s" "" | tr " " p); echo "$pad$MS_SECRET"');
   script(
     'leak-advanced.sh',
     'echo "{\\"prtg\\":{\\"error\\":1,\\"text\\":\\"key $MS_SECRET refused\\"}}"',
@@ -571,6 +577,41 @@ describe('what a sensor may hand a script (S-19)', () => {
           assert.ok(error instanceof Error);
           assert.ok(error.message.includes(said), `${type.id}: ${error.message}`);
           assert.ok(!error.message.includes('api-key-1234'), type.id);
+          return true;
+        },
+      );
+    }
+  });
+});
+
+describe('a secret across the cut a message makes (S-21)', () => {
+  const catalogue = new SensorCatalogue().register(exeScript).register(exeScriptAdvanced).seal();
+  const SECRET = 'K9x2Vw8qJ3m7Rt5pHy4nLb6cGf1dPs0zXa2eWu3i';
+
+  it('is scrubbed before the cut, so no piece of it survives', async () => {
+    // Cut first, the part before the cut was no longer the secret the scrub looks for, and it
+    // stayed in the message: in the state log, and in every notification.
+    assert.equal(SECRET.length, 40);
+    for (const [type, program] of [
+      [exeScript, 'across-stderr.sh'],
+      [exeScriptAdvanced, 'across-stdout.sh'],
+    ] as const) {
+      await assert.rejects(
+        () =>
+          catalogue.execute(type.id, {
+            sensorId: 3,
+            target: { host: 'device.example.invalid', ipVersion: 'auto' },
+            params: { program, secret: SECRET, timeoutMs: 10_000 },
+            credentials: {},
+            signal: new AbortController().signal,
+          }),
+        (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.ok(error.message.includes(`ppp${SCRUBBED}`), `${type.id}: ${error.message}`);
+          for (let at = 0; at + 4 <= SECRET.length; at += 1) {
+            const piece = SECRET.slice(at, at + 4);
+            assert.ok(!error.message.includes(piece), `${type.id} kept "${piece}"`);
+          }
           return true;
         },
       );

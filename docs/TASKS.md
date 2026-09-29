@@ -549,7 +549,7 @@ because each is a decision rather than a defect:
       `catalogue-registry.test.ts` 1. Mutation 3/3: the create check dropped (2 fail), the update
       check dropped (1 fails), the probe's refusal dropped (2 fail).
 
-- [ ] **S-21 — A typographic quote ends `windows.service`'s PowerShell string, and a secret
+- [x] **S-21 — A typographic quote ends `windows.service`'s PowerShell string, and a secret
       clipped before the scrub keeps its prefix** · S · S-19 · Found in review round four
       (`findings/2026-09-29-review-round-4.md`, `S-21`).
       - **High, and it blocks 1.1, not 1.0.** `windows-service.ts:65` and `windows-shared.ts:38`
@@ -570,6 +570,78 @@ because each is a decision rather than a defect:
       - a 40-character secret straddling the 300-character cut, with no substring of four or
         more characters surviving.
       Mutants as usual.
+
+      **S-21 outcome.**
+      - **The service name never enters script text.**
+        - `queryCim` takes a `CimFilter`: either `{ wql }`, a filter the code wrote, or
+          `{ field, equals }`.
+        - `equals` travels in `MS_WIN_MATCH`, beside the host and the account. The snippet builds
+          the WQL filter from `$env:MS_WIN_MATCH` in PowerShell, escaping `'` and `\` with WQL's
+          backslash. PowerShell never parses a variable's value as code.
+        - `field` is spliced, so it must be a property name (`[A-Za-z_][A-Za-z0-9_]*`), or the
+          query throws.
+        - `windows.service` filters `{ field: 'Name', equals }`; `windows.volume` keeps its
+          constant as `{ wql }`.
+      - **Defence in depth.** `service` has a pattern refusing U+0027, U+0022, the backtick,
+        U+2018 to U+201F, `\`, `/` and control characters. `$` stays, because
+        `MSSQL$SQLEXPRESS` is an ordinary service name.
+      - **The scrub runs before every clip.**
+        - `CheckContext.scrub` is new and optional. The catalogue sets it to the same scrub it
+          applies on the way out. `scrubberOf(context)` reads it, or does nothing when a test
+          calls a type directly.
+        - Every type that clips somebody else's words into a message scrubs first:
+          - `exe.script`'s stderr and stdout tails, and its parse errors' quotes of stdout;
+          - the Windows transport's stderr tail (400) and its envelope quotes (300);
+          - the SSH types' `clip` (`ssh.script`, `ssh.disk.free`, `ssh.load`, `ssh.meminfo`, and
+            the SSH script parser);
+          - `snmp.custom.string`'s `clip`;
+          - `mail.smtp`'s accepted line.
+        - The script parser's "is not a return code" quoted the text before the first colon,
+          which could fall inside a secret. It now splits the scrubbed line.
+      - **Not changed, and why:**
+        - `port.tcp` clips a banner but holds no secret: no `writeOnly` parameter and no
+          credential kind.
+        - `rest.custom`'s `cut` shapes a preview of a document the operator pasted, not a check
+          message.
+        - Item-level cuts (the first four DNS records, the first twelve ports) cannot split a
+          value.
+      - `adding-a-sensor-type.md` says both rules.
+
+      **Tests.**
+      - `windows-transport.test.ts`:
+        - For each of U+0027 and U+2018 to U+201B, a name carrying it reaches the fake
+          PowerShell in `MS_WIN_MATCH` and appears nowhere in the script.
+        - A filter this code wrote stays in the script and sets no match.
+        - A `field` that is not a property name is refused.
+        - The pattern refuses every character it names and takes `Spooler`,
+          `MSSQL$SQLEXPRESS`, `Apple Mobile Device Service` and `a.b-c_d`.
+        - A secret straddling stderr's 400-character cut leaves no piece in the message.
+        - **Against a real `pwsh`**, the `-Filter` expression, evaluated by PowerShell, gives
+          the WQL expected for `O'Brien`, a backslash, `x' OR Name LIKE '%`, the four
+          typographic quotes, `` $(Get-Date) `n `` and `MSSQL$SQLEXPRESS`. The fake never
+          parses it, so only this proves the escape is read as meant. `whereOf` is exported
+          for it.
+      - `windows-sensors.test.ts`: `windows.service` finds its service through the
+        environment, whatever quote the name holds.
+      - `exe-script.test.ts`: a 40-character secret straddling stderr's cut (`exe.script`) and
+        the parse error's cut of stdout (`exe.script.advanced`), through the catalogue. It
+        comes back `ppp[scrubbed]`, and no four-character piece of it survives.
+      - Untested, and each reuses the scrubbed-clip shape these tests prove: the SSH,
+        `snmp.custom.string` and `mail.smtp` clips, the envelope's quotes, and the parser's XML
+        and 200-character quotes.
+      - Sensors suite 1,031 pass, 10 skipped. Probe `catalogue-registry` 2. eslint clean, and
+        `sensor-reference.md` is current.
+
+      **Mutation, 9/9.** Each was run against the four suites above (177 tests):
+      1. The service name spliced as WQL again (1 fails).
+      2. The match not passed (6 fail).
+      3. The pattern removed (1 fails).
+      4. `exe.script`'s stderr tail unscrubbed (1 fails).
+      5. `parseJson`'s quote unscrubbed (1 fails).
+      6. The Windows stderr tail unscrubbed (1 fails).
+      7. The catalogue passing no scrub (2 fail).
+      8. The property-name check bypassed (1 fails).
+      9. The WQL escape dropped, `'$1'` (the real-`pwsh` test fails).
 
 - [x] **S-16 — Cheaper create** · S · S-03 · Building a 5,000-object tree serially took 24 of its
       30-second budget; it now takes 21, and the database work per create went from 1.92 ms to

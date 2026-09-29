@@ -1,4 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
+import { scrubberOf } from '../support/secrets.js';
 
 /**
  * Whether a relay is accepting mail (`T-17`).
@@ -92,6 +93,7 @@ export const mailSmtp: SensorType = {
   },
 
   async execute(context: CheckContext): Promise<CheckExecution> {
+    const scrub = scrubberOf(context);
     const { SmtpSession } = await import('../support/mail/smtp.js');
     const { readCredential, readTransport, securityNote } =
       await import('../support/mail/schema.js');
@@ -142,7 +144,7 @@ export const mailSmtp: SensorType = {
           ),
         );
         channels.push({ key: 'sendTime', value: msSince(sendStarted, process.hrtime.bigint()) });
-        notes.push(`the message was accepted: ${accepted.slice(0, 120)}`);
+        notes.push(`the message was accepted: ${scrub(accepted).slice(0, 120)}`);
       }
       await session.quit();
 

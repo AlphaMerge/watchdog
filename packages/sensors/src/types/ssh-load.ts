@@ -1,4 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
+import { scrubberOf } from '../support/secrets.js';
 import { sshParamsSchema } from '../support/ssh/schema.js';
 
 /**
@@ -37,6 +38,7 @@ export const sshLoad: SensorType = {
   },
 
   async execute(context: CheckContext): Promise<CheckExecution> {
+    const scrub = scrubberOf(context);
     const { sshCheck, hostKeyNote, parseLoadAverage, clip } =
       await import('../support/ssh/index.js');
 
@@ -53,7 +55,7 @@ export const sshLoad: SensorType = {
       if (load === null) {
         throw new Error(
           `${context.target.host} reported no load average — neither /proc/loadavg nor uptime ` +
-            `gave one. Its output was "${clip(result.stdout)}"`,
+            `gave one. Its output was "${clip(scrub(result.stdout))}"`,
         );
       }
 

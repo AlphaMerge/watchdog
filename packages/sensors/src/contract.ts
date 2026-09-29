@@ -153,6 +153,15 @@ export interface CheckContext {
    * `since` is how a type tells apart "no traps arrived" from "I have not been listening".
    */
   readonly received?: ReceivedBatch;
+  /**
+   * Replaces every secret this check holds with a marker (`S-21`). Set by the catalogue.
+   *
+   * **A type that clips somebody else's words into a message clips what this returns.** The
+   * catalogue scrubs every message as it leaves (`S-19`), but a clip made first can cut a secret
+   * in two, and the half before the cut is no longer the value the scrub looks for. Absent where a
+   * test calls a type directly, and then nothing is scrubbed; `scrubberOf` reads it either way.
+   */
+  readonly scrub?: (text: string) => string;
 }
 
 /**

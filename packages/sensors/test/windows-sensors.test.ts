@@ -72,6 +72,25 @@ const failing = (type: SensorType, directive: string, params: Record<string, unk
     signal: new AbortController().signal,
   });
 
+describe('windows.service’s name (S-21)', () => {
+  it('reaches the machine in the environment, whatever quote it holds', async () => {
+    // PowerShell ends a single-quoted string at each of these, and only U+0027 was doubled.
+    for (const quote of ["'", '\u2018', '\u2019', '\u201A', '\u201B']) {
+      const execution = await windowsService.execute({
+        sensorId: 1,
+        target: { host: 'server01', ipVersion: 'v4' },
+        params: {
+          host: 'server01 #FAKE:service',
+          service: `x${quote}; Start-Process calc; ${quote}`,
+        },
+        credentials: { windows: { username: 'CORP\\svc', password: 'x' } },
+        signal: new AbortController().signal,
+      });
+      assert.equal(execution.message, 'Held apart is Running (start mode Auto)', quote);
+    }
+  });
+});
+
 const valueOf = (execution: CheckExecution, key: string): number | undefined =>
   execution.channels.find((channel) => channel.key === key)?.value;
 

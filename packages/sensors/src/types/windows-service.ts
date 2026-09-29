@@ -44,6 +44,10 @@ export const windowsService: SensorType = {
           'The service *name*, not its display name — `Spooler`, not `Print Spooler`. ' +
           '`Get-Service | Select Name, DisplayName` on the machine lists both. The display name ' +
           'is localised and changes with the machine’s language; the name does not.',
+        // Defence in depth (`S-21`): the name never enters the script, but no service needs a
+        // quote of any kind, a backtick, a slash or a control character, and each is something
+        // PowerShell or WQL reads. `$` stays: `MSSQL$SQLEXPRESS` is an ordinary service name.
+        pattern: String.raw`^[^'"\u0060\u2018-\u201F\\/\u0000-\u001F\u007F]+$`,
       },
     },
   },
@@ -65,7 +69,7 @@ export const windowsService: SensorType = {
       context,
       'Win32_Service',
       ['Name', 'DisplayName', 'State', 'StartMode', 'Status', 'ProcessId'],
-      `Name = '${service.replace(/'/g, "''")}'`,
+      { field: 'Name', equals: service },
     );
     const row = rows[0];
     if (row === undefined) {

@@ -1,4 +1,5 @@
 export {
+  ENV_MATCH,
   RESULT_MARKER,
   WindowsError,
   asRows,

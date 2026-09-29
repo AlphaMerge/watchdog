@@ -1,4 +1,5 @@
 import type { CheckContext } from '../../contract.js';
+import { scrubberOf } from '../secrets.js';
 import { AUTHENTICATIONS, type Authentication, type PowerShellOptions } from './powershell.js';
 
 /**
@@ -75,6 +76,8 @@ export function windowsOptions(context: CheckContext): PowerShellOptions {
     // absent credentials mean "use who I am", not "ask somewhere else".
     host: isLocal(named) ? '' : named,
     timeoutMs: Number(context.params['timeoutMs'] ?? 30_000),
+    // What PowerShell printed is scrubbed before it is cut into a message (`S-21`).
+    scrub: scrubberOf(context),
     ...(username === ''
       ? {}
       : {

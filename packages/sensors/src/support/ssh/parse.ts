@@ -50,7 +50,10 @@ export class ParseError extends Error {
  * `=` works wherever `:` does, because half the world writes `key=value` and being strict about
  * which would be a rule with no purpose behind it.
  */
-export function parseScriptOutput(text: string): ScriptOutput {
+export function parseScriptOutput(
+  text: string,
+  scrub: (text: string) => string = (said) => said,
+): ScriptOutput {
   const trimmed = text.trim();
   if (trimmed === '') {
     throw new ParseError('the script produced no output at all');
@@ -95,7 +98,7 @@ export function parseScriptOutput(text: string): ScriptOutput {
       // Not silently skipped: a channel whose value stopped being a number is the shape of a
       // script that started printing an error where it used to print a figure.
       throw new ParseError(
-        `the script reported "${key}" as "${clip(rest)}", which is not a number — a channel ` +
+        `the script reported "${key}" as "${clip(scrub(rest))}", which is not a number — a channel ` +
           'holds a number, and text belongs in the message line',
       );
     }
@@ -104,7 +107,7 @@ export function parseScriptOutput(text: string): ScriptOutput {
 
   if (readings.length === 0) {
     throw new ParseError(
-      `the script produced no readings; its output was "${clip(trimmed)}". A reading is a line ` +
+      `the script produced no readings; its output was "${clip(scrub(trimmed))}". A reading is a line ` +
         'like "queue:12", or a bare number on its own',
     );
   }

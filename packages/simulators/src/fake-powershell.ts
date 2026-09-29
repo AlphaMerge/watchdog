@@ -81,11 +81,36 @@ function run(text) {
           user: process.env.MS_WIN_USER ?? null,
           password: process.env.MS_WIN_PASSWORD ?? null,
           auth: process.env.MS_WIN_AUTH ?? null,
+          match: process.env.MS_WIN_MATCH ?? null,
           leaked: process.env.MS_SECRET_FROM_PARENT ?? null,
           argv: process.argv.slice(2, 5),
           script: text,
         },
       });
+      return;
+    case 'service':
+      // What Win32_Service answers for the name a query carried in MS_WIN_MATCH (\`S-21\`), and
+      // nothing for one it did not, as for a name spliced into the script instead. DisplayName
+      // says whether the name is in the script text as well, which it must never be.
+      {
+        const name = process.env.MS_WIN_MATCH;
+        say({
+          ok: true,
+          data:
+            name === undefined
+              ? []
+              : [
+                  {
+                    Name: name,
+                    DisplayName: text.includes(name) ? 'Spliced' : 'Held apart',
+                    State: 'Running',
+                    StartMode: 'Auto',
+                    Status: 'OK',
+                    ProcessId: 4242,
+                  },
+                ],
+        });
+      }
       return;
     case 'badjson':
       process.stdout.write(MARKER + '{not json at all\\n');

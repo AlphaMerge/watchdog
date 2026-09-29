@@ -3,7 +3,9 @@ import { after, before, describe, it } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { rmSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { SensorCatalogue } from '../src/catalogue.js';
 import type { CheckContext } from '../src/contract.js';
+import { SCRUBBED } from '../src/support/secrets.js';
 import {
   POWERSHELL_ENV,
   RESULT_MARKER,
@@ -16,6 +18,8 @@ import {
   windowsOptions,
   type PowerShellRun,
 } from '../src/support/windows/index.js';
+import { queryCim, whereOf } from '../src/types/windows-shared.js';
+import { windowsService } from '../src/types/windows-service.js';
 import { installFakePowerShell } from '@ms/simulators';
 
 /**
@@ -282,6 +286,102 @@ describe('running it', () => {
   });
 });
 
+describe('a value a query filters on (S-21)', () => {
+  const context = (host: string, password = 'x'): CheckContext => ({
+    sensorId: 1,
+    target: { host: 'server01', ipVersion: 'v4' },
+    params: { host, service: 'Spooler' },
+    credentials: { windows: { username: 'CORP\\svc', password } },
+    signal: new AbortController().signal,
+  });
+
+  for (const quote of ["'", '\u2018', '\u2019', '\u201A', '\u201B']) {
+    const code = `U+${(quote.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0')}`;
+    it(`carries a name with ${code} in the environment, never in the script`, async () => {
+      // PowerShell ends a single-quoted string at each of these, and only U+0027 was doubled:
+      // this name ran `Start-Process calc` as the probe's account.
+      const name = `x${quote}; Start-Process calc; ${quote}`;
+      const [row] = await queryCim(context('server01 #FAKE:env'), 'Win32_Service', ['Name'], {
+        field: 'Name',
+        equals: name,
+      });
+      assert.ok(row !== undefined);
+      assert.equal(row['match'], name);
+      const script = String(row['script']);
+      assert.ok(script.includes('-Filter ("Name = \'" + ($env:MS_WIN_MATCH'), 'the control');
+      assert.ok(!script.includes('Start-Process'), script);
+      assert.ok(!script.includes(quote === "'" ? "x'" : quote), 'no part of the name');
+    });
+  }
+
+  it('leaves a filter this code wrote in the script, and sets no match', async () => {
+    const [row] = await queryCim(context('server01 #FAKE:env'), 'Win32_LogicalDisk', ['Size'], {
+      wql: 'DriveType = 3',
+    });
+    assert.ok(row !== undefined);
+    assert.equal(row['match'], null);
+    assert.ok(String(row['script']).includes("-Filter 'DriveType = 3'"));
+  });
+
+  it('refuses a property name, which it would have to splice', async () => {
+    await assert.rejects(
+      () =>
+        queryCim(context('server01 #FAKE:env'), 'Win32_Service', ['Name'], {
+          field: "Name = 'x' OR Name",
+          equals: 'x',
+        }),
+      /is not a CIM property name/,
+    );
+  });
+
+  it('refuses in the name what PowerShell or WQL would read, and takes real names', () => {
+    // Defence in depth: the name never enters the script, and no service needs any of these.
+    const catalogue = new SensorCatalogue().register(windowsService).seal();
+    const valid = (service: string): boolean =>
+      catalogue.validate('windows.service', { service }).valid;
+    for (const bad of [
+      "x'y",
+      'x\u2018y',
+      'x\u2019y',
+      'x\u201Ay',
+      'x\u201By',
+      'x"y',
+      'x\u201Cy',
+      'x`y',
+      'x\\y',
+      'x/y',
+      'x\ny',
+    ]) {
+      assert.equal(valid(bad), false, JSON.stringify(bad));
+    }
+    for (const good of ['Spooler', 'MSSQL$SQLEXPRESS', 'Apple Mobile Device Service', 'a.b-c_d']) {
+      assert.equal(valid(good), true, good);
+    }
+  });
+
+  it('scrubs what PowerShell printed before it is cut into the message', async () => {
+    // The password across the 400th character of stderr: cut first, its first half was no
+    // longer the value the catalogue's scrub looks for.
+    const secret = 'K9x2Vw8qJ3m7Rt5pHy4nLb6cGf1dPs0zXa2eWu3i';
+    const catalogue = new SensorCatalogue().register(windowsService).seal();
+    await assert.rejects(
+      () =>
+        catalogue.execute(
+          'windows.service',
+          context(`server01 #FAKE:crash ${'p'.repeat(380)}${secret}`, secret),
+        ),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.ok(error.message.includes(`ppp${SCRUBBED}`), error.message);
+        for (let at = 0; at + 4 <= secret.length; at += 1) {
+          assert.ok(!error.message.includes(secret.slice(at, at + 4)), secret.slice(at, at + 4));
+        }
+        return true;
+      },
+    );
+  });
+});
+
 describe('which machine, and as whom', () => {
   const context = (
     params: Record<string, unknown>,
@@ -419,6 +519,33 @@ describe(
           ),
         (error: unknown) => error instanceof WindowsError && error.message.length > 20,
       );
+    });
+
+    it('builds the WQL filter from the matched value as data, escaping what WQL reads (S-21)', async () => {
+      // What PowerShell hands `-Filter`, evaluated by a real one: the fake never parses the
+      // expression, so only this says the escape is PowerShell's reading of it and not ours.
+      const expression = whereOf({ field: 'Name', equals: 'unused' }).replace(/^ -Filter /, '');
+      const cases: readonly (readonly [string, string])[] = [
+        ["O'Brien", String.raw`Name = 'O\'Brien'`],
+        [String.raw`back\slash`, String.raw`Name = 'back\\slash'`],
+        ["x' OR Name LIKE '%", String.raw`Name = 'x\' OR Name LIKE \'%'`],
+        ['a‘b’c‚d‛e', "Name = 'a‘b’c‚d‛e'"],
+        ['$(Get-Date) `n', "Name = '$(Get-Date) `n'"],
+        ['MSSQL$SQLEXPRESS', "Name = 'MSSQL$SQLEXPRESS'"],
+      ];
+      process.env[POWERSHELL_ENV] = pwsh;
+      try {
+        for (const [name, wql] of cases) {
+          const outcome = await runPowerShell(`@{ filter = ${expression} }`, {
+            host: '',
+            timeoutMs: 60_000,
+            match: name,
+          });
+          assert.deepEqual(outcome.data, { filter: wql }, name);
+        }
+      } finally {
+        process.env[POWERSHELL_ENV] = FAKE;
+      }
     });
   },
 );

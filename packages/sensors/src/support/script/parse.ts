@@ -63,7 +63,12 @@ const MAX_CHANNELS = 50;
  * `key` is the channel the value lands on, which the caller owns: the simple sensor calls it
  * `value` and the advanced one uses whatever the operator named as primary.
  */
-export function parseSimple(stdout: string, format: ScriptFormat, key: string): ScriptOutput {
+export function parseSimple(
+  stdout: string,
+  format: ScriptFormat,
+  key: string,
+  scrub: (text: string) => string = (said) => said,
+): ScriptOutput {
   const text = stdout.trim();
   if (text === '') {
     throw new ScriptError(
@@ -83,7 +88,7 @@ export function parseSimple(stdout: string, format: ScriptFormat, key: string): 
   }
 
   if (format === 'json') {
-    const parsed = parseJson(text, key);
+    const parsed = parseJson(text, key, scrub);
     return parsed;
   }
 
@@ -101,7 +106,8 @@ export function parseSimple(stdout: string, format: ScriptFormat, key: string): 
 
   const returnCode = Number(line.slice(0, first).trim());
   if (!Number.isInteger(returnCode)) {
-    throw new ScriptError(`${quote(line.slice(0, first))} is not a return code`);
+    // Scrubbed before it is cut at the colon, which could fall inside a secret (`S-21`).
+    throw new ScriptError(`${quote(scrub(line).split(':')[0] ?? '')} is not a return code`);
   }
   const raw = line.slice(first + 1, second).trim();
   const value = Number(raw);
@@ -134,13 +140,17 @@ export function parseSimple(stdout: string, format: ScriptFormat, key: string): 
  * character rather than from a setting: asking an operator to describe their own script's output
  * to a form is asking them to get it wrong once.
  */
-export function parseAdvanced(stdout: string, primaryKey: string): ScriptOutput {
+export function parseAdvanced(
+  stdout: string,
+  primaryKey: string,
+  scrub: (text: string) => string = (said) => said,
+): ScriptOutput {
   const text = stdout.trim();
   if (text === '') {
     throw new ScriptError('the program printed nothing on stdout');
   }
-  if (text.startsWith('<')) return parsePrtgXml(text, primaryKey);
-  return parseJson(text, primaryKey);
+  if (text.startsWith('<')) return parsePrtgXml(text, primaryKey, scrub);
+  return parseJson(text, primaryKey, scrub);
 }
 
 /**
@@ -151,14 +161,18 @@ export function parseAdvanced(stdout: string, primaryKey: string): ScriptOutput 
  * `channelsFrom` and produces the same keys. `<error>1</error>` with `<text>` is how such a
  * script reports a failure, and it fails the check rather than becoming a reading.
  */
-function parsePrtgXml(text: string, primaryKey: string): ScriptOutput {
+function parsePrtgXml(
+  text: string,
+  primaryKey: string,
+  scrub: (text: string) => string,
+): ScriptOutput {
   const tree = parseXml(text);
   const root = firstOf(tree['prtg']);
   if (!isRecord(root)) {
     throw new ScriptError(
       'the program printed XML with no <prtg> element — that is the shape an advanced script ' +
         'returns, and the whole document was ' +
-        quote(text.slice(0, 200)),
+        quote(scrub(text).slice(0, 200)),
     );
   }
 
@@ -201,7 +215,11 @@ function textOf(value: unknown): unknown {
 /**
  * Several channels, from JSON — both shapes.
  */
-function parseJson(text: string, primaryKey: string): ScriptOutput {
+function parseJson(
+  text: string,
+  primaryKey: string,
+  scrub: (text: string) => string,
+): ScriptOutput {
   let document: unknown;
   try {
     document = JSON.parse(text) as unknown;
@@ -209,7 +227,7 @@ function parseJson(text: string, primaryKey: string): ScriptOutput {
     throw new ScriptError(
       'the program did not print JSON: ' +
         (error instanceof Error ? error.message : String(error)) +
-        ` — it printed ${quote(text.slice(0, 120))}`,
+        ` — it printed ${quote(scrub(text).slice(0, 120))}`,
     );
   }
   if (!isRecord(document)) {
@@ -246,7 +264,7 @@ function parseJson(text: string, primaryKey: string): ScriptOutput {
     throw new ScriptError(
       'the JSON has no "value", no "channels" and no "prtg" — one of those is what this sensor ' +
         'reads, and the whole document was ' +
-        quote(text.slice(0, 200)),
+        quote(scrub(text).slice(0, 200)),
     );
   }
   return {

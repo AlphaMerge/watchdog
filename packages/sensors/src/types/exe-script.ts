@@ -1,4 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
+import { scrubberOf } from '../support/secrets.js';
 import { SCRIPT_SCHEMA, SCRIPT_SECRET_DESTINATIONS, runScript } from './exe-script-shared.js';
 
 /**
@@ -74,7 +75,7 @@ export const exeScript: SensorType = {
     const format = raw === 'number' || raw === 'json' ? raw : 'prtg';
 
     const run = await runScript(context);
-    const output = parseSimple(run.stdout, format, 'value');
+    const output = parseSimple(run.stdout, format, 'value', scrubberOf(context));
     const value = output.channels[0]?.value ?? 0;
 
     return {

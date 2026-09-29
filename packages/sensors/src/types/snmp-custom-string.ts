@@ -1,4 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
+import { scrubberOf } from '../support/secrets.js';
 import { SNMP_SECRET_DESTINATIONS, snmpParamsSchema } from '../support/snmp/schema.js';
 import { MAX_PATTERN } from '../support/pattern.js';
 
@@ -93,6 +94,7 @@ export const snmpCustomString: SensorType = {
   },
 
   async execute(context: CheckContext): Promise<CheckExecution> {
+    const scrub = scrubberOf(context);
     const { snmpCheck, stringOf, isException, normaliseOid, compilePattern, extract } =
       await import('../support/snmp/index.js');
 
@@ -138,18 +140,18 @@ export const snmpCustomString: SensorType = {
           // lookup is set against. The message carries what the device said instead.
           return {
             channels: [{ key: 'value', value: 0 }],
-            message: `${oid} did not match /${source}/ — it says "${clip(text)}"`,
+            message: `${oid} did not match /${source}/ — it says "${clip(scrub(text))}"`,
           };
         }
         throw new Error(
-          `${oid} did not match /${source}/ — the device says "${clip(text)}", and this sensor ` +
+          `${oid} did not match /${source}/ — the device says "${clip(scrub(text))}", and this sensor ` +
             'needs a number out of it',
         );
       }
 
       if (found.kind === 'not-a-number') {
         throw new Error(
-          `${oid} matched "${clip(found.matched)}", which is not a number — use the match mode ` +
+          `${oid} matched "${clip(scrub(found.matched))}", which is not a number — use the match mode ` +
             'to report whether the pattern is there, rather than what it says',
         );
       }
@@ -158,8 +160,8 @@ export const snmpCustomString: SensorType = {
         channels: [{ key: 'value', value: found.value }],
         // The raw string, always. It is the thing an operator opened the sensor to read, and the
         // only way to tell "the pattern is wrong" from "the device changed what it reports".
-        message: `${oid} = "${clip(text)}"${
-          found.matched === text ? '' : ` → "${clip(found.matched)}"`
+        message: `${oid} = "${clip(scrub(text))}"${
+          found.matched === text ? '' : ` → "${clip(scrub(found.matched))}"`
         }`,
       };
     });
