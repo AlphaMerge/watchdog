@@ -454,6 +454,51 @@ describe('scheduled rediscovery', { skip: available ? false : 'no database' }, (
       assert.ok(!everything.includes('community-3b1e'), 'no community is ever written down');
     });
 
+    it('leaves the community behind when the range or the probe moves without it (A-40)', async () => {
+      const logged = async (id: number) =>
+        db.query<{ summary: Record<string, unknown>; diff: { field: string }[] }>(
+          `SELECT summary, diff FROM audit_log
+           WHERE action = 'discovery.schedule.updated' AND (summary->>'scheduleId')::bigint = $1
+           ORDER BY id`,
+          [id],
+        );
+      const created = await create({ snmpCommunity: 'moved-community-9c2d' });
+
+      // Sent again with the move: it goes where it was sent.
+      const resent = await rediscovery.update(
+        created.id,
+        1,
+        { range: '10.0.1.0/29', snmpCommunity: 'moved-community-9c2d' },
+        testActor,
+      );
+      assert.equal(resent?.snmpCommunity, 'moved-community-9c2d');
+
+      const moved = await rediscovery.update(created.id, 2, { range: '10.0.2.0/29' }, testActor);
+      assert.equal(moved?.snmpCommunity, '', 'a new range is not where the community was set for');
+
+      const [kept, left] = await logged(created.id);
+      assert.equal(kept?.summary['communityLeftBehind'], undefined);
+      assert.equal(left?.summary['communityLeftBehind'], true, 'the history says why it went');
+      assert.ok(left.diff.some((change) => change.field === 'discovery.schedule.community'));
+
+      // And the probe: the group moves, and the rule follows it without the community.
+      const other = await harness.service.create(testActor, {
+        kind: 'probe',
+        parentId: harness.rootId,
+        name: `other-${String(process.hrtime.bigint())}`,
+      });
+      const second = await create({ snmpCommunity: 'moved-community-9c2d' });
+      await harness.service.move(testActor, groupId, other.id, { kind: 'none' });
+      const followed = await rediscovery.update(second.id, 1, { probeId: other.id }, testActor);
+      assert.equal(followed?.snmpCommunity, '', 'another probe is not where it was set for');
+      const [probeMove] = await logged(second.id);
+      assert.equal(probeMove?.summary['communityLeftBehind'], true);
+      const everything = JSON.stringify(
+        await db.query(`SELECT summary, diff FROM audit_log WHERE action LIKE 'discovery.%'`),
+      );
+      assert.ok(!everything.includes('community-9c2d'), 'no community is ever written down');
+    });
+
     it('asks what a new rule is asked: the range, the cadence and the probe', async () => {
       const created = await create();
       await assert.rejects(

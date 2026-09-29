@@ -1,5 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
-import { snmpParamsSchema } from '../support/snmp/schema.js';
+import { SNMP_SECRET_DESTINATIONS, snmpParamsSchema } from '../support/snmp/schema.js';
 
 /**
  * Free space on one filesystem over SNMP (`T-05`).
@@ -22,6 +22,7 @@ export const snmpDiskFree: SensorType = {
   id: 'snmp.diskfree',
   category: 'SNMP',
   costHint: 'medium',
+  secretDestinations: SNMP_SECRET_DESTINATIONS,
   credentialKinds: ['snmp'],
 
   paramsSchema: snmpParamsSchema(

@@ -1,5 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
-import { snmpParamsSchema } from '../support/snmp/schema.js';
+import { SNMP_SECRET_DESTINATIONS, snmpParamsSchema } from '../support/snmp/schema.js';
 
 /**
  * Processor load over SNMP (`T-05`).
@@ -25,6 +25,7 @@ export const snmpCpu: SensorType = {
   id: 'snmp.cpu',
   category: 'SNMP',
   costHint: 'medium',
+  secretDestinations: SNMP_SECRET_DESTINATIONS,
   credentialKinds: ['snmp'],
 
   paramsSchema: snmpParamsSchema(

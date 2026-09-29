@@ -1,5 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
-import { snmpParamsSchema } from '../support/snmp/schema.js';
+import { SNMP_SECRET_DESTINATIONS, snmpParamsSchema } from '../support/snmp/schema.js';
 // Type-only, and therefore erased: no `net-snmp` reaches the core, which loads this catalogue
 // for schemas and channel declarations and never runs a check.
 import type { SnmpSession, SnmpVarbind } from '../support/snmp/session.js';
@@ -42,6 +42,7 @@ export const snmpTraffic: SensorType = {
   // Holds a UDP session for the length of a few round trips. Not `light`, because a device that
   // has stopped answering holds it for the whole timeout.
   costHint: 'medium',
+  secretDestinations: SNMP_SECRET_DESTINATIONS,
   // The community string or v3 user lives on the device, inherited by every SNMP sensor under
   // it (`A-05`). It is deliberately not a parameter of this type: forty interfaces on a router
   // is forty sensors, and forty copies of a credential is forty places to rotate it.

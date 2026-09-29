@@ -273,7 +273,7 @@ detail it hands out — API responses, audit rows, anything — while the stored
 the probe can use it. The read instead carries `redactedParams: ['community']`, so a form can
 show "set" without ever receiving the value.
 
-Three rules follow from how the redactor works:
+Four rules follow from how the redactor works:
 
 - **Hoist it to a plain property.** A `writeOnly` inside `oneOf`/`anyOf`/`allOf`/`items` cannot
   be redacted without evaluating which branch matched, and a redactor that guesses wrong either
@@ -286,6 +286,23 @@ Three rules follow from how the redactor works:
   Sending the key with a value rotates it; sending it as `null` removes it, and the schema then
   decides whether this type may be without it. You get this for free; it is worth knowing because
   it means a client cannot delete a credential by accident, and cannot clear one by sending `""`.
+- **Say where it is sent** (`A-40`). Every `writeOnly` parameter needs an entry in
+  `secretDestinations`, naming the other parameters that choose where the secret goes — and the
+  catalogue **refuses to register** a type that leaves one out. An update that changes any of
+  them and does not send the secret again clears it, and the audit entry lists it under
+  `secretsCleared`. Otherwise anyone with `write` on the sensor could keep a secret they were
+  never shown and point it somewhere they can read. `[]` says no parameter chooses it: it goes
+  to the device the sensor is on, which is what a sensor's own device credential should say.
+  A destination must be a plain property that is not itself `writeOnly`.
+
+  ```ts
+  // exe.script: the program, told what its arguments, environment and directory say, decides
+  // where MS_SECRET ends up — so changing any of them clears it unless it is entered again.
+  secretDestinations: { secret: ['program', 'args', 'env', 'workingDirectory'] },
+  ```
+
+  Err towards naming a parameter. The cost of naming one too many is a secret re-entered; the
+  cost of one too few is a secret sent somewhere its owner never chose.
 
 The form (`U-08`) follows from the same annotation: a `writeOnly` parameter renders as
 "set, write-only" with Replace and Clear, never as a filled input, and is omitted from the save
@@ -312,6 +329,7 @@ All of these fail at startup, loudly, rather than at runtime:
 | `id` is not already registered                 | shadowing makes behaviour depend on registration order          |
 | `paramsSchema` compiles                        | a broken schema would fail on the first sensor, not the first boot |
 | no `writeOnly` inside a combinator             | it could not be reliably redacted                               |
+| every `writeOnly` has a `secretDestinations` entry, naming visible properties | a secret stays with where it is sent (`A-40`) |
 | at most one `isPrimary` channel                | the one-primary-per-sensor index                                |
 | no repeated channel key                        | `(sensor_id, key)` is unique                                    |
 | the schema validates its own declared defaults | a `default` a `pattern` rejects is a field nobody can fill in   |

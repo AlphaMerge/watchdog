@@ -85,6 +85,19 @@ export const SNMP_CREDENTIAL_SCHEMA: Readonly<Record<string, JsonSchema>> = {
   },
 };
 
+/**
+ * Where the three secrets above go (`A-40`): to the device the sensor is on, at `port`.
+ *
+ * The port is named because it chooses a listener. On a shared host an unprivileged account can
+ * bind a high UDP port, so a writer who could move the port without entering the community again
+ * could have it sent to a listener of their own. Moving the sensor to another device is `A-41`'s.
+ */
+export const SNMP_SECRET_DESTINATIONS: Readonly<Record<string, readonly string[]>> = {
+  community: ['port'],
+  authKey: ['port'],
+  privKey: ['port'],
+};
+
 /** The transport parameters: where to send, how long to wait, how hard to try. */
 export const SNMP_TRANSPORT_SCHEMA: Readonly<Record<string, JsonSchema>> = {
   port: {
@@ -93,7 +106,9 @@ export const SNMP_TRANSPORT_SCHEMA: Readonly<Record<string, JsonSchema>> = {
     maximum: 65_535,
     default: 161,
     title: 'Port',
-    description: 'The agent’s UDP port. 161 unless somebody has moved it.',
+    description:
+      'The agent’s UDP port. 161 unless somebody has moved it. Changing it clears a community or ' +
+      'key set on this sensor unless you enter it again.',
   },
   timeoutMs: {
     type: 'integer',

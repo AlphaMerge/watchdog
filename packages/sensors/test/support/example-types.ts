@@ -29,6 +29,8 @@ export const snmpType: SensorType = {
   id: 'snmp.traffic',
   category: 'SNMP',
   costHint: 'medium',
+  // Both go to the device the sensor is on, and nowhere a parameter chooses (`A-40`).
+  secretDestinations: { community: [], 'auth.privKey': [] },
   paramsSchema: {
     type: 'object',
     additionalProperties: false,

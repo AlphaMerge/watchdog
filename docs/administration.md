@@ -312,6 +312,11 @@ arguments and the variables — so treat both as untrusted input in every script
   environment.
 - **The working directory is inside the script directory too**, named as the program is. Empty
   runs the program where it lives.
+- **A sensor's secret stays with where it is sent** (`A-40`). Changing the program, its
+  arguments, its environment or its working directory clears the secret unless you enter it
+  again, and the audit entry says so. Those decide where a script sends `MS_SECRET`, so keeping
+  it would let anyone with `write` on the sensor point a secret they were never shown at a
+  listener of their own.
 - **Scripts run as the probe's account**, which holds the probe's identity and the credentials the
   core sends it. `probe.processUid`/`processGid` run them as another account instead, but need the
   probe to have `CAP_SETUID`, which the shipped unit does not grant.

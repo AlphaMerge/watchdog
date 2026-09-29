@@ -535,6 +535,10 @@ export class TemplateService {
    * a PUT that faithfully echoes what the operator saw carries no webhook URL, and treating that
    * as "remove it" would break the template every time somebody fixed a typo in the subject.
    * Sending an explicit `null` clears it. See `notificationMethods.mergeSecrets`.
+   *
+   * **Kept only while it goes where it went** (`A-40`). An edit that changes the webhook's URL or
+   * the program's path clears the secrets bound to it unless it sends them again, so editing a
+   * template is not a way to send somebody else's token to a host of one's own.
    */
   async update(actor: Actor, id: number, input: TemplateInput): Promise<TemplateView> {
     const now = new Date();
@@ -543,6 +547,13 @@ export class TemplateService {
       if (before === null) throw notFound(id);
 
       const write = this.#parse(input, before);
+      // What this edit left behind by moving where it was sent (`A-40`). Named in the audit
+      // entry and the log — the paths, never the values — so a webhook that stops authenticating
+      // after somebody changed its URL says why, and who.
+      const secretsCleared =
+        before.method === write.method
+          ? notificationMethods.secretsLeftBehind(write.method, input.settings, before.settings)
+          : [];
       await this.#requireSchedule(q, write.scheduleId);
       await this.#repo.update(q, id, write);
       await this.#audit.record(
@@ -555,10 +566,17 @@ export class TemplateService {
             templateId: id,
             name: write.name,
             method: write.method,
+            ...(secretsCleared.length === 0 ? {} : { secretsCleared }),
           },
         ],
         now,
       );
+      if (secretsCleared.length > 0) {
+        this.#logger.info(
+          { templateId: id, secretsCleared },
+          'template edit moved where its secrets were sent, and cleared them',
+        );
+      }
       return this.#loaded(q, id);
     });
   }

@@ -78,6 +78,16 @@ export interface SensorTypeGate {
   ): Record<string, unknown>;
 
   /**
+   * The stored secrets `carryWriteOnly` does not carry, because the patch changes where they are
+   * sent without sending them again (`A-40`). Paths, never values.
+   */
+  secretsLeftBehind(
+    sensorType: string,
+    patch: Record<string, unknown>,
+    stored: Record<string, unknown>,
+  ): readonly string[];
+
+  /**
    * The types whose sensors read something other than their own target (`A-29`), so that a
    * write can ask the database for just those — and skip asking at all for the rest, which is
    * every sensor a provisioning run creates.
@@ -203,6 +213,15 @@ export function catalogueSensorTypeGate(catalogue: SensorCatalogue): SensorTypeG
       // refuse the patch anyway with a message that names what is registered.
       if (!catalogue.has(sensorType)) return patch;
       return catalogue.carryWriteOnly(sensorType, patch, stored);
+    },
+
+    secretsLeftBehind(
+      sensorType: string,
+      patch: Record<string, unknown>,
+      stored: Record<string, unknown>,
+    ): readonly string[] {
+      if (!catalogue.has(sensorType)) return [];
+      return catalogue.secretsLeftBehind(sensorType, patch, stored);
     },
 
     readingTypes,

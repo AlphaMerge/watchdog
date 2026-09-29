@@ -1,5 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
-import { SCRIPT_SCHEMA, runScript } from './exe-script-shared.js';
+import { SCRIPT_SCHEMA, SCRIPT_SECRET_DESTINATIONS, runScript } from './exe-script-shared.js';
 
 /**
  * One number from a program this probe was told it may run (`T-19`).
@@ -30,6 +30,7 @@ export const exeScript: SensorType = {
   costHint: 'medium',
   // The reason `P-03` exists. A fault in code somebody else wrote must not take the probe down.
   isolation: 'process',
+  secretDestinations: SCRIPT_SECRET_DESTINATIONS,
 
   paramsSchema: {
     type: 'object',

@@ -132,6 +132,122 @@ describe('notification methods', () => {
     assert.equal(cleared['webhookUrl'], null, 'an explicit null is an instruction, not an absence');
   });
 
+  describe('a secret stays with where it is sent (A-40)', () => {
+    const HOOK = 'https://hooks.example.test/pager';
+    const stored = {
+      url: HOOK,
+      verb: 'POST',
+      secretHeaders: { authorization: BEARER },
+      timeoutMs: 10_000,
+    };
+
+    it('keeps it through an edit that leaves the destination alone', () => {
+      const merged = notificationMethods.mergeSecrets(
+        'webhook',
+        { url: HOOK, verb: 'PUT' },
+        stored,
+      );
+      assert.deepEqual(merged['secretHeaders'], { authorization: BEARER });
+      assert.deepEqual(notificationMethods.secretsLeftBehind('webhook', { url: HOOK }, stored), []);
+    });
+
+    it('leaves it behind when the edit points the webhook somewhere else', () => {
+      // The attack: somebody who may edit the template but never saw the token points it at a
+      // host of their own and presses "test".
+      for (const url of [
+        'https://collector.attacker.test/pager',
+        'https://hooks.example.test/elsewhere',
+        'https://hooks.example.test/pager?copy=1',
+        'http://hooks.example.test/pager',
+      ]) {
+        const merged = notificationMethods.mergeSecrets('webhook', { url }, stored);
+        assert.equal(merged['secretHeaders'], undefined, url);
+        assert.deepEqual(
+          notificationMethods.secretsLeftBehind('webhook', { url }, stored),
+          ['secretHeaders'],
+          url,
+        );
+      }
+    });
+
+    it('keeps what the same edit sends again, since its sender has it', () => {
+      const incoming = {
+        url: 'https://collector.example.test/new',
+        secretHeaders: { authorization: 'Bearer typed-again' },
+      };
+      const merged = notificationMethods.mergeSecrets('webhook', incoming, stored);
+      assert.deepEqual(merged['secretHeaders'], { authorization: 'Bearer typed-again' });
+      assert.deepEqual(notificationMethods.secretsLeftBehind('webhook', incoming, stored), []);
+    });
+
+    it('reads a URL as the address it is, not as the characters typed', () => {
+      const merged = notificationMethods.mergeSecrets(
+        'webhook',
+        { url: 'HTTPS://Hooks.Example.test/pager' },
+        stored,
+      );
+      assert.deepEqual(merged['secretHeaders'], { authorization: BEARER });
+    });
+
+    it('binds a program’s secret arguments to the program', () => {
+      const program = { path: 'page.sh', secretArgs: ['--token=s3cret'] };
+      const same = notificationMethods.mergeSecrets('program', { path: 'page.sh' }, program);
+      assert.deepEqual(same['secretArgs'], ['--token=s3cret']);
+      const other = notificationMethods.mergeSecrets('program', { path: 'log-args.sh' }, program);
+      assert.equal(other['secretArgs'], undefined);
+    });
+
+    it('says nothing is left behind where nothing was set', () => {
+      // A webhook with no secret headers loses nothing by moving, and an audit entry saying it
+      // cleared an empty bag would invite somebody to go looking for a token that never existed.
+      assert.deepEqual(
+        notificationMethods.secretsLeftBehind(
+          'webhook',
+          { url: 'https://elsewhere.example.test/' },
+          { url: HOOK, secretHeaders: {} },
+        ),
+        [],
+      );
+    });
+
+    const method = (secretDestinations: Record<string, string[]>) => ({
+      id: 'probe',
+      name: 'Probe',
+      description: '',
+      usesRecipients: false,
+      summarisable: false,
+      placeholderFields: [],
+      secretDestinations,
+      settingsSchema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string' },
+          token: { type: 'string', writeOnly: true },
+          key: { type: 'string', writeOnly: true },
+        },
+      },
+      describe: () => '',
+    });
+
+    it('refuses a method that stores a secret without saying where it goes', () => {
+      assert.throws(
+        () => new MethodRegistry([method({ token: ['url'] })]),
+        /must say where each of its secrets is sent/,
+      );
+    });
+
+    it('refuses a destination that is not a visible setting', () => {
+      assert.throws(
+        () => new MethodRegistry([method({ token: ['host'], key: [] })]),
+        /sends "token" to "host", which is not a visible setting/,
+      );
+      assert.throws(
+        () => new MethodRegistry([method({ token: ['key'], key: [] })]),
+        /sends "token" to "key", which is not a visible setting/,
+      );
+    });
+  });
+
   it('refuses a schema that hides a secret where the redactor cannot reach it', () => {
     // The rule `SensorCatalogue` enforces, enforced here too and at the same moment: a
     // `writeOnly` under a combinator is a secret that quietly comes back, so building the
@@ -146,6 +262,7 @@ describe('notification methods', () => {
             usesRecipients: false,
             summarisable: false,
             placeholderFields: [],
+            secretDestinations: {},
             settingsSchema: {
               type: 'object',
               oneOf: [{ properties: { token: { type: 'string', writeOnly: true } } }],
@@ -167,6 +284,7 @@ describe('notification methods', () => {
         usesRecipients: false,
         summarisable: false,
         placeholderFields: [],
+        secretDestinations: { token: [] },
         settingsSchema: {
           type: 'object',
           properties: { token: { type: 'string', writeOnly: true } },
@@ -351,6 +469,35 @@ describe('templates', { skip: available ? false : 'no database' }, () => {
       [id],
     );
     assert.ok(!JSON.stringify(rows[0]?.settings).includes('xoxb'));
+  });
+
+  it('clears the secret headers of a webhook an edit re-points, and says so (A-40)', async () => {
+    const created = await templates.create(testActor, {
+      name: 'Pager',
+      method: 'webhook',
+      settings: {
+        url: 'https://hooks.example.test/pager',
+        secretHeaders: { authorization: BEARER },
+      },
+    });
+    audited.length = 0;
+    const updated = await templates.update(testActor, created.id, {
+      name: 'Pager',
+      method: 'webhook',
+      settings: { url: 'https://collector.attacker.test/pager' },
+    });
+    assert.deepEqual(updated.redactedSettings, [], 'the form now shows them as not set');
+
+    const rows = await db.query<{ settings: Record<string, unknown> }>(
+      'SELECT settings FROM notification_template WHERE id = $1',
+      [created.id],
+    );
+    assert.ok(!JSON.stringify(rows[0]?.settings).includes('do-not-leak'), 'gone from storage');
+
+    const entry = audited.find((m) => m.action === 'template.updated');
+    assert.ok(entry?.action === 'template.updated');
+    assert.deepEqual(entry.secretsCleared, ['secretHeaders'], 'the history names what went');
+    assert.ok(!JSON.stringify(entry).includes('do-not-leak'), 'by name, never by value');
   });
 
   it('refuses recipients on a method that has none', async () => {

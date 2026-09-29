@@ -1,5 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
-import { SCRIPT_SCHEMA, runScript } from './exe-script-shared.js';
+import { SCRIPT_SCHEMA, SCRIPT_SECRET_DESTINATIONS, runScript } from './exe-script-shared.js';
 
 /**
  * Many numbers from a program this probe was told it may run (`T-19`).
@@ -27,6 +27,7 @@ export const exeScriptAdvanced: SensorType = {
   category: 'Custom',
   costHint: 'medium',
   isolation: 'process',
+  secretDestinations: SCRIPT_SECRET_DESTINATIONS,
 
   paramsSchema: {
     type: 'object',

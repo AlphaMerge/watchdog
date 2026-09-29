@@ -1851,6 +1851,12 @@ export class ObjectService {
         );
       }
 
+      // Worked out before the carry below, which drops them: the audit entry says which secrets
+      // an edit left behind by changing where they are sent (`A-40`).
+      const secretsCleared =
+        patch.kind === 'sensor' && patch.params !== undefined && before.kind === 'sensor'
+          ? this.#sensorTypes.secretsLeftBehind(before.sensorType, patch.params, before.params)
+          : [];
       const applied: UpdateObjectInput =
         patch.kind === 'sensor' && patch.params !== undefined
           ? {
@@ -1898,10 +1904,17 @@ export class ObjectService {
             before: safeBefore,
             after: safeAfter,
             changedParams,
+            ...(secretsCleared.length === 0 ? {} : { secretsCleared }),
           },
         ],
         new Date(),
       );
+      if (secretsCleared.length > 0) {
+        this.#logger.info(
+          { objectId: id, secretsCleared },
+          'an edit changed where these secrets are sent without sending them again; cleared',
+        );
+      }
 
       return safeAfter;
     });

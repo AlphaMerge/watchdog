@@ -166,7 +166,7 @@ Every sensor of this type has:
 | `program` | string |  | ≥ 1 chars, ≤ 255 chars | **required** |
 | `args` | array of string | _(none)_ | ≤ 20 entries |  |
 | `env` | array of object | _(none)_ | ≤ 20 entries |  |
-| `secret` | string | _(empty)_ | ≤ 2000 chars | **write-only** |
+| `secret` | string |  | ≤ 2000 chars | **write-only** |
 | `workingDirectory` | string | _(empty)_ | ≤ 500 chars |  |
 | `timeoutMs` | integer | `30000` | ≥ 1000, ≤ 300000 |  |
 | `format` | `prtg` · `number` · `json` | `"prtg"` |  |  |
@@ -176,7 +176,7 @@ Every sensor of this type has:
 - **Program** (`program`) — The file to run, **inside this probe’s script directory** — a name, not a path. That directory is set on the probe and cannot be overridden here, because a sensor that could name any path would make creating a sensor the same thing as running any command as the account this probe holds its credentials in.
 - **Arguments** (`args`) — Passed one per entry, never joined into a command line and never through a shell — so a space or a quote in an argument is just a character. `%host`, `%sensorid` and `%device` are substituted.
 - **Environment** (`env`) — **Each name starts with `MS_VAR_`**, then capitals, digits and underscores — a variable like `BASH_ENV` or `NODE_OPTIONS` tells the interpreter to run code the sensor’s writer chose, so no other name reaches a script. The program gets **only** these, plus `PATH`, `LANG`, `LC_*` and `TZ` as this probe has them and the placeholders below. It does not inherit the rest of this probe’s environment, which holds whatever arrived through MS_* overrides — handing that to a script is how a credential leaves the machine.
-- **Secret** (`secret`) — Passed to the program as `MS_SECRET` in its environment, for a script that needs an API key. Write-only: no API route returns it, to anyone. In the environment rather than an argument, because arguments are world-readable through `ps`.
+- **Secret** (`secret`) — Passed to the program as `MS_SECRET` in its environment, for a script that needs an API key. Write-only: no API route returns it, to anyone. In the environment rather than an argument, because arguments are world-readable through `ps`. Changing the program, its arguments, its environment or its working directory clears the secret unless you enter it again: those decide where the script sends it.
 - **Working directory** (`workingDirectory`) — A directory **inside this probe’s script directory**, named the way the program is. Empty runs the program in the directory it was found in, which is usually right.
 - **Timeout** (`timeoutMs`) — The program is sent SIGTERM at this point and killed shortly after — and the whole process *group* is, so a script that backgrounds something does not outlive its own kill.
 - **Output format** (`format`) — `prtg` reads `returncode:value:message`, which is what an existing PRTG EXE script already prints. `number` reads the whole of stdout as one number, which is what a one-line shell script naturally produces. `json` reads {"value":…,"message":…}.
@@ -199,7 +199,7 @@ Every sensor of this type has:
 | `program` | string |  | ≥ 1 chars, ≤ 255 chars | **required** |
 | `args` | array of string | _(none)_ | ≤ 20 entries |  |
 | `env` | array of object | _(none)_ | ≤ 20 entries |  |
-| `secret` | string | _(empty)_ | ≤ 2000 chars | **write-only** |
+| `secret` | string |  | ≤ 2000 chars | **write-only** |
 | `workingDirectory` | string | _(empty)_ | ≤ 500 chars |  |
 | `timeoutMs` | integer | `30000` | ≥ 1000, ≤ 300000 |  |
 | `primaryChannel` | string | `"value"` | ≥ 1 chars, ≤ 40 chars |  |
@@ -209,7 +209,7 @@ Every sensor of this type has:
 - **Program** (`program`) — The file to run, **inside this probe’s script directory** — a name, not a path. That directory is set on the probe and cannot be overridden here, because a sensor that could name any path would make creating a sensor the same thing as running any command as the account this probe holds its credentials in.
 - **Arguments** (`args`) — Passed one per entry, never joined into a command line and never through a shell — so a space or a quote in an argument is just a character. `%host`, `%sensorid` and `%device` are substituted.
 - **Environment** (`env`) — **Each name starts with `MS_VAR_`**, then capitals, digits and underscores — a variable like `BASH_ENV` or `NODE_OPTIONS` tells the interpreter to run code the sensor’s writer chose, so no other name reaches a script. The program gets **only** these, plus `PATH`, `LANG`, `LC_*` and `TZ` as this probe has them and the placeholders below. It does not inherit the rest of this probe’s environment, which holds whatever arrived through MS_* overrides — handing that to a script is how a credential leaves the machine.
-- **Secret** (`secret`) — Passed to the program as `MS_SECRET` in its environment, for a script that needs an API key. Write-only: no API route returns it, to anyone. In the environment rather than an argument, because arguments are world-readable through `ps`.
+- **Secret** (`secret`) — Passed to the program as `MS_SECRET` in its environment, for a script that needs an API key. Write-only: no API route returns it, to anyone. In the environment rather than an argument, because arguments are world-readable through `ps`. Changing the program, its arguments, its environment or its working directory clears the secret unless you enter it again: those decide where the script sends it.
 - **Working directory** (`workingDirectory`) — A directory **inside this probe’s script directory**, named the way the program is. Empty runs the program in the directory it was found in, which is usually right.
 - **Timeout** (`timeoutMs`) — The program is sent SIGTERM at this point and killed shortly after — and the whole process *group* is, so a script that backgrounds something does not outlive its own kill.
 - **Primary channel** (`primaryChannel`) — The key of the channel this sensor is judged by. The program must return it every scan; the rest of what it returns becomes channels on their own the first time they appear. For a PRTG-format script this is the first channel’s name in lower case with spaces as underscores — “Free Space” is `free_space`.
@@ -532,7 +532,7 @@ cost: **medium** · credentials: `snmp`
 - **Privacy protocol** (`privProtocol`) — For v3 at authPriv. aes256b and aes256r are the two incompatible 256-bit AES variants (Blumenthal and Reeder); there is no way to detect which an agent wants, and the wrong one fails as a decryption error.
 - **Privacy key** (`privKey`) — For v3 at authPriv. At least eight characters, per RFC 3414.
 - **Context name** (`context`) — For v3 against an agent that proxies several contexts. Usually left empty.
-- **Port** (`port`) — The agent’s UDP port. 161 unless somebody has moved it.
+- **Port** (`port`) — The agent’s UDP port. 161 unless somebody has moved it. Changing it clears a community or key set on this sensor unless you enter it again.
 - **Timeout** (`timeoutMs`) — Per attempt, not for the check. With retries set to 1 a check can take twice this long before it gives up.
 - **Retries** (`retries`) — SNMP runs over UDP, so a lost request looks exactly like a silent agent. One retry absorbs ordinary packet loss; more mostly delays a genuine failure being reported.
 - **Where to read it** (`source`) — `auto` walks hrProcessorLoad and falls back to UCD’s ssCpuIdle when the device has no HOST-RESOURCES-MIB. Force one only for a device that answers both and disagrees with itself.
@@ -577,7 +577,7 @@ Every sensor of this type has:
 - **Privacy protocol** (`privProtocol`) — For v3 at authPriv. aes256b and aes256r are the two incompatible 256-bit AES variants (Blumenthal and Reeder); there is no way to detect which an agent wants, and the wrong one fails as a decryption error.
 - **Privacy key** (`privKey`) — For v3 at authPriv. At least eight characters, per RFC 3414.
 - **Context name** (`context`) — For v3 against an agent that proxies several contexts. Usually left empty.
-- **Port** (`port`) — The agent’s UDP port. 161 unless somebody has moved it.
+- **Port** (`port`) — The agent’s UDP port. 161 unless somebody has moved it. Changing it clears a community or key set on this sensor unless you enter it again.
 - **Timeout** (`timeoutMs`) — Per attempt, not for the check. With retries set to 1 a check can take twice this long before it gives up.
 - **Retries** (`retries`) — SNMP runs over UDP, so a lost request looks exactly like a silent agent. One retry absorbs ordinary packet loss; more mostly delays a genuine failure being reported.
 - **OID** (`oid`) — The object to read, in numeric form — for example 1.3.6.1.2.1.25.3.3.1.2.1. Include the instance: a scalar ends in .0, and a table column needs its row index. Reading the column without one returns "no such object", because the column is not itself an object.
@@ -627,7 +627,7 @@ Every sensor of this type has:
 - **Privacy protocol** (`privProtocol`) — For v3 at authPriv. aes256b and aes256r are the two incompatible 256-bit AES variants (Blumenthal and Reeder); there is no way to detect which an agent wants, and the wrong one fails as a decryption error.
 - **Privacy key** (`privKey`) — For v3 at authPriv. At least eight characters, per RFC 3414.
 - **Context name** (`context`) — For v3 against an agent that proxies several contexts. Usually left empty.
-- **Port** (`port`) — The agent’s UDP port. 161 unless somebody has moved it.
+- **Port** (`port`) — The agent’s UDP port. 161 unless somebody has moved it. Changing it clears a community or key set on this sensor unless you enter it again.
 - **Timeout** (`timeoutMs`) — Per attempt, not for the check. With retries set to 1 a check can take twice this long before it gives up.
 - **Retries** (`retries`) — SNMP runs over UDP, so a lost request looks exactly like a silent agent. One retry absorbs ordinary packet loss; more mostly delays a genuine failure being reported.
 - **OID** (`oid`) — The object to read, in numeric form. Include the instance — a scalar ends in .0.
@@ -673,7 +673,7 @@ cost: **medium** · credentials: `snmp`
 - **Privacy protocol** (`privProtocol`) — For v3 at authPriv. aes256b and aes256r are the two incompatible 256-bit AES variants (Blumenthal and Reeder); there is no way to detect which an agent wants, and the wrong one fails as a decryption error.
 - **Privacy key** (`privKey`) — For v3 at authPriv. At least eight characters, per RFC 3414.
 - **Context name** (`context`) — For v3 against an agent that proxies several contexts. Usually left empty.
-- **Port** (`port`) — The agent’s UDP port. 161 unless somebody has moved it.
+- **Port** (`port`) — The agent’s UDP port. 161 unless somebody has moved it. Changing it clears a community or key set on this sensor unless you enter it again.
 - **Timeout** (`timeoutMs`) — Per attempt, not for the check. With retries set to 1 a check can take twice this long before it gives up.
 - **Retries** (`retries`) — SNMP runs over UDP, so a lost request looks exactly like a silent agent. One retry absorbs ordinary packet loss; more mostly delays a genuine failure being reported.
 - **Mount point** (`mountPoint`) — Matched against `hrStorageDescr` — “/”, “/var”, “C:\ Label:… ” on Windows. Compared whole, ignoring case and surrounding spaces; a device that decorates the description needs the “starts with” match below. Resolved on every scan, so this sensor follows the filesystem when the device renumbers its storage table.
@@ -718,7 +718,7 @@ cost: **medium** · credentials: `snmp`
 - **Privacy protocol** (`privProtocol`) — For v3 at authPriv. aes256b and aes256r are the two incompatible 256-bit AES variants (Blumenthal and Reeder); there is no way to detect which an agent wants, and the wrong one fails as a decryption error.
 - **Privacy key** (`privKey`) — For v3 at authPriv. At least eight characters, per RFC 3414.
 - **Context name** (`context`) — For v3 against an agent that proxies several contexts. Usually left empty.
-- **Port** (`port`) — The agent’s UDP port. 161 unless somebody has moved it.
+- **Port** (`port`) — The agent’s UDP port. 161 unless somebody has moved it. Changing it clears a community or key set on this sensor unless you enter it again.
 - **Timeout** (`timeoutMs`) — Per attempt, not for the check. With retries set to 1 a check can take twice this long before it gives up.
 - **Retries** (`retries`) — SNMP runs over UDP, so a lost request looks exactly like a silent agent. One retry absorbs ordinary packet loss; more mostly delays a genuine failure being reported.
 - **Count cache as available** (`countCacheAsAvailable`) — On by default, and it is the difference between a Linux box reading 35% used and the same box reading 64%. The kernel spends free memory on page cache deliberately and returns it under pressure, so cache is available memory. Turn this off only for a device where reclaiming the cache is genuinely not free.
@@ -759,7 +759,7 @@ cost: **medium** · credentials: `snmp`
 - **Privacy protocol** (`privProtocol`) — For v3 at authPriv. aes256b and aes256r are the two incompatible 256-bit AES variants (Blumenthal and Reeder); there is no way to detect which an agent wants, and the wrong one fails as a decryption error.
 - **Privacy key** (`privKey`) — For v3 at authPriv. At least eight characters, per RFC 3414.
 - **Context name** (`context`) — For v3 against an agent that proxies several contexts. Usually left empty.
-- **Port** (`port`) — The agent’s UDP port. 161 unless somebody has moved it.
+- **Port** (`port`) — The agent’s UDP port. 161 unless somebody has moved it. Changing it clears a community or key set on this sensor unless you enter it again.
 - **Timeout** (`timeoutMs`) — Per attempt, not for the check. With retries set to 1 a check can take twice this long before it gives up.
 - **Retries** (`retries`) — SNMP runs over UDP, so a lost request looks exactly like a silent agent. One retry absorbs ordinary packet loss; more mostly delays a genuine failure being reported.
 - **Table OID** (`tableOid`) — The table’s entry OID — 1.3.6.1.2.1.25.2.3.1 for hrStorageEntry, 1.3.6.1.2.1.2.2.1 for ifEntry. Every column below is read relative to this, so a column that lives in a different subtree — ifXTable beside ifTable — needs a second sensor.
@@ -807,7 +807,7 @@ cost: **medium** · credentials: `snmp`
 - **Privacy protocol** (`privProtocol`) — For v3 at authPriv. aes256b and aes256r are the two incompatible 256-bit AES variants (Blumenthal and Reeder); there is no way to detect which an agent wants, and the wrong one fails as a decryption error.
 - **Privacy key** (`privKey`) — For v3 at authPriv. At least eight characters, per RFC 3414.
 - **Context name** (`context`) — For v3 against an agent that proxies several contexts. Usually left empty.
-- **Port** (`port`) — The agent’s UDP port. 161 unless somebody has moved it.
+- **Port** (`port`) — The agent’s UDP port. 161 unless somebody has moved it. Changing it clears a community or key set on this sensor unless you enter it again.
 - **Timeout** (`timeoutMs`) — Per attempt, not for the check. With retries set to 1 a check can take twice this long before it gives up.
 - **Retries** (`retries`) — SNMP runs over UDP, so a lost request looks exactly like a silent agent. One retry absorbs ordinary packet loss; more mostly delays a genuine failure being reported.
 - **Interface index** (`ifIndex`) — The SNMP index of the interface (`ifIndex`). Fast — one request per scan — but not stable on every device: some renumber their interfaces across a reboot or a module change, after which this sensor is watching a different port with no sign that anything happened. Use the interface name instead where that is a risk.
@@ -868,7 +868,7 @@ cost: **light** · credentials: `snmp`
 - **Privacy protocol** (`privProtocol`) — For v3 at authPriv. aes256b and aes256r are the two incompatible 256-bit AES variants (Blumenthal and Reeder); there is no way to detect which an agent wants, and the wrong one fails as a decryption error.
 - **Privacy key** (`privKey`) — For v3 at authPriv. At least eight characters, per RFC 3414.
 - **Context name** (`context`) — For v3 against an agent that proxies several contexts. Usually left empty.
-- **Port** (`port`) — The agent’s UDP port. 161 unless somebody has moved it.
+- **Port** (`port`) — The agent’s UDP port. 161 unless somebody has moved it. Changing it clears a community or key set on this sensor unless you enter it again.
 - **Timeout** (`timeoutMs`) — Per attempt, not for the check. With retries set to 1 a check can take twice this long before it gives up.
 - **Retries** (`retries`) — SNMP runs over UDP, so a lost request looks exactly like a silent agent. One retry absorbs ordinary packet loss; more mostly delays a genuine failure being reported.
 

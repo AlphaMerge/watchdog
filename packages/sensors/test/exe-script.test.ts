@@ -578,6 +578,80 @@ describe('what a sensor may hand a script (S-19)', () => {
   });
 });
 
+describe('a script’s secret stays with where it is sent (A-40)', () => {
+  const TYPES = [exeScript, exeScriptAdvanced];
+  const catalogue = new SensorCatalogue().register(exeScript).register(exeScriptAdvanced).seal();
+  const SECRET = 'api-key-1234';
+
+  /** What the core stores, and what a client that read the sensor back would send. */
+  const storedFor = (
+    typeId: string,
+    env: readonly Record<string, string>[] = [{ name: 'MS_VAR_REGION', value: 'eu' }],
+  ): Record<string, unknown> => {
+    const checked = catalogue.validate(typeId, {
+      program: 'check.sh',
+      args: ['https://api.example.invalid'],
+      env,
+      secret: SECRET,
+    });
+    assert.ok(checked.valid, typeId);
+    return checked.params;
+  };
+  const readBack = (typeId: string, stored: Record<string, unknown>): Record<string, unknown> =>
+    catalogue.redact(typeId, stored).params;
+
+  it('carries the secret over an edit that leaves where it goes alone', () => {
+    for (const type of TYPES) {
+      const stored = storedFor(type.id);
+      const patch = { ...readBack(type.id, stored), timeoutMs: 20_000 };
+      assert.deepEqual(catalogue.secretsLeftBehind(type.id, patch, stored), [], type.id);
+      assert.equal(catalogue.carryWriteOnly(type.id, patch, stored)['secret'], SECRET, type.id);
+    }
+  });
+
+  it('reads a parameter left out at its default as unchanged', () => {
+    // `workingDirectory` and an entry's `value` are stored at their defaults; a client that
+    // leaves them out has not moved anything.
+    for (const type of TYPES) {
+      const stored = storedFor(type.id, [{ name: 'MS_VAR_VERBOSE' }]);
+      assert.deepEqual(stored['env'], [{ name: 'MS_VAR_VERBOSE', value: '' }], type.id);
+      const patch = { ...readBack(type.id, stored), env: [{ name: 'MS_VAR_VERBOSE' }] };
+      Reflect.deleteProperty(patch, 'workingDirectory');
+      assert.deepEqual(catalogue.secretsLeftBehind(type.id, patch, stored), [], type.id);
+      assert.equal(catalogue.carryWriteOnly(type.id, patch, stored)['secret'], SECRET, type.id);
+    }
+  });
+
+  it('leaves the secret behind when the program, arguments, environment or directory change', () => {
+    const MOVES: Record<string, unknown> = {
+      program: 'print-env.sh',
+      args: ['https://listener.example.invalid'],
+      env: [{ name: 'MS_VAR_REGION', value: 'https://listener.example.invalid' }],
+      workingDirectory: 'elsewhere',
+    };
+    for (const type of TYPES) {
+      for (const [param, value] of Object.entries(MOVES)) {
+        const stored = storedFor(type.id);
+        const patch = { ...readBack(type.id, stored), [param]: value };
+        const where = `${type.id}: ${param}`;
+        assert.deepEqual(catalogue.secretsLeftBehind(type.id, patch, stored), ['secret'], where);
+        const carried = catalogue.carryWriteOnly(type.id, patch, stored);
+        assert.equal(Object.hasOwn(carried, 'secret'), false, where);
+        assert.deepEqual(carried, patch, `${where}: and the rest of the edit stands`);
+      }
+    }
+  });
+
+  it('keeps a secret sent again with the change, which is how an operator moves one', () => {
+    for (const type of TYPES) {
+      const stored = storedFor(type.id);
+      const patch = { ...readBack(type.id, stored), program: 'other.sh', secret: 'api-key-5678' };
+      assert.deepEqual(catalogue.secretsLeftBehind(type.id, patch, stored), [], type.id);
+      assert.equal(catalogue.carryWriteOnly(type.id, patch, stored)['secret'], 'api-key-5678');
+    }
+  });
+});
+
 describe('exe.script.advanced', () => {
   it('reports every channel the program returned', async () => {
     const execution = await run(exeScriptAdvanced, { program: 'advanced.sh' });

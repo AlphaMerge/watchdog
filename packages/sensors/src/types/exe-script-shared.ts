@@ -26,6 +26,20 @@ const MAX_OUTPUT_BYTES = 512 * 1024;
  */
 export const SENSOR_VARIABLE = /^MS_VAR_[A-Z0-9_]+$/;
 
+/**
+ * Where the script's secret goes (`A-40`): wherever the program, told what its arguments,
+ * environment and working directory tell it, sends it.
+ *
+ * All four, not the program alone. A script that takes its target as an argument —
+ * `check_rest.sh https://…` with `MS_SECRET` as the bearer token — is the common case, not the
+ * rare one, and binding only the program would let anyone with `write` on the sensor point that
+ * argument at a listener of their own and keep the secret. Re-entering it when a threshold
+ * argument changes is the price.
+ */
+export const SCRIPT_SECRET_DESTINATIONS: Readonly<Record<string, readonly string[]>> = {
+  secret: ['program', 'args', 'env', 'workingDirectory'],
+};
+
 export const SCRIPT_SCHEMA: Readonly<Record<string, JsonSchema>> = {
   program: {
     type: 'string',
@@ -89,12 +103,15 @@ export const SCRIPT_SCHEMA: Readonly<Record<string, JsonSchema>> = {
     type: 'string',
     maxLength: 2_000,
     writeOnly: true,
-    default: '',
+    // No default: an empty one would be stored for every script sensor and read back as "set",
+    // so a secret left behind by an edit (`A-40`) would look as if it were still there.
     title: 'Secret',
     description:
       'Passed to the program as `MS_SECRET` in its environment, for a script that needs an API ' +
       'key. Write-only: no API route returns it, to anyone. In the environment rather than an ' +
-      'argument, because arguments are world-readable through `ps`.',
+      'argument, because arguments are world-readable through `ps`. Changing the program, its ' +
+      'arguments, its environment or its working directory clears the secret unless you enter ' +
+      'it again: those decide where the script sends it.',
   },
   workingDirectory: {
     type: 'string',

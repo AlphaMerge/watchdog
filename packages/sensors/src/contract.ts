@@ -300,6 +300,22 @@ export interface SensorType {
    */
   readonly credentialKinds?: readonly string[];
   /**
+   * Where each `writeOnly` parameter is sent, as the other parameters that say so (`A-40`).
+   *
+   * **A secret stays with where it is sent.** A read never returns a secret, so an edit that
+   * leaves it out keeps the stored one — and without this, anyone with `write` on the sensor
+   * could keep the secret and change where it goes: point a script's secret at a program that
+   * prints its environment somewhere they can read it. So an edit that changes any parameter
+   * named here and does not send the secret again clears it, and the audit entry says which.
+   *
+   * Required for every `writeOnly` parameter, and the catalogue refuses a type that leaves one
+   * out: a secret nobody has said the destination of is one a new type would carry anywhere.
+   * `[]` says no parameter chooses it — it goes to the device the sensor is on, and nowhere
+   * else — which is what a credential the sensor holds for its own device should say. Each
+   * destination is a dotted path to a plain property that is not itself `writeOnly`.
+   */
+  readonly secretDestinations?: Readonly<Record<string, readonly string[]>>;
+  /**
    * The probe-side listener this type is fed by, instead of polling (`T-06`).
    *
    * Declared rather than discovered, and the probe reads it from the catalogue rather than

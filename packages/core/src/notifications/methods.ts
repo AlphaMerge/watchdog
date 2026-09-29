@@ -58,6 +58,21 @@ export interface NotificationMethod {
    * Empty for a method whose settings are all switches and endpoints.
    */
   readonly placeholderFields: readonly string[];
+  /**
+   * Where each secret is sent (`A-40`): every `writeOnly` path, mapped to the settings fields that
+   * name its destination. An empty list is a secret that is its own destination, as a Slack
+   * webhook URL is.
+   *
+   * **A secret does not follow its destination.** An edit that leaves a secret out keeps it —
+   * the form was rendered without it — but only while the fields named here are unchanged. Change
+   * the webhook's URL or the program's path and a secret the same request does not send again is
+   * cleared. Otherwise anybody who may edit a template could point a bearer token somebody else
+   * set at a host of their own, press "test", and read it off the wire.
+   *
+   * Required, and checked against the schema's `writeOnly` paths when the registry is built, so
+   * a method added later cannot store a secret without saying where it goes.
+   */
+  readonly secretDestinations: Readonly<Record<string, readonly string[]>>;
   /** One line an operator reads on the template list, built from the settings. */
   describe(settings: Record<string, unknown>): string;
 }
@@ -87,6 +102,8 @@ export const EMAIL_METHOD: NotificationMethod = {
   summarisable: true,
   // Nothing but a format switch and a sender address; the message itself is the subject and body.
   placeholderFields: [],
+  // No secret: the relay's credentials are the installation's configuration, not a template's.
+  secretDestinations: {},
   settingsSchema: {
     type: 'object',
     additionalProperties: false,
@@ -122,6 +139,7 @@ export const WEBHOOK_METHOD: NotificationMethod = {
   summarisable: false,
   // Deliberately not the URL: a percent-encoded path is indistinguishable from a placeholder.
   placeholderFields: [],
+  secretDestinations: { secretHeaders: ['url'] },
   settingsSchema: {
     type: 'object',
     additionalProperties: false,
@@ -169,6 +187,8 @@ function chatMethod(
     usesRecipients: false,
     summarisable: false,
     placeholderFields: [],
+    // The URL is the credential and the destination at once: re-pointing it replaces it.
+    secretDestinations: { webhookUrl: [] },
     settingsSchema: {
       type: 'object',
       additionalProperties: false,
@@ -229,6 +249,8 @@ export const PROGRAM_METHOD: NotificationMethod = {
   summarisable: false,
   // The arguments are content: an operator writes `--message %lastmessage` and means it.
   placeholderFields: ['args', 'secretArgs'],
+  // A password written for one script is not one for whichever script the path names next.
+  secretDestinations: { secretArgs: ['path'] },
   settingsSchema: {
     type: 'object',
     additionalProperties: false,
@@ -302,12 +324,14 @@ export class MethodRegistry {
   constructor(methods: readonly NotificationMethod[]) {
     for (const method of methods) {
       if (this.#entries.has(method.id)) throw new Error(`duplicate method ${method.id}`);
+      // Collected once, at load. A `writeOnly` the redactor could not reach would be a secret
+      // that quietly comes back, so finding one is a startup failure rather than a surprise.
+      const writeOnly = collectWriteOnly(method.settingsSchema, method.id);
+      checkDestinations(method, writeOnly);
       this.#entries.set(method.id, {
         method,
         validate: ajv.compile(method.settingsSchema),
-        // Collected once, at load. A `writeOnly` the redactor could not reach would be a secret
-        // that quietly comes back, so finding one is a startup failure rather than a surprise.
-        writeOnly: collectWriteOnly(method.settingsSchema, method.id),
+        writeOnly,
       });
     }
   }
@@ -400,9 +424,47 @@ export class MethodRegistry {
       const segments = path.split('.');
       if (hasAtPath(merged, segments)) continue;
       const held = readAtPath(stored, segments);
-      if (held !== undefined) setAtPath(merged, segments, held);
+      // Kept only where it was going (`A-40`): a secret whose destination this edit changes is
+      // left behind, and the request has to send it again to keep it.
+      if (held !== undefined && this.#stays(methodId, path, incoming, stored)) {
+        setAtPath(merged, segments, held);
+      }
     }
     return merged;
+  }
+
+  /**
+   * The secrets `mergeSecrets` leaves behind because the edit moved where they are sent: held
+   * before, not sent again, and bound to a destination that changed. For the audit entry and the
+   * log, so a template that stopped authenticating after an edit says why.
+   */
+  secretsLeftBehind(
+    methodId: string,
+    incoming: Readonly<Record<string, unknown>>,
+    stored: Readonly<Record<string, unknown>>,
+  ): readonly string[] {
+    return (this.#entries.get(methodId)?.writeOnly ?? []).filter((path) => {
+      const segments = path.split('.');
+      return (
+        !hasAtPath(incoming, segments) &&
+        isConfigured(readAtPath(stored, segments)) &&
+        !this.#stays(methodId, path, incoming, stored)
+      );
+    });
+  }
+
+  /** Whether every field naming where this secret goes is the same in the edit as before. */
+  #stays(
+    methodId: string,
+    path: string,
+    incoming: Readonly<Record<string, unknown>>,
+    stored: Readonly<Record<string, unknown>>,
+  ): boolean {
+    const destinations = this.#entries.get(methodId)?.method.secretDestinations[path] ?? [];
+    return destinations.every((field) => {
+      const segments = field.split('.');
+      return sameDestination(readAtPath(incoming, segments), readAtPath(stored, segments));
+    });
   }
 
   #entry(id: string): {
@@ -457,6 +519,50 @@ function collectWriteOnly(schema: Record<string, unknown>, methodId: string): re
       }
     }
   }
+}
+
+/**
+ * Refuses a method whose secrets do not each say where they are sent (`A-40`), or that names a
+ * destination which is not one of its settings — or is itself a secret, which would never be in
+ * the edit to compare.
+ */
+function checkDestinations(method: NotificationMethod, writeOnly: readonly string[]): void {
+  const declared = Object.keys(method.secretDestinations).sort();
+  const secrets = [...writeOnly].sort();
+  if (declared.join('\n') !== secrets.join('\n')) {
+    throw new Error(
+      `method "${method.id}" must say where each of its secrets is sent: secretDestinations ` +
+        `names [${declared.join(', ')}] and the schema's writeOnly fields are ` +
+        `[${secrets.join(', ')}]`,
+    );
+  }
+  const properties = (method.settingsSchema['properties'] ?? {}) as Record<string, unknown>;
+  for (const [secret, fields] of Object.entries(method.secretDestinations)) {
+    for (const field of fields) {
+      if (!(field in properties) || writeOnly.includes(field)) {
+        throw new Error(
+          `method "${method.id}" sends "${secret}" to "${field}", which is not a visible setting`,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Whether two values of a destination field name the same place. A URL is compared as the URL it
+ * parses to, so `HTTPS://Hooks.example.com/x` is not a new destination; anything else, and any
+ * text that is not a URL, must be identical.
+ */
+function sameDestination(a: unknown, b: unknown): boolean {
+  if (typeof a === 'string' && typeof b === 'string') {
+    if (a === b) return true;
+    try {
+      return new URL(a).href === new URL(b).href;
+    } catch {
+      return false;
+    }
+  }
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 /** Whether a secret slot actually holds one. Absent, null, empty text or an empty bag do not. */

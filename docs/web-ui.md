@@ -125,7 +125,9 @@ next, whether it creates what it finds, and when it last ran.
   sends only what you changed, with the version you opened. If somebody else saved first, the
   form says so and offers the rule as it now is, rather than saving over their change.
 - **The SNMP community is never shown**, not even to an administrator. When you edit a rule you
-  choose to keep the stored community, replace it or remove it. Keeping is the default.
+  choose to keep the stored community, replace it or remove it. Keeping is the default, but only
+  while the rule scans where the community was set for: changing its range or its probe clears
+  the community unless you enter it again in the same save, and the rule's history says so.
 
 ### Templates
 
@@ -142,6 +144,12 @@ Notification templates — what a message says, who receives it, and when it is 
   message to either reaches nobody. Only an administrator can pick them, since only an
   administrator may list who is in the installation. Anyone else who edits a template sees the
   users and groups already on it by number, keeps them as they are, and can still remove them.
+- **A secret stays with where it is sent.** Secret headers and secret arguments are never shown,
+  and saving a form that leaves them blank keeps them. Changing an HTTP action's URL or a
+  program's name clears the secrets that went there, unless you enter them again in the same
+  save. After such a save the form shows them as not set, and the template's history says which
+  were cleared. This is so that editing a template cannot send a token somebody else set to an
+  address of your choosing.
 
 ### Sensor types
 
@@ -220,6 +228,10 @@ so a link to a sensor's triggers is a link somebody can send.
 
 Add a sensor beneath a device at `/objects/:id/add-sensor`. Everything after "which type" is
 generated from the type's `paramsSchema`, which is what keeps adding a sensor type a one-file job.
+A secret parameter shows as set, never as its value, and a save that leaves it alone keeps it —
+unless the save changes where the type sends it, such as a script's program, arguments,
+environment or working directory, or an SNMP sensor's port. Then it is cleared unless entered again, and the sensor's
+**Changes** tab says which (`A-40`).
 
 On the **Settings** tab, each row is a toggle rather than a plain input, because the source is the
 half that matters: "60 seconds" is not the same fact as "60 seconds, because the group two levels

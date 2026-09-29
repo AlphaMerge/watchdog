@@ -14803,6 +14803,122 @@ because each is a decision rather than a defect:
       half-built (on an injected clock or a short window, so the test itself does not take four
       minutes); and the documentation says the above.
 
+- [x] **A-40 — A stored secret follows its endpoint wherever a writer points it** · M · A-05,
+      N-05, A-29 · Found 2026-09-29 by `V2-07`'s design review, which found it for a directory's
+      bind password and noted that it is not only a directory's problem. A write that leaves out a
+      secret keeps it, because the form it came from was rendered without it, and that rule never
+      asked whether the write changed where the secret goes. A template editor holds `write`, and
+      never sees the secret headers an administrator set on an HTTP action. They could still point
+      its URL at a host of their own and press "test", and the headers went with it.
+
+      Decided (WatchDog, 2026-09-29). The inventory found the same shape in three places that share
+      one mechanism, and those are this ticket; the device credential case is `A-41`, and
+      `http.transaction`'s placeholders are `A-42`.
+      1. **Notification methods.** Each method declares which visible settings each of its
+         secrets goes to (`secretDestinations`), and the registry refuses a method that does not.
+         Changing a webhook's URL clears its `secretHeaders`, and changing a program's path clears
+         its `secretArgs`, unless the same request sends them again. The audit entry names what
+         went. `/templates/:id/test` sends what is stored, so it never sends a secret to a
+         destination changed since the secret was set.
+      2. **A rediscovery rule's community.** An edit that changes the rule's range or its probe and
+         does not send the community clears it, and the audit entry says so.
+      3. **A sensor's own secret parameters.** `SensorType.secretDestinations`, required for every
+         `writeOnly` parameter and checked by the catalogue when a type registers. `exe.script` and
+         `exe.script.advanced` bind `secret` to the program, its arguments, its environment and
+         its working directory. All four, because a script that takes its target as an argument is
+         the common case. The SNMP polling types bind their community, `authKey` and `privKey` to
+         `port`, since on a shared host anyone can listen on a high UDP port. `[]` says a secret
+         goes only to the device the sensor is on, which is `A-41`'s to bind.
+
+      **Done when** a writer who re-points a template and tests it has a receiver that sees no
+      secret; a rule moved to another range or probe keeps no community it was not sent; a script
+      sensor whose program, arguments, environment or directory changes keeps no secret it was not
+      sent; and each clearing is in the audit log by name, never by value.
+
+      **Outcome.** All three, through one rule: a secret carries over an edit that leaves it out
+      only while every setting that says where it goes is unchanged. A notification method and a
+      sensor type each declare that in `secretDestinations`, and the registry and the catalogue
+      refuse one that stores a secret without saying. The catalogue check found what the inventory
+      had not: the eight SNMP polling types spread a write-only community, `authKey` and `privKey`
+      into their own parameters, and would not register until they declared them. The audit entry
+      says which secrets an edit left behind: `secretsCleared` on templates and sensors, and
+      `communityLeftBehind` on rediscovery rules. It never records the value.
+      - URLs are compared as addresses: `HTTPS://Hooks.Example.test/pager` is where
+        `https://hooks.example.test/pager` was. A sensor's parameters are compared after the
+        type's own defaults are filled in, so a client that leaves out a field at its default has
+        moved nothing. Arrays and objects are compared by their JSON, so a reordered object reads as
+        a move. That costs a secret re-entered, and the other mistake would carry it somewhere new.
+      - `exe.script`'s `secret` no longer defaults to `""`. The default was stored for every script
+        sensor and read back as "set", so a secret this cleared would still have looked present.
+        Sensors stored before this keep reading "set" until someone edits them.
+      - **Not closed here: the host half.** An SNMP sensor's secrets now stay with its `port`,
+        but the device's host they go to is `A-41`'s, and so is every credential set a device
+        inherits. Moving, cloning or re-hosting a device still carries them.
+
+      Mutations caught: 25 of 25, each applied alone, built, and run against its own tests. They
+      cover a carry that ignores destinations, in both registries; each declared destination
+      dropped (webhook URL, program path, the script's four, the SNMP port); URLs compared as
+      typed; a patch compared without its defaults; each of the catalogue's five registration
+      refusals switched off; the rediscovery range and probe clauses; a community sent again but
+      cleared anyway; each of the three audit records; and the script secret's empty default put
+      back.
+
+- [ ] **A-41 — A device credential goes to whatever host a device writer names** · L · A-05,
+      A-29, A-40 · Found 2026-09-29 by `A-40`'s inventory. Credential sets are inherited: an
+      administrator sets SNMP, SSH or WMI credentials on a group, and every device beneath uses
+      them. A user with `write` on one of those devices may change its host, and at its next
+      connection the probe sends the inherited credentials to the new host. The same happens when a
+      writer creates a device under the group, moves one there, or clones one into it. No read
+      returns the secret, and none needs to: the new host receives it.
+
+      Decided (WatchDog, 2026-09-29):
+      - **Tier A: the voucher.** A write that brings an inherited credential to a new destination
+        needs `write` on the object the credential set belongs to. The write can be a host change,
+        a create, a move or a clone. The check is continuous, the way `A-29`'s is, so a grant
+        taken away later stops the credential being sent. The 403 names the credential kind and
+        the object it belongs to, never the secret.
+      - **B1: allowed targets.** A credential set may carry the targets it may be sent to: hosts,
+        CIDR ranges and, for SSH, host key fingerprints. Changing the targets clears the secret
+        unless it is sent again. A host inside the targets passes Tier A without `write` on the
+        owner, which is how an administrator delegates.
+      - **Devices a discovery rule provisions** are vouched for by the rule's writer.
+      - **Secrets in sensor parameters.** SNMP types that carry a community, `authKey` or
+        `privKey` in their parameters rather than a credential set get the same rule: a sensor
+        whose device changes keeps no secret its writer could not have set.
+      - **Between probes.** Moving a device to another probe sends its credentials to that probe.
+        The documentation says so. Whether this needs a rule of its own is part of the design.
+      - `administration.md` says, in so many words, that `write` on the object a credential set
+        belongs to is trust with that credential, unless the set has allowed targets.
+      - Core Health counts credential sets with no allowed targets, and the UI flags them.
+
+      **Before the design is final:** check the inventory mechanically. Every `writeOnly` field in
+      every sensor type's `paramsSchema`, every call that unseals a vaulted credential, and every
+      column in the migrations that stores a secret has to map to a row of the inventory. Anything
+      unmapped is listed, and a route that was not read is marked "not verified". The first pass,
+      made landing `A-40`, found one destination the inventory had not named: a sensor's `port`
+      chooses the listener an inherited credential set is sent to on the device's host. So a sensor
+      write that changes it brings the set to a new destination too.
+
+      **Done when** a device writer without `write` on the credential set's owner cannot bring the
+      credential to a new host by editing, creating, moving or cloning a device, and the probe is
+      never sent it; a host inside the allowed targets can; and each of those has a test.
+
+- [ ] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
+      S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
+      siblings are substituted into any text a step sends: the path, every header and the body.
+      The sensor's writer chooses that text, and need not be able to read the device's `http`
+      credential. So they can put the credential into a query string or a custom header, where a
+      server logs it or sends it back. `S-19` scrubs exact values out of the sensor's messages,
+      and a re-encoded copy is not an exact value.
+
+      Decided (WatchDog, 2026-09-29): `{{credential.*}}` is accepted in the `Authorization` header
+      and the body only, and refused anywhere else when the sensor is written. An echo in a
+      response is scrubbed through `S-19`'s scrub point before any message or capture carries it.
+
+      **Done when** a sensor whose path or other header names a credential is refused, with the
+      step and the field in the message, and a test shows an echoed credential absent from what
+      the sensor reports.
+
 - [x] **A-43 — A mistyped credential key is stored in plaintext and returned** · S · A-05 ·
       Security. Found 2026-09-29 by `D-12`'s sweep of open request schemas, and split out by
       WatchDog to go first. `PUT /objects/:id/credentials/:kind` takes `values` as any object.

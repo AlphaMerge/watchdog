@@ -294,7 +294,13 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
       return {
         ...base,
         objectKind: mutation.kind,
-        summary: paramsSummary(mutation.changedParams),
+        summary: {
+          ...paramsSummary(mutation.changedParams),
+          // Which secrets the edit left behind by moving where they are sent (`A-40`).
+          ...(mutation.secretsCleared === undefined
+            ? {}
+            : { secretsCleared: [...mutation.secretsCleared] }),
+        },
         diff: diffObjects(mutation.before, mutation.after),
       };
 
@@ -385,6 +391,11 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
           templateId: mutation.templateId,
           name: mutation.name,
           method: mutation.method,
+          // Which secrets an edit cleared by moving where they were sent (`A-40`): their paths,
+          // never their values.
+          ...(mutation.secretsCleared === undefined
+            ? {}
+            : { secretsCleared: [...mutation.secretsCleared] }),
         },
         diff: [
           {
@@ -692,7 +703,11 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
       return {
         ...base,
         objectKind: null,
-        summary: { scheduleId: mutation.scheduleId, name: mutation.after.name },
+        summary: {
+          scheduleId: mutation.scheduleId,
+          name: mutation.after.name,
+          ...(mutation.communityLeftBehind === true ? { communityLeftBehind: true } : {}),
+        },
         diff: [
           ...changed(REDISCOVERY_FIELDS, mutation.before, mutation.after, 'discovery.schedule'),
           ...(mutation.communityReplaced === true

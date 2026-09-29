@@ -300,6 +300,11 @@ export class RediscoveryService {
    * the next firing says again if it is still refused. An edit that changes nothing writes
    * nothing and keeps its version.
    *
+   * The community stays with where it is sent (`A-40`). An edit that moves the range or the probe
+   * and does not send a community clears the stored one, and the audit entry says so: a secret
+   * someone else set for one network is not theirs to point at another, and anyone with `write`
+   * on the group could otherwise read it back by pointing the rule at a host they listen on.
+   *
    * @returns null when there is no such rule.
    */
   async update(
@@ -325,7 +330,18 @@ export class RediscoveryService {
         );
       }
 
-      const merged = { ...current, ...definedOf(patch) };
+      // A community travels with the range and the probe it was set for (`A-40`), so moving
+      // either without sending one leaves it behind.
+      const communityLeftBehind =
+        patch.snmpCommunity === undefined &&
+        current.snmpCommunity !== '' &&
+        ((patch.range !== undefined && patch.range !== current.range) ||
+          (patch.probeId !== undefined && patch.probeId !== current.probeId));
+      const merged = {
+        ...current,
+        ...definedOf(patch),
+        ...(communityLeftBehind ? { snmpCommunity: '' } : {}),
+      };
       const spec = specOf(merged);
       // The sentence is computed from the cadence, so it is computed again: the audit compares
       // it, and a rule moved from 03:00 to 04:00 would otherwise read as unchanged.
@@ -390,6 +406,7 @@ export class RediscoveryService {
             before,
             after: auditOf(updated),
             ...(communityReplaced ? { communityReplaced } : {}),
+            ...(communityLeftBehind ? { communityLeftBehind } : {}),
           },
         ],
         this.#now(),

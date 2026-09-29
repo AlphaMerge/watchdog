@@ -900,6 +900,9 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
             'it is on has its own route. The group cannot change — a rule in another group is ' +
             'another rule — and the probe must be the one the group is under. `snmpCommunity` ' +
             'left out keeps the stored one, and an empty one clears it; it is never returned. ' +
+            'A community stays with where it is sent: an edit that changes `range` or `probeId` ' +
+            'and leaves `snmpCommunity` out clears the stored one, and the audit entry says so ' +
+            '— send it again with the edit to keep scanning with it. ' +
             'An edit that changes something clears `lastProblem`, and one that changes nothing ' +
             'keeps its version.',
           params: idParams,

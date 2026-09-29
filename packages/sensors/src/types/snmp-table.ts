@@ -1,5 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
-import { snmpParamsSchema } from '../support/snmp/schema.js';
+import { SNMP_SECRET_DESTINATIONS, snmpParamsSchema } from '../support/snmp/schema.js';
 import { MAX_PATTERN } from '../support/pattern.js';
 // Type-only, and therefore erased: no `net-snmp` reaches the core, which loads this catalogue
 // for schemas and channel declarations and never runs a check.
@@ -162,6 +162,7 @@ export const snmpTable: SensorType = {
   // A walk when the row is matched by name, and one request when it is not. Never a child
   // process, but it holds a session for the length of a table walk on a large table.
   costHint: 'medium',
+  secretDestinations: SNMP_SECRET_DESTINATIONS,
   credentialKinds: ['snmp'],
 
   paramsSchema: snmpParamsSchema(

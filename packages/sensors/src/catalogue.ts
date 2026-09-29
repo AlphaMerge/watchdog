@@ -76,6 +76,8 @@ export class SensorCatalogue {
   readonly #types = new Map<string, SensorType>();
   readonly #validators = new Map<string, ValidateFunction>();
   readonly #writeOnly = new Map<string, readonly string[]>();
+  /** Each type's `secretDestinations`, checked against its `writeOnly` paths (`A-40`). */
+  readonly #destinations = new Map<string, Readonly<Record<string, readonly string[]>>>();
   readonly #ajv: Ajv;
   #sealed = false;
 
@@ -124,12 +126,14 @@ export class SensorCatalogue {
     }
 
     const writeOnly = collectWriteOnly(type.paramsSchema, type.id);
+    assertSecretsSayWhereTheyGo(type, writeOnly);
     assertOnePrimaryChannel(type);
     assertSaysWhatItReads(type);
 
     this.#types.set(type.id, type);
     this.#validators.set(type.id, validate);
     this.#writeOnly.set(type.id, writeOnly);
+    this.#destinations.set(type.id, type.secretDestinations ?? {});
     return this;
   }
 
@@ -255,6 +259,11 @@ export class SensorCatalogue {
    * - **present** with a value — the patch wins, which is a rotation;
    * - **present as `null`** — removed, and then validated, so a required secret cannot be
    *   cleared and an optional one can.
+   *
+   * **Absent is carried only while the secret is going where it went** (`A-40`). A patch that
+   * changes a parameter the type names in `secretDestinations` and does not send the secret
+   * again leaves it behind — `secretsLeftBehind` says which — because keeping it would let
+   * anyone with `write` on the sensor send a secret they were never shown somewhere new.
    */
   carryWriteOnly(
     id: string,
@@ -276,9 +285,54 @@ export class SensorCatalogue {
       }
       if (given !== undefined) continue;
       const held = readAtPath(stored, segments);
-      if (held !== undefined) writeAtPath(merged, segments, held);
+      if (held === undefined || this.#sentElsewhere(id, path, patch, stored)) continue;
+      writeAtPath(merged, segments, held);
     }
     return merged;
+  }
+
+  /**
+   * The stored secrets `carryWriteOnly` leaves behind for this patch (`A-40`): those it does not
+   * mention, whose destinations it changes. Paths only — this is what an audit entry records.
+   */
+  secretsLeftBehind(
+    id: string,
+    patch: Readonly<Record<string, unknown>>,
+    stored: Readonly<Record<string, unknown>>,
+  ): readonly string[] {
+    return (this.#writeOnly.get(id) ?? []).filter((path) => {
+      const segments = path.split('.');
+      return (
+        readAtPath(patch, segments) === undefined &&
+        readAtPath(stored, segments) !== undefined &&
+        this.#sentElsewhere(id, path, patch, stored)
+      );
+    });
+  }
+
+  /**
+   * Whether a patch changes where the secret at `path` is sent.
+   *
+   * The patch is compared with its defaults filled in by the type's own validator, because the
+   * stored params were: a client that leaves out a parameter at its default has not moved
+   * anything. Arrays and objects compare by their JSON, which reads a reordered object as a
+   * change. That mistake costs a secret re-entered; the other one would carry it somewhere new.
+   */
+  #sentElsewhere(
+    id: string,
+    path: string,
+    patch: Readonly<Record<string, unknown>>,
+    stored: Readonly<Record<string, unknown>>,
+  ): boolean {
+    const destinations = this.#destinations.get(id)?.[path] ?? [];
+    if (destinations.length === 0) return false;
+    const filled = structuredClone(patch) as Record<string, unknown>;
+    // Run for its defaults, not its verdict: `normalise` judges the patch after this.
+    this.#validators.get(id)?.(filled);
+    return destinations.some((destination) => {
+      const segments = destination.split('.');
+      return !sameParam(readAtPath(filled, segments), readAtPath(stored, segments));
+    });
   }
 
   /**
@@ -357,6 +411,82 @@ function assertSaysWhatItReads(type: SensorType): void {
     `sensor type "${type.id}" is evaluated by the core, so it has to declare what it reads: ` +
       '`references` for the objects its parameters name, or `requires` for a bar on writing one',
   );
+}
+
+/**
+ * Every secret says where it is sent, and where it is sent is a parameter an edit can be seen
+ * changing (`A-40`).
+ *
+ * Declared for every `writeOnly` path rather than assumed, because the assumption a new type
+ * would get by default — carry the secret whatever else changes — is the one that leaks it. A
+ * destination that is itself write-only, or holds one, is refused: comparing it would compare a
+ * secret, and nobody editing the sensor can see what they would be changing.
+ */
+function assertSecretsSayWhereTheyGo(type: SensorType, writeOnly: readonly string[]): void {
+  const declared = type.secretDestinations ?? {};
+  const where = `sensor type "${type.id}"`;
+  for (const path of writeOnly) {
+    if (!Object.hasOwn(declared, path)) {
+      throw new SensorTypeError(
+        'BAD_SENSOR_TYPE',
+        `${where} marks "${path}" writeOnly but does not say where it is sent: name the ` +
+          'parameters that choose it in `secretDestinations`, or `[]` if it goes only to the ' +
+          'device the sensor is on',
+      );
+    }
+  }
+  for (const [path, destinations] of Object.entries(declared)) {
+    if (!writeOnly.includes(path)) {
+      throw new SensorTypeError(
+        'BAD_SENSOR_TYPE',
+        `${where} says where "${path}" is sent, but "${path}" is not a writeOnly parameter`,
+      );
+    }
+    for (const destination of destinations) {
+      const secret = writeOnly.find(
+        (one) =>
+          one === destination ||
+          one.startsWith(`${destination}.`) ||
+          destination.startsWith(`${one}.`),
+      );
+      if (secret !== undefined) {
+        throw new SensorTypeError(
+          'BAD_SENSOR_TYPE',
+          `${where} says "${path}" is sent where "${destination}" says, but "${secret}" is ` +
+            'write-only, so nobody editing the sensor can see it change',
+        );
+      }
+      if (schemaAt(type.paramsSchema, destination.split('.')) === undefined) {
+        throw new SensorTypeError(
+          'BAD_SENSOR_TYPE',
+          `${where} says "${path}" is sent where "${destination}" says, but its paramsSchema ` +
+            `has no property "${destination}"`,
+        );
+      }
+    }
+  }
+}
+
+/** The schema of a dotted property path, through `properties` only, or undefined. */
+function schemaAt(schema: JsonSchema, segments: readonly string[]): JsonSchema | undefined {
+  let cursor: unknown = schema;
+  for (const segment of segments) {
+    if (typeof cursor !== 'object' || cursor === null) return undefined;
+    const properties = (cursor as Record<string, unknown>)['properties'];
+    if (typeof properties !== 'object' || properties === null) return undefined;
+    if (!Object.hasOwn(properties, segment)) return undefined;
+    cursor = (properties as Record<string, unknown>)[segment];
+  }
+  return typeof cursor === 'object' && cursor !== null && !Array.isArray(cursor)
+    ? (cursor as JsonSchema)
+    : undefined;
+}
+
+/** Two parameter values as the same destination: primitives by value, the rest by JSON. */
+function sameParam(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 /**

@@ -47,6 +47,11 @@ export type Mutation =
        * is the auditable fact; the value is the thing that must not be here.
        */
       changedParams: readonly string[];
+      /**
+       * The `writeOnly` parameters the edit cleared by changing where they are sent without
+       * sending them again (`A-40`). They are in `changedParams` too; this says why.
+       */
+      secretsCleared?: readonly string[];
     }
   | {
       action: 'object.moved';
@@ -245,6 +250,11 @@ export type Mutation =
       templateId: number;
       name: string;
       method: string;
+      /**
+       * The secrets an update cleared because it changed where they were sent (`A-40`). Paths
+       * only, such as `secretHeaders`; absent when there were none.
+       */
+      secretsCleared?: readonly string[];
     }
   | {
       /**
@@ -584,6 +594,12 @@ export type Mutation =
        * without saying what either was.
        */
       communityReplaced?: boolean;
+      /**
+       * The community cleared because the edit moved the range or the probe without sending one
+       * (`A-40`). `community` going from `true` to `false` shows that it went; this says why, so
+       * the person whose scans stopped answering can tell it from someone clearing it on purpose.
+       */
+      communityLeftBehind?: boolean;
     }
   | {
       action: 'discovery.schedule.deleted';
@@ -944,7 +960,14 @@ function summarise(mutation: Mutation): Record<string, unknown> {
     case 'object.created':
       return { action: mutation.action, objectId: mutation.objectId, kind: mutation.kind };
     case 'object.updated':
-      return { action: mutation.action, objectId: mutation.objectId, kind: mutation.kind };
+      return {
+        action: mutation.action,
+        objectId: mutation.objectId,
+        kind: mutation.kind,
+        ...(mutation.secretsCleared === undefined
+          ? {}
+          : { secretsCleared: [...mutation.secretsCleared] }),
+      };
     case 'object.moved':
       return {
         action: mutation.action,
@@ -1049,6 +1072,9 @@ function summarise(mutation: Mutation): Record<string, unknown> {
         templateId: mutation.templateId,
         name: mutation.name,
         method: mutation.method,
+        ...(mutation.secretsCleared === undefined
+          ? {}
+          : { secretsCleared: [...mutation.secretsCleared] }),
       };
     case 'template.tested':
       return {
@@ -1182,6 +1208,7 @@ function summarise(mutation: Mutation): Record<string, unknown> {
         objectId: mutation.objectId,
         scheduleId: mutation.scheduleId,
         name: mutation.after.name,
+        ...(mutation.communityLeftBehind === true ? { communityLeftBehind: true } : {}),
       };
     case 'account.created':
     case 'account.deleted':

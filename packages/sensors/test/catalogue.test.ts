@@ -295,6 +295,103 @@ describe('writeOnly redaction', () => {
   });
 });
 
+describe('where a secret is sent (A-40)', () => {
+  /** A type with one secret, a place it is sent, and one parameter that has nothing to do with it. */
+  const withSecret = (secretDestinations?: Readonly<Record<string, readonly string[]>>) =>
+    variant({
+      ...(secretDestinations === undefined ? {} : { secretDestinations }),
+      paramsSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          url: { type: 'string', default: '' },
+          token: { type: 'string', writeOnly: true },
+          auth: {
+            type: 'object',
+            properties: { user: { type: 'string' }, key: { type: 'string', writeOnly: true } },
+          },
+          timeoutMs: { type: 'integer', default: 5_000 },
+        },
+      },
+    });
+  const refused = (type: SensorType, said: RegExp): void => {
+    assert.throws(
+      () => new SensorCatalogue().register(type),
+      (error: unknown) =>
+        error instanceof SensorTypeError &&
+        error.code === 'BAD_SENSOR_TYPE' &&
+        said.test(error.message),
+    );
+  };
+
+  it('refuses a type with a secret it does not say the destination of', () => {
+    refused(withSecret(), /"token" writeOnly but does not say where it is sent/);
+    refused(withSecret({ token: ['url'] }), /"auth\.key" writeOnly but does not say/);
+  });
+
+  it('refuses a destination declared for a parameter that is not a secret', () => {
+    refused(
+      withSecret({ token: ['url'], 'auth.key': [], url: [] }),
+      /where "url" is sent, but "url" is not a writeOnly/,
+    );
+  });
+
+  it('refuses a destination that is a secret or holds one, since nobody can see it change', () => {
+    refused(withSecret({ token: ['auth.key'], 'auth.key': [] }), /"auth\.key" is write-only/);
+    refused(withSecret({ token: ['auth'], 'auth.key': [] }), /"auth\.key" is write-only/);
+    refused(withSecret({ token: [], 'auth.key': ['token'] }), /"token" is write-only/);
+  });
+
+  it('refuses a destination its paramsSchema does not have', () => {
+    refused(withSecret({ token: ['uri'], 'auth.key': [] }), /has no property "uri"/);
+    refused(withSecret({ token: [''], 'auth.key': [] }), /has no property ""/);
+  });
+
+  it('accepts [] for a secret that goes only to the device, and a nested destination', () => {
+    const c = new SensorCatalogue().register(
+      withSecret({ token: ['url', 'auth.user'], 'auth.key': [] }),
+    );
+    const stored = { url: 'https://a.example', token: 't', auth: { user: 'u', key: 'k' } };
+
+    const same = { url: 'https://a.example', auth: { user: 'u' } };
+    assert.deepEqual(c.secretsLeftBehind('icmp.ping', same, stored), []);
+    assert.deepEqual(c.carryWriteOnly('icmp.ping', same, stored), stored);
+    const moved = { url: 'https://a.example', auth: { user: 'someone-else' } };
+    assert.deepEqual(c.secretsLeftBehind('icmp.ping', moved, stored), ['token']);
+    assert.deepEqual(c.carryWriteOnly('icmp.ping', moved, stored), {
+      url: 'https://a.example',
+      auth: { user: 'someone-else', key: 'k' },
+    });
+  });
+
+  it('binds every shipped SNMP type’s community and keys to its port', () => {
+    const c = standardCatalogue();
+    const snmp = c.ids().filter((id) => c.writeOnlyPaths(id).includes('community'));
+    assert.ok(snmp.length >= 8, 'the SNMP polling types carry a community in their parameters');
+    for (const id of snmp) {
+      assert.deepEqual([...c.writeOnlyPaths(id)].sort(), ['authKey', 'community', 'privKey'], id);
+      const stored = { version: 'v3', community: 'c', authKey: 'a', privKey: 'p', port: 161 };
+      assert.deepEqual(
+        c.secretsLeftBehind(id, { version: 'v3', timeoutMs: 9_000 }, stored),
+        [],
+        id,
+      );
+      assert.deepEqual(
+        [...c.secretsLeftBehind(id, { version: 'v3', port: 1161 }, stored)].sort(),
+        ['authKey', 'community', 'privKey'],
+        `${id}: a listener on another port is not where they were set for`,
+      );
+    }
+  });
+
+  it('reads a destination left out at its default as unchanged, the way it was stored', () => {
+    const c = new SensorCatalogue().register(withSecret({ token: ['url'], 'auth.key': [] }));
+    const stored = { url: '', token: 't', timeoutMs: 5_000 };
+    assert.deepEqual(c.secretsLeftBehind('icmp.ping', { timeoutMs: 9_000 }, stored), []);
+    assert.equal(c.carryWriteOnly('icmp.ping', { timeoutMs: 9_000 }, stored)['token'], 't');
+  });
+});
+
 describe('lookup', () => {
   it('throws a typed error for an unknown type', () => {
     assert.throws(

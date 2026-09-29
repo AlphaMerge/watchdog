@@ -1,5 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
-import { snmpParamsSchema } from '../support/snmp/schema.js';
+import { SNMP_SECRET_DESTINATIONS, snmpParamsSchema } from '../support/snmp/schema.js';
 
 /**
  * How long the device has been up, and whether it restarted (`T-05`).
@@ -26,6 +26,7 @@ export const snmpUptime: SensorType = {
   id: 'snmp.uptime',
   category: 'SNMP',
   costHint: 'light',
+  secretDestinations: SNMP_SECRET_DESTINATIONS,
   credentialKinds: ['snmp'],
 
   paramsSchema: snmpParamsSchema({}, []),

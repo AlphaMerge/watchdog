@@ -1,5 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
-import { snmpParamsSchema } from '../support/snmp/schema.js';
+import { SNMP_SECRET_DESTINATIONS, snmpParamsSchema } from '../support/snmp/schema.js';
 
 /**
  * One arbitrary numeric OID (`T-03`).
@@ -24,6 +24,7 @@ export const snmpCustom: SensorType = {
   id: 'snmp.custom',
   category: 'SNMP',
   costHint: 'medium',
+  secretDestinations: SNMP_SECRET_DESTINATIONS,
   credentialKinds: ['snmp'],
 
   paramsSchema: snmpParamsSchema(

@@ -278,6 +278,58 @@ describe(
       assert.equal(row?.params['community'], SECRET);
     });
 
+    it('clears a script’s secret an edit points somewhere else, and says so (A-40)', async () => {
+      // The real type, for its declaration: which parameters choose where its secret goes is the
+      // type's to say, and a stand-in would be testing a declaration nobody ships.
+      const exeScript = BUILT_IN_SENSOR_TYPES.find((type) => type.id === 'exe.script');
+      assert.ok(exeScript !== undefined, 'exe.script is not a built-in type any more');
+      const scripts = await buildHarness(db, { types: [exeScript] });
+      const sensor = await scripts.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name: 'script',
+        sensorType: 'exe.script',
+        params: { program: 'check.sh', args: ['https://api.example.invalid'], secret: SECRET },
+      });
+      const stored = async (): Promise<Record<string, unknown>> => {
+        const [row] = await db.query<{ params: Record<string, unknown> }>(
+          'SELECT params FROM sensor_config WHERE object_id = $1',
+          [sensor.id],
+        );
+        return row?.params ?? {};
+      };
+
+      // Where it goes left alone: carried, and nothing to say.
+      await scripts.service.update(
+        testActor,
+        sensor.id,
+        { kind: 'sensor', params: { program: 'check.sh', args: ['https://api.example.invalid'] } },
+        { kind: 'none' },
+      );
+      assert.equal((await stored())['secret'], SECRET);
+
+      scripts.audit.recorded.length = 0;
+      await scripts.service.update(
+        testActor,
+        sensor.id,
+        {
+          kind: 'sensor',
+          params: { program: 'check.sh', args: ['https://listener.example.invalid'] },
+        },
+        { kind: 'none' },
+      );
+      assert.equal(Object.hasOwn(await stored(), 'secret'), false, 'the secret stayed behind');
+      const read = await scripts.service.get(sensor.id);
+      assert.ok(read.kind === 'sensor');
+      assert.deepEqual(read.redactedParams, [], 'and nothing claims it is still set');
+
+      const entry = scripts.audit.recorded.find((one) => one.action === 'object.updated');
+      assert.ok(entry?.action === 'object.updated');
+      assert.deepEqual(entry.secretsCleared, ['secret'], 'the history says what went');
+      assert.ok(entry.changedParams.includes('secret'));
+      assert.ok(!JSON.stringify(scripts.audit.recorded).includes(SECRET));
+    });
+
     it('does not put the secret into the audit entry for the patch that kept it', async () => {
       // The value now passes through `update` even when the caller never sent it, so the audit
       // path has one more way to be handed a credential than it had before.

@@ -541,7 +541,7 @@ Enabling computes the next run; disabling clears it, so a schedule that is off c
 
 Change a schedule
 
-`If-Match` carries the version the edit was made against (`W/"3"`, from the rule’s `version` or the `ETag` of the answer that returned it). Without it the request is refused with 428, and against a version that is no longer current with 412: two people editing one rule must not have the second silently undo the first. Whether it is on has its own route. The group cannot change — a rule in another group is another rule — and the probe must be the one the group is under. `snmpCommunity` left out keeps the stored one, and an empty one clears it; it is never returned. An edit that changes something clears `lastProblem`, and one that changes nothing keeps its version.
+`If-Match` carries the version the edit was made against (`W/"3"`, from the rule’s `version` or the `ETag` of the answer that returned it). Without it the request is refused with 428, and against a version that is no longer current with 412: two people editing one rule must not have the second silently undo the first. Whether it is on has its own route. The group cannot change — a rule in another group is another rule — and the probe must be the one the group is under. `snmpCommunity` left out keeps the stored one, and an empty one clears it; it is never returned. A community stays with where it is sent: an edit that changes `range` or `probeId` and leaves `snmpCommunity` out clears the stored one, and the audit entry says so — send it again with the edit to keep scanning with it. An edit that changes something clears `lastProblem`, and one that changes nothing keeps its version.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -2091,7 +2091,7 @@ One template
 
 Replace a template
 
-Whole-document, with one exception: a secret the request does not carry is **kept**, because the form it came from was rendered without it. Send an explicit `null` to clear one.
+Whole-document, with one exception: a secret the request does not carry is **kept**, because the form it came from was rendered without it. Send an explicit `null` to clear one. **A secret is kept only while it goes where it went:** a request that changes a webhook's `url` or a program's `path` clears the secrets sent there unless it carries them again, so re-pointing a template never sends a token somebody else set to a new destination.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
