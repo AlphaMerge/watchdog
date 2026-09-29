@@ -4,8 +4,8 @@ import { FACTORY_SENSOR_TYPE, type FactoryReach } from './reach.js';
 import {
   storedVoucher,
   WITHHELD,
+  type SensorVouching,
   type StoredVoucher,
-  type VoucherCheck,
 } from '../objects/vouching.js';
 import {
   FormulaError,
@@ -53,14 +53,15 @@ export interface FactoryServiceOptions {
    * Asked before a factory is evaluated, whether whoever vouched for it may still read what its
    * formulas name (`A-29`). Required for `P-111`'s reason: a wiring line that can be deleted with
    * every test still green is one that will be. `withheld` is what every sweep withholds right
-   * now, so a factory reading a withheld Probe Health knows it (`M-23`).
+   * now, so a factory reading a withheld Probe Health knows it (`M-23`). `settleTogether` settles
+   * this sweep's sets in one transaction (`M-28`).
    */
-  readonly vouching: VoucherCheck & { withheld(): ReadonlyMap<number, string> };
+  readonly vouching: FactoryVouching;
   /**
    * Where a factory whose every channel reads a sensor on a lost or frozen probe is held Unknown
    * (`M-26`). Required for `vouching`'s reason.
    */
-  readonly reach: Pick<FactoryReach, 'settle'>;
+  readonly reach: Pick<FactoryReach, 'stage'>;
   readonly now?: () => Date;
 }
 
@@ -106,12 +107,15 @@ const UPSTREAM = 'factory-upstream';
 const NOTHING_WITHHELD: ReadonlyMap<number, string> = new Map();
 const NOTHING_HELD: ReadonlyMap<number, readonly number[]> = new Map();
 
+/** What the factory sweep asks of the voucher check. */
+export type FactoryVouching = Pick<SensorVouching, 'refusals' | 'withheld' | 'settleTogether'>;
+
 export class FactoryService {
   readonly #db: Database;
   readonly #logger: Logger;
   readonly #ingest: (results: readonly CheckResult[]) => Promise<void>;
-  readonly #vouching: VoucherCheck & { withheld(): ReadonlyMap<number, string> };
-  readonly #reach: Pick<FactoryReach, 'settle'>;
+  readonly #vouching: FactoryVouching;
+  readonly #reach: Pick<FactoryReach, 'stage'>;
   readonly #now: () => Date;
 
   #sweeps = 0;
@@ -166,10 +170,8 @@ export class FactoryService {
         voucher: sensor.voucher,
       })),
     );
-    await this.#vouching.settle('factory', withheld);
     if (sensors.length === 0) {
-      await this.#vouching.settle(UPSTREAM, NOTHING_WITHHELD);
-      await this.#reach.settle(NOTHING_HELD);
+      await this.#settle(withheld, NOTHING_WITHHELD, NOTHING_HELD);
       this.#lastAway.clear();
       return 0;
     }
@@ -357,10 +359,9 @@ export class FactoryService {
       });
     }
 
-    // Before the results, as the factory sweep's own set is, so that a factory let go here is
-    // re-decided before its fresh result is applied.
-    await this.#vouching.settle(UPSTREAM, upstream);
-    await this.#reach.settle(held);
+    // Before the results, so that a factory let go here is re-decided before its fresh result is
+    // applied.
+    await this.#settle(withheld, upstream, held);
     if (results.length > 0) await this.#ingest(results);
     if (this.#cycles > 0 && cycles.size > 0) {
       // Once a sweep, not once a sensor: a ring of eight would otherwise be eight identical
@@ -371,6 +372,28 @@ export class FactoryService {
       );
     }
     return results.length;
+  }
+
+  /**
+   * The sweep's three sets, settled in one transaction (`M-28`): the factories refused for who
+   * vouched for them, those withheld for what they read (`M-23`), and those held for their
+   * inputs' probe (`M-26`). A factory crosses between any two of them in one sweep when its
+   * voucher returns or a probe goes or comes back, and settled one after another it was
+   * re-decided in between with neither: its last reading, a transition and a notification, then
+   * Unknown again. All three move first, and what crossed is re-decided once.
+   */
+  async #settle(
+    refused: ReadonlyMap<number, string>,
+    upstream: ReadonlyMap<number, string>,
+    held: ReadonlyMap<number, readonly number[]>,
+  ): Promise<void> {
+    await this.#vouching.settleTogether(
+      new Map([
+        ['factory', refused],
+        [UPSTREAM, upstream],
+      ]),
+      this.#reach.stage(held),
+    );
   }
 
   /** Every factory sensor that is not paused, with its formulas parsed. */

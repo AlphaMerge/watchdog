@@ -399,16 +399,15 @@ async function serve(): Promise<void> {
   // the boot reconciliation below, and republished by every sweep. The other two sources are
   // built much later, so they are read through the late references.
   const probeHealthTargets = new ProbeHealthTargets();
-  // And the Sensor Factories held for their inputs' probe (`M-26`), carried by that probe, and
-  // laid over the facts by the state service, which the holder needs.
-  // eslint-disable-next-line prefer-const -- assigned below, once the state service exists.
-  let factoryReachRef: FactoryReach | undefined;
-  const noneUnreached: ReadonlySet<number> = new Set();
+  // And the Sensor Factories held for their inputs' probe (`M-26`), carried by that probe and laid
+  // over the facts by the state service. Staged by the factory sweep and settled with its voucher
+  // sets, in their transaction (`M-28`).
+  const factoryReach = new FactoryReach();
   const episodes = new ProbeEpisodeIndex({
     lost: () => reachabilityRef,
     frozen: () => clockFreezeRef,
     alarms: () => probeHealthTargets,
-    factories: () => factoryReachRef,
+    factories: () => factoryReach,
   });
   // A core-evaluated sensor is not scanned by the probe it sits under (`P-13`), so neither a
   // probe's outage nor the tree carries it: `ProbeReachability`, `ClockFreeze` and the engine's
@@ -469,7 +468,7 @@ async function serve(): Promise<void> {
     onStatesCommitted: publishStates,
     unreachableSensors: () => reachabilityRef?.unreachableSensors() ?? noProbesDown,
     clockFrozenSensors: () => clockFreezeRef?.frozenSensors() ?? noneFrozen,
-    unreachedFactories: () => factoryReachRef?.unreached() ?? noneUnreached,
+    unreachedFactories: () => factoryReach.unreached(),
     withheldSensors: () => vouchingRef?.withheld() ?? nothingWithheld,
   });
   // The configuration half of the same job: adding a trigger during an outage has to arm the
@@ -676,8 +675,6 @@ async function serve(): Promise<void> {
   // shipping other sensors' history out to it. The results go through `acceptResults` exactly as
   // a probe's do, which is what gives a factory sensor history, limits, dependencies and alarms
   // with no special case anywhere downstream.
-  const factoryReach = new FactoryReach({ db, logger, states, dependencies: dependencyPauses });
-  factoryReachRef = factoryReach;
   const factory = new FactoryService({
     db,
     logger,

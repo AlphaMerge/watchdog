@@ -5,6 +5,7 @@ import { FactoryReach, UNREACHED_MESSAGE } from '../src/factory/reach.js';
 import { FactoryService } from '../src/factory/service.js';
 import { FactorySweep } from '../src/factory/sweep.js';
 import type { Database } from '../src/db/pool.js';
+import { WITHHELD } from '../src/objects/vouching.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -12,7 +13,11 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, testActor } from './support/tree.js';
-import { everyVoucherHolds, nothingFollowsReach } from './support/vouching.js';
+import {
+  everyVoucherHolds,
+  installationVouching,
+  nothingFollowsReach,
+} from './support/vouching.js';
 
 /**
  * The Sensor Factory evaluator (`T-21`), against a real tree and real readings.
@@ -490,9 +495,9 @@ describe('sensor factory', { skip: available ? false : 'no database' }, () => {
     factory = new FactoryService({
       vouching: { ...everyVoucherHolds, withheld: () => new Map([[hidden, 'withheld']]) },
       reach: {
-        settle: (next) => {
+        stage: (next) => {
           settled.push(next);
-          return Promise.resolve(0);
+          return nothingFollowsReach.stage(next);
         },
       },
       db,
@@ -575,9 +580,9 @@ describe('sensor factory', { skip: available ? false : 'no database' }, () => {
     factory = new FactoryService({
       vouching: everyVoucherHolds,
       reach: {
-        settle: (next) => {
+        stage: (next) => {
           settled.push(next);
-          return Promise.resolve(0);
+          return nothingFollowsReach.stage(next);
         },
       },
       db,
@@ -673,26 +678,28 @@ describe('the factory sweep', () => {
   });
 });
 
-describe('the factories held for their inputs’ probe (`M-26`)', () => {
-  function reachOver(fails = false) {
+describe('the sets a factory sweep settles together (`M-26`, `M-28`)', () => {
+  function world(fails = false) {
     const calls: string[] = [];
-    const reach = new FactoryReach({
-      db: { tx: (fn) => fn({} as never) },
-      logger: silentLogger,
+    const ids = (list: readonly number[]): string => [...list].sort((a, b) => a - b).join(',');
+    const vouching = installationVouching({
+      db: { tx: (fn: (q: never) => Promise<unknown>) => fn({} as never) } as never,
       states: {
-        reevaluate: (_q, ids, _at, cause) => {
-          calls.push(`reevaluate ${ids.join(',')} ${cause.sources?.join(',') ?? ''}`);
-          assert.equal(cause.message, UNREACHED_MESSAGE);
-          return fails ? Promise.reject(new Error('could not serialize')) : Promise.resolve(1);
+        reevaluate: (_q, sensors, _at, cause) => {
+          const words = cause.message === UNREACHED_MESSAGE ? 'probe words' : 'no words';
+          calls.push(`reevaluate ${ids(sensors)} ${cause.sources?.join(',') ?? ''} ${words}`);
+          return fails
+            ? Promise.reject(new Error('could not serialize'))
+            : Promise.resolve(sensors.length);
         },
       },
       dependencies: {
-        holdWithheld: (_q, ids) => {
-          calls.push(`hold ${ids.join(',')}`);
+        holdWithheld: (_q, sensors) => {
+          calls.push(`hold ${ids(sensors)}`);
           return Promise.resolve();
         },
-        returnWithheld: (_q, ids) => {
-          calls.push(`return ${ids.join(',')}`);
+        returnWithheld: (_q, sensors) => {
+          calls.push(`return ${ids(sensors)}`);
           return Promise.resolve();
         },
         recompute: () => {
@@ -701,30 +708,91 @@ describe('the factories held for their inputs’ probe (`M-26`)', () => {
         },
       },
     });
-    return { reach, calls };
+    const reach = new FactoryReach();
+    /** The sweep's own refusals, what it withholds for what they read, and what it holds. */
+    const settle = (
+      refused: [number, string][],
+      upstream: [number, string][],
+      held: [number, number[]][],
+    ): Promise<number> =>
+      vouching.settleTogether(
+        new Map([
+          ['factory', new Map(refused)],
+          ['factory-upstream', new Map(upstream)],
+        ]),
+        reach.stage(new Map(held)),
+      );
+    return { vouching, reach, calls, settle };
   }
 
-  it('re-decides only what crossed, as cause probe, keeping a Down master holding', async () => {
-    const { reach, calls } = reachOver();
-    await reach.settle(new Map([[1, [9]]]));
-    assert.deepEqual(calls, ['hold 1', 'reevaluate 1 probe', 'return ', 'recompute']);
+  it('re-decides what crossed once, and holds or lets go only what came into or left them all', async () => {
+    const { reach, calls, settle } = world();
+    await settle([], [], [[1, [9]]]);
+    assert.deepEqual(calls, [
+      'hold 1',
+      'reevaluate 1 access,probe probe words',
+      'return ',
+      'recompute',
+    ]);
     assert.deepEqual([...reach.unreached()], [1]);
     assert.deepEqual(reach.inputsOf(1), [9]);
 
     calls.length = 0;
-    await reach.settle(new Map([[1, [8]]]));
+    await settle([], [], [[1, [8]]]);
     assert.deepEqual(calls, [], 'nothing crossed');
     assert.deepEqual(reach.inputsOf(1), [8], 'but what it lacks is kept current');
 
-    await reach.settle(new Map());
-    assert.deepEqual(calls, ['hold ', 'reevaluate 1 probe', 'return 1', 'recompute']);
-    assert.equal(reach.unreached().size, 0);
+    // Held for its probe, then withheld for what it reads: re-decided once, and a master it is
+    // keeps holding, marked where it came in.
+    await settle([], [[1, WITHHELD.upstream]], []);
+    assert.deepEqual(calls, [
+      'hold ',
+      'reevaluate 1 access,probe probe words',
+      'return ',
+      'recompute',
+    ]);
+
+    // Refused for its voucher, then withheld for what it reads: the same, once.
+    calls.length = 0;
+    await settle([[2, WITHHELD.lostRead]], [[1, WITHHELD.upstream]], []);
+    assert.deepEqual(calls, [
+      'hold 2',
+      'reevaluate 2 access,probe probe words',
+      'return ',
+      'recompute',
+    ]);
+    calls.length = 0;
+    await settle(
+      [],
+      [
+        [1, WITHHELD.upstream],
+        [2, WITHHELD.upstream],
+      ],
+      [],
+    );
+    assert.deepEqual(calls, [
+      'hold ',
+      'reevaluate 2 access,probe probe words',
+      'return ',
+      'recompute',
+    ]);
+
+    // Out of all of them.
+    calls.length = 0;
+    await settle([], [], []);
+    assert.deepEqual(calls, [
+      'hold ',
+      'reevaluate 1,2 access,probe probe words',
+      'return 1,2',
+      'recompute',
+    ]);
   });
 
-  it('takes the set back when the write fails, so the next sweep tries again', async () => {
-    const { reach } = reachOver(true);
-    assert.equal(await reach.settle(new Map([[1, [9]]])), 0);
+  it('takes every set back when the write fails, so the next sweep tries again', async () => {
+    const { vouching, reach, settle } = world(true);
+    assert.equal(await settle([[2, WITHHELD.lostRead]], [[3, WITHHELD.upstream]], [[1, [9]]]), 0);
     assert.equal(reach.unreached().size, 0);
     assert.equal(reach.inputsOf(1), undefined);
+    assert.equal(vouching.withheld().size, 0);
   });
 });

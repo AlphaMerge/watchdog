@@ -38,7 +38,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
-import { everyVoucherHolds } from './support/vouching.js';
+import { everyVoucherHolds, installationVouching } from './support/vouching.js';
 
 const available = await databaseAvailable();
 
@@ -216,7 +216,7 @@ describe(
         coreEvaluatedTypes: CORE_EVALUATED,
         probeAlarms,
       });
-      const reach = new FactoryReach({ db, logger: silent, states, dependencies });
+      const reach = new FactoryReach();
       const index = new ProbeEpisodeIndex({
         lost: () => reachability,
         frozen: () => freeze,
@@ -242,7 +242,7 @@ describe(
       const factories = new FactoryService({
         db,
         logger: silent,
-        vouching: everyVoucherHolds,
+        vouching: installationVouching({ db, states, dependencies }),
         reach,
         ingest: (results) => ingestFrom(IN_PROCESS_SOURCE.factory, results),
       });

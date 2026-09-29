@@ -6349,7 +6349,7 @@ because each is a decision rather than a defect:
         - A factory that crosses between withheld for what it reads (`M-23`) and held for its
           probe in one sweep is re-decided by two settles in two transactions. It passes through
           its last reading between them: one extra transition, and an Up on a trigger on Up. `M-23`
-          has the same between its two sets.
+          has the same between its two sets. Filed as `M-28`.
         - A factory held before a core restart is carried by nothing until the first factory
           sweep. A reconciliation in that window arms it as any sensor, and the due sweep parks
           it if that sweep has run by then.
@@ -6394,6 +6394,53 @@ because each is a decision rather than a defect:
       - a sensor still covered through another live Probe Health stays held;
       - a scenario test in `probe-episode-scenario.test.ts`, per `M-17`, covers both, with each
         asserted alarm asserted present first. Mutants as usual.
+
+- [x] **M-28 — a factory crossing withheld (`M-23`) and held-for-its-probe in one sweep is
+      re-decided in two transactions, and passes through its last reading** · S · M-26, M-23 ·
+      Found finishing `M-26`.
+      The factory sweep keeps three sets of factories it does not evaluate: those refused for who
+      vouched for them (`A-29`), those withheld for what they read (`M-23`), and those held for
+      their inputs' probe (`M-26`). Each settled in its own transaction. A factory leaving one
+      set for another in the same sweep was re-decided in between with neither: row 5, its last
+      reading, which is usually Up. That is a transition there, one back, and an Up on any
+      trigger on Up. It happens when a factory's voucher returns while what it reads is
+      withheld, `M-23`'s own pair, and when a probe goes or comes back under a factory that also
+      reads a withheld sensor. Held to withheld also ran `returnWithheld` on a factory still not
+      evaluated, so a factory master lost `M-23`'s mark and let its dependents go after the
+      delay.
+
+      **Done when:**
+      - the three sets move before anything is re-decided, and what crossed is re-decided in one
+        transaction;
+      - what holds or lets go of dependents is counted against all three together;
+      - a factory withheld for another reason takes the new words without a transition;
+      - a scenario test shows no extra transition and no Up on a trigger on Up, for `M-23`'s pair
+        and `M-26`'s, both ways. Mutants as usual.
+
+      **Done.** `SensorVouching.settleTogether` takes several owners' sets and a set alongside that
+      has already moved, `FactoryReach.stage`'s, and re-decides what crossed in one transaction.
+      `settle` is its one-owner case, so the Probe Health and Core Health sweeps are unchanged.
+      - **All three move first.** The factory sweep settles its refusals, what it withholds for
+        what a factory reads and what it holds for a probe once, at the end, before its results
+        go in. A factory that moved between two of them is re-decided once, with all three in
+        place, so it passes through nothing.
+      - **Counted against all three.** What came into none before and some now is marked, and
+        what left them all is returned, so a factory master moving between them keeps `M-23`'s
+        mark and neither holds anew nor lets go.
+      - **Reworded, not re-decided.** `reevaluate` gives a withheld sensor whose state and cause
+        did not move the words of its new reason, with its start kept and no transition. Refused
+        for its voucher and then withheld for what it reads, a factory otherwise kept saying a
+        grant was missing that it had back.
+      - `FactoryReach` is a set and nothing more: it stages, and the voucher check writes.
+
+      Tests:
+      - `sensor-vouching`: a factory refused for its voucher and then withheld for what it
+        reads, and one withheld and then held for its probe and back, under a trigger on Up. Each
+        crossing is at most one transition, the first none, with its start kept and its words
+        changed, and nothing is sent.
+      - `factory-service`: one re-decision per crossing, what is marked and returned counted
+        against all three sets, and every set taken back when the write fails.
+      Mutations 11/11.
 
 - [x] **M-24 — `M-22`'s episode and its held set are not linked in every direction** · M · M-22,
       M-17 · Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `M-24`).

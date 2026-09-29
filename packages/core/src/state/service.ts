@@ -484,7 +484,26 @@ export class SensorStateService {
       // next genuine failure.
       if (clearedByRecovery(facts, decision) !== facts) recovered.push(sensorId);
 
-      if (decision.state === runtime.state && decision.cause === runtime.cause) continue;
+      if (decision.state === runtime.state && decision.cause === runtime.cause) {
+        // **Withheld for another reason: its words follow, and nothing else moves** (`M-28`). A
+        // factory refused for its voucher that is then withheld for what it reads stays
+        // `unknown`/`access`, and its message said a grant it has back was missing. No
+        // transition, and the state keeps its start.
+        const reworded = this.#withheldMessage(sensorId, decision);
+        if (reworded !== undefined && reworded !== runtime.message) {
+          rewrites.push({
+            sensorId,
+            at,
+            state: decision.state,
+            cause: decision.cause,
+            message: reworded,
+            since: runtime.since,
+            reset: false,
+          });
+          this.#cache.delete(sensorId);
+        }
+        continue;
+      }
 
       // The operator's words when the operator's action is what decided the state, and nothing
       // on the way out — the reason a sensor is Unknown after a resume is that nobody has

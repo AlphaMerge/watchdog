@@ -7,6 +7,7 @@ import { AccessService, type AccessPrincipal, type Visibility } from '../src/aut
 import { AccountService, type AccountRole } from '../src/auth/accounts.js';
 import { GroupService } from '../src/auth/groups.js';
 import type { Database, Queryable } from '../src/db/pool.js';
+import { FactoryReach } from '../src/factory/reach.js';
 import { FactoryService } from '../src/factory/service.js';
 import { MessageContextLoader } from '../src/notifications/context.js';
 import { AlarmEngine } from '../src/notifications/engine.js';
@@ -33,7 +34,6 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { actorNamed, buildHarness, silent, testActor, type Harness } from './support/tree.js';
-import { nothingFollowsReach } from './support/vouching.js';
 
 /**
  * `A-29`, the second half: who vouched for a sensor, re-checked every time it is evaluated.
@@ -53,6 +53,7 @@ const available = await databaseAvailable();
 
 const NEVER_ISSUED = 9_000_000;
 const NONE_WITHHELD: ReadonlyMap<number, string> = new Map();
+const NONE_HELD: ReadonlySet<number> = new Set();
 
 /** The formula a factory over these sensors' `rtt` would have. */
 const sumOf = (...ids: number[]): Record<string, unknown> => ({
@@ -100,6 +101,8 @@ describe(
 
     /** Replaced per test; the state service reads whichever is current. */
     let vouching: SensorVouching | undefined;
+    /** The factories held for their inputs' probe (`M-26`), replaced per test the same way. */
+    let reach: FactoryReach | undefined;
     let factory: FactoryService;
     let ingested: CheckResult[] = [];
 
@@ -217,7 +220,7 @@ describe(
       count('SELECT count(*)::text AS n FROM notification_request');
 
     /** A mail template and a state trigger on the root, as an installation's default would be. */
-    async function stateTrigger(state: 'down' | 'unknown'): Promise<void> {
+    async function stateTrigger(state: 'down' | 'unknown' | 'up'): Promise<void> {
       const template = await templates.create(testActor, {
         name: `Vouching ${state} ${String(process.hrtime.bigint())}`,
         method: 'email',
@@ -261,6 +264,7 @@ describe(
         states: true,
         alarms: engine,
         withheldSensors: () => vouching?.withheld() ?? NONE_WITHHELD,
+        unreachedFactories: () => reach?.unreached() ?? NONE_HELD,
       });
       const sync = new TriggerSync({ engine, logger: silent });
       h.audit.also = sync;
@@ -356,11 +360,12 @@ describe(
       );
       ingested = [];
       vouching = newVouching();
+      reach = new FactoryReach();
       factory = new FactoryService({
         db,
         logger: silent,
         vouching,
-        reach: nothingFollowsReach,
+        reach,
         ingest: async (results) => {
           ingested.push(...results);
           await ingest(
@@ -1098,6 +1103,153 @@ describe(
       for (const id of sensors) assert.equal((await runtimeOf(id)).state, 'down');
       assert.equal(await scheduler.sweep(new Date(now + 7_200_000)), 0);
       assert.equal(await requests(), 20, 'the same outage, not a second page');
+    });
+
+    it('re-decides a factory crossing between what withholds and holds it once, with nothing on the way (M-28)', async () => {
+      // Settled one set after another, a factory moving between two of them in one sweep was
+      // re-decided in between with neither: its last reading, Up, a transition there and back,
+      // and a notification on a trigger on Up.
+      const probe = (
+        await h.service.create(testActor, {
+          kind: 'probe',
+          parentId: h.rootId,
+          name: `far-${String(process.hrtime.bigint())}`,
+        })
+      ).id;
+      const box = (
+        await h.service.create(testActor, {
+          kind: 'device',
+          parentId: probe,
+          name: 'far-box',
+          host: '192.0.2.9',
+        })
+      ).id;
+      const far = (
+        await h.service.create(testActor, {
+          kind: 'sensor',
+          parentId: box,
+          name: 'far-ping',
+          sensorType: 'icmp.ping',
+        })
+      ).id;
+      await db.query(
+        `INSERT INTO sample (channel_id, time, value)
+         SELECT id, now(), 3 FROM channel WHERE sensor_id = $1 AND key = 'rtt'`,
+        [far],
+      );
+      await ingest([{ sensorId: far, at: new Date(), outcome: 'ok', message: 'reachable' }]);
+      // Its voucher's, then what it reads: `M-23`'s pair.
+      const [refused] = await makeFactories(await as(analyst), 1);
+      assert.ok(refused !== undefined);
+      // What it reads, then its inputs' probe, and back: `M-26`'s.
+      const both = await factoryOf(admin, [
+        {
+          key: 'total',
+          formula: `channel(${String(sourcePing)}, 'rtt') + channel(${String(far)}, 'rtt')`,
+        },
+      ]);
+      await factory.sweep();
+      assert.equal((await runtimeOf(refused)).state, 'up');
+      assert.equal((await runtimeOf(both)).state, 'up');
+      await stateTrigger('up');
+      await scheduler.sweep(new Date(Date.now() + 60_000));
+      const quiet = await requests();
+      const history = (id: number): Promise<number> =>
+        count(`SELECT count(*)::text AS n FROM sensor_state WHERE sensor_id = $1`, [id]);
+
+      await revokeSources();
+      try {
+        await factory.sweep();
+        assert.deepEqual(await runtimeOf(refused), {
+          state: 'unknown',
+          cause: 'access',
+          message: WITHHELD.lostRead,
+        });
+        assert.equal((await runtimeOf(both)).state, 'up', 'its voucher reads it all');
+      } finally {
+        await restoreSources();
+      }
+
+      // Its read back, and what it reads withheld by another sweep and out of readings: one
+      // factory crosses from its voucher to what it reads, and the other goes Unknown for it.
+      await vouching?.settle('elsewhere', new Map([[sourcePing, WITHHELD.lostRead]]));
+      await db.query(
+        'DELETE FROM sample WHERE channel_id IN (SELECT id FROM channel WHERE sensor_id = $1)',
+        [sourcePing],
+      );
+      try {
+        const sinceOf = async (id: number): Promise<number> => {
+          const [row] = await db.query<{ since: Date }>(
+            'SELECT since FROM sensor_runtime WHERE object_id = $1',
+            [id],
+          );
+          assert.ok(row !== undefined);
+          return row.since.getTime();
+        };
+        const before = await history(refused);
+        const since = await sinceOf(refused);
+        await factory.sweep();
+        assert.deepEqual(await runtimeOf(refused), {
+          state: 'unknown',
+          cause: 'access',
+          message: WITHHELD.upstream,
+        });
+        assert.equal(await history(refused), before, 'no transition, and no Up on the way');
+        assert.equal(await sinceOf(refused), since, 'Unknown since its voucher was refused');
+        assert.deepEqual(await runtimeOf(both), {
+          state: 'unknown',
+          cause: 'access',
+          message: WITHHELD.upstream,
+        });
+
+        // The far probe lost, and its readings run out: withheld to held, once.
+        await db.query(
+          `UPDATE sensor_runtime SET state = 'unknown', cause = 'probe' WHERE object_id = $1`,
+          [far],
+        );
+        await db.query(
+          `UPDATE sample SET time = now() - interval '2 hours'
+           WHERE channel_id IN (SELECT id FROM channel WHERE sensor_id = $1)`,
+          [far],
+        );
+        let recorded = await history(both);
+        await factory.sweep();
+        assert.equal((await runtimeOf(both)).cause, 'probe');
+        assert.equal(await history(both), recorded + 1, 'one transition, from access to probe');
+
+        // Back and reporting: held to withheld, once.
+        await db.query(
+          `UPDATE sensor_runtime SET state = 'up', cause = 'scan', last_result_at = now()
+           WHERE object_id = $1`,
+          [far],
+        );
+        await db.query(
+          `INSERT INTO sample (channel_id, time, value)
+           SELECT id, now(), 4 FROM channel WHERE sensor_id = $1 AND key = 'rtt'`,
+          [far],
+        );
+        recorded = await history(both);
+        await factory.sweep();
+        assert.deepEqual(await runtimeOf(both), {
+          state: 'unknown',
+          cause: 'access',
+          message: WITHHELD.upstream,
+        });
+        assert.equal(await history(both), recorded + 1, 'one transition, from probe to access');
+
+        await scheduler.sweep(new Date(Date.now() + 60_000));
+        assert.equal(await requests(), quiet, 'no Up for either on the way');
+      } finally {
+        await vouching?.settle('elsewhere', NONE_WITHHELD);
+        await db.query(
+          `INSERT INTO sample (channel_id, time, value)
+           SELECT id, now(), 12 FROM channel WHERE sensor_id = $1 AND key = 'rtt'`,
+          [sourcePing],
+        );
+      }
+      await factory.sweep();
+      assert.equal((await runtimeOf(both)).state, 'up');
+      assert.equal((await runtimeOf(refused)).state, 'up');
     });
 
     it('notifies through a trigger on Unknown, as a lost probe does', async () => {

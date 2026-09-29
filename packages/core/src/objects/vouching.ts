@@ -58,6 +58,24 @@ export interface VoucherCheck {
   settle(owner: string, refused: ReadonlyMap<number, string>): Promise<number>;
 }
 
+/**
+ * A set of sensors not being evaluated that has already moved, and what moved (`M-28`): settled
+ * beside the voucher sets, in their transaction.
+ */
+export interface StagedSet {
+  /** The sensors that came in. */
+  readonly entered: readonly number[];
+  /** The sensors that went out. */
+  readonly left: readonly number[];
+  /** Whether it holds this sensor now. */
+  holds(sensorId: number): boolean;
+  /** The cause it decides, and the words for a sensor it decides. */
+  readonly cause: SensorStateCause;
+  readonly message: string;
+  /** Puts the set back, for a write that did not land. */
+  undo(): void;
+}
+
 /** What this needs from the state service: re-decide these, in this transaction. */
 export interface WithheldReevaluator {
   reevaluate(
@@ -297,21 +315,55 @@ export class SensorVouching implements VoucherCheck {
    * `refused` is the whole answer for that sweep, so a sensor it withheld last time and did not
    * look at now — deleted, paused — is let go, and the set cannot grow stale.
    */
-  async settle(owner: string, refused: ReadonlyMap<number, string>): Promise<number> {
-    const had = this.#byOwner.get(owner);
-    const before = had ?? new Map<number, string>();
-    this.#byOwner.set(owner, new Map(refused));
+  settle(owner: string, refused: ReadonlyMap<number, string>): Promise<number> {
+    return this.settleTogether(new Map([[owner, refused]]));
+  }
 
+  /**
+   * Replaces what each owner withholds, and re-decides what crossed, in one transaction with
+   * `alongside`, a set that holds sensors unevaluated for another reason and has already moved
+   * (`M-28`).
+   *
+   * **Every set moves before anything is re-decided.** Settled one after another, a sensor
+   * leaving one set for another was re-decided in between, with neither: it passed through its
+   * last reading, a transition and a notification on the way, and then went back to Unknown. The
+   * factory sweep's own refusals, what it withholds for what a factory reads, and the factories
+   * held for their inputs' probe are three sets, and a factory can cross between any two in one
+   * sweep. So what came in or went out is counted against all of them together: a sensor that
+   * only moved between them is re-decided once, and neither holds nor lets go what depends on it.
+   */
+  async settleTogether(
+    owners: ReadonlyMap<string, ReadonlyMap<number, string>>,
+    alongside?: StagedSet,
+  ): Promise<number> {
+    const had = new Map<string, ReadonlyMap<number, string> | undefined>();
+    const touched = new Set<number>([...(alongside?.entered ?? []), ...(alongside?.left ?? [])]);
+    for (const [owner, refused] of owners) {
+      const before = this.#byOwner.get(owner);
+      had.set(owner, before);
+      for (const id of before?.keys() ?? []) touched.add(id);
+      for (const id of refused.keys()) touched.add(id);
+    }
+    const was = new Map([...touched].map((id) => [id, this.#withheld.get(id)]));
+    for (const [owner, refused] of owners) this.#byOwner.set(owner, new Map(refused));
+
+    const cameIn = new Set(alongside?.entered);
+    const wentOut = new Set(alongside?.left);
+    const heldBefore = (id: number): boolean =>
+      alongside !== undefined &&
+      (cameIn.has(id) ? false : wentOut.has(id) ? true : alongside.holds(id));
     const entered: number[] = [];
     const left: number[] = [];
     const changed: number[] = [];
-    for (const id of new Set([...before.keys(), ...refused.keys()])) {
-      const was = this.#withheld.get(id);
+    for (const id of touched) {
+      const before = was.get(id);
       const now = this.#recount(id);
-      if (was === now) continue;
+      if (before === now && !cameIn.has(id) && !wentOut.has(id)) continue;
       changed.push(id);
-      if (was === undefined) entered.push(id);
-      else if (now === undefined) left.push(id);
+      const unevaluatedBefore = before !== undefined || heldBefore(id);
+      const unevaluatedNow = now !== undefined || alongside?.holds(id) === true;
+      if (!unevaluatedBefore && unevaluatedNow) entered.push(id);
+      else if (unevaluatedBefore && !unevaluatedNow) left.push(id);
     }
     if (changed.length === 0 || this.#states === undefined) return 0;
 
@@ -322,10 +374,11 @@ export class SensorVouching implements VoucherCheck {
         // Marked while its state still says Down: Unknown is not Down, and letting go would page
         // each dependent on the outage the master can no longer speak for.
         await this.#dependencies?.holdWithheld(q, entered);
-        // `access` is the only cause this can speak for; the words themselves come from the set.
+        // `access` is the cause this can speak for, and the words come from the set. The set
+        // alongside speaks for its own.
         const count = await this.#states?.reevaluate(q, changed, at, {
-          message: '',
-          sources: ['access'],
+          message: alongside?.message ?? '',
+          sources: alongside === undefined ? ['access'] : ['access', alongside.cause],
         });
         // Vouched for again, a master is evaluated again, and settles as any master returning
         // from Down does: holding if Down, after the configured delay if not.
@@ -335,8 +388,8 @@ export class SensorVouching implements VoucherCheck {
       });
       if (entered.length > 0 || left.length > 0) {
         this.#logger.info(
-          { owner, withheld: entered.length, released: left.length, moved },
-          'sensors withheld or released because of who vouched for them',
+          { owners: [...owners.keys()], withheld: entered.length, released: left.length, moved },
+          'sensors withheld or released because of who vouched for them or what they read',
         );
       }
       return moved;
@@ -347,11 +400,14 @@ export class SensorVouching implements VoucherCheck {
       // monitored, or Down with its alarm still paging. Restored, the next settle sees the same
       // crossings and makes the same write. Recounted rather than copied back, so another owner
       // that settled while this write was out keeps what it did.
-      if (had === undefined) this.#byOwner.delete(owner);
-      else this.#byOwner.set(owner, had);
-      for (const id of changed) this.#recount(id);
+      for (const [owner, before] of had) {
+        if (before === undefined) this.#byOwner.delete(owner);
+        else this.#byOwner.set(owner, before);
+      }
+      for (const id of touched) this.#recount(id);
+      alongside?.undo();
       this.#logger.error(
-        { owner, sensors: changed.length, err: describeError(error) },
+        { owners: [...owners.keys()], sensors: changed.length, err: describeError(error) },
         'could not re-decide sensors after a voucher check; the next sweep tries again',
       );
       return 0;

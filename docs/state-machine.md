@@ -691,10 +691,19 @@ Two further notes for whoever picks those up:
   or on a withheld sensor, as long as at least one is the probe's. It lays `probeReachable: false`
   over the factory's facts, as the lost set does, so row 3 decides it: `unknown`/`probe`, with a
   gap, and a message that names nothing. The probe is the wider fact, so a factory reading both
-  is the probe's rather than withheld. The set settles on crossing, as the voucher check's does:
-  what crossed is re-decided in one transaction, and the set goes back if the write fails. Like
-  the lost set, it is live and not persisted, and after a restart it is empty until the first
-  factory sweep.
+  is the probe's rather than withheld. The set settles on crossing, in the transaction that
+  settles the sweep's voucher sets, and goes back if the write fails (`M-28`, below). Like the
+  lost set, it is live and not persisted, and after a restart it is empty until the first factory
+  sweep.
+  - **The factory sweep's three sets settle as one** (`M-28`): the factories refused for who
+    vouched for them, those withheld for what they read, and those held for their inputs'
+    probe. A factory crosses between two of them in one sweep when its voucher returns, or a
+    probe goes or comes back. Settled one after another, it was re-decided in between with
+    neither: its last reading, a transition there and back, and an Up on a trigger on Up. All
+    three move first, and what crossed is re-decided once. What came into or left them all is
+    what holds or lets go of dependents, so a factory master moving between them keeps its
+    mark. One withheld for another reason keeps its state, its cause and its start, and takes
+    the new reason's words, with no transition.
   - **Until its inputs report again.** A sensor whose probe has come back reads its last reading
     at once, but nothing is measured until its first result, and a spool replays oldest first.
     So a factory stays held while every gap is on a sensor it saw away, that has reported nothing
