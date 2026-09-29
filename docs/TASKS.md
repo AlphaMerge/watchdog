@@ -17026,6 +17026,19 @@ because each is a decision rather than a defect:
         the push has already returned);
       - no return after the read (the endpoint test fails).
 
+- [ ] **A-51 — `object.moved` history names the hidden place an object came from** · S · A-46,
+      A-12 · Found while doing `A-46`. Low.
+      An `object.moved` entry's diff carries the old and new `parentId`, and its summary
+      `fromProbeId` and `toProbeId`. `GET /objects/:id/audit` serves them to anyone with `read`
+      on the moved object, so a reader who can see the object but not where it came from, or the
+      probe it was on, is handed the ids of objects hidden from them. Ids only, never names; the
+      same history names nothing else it cannot see.
+
+      **Done when** the history route leaves out, for a reader who cannot see it, each of those
+      ids that names a hidden object, in the way `A-46` leaves out counts, and an administrator
+      still reads them all. A test in `object-visibility.test.ts` moves a visible device out of a
+      group the reader cannot see, and back. Mutants as usual.
+
 ### Panel round two — notifications, schedules, triggers
 
 Eight lenses over `packages/core/src/{notifications,schedules,triggers}`, merged to 34 distinct
