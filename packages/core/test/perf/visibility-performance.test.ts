@@ -1,10 +1,11 @@
 import { strict as assert } from 'node:assert';
+import type { QueryResultRow } from 'pg';
 import { DatabaseAuditSink } from '../../src/audit/store.js';
 import { after, before, describe, it } from 'node:test';
 import { AccessService, type AccessPrincipal } from '../../src/auth/access.js';
 import { AccountService } from '../../src/auth/accounts.js';
 import { GroupService } from '../../src/auth/groups.js';
-import type { Database } from '../../src/db/pool.js';
+import type { Database, Queryable } from '../../src/db/pool.js';
 import { AlarmService } from '../../src/state/alarms.js';
 import { StateBroadcaster } from '../../src/state/stream.js';
 import {
@@ -23,11 +24,13 @@ const available = await databaseAvailable();
  * customer groups, twenty devices in each and ten sensors on each device. One sensor in twenty is
  * Down, so the alarm list has a thousand rows to page and count.
  *
- * Every read path is timed for six principals, chosen for the shapes the predicate has to
+ * Every read path is timed for seven principals, chosen for the shapes the predicate has to
  * handle:
  *
  * - **an administrator** — the short circuit, and the baseline every other row is read against;
  * - **the root, with ten customers carved out** — the `NOT IN` form, over 2,000 hidden sensors;
+ * - **the root, with four hundred devices carved out** — the `NOT IN` form walked from four
+ *   hundred boundaries, forty of them re-opened by a grant on a sensor inside (`A-33`);
  * - **one customer** — the `IN` form at its smallest, 200 sensors;
  * - **one probe** — the `IN` form over a quarter of the installation;
  * - **fifty customers**, granted one by one — the `IN` form seeded from fifty boundaries, which is
@@ -49,6 +52,75 @@ const WARMUP = 3;
 const RUNS = 15;
 
 const BUDGET_MS = { resolve: 50, list: 250, alarms: 250, counts: 250, snapshot: 2_000 } as const;
+
+/** The principal `A-33` measures: several hundred carve-outs, some of them re-opened. */
+const CARVED = 'root, 400 carved out';
+
+/** One node of `EXPLAIN (FORMAT JSON)`, with only the fields read here named. */
+interface PlanNode {
+  readonly 'Subplan Name'?: string;
+  readonly 'CTE Name'?: string;
+  readonly Plans?: readonly PlanNode[];
+  readonly [field: string]: unknown;
+}
+
+function* nodesOf(node: PlanNode): Generator<PlanNode> {
+  yield node;
+  for (const child of node.Plans ?? []) yield* nodesOf(child);
+}
+
+/**
+ * How each `NOT IN` over the visibility walk was planned: hashed once, or read again for every
+ * row it filters (`A-33`).
+ *
+ * A walk is a subplan whose nodes scan the `exception` CTE. How it is used is printed where it
+ * is referenced — `(hashed SubPlan 2)` or `(SubPlan 2)`, in PostgreSQL 16's form and in 17's
+ * `ANY (x = (hashed SubPlan 2).col1)` — in a filter or a condition, or, for a walk in a select
+ * list such as the alarm list's marking of each step, in the output a `VERBOSE` plan prints and
+ * no other does. So the plan read here is a `VERBOSE` one, and a walk found referenced nowhere
+ * is `unseen` rather than passed.
+ */
+function notInPlans(root: PlanNode): {
+  walks: number;
+  hashed: number;
+  rescanned: number;
+  unseen: number;
+} {
+  const walks = new Map<string, { hashed: boolean; rescanned: boolean }>();
+  const references: string[] = [];
+  for (const node of nodesOf(root)) {
+    const name = /^SubPlan (\d+)$/.exec(node['Subplan Name'] ?? '')?.[1];
+    if (name !== undefined && [...nodesOf(node)].some((one) => one['CTE Name'] === 'exception')) {
+      walks.set(name, { hashed: false, rescanned: false });
+    }
+    for (const [field, value] of Object.entries(node)) {
+      if (!/Filter|Cond|Output/.test(field)) continue;
+      for (const text of Array.isArray(value) ? value : [value]) {
+        if (typeof text === 'string') references.push(text);
+      }
+    }
+  }
+  for (const text of references) {
+    for (const match of text.matchAll(/(hashed )?SubPlan (\d+)(?!\d)/g)) {
+      const walk = walks.get(match[2] ?? '');
+      if (walk === undefined) continue;
+      if (match[1] === undefined) walk.rescanned = true;
+      else walk.hashed = true;
+    }
+  }
+  const all = [...walks.values()];
+  return {
+    walks: all.length,
+    hashed: all.filter((walk) => walk.hashed && !walk.rescanned).length,
+    rescanned: all.filter((walk) => walk.rescanned).length,
+    unseen: all.filter((walk) => !walk.hashed && !walk.rescanned).length,
+  };
+}
+
+/** How many walks of the carve-outs a statement's text holds. */
+function walksIn(text: string): number {
+  return [...text.matchAll(/NOT IN \(\s*WITH RECURSIVE exception/g)].length;
+}
 
 describe(
   `object visibility at ${SENSORS.toLocaleString('en')} sensors`,
@@ -158,6 +230,28 @@ describe(
         [harness.rootId, 'read'],
         ...groupIds.slice(0, 10).map((id) => [id, 'none'] as const),
       ]);
+      // Every fifth device carved out, and the first sensor of every tenth of those re-opened:
+      // four hundred holes spread over every customer, forty of them with a grant inside.
+      const deviceIds = (
+        await db.query<{ id: string }>(
+          `SELECT id::text AS id FROM object WHERE kind = 'device' ORDER BY id`,
+        )
+      ).map((row) => Number(row.id));
+      const carved = deviceIds.filter((_, index) => index % 5 === 0);
+      const reopened = (
+        await db.query<{ id: string }>(
+          `SELECT DISTINCT ON (parent_id) id::text AS id FROM object
+           WHERE parent_id = ANY($1::bigint[]) ORDER BY parent_id, id`,
+          [carved.filter((_, index) => index % 10 === 0)],
+        )
+      ).map((row) => Number(row.id));
+      assert.equal(carved.length, 400);
+      assert.equal(reopened.length, 40);
+      await principal(CARVED, [
+        [harness.rootId, 'read'],
+        ...carved.map((id) => [id, 'none'] as const),
+        ...reopened.map((id) => [id, 'read'] as const),
+      ]);
       await principal('one customer', [[groupIds[0] ?? 0, 'read']]);
       await principal('one probe', [[probeIds[0] ?? 0, 'read']]);
       await principal(
@@ -188,6 +282,40 @@ describe(
         median: ms[Math.floor(ms.length / 2)] ?? 0,
         p90: ms[Math.floor(ms.length * 0.9)] ?? 0,
       };
+    }
+
+    /**
+     * The statements `run` sends through `db`, with their parameters, in order: on the pool, and
+     * inside `db.tx`, which is where the alarm list reads.
+     */
+    async function recorded(
+      run: () => Promise<unknown>,
+    ): Promise<(readonly [string, readonly unknown[]])[]> {
+      const statements: (readonly [string, readonly unknown[]])[] = [];
+      const recording = (q: Queryable): void => {
+        const query = q.query.bind(q);
+        q.query = <T extends QueryResultRow>(
+          text: string,
+          values?: readonly unknown[],
+        ): Promise<T[]> => {
+          statements.push([text, values ?? []]);
+          return query<T>(text, values);
+        };
+      };
+      const tx = db.tx.bind(db);
+      recording(db);
+      db.tx = <T>(fn: (q: Queryable) => Promise<T>): Promise<T> =>
+        tx((q) => {
+          recording(q);
+          return fn(q);
+        });
+      try {
+        await run();
+      } finally {
+        delete (db as { query?: unknown }).query;
+        delete (db as { tx?: unknown }).tx;
+      }
+      return statements;
     }
 
     it('keeps every read path inside an operator’s budget, for every shape of grant', async () => {
@@ -255,6 +383,85 @@ describe(
       process.stdout.write(`\n    measured (A-12), ${SENSORS.toLocaleString('en')} sensors:\n`);
       process.stdout.write(`${rows.join('\n')}\n`);
       assert.deepEqual(over, [], 'over budget');
+    });
+
+    it('hashes the NOT IN of several hundred carve-outs on every read path (A-33)', async () => {
+      // **The plan, not only the time.** PostgreSQL never turns `NOT IN` into an anti-join,
+      // because of what it does with a null. It either hashes the subquery once, or, when it
+      // expects the rows not to fit in `work_mem`, reads them again for every row it filters, which
+      // is quadratic in the size of the tree. The table above would show that only as a time
+      // that grew; this names it. `NOT EXISTS` would plan as an anti-join, and would read a null
+      // column as visible where `NOT IN` reads it as hidden. The one nullable column the condition
+      // is applied to, `tops`' `parent_id`, tests for null itself, so a switch would be safe, and
+      // this is what says whether one is needed.
+      const principal = principals.get(CARVED);
+      assert.ok(principal !== undefined);
+      const visibility = await access.visibilityFor(principal);
+      const paths: readonly (readonly [string, () => Promise<unknown>])[] = [
+        [
+          'list',
+          () =>
+            harness.service.list(
+              { kinds: ['sensor'] },
+              { limit: 100, sort: 'name', cursor: null },
+              visibility,
+            ),
+        ],
+        ['alarms', () => alarms.list({ limit: 100, visibility })],
+        ['counts', () => harness.service.visibleCounts(visibility)],
+        ['snapshot', () => stream.snapshot(db, null, visibility)],
+      ];
+      // Each path by name, so that one path sending two statements cannot stand in for another
+      // that sent none.
+      const walked: (readonly [string, string, readonly unknown[]])[] = [];
+      const silentPaths: string[] = [];
+      for (const [name, run] of paths) {
+        const own = (await recorded(run)).filter(([text]) => walksIn(text) > 0);
+        if (own.length === 0) silentPaths.push(name);
+        for (const [text, values] of own) walked.push([name, text, values]);
+      }
+      assert.deepEqual(silentPaths, [], 'a read path that sent no walk of the carve-outs');
+
+      const rows: string[] = [];
+      const unhashed: string[] = [];
+      for (const [name, text, values] of walked) {
+        const explained = await db.query<{
+          'QUERY PLAN': { Plan: PlanNode; 'Execution Time': number }[];
+        }>(`EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON) ${text}`, values);
+        const result = explained[0]?.['QUERY PLAN'][0];
+        assert.ok(result !== undefined);
+        const { walks, hashed, rescanned, unseen } = notInPlans(result.Plan);
+        rows.push(
+          `    ${name.padEnd(10)}  walks ${String(walks)}  hashed ${String(hashed)}` +
+            `  re-read ${String(rescanned)}  unseen ${String(unseen)}` +
+            `  ${result['Execution Time'].toFixed(1).padStart(7)} ms`,
+        );
+        // Every walk the text holds is found in the plan, and every one found is hashed. Found
+        // can be more than the text holds: a walk in an inlined CTE's select list is copied to
+        // each place that reads the column, as the alarm list's step marking is to both of its
+        // `FILTER (WHERE visible)`s.
+        if (walks < walksIn(text) || hashed !== walks) unhashed.push(name);
+      }
+      process.stdout.write(`\n    the NOT IN plans (A-33), ${CARVED}:\n${rows.join('\n')}\n`);
+      assert.deepEqual(unhashed, [], 'a NOT IN over the carve-outs that is not hashed');
+
+      // Not vacuous: each statement, planned with too little memory to hash, is caught re-reading
+      // at every walk — the alarm list's walk in its select list with the rest.
+      const missed: string[] = [];
+      for (const [name, text, values] of walked) {
+        const starved = await db.transaction(async (client) => {
+          await client.query(`SET LOCAL work_mem = '64kB'`);
+          const result = await client.query<{ 'QUERY PLAN': { Plan: PlanNode }[] }>(
+            `EXPLAIN (VERBOSE, FORMAT JSON) ${text}`,
+            [...values],
+          );
+          return result.rows[0]?.['QUERY PLAN'][0]?.Plan;
+        });
+        assert.ok(starved !== undefined);
+        const { walks, rescanned } = notInPlans(starved);
+        if (walks < walksIn(text) || rescanned !== walks) missed.push(name);
+      }
+      assert.deepEqual(missed, [], 'a starved plan not seen re-reading at every walk');
     });
   },
 );

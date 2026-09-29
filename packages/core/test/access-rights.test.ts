@@ -523,23 +523,221 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
       }
     }
 
+    /** What `agree` counted, so that a test can show it was not vacuous. */
+    interface Tally {
+      comparisons: number;
+      visible: number;
+      hidden: number;
+      children: number;
+    }
+
+    /**
+     * Every consumer of a `Visibility` against the resolver, on every object, for every role and
+     * scope: the SQL condition a list filters with, the path check the stream uses, the walk-free
+     * condition `hasChildren` and `childCount` use, and the trimmed path a detail shows.
+     */
+    async function agree(
+      label: string,
+      paths: ReadonlyMap<number, readonly number[]>,
+      ids: readonly number[],
+      tally: Tally,
+    ): Promise<void> {
+      for (const { name, principal } of principalsOf()) {
+        const expected = await access.resolveManyFor(principal, ids);
+        const visibility = await access.visibilityFor(principal);
+
+        const values: unknown[] = [];
+        const condition = visibility.where('o.id', (value) => `$${String(values.push(value))}`);
+        const listed = new Set(
+          (
+            await db.query<{ id: string }>(
+              `SELECT o.id::text AS id FROM object o WHERE ${condition}`,
+              values,
+            )
+          ).map((row) => Number(row.id)),
+        );
+        // The walk-free shortcut `hasChildren` and `childCount` use: asked only of the children
+        // of a visible object, where it has to give the resolver's answer with no walk at all.
+        const childValues: unknown[] = [];
+        const childCondition = visibility.whereChildOfVisible(
+          'c.id',
+          (value) => `$${String(childValues.push(value))}`,
+        );
+        const childOfVisible = new Map(
+          (
+            await db.query<{ id: string; visible: boolean }>(
+              `SELECT c.id::text AS id, (${childCondition}) AS visible
+               FROM object c WHERE c.parent_id IS NOT NULL`,
+              childValues,
+            )
+          ).map((row) => [Number(row.id), row.visible]),
+        );
+
+        for (const id of ids) {
+          const readable = atLeast(expected.get(id) ?? 'none', 'read');
+          const path = paths.get(id) ?? [];
+          const where = `${label}, ${name}, object ${String(id)}`;
+          assert.equal(listed.has(id), readable, `the SQL condition disagreed: ${where}`);
+          assert.equal(visibility.sees(path), readable, `the path check disagreed: ${where}`);
+          const parent = path.at(-2);
+          if (parent !== undefined && atLeast(expected.get(parent) ?? 'none', 'read')) {
+            assert.equal(
+              childOfVisible.get(id),
+              readable,
+              `the child-of-visible condition disagreed: ${where}`,
+            );
+            tally.children += 1;
+          }
+          // Trimming keeps exactly the steps the resolver would let this principal read.
+          assert.deepEqual(
+            visibility.trim(path),
+            path.filter((step) => atLeast(expected.get(step) ?? 'none', 'read')),
+            `the trimmed path disagreed: ${where}`,
+          );
+          tally.comparisons += 1;
+          if (readable) tally.visible += 1;
+          else tally.hidden += 1;
+        }
+      }
+    }
+
     it('agrees on every object, for every role and scope, over randomised grants', async () => {
       await buildNestedTree();
       const paths = await pathsOfEverything();
       const ids = [...paths.keys()].sort((a, b) => a - b);
-      const principals = principalsOf();
 
-      let comparisons = 0;
-      let visibleSeen = 0;
-      let hiddenSeen = 0;
-      let childrenChecked = 0;
+      const tally: Tally = { comparisons: 0, visible: 0, hidden: 0, children: 0 };
       for (let seed = 1; seed <= 40; seed += 1) {
         await scatterGrants(random(seed), ids);
+        await agree(`seed ${String(seed)}`, paths, ids, tally);
+      }
 
-        for (const { name, principal } of principals) {
-          const expected = await access.resolveManyFor(principal, ids);
+      // Not vacuous: both answers occurred plenty, so a condition that said "yes" to everything
+      // or "no" to everything would have failed above.
+      assert.ok(tally.comparisons > 5000, `only ${String(tally.comparisons)} comparisons`);
+      assert.ok(tally.visible > 500, `only ${String(tally.visible)} visible answers`);
+      assert.ok(tally.hidden > 500, `only ${String(tally.hidden)} hidden answers`);
+      assert.ok(tally.children > 1000, `only ${String(tally.children)} children checked`);
+    });
+
+    it('agrees on every nested shape of hole in a readable root (A-33)', async () => {
+      // **Fixed, because the scatter above never makes them.** Across its forty seeds it put a
+      // hole inside a hole zero times and re-opened a hole zero times, and those are where the
+      // walk behind `NOT IN` has to stop at the right boundary and no other. Each shape is the
+      // account's two groups, Alpha reading the root, and the grants below. `seen` is written out
+      // by hand rather than taken from the resolver, so a shape that agreed with a wrong resolver
+      // would still fail.
+      await buildNestedTree();
+      const paths = await pathsOfEverything();
+      const ids = [...paths.keys()].sort((a, b) => a - b);
+      const idOf = async (name: string): Promise<number> => {
+        const rows = await db.query<{ id: string }>(
+          'SELECT id::text AS id FROM object WHERE name = $1',
+          [name],
+        );
+        assert.equal(rows.length, 1, name);
+        return Number(rows[0]?.id);
+      };
+      // outer-0 ⊃ inner-0 ⊃ device ⊃ sensor, with a device beside inner-0 and a second outer
+      // group that no shape touches.
+      const outer = await idOf('outer-0');
+      const inner = await idOf('inner-0');
+      const device = await idOf(`device-${String(inner)}-0`);
+      const sensor = await idOf(`sensor-${String(device)}-0`);
+      const beside = await idOf(`device-${String(outer)}-0`);
+      const untouched = await idOf('outer-1');
+      const named = { outer, inner, device, sensor, beside, untouched };
+      type Named = keyof typeof named;
+
+      const SHAPES: readonly {
+        readonly shape: string;
+        readonly grants: readonly (readonly [Named, 'alpha' | 'beta' | 'gamma', AccessRight])[];
+        readonly seen: readonly Named[];
+      }[] = [
+        {
+          shape: 'a hole',
+          grants: [['outer', 'alpha', 'none']],
+          seen: ['untouched'],
+        },
+        {
+          shape: 'a hole inside a hole',
+          grants: [
+            ['outer', 'alpha', 'none'],
+            ['inner', 'alpha', 'none'],
+          ],
+          seen: ['untouched'],
+        },
+        {
+          shape: 'a hole re-opened',
+          grants: [
+            ['outer', 'alpha', 'none'],
+            ['inner', 'alpha', 'read'],
+          ],
+          seen: ['inner', 'device', 'sensor', 'untouched'],
+        },
+        {
+          shape: 'a hole inside a re-opened hole',
+          grants: [
+            ['outer', 'alpha', 'none'],
+            ['inner', 'alpha', 'read'],
+            ['device', 'alpha', 'none'],
+          ],
+          seen: ['inner', 'untouched'],
+        },
+        {
+          shape: 'a hole re-opened, carved and re-opened again',
+          grants: [
+            ['outer', 'alpha', 'none'],
+            ['inner', 'alpha', 'read'],
+            ['device', 'alpha', 'none'],
+            ['sensor', 'alpha', 'read'],
+          ],
+          seen: ['inner', 'sensor', 'untouched'],
+        },
+        {
+          shape: 'a hole inside a hole, re-opened at its deepest',
+          grants: [
+            ['outer', 'alpha', 'none'],
+            ['inner', 'alpha', 'none'],
+            ['sensor', 'beta', 'read'],
+          ],
+          seen: ['sensor', 'untouched'],
+        },
+        {
+          // Beta holds nothing above the hole, so what re-opens it is a grant of its own.
+          shape: 'a hole re-opened by the other group',
+          grants: [
+            ['outer', 'alpha', 'none'],
+            ['inner', 'beta', 'read'],
+          ],
+          seen: ['inner', 'device', 'sensor', 'untouched'],
+        },
+        {
+          // Highest wins across groups: Alpha still reads it from the root, so this is no hole.
+          shape: 'a none that the other group reads through',
+          grants: [['outer', 'beta', 'none']],
+          seen: ['outer', 'inner', 'device', 'sensor', 'beside', 'untouched'],
+        },
+        {
+          shape: 'a none for a group the account is not in',
+          grants: [['outer', 'gamma', 'none']],
+          seen: ['outer', 'inner', 'device', 'sensor', 'beside', 'untouched'],
+        },
+      ];
+
+      const groupIds = { alpha: alphaId, beta: betaId, gamma: gammaId };
+      const readers = principalsOf().filter(({ principal }) => principal.scope !== 'none');
+      const tally: Tally = { comparisons: 0, visible: 0, hidden: 0, children: 0 };
+      for (const { shape, grants, seen } of SHAPES) {
+        await db.query('DELETE FROM object_access');
+        await access.grant(harness.rootId, alphaId, 'read', actorNamed('agreement'));
+        for (const [on, group, right] of grants) {
+          await access.grant(named[on], groupIds[group], right, actorNamed('agreement'));
+        }
+        await agree(shape, paths, ids, tally);
+
+        for (const { name, principal } of readers) {
           const visibility = await access.visibilityFor(principal);
-
           const values: unknown[] = [];
           const condition = visibility.where('o.id', (value) => `$${String(values.push(value))}`);
           const listed = new Set(
@@ -550,57 +748,15 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
               )
             ).map((row) => Number(row.id)),
           );
-          // The walk-free shortcut `hasChildren` and `childCount` use: asked only of the children
-          // of a visible object, where it has to give the resolver's answer with no walk at all.
-          const childValues: unknown[] = [];
-          const childCondition = visibility.whereChildOfVisible(
-            'c.id',
-            (value) => `$${String(childValues.push(value))}`,
-          );
-          const childOfVisible = new Map(
-            (
-              await db.query<{ id: string; visible: boolean }>(
-                `SELECT c.id::text AS id, (${childCondition}) AS visible
-                 FROM object c WHERE c.parent_id IS NOT NULL`,
-                childValues,
-              )
-            ).map((row) => [Number(row.id), row.visible]),
-          );
-
-          for (const id of ids) {
-            const readable = atLeast(expected.get(id) ?? 'none', 'read');
-            const path = paths.get(id) ?? [];
-            const where = `seed ${String(seed)}, ${name}, object ${String(id)}`;
-            assert.equal(listed.has(id), readable, `the SQL condition disagreed: ${where}`);
-            assert.equal(visibility.sees(path), readable, `the path check disagreed: ${where}`);
-            const parent = path.at(-2);
-            if (parent !== undefined && atLeast(expected.get(parent) ?? 'none', 'read')) {
-              assert.equal(
-                childOfVisible.get(id),
-                readable,
-                `the child-of-visible condition disagreed: ${where}`,
-              );
-              childrenChecked += 1;
-            }
-            // Trimming keeps exactly the steps the resolver would let this principal read.
-            assert.deepEqual(
-              visibility.trim(path),
-              path.filter((step) => atLeast(expected.get(step) ?? 'none', 'read')),
-              `the trimmed path disagreed: ${where}`,
-            );
-            comparisons += 1;
-            if (readable) visibleSeen += 1;
-            else hiddenSeen += 1;
+          const hidden = seen.length < Object.keys(named).length;
+          // The form this ticket is about: a readable root with exceptions carved out of it.
+          assert.equal(condition.includes('NOT IN'), hidden, `${shape}, ${name}: ${condition}`);
+          for (const [key, id] of Object.entries(named) as [Named, number][]) {
+            assert.equal(listed.has(id), seen.includes(key), `${shape}, ${name}: ${key}`);
           }
         }
       }
-
-      // Not vacuous: both answers occurred plenty, so a condition that said "yes" to everything
-      // or "no" to everything would have failed above.
-      assert.ok(comparisons > 5000, `only ${String(comparisons)} comparisons`);
-      assert.ok(visibleSeen > 500, `only ${String(visibleSeen)} visible answers`);
-      assert.ok(hiddenSeen > 500, `only ${String(hiddenSeen)} hidden answers`);
-      assert.ok(childrenChecked > 1000, `only ${String(childrenChecked)} children checked`);
+      assert.ok(tally.comparisons > 1000, `only ${String(tally.comparisons)} comparisons`);
     });
 
     it('finds the weakest right beneath every object, for every role and scope (A-35)', async () => {
