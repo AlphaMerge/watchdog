@@ -13,13 +13,13 @@ import {
   MAX_RECIPIENTS,
   type ReportFormat,
 } from '../../reports/outputs.js';
-import { mediaTypeOf, type ReportOutputRepository } from '../../reports/delivery.js';
+import type { ReportOutputRepository } from '../../reports/delivery.js';
 import { ReportError } from '../../reports/errors.js';
 import type { ReportContext } from '../../reports/context.js';
 import type { ReportRenderer } from '../../reports/render.js';
 import type { Database } from '../../db/pool.js';
 import type { ReportFormatter } from '../../reports/formatter.js';
-import { MAX_PDF_PAGES } from '../../reports/pdf.js';
+import { MAX_PDF_PAGES, mediaTypeOf } from '../../reports/media.js';
 import type { ReportService, ReportViewer } from '../../reports/service.js';
 import { actorFor } from '../authentication.js';
 import { READS, writesIn } from '../authorization.js';

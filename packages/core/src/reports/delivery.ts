@@ -5,6 +5,7 @@ import type { DocumentMessage } from '../notifications/delivery/email.js';
 import type { DeliveryResult } from '../notifications/delivery/transport.js';
 import type { ReportDocument } from './table.js';
 import { keepsOutput, sendsEmail, validateOutputs, type ReportDeliveryMode } from './outputs.js';
+import { mediaTypeOf } from './media.js';
 import type { ReportFormatter } from './formatter.js';
 import type { ReportRow } from './repository.js';
 
@@ -185,26 +186,10 @@ export class ReportOutputRepository {
   }
 }
 
-/* ------------------------------------------------------------------- rendering */
-
-const MEDIA: Readonly<Record<string, string>> = {
-  html: 'text/html; charset=utf-8',
-  csv: 'text/csv; charset=utf-8',
-  pdf: 'application/pdf',
-  // `application/xml` rather than `text/xml`: RFC 7303 deprecated the latter's charset handling,
-  // and a report is UTF-8 with the encoding declared in the document itself.
-  xml: 'application/xml; charset=utf-8',
-  zip: 'application/zip',
-};
-
-export function mediaTypeOf(format: string): string {
-  return MEDIA[format] ?? 'application/octet-stream';
-}
-
-// `filenameFor`, `renderOutputs` and `RenderedOutput` live in `formats.ts` now (`P-204`): they are the
-// half of this that runs in the formatting worker, and the worker must not load a database client
-// to get them. Re-exported so nothing that imported them from here has to know.
-export { filenameFor, renderOutputs, type RenderedOutput } from './formats.js';
+// `filenameFor`, `renderOutputs` and `RenderedOutput` live in `formats.ts` (`P-204`), and are not
+// re-exported from here. A re-export loads `formats.ts`, and through it `pdf.ts`, `pdfkit` and
+// `fontkit`, into every build that imports this module for its repository. The housekeeper does,
+// in a v1 core that renders nothing (`H-19`).
 
 /* ------------------------------------------------------------------- delivery */
 

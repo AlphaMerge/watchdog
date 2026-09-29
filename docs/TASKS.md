@@ -19212,7 +19212,7 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       release 1.1" from its generator, so the note survives regeneration. `sizing.md`'s Windows
       gap cited `H-09`, and now cites `H-17`. `CLAUDE.md` and `ADR-001` are unchanged.
 
-- [ ] **H-19 — A v1 core still loads `pdfkit` and `fontkit`** · S · H-12 · `H-12` left it said:
+- [x] **H-19 — A v1 core still loads `pdfkit` and `fontkit`** · S · H-12 · `H-12` left it said:
       the report routes import `MAX_PDF_PAGES` from `reports/pdf.ts`, and they and the
       housekeeper import `mediaTypeOf` from `reports/delivery.ts`, so both modules, and the PDF
       stack behind them, load in a build that constructs no reports. **Done when** those two
@@ -19220,6 +19220,26 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       `reports/wiring.ts` dynamically, inside the full profile's branch; and a test starts a v1
       core's module graph and asserts that neither `pdfkit` nor `fontkit` is among the modules it
       loaded, alongside a full one where both are, so that the check can fail.
+
+      **Done.**
+      - **There were two paths, not one.** The routes read `MAX_PDF_PAGES` from `pdf.ts` and
+        `mediaTypeOf` from `delivery.ts`. `delivery.ts` also loaded `pdf.ts` itself, through a
+        re-export of `formats.ts` that `P-204` kept for compatibility and nothing used. The
+        housekeeper imports `delivery.ts` for its repository, so moving the constants alone would
+        have left the PDF stack in a v1 core. The re-export is gone.
+      - **The constants** live in `reports/media.ts`, which imports nothing. **`profile.ts`** loads
+        `reports/wiring.ts` through `loadReporting()`, a dynamic import after the full profile's
+        check.
+      - **`module-graph.test.ts`** imports `main.js` in a child process with a resolve hook and
+        lists every module it resolved. It asserts `fastify` and `main.js` are in the list first,
+        so a hook that saw nothing cannot pass. On the unfixed tree it failed with "a v1 core
+        loads pdfkit".
+      - **A full core loads the two in different threads.** `fontkit` is on the main thread,
+        because the fonts are checked at start-up. `pdfkit` is only in the formatting worker
+        (`P-204`). So the full case checks `fontkit` in the full graph and `pdfkit` in the
+        worker's, loaded from `format-job.js`.
+      - **Mutants:** a static `import './reports/wiring.js'` in `profile.ts`, and the `formats.ts`
+        re-export put back in `delivery.ts`. Each built, and each failed the v1 case.
 
 - [x] **H-20 — A package can claim an exact commit it is not** · M · H-11 · Found on 2026-09-28
       by an independent review of `H-11`…`H-13`, and each of the three confirmed by two

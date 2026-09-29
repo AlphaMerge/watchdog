@@ -15,8 +15,8 @@ import {
   ReportDelivery,
   ReportOutputRepository,
   backoffMs,
-  filenameFor,
 } from '../src/reports/delivery.js';
+import { filenameFor } from '../src/reports/formats.js';
 import { validateOutputs } from '../src/reports/outputs.js';
 import { ReportFormatter } from '../src/reports/formatter.js';
 import type { DocumentMessage } from '../src/notifications/delivery/email.js';

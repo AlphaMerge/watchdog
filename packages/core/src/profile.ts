@@ -8,7 +8,7 @@ import { MapRepository } from './maps/repository.js';
 import { MapResolver } from './maps/resolver.js';
 import { MapService } from './maps/service.js';
 import { libraryAuditSinks, mapAuditSinks } from './objects/audit-composition.js';
-import { startReporting, type Reporting, type ReportingOptions } from './reports/wiring.js';
+import type { Reporting, ReportingOptions, startReporting } from './reports/wiring.js';
 
 /**
  * What a core build constructs, by its profile (`H-12`).
@@ -51,6 +51,7 @@ export async function startV2Subsystems(
   options: ReportingOptions,
 ): Promise<V2Subsystems> {
   if (profile !== 'full') return {};
+  const reports = await loadReporting();
   const { db, logger, access, history, auditSinks } = options;
   return {
     // **The maps API, which `G-01` wrote and nothing mounted.** `ApiServer` takes the service as
@@ -76,8 +77,19 @@ export async function startV2Subsystems(
       logger,
     }),
     // Built in their own module, so that one call either starts reports or does not (`E-01`…`E-12`).
-    reporting: await startReporting(options),
+    reporting: await reports.startReporting(options),
   };
+}
+
+/**
+ * The reports module, loaded only when a build asks for it (`H-19`).
+ *
+ * **Imported dynamically, so that a v1 core never loads `pdfkit` and `fontkit`.** A static import
+ * here put the PDF stack into every build's start-up, whether or not it constructed a report.
+ * Exported so that `module-graph.test.ts` loads the full profile's graph the way this module does.
+ */
+export async function loadReporting(): Promise<{ readonly startReporting: typeof startReporting }> {
+  return import('./reports/wiring.js');
 }
 
 /** What `ApiServer` is given of them: each one that exists, and nothing for one that does not. */
