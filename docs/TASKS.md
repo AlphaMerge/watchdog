@@ -6645,6 +6645,24 @@ because each is a decision rather than a defect:
       - every duration listed runs on a monotonic clock, or says why it can't.
       Mutants as usual.
 
+- [x] **P-250 — a log baseline taken only at a record counts a stall long over** · S · P-216,
+      P-245 · Found 2026-09-29 by bc8184 while landing `P-245`, in `P-216` part 3. Probe Health
+      took each probe's log baseline only where it wrote a record, and `logDropped` warns above
+      0. So every path that skips one left the baseline stale: no Probe Health on the probe, no
+      sensors at all, every sensor withheld, and `M-22`'s boot grace. A probe that dropped lines on
+      Monday with no Probe Health on it gave the sensor added on Thursday Monday's count, stamped
+      Thursday. Core Health had the same defect, not the "probably not" it was filed with: its
+      sweep returns before reading when no sensor exists or all are withheld, and its own baseline
+      and the local probe's moved only on a reading. A reconnect had it too: lines dropped while
+      a probe was away were counted at the first record after it.
+
+      **Landed** (2026-09-29). Both sweeps take every baseline at their start, before anything can
+      return, beside `P-245`'s `drainMemory()`. Probe Health takes every connected probe's, from
+      the endpoint's `connectedProbeIds()`. What no record takes is let go, and is a gap. A new
+      session starts a new baseline whose first reading gaps, on both sensors. A table test covers
+      each skip path, and a test covers the new session; moving either sweep's take below its
+      early return, or dropping the session reset, fails them.
+
 - [ ] **P-249 — a mutation that failed inside its transaction is answered as committed** · M ·
       P-103, P-111 · Found 2026-09-29 while designing `P-239`'s failure path, and measured.
       **High**: a silent loss behind a success answer.

@@ -724,6 +724,11 @@ That covers a stop, a crash, and a configuration it refuses (exit 78); it cannot
 Health counts the local probe's lines with its own, and the local probe's `logDropped` gaps: one
 journal, one alarm. A probe on a host of its own has its own journal and its own warning.
 
+`logDropped` counts the lines dropped since the last reading, whether or not that reading was
+recorded. So a sensor added to a probe, or released after being withheld, starts from its own
+first interval, not from everything dropped before it existed. The first reading after a probe
+reconnects is a gap: what it dropped while away fell in no reading (`P-250`).
+
 What to look at, in order:
 
 - **`journalctl --disk-usage` and the disk under `/var/log/journal`.** A full disk stops the

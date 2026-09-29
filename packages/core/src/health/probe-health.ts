@@ -57,6 +57,11 @@ export interface ProbeHealthSources {
    * report, as below 20.
    */
   drainMemory?: () => ReadonlyMap<number, MemoryFold>;
+  /**
+   * Every probe connected now, from the endpoint (`P-250`). Each sweep takes every one's log
+   * baseline from it, recorded or not; absent, `logDropped` gaps.
+   */
+  connectedProbeIds?: () => readonly number[];
 }
 
 export interface ProbeHealthServiceOptions {
@@ -205,8 +210,11 @@ export class ProbeHealthService {
   readonly #vouching: VoucherCheck;
   readonly #now: () => Date;
   readonly #uptime: () => number;
-  /** One baseline per probe for its log's drops, taken by records only (`P-216` part 3). */
-  readonly #logMeters = new Map<number, DeltaMeter>();
+  /**
+   * One baseline per probe for its log's drops (`P-216` part 3), and the session it belongs to:
+   * a new session starts a new baseline (`P-250`).
+   */
+  readonly #logMeters = new Map<number, { meter: DeltaMeter; session: number }>();
 
   #sweeps = 0;
   #evaluated = 0;
@@ -420,6 +428,11 @@ export class ProbeHealthService {
     // that time and gave the first record after it a squeeze long over, stamped now. Shared by
     // every sensor on one probe: two sensors reporting on it record the same lows (`P-219`).
     const folds = this.#sources.drainMemory?.();
+    // **Every probe's log baseline, every sweep, for the same reason** (`P-250`). Taken only where
+    // a record was written, a probe with no Probe Health dropping lines on Monday gave the sensor
+    // added on Thursday a count of Monday's lines, stamped Thursday: a warning for a stall three
+    // days over. Now what no record takes is let go, and is a gap, on every path that skips one.
+    const logs = this.#advanceLogs();
     const sensors = await readHealthSensors(this.#db);
     // Settled even when there are none, so a sensor withheld last sweep and deleted since is let
     // go rather than held Unknown for ever.
@@ -451,9 +464,6 @@ export class ProbeHealthService {
 
     const at = this.#now().toISOString();
     const results: CheckResult[] = [];
-    // The log's drops are taken once per probe per sweep, and shared like the folds: the second
-    // sensor on a probe would otherwise read a count of zero (`P-216` part 3).
-    const logs = new Map<number, number | null>();
     for (const row of sensors) {
       const sensorId = Number(row.id);
       // Not read and nothing recorded: a gap, and Unknown laid over it by the check (`A-29`).
@@ -544,11 +554,11 @@ export class ProbeHealthService {
     latest: ProbeHealthReading,
     taken: {
       folds: ReadonlyMap<number, MemoryFold> | undefined;
-      logs: Map<number, number | null>;
+      /** Each connected probe's log drops since the last sweep, taken at its start (`P-250`). */
+      logs: ReadonlyMap<number, number | null>;
     },
     local: boolean,
   ): ProbeHealthReading {
-    if (!taken.logs.has(probeId)) taken.logs.set(probeId, this.#logDropped(probeId, link));
     const reading: ProbeHealthReading = {
       ...latest,
       // **Not the local probe's to report** (`P-216` part 3, `M-21`'s rule): it writes to the core's
@@ -580,26 +590,42 @@ export class ProbeHealthService {
   }
 
   /**
-   * Log lines this probe dropped since the last record (`P-216` part 3), from the running total on
-   * its latest heartbeat.
+   * Log lines each connected probe dropped since the last sweep (`P-216` part 3, `P-250`), from
+   * the running total on its latest heartbeat. Taken for every probe at the start of every sweep,
+   * so a window no record covers is let go rather than counted by the next one.
    *
-   * **A count per record, not the total and not a counter's rate.** A total warns for ever after
-   * one stall; a rate gaps on the first reading after the probe restarts, which is the reading
-   * that covers the stall that restarted it. After a restart the new total is all new. A probe
-   * this core meets already running gaps once, because the core before this one may have
-   * recorded what it holds; one that started after this core counts in full.
+   * **A count per sweep, not the total and not a counter's rate.** A total warns for ever after one
+   * stall; a rate gaps on the first reading after the probe restarts, which is the reading that
+   * covers the stall that restarted it. A probe this core meets already running gaps once,
+   * because the core before this one may have recorded what it holds; one that started after this
+   * core counts in full. **A new session gaps too**: the lines a probe dropped while it was not
+   * connected fell in no sweep's window, and counting them at the reconnect would date them now.
    */
-  #logDropped(probeId: number, link: ProbeLink): number | null {
-    if (!link.connected) return null;
-    const total = link.health?.logDropped;
-    const uptime = link.health?.uptimeSeconds;
-    if (total === undefined || uptime === undefined) return null;
-    let meter = this.#logMeters.get(probeId);
-    if (meter === undefined) {
-      meter = new DeltaMeter();
-      this.#logMeters.set(probeId, meter);
+  #advanceLogs(): ReadonlyMap<number, number | null> {
+    const taken = new Map<number, number | null>();
+    const connected = this.#sources.connectedProbeIds?.() ?? [];
+    for (const probeId of connected) {
+      const link = this.#sources.link(probeId);
+      if (!link.connected) continue;
+      const total = link.health?.logDropped;
+      const uptime = link.health?.uptimeSeconds;
+      if (total === undefined || uptime === undefined) continue;
+      const session = link.connectedAt.getTime();
+      const held = this.#logMeters.get(probeId);
+      if (held === undefined || held.session !== session) {
+        const meter = new DeltaMeter();
+        this.#logMeters.set(probeId, { meter, session });
+        // A probe first seen by this core counts in full if it started after the core did; one
+        // met again on a new session does not (above).
+        taken.set(
+          probeId,
+          meter.take(total, uptime, held === undefined && uptime < this.#uptime()),
+        );
+        continue;
+      }
+      taken.set(probeId, held.meter.take(total, uptime, false));
     }
-    return meter.take(total, uptime, uptime < this.#uptime());
+    return taken;
   }
 }
 

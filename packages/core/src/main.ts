@@ -1331,7 +1331,7 @@ async function serve(): Promise<void> {
         const uptimeSeconds = link.health?.uptimeSeconds;
         return dropped === undefined || uptimeSeconds === undefined
           ? null
-          : { droppedLines: dropped, uptimeSeconds };
+          : { droppedLines: dropped, uptimeSeconds, session: link.connectedAt.getTime() };
       },
       queries: () => probeQueries.stats(),
       ingestionDiscards: () => ingestion.stats(),
@@ -1404,6 +1404,8 @@ async function serve(): Promise<void> {
       frozenSensors: (probeObjectId) => clockFreeze.frozenOn(probeObjectId),
       // The sweep, and only the sweep, drains the probes' folded memory lows (`P-219`, `P-245`).
       drainMemory: () => probeEndpoint.drainMemory(),
+      // Every connected probe's log baseline is taken each sweep, recorded or not (`P-250`).
+      connectedProbeIds: () => probeEndpoint.connectedProbeIds(),
     },
     delivery: deliveryWatch,
     ingest: async (results) => {

@@ -133,7 +133,7 @@ export interface CoreHealthSources {
    * machine's memory, and its `logDropped` counts the local probe's lines with its own; the local
    * probe's `logDropped` gaps. A probe on its own host keeps its own.
    */
-  localProbeLog?: (q: Queryable) => Promise<{ droppedLines: number; uptimeSeconds: number } | null>;
+  localProbeLog?: (q: Queryable) => Promise<LocalProbeLog | null>;
   /**
    * `CredentialVault.setsWithUndeclaredKeys` — the credential sets written before writes were
    * checked against their kind that hold a key it does not declare (`A-43`). Counted at every
@@ -182,6 +182,14 @@ export type CoreHealthReading = Readonly<Record<string, number | null>>;
 
 const HEALTH_TYPE = 'ms.core.health';
 
+/** The local probe's running total of log lines dropped, from its latest heartbeat (`P-216`). */
+export interface LocalProbeLog {
+  readonly droppedLines: number;
+  readonly uptimeSeconds: number;
+  /** When its session connected, in epoch ms: a new session starts a new baseline (`P-250`). */
+  readonly session: number;
+}
+
 /**
  * One reader's baselines (`CpuMeter`'s reason, `P-216` part 3): CPU and the log's drops are both
  * the difference between two readings, and each reading consumes the one before. The sweep, the
@@ -190,7 +198,7 @@ const HEALTH_TYPE = 'ms.core.health';
 export class CoreHealthMeters {
   readonly cpu = new CpuMeter();
   readonly log = new DeltaMeter();
-  readonly localProbeLog = new DeltaMeter();
+  localProbeLog: { readonly meter: DeltaMeter; readonly session: number } | undefined;
 }
 
 const MB = 1024 * 1024;
@@ -274,6 +282,8 @@ export class CoreHealthService {
   async #read(
     meters: CoreHealthMeters,
     degradeOnDatabaseError: boolean,
+    /** The sweep's, taken before anything could skip the reading (`P-250`); a route takes its own. */
+    takenLogDropped?: number | null,
   ): Promise<{ reading: CoreHealthReading; parkedError: string | null }> {
     const now = this.#now();
     const ingestion = this.#sources.ingestion();
@@ -290,6 +300,8 @@ export class CoreHealthService {
     const memory = this.#process.memoryUsage();
     const queues = await this.#queues(now, degradeOnDatabaseError);
     const uptime = this.#process.uptime();
+    const dropped =
+      takenLogDropped === undefined ? await this.#takeLogDropped(meters) : takenLogDropped;
 
     const discards = this.#sources.ingestionDiscards();
     const reading: CoreHealthReading = {
@@ -349,7 +361,7 @@ export class CoreHealthService {
       resultsPastDated: discards.discardedPastTime,
       reactionsDeferred: ingestion.deferredReactions,
       credentialsToReenter: queues.credentials,
-      logDropped: logDropped(meters, log, queues.localProbeLog, uptime),
+      logDropped: dropped,
       logBacklog: log === undefined ? null : round(log.backlogBytes / MB, 2),
     };
     return { reading, parkedError: queues.parked.lastError };
@@ -364,6 +376,11 @@ export class CoreHealthService {
    */
   async sweep(): Promise<number> {
     this.#sweeps += 1;
+    // **The log's baselines, whether or not anything is recorded** (`P-250`). Taken only when a
+    // sensor was read, a core with no Core Health sensor, or only withheld ones, gave the sensor
+    // added days later a count of every line dropped since it started, stamped now: a warning for
+    // a stall long over. What this sweep does not record is let go, and is a gap.
+    const takenLogDropped = await this.#takeLogDropped(this.#sweepMeters);
     const every = await this.#db.query<{
       id: string;
       params: Record<string, unknown>;
@@ -396,7 +413,7 @@ export class CoreHealthService {
     let reading: CoreHealthReading;
     let parkedError: string | null;
     try {
-      ({ reading, parkedError } = await this.#read(this.#sweepMeters, false));
+      ({ reading, parkedError } = await this.#read(this.#sweepMeters, false, takenLogDropped));
     } catch (error: unknown) {
       // **The sensor fails rather than the sweep**, and it fails with a message. A Core Health
       // sensor that silently stopped reporting is the failure this whole ticket exists to make
@@ -431,6 +448,23 @@ export class CoreHealthService {
     this.#evaluated += results.length;
     await this.#ingest(results);
     return results.length;
+  }
+
+  /**
+   * The log lines dropped since these meters were last taken, the core's and the local probe's.
+   * The local probe's part is a gap where the database cannot say which probe that is.
+   */
+  async #takeLogDropped(meters: CoreHealthMeters): Promise<number | null> {
+    let local: LocalProbeLog | null = null;
+    try {
+      local = (await this.#sources.localProbeLog?.(this.#db)) ?? null;
+    } catch (error: unknown) {
+      this.#logger.warn(
+        { err: describeError(error) },
+        "core health could not read the local probe's log; its part of logDropped is a gap",
+      );
+    }
+    return logDropped(meters, this.#sources.log?.(), local, this.#process.uptime());
   }
 
   /**
@@ -472,7 +506,6 @@ export class CoreHealthService {
     parked: { count: number | null; lastError: string | null };
     reap: number | null;
     credentials: number | null;
-    localProbeLog: { droppedLines: number; uptimeSeconds: number } | null;
   }> {
     try {
       return await this.#db.tx(async (q) => ({
@@ -482,7 +515,6 @@ export class CoreHealthService {
         parked: await parkedBackfill(q),
         reap: await count(q, 'SELECT count(*)::int AS n FROM channel_reap'),
         credentials: await this.#sources.credentialsToReenter(q),
-        localProbeLog: (await this.#sources.localProbeLog?.(q)) ?? null,
       }));
     } catch (error: unknown) {
       if (!degrade) throw error;
@@ -497,7 +529,6 @@ export class CoreHealthService {
         parked: { count: null, lastError: null },
         reap: null,
         credentials: null,
-        localProbeLog: null,
       };
     }
   }
@@ -591,18 +622,27 @@ function describe(reading: CoreHealthReading, parkedError: string | null = null)
 function logDropped(
   meters: CoreHealthMeters,
   own: LogOutputStats | undefined,
-  local: { droppedLines: number; uptimeSeconds: number } | null,
+  local: LocalProbeLog | null,
   uptime: number,
 ): number | null {
   const mine = own === undefined ? null : meters.log.take(own.droppedLines, uptime, true);
-  const theirs =
-    local === null
-      ? null
-      : meters.localProbeLog.take(
-          local.droppedLines,
-          local.uptimeSeconds,
-          local.uptimeSeconds < uptime,
-        );
+  let theirs: number | null = null;
+  if (local !== null) {
+    const held = meters.localProbeLog;
+    if (held === undefined || held.session !== local.session) {
+      // A probe first met counts in full only if it started after this core did; one met again on
+      // a new session gaps, since what it dropped while away fell in no reading (`P-250`).
+      const meter = new DeltaMeter();
+      meters.localProbeLog = { meter, session: local.session };
+      theirs = meter.take(
+        local.droppedLines,
+        local.uptimeSeconds,
+        held === undefined && local.uptimeSeconds < uptime,
+      );
+    } else {
+      theirs = held.meter.take(local.droppedLines, local.uptimeSeconds, false);
+    }
+  }
   if (mine === null && theirs === null) return null;
   return (mine ?? 0) + (theirs ?? 0);
 }

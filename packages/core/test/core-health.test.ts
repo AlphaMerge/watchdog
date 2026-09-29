@@ -4,6 +4,7 @@ import { CORE_HEALTH_CHANNELS, CORE_HEALTH_COUNTERS } from '@ms/sensors';
 import type { AvailableMemoryLow, CheckResult } from '@ms/shared';
 import {
   CoreHealthService,
+  type LocalProbeLog,
   readingsFrom,
   type CoreHealthReading,
   type CoreHealthSources,
@@ -507,13 +508,11 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
   describe('the log lines a reading counts (P-216 part 3)', () => {
     function logged(): {
       own: { droppedLines: number; droppedBytes: number; backlogBytes: number };
-      local: { current: { droppedLines: number; uptimeSeconds: number } | null };
+      local: { current: LocalProbeLog | null };
       service: CoreHealthService;
     } {
       const own = { droppedLines: 0, droppedBytes: 0, backlogBytes: 0 };
-      const local: { current: { droppedLines: number; uptimeSeconds: number } | null } = {
-        current: null,
-      };
+      const local: { current: LocalProbeLog | null } = { current: null };
       const service = new CoreHealthService({
         vouching: everyVoucherHolds,
         db,
@@ -547,15 +546,73 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       // A probe running from before this core: its total may be on record already, so its part
       // gaps once and the core's own stands.
       own.droppedLines = 3;
-      local.current = { droppedLines: 500, uptimeSeconds: 9_000 };
+      local.current = { droppedLines: 500, uptimeSeconds: 9_000, session: 1 };
       assert.equal((await service.read())['logDropped'], 3);
       own.droppedLines = 5;
-      local.current = { droppedLines: 740, uptimeSeconds: 9_030 };
+      local.current = { droppedLines: 740, uptimeSeconds: 9_030, session: 1 };
       assert.equal((await service.read())['logDropped'], 2 + 240);
-      // The probe restarted: its new total is all new.
-      local.current = { droppedLines: 12, uptimeSeconds: 20 };
-      assert.equal((await service.read())['logDropped'], 12);
+      // The probe restarted, which is a new session: its part gaps once, as a reconnect's does,
+      // since what it dropped while away fell in no reading (`P-250`).
+      own.droppedLines = 6;
+      local.current = { droppedLines: 12, uptimeSeconds: 20, session: 2 };
+      assert.equal((await service.read())['logDropped'], 1);
+      local.current = { droppedLines: 15, uptimeSeconds: 50, session: 2 };
+      assert.equal((await service.read())['logDropped'], 3);
     });
+
+    // **What no sweep recorded is let go** (`P-250`): with no Core Health sensor, or only withheld
+    // ones, the baselines still move, so the first record after counts only its own interval.
+    for (const path of ['every sensor withheld', 'no sensor at all'] as const) {
+      it(`lets go of what it dropped with ${path} (P-250)`, async () => {
+        const own = { droppedLines: 0, droppedBytes: 0, backlogBytes: 0 };
+        const local = { current: { droppedLines: 0, uptimeSeconds: 9_000, session: 1 } };
+        const skip = { on: false };
+        const recorded: CheckResult[] = [];
+        const service = new CoreHealthService({
+          vouching: {
+            refusals: (sensors) =>
+              Promise.resolve(
+                new Map(
+                  skip.on && path === 'every sensor withheld'
+                    ? sensors.map((one) => [one.sensorId, 'withheld'] as const)
+                    : [],
+                ),
+              ),
+            settle: () => Promise.resolve(0),
+          },
+          db: {
+            query: (sql: string, params?: unknown[]) =>
+              skip.on && path === 'no sensor at all' ? Promise.resolve([]) : db.query(sql, params),
+            tx: db.tx.bind(db),
+          } as unknown as Database,
+          logger: silent,
+          sources: {
+            ...sources(),
+            log: () => ({ ...own }),
+            localProbeLog: () => Promise.resolve(local.current),
+          },
+          ingest: (results) => {
+            recorded.push(...results);
+            return Promise.resolve();
+          },
+          process: fakeProcess({ cpuUs: [], elapsedNs: [], uptime: 1_000 }),
+        });
+        const logDropped = (): unknown =>
+          recorded.at(-1)?.channels.find((channel) => channel.key === 'logDropped')?.value;
+        await service.sweep();
+        skip.on = true;
+        own.droppedLines = 1_000;
+        local.current = { ...local.current, droppedLines: 500, uptimeSeconds: 9_030 };
+        recorded.length = 0;
+        await service.sweep();
+        assert.equal(recorded.length, 0, 'nothing recorded');
+        skip.on = false;
+        own.droppedLines = 1_007;
+        local.current = { ...local.current, droppedLines: 503, uptimeSeconds: 9_060 };
+        await service.sweep();
+        assert.equal(logDropped(), 10, 'the lines since the last sweep, not the 1,500 before it');
+      });
+    }
 
     it('gaps with no log to read, and never reads the gap as zero', async () => {
       const service = build();

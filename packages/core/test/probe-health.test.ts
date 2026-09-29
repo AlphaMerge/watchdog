@@ -100,6 +100,8 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
   let probeId = 0;
   let sensorId = 0;
   let orphanId = 0;
+  /** The probe the orphan sits under, which has no Probe Health of its own. */
+  let watcherId = 0;
   let harness: Harness;
 
   before(async () => {
@@ -135,6 +137,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       parentId: harness.rootId,
       name: 'local-probe',
     });
+    watcherId = watcher.id;
     const watcherDevice = await harness.service.create(testActor, {
       kind: 'device',
       parentId: watcher.id,
@@ -709,18 +712,43 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
   });
 
   describe('the log lines a record counts (P-216 part 3)', () => {
-    /** One service across sweeps, so each record's count is against the one before. */
+    /**
+     * One service across sweeps, so each record's count is against the one before, with every
+     * path by which a sweep records nothing switchable between them (`P-250`).
+     */
     function recorder(uptime = 10_000): {
       link: { current: ProbeLink };
+      skip: { withhold: boolean; awaiting: boolean; noSensors: boolean };
+      connected: { ids: number[] };
       sweep: () => Promise<Map<number, Record<string, number>>>;
     } {
       const link = { current: connected() };
+      const skip = { withhold: false, awaiting: false, noSensors: false };
+      const connectedIds = { ids: [probeId] };
       const results: CheckResult[] = [];
+      // The sweep with no sensors at all: every query it makes finds nothing.
+      const maybeEmpty = {
+        query: (sql: string, params?: unknown[]) =>
+          skip.noSensors ? Promise.resolve([]) : db.query(sql, params),
+        tx: db.tx.bind(db),
+      } as unknown as Database;
       const service = new ProbeHealthService({
-        vouching: everyVoucherHolds,
-        db,
+        vouching: {
+          refusals: (sensors) =>
+            Promise.resolve(
+              new Map(
+                skip.withhold ? sensors.map((one) => [one.sensorId, 'withheld'] as const) : [],
+              ),
+            ),
+          settle: () => Promise.resolve(0),
+        },
+        db: maybeEmpty,
         logger: silent,
-        sources: { link: () => link.current },
+        sources: {
+          link: () => link.current,
+          connectedProbeIds: () => (link.current.connected ? connectedIds.ids : []),
+        },
+        delivery: { verdictFor: () => null, awaitingFirstConnect: () => skip.awaiting },
         ingest: (batch) => {
           results.push(...batch);
           return Promise.resolve();
@@ -730,6 +758,8 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       });
       return {
         link,
+        skip,
+        connected: connectedIds,
         sweep: async () => {
           results.length = 0;
           await service.sweep();
@@ -765,12 +795,103 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal((await r.sweep()).get(sensorId)?.['logDropped'], 0, 'and clears');
     });
 
-    it('counts a probe that restarted in full, which is the stall that restarted it', async () => {
+    it('gaps the first record of a new session, and counts from it (P-250)', async () => {
+      // What a probe dropped while it was not connected fell in no sweep's window; counting it at
+      // the reconnect would date it now. A restart is a new session too.
       const r = recorder(1_000);
       r.link.current = reporting(400, 5_000);
       await r.sweep();
-      r.link.current = reporting(900, 12);
-      assert.equal((await r.sweep()).get(sensorId)?.['logDropped'], 900);
+      r.link.current = reporting(460, 5_030);
+      assert.equal((await r.sweep()).get(sensorId)?.['logDropped'], 60);
+      r.link.current = { connected: false };
+      await r.sweep();
+      const again = (total: number, uptimeSeconds: number): ProbeLink =>
+        connected({
+          connectedAt: new Date('2026-08-28T06:00:00Z'),
+          health: { ...FULL, logDropped: total, logBacklogBytes: 0, uptimeSeconds },
+        });
+      r.link.current = again(3_000, 9_000);
+      assert.equal('logDropped' in ((await r.sweep()).get(sensorId) ?? {}), false, 'a gap');
+      r.link.current = again(3_004, 9_030);
+      assert.equal((await r.sweep()).get(sensorId)?.['logDropped'], 4);
+    });
+
+    // **Every path by which a sweep records nothing lets the window go** (`P-250`). Before, the
+    // baseline moved only where a record was written, so the first record after any of these
+    // counted everything dropped while it lasted, stamped now: a warning for a stall long over.
+    const SKIPS: readonly {
+      name: string;
+      set: (r: ReturnType<typeof recorder>) => Promise<void> | void;
+      unset: (r: ReturnType<typeof recorder>) => Promise<void> | void;
+    }[] = [
+      {
+        name: 'no sensors at all',
+        set: (r) => {
+          r.skip.noSensors = true;
+        },
+        unset: (r) => {
+          r.skip.noSensors = false;
+        },
+      },
+      {
+        name: 'every sensor withheld',
+        set: (r) => {
+          r.skip.withhold = true;
+        },
+        unset: (r) => {
+          r.skip.withhold = false;
+        },
+      },
+      {
+        name: 'the boot grace, before the probe is known to be there (M-22)',
+        set: (r) => {
+          r.skip.awaiting = true;
+        },
+        unset: (r) => {
+          r.skip.awaiting = false;
+        },
+      },
+    ];
+    for (const path of SKIPS) {
+      it(`lets go of what it dropped during ${path.name} (P-250)`, async () => {
+        const r = recorder(1_000);
+        r.link.current = reporting(400, 5_000);
+        await r.sweep();
+        await path.set(r);
+        r.link.current = reporting(1_400, 5_030);
+        const skipped = await r.sweep();
+        assert.equal(skipped.get(sensorId)?.['logDropped'], undefined, 'nothing recorded');
+        await path.unset(r);
+        r.link.current = reporting(1_410, 5_060);
+        assert.equal(
+          (await r.sweep()).get(sensorId)?.['logDropped'],
+          10,
+          'the lines since the last sweep, not the thousand while it lasted',
+        );
+      });
+    }
+
+    it('lets go of what a probe with no Probe Health dropped, until one reports on it (P-250)', async () => {
+      // Monday's lines, on a probe nobody watched, are not Thursday's warning.
+      const r = recorder(1_000);
+      r.connected.ids = [probeId, watcherId];
+      r.link.current = reporting(400, 5_000);
+      await r.sweep();
+      r.link.current = reporting(1_400, 5_030);
+      await r.sweep();
+      // The orphan stops naming the remote probe and reports on the one it sits under.
+      await db.query("UPDATE sensor_config SET params = '{}'::jsonb WHERE object_id = $1", [
+        orphanId,
+      ]);
+      try {
+        r.link.current = reporting(1_410, 5_060);
+        assert.equal((await r.sweep()).get(orphanId)?.['logDropped'], 10);
+      } finally {
+        await db.query('UPDATE sensor_config SET params = $2::jsonb WHERE object_id = $1', [
+          orphanId,
+          JSON.stringify({ probeId }),
+        ]);
+      }
     });
 
     it('counts a probe that started after this core did in full on its first record', async () => {
