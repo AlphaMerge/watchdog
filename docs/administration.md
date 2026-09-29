@@ -253,7 +253,9 @@ could republish that they could not read already. A write vouches as the install
 the account making it has logged in, and the audit log still names that account. A sensor an
 account already vouches for, from migration 059 or from a time the layer was on, is not checked
 while the layer stays off: nothing is withheld for its voucher. Switch the layer on and each of
-those is held to its account again from the next sweep.
+those is held to its account again from the next sweep. Expect several to go **Unknown** at
+once then, one for each sensor whose account can no longer read what it names, or has been
+deleted or disabled. Each message says how to vouch for it again.
 
 **On upgrade** (migration 059) every existing sensor is assigned the account that last created it
 or wrote its parameters, from the audit log, directly or through one of its tokens. That account
