@@ -601,7 +601,7 @@ One template, in full
 
 What a fingerprint would produce
 
-The answer `D-04` will act on, before it acts on it. Takes a fingerprint — one of the ones a discovery run recorded — and reports which templates matched and which sensors would actually be created, given the credential kinds available.
+The answer `D-04` will act on, before it acts on it. Takes a fingerprint — one of the ones a discovery run recorded — and reports which templates matched and which sensors would actually be created, given the credential kinds available. The fingerprint is checked as a stored one is: without an IPv4 `address`, a known `kind` and a number on every port, or with anything but text in a text field, it is a 400 `FINGERPRINT_INVALID` naming the field. Fields this build does not know are accepted and ignored.
 
 **Body**
 

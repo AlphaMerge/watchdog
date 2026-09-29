@@ -12064,7 +12064,7 @@ because each is a decision rather than a defect:
       password is generated state, not a test value; the rendered vitests are what cover the
       page.
 
-- [ ] **D-12 — A fingerprint the plan route never checked reaches the matcher** · S · D-03 ·
+- [x] **D-12 — A fingerprint the plan route never checked reaches the matcher** · S · D-03 ·
       Found 2026-09-29 during `A-31`. `POST /device-templates/plan` answers 500 to
       `{"fingerprint": {}}` on any installation with templates loaded. Its body schema is an object
       with any properties, and the route hands that straight to `templates.plan()`, whose
@@ -12080,6 +12080,65 @@ because each is a decision rather than a defect:
         listed in the outcome with a verdict: validated further in, harmless, or fixed here, each
         fixed one with a test that sends `{}` and expects 400, not 500. More than a couple of real
         ones go back to WatchDog to split.
+
+      **D-12 outcome.**
+      - **One check, where there were one reader and none.** `checkFingerprint` in
+        `discovery/fingerprint.ts` is the definition for a fingerprint a probe reports and for one
+        an operator submits. It answers the fingerprint, normalised, or the field that stops it
+        and why. `readFingerprint` wraps it for the discovery service, which uses it where a
+        probe's report is written and where a stored fingerprint is read.
+        The plan route turns a refusal into `FINGERPRINT_INVALID`, a 400 whose sentence starts
+        with the field (`fingerprint.ports[0].port must be an integer from 1 to 65535`) and whose
+        context names it.
+      - **It checks more than the old reader did, because the matcher needed more.** The old
+        reader checked `address` and `kind` and passed the rest through as it arrived, so a
+        stored `vendor: 5` reached `toLowerCase` and `ports: [null]` reached `.port`, the same
+        500 by the probe's path. Now:
+        - `address` has to be IPv4 by `net.isIPv4` rather than by a digits-and-dots pattern
+          that let `10.0.0.300` through to an `::inet` cast;
+        - `reverseName`, `sysDescr`, `sysObjectId`, `sysName`, `httpServer` and `vendor` have to
+          be text, because the matcher or provisioning calls a string method on each;
+        - `ports` has to be a list, and every entry needs an integer `port` from 1 to 65535.
+        `null` in one of those fields, or as `ports`, reads as absent and is removed, since
+        provisioning tests them against `undefined`. Everything else is still carried through,
+        a field this build does not know included. A confidence that is not a number still reads
+        as 0, and evidence still keeps only its strings: neither can break a match.
+      - **A stored fingerprint written before this that fails the check reads as unidentified**,
+        so its host gets the generic plan instead of failing the run's plan with a 500. Nothing
+        rewrites the row. The probe's own classifier output passes unchanged, which a test
+        asserts on three classified hosts.
+      - **The sweep** of request schemas that are `additionalProperties: true` or objects with no
+        properties, and whose value reaches code expecting a structure:
+        - `POST /device-templates/plan`, `fingerprint`: **fixed here**.
+        - `PUT /objects/{id}/credentials/{kind}`, `values`: split out as `A-43`, since it was a
+          secret stored in the clear rather than a 500. Landed as `3eca63d`.
+        - `POST /objects/{id}/as-template`, `match`: **harmless**. It is echoed into the file
+          the route returns and matched against nothing. The file is checked by
+          `validateTemplate` when an operator installs it and the core loads it.
+        - `POST /sensor-types/{id}/preview`, `params`: **read defensively**. It is unvalidated
+          on purpose (the schema says why), and the only previewer, `rest.custom`, reads it
+          through `readMappings` and `readExpectations`, which skip what they cannot read.
+        - Notification templates, `settings` on create and update: **validated further in**, by
+          the method's own schema (`notifications/templates.ts:628`).
+        - Triggers, `settings` on create and update: **validated further in**, by the trigger
+          kind's schema (`triggers/service.ts:182`).
+        - Maps, `layout` on create and update: **read defensively**, by `readWidgets`, which
+          leaves out a widget it cannot read and reports why.
+        - Objects, `params` on create, update and tree create: **validated further in**, by
+          `SensorTypeGate.normalise`, against the sensor type's `paramsSchema`.
+        - Everything else that matched the search is a response schema.
+      - **Tests.** `fingerprint-check.test.ts` covers the check as a table: 16 refusals, each
+        naming its field, and the acceptances (the classifier's output, `null` as absent, an
+        address and a kind alone, an unknown field kept, confidence and evidence tidied). It
+        also asserts that everything the check accepts plans against the shipped templates. It
+        drives the route on a server with the shipped templates and no database: `{}`,
+        `vendor: 5` and `ports: [null]` each answer 400 with the field, and a valid fingerprint
+        answers 200, with a `null` vendor or without one. `discovery.test.ts` refuses the numeric
+        vendor and the null port from a probe, and reads a planted stored row with a numeric
+        vendor as unidentified. Mutation 8/8: the route skipping the check, the text fields
+        unchecked, a port entry without a number let through, a null kept, the address matched
+        by pattern, the stored read unchecked, a null `ports` refused, and the code missing from
+        the status table.
 
 ## Phase 8 — Remote probes
 

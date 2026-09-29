@@ -493,11 +493,33 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
         { kind: 'linux', confidence: 10, ports: [], evidence: [] },
         'not an object',
         null,
+        // The two a template's criteria would have thrown on (`D-12`).
+        fingerprint('10.0.0.3', { vendor: 5 }),
+        fingerprint('10.0.0.3', { ports: [null] }),
       ]);
       assert.equal((await mustGet(run.id)).identified, 1);
       const hosts = await discovery.hosts(run.id);
       assert.equal(hosts[0]?.fingerprint?.kind, 'linux');
       assert.equal(hosts[1]?.fingerprint, null, 'an unknown kind is not written');
+      assert.equal(hosts[2]?.fingerprint, null, 'a numeric vendor or a null port is not written');
+    });
+
+    it('reads a stored fingerprint the matcher could not as unidentified (D-12)', async () => {
+      // Written before `D-12`, whose reader let a numeric vendor through: the run's plan read it
+      // and answered 500. Now it reads as a host nobody identified, which gets the generic plan.
+      const run = await sweptAndFound(['10.0.0.1', '10.0.0.2']);
+      await discovery.identified(probeId, run.id, 2, [
+        fingerprint('10.0.0.1'),
+        fingerprint('10.0.0.2'),
+      ]);
+      await db.query(
+        `UPDATE discovery_host SET fingerprint = fingerprint || '{"vendor": 5}'::jsonb
+         WHERE run_id = $1 AND address = '10.0.0.2'::inet`,
+        [run.id],
+      );
+      const hosts = await discovery.hosts(run.id);
+      assert.equal(hosts[0]?.fingerprint?.kind, 'linux');
+      assert.equal(hosts[1]?.fingerprint, null);
     });
 
     it('keeps a field it does not know about, because a newer probe may send one', async () => {

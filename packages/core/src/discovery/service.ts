@@ -12,6 +12,7 @@ import type { Database } from '../db/pool.js';
 import type { Actor, AuditSink } from '../objects/audit.js';
 import type { ProbeRefusals } from '../probes/refusals.js';
 import { DiscoveryError } from './errors.js';
+import { readFingerprint } from './fingerprint.js';
 import { requireGroupProbe } from './scope.js';
 import { describeRun, type DiscoverySummary } from './summary.js';
 
@@ -971,39 +972,6 @@ function read(row: Record<string, unknown>): DiscoveryRunRow {
 
 function iso(value: unknown): string {
   return value instanceof Date ? value.toISOString() : String(value);
-}
-
-/** The device kinds this build knows. A probe naming another is a newer probe, and is refused. */
-const KINDS = new Set(['windows', 'linux', 'network', 'printer', 'hypervisor', 'nas', 'unknown']);
-
-/**
- * A fingerprint from a probe, or null.
- *
- * **Strict about the two fields anything downstream depends on and permissive about the rest.**
- * `address` is what the row is matched by and `kind` is what `D-03` maps to a sensor set; a
- * fingerprint missing either is not usable for anything. Everything else is carried through as it
- * arrived, because a newer probe reporting a field this build has never heard of is exactly the
- * case the wire schema left open on purpose — dropping it would lose information a later release
- * knows how to read, and the column is `jsonb`.
- */
-function readFingerprint(value: unknown): Fingerprint | null {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
-  const address = record['address'];
-  if (typeof address !== 'string' || !/^\d{1,3}(\.\d{1,3}){3}$/.test(address)) return null;
-  const kind = record['kind'];
-  if (typeof kind !== 'string' || !KINDS.has(kind)) return null;
-  const confidence = Number(record['confidence']);
-  return {
-    ...record,
-    address,
-    kind: kind as Fingerprint['kind'],
-    confidence: Number.isFinite(confidence) ? Math.min(100, Math.max(0, confidence)) : 0,
-    ports: Array.isArray(record['ports']) ? (record['ports'] as Fingerprint['ports']) : [],
-    evidence: Array.isArray(record['evidence'])
-      ? (record['evidence'] as unknown[]).filter((one): one is string => typeof one === 'string')
-      : [],
-  };
 }
 
 /** A level from the database, defaulting rather than throwing — see `levelDefinition`. */

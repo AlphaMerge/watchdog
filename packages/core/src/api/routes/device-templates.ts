@@ -5,6 +5,7 @@ import { AppError, type Fingerprint } from '@ms/shared';
 import type { DeviceTemplateCatalogue } from '../../device-templates/catalogue.js';
 import { templateFromDevice } from '../../device-templates/from-device.js';
 import { runNotFound } from '../../discovery/errors.js';
+import { checkFingerprint } from '../../discovery/fingerprint.js';
 import type { DiscoveryService } from '../../discovery/service.js';
 import type { Visibility } from '../../auth/access.js';
 import { ObjectError } from '../../objects/errors.js';
@@ -145,7 +146,11 @@ export function deviceTemplateRoutes(
         description:
           'The answer `D-04` will act on, before it acts on it. Takes a fingerprint — one of ' +
           'the ones a discovery run recorded — and reports which templates matched and which ' +
-          'sensors would actually be created, given the credential kinds available.',
+          'sensors would actually be created, given the credential kinds available. The ' +
+          'fingerprint is checked as a stored one is: without an IPv4 `address`, a known ' +
+          '`kind` and a number on every port, or with anything but text in a text field, it is ' +
+          'a 400 `FINGERPRINT_INVALID` naming the field. Fields this build does not know are ' +
+          'accepted and ignored.',
         body: {
           type: 'object',
           required: ['fingerprint'],
@@ -189,8 +194,17 @@ export function deviceTemplateRoutes(
       },
     },
     (request: FastifyRequest) => {
-      const body = request.body as { fingerprint: Fingerprint; credentials?: string[] };
-      const plan = templates.plan(body.fingerprint, new Set(body.credentials ?? []));
+      const body = request.body as { fingerprint: unknown; credentials?: string[] };
+      // Through the check a stored fingerprint takes (`D-12`). The body schema leaves the
+      // fingerprint open, as the wire does, so this is where a missing `ports` or a numeric
+      // `vendor` stops, rather than inside the matcher as a 500.
+      const check = checkFingerprint(body.fingerprint);
+      if (!check.ok) {
+        throw new AppError('FINGERPRINT_INVALID', `fingerprint.${check.field} ${check.problem}`, {
+          context: { field: `fingerprint.${check.field}` },
+        });
+      }
+      const plan = templates.plan(check.fingerprint, new Set(body.credentials ?? []));
       return {
         templates: plan.templates.map((one) => ({
           id: one.template.id,

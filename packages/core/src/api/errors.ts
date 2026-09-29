@@ -57,6 +57,8 @@ const MASKED = 'the request could not be completed';
 export const APP_ERROR_STATUS: ReadonlyMap<string, AppErrorAnswer> = new Map([
   // The caller's. They can fix it once they are told what it is.
   ['DEVICE_TEMPLATE_NOT_FOUND', { status: 404, says: true }],
+  // A plan asked for a fingerprint the matcher cannot read (`D-12`). The sentence names the field.
+  ['FINGERPRINT_INVALID', { status: 400, says: true }],
   // Wrapped as `DISCOVERY_RANGE_INVALID` by the discovery routes. A parse that escapes some other
   // way is still the caller's range.
   ['IP_RANGE_INVALID', { status: 400, says: true }],
