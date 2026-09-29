@@ -6145,6 +6145,13 @@ because each is a decision rather than a defect:
         a trigger on Unknown would hear nothing: `M-24`'s silence again.
       - An Unknown sensor's status in a formula reads not-up, the formula language's rule, and
         stays as it is (decided in `M-23`).
+      - **Carry a held factory by its inputs' probe**, not merely "never carried": resolve its
+        carrier in the episode index's `carrierOf` through the inputs it lacks. Never carried
+        alone would give a trigger on Unknown a second alarm, for the factory, beside the
+        probe's episode alarm.
+      - **A started overlay is pinned locally** at `refs/wip/m26-overlay` (213d81c, not pushed):
+        `FactoryReach`, the `unreachedFactories` state option, the sweep's hold and unit tests.
+        It is unbuilt and has no engine part.
 
       **Done when:**
       - a factory whose every channel gapped on sensors under a lost or frozen probe reads
