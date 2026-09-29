@@ -4,6 +4,7 @@ import { AccessService } from '../src/auth/access.js';
 import { addressesOnly } from './support/recipients.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { createTransport, type SendMailOptions } from 'nodemailer';
 import type { SmtpConfig, SmtpRelay } from '@ms/shared';
 import { DatabaseAuditSink } from '../src/audit/store.js';
 import type { Database } from '../src/db/pool.js';
@@ -155,6 +156,38 @@ describe('the email transport', () => {
       }) as never;
     return { sent, build };
   }
+
+  it('sends a subject in any script, which the mail library encodes (N-18)', async () => {
+    // The webhook's header failed on anything above U+00FF. Email's subject is a header too, and
+    // this is the check that it is encoded rather than refused: the real library builds the
+    // message here, and only the relay is left out.
+    const compiled: string[] = [];
+    const library = createTransport({ streamTransport: true, buffer: true, newline: 'unix' });
+    const build = (): never =>
+      ({
+        sendMail: async (mail: SendMailOptions) => {
+          const info = await library.sendMail(mail);
+          const raw: unknown = info.message;
+          compiled.push(Buffer.isBuffer(raw) ? raw.toString('utf8') : '');
+          return { messageId: info.messageId, accepted: ['ops@example.test'], rejected: [] };
+        },
+        close: () => undefined,
+      }) as never;
+    const transport = new EmailTransport({
+      config: smtp(),
+      logger: silent,
+      recipients: addressesOnly,
+      build,
+    });
+    const subject = 'Ping on Київ-edge 🔥 is down — 東京, ÿ';
+    const result = await transport.send(message({ subject }));
+    assert.ok(result.ok, result.ok ? '' : result.error);
+
+    const raw = compiled.at(0) ?? '';
+    const header = /^Subject: (.*(?:\n[ \t].*)*)/mu.exec(raw)?.[1] ?? '';
+    assert.match(header, /^[\x20-\x7E\n\t]+$/u, 'the header itself is ASCII');
+    assert.equal(decodeWords(header), subject);
+  });
 
   it('refuses to send when no relay is configured, and does not retry', async () => {
     const transport = new EmailTransport({
@@ -977,3 +1010,25 @@ describe(
     );
   },
 );
+
+/**
+ * RFC 2047's encoded words back to text, for the one test that reads a compiled message. Adjacent
+ * words are joined, since the whitespace between them is folding and not part of the subject.
+ */
+function decodeWords(header: string): string {
+  return header
+    .replace(/\n[ \t]/gu, ' ')
+    .replace(/\?=\s+=\?/gu, '?==?')
+    .replace(/=\?utf-8\?([bq])\?([^?]*)\?=/giu, (_word, encoding: string, text: string) =>
+      encoding.toLowerCase() === 'b'
+        ? Buffer.from(text, 'base64').toString('utf8')
+        : Buffer.from(
+            text
+              .replace(/_/gu, ' ')
+              .replace(/=([0-9a-f]{2})/giu, (_hex, pair: string) =>
+                String.fromCharCode(parseInt(pair, 16)),
+              ),
+            'latin1',
+          ).toString('utf8'),
+    );
+}

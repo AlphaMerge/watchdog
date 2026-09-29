@@ -150,6 +150,12 @@ Notification templates — what a message says, who receives it, and when it is 
   save. After such a save the form shows them as not set, and the template's history says which
   were cleared. This is so that editing a template cannot send a token somebody else set to an
   address of your choosing.
+- **An HTTP action sends its subject as the `x-ms-subject` header**, so an endpoint can route on
+  it without parsing the body. A subject in printable ASCII is sent as it is. Anything else is
+  sent as percent-encoded UTF-8, with `x-ms-subject-encoding: utf-8-percent` beside it, and
+  `decodeURIComponent` gives the text back. That covers a name in any script, an emoji, and the
+  `—` a placeholder shows when it has no value. A header cannot carry those raw, and until
+  `N-18` they failed the delivery on every retry.
 
 ### Sensor types
 

@@ -11,9 +11,13 @@ import {
   sameOrigin,
   schemeAllowed,
 } from '@ms/shared';
-import { WebhookTransport } from '../src/notifications/delivery/webhook.js';
+import {
+  SUBJECT_ENCODING,
+  subjectHeaders,
+  WebhookTransport,
+} from '../src/notifications/delivery/webhook.js';
 import type { OutgoingMessage } from '../src/notifications/delivery/transport.js';
-import { substitute, type MessageContext } from '../src/notifications/placeholders.js';
+import { render, substitute, type MessageContext } from '../src/notifications/placeholders.js';
 import { messageContext } from './support/messages.js';
 import { silent } from './support/tree.js';
 
@@ -267,6 +271,76 @@ describe('the webhook transport', () => {
     assert.equal(seen.at(0)?.headers['user-agent'], 'ms-core-test');
     // So an endpoint can route without parsing the body.
     assert.equal(seen.at(0)?.headers['x-ms-subject'], 'Ping on edge-router is down');
+  });
+
+  describe('a subject outside printable ASCII (N-18)', () => {
+    // Node refuses a header value above U+00FF before the request is sent, and every retry
+    // rendered the same subject, so any of these lost the alarm for good.
+    const SUBJECTS: readonly (readonly [string, string])[] = [
+      ['Cyrillic', 'Ping on Київ-edge is down'],
+      ['CJK', 'Ping on 東京-core is down'],
+      ['an emoji', 'Ping 🔥 on edge-router is down'],
+      ['an em dash', 'DNS on ns1 is down: that zone does not exist — check the spelling'],
+      ['U+00FF itself', 'Ping on edge-routerÿ is down'],
+      ['a tab', 'Ping on edge-router\tis down'],
+    ];
+
+    for (const [what, subject] of SUBJECTS) {
+      it(`delivers ${what}, and the endpoint decodes it back`, async () => {
+        const result = await transport().send(
+          message({
+            subject,
+            settings: { url: url(), verb: 'POST', contentType: 'application/json' },
+          }),
+        );
+        assert.ok(result.ok, result.ok ? '' : result.error);
+        const headers = seen.at(0)?.headers ?? {};
+        assert.equal(headers['x-ms-subject-encoding'], SUBJECT_ENCODING);
+        assert.equal(decodeURIComponent(String(headers['x-ms-subject'])), subject);
+      });
+    }
+
+    it('delivers what a template renders, with the — of a placeholder that has nothing', async () => {
+      // The review's case: a Cyrillic device and a sensor with no previous state.
+      const rendered = render(
+        { subject: '%sensor on %device: %laststatus', body: '{}' },
+        messageContext({ deviceName: 'Київ-edge', previousState: null }),
+      );
+      assert.match(rendered.subject, /—/u, 'the control: the placeholder rendered its dash');
+      const result = await transport().send(
+        message({
+          subject: rendered.subject,
+          settings: { url: url(), verb: 'POST', contentType: 'application/json' },
+        }),
+      );
+      assert.ok(result.ok, result.ok ? '' : result.error);
+      assert.equal(
+        decodeURIComponent(String(seen.at(0)?.headers['x-ms-subject'])),
+        rendered.subject,
+      );
+    });
+
+    it('sends a printable-ASCII subject as it always has, with no encoding header', () => {
+      assert.deepEqual(subjectHeaders('Ping on edge-router is down: 100% loss'), {
+        'x-ms-subject': 'Ping on edge-router is down: 100% loss',
+      });
+    });
+
+    it('sends half a surrogate pair as U+FFFD rather than throwing', () => {
+      // A subject cut at a length limit can end inside an emoji.
+      const cut = 'Ping 🔥'.slice(0, -1);
+      const headers = subjectHeaders(cut);
+      assert.equal(decodeURIComponent(headers['x-ms-subject'] ?? ''), 'Ping \uFFFD');
+    });
+
+    it('still folds a line break before encoding, so nothing can end the header', () => {
+      const headers = subjectHeaders('Ping on Київ\r\nBcc: someone@else');
+      assert.equal(
+        decodeURIComponent(headers['x-ms-subject'] ?? ''),
+        'Ping on Київ Bcc: someone@else',
+      );
+      assert.doesNotMatch(headers['x-ms-subject'] ?? '', /[\r\n]/u);
+    });
   });
 
   it('sends the secret headers it was configured with', async () => {

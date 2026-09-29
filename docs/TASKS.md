@@ -2974,7 +2974,7 @@ because each is a decision rather than a defect:
       dropping to zero and a simulated outage queueing nothing at all; then the fence down, the
       trigger back, and the outage arriving in MailHog.
 
-- [ ] **N-18 — a webhook subject outside Latin-1 fails the delivery, every retry** · S · N-08 ·
+- [x] **N-18 — a webhook subject outside Latin-1 fails the delivery, every retry** · S · N-08 ·
       Found in review round 4b (`findings/2026-09-29-review-round-4b.md`, `N-18`). **High.**
       `webhook.ts:77` puts the rendered subject in the `x-ms-subject` header with only CR and LF
       removed. Node's `http.request` refuses a header value with any character above U+00FF, and
@@ -2991,6 +2991,47 @@ because each is a decision rather than a defect:
       other place a rendered value becomes a header value, including the other delivery
       methods, and list each in the outcome. Tests: subjects with Cyrillic, CJK, an emoji, an em
       dash and U+00FF itself, delivered to a test receiver and decoded back. Mutants as usual.
+
+      **N-18 outcome.** `subjectHeaders` in `webhook.ts` builds the header, and nothing a subject
+      holds can make it fail.
+      - **Printable ASCII is sent as before**, with no second header, which is every subject an
+        endpoint has been sent so far.
+      - **Anything else is sent as its UTF-8, percent-encoded**, with `x-ms-subject-encoding:
+        utf-8-percent`. Latin-1 is encoded too, although Node would send it: sent raw, a receiver
+        would have to guess its charset.
+      - **Line breaks are folded first**, as before. The text is then made well-formed, because
+        `encodeURIComponent` throws on half a surrogate pair, which a subject cut at a length
+        limit can end in. That half becomes U+FFFD.
+      - `web-ui.md` says what the header carries and how to decode it.
+
+      **The sweep.** Every place a rendered value leaves the core:
+      - **Webhook `x-ms-subject`**: the defect, fixed.
+      - **Webhook secret headers**: operator configuration, not rendered, and outside this ticket.
+      - **Email subject and attachment names**: headers too, and nodemailer encodes them
+        (RFC 2047). A new test runs the real library, with only the relay left out, and decodes
+        the Subject back from the compiled message. The `X-MS-*` mail headers are numbers.
+      - **Slack and Teams**: the subject and body go inside a JSON body, and no rendered value
+        is a header.
+      - **Program delivery**: rendered values are arguments and environment variables. Those
+        take any UTF-8. Their one refusal, a NUL, cannot reach them, because names and messages
+        come out of PostgreSQL, which cannot store one.
+      - **The API**: no response header carries a name. Report downloads set no
+        `Content-Disposition`, and the rest are fixed strings, numbers and ETags.
+
+      **Tests.**
+      - `webhook-delivery.test.ts` 10. Six delivered to the test receiver and decoded back:
+        Cyrillic, CJK, an emoji, an em dash, U+00FF itself and a tab. One rendered by a template:
+        a Cyrillic device and `%laststatus` with no previous state, the review's own case. Then
+        ASCII unchanged with no encoding header, half a surrogate pair, and a line break folded
+        before encoding.
+      - `email-delivery.test.ts` 1: a subject in four scripts through the real mail library,
+        ASCII on the wire and the same text decoded.
+
+      Mutation 4/4:
+      - the old raw header (7 tests);
+      - no well-formed step (1);
+      - Latin-1 sent raw (1);
+      - no line-break fold before encoding (1).
 
 ## Phase 5 — Web UI
 
