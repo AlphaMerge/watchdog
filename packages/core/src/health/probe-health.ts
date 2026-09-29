@@ -15,6 +15,7 @@ import type { TimeRefusals } from '../ingestion/service.js';
 import type { DeliveryVerdict } from '../probes/delivery.js';
 import type { MemoryFold, ProbeLink } from '../transport/probe-endpoint.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
+import { judgeCoreClock, remoteClockOffsets } from './core-clock.js';
 
 /**
  * Probe Health, evaluated by the core (`P-13`, and `P-04`'s remaining half).
@@ -277,11 +278,18 @@ export class ProbeHealthService {
    * its machine-wide channels gap, because Core Health owns that reading (`M-21`). The sweep
    * passes it; the API does not, because it raises no alarm and the operator asking should see
    * what the probe reports.
+   *
+   * `coreClockOwned` is the sweep's verdict that every remote probe reads ahead, so the clock at
+   * fault is the core's and Core Health says so (`P-247`): this probe's two clock warnings gap.
    */
   read(
     probeObjectId: number,
     /** `link` is the sweep's, read once for the reading and the record alike. */
-    options: { readonly local?: boolean; readonly link?: ProbeLink } = {},
+    options: {
+      readonly local?: boolean;
+      readonly link?: ProbeLink;
+      readonly coreClockOwned?: boolean;
+    } = {},
   ): { reading: ProbeHealthReading; message: string } {
     const link = options.link ?? this.#sources.link(probeObjectId);
     if (!link.connected) {
@@ -395,11 +403,18 @@ export class ProbeHealthService {
       spoolStalled:
         health?.spoolStalledMs === undefined ? null : round(health.spoolStalledMs / 1000, 1),
       clockJumps: health?.clockJumps ?? null,
-      resultsFutureDated: refused?.future ?? null,
+      // **Gaps while Core Health owns the clock** (`P-247`): every remote probe ahead is the
+      // core's clock behind, one fault and Core Health's alarm, not one per probe naming the
+      // wrong machine. The sentence still gives the offset. Refusals as too old stay: a core
+      // that is behind does not cause them.
+      resultsFutureDated: options.coreClockOwned === true ? null : (refused?.future ?? null),
       resultsPastDated: refused?.past ?? null,
       // The core's reading of the probe's clock, from the `sentAt` on what it sends (`P-232`).
       // Seconds, positive when the probe is behind; a gap until this session has sent one.
-      clockOffset: link.clockOffsetMs === null ? null : round(link.clockOffsetMs / 1000, 1),
+      clockOffset:
+        link.clockOffsetMs === null || options.coreClockOwned === true
+          ? null
+          : round(link.clockOffsetMs / 1000, 1),
       sensorsFrozen: this.#sources.frozenSensors?.(probeObjectId) ?? null,
       cpu: health?.cpuPercent ?? null,
       memory: health?.memoryMb ?? null,
@@ -426,10 +441,16 @@ export class ProbeHealthService {
 
     return {
       reading,
-      message: describe(reading, skew, health !== undefined, health?.poolSize, {
-        local: options.local === true,
-        machineAvailablePercent: health?.memoryAvailablePercent,
-      }),
+      message: describe(
+        reading,
+        skew,
+        health !== undefined,
+        health?.poolSize,
+        { local: options.local === true, machineAvailablePercent: health?.memoryAvailablePercent },
+        options.coreClockOwned === true && link.clockOffsetMs !== null
+          ? -link.clockOffsetMs / 1_000
+          : undefined,
+      ),
     };
   }
 
@@ -484,6 +505,14 @@ export class ProbeHealthService {
       ).map((row) => Number(row.object_id)),
     );
 
+    // Whether the core's own clock is behind every remote probe, judged once for all of them
+    // from the same live links Core Health reads (`P-247`).
+    const coreClock = judgeCoreClock(
+      remoteClockOffsets(this.#sources.connectedProbeIds?.() ?? [], local, (id) =>
+        this.#sources.link(id),
+      ),
+    );
+
     const at = this.#now().toISOString();
     const results: CheckResult[] = [];
     for (const row of sensors) {
@@ -521,7 +550,11 @@ export class ProbeHealthService {
       if (this.#delivery?.awaitingFirstConnect?.(probeId) === true) continue;
       try {
         const link = this.#sources.link(probeId);
-        const { reading, message } = this.read(probeId, { local: local.has(probeId), link });
+        const { reading, message } = this.read(probeId, {
+          local: local.has(probeId),
+          link,
+          coreClockOwned: coreClock.owned && !local.has(probeId),
+        });
         results.push({
           sensorId,
           at,
@@ -763,6 +796,11 @@ function describe(
     local: false,
     machineAvailablePercent: undefined,
   },
+  /**
+   * Seconds this probe reads ahead of the core, when every remote probe does and Core Health
+   * reports it as the core's clock (`P-247`). Said in words, since the channels gap.
+   */
+  aheadOfCoreSeconds?: number,
 ): string {
   const parts: string[] = [];
   const scheduled = reading['scheduled'];
@@ -781,6 +819,13 @@ function describe(
     );
   }
 
+  // The core's measurement, so on a probe of any version, and before its own numbers.
+  if (aheadOfCoreSeconds !== undefined) {
+    parts.push(
+      `its clock reads ${String(Math.round(aheadOfCoreSeconds))} s ahead of the core's, as every ` +
+        "probe's does, which Core Health reports as the core's clock",
+    );
+  }
   if (!reporting) {
     // **Said in words, never as an absent channel.** `R-06`'s rule: a probe that connects and
     // quietly does less than it should is the failure worth making visible.

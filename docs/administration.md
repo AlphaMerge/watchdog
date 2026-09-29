@@ -566,7 +566,9 @@ alarm.
 | `notifyOldest` | Notifications queued and undelivered. 15 minutes warns; an hour means nobody is being told anything |
 | `hostsRefused` | Requests refused since the last reading because their `Host` is not one of the core's names. No limit, since scanners send these all day. A step up after a DNS or proxy change is somebody reaching the core by a name nobody listed. See [the names the core answers to](#the-names-the-core-answers-to) |
 | `rateLimited` | **Any value above zero is a warning.** Requests refused since the last reading by the per-client rate limit. Nobody using the web UI meets it, so a refusal is a runaway loop, an enumeration, or a provisioning script that should use `POST /objects/tree` or needs `api.rateLimitPerMinute` raised. The log names the client. See [the rate limit, and provisioning scripts](#the-rate-limit-and-provisioning-scripts) |
-| `alarmOverdue` | The alarm sweep is not running. Everything downstream of it is silently stale |
+| `alarmOverdue` | The alarm sweep is not running. Everything downstream of it is silently stale. Measured on the clock the scheduler's timer runs on, so a step of the core's wall clock is not lateness (`P-247`) |
+| `clockBehind` | How far **the core's own clock** is behind every remote probe's, with two or more connected. Warns beyond a minute, errors at 15 minutes, where every remote probe's results are refused. While it is over a minute, each Probe Health's clock warnings stand down and its sentence names the offset instead: one alarm, on the machine at fault. A gap with fewer than two remote probes. See [the core's own clock](#the-cores-own-clock) |
+| `resultsUnreadableTime` | **Any value above zero is a warning.** Results dropped because their time is not a date, which our probe never sends: a broken or hostile build. What it drops is usually a failed check (`P-247`) |
 | `probesDown` | Probes not connected. Their sensors are not being checked |
 
 ### Probe Health — `ms.probe.health`
@@ -666,6 +668,33 @@ The bound behind is deliberately that long. A probe's spool is bounded by size, 
 probe cut off for a month replays a month. Past the raw retention, its readings still fill the
 rollup tiers where they are empty, and its states still count towards uptime. A shorter bound
 would throw that away at the door.
+
+### The core's own clock
+
+Every check above compares a probe's clock with the core's, so each one names the probe. When the
+core's clock is the wrong one, it looks like every probe is wrong at once: a core twenty minutes
+slow sees every probe twenty minutes ahead, refuses all of their results past fifteen, and every
+sensor on a remote probe holds its last state, so a real outage cannot alarm.
+
+**So when every remote probe reads ahead by more than a minute, two or more of them, the core
+names itself** (`P-247`). Core Health's `clockBehind` warns, and errors at 15 minutes. Each Probe
+Health's `clockOffset` and `resultsFutureDated` gap meanwhile, and its sentence says "its clock
+reads 1200 s ahead of the core's, as every probe's does, which Core Health reports as the core's
+clock". One fault, one alarm, on the machine at fault, as `M-21` does for memory.
+
+- **The local probe is left out.** It reads the core's own clock, so it agrees with the core
+  whatever the time is.
+- **One remote probe is not enough.** One probe ahead cannot be told from one probe with a bad
+  clock, so with fewer than two the channel gaps and the probe's own warnings stand, naming the
+  probe. If fixing that probe's time sync does not clear them, check the core's clock.
+- **The results are still refused while it stands.** The core cannot know which clock is right,
+  so every sensor on a remote probe holds its last state until the core's clock is put right.
+  That adds no alarm of its own: Core Health's error says it.
+- **Two probes set wrong the same way are blamed on the core.** That costs which machine is
+  named, never whether an alarm is raised.
+
+The fix is the core host's time sync. The core does not correct for it: it cannot tell a wrong
+clock from a right one, only that the others disagree with it.
 
 ### A lost or frozen probe, and who is told
 

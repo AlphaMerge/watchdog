@@ -225,6 +225,11 @@ const CORE_METRICS: readonly Metric[] = [
     help: 'How late the alarm scheduler is for the sweep it said it would run. Zero when idle.',
   },
   {
+    key: 'clockBehind',
+    name: 'ms_core_clock_behind_probes_seconds',
+    help: "How far this core's clock is behind every remote probe's, with two or more connected.",
+  },
+  {
     key: 'alarmsFired',
     name: 'ms_core_alarm_steps_fired_total',
     help: 'Notification steps the alarm scheduler has fired. Its rate is the alarm rate.',

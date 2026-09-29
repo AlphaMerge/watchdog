@@ -460,6 +460,37 @@ describe('accounts and sessions', { skip: available ? false : 'no database' }, (
       assert.equal((await throttle.check('ops', '203.0.113.4')).refused, false);
     });
 
+    // `P-247`: the stamps are wall-clock, and a backward step of the clock left every failure before
+    // it in the future: the address stayed blocked for the step and the block besides.
+    it('blocks for the block and no longer across a backward step of the clock', async () => {
+      let clock = new Date('2026-09-29T09:00:00.000Z');
+      const throttle = new LoginThrottle({
+        db,
+        logger: silentLogger,
+        config: { maxPerAddress: 2, windowMs: 60_000, addressBlockMs: 60_000 },
+        now: () => clock,
+        sleep: () => Promise.resolve(),
+      });
+      await throttle.record('ops', '203.0.113.21', false);
+      await throttle.record('ops', '203.0.113.21', false);
+
+      // The clock is put back an hour.
+      clock = new Date(clock.getTime() - 3_600_000);
+      const blocked = await throttle.check('ops', '203.0.113.21');
+      assert.equal(blocked.refused, true, 'the failures still count, as now');
+      assert.ok(
+        blocked.retryAfterSeconds <= 60,
+        `a minute's block, not an hour and a minute: ${JSON.stringify(blocked)}`,
+      );
+
+      clock = new Date(clock.getTime() + 61_000);
+      assert.equal(
+        (await throttle.check('ops', '203.0.113.21')).refused,
+        false,
+        'free once the block has passed on the clock as it now reads',
+      );
+    });
+
     it('survives a restart, because a crash must not hand out a fresh allowance', async () => {
       // Counted in the database rather than in memory for exactly this. An attacker who can make
       // a service restart should not get their attempt budget back for doing it.

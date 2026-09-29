@@ -823,6 +823,49 @@ describe('rate limiting', () => {
     assert.equal(neighbour.statusCode, 200, 'the next /64 is somebody else');
   });
 
+  it('says when the window resets as a Unix time, from the time it has left', async () => {
+    const wall = await build((instance) => {
+      registerRateLimit(instance, {
+        logger: silent,
+        max: 3,
+        windowMs: 60_000,
+        now: () => 5_000,
+        wallNow: () => 1_750_000_000_000,
+      });
+    });
+    try {
+      const response = await wall.inject({ method: 'GET', url: '/api/v1/thing' });
+      assert.equal(response.headers['x-ratelimit-reset'], String(1_750_000_000 + 60));
+    } finally {
+      await wall.close();
+    }
+  });
+
+  // `P-247`: on the wall clock, a backward step of an hour kept every window open for the hour,
+  // and a client over the limit was refused all of it.
+  it('opens a new window on time across a backward step of the wall clock', async () => {
+    // The wall clock is replaced before the limiter exists, so a default that captured it would
+    // hold this one, which then steps back and stands still.
+    const realNow = Date.now;
+    let wall = realNow();
+    Date.now = (): number => wall;
+    const stepped = await build((instance) => {
+      registerRateLimit(instance, { logger: silent, max: 1, windowMs: 50 });
+    });
+    try {
+      const once = (): Promise<{ statusCode: number }> =>
+        stepped.inject({ method: 'GET', url: '/api/v1/thing' });
+      assert.equal((await once()).statusCode, 200);
+      assert.equal((await once()).statusCode, 429);
+      wall -= 3_600_000;
+      await sleep(80);
+      assert.equal((await once()).statusCode, 200, 'the window is a duration, not a date');
+    } finally {
+      Date.now = realNow;
+      await stepped.close();
+    }
+  });
+
   it('starts a fresh window once the old one has passed', async () => {
     for (let n = 0; n < 4; n += 1) await get();
     assert.equal((await get()).statusCode, 429);

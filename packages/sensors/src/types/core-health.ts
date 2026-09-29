@@ -385,6 +385,43 @@ const CHANNELS: readonly ChannelDef[] = [
     unit: 'results',
     counter: { bits: 64 },
   },
+  // `P-247`. Results whose timestamp is not a date at all, dropped whole: the state machine is a
+  // fold over time and cannot place them. Our probe stamps every result with `toISOString`, so
+  // anything here is a broken build or a hostile one, and what it drops is most often a failed
+  // check, the one result a batch most needs to carry. Before this it was counted nowhere.
+  {
+    key: 'resultsUnreadableTime',
+    name: 'Results dropped for an unreadable time',
+    unit: 'results',
+    counter: { bits: 64 },
+    limits: {
+      upperWarning: 0,
+      warningMessage:
+        'results are being dropped because their time cannot be read: a probe is sending malformed timestamps',
+    },
+  },
+  // `P-247`. How far this core's clock is behind every remote probe's, when two or more are
+  // connected: the smallest lead among them, 0 when any is not ahead, and a gap with fewer than two,
+  // since one probe ahead cannot be told from one probe wrong. **The core's condition, not theirs**:
+  // while this is over a minute, each Probe Health's clock warnings gap and its sentence names the
+  // offset instead, as `M-21` does for memory. One fault, one alarm, on the machine at fault.
+  //
+  // **The error is at fifteen minutes because that is where ingestion refuses everything**
+  // (`DEFAULT_MAX_FUTURE_SKEW_MS`, `P-99`): every remote probe's results are then future-dated to
+  // this core, every sensor on them holds its last state, and a real outage cannot alarm.
+  {
+    key: 'clockBehind',
+    name: 'Clock behind the probes',
+    unit: 's',
+    limits: {
+      upperWarning: 60,
+      upperError: 900,
+      warningMessage:
+        "this core's clock is behind every probe's by more than a minute; check time sync on the core's host",
+      errorMessage:
+        "this core's clock is so far behind that every probe's results are refused as future-dated; no sensor on a remote probe is being updated",
+    },
+  },
   // `P-157`. Alarm reactions held back because the batch that carried them was a probe replaying
   // its spool: they are folded into the first batch that is not, which is what stops an outage
   // that began during a drain going unalarmed. `CLAUDE.md`: nothing is deferred silently.

@@ -33,6 +33,11 @@ export interface IdentifyRunnerDeps {
   ) => void;
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   readonly progressIntervalMs?: number;
+  /**
+   * Monotonic milliseconds, which progress and standing down are timed on (`P-247`), as the
+   * sweep's are: on the wall clock a backward step sent no progress for the length of the step.
+   */
+  readonly now?: () => number;
 }
 
 const DEFAULT_PROGRESS_INTERVAL_MS = 2_000;
@@ -112,7 +117,8 @@ export class IdentifyRunner {
     const progressEvery = this.#deps.progressIntervalMs ?? DEFAULT_PROGRESS_INTERVAL_MS;
     const stopped = (): boolean => controller.signal.aborted;
     const inFlight = new Set<Promise<void>>();
-    let lastProgress = Date.now();
+    const clock = this.#deps.now ?? ((): number => performance.now());
+    let lastProgress = clock();
     let ending: SweepEnding = 'done';
     let message = '';
 
@@ -120,7 +126,7 @@ export class IdentifyRunner {
       const found = run.found;
       run.found = [];
       this.#deps.onProgress(job.runId, run.cursor, found);
-      lastProgress = Date.now();
+      lastProgress = clock();
     };
 
     try {
@@ -129,10 +135,10 @@ export class IdentifyRunner {
         if (address === undefined) break;
 
         while (this.#deps.queueDepth() > 0 && !stopped()) {
-          const waitedFrom = Date.now();
+          const waitedFrom = clock();
           await sleep(YIELD_MS, controller.signal);
-          this.#yieldedMs += Date.now() - waitedFrom;
-          if (Date.now() - lastProgress >= progressEvery) flush();
+          this.#yieldedMs += clock() - waitedFrom;
+          if (clock() - lastProgress >= progressEvery) flush();
         }
         if (stopped()) break;
 
@@ -146,7 +152,7 @@ export class IdentifyRunner {
         inFlight.add(attempt);
         void attempt.finally(() => inFlight.delete(attempt));
 
-        if (Date.now() - lastProgress >= progressEvery) flush();
+        if (clock() - lastProgress >= progressEvery) flush();
       }
 
       // Whatever is still in the air belongs to this run. A fingerprint that finished after the

@@ -141,6 +141,9 @@ export class ScheduleSweep {
 
   #arm(): void {
     if (this.#stopped) return;
+    // **The wall clock, on purpose** (`P-247` looked). A schedule's boundaries are times of day,
+    // so the wake is aligned to the wall clock's minute; the delay is at most a minute and read
+    // again at every wake, so a step of the clock costs at most one late minute, never the step.
     const now = Date.now();
     // Just past the minute, so a boundary at 09:00:00 is acted on at 09:00:00 and not at
     // 08:59:59.998 — where the schedule is still closed and the sweep would decide nothing

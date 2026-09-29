@@ -113,3 +113,24 @@ describe('replay pacing', () => {
     assert.equal(stats.maxDelayMs, 200);
   });
 });
+
+// `P-247`: how long since a probe last reported a backlog is a duration. On the wall clock, a
+// backward step kept a finished probe counted as catching up, and paying for it, for the step.
+describe('replay pacing across a clock step', () => {
+  it('lets a probe that stopped go on time, whatever the wall clock does', async () => {
+    // Replaced before the pacer exists, so a default that captured it would hold this one.
+    const realNow = Date.now;
+    let wall = realNow();
+    Date.now = (): number => wall;
+    try {
+      const p = new ReplayPacer({ config: { ...CONFIG, idleAfterMs: 20 }, logger: silent });
+      p.pace('gone', 500);
+      assert.equal(p.stats().replaying, 1);
+      wall -= 3_600_000;
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      assert.equal(p.stats().replaying, 0, 'idle past the limit on the clock that measures it');
+    } finally {
+      Date.now = realNow;
+    }
+  });
+});

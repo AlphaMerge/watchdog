@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { describe, it } from 'node:test';
 import { ShareRateLimit, mintShareToken, shareTokenHash } from '../src/maps/shares.js';
 
@@ -39,6 +40,24 @@ describe('a share token', () => {
 });
 
 describe('what one link may cost', () => {
+  // `P-247`: on the wall clock, a backward step kept a wall display refused for the step.
+  it('opens a new window on time across a backward step of the wall clock', async () => {
+    // Replaced before the limiter exists, so a default that captured it would hold this one.
+    const realNow = Date.now;
+    let wall = realNow();
+    Date.now = (): number => wall;
+    const limit = new ShareRateLimit({ perWindow: 1, windowMs: 50 });
+    try {
+      assert.equal(limit.allow('display'), true);
+      assert.equal(limit.allow('display'), false);
+      wall -= 3_600_000;
+      await sleep(80);
+      assert.equal(limit.allow('display'), true, 'the window is a duration, not a date');
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
   const at = (ms: number) => (): number => ms;
 
   it('allows a windowful and refuses the next', () => {

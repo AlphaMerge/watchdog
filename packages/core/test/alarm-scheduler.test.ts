@@ -152,6 +152,56 @@ describe('what the stats say while a sweep is still running', () => {
   });
 });
 
+// `P-247`: how late the scheduler is, on the clock its timer runs on. Measured as the wall clock
+// less `nextWakeAt`, a forward step of the wall clock read as a sweep that never ran.
+describe('how overdue the scheduler is', () => {
+  it('is measured on the monotonic clock, so a wall-clock step is not lateness', async () => {
+    let mono = 1_000_000;
+    const engine = {
+      sweep: () => Promise.resolve({ fired: 0, queued: 0 }),
+      nextDueAt: () => Promise.resolve(null),
+    } as unknown as AlarmEngine;
+    const db = {
+      tx: <T>(fn: (q: never) => Promise<T>): Promise<T> => fn(undefined as never),
+    } as unknown as Database;
+    const scheduler = new AlarmScheduler({
+      db,
+      engine,
+      logger: silent,
+      maxSleepMs: 60_000,
+      settleMs: [],
+      monotonicNow: () => mono,
+    });
+    assert.equal(scheduler.stats.overdueMs, 0, 'nothing armed is not late');
+    const realNow = Date.now;
+    try {
+      scheduler.start();
+      await until(
+        () => scheduler.stats.sweeps >= 1 && scheduler.stats.nextWakeAt !== null,
+        'a sweep',
+      );
+      await until(
+        () => (scheduler.stats.nextWakeAt?.getTime() ?? 0) - realNow() > 30_000,
+        'the scheduler to sleep the cap',
+      );
+      assert.equal(scheduler.stats.overdueMs, 0, 'asleep with its wake ahead');
+
+      // The wall clock jumps an hour ahead; the timer's clock does not move.
+      const stepped = realNow() + 3_600_000;
+      Date.now = (): number => stepped;
+      assert.equal(scheduler.stats.overdueMs, 0, 'a step of the wall clock is not lateness');
+
+      // The timer's own clock passing its wake is.
+      mono += 60_000 + 90_000;
+      assert.equal(scheduler.stats.overdueMs, 90_000);
+    } finally {
+      Date.now = realNow;
+      scheduler.stop();
+    }
+    assert.equal(scheduler.stats.overdueMs, 0, 'a stopped scheduler is not late');
+  });
+});
+
 // -------------------------------------------------------------------------------------------
 // Against a real database.
 // -------------------------------------------------------------------------------------------

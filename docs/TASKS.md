@@ -7347,7 +7347,7 @@ because each is a decision rather than a defect:
         - each of the three types resolving with "only this device" off;
         - the trap rules shown the raw sender.
 
-- [ ] **P-247 — the core's own clock: blamed on the probes, and four durations on the wall
+- [x] **P-247 — the core's own clock: blamed on the probes, and four durations on the wall
       clock** · M · P-231, P-232 · Found in review round 4b
       (`findings/2026-09-29-review-round-4b.md`, `P-247`).
       - **Medium** (`ingestion/service.ts:703`). A core whose clock is more than 15 minutes slow
@@ -7371,6 +7371,56 @@ because each is a decision rather than a defect:
       - unparseable timestamps are counted on Core Health;
       - every duration listed runs on a monotonic clock, or says why it can't.
       Mutants as usual.
+
+      **Done.**
+      - **The core names its own clock.** `health/core-clock.ts` judges it once, for both
+        sweeps, from the live links. If two or more connected remote probes all read ahead by
+        more than a minute, the fault is the core's. The local probe reads the core's clock, so
+        it is left out. With fewer than two remote probes the reading gaps.
+      - **Core Health's `clockBehind`** gives the smallest lead among the remote probes. It warns
+        at 60 s, where Probe Health's `clockOffset` warns, and errors at 900 s, where ingestion
+        refuses everything. A test pins both limits to those two sources.
+      - **Each Probe Health stands down while Core Health owns it.** Its `clockOffset` and
+        `resultsFutureDated` gap, and its sentence gives the offset in words, as `M-21` does for
+        memory.
+      - **Scenario test** (`core-clock-scenario.test.ts`, with a local probe and three remote
+        probes, through both sweeps, ingestion and the state machine):
+        - every probe 20 min ahead: one alarm, Core Health Down;
+        - every probe 2 min ahead: Core Health Warning alone;
+        - one probe ahead: that probe's Probe Health alone;
+        - one remote probe connected: Core Health stays Up;
+        - two remote probes and the local one: Core Health's again.
+      - **Unparseable timestamps** are counted as results before the error branch, in
+        `discardedUnreadableTime`, and logged once a batch. They show on Core Health's
+        `resultsUnreadableTime`, which warns above 0.
+      - **Monotonic now, each with a clock-step test:**
+        - the alarm scheduler's `overdueMs`, which Core Health takes as it is;
+        - both rate limiters, where `x-ratelimit-reset` stays a Unix time;
+        - the discovery sweep's bucket and progress;
+        - the identify runner, the replay pacer and the HTTP delivery deadline, three of the
+          critic's four.
+      - **The fourth, `schedules/sweep.ts`, stays on the wall clock.** It aligns to the minute
+        of a schedule's wall-clock boundaries and costs at most one late minute.
+      - **The critic's login throttle finding was real.** Failures stamped before a backward step
+        stayed in the window. The check now rewrites future-dated rows to now, in the same
+        round trip, and reads them as now.
+      - **Mutants:** 14, one per change, each killed by its test. Five first survived: their
+        tests replaced `Date.now` after the code had captured it. They now replace it before.
+      - **With fewer than two connected remote probes, a slow core still reads as the probe's
+        fault.** One probe ahead cannot be told apart from one probe whose own clock is ahead.
+        So `clockBehind` gaps and the operator sees that probe's Probe Health warn on
+        `clockOffset` and, past 15 minutes, `resultsFutureDated`, naming the probe. The fix
+        the operator reaches for, the probe host's time sync, does not clear it. The
+        administration guide says to check the core's clock when that happens.
+      - **While `clockBehind` stands, results are still refused as future-dated**, so every
+        sensor on a remote probe holds its last state. The core cannot know which clock is
+        right, so it keeps refusing. The freeze adds no alarm of its own: the sensors are not
+        Unknown, `delivering` stays 1 because results still arrive, and `ClockFreeze` needs a
+        probe behind, not ahead. So Core Health's one alarm is the whole of it, and its error
+        message says that no sensor on a remote probe is being updated.
+      - **Heavy run: one load failure.** Core 3855 of 3856, probe 390 of 390. The one failure was
+        alarm-scheduler's "waits out a latency and then fires" (33 s against its 20 s wait). This
+        change does not touch that path, and the file alone passed three times of three.
 
 - [ ] **P-251 — the batch-size sweep's p99 budget is its slowest write** · S · P-237, S-07 ·
       Found by `P-237` (`findings/2026-09-29-batch-sweep-median-under-load.md`). Low.

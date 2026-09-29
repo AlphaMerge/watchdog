@@ -55,7 +55,7 @@ function sources(
     oldestPendingAgeMs: number;
     deliveryThrows: boolean;
     alarmsFired: number;
-    nextWakeAt: Date | null;
+    alarmOverdueMs: number;
     queriesRefused: number;
     reportsDeferred: number;
     reportsFailed: number;
@@ -64,6 +64,7 @@ function sources(
     reportFormatsRefused: number;
     resultsFutureDated: number;
     resultsPastDated: number;
+    resultsUnreadableTime: number;
     credentialsToReenter: number;
     unboundedCredentials: number;
     disk: { freePercent: number; freeBytes: number; databaseBytes: number } | null;
@@ -96,7 +97,7 @@ function sources(
     }),
     alarms: () => ({
       fired: overrides.alarmsFired ?? 0,
-      nextWakeAt: overrides.nextWakeAt ?? null,
+      overdueMs: overrides.alarmOverdueMs ?? 0,
     }),
     reports: () => ({
       deferred: overrides.reportsDeferred ?? 0,
@@ -109,6 +110,7 @@ function sources(
     ingestionDiscards: () => ({
       discardedFutureTime: overrides.resultsFutureDated ?? 0,
       discardedPastTime: overrides.resultsPastDated ?? 0,
+      discardedUnreadableTime: overrides.resultsUnreadableTime ?? 0,
     }),
     probes: () => ({
       probesDown: overrides.probesDown ?? 0,
@@ -428,21 +430,18 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(reading['ingestQueue'], 0);
     });
 
-    it('reports the alarm sweep as overdue only once it actually is', async () => {
-      // `P-22`. Zero is the answer almost always — a scheduler asleep with a wake ahead of it is
-      // on time, and so is one that has never armed anything. Reporting "minus forty seconds" or
-      // a gap for either would make the channel noise, and a channel that is noisy when nothing
-      // is wrong is a channel nobody looks at when something is.
+    it('reports the alarm sweep as overdue in the scheduler’s own whole seconds', async () => {
+      // `P-22`, and `P-247`: the scheduler measures it on its timer's clock and says 0 while its
+      // wake is ahead (`alarm-scheduler.test.ts`), so Core Health takes the figure as it is and
+      // never consults a wall clock of its own for it.
       const NOW = new Date('2026-08-29T10:00:00.000Z');
-      const at = (offsetMs: number): Date => new Date(NOW.getTime() + offsetMs);
-      const overdue = async (nextWakeAt: Date | null): Promise<number | null | undefined> =>
-        (await build({ nextWakeAt }, undefined, undefined, () => NOW).read())['alarmOverdue'];
+      const overdue = async (alarmOverdueMs: number): Promise<number | null | undefined> =>
+        (await build({ alarmOverdueMs }, undefined, undefined, () => NOW).read())['alarmOverdue'];
 
-      assert.equal(await overdue(null), 0, 'nothing armed is not the same as stuck');
-      assert.equal(await overdue(at(30_000)), 0, 'a wake still ahead is on time');
-      assert.equal(await overdue(at(-1)), 0, 'a millisecond late is on time');
-      assert.equal(await overdue(at(-40_000)), 40);
-      assert.equal(await overdue(at(-3_600_000)), 3_600);
+      assert.equal(await overdue(0), 0, 'on time');
+      assert.equal(await overdue(400), 0, 'under half a second is on time');
+      assert.equal(await overdue(40_000), 40);
+      assert.equal(await overdue(3_600_000), 3_600);
     });
 
     it('passes the alarm scheduler’s fired count through as a counter', async () => {
@@ -1030,7 +1029,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       const NOW = new Date('2026-08-29T10:00:00.000Z');
       const batches: CheckResult[][] = [];
       const service = build(
-        { nextWakeAt: new Date(NOW.getTime() - 90_000) },
+        { alarmOverdueMs: 90_000 },
         { cpuUs: [], elapsedNs: [] },
         (results) => {
           batches.push([...results]);

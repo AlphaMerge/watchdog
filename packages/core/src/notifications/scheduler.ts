@@ -30,6 +30,8 @@ export interface AlarmSchedulerOptions {
   minSleepMs?: number;
   /** How many full batches one wake drains before sleeping again. */
   maxRounds?: number;
+  /** Monotonic milliseconds, which `overdueMs` is measured on. Injectable for a test. */
+  monotonicNow?: () => number;
   /**
    * How long after a wake that found nothing to look again, in order.
    *
@@ -62,8 +64,18 @@ export interface AlarmSchedulerStats {
    * something is poking far more often than it arms anything.
    */
   idleWakes: number;
-  /** When the scheduler intends to run next, or null when it is not running. */
+  /** When the scheduler intends to run next, or null when it is not running. For display. */
   nextWakeAt: Date | null;
+  /**
+   * How far past its wake the timer is, in milliseconds on the monotonic clock: 0 while the
+   * wake is still ahead or nothing is armed (`P-247`).
+   *
+   * **The same clock as the timer, which is the point.** Worked out as the wall clock less
+   * `nextWakeAt`, a forward step of the wall clock read as a sweep that had not run: an hour's
+   * step was an hour overdue on Core Health, Down, and "escalations are not firing", about a timer
+   * that fired on time a few seconds later.
+   */
+  overdueMs: number;
 }
 
 const DEFAULT_MAX_SLEEP_MS = 60_000;
@@ -120,6 +132,9 @@ export class AlarmScheduler {
    */
   #settling = 0;
   #nextWakeAt: Date | null = null;
+  /** The armed wake on `#monotonicNow`'s clock, or null. */
+  #wakeDeadline: number | null = null;
+  readonly #monotonicNow: () => number;
   #sweeps = 0;
   #fired = 0;
   #wakes = 0;
@@ -133,6 +148,7 @@ export class AlarmScheduler {
     this.#minSleepMs = options.minSleepMs ?? DEFAULT_MIN_SLEEP_MS;
     this.#maxRounds = options.maxRounds ?? DEFAULT_MAX_ROUNDS;
     this.#settleMs = options.settleMs ?? DEFAULT_SETTLE_MS;
+    this.#monotonicNow = options.monotonicNow ?? ((): number => performance.now());
   }
 
   get stats(): AlarmSchedulerStats {
@@ -142,6 +158,8 @@ export class AlarmScheduler {
       wakes: this.#wakes,
       idleWakes: this.#idleWakes,
       nextWakeAt: this.#nextWakeAt,
+      overdueMs:
+        this.#wakeDeadline === null ? 0 : Math.max(0, this.#monotonicNow() - this.#wakeDeadline),
     };
   }
 
@@ -156,6 +174,7 @@ export class AlarmScheduler {
     if (this.#timer !== undefined) clearTimeout(this.#timer);
     this.#timer = undefined;
     this.#nextWakeAt = null;
+    this.#wakeDeadline = null;
   }
 
   /**
@@ -278,6 +297,7 @@ export class AlarmScheduler {
     if (this.#stopped) return;
     if (this.#timer !== undefined) clearTimeout(this.#timer);
     this.#nextWakeAt = new Date(Date.now() + delayMs);
+    this.#wakeDeadline = this.#monotonicNow() + delayMs;
     this.#timer = setTimeout(() => {
       void this.#cycle();
     }, delayMs);

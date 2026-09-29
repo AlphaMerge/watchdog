@@ -1,5 +1,7 @@
 import { strict as assert } from 'node:assert';
+import { Writable } from 'node:stream';
 import { after, before, beforeEach, describe, it } from 'node:test';
+import { pino } from 'pino';
 import type { CheckResult, IngestionConfig } from '@ms/shared';
 import type { Database, Queryable } from '../src/db/pool.js';
 import { ChannelResolver } from '../src/ingestion/channels.js';
@@ -651,6 +653,52 @@ describe(
 
       assert.equal(reply.type, 'results-ack');
       assert.equal(svc.stats().discardedInvalidTime, 1);
+      await created.stop();
+    });
+
+    // `P-247`: counted as readings only, a failed check with an unreadable time, which carries
+    // none, left every counter at zero and was gone.
+    it('counts every result whose timestamp is not a date, readings or none, and says so once', async () => {
+      const lines: Record<string, unknown>[] = [];
+      const logger = pino(
+        { level: 'warn' },
+        new Writable({
+          write(chunk: Buffer, _encoding, done): void {
+            lines.push(JSON.parse(chunk.toString()) as Record<string, unknown>);
+            done();
+          },
+        }),
+      );
+      const created = new Ingestor({ db, logger: silent, config: ingestion() });
+      const svc = new IngestionService({ db, logger, ingestor: created });
+      const result = (at: string, outcome: 'ok' | 'error', readings: number): CheckResult => ({
+        sensorId,
+        at,
+        outcome,
+        message: outcome === 'error' ? 'connection refused' : '',
+        durationMs: 1,
+        channels: readings === 0 ? [] : [{ key: 'rtt', value: 5 }],
+      });
+      const reply = await svc.acceptResults('probe-7', {
+        type: 'results',
+        batchId: 'batch-unreadable',
+        results: [
+          result('undefined', 'error', 0),
+          result('garbage', 'ok', 0),
+          result('the day before yesterday', 'ok', 1),
+        ],
+      });
+
+      assert.equal(reply.type, 'results-ack');
+      const stats = svc.stats();
+      assert.equal(stats.discardedUnreadableTime, 3, 'every one of the three results');
+      assert.equal(stats.discardedInvalidTime, 1, 'the one reading, as before');
+      assert.equal(stats.discardedOnError, 0, 'the failed check is counted for its time');
+      const said = lines.filter((line) => String(line['msg']).includes('time cannot be read'));
+      assert.equal(said.length, 1, 'once a batch');
+      const first = said[0] ?? {};
+      assert.equal(first['source'], 'probe-7');
+      assert.equal(first['count'], 3);
       await created.stop();
     });
 

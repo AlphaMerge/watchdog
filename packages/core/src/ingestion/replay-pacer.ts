@@ -56,7 +56,9 @@ export class ReplayPacer {
   constructor(options: ReplayPacerOptions) {
     this.#config = options.config;
     this.#logger = options.logger.child({ component: 'replay-pacer' });
-    this.#now = options.now ?? Date.now;
+    // Monotonic (`P-247`): how long since a probe last reported a backlog is a duration, and on
+    // the wall clock a backward step kept a finished probe counted as catching up for the step.
+    this.#now = options.now ?? ((): number => performance.now());
   }
 
   stats(): ReplayPacerStats {

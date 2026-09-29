@@ -247,6 +247,52 @@ describe('bounds', () => {
     assert.ok(h.slept > 0, 'it waited for tokens');
   });
 
+  // `P-247`: refilled from the wall clock, a backward step of an hour made the allowance minus an
+  // hour's worth of tokens, and the run slept the hour with no progress sent.
+  it('keeps its rate across a backward step of the wall clock', async () => {
+    // The longest, kept as it goes: the fake sleep takes no time, so the loop sleeps thousands of
+    // times while the real clock earns each token.
+    let longest = 0;
+    let sleeps = 0;
+    // Replaced before the run starts, so a default that captured it would hold this one, which
+    // steps back at the first address and then stands still.
+    const realNow = Date.now;
+    let wall = realNow();
+    Date.now = (): number => wall;
+    let stepped = false;
+    const h = harness({
+      probe: (address: string) => {
+        if (!stepped) {
+          stepped = true;
+          wall -= 3_600_000;
+        }
+        return Promise.resolve(address.endsWith('.2') ? 2 : null);
+      },
+      sleep: (ms: number) => {
+        sleeps += 1;
+        longest = Math.max(longest, ms);
+        // Its own bound, so a bucket that has lost the step fails here at once rather than
+        // spinning until the file's timeout: a wait past one token is already the failure.
+        if (ms > 500) h.runner.stop();
+        return new Promise<void>((resolve) => {
+          setImmediate(resolve);
+        });
+      },
+    });
+    try {
+      h.runner.start({ ...JOB, ratePerSecond: 2 });
+      await h.done;
+    } finally {
+      Date.now = realNow;
+    }
+    assert.equal(ended(h).ending, 'done');
+    assert.ok(sleeps > 0, 'it waited for tokens');
+    assert.ok(
+      longest <= 500,
+      `a token at 2 a second is at most 500 ms away, not the step: ${String(longest)}`,
+    );
+  });
+
   it('does not wait at all when no rate is set', async () => {
     const h = harness();
     h.runner.start(JOB);
