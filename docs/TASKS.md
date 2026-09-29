@@ -6402,6 +6402,36 @@ because each is a decision rather than a defect:
       - every duration listed runs on a monotonic clock, or says why it can't.
       Mutants as usual.
 
+- [ ] **P-249 — a mutation that failed inside its transaction is answered as committed** · M ·
+      P-103, P-111 · Found 2026-09-29 while designing `P-239`'s failure path, and measured.
+      **High**: a silent loss behind a success answer.
+      - **Measured** with node-pg against the test database. The sequence was `BEGIN`, an
+        `INSERT`, a `SELECT 1/0` whose error is caught, then `COMMIT`. The `COMMIT` resolves with
+        no error and command tag `ROLLBACK`, and the row is not there. PostgreSQL rolls back a
+        transaction an error has aborted, and says so only in the tag.
+      - **`Database.transaction()` never reads the tag** (`db/pool.ts:179`). It returns the
+        callback's result as if it had committed. `tx()` then runs every `afterCommit` hook for a
+        transaction that wrote nothing.
+      - **So a catch inside someone else's transaction is a silent loss.** `ReachabilitySync`
+        catches any error from `resync`, so as not to fail the mutation
+        (`reachability-sync.ts:54`). A failed statement in there leaves the mutation's
+        transaction aborted. If nothing after it queries, the object service answers success, and
+        the move, its audit row and every other sink's write are gone. The after-commit hooks
+        announce a commit that did not happen. No other sink or catch site has been audited.
+
+      **Done when:**
+      - `transaction()` throws a `DatabaseError` when `COMMIT`'s command is `ROLLBACK`, and no
+        `afterCommit` hook runs for it;
+      - a `savepoint(fn)` helper exists for code that must catch a database error inside
+        someone else's transaction;
+      - every audit sink, and every other catch inside a transaction, is listed, and each one
+        either moves into a savepoint or rethrows;
+      - there is a test for each half. With a savepoint, a sink that fails a statement and catches
+        leaves the mutation committing. Without one, the API answers an error, not success.
+
+      Owner: after `P-229`, which is changing `db/pool.ts` now. `P-239`'s `ClockFreezeSync`
+      rethrows already.
+
 - [x] **P-223 — the core's unlabelled metrics export a gap as zero** · S · P-14, H-12 · Found
       2026-09-28 in the round-2 review of `H-12`. The exporter's rule is that a gap is an absent
       series, never a zero, and its tests covered only the probe's series. Those are labelled, and
