@@ -6,7 +6,15 @@ import type {
   SensorType,
 } from '../contract.js';
 import { MAX_PATTERN } from '../support/pattern.js';
-import { checkedTarget, guardOf, lookupFor } from '../support/checked-target.js';
+import type { LookupFunction } from 'node:net';
+import { targetVerdict } from '@ms/shared';
+import { restrictionOf } from '../credentials/index.js';
+import {
+  checkedTarget,
+  DEFAULT_TARGET_POLICY,
+  guardOf,
+  lookupFor,
+} from '../support/checked-target.js';
 import { CredentialsWithheldError, PIN_REFUSALS, pinnedLookup } from '../support/pinned-target.js';
 import type { DbConnectOptions, DbDriver, DbResult, DbRow } from '../support/db/driver.js';
 
@@ -289,6 +297,37 @@ export async function runDbCheck(driver: DbDriver, context: CheckContext): Promi
   const lookup =
     pinned === undefined ? lookupFor(host, checked).lookup : pinnedLookup(host, pinned);
 
+  // **Where the set may go bounds where a redirect may take it** (`A-41b`). The probe is told
+  // the set's own `allowedTargets`, so it can say whether the server the login was handed on
+  // to is inside them. A name the targets do not cover by name is not resolved to find out:
+  // undecided is refused, as it is everywhere a pin is not made.
+  const targets = restrictionOf('database', credential).targets;
+  const guarded = (context.target.policy ?? DEFAULT_TARGET_POLICY) !== 'none';
+  const withheld = (message: string): CredentialsWithheldError =>
+    new CredentialsWithheldError(message, {
+      sensorId: context.sensorId,
+      target: host,
+      phase: 'connect',
+      kind: 'database',
+    });
+  const redirect = async (other: string): Promise<LookupFunction | undefined> => {
+    // A set held to one address is not sent to a second.
+    if (pinned !== undefined) throw withheld(PIN_REFUSALS.redirected(host, other));
+    if (targets.length > 0 && targetVerdict(other, targets) !== 'inside') {
+      throw withheld(PIN_REFUSALS.redirectedOutside(host, other));
+    }
+    // And the probe's target policy, on a lookup of the routed name's own.
+    const onward = await checkedTarget({
+      ...guardOf(context.target),
+      host: other,
+      timeoutMs: Math.max(1, connectTimeoutMs - spentMs()),
+      signal: context.signal,
+      verb: 'follow a redirect to',
+      doing: `following a redirect from ${host} to ${other}`,
+    });
+    return lookupFor(other, onward).lookup;
+  };
+
   const options: DbConnectOptions = {
     host,
     port,
@@ -306,28 +345,13 @@ export async function runDbCheck(driver: DbDriver, context: CheckContext): Promi
           // **The lookup and the connect share the one timeout**, as they did when the driver
           // made the lookup: what it took is taken from what the connect has.
           connectWithinMs: Math.max(1, connectTimeoutMs - spentMs()),
-          // A server the device hands the connection on to is another host, checked as one. A
-          // set held to one address is not sent to a second.
-          redirect: async (other: string) => {
-            if (pinned !== undefined) {
-              throw new CredentialsWithheldError(PIN_REFUSALS.redirected(host, other), {
-                sensorId: context.sensorId,
-                target: host,
-                phase: 'connect',
-                kind: 'database',
-              });
-            }
-            const onward = await checkedTarget({
-              ...guardOf(context.target),
-              host: other,
-              timeoutMs: Math.max(1, connectTimeoutMs - spentMs()),
-              signal: context.signal,
-              verb: 'follow a redirect to',
-              doing: `following a redirect from ${host} to ${other}`,
-            });
-            return lookupFor(other, onward).lookup;
-          },
         }),
+    // **A server the device hands the login on to is another host** (SQL Server's redirect),
+    // and it is asked about **whenever anything is checked at all**: a device given as an
+    // address too, which has no lookup and whose redirect would otherwise be the driver's to
+    // resolve and follow unchecked. Absent only where nothing is: `none`, and a set with no
+    // bounds.
+    ...(guarded || targets.length > 0 || pinned !== undefined ? { redirect } : {}),
     ...(pinned === undefined ? {} : { pinned }),
   };
 

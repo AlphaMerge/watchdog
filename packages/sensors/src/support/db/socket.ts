@@ -118,13 +118,22 @@ function nameOf(host: string): string {
  * signal), which its typings do not say: an argument that is not that shape is taken for the
  * device itself, which is the only place the typed contract connects to. A host that is not
  * the device's is handed to `options.redirect`, which checks it against the policy on a lookup
- * of its own, or refuses it for a set that was pinned.
+ * of its own, or refuses it for a set whose bounds do not cover it.
+ *
+ * What `tedious` 20 does, from `lib/connection.js`: `performSentLogin7WithStandardLogin`
+ * (2364-2390) returns the routing a login was answered with, `initialiseConnection` (1141-1145)
+ * goes to `performReRouting` (2323-2335), which destroys the socket and starts over, and
+ * `connectOnPort` (1253-1260) then calls the connector with `routingData.server` and
+ * `routingData.port` as the host and port of its first argument.
  */
 export function tdsConnector(
   options: DbConnectOptions,
 ): ((...asked: readonly unknown[]) => Promise<Socket>) | undefined {
+  // **Handed over whenever a redirect has to be asked about**, which is not only when the
+  // device's name was resolved: a device given as an address has no lookup, and left to itself
+  // `tedious` would resolve the server it is routed to and connect there unchecked.
   const lookup = options.lookup;
-  if (lookup === undefined) return undefined;
+  if (lookup === undefined && options.redirect === undefined) return undefined;
   return async (...asked) => {
     const to = asked[0] as { host?: unknown; port?: unknown } | undefined;
     const signal = asked[2] instanceof AbortSignal ? asked[2] : undefined;

@@ -201,6 +201,7 @@ type Certificate = { key: string; cert: string } | undefined;
 
 function listen(
   onConnection: (socket: Socket, fake: Fake) => void,
+  address = '127.0.0.1',
 ): Promise<{ fake: Fake; server: Server }> {
   return new Promise((resolve) => {
     const sockets = new Set<Socket>();
@@ -224,7 +225,7 @@ function listen(
           });
         }),
     };
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(0, address, () => {
       const address = server.address();
       (fake as { port: number }).port =
         typeof address === 'object' && address !== null ? address.port : 0;
@@ -461,12 +462,80 @@ async function mysqlServer(certificate?: Certificate): Promise<Fake> {
   return fake;
 }
 
+/** One TDS packet from the server: a tabular result, complete in itself. */
+const tdsReply = (body: Buffer): Buffer => {
+  const header = Buffer.from([0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]);
+  header.writeUInt16BE(8 + body.length, 2);
+  return Buffer.concat([header, body]);
+};
+
+const uint16 = (value: number): Buffer => {
+  const buffer = Buffer.alloc(2);
+  buffer.writeUInt16LE(value);
+  return buffer;
+};
+
 /**
- * SQL Server, far enough to see where `tedious` connects and what its TLS names: it answers
- * the PRELOGIN saying encryption is on, notes whether the TLS hello that follows (inside TDS
- * packets) carries the device's name, and hangs up. No login is ever accepted.
+ * What SQL Server answers a login with when it hands it on: an ENVCHANGE of type 20 naming the
+ * server and port, the LOGINACK, and DONE. `tedious` takes the routing only beside a LOGINACK.
  */
-async function tdsServer(): Promise<Fake> {
+function routingReply(server: string, port: number): Buffer {
+  const route = Buffer.concat([
+    Buffer.from([0]),
+    uint16(port),
+    uint16(server.length),
+    Buffer.from(server, 'ucs2'),
+  ]);
+  const change = Buffer.concat([Buffer.from([20]), uint16(route.length), route, uint16(0)]);
+  const program = 'fake';
+  const ack = Buffer.concat([
+    Buffer.from([1]),
+    // TDS 7.4.
+    Buffer.from([0x74, 0x00, 0x00, 0x04]),
+    Buffer.from([program.length]),
+    Buffer.from(program, 'ucs2'),
+    Buffer.from([15, 0, 0, 0]),
+  ]);
+  return tdsReply(
+    Buffer.concat([
+      Buffer.from([0xe3]),
+      uint16(change.length),
+      change,
+      Buffer.from([0xad]),
+      uint16(ack.length),
+      ack,
+      Buffer.from([0xfd]),
+      Buffer.alloc(12),
+    ]),
+  );
+}
+
+/** A PRELOGIN answer: version 15.0.0.0, and whether the server encrypts (1) or cannot (2). */
+const preloginReply = (encryption: number): Buffer =>
+  // VERSION at 11 for 6 bytes, ENCRYPTION at 17 for 1, the terminator, then the data.
+  tdsReply(
+    Buffer.concat([
+      Buffer.from([0x00, 0x00, 0x0b, 0x00, 0x06, 0x01, 0x00, 0x11, 0x00, 0x01, 0xff]),
+      Buffer.from([0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, encryption]),
+    ]),
+  );
+
+/**
+ * SQL Server, far enough to see where `tedious` connects, what its TLS names, and where it
+ * goes when it is routed on.
+ *
+ * - **By default** it answers the PRELOGIN saying encryption is on, notes whether the TLS
+ *   hello that follows (inside TDS packets) carries the device's name, and hangs up.
+ * - **With `route`** it says it has no encryption, takes the LOGIN7 that follows, and answers
+ *   it by routing the login to another server, as Azure SQL does from inside its network.
+ * - **With `login`** it takes the LOGIN7 and hangs up: a server a login arrived at.
+ *
+ * `said` has `login7` for each login a server was sent, which is where the password is.
+ */
+async function tdsServer(
+  mode: { route?: { server: string; port: number }; login?: true; address?: string } = {},
+): Promise<Fake> {
+  const plain = mode.route !== undefined || mode.login === true;
   const { fake } = await listen((socket, self) => {
     let pending = Buffer.alloc(0);
     let packets = 0;
@@ -482,15 +551,18 @@ async function tdsServer(): Promise<Fake> {
         packets += 1;
         if (packets === 1) {
           self.said.push(`packet 0x${type.toString(16)}`);
-          // VERSION at 11 for 6 bytes, ENCRYPTION at 17 for 1, the terminator, then the data:
-          // version 15.0.0.0 and ENCRYPT_ON.
-          const body = Buffer.from([
-            0x00, 0x00, 0x0b, 0x00, 0x06, 0x01, 0x00, 0x11, 0x00, 0x01, 0xff, 0x0f, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x01,
-          ]);
-          const header = Buffer.from([0x04, 0x01, 0x00, 8 + body.length, 0x00, 0x00, 0x01, 0x00]);
-          socket.write(Buffer.concat([header, body]));
+          socket.write(preloginReply(plain ? 0x02 : 0x01));
           continue;
+        }
+        if (plain) {
+          // 0x10 is LOGIN7: the user name and the password are in it.
+          self.said.push(type === 0x10 ? 'login7' : `packet 0x${type.toString(16)}`);
+          if (mode.route !== undefined && type === 0x10) {
+            socket.write(routingReply(mode.route.server, mode.route.port));
+            continue;
+          }
+          socket.destroy();
+          return;
         }
         // The TLS client hello, wrapped in a PRELOGIN packet. Its server name is in the clear.
         for (const name of [NAME, OTHER, '127.0.0.1']) {
@@ -501,7 +573,7 @@ async function tdsServer(): Promise<Fake> {
         return;
       }
     });
-  });
+  }, mode.address);
   return fake;
 }
 
@@ -1022,7 +1094,7 @@ describe('what a database driver is handed', () => {
     await runDbCheck(recording(seen), contextOf(NAME, dns, {}, { policy: 'none' }));
     await runDbCheck(recording(seen), contextOf('169.254.7.7', dns, {}, { policy: 'none' }));
     assert.deepEqual(
-      seen.map((options) => [options.host, options.lookup, options.redirect]),
+      seen.map((options) => [options.host, options.lookup, options.connectWithinMs]),
       [
         ['127.0.0.1', undefined, undefined],
         [NAME, undefined, undefined],
@@ -1030,6 +1102,90 @@ describe('what a database driver is handed', () => {
       ],
     );
     assert.equal(dns.calls.length, 0);
+    // A redirect is asked about for an address too, wherever anything is checked: only under
+    // `none`, with a set that has no bounds, is the driver left to follow one by itself.
+    assert.deepEqual(
+      seen.map((options) => typeof options.redirect),
+      ['function', 'undefined', 'undefined'],
+    );
+  });
+
+  it('a device given as an address: a redirect is checked against the policy all the same', async () => {
+    const seen: DbConnectOptions[] = [];
+    const dns = rebinding(v4('127.0.0.3'), v4('127.0.0.3', METADATA));
+    await runDbCheck(recording(seen), contextOf('127.0.0.1', dns));
+    const redirect = seen[0]?.redirect ?? assert.fail('no redirect was handed over');
+    await assert.rejects(redirect(METADATA), TargetRefusedError);
+    assert.equal(dns.calls.length, 0);
+    const onward = (await redirect(OTHER)) ?? assert.fail('a name needs a lookup');
+    assert.deepEqual(await ask(onward, OTHER), ['127.0.0.3']);
+    await assert.rejects(redirect(OTHER), TargetRefusedError);
+    assert.equal(dns.calls.length, 2);
+  });
+
+  describe('a set with bounds is not sent on to a server outside them', () => {
+    const bounded = (host: string, targets: string[], policy?: TargetPolicy): CheckContext => {
+      const context = contextOf(
+        host,
+        rebinding(v4('127.0.0.1'), v4('127.0.0.3')),
+        {},
+        policy === undefined ? {} : { policy },
+      );
+      return {
+        ...context,
+        credentials: {
+          database: { username: 'monitor', password: 'secret', allowedTargets: targets },
+        },
+      };
+    };
+    const refusedTo = async (context: CheckContext, other: string): Promise<void> => {
+      const seen: DbConnectOptions[] = [];
+      await runDbCheck(recording(seen), context);
+      const redirect = seen[0]?.redirect ?? assert.fail('no redirect was handed over');
+      const error = await failure(redirect(other));
+      assert.ok(error instanceof CredentialsWithheldError, String(error));
+      assert.equal(error.message, PIN_REFUSALS.redirectedOutside(context.target.host, other));
+      assert.deepEqual(
+        [error.sensorId, error.target, error.phase, error.kind],
+        [62, context.target.host, 'connect', 'database'],
+      );
+    };
+
+    it('a device given as an address inside the targets', async () => {
+      const context = bounded('127.0.0.1', ['127.0.0.0/8']);
+      // An address outside, and a name: the targets name addresses, and a name is not
+      // resolved to find out whether it is inside them.
+      await refusedTo(context, '192.0.2.9');
+      await refusedTo(context, OTHER);
+      await refusedTo(context, METADATA);
+    });
+
+    it('a device given as a name that a name entry covers', async () => {
+      const context = bounded(NAME, [NAME]);
+      await refusedTo(context, OTHER);
+      await refusedTo(context, '127.0.0.3');
+    });
+
+    it('under `none` too: the bounds are the set’s, not the policy’s', async () => {
+      await refusedTo(bounded('127.0.0.1', ['127.0.0.0/8'], 'none'), '192.0.2.9');
+      await refusedTo(bounded(NAME, [NAME], 'none'), OTHER);
+    });
+
+    it('a server inside the bounds is followed, and still checked against the policy', async () => {
+      const seen: DbConnectOptions[] = [];
+      // An address the targets cover needs no lookup.
+      await runDbCheck(recording(seen), bounded('127.0.0.1', ['127.0.0.0/8', '169.254.0.0/16']));
+      const byAddress = seen[0]?.redirect ?? assert.fail('no redirect was handed over');
+      assert.equal(await byAddress('127.0.0.3'), undefined);
+      // Inside the set's targets and refused by the probe's policy: a failed check.
+      await assert.rejects(byAddress(METADATA), TargetRefusedError);
+      // A name a `*.domain` entry covers is resolved once and checked against the policy.
+      const context = bounded(NAME, ['*.policy.invalid']);
+      await runDbCheck(recording(seen), context);
+      const byName = seen[1]?.redirect ?? assert.fail('no redirect was handed over');
+      const onward = (await byName(OTHER)) ?? assert.fail('a name needs a lookup');
+      assert.deepEqual(await ask(onward, OTHER), ['127.0.0.3']);
+    });
   });
 
   it('a name that does not resolve fails in the guard, and the driver is not asked', async () => {
@@ -1118,6 +1274,172 @@ describe('what a database driver is handed', () => {
   });
 });
 
+describe('a SQL Server that routes the login to another server', () => {
+  // The real `tedious`, answered a login with a routing ENVCHANGE: it destroys its socket and
+  // asks its connector for the server it was routed to. `onward` is that server, on 127.0.0.2,
+  // which the device's own address is not: what arrives there arrived by the redirect.
+  let onward: Fake;
+  before(async () => {
+    onward = await tdsServer({ login: true, address: '127.0.0.2' });
+  });
+  after(async () => {
+    await onward.close();
+  });
+  const reset = (): void => {
+    onward.connections = 0;
+    onward.said.length = 0;
+  };
+  const routed = async (
+    to: string,
+    run: Omit<Run, 'port'>,
+    dns: Rebinding,
+  ): Promise<{ error: Error; device: Fake }> => {
+    const device = await tdsServer({ route: { server: to, port: onward.port } });
+    try {
+      const error = await failure(execute(dbMssql, dns, { port: device.port, ...run }));
+      return { error, device };
+    } finally {
+      await device.close();
+    }
+  };
+  /** The device was logged in to, once, and routed the login on. */
+  const loggedIn = (device: Fake): void => {
+    assert.deepEqual(device.said, ['packet 0x12', 'login7']);
+  };
+  /** A database that went away, and neither kind of refusal. */
+  const ordinary = (error: Error): void => {
+    assert.ok(!(error instanceof TargetRefusedError), String(error));
+    assert.ok(!isCredentialsWithheld(error), String(error));
+  };
+
+  it('an address-literal device routed to a metadata address is refused, with nothing sent there', async () => {
+    reset();
+    const dns = rebinding();
+    const { error, device } = await routed(METADATA, { host: '127.0.0.1' }, dns);
+    loggedIn(device);
+    assert.ok(error instanceof TargetRefusedError, String(error));
+    assert.match(
+      error.message,
+      /^refusing to follow a redirect to 169\.254\.169\.254, which is link-local/,
+    );
+    assert.equal(dns.calls.length, 0);
+    assert.equal(onward.connections, 0);
+  });
+
+  it('an address-literal device routed to a name that resolves to one is refused on one lookup', async () => {
+    reset();
+    // One address the onward server listens on and one the policy refuses.
+    const dns = rebinding(v4('127.0.0.2', METADATA));
+    const { error, device } = await routed(OTHER, { host: '127.0.0.1' }, dns);
+    loggedIn(device);
+    assert.ok(error instanceof TargetRefusedError, String(error));
+    assert.equal(error.address, METADATA);
+    assert.deepEqual(dns.calls, [{ host: OTHER, family: 0 }]);
+    assert.equal(onward.connections, 0);
+  });
+
+  it('an address-literal device, a set with no bounds: followed, on one lookup for the routed name', async () => {
+    reset();
+    const dns = rebinding(v4('127.0.0.2'));
+    const { error, device } = await routed(OTHER, { host: '127.0.0.1' }, dns);
+    loggedIn(device);
+    // The onward server hangs up on the login.
+    ordinary(error);
+    assert.deepEqual(dns.calls, [{ host: OTHER, family: 0 }]);
+    assert.equal(onward.connections, 1);
+    assert.deepEqual(onward.said, ['packet 0x12', 'login7']);
+  });
+
+  it('a named device, a set with no bounds: followed, each name on one lookup', async () => {
+    reset();
+    const dns = rebinding(v4('127.0.0.1'), v4('127.0.0.2'));
+    const { error, device } = await routed(OTHER, {}, dns);
+    loggedIn(device);
+    ordinary(error);
+    assert.deepEqual(dns.calls, [
+      { host: NAME, family: 0 },
+      { host: OTHER, family: 0 },
+    ]);
+    assert.deepEqual(onward.said, ['packet 0x12', 'login7']);
+  });
+
+  it('a bounded set, a device given as an address inside it: the redirect is withheld, with nothing sent on', async () => {
+    reset();
+    for (const to of [OTHER, '127.0.0.2']) {
+      const dns = rebinding(v4('127.0.0.2'));
+      const { error, device } = await routed(
+        to,
+        { host: '127.0.0.1', targets: ['127.0.0.1'] },
+        dns,
+      );
+      loggedIn(device);
+      assert.ok(error instanceof CredentialsWithheldError, String(error));
+      assert.equal(error.message, PIN_REFUSALS.redirectedOutside('127.0.0.1', to));
+      assert.equal(dns.calls.length, 0, 'a server the set may not reach is not resolved');
+    }
+    assert.equal(onward.connections, 0);
+  });
+
+  it('a bounded set, a device a name entry covers: the redirect is withheld, with nothing sent on', async () => {
+    reset();
+    const dns = rebinding(v4('127.0.0.1'), v4('127.0.0.2'));
+    const { error, device } = await routed(OTHER, { targets: [NAME] }, dns);
+    loggedIn(device);
+    assert.ok(error instanceof CredentialsWithheldError, String(error));
+    assert.equal(error.message, PIN_REFUSALS.redirectedOutside(NAME, OTHER));
+    assert.deepEqual(dns.calls, [{ host: NAME, family: 0 }]);
+    assert.equal(onward.connections, 0);
+  });
+
+  it('a pinned set: the redirect is withheld, with nothing sent on', async () => {
+    reset();
+    const dns = rebinding(v4('127.0.0.1'), v4('127.0.0.2'));
+    const { error, device } = await routed('127.0.0.2', { targets: INSIDE }, dns);
+    loggedIn(device);
+    assert.ok(error instanceof CredentialsWithheldError, String(error));
+    assert.equal(error.message, PIN_REFUSALS.redirected(NAME, '127.0.0.2'));
+    assert.equal(dns.calls.length, 1);
+    assert.equal(onward.connections, 0);
+  });
+
+  it('a bounded set under `none` is withheld all the same', async () => {
+    reset();
+    const dns = rebinding();
+    const { error, device } = await routed(
+      '127.0.0.2',
+      { host: '127.0.0.1', targets: ['127.0.0.1'], policy: 'none' },
+      dns,
+    );
+    loggedIn(device);
+    assert.ok(error instanceof CredentialsWithheldError, String(error));
+    assert.equal(onward.connections, 0);
+  });
+
+  it('a bounded set whose targets cover the routed server is sent on to it', async () => {
+    reset();
+    const dns = rebinding();
+    const { error, device } = await routed(
+      '127.0.0.2',
+      { host: '127.0.0.1', targets: INSIDE },
+      dns,
+    );
+    loggedIn(device);
+    ordinary(error);
+    assert.deepEqual(onward.said, ['packet 0x12', 'login7']);
+    assert.equal(dns.calls.length, 0);
+  });
+
+  it('under `none`, a set with no bounds: followed as `tedious` always did, with nothing checked', async () => {
+    reset();
+    const dns = rebinding(v4(METADATA));
+    const { error, device } = await routed('127.0.0.2', { host: '127.0.0.1', policy: 'none' }, dns);
+    loggedIn(device);
+    ordinary(error);
+    assert.deepEqual(onward.said, ['packet 0x12', 'login7']);
+    assert.equal(dns.calls.length, 0);
+  });
+});
+
 describe('the connector `tedious` is handed', () => {
   let fake: Fake;
   before(async () => {
@@ -1147,9 +1469,29 @@ describe('the connector `tedious` is handed', () => {
     ...over,
   });
 
-  it('is none for a device the driver connects to as it always has', () => {
+  it('is none only where nothing is checked: no lookup, and no redirect to ask about', () => {
     const { lookup: _lookup, ...plain } = options();
     assert.equal(tdsConnector(plain), undefined);
+  });
+
+  it('for a device given as an address: connects to it as it stands, and asks about a redirect', async () => {
+    const asked: string[] = [];
+    const { lookup: _lookup, ...plain } = options({
+      host: '127.0.0.1',
+      redirect: (host) => {
+        asked.push(host);
+        return Promise.reject(new Error('not there'));
+      },
+    });
+    const connector = tdsConnector(plain) ?? assert.fail('no connector for an address');
+    fake.connections = 0;
+    const socket = await connector({ host: '127.0.0.1', port: fake.port });
+    assert.equal(socket.remotePort, fake.port);
+    socket.destroy();
+    assert.deepEqual(asked, []);
+    await assert.rejects(connector({ host: OTHER, port: fake.port }), /not there/);
+    assert.deepEqual(asked, [OTHER]);
+    assert.equal(fake.connections, 1);
   });
 
   it('connects to the device through the checked lookup, however it is asked', async () => {

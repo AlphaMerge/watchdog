@@ -427,8 +427,31 @@ nobody, not even an administrator, can bring it outside.
   | SSH | Checked and pinned. The server is still identified by its host key. |
   | HTTP | Checked and pinned. The request still names the device: `Host`, TLS SNI and the certificate check are on the name. |
   | Mail (SMTP, IMAP, POP3) | Checked and pinned, with the certificate checked against the name, after `STARTTLS` too. |
-  | PostgreSQL, MySQL, SQL Server | Checked and pinned, **by a probe at protocol 27** (`A-62`): the driver is handed a connection to the address that was checked, and TLS still names the device. A server that hands the login on to another (SQL Server's redirect) is not followed with a pinned set: the sensor reads Unknown, naming where it was sent. |
+  | PostgreSQL, MySQL, SQL Server | Checked and pinned, **by a probe at protocol 27** (`A-62`): the driver is handed a connection to the address that was checked, and TLS still names the device. A server that hands the login on to another (SQL Server's redirect) is not followed with a pinned set: the sensor reads Unknown, naming where it was sent. See the redirect rule below the table. |
   | Windows (PowerShell) | **Withheld.** Kerberos needs the name, and PowerShell resolves it: there is no connection to hand it. |
+
+  **A SQL Server that redirects the login** (`A-62`). SQL Server can answer a login by naming
+  another server and port, and the driver then logs in there, with the password. Azure SQL
+  does this from inside its network. Where a database set may go bounds where a redirect may
+  take it:
+
+  | The database set | A redirect |
+  | --- | --- |
+  | Has `allowedTargets`, and the routed server is inside them: an address or range that covers its address, a name or `*.domain` that covers its name | Followed, after the probe's target policy has checked it. |
+  | Has `allowedTargets`, and the routed server is not inside them, or is a name where they name only addresses | **Not followed.** Nothing is sent to the routed server, and the check ends with a sentence naming it. The probe does not resolve a routed name to find out. |
+  | Was pinned for a named device | **Not followed**, wherever it points: the set was checked against one address. |
+  | Has no `allowedTargets` | **Followed**, held only to the probe's target policy. Under `probe.targetPolicy: none` the driver follows it unchecked, as it always did. |
+
+  The first login has already been made to the device when it redirects: the rule decides
+  whether a second one is made elsewhere. **A set with no targets follows a redirect to
+  wherever the server says**, and with **Verify the certificate** off, which is the database
+  sensors' default, the redirect itself is unauthenticated: anyone on the path between the
+  probe and the server can write it. Give a SQL Server set `allowedTargets` that name the
+  servers it is for, the routed ones included, and turn verification on where the server has a
+  certificate you issued. A refusal reads **Unknown** on a named device the probe was left to
+  check, and **Down** with the same sentence on a device given as an address or covered by a
+  name entry, because the core takes a refusal from a probe only for a sensor it left to
+  that probe.
 
   For Windows sensors, give the device its address, or add its name or `*.domain` to the
   targets; the sensor's message says which. **A probe older than protocol 24 is not sent such a
@@ -673,7 +696,7 @@ as it stands and nothing is resolved, on every one of them.
 | SNMP: `snmp.traffic`, `snmp.custom`, `snmp.custom.string`, `snmp.table`, `snmp.cpu`, `snmp.diskfree`, `snmp.memory`, `snmp.uptime` | Yes | UDP has no lookup to answer: each scan resolves the name once, checks every address, and asks the agent at a checked address. The session it has is kept while its address is still among the answers, so a name whose answers rotate keeps one session; it is replaced only when the name no longer has that address. Over IPv4 unless the device is set to IPv6, as before. |
 | TCP: `port.tcp`, `port.range` | Yes | The socket's lookup is answered with the checked addresses. A range is resolved once for all its ports. |
 | TLS: `tls.certificate`, `tls.security` | Yes | As TCP. Every handshake of a security check goes to the same checked addresses. |
-| Databases: `db.postgresql`, `db.mysql`, `db.mssql` | Yes (`A-62`) | None of the three drivers takes a lookup, and each takes the connection: `pg` and `mysql2` a `stream`, `tedious` a `connector`. The name is resolved once and checked, and the driver is handed a socket whose lookup is answered with the checked addresses. The driver still holds the name, so TLS sends it and checks the certificate against it, never against the address. PostgreSQL's second connection under `prefer`, when the server has no TLS, goes to the same checked addresses with no second lookup. **A server SQL Server redirects the login to** is another host: it is resolved and checked on a lookup of its own before it is followed. Whichever address family the name has, as before. |
+| Databases: `db.postgresql`, `db.mysql`, `db.mssql` | Yes (`A-62`) | None of the three drivers takes a lookup, and each takes the connection: `pg` and `mysql2` a `stream`, `tedious` a `connector`. The name is resolved once and checked, and the driver is handed a socket whose lookup is answered with the checked addresses. The driver still holds the name, so TLS sends it and checks the certificate against it, never against the address. PostgreSQL's second connection under `prefer`, when the server has no TLS, goes to the same checked addresses with no second lookup. **A server SQL Server redirects the login to** is another host: it is resolved and checked on a lookup of its own before it is followed, **whether the device was given as a name or as an address**, and a routed server the policy refuses is sent nothing. A credential set's `allowedTargets` bound the redirect too (the redirect rule, under the credential targets above). Whichever address family the name has, as before. |
 | Windows: `windows.cpu`, `windows.memory`, `windows.service`, `windows.volume` | **An address only: a name is outside the policy** | A device given as a refused address is refused, and the sensor's own `host` parameter is checked as the device's is. **A name is not resolved or checked.** The probe starts PowerShell and hands it the name; PowerShell's `New-CimSession -ComputerName` resolves it inside that process, WinRM takes no address in its place without breaking Kerberos, which authenticates the *name*, and there is no socket or lookup the probe can hand a child process. A check made here would be of an answer the connection never uses. If a Windows device must not be able to point a probe at a link-local address, give the device its address. |
 | ICMP: `icmp.ping`, `icmp.jitter` | No | An echo carries no credential and brings back no content, so the guard would buy nothing. `ping` resolves the name in its own process, as before. Resolving it in the probe instead would put the largest sensor population on the probe's shared lookup threads, where a lookup cannot be cancelled and abandoned ones pile up uncounted while a resolver is down, and it would lose `ping`'s own choice of address family. |
 | DNS: `dns.record`, `dns.blocklist` | No | They ask a resolver about a name and connect to no device. The resolver is the probe's own or an address in the sensor's parameters, and on a cloud machine the provider's resolver is itself link-local. |

@@ -18743,7 +18743,8 @@ because each is a decision rather than a defect:
         server the login was routed to. That host is resolved and checked on a lookup of its
         own before it is followed; with a pinned set it is refused as
         `CredentialsWithheldError`. `tedious` passes the destination as arguments its typings
-        do not declare: a call without them is taken for the device.
+        do not declare: a call without them is taken for the device. The review below changed
+        when the connector is handed over and what bounds a redirect.
       - **The lookup and the connect share `connectTimeoutMs`**, and **Connect time** includes
         the lookup, as when the driver made it. Any address family, as the drivers connected.
       - **`describeDbError` keeps a refusal's class** through a driver that wraps it, and reads
@@ -18791,6 +18792,49 @@ because each is a decision rather than a defect:
         a Unix socket directory now fails as a name that does not resolve, under any policy
         but `none`. `boundsBeneath` hands the kind to the gate and asks as the newest probe,
         so it changes nothing there.
+
+      **A-62 review.** Two findings on a SQL Server login redirect, both confirmed and closed in
+      a second commit. Where the outcome above says otherwise, this is what is true.
+      - **F1, a redirect was followed unchecked from a device given as an address.** No lookup
+        meant no connector, so `tedious` resolved the routed server itself and logged in
+        there. `tdsConnector` is now handed over whenever a redirect has to be asked about,
+        and `runDbCheck` supplies `redirect` unless the policy is `none` and the set has no
+        bounds. The first connection of an address-literal device goes to the literal with no
+        lookup, as before; every later call for a routed host is resolved once and checked.
+      - **F2, only a pinned set was held to its bounds on a redirect.** The probe is sent the
+        set's own `allowedTargets` (it is what `pinTarget` reads), so no wire change was
+        needed and the rule is the precise one, not "refuse every redirect": a routed server
+        must be `inside` the targets by `targetVerdict`, or the check ends as
+        `CredentialsWithheldError` with nothing sent to it. A routed *name* against targets
+        that name only addresses is undecided and is refused; it is not resolved to find out.
+        A pinned set still refuses every redirect. A bounded set is held to this under `none`
+        too. An unbounded set follows a redirect under the target policy, and the guide says
+        so, and that with verification off the redirect is unauthenticated.
+      - **What the core does with that refusal.** `CredentialVouching.reported` believes
+        `withheld` only for a sensor the configuration left to its probe, which is the pinned
+        case. For a device given as an address, or a name a name entry covers, the refusal is
+        counted with the unearned ones and read as a failed scan: **Down** with the sentence,
+        not Unknown. Read from the code, not driven by a core test. Making it Unknown means
+        widening what the core believes from a probe, which is a ticket of its own.
+      - **The TDS fake now answers a login with a routing ENVCHANGE** (and a LOGINACK, which
+        `tedious` requires beside it), so the real `tedious` 20 is driven down its routing
+        path: `performSentLogin7WithStandardLogin` (`lib/connection.js` 2364), the routing
+        check in `initialiseConnection` (1141), `performReRouting` (2323) and `connectOnPort`
+        (1253), which calls the connector with the routed server and port. The routed server
+        is a second fake on 127.0.0.2 that records a LOGIN7 and hangs up.
+      - **Tests:** `db-checked-target.test.ts` is 71, none skipped. Through the real driver:
+        an address-literal device routed to a metadata address, and to a name with one good
+        and one metadata address, is refused with no connection to the routed server; routed
+        to an ordinary name with an unbounded set it is followed on one lookup and the login
+        arrives; a bounded set (address in targets, name entry, pinned, and under `none`) is
+        withheld with no connection onward; a bounded set whose targets cover the routed
+        server is followed; `none` with no bounds is followed with nothing resolved.
+      - **Mutation:** 8 of 8 killed by a test, one for each new branch. The two that leave
+        `tedious` to follow a redirect by itself were run against the cases that route to
+        loopback only, so that no mutant sent anything to a link-local address.
+      - **Not proven against a real server:** that Azure SQL's redirect, with TLS on and a
+        login that then completes, behaves as the fake's does. The fake routes without
+        encryption and the routed fake accepts no login.
 
 - [x] **A-63 — discovery is not held to the target policy** · S · A-57 · Found 2026-10-02 by
       `A-57`. `discovery/ping-probe.ts` and `identify.ts` reach whatever a range or a name
