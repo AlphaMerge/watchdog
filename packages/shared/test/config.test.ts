@@ -185,6 +185,70 @@ describe('loadConfig', () => {
     assert.equal(config.probe.workerPoolSize, 0);
     assert.equal(config.core.heartbeatIntervalMs, 10_000);
   });
+
+  describe('the probe’s flow collector (`B-07`)', () => {
+    const load = (flowListener: Record<string, unknown>) =>
+      loadConfig({
+        schema: probeConfigSchema,
+        env: {},
+        argv: ['--config', tempFile('probe.json', JSON.stringify({ flowListener }))],
+      });
+
+    it('is off unless it is turned on, with every other setting filled in', () => {
+      const { config } = loadConfig({ schema: probeConfigSchema, env: {}, argv: [] });
+      assert.deepEqual(config.flowListener, {
+        enabled: false,
+        port: 2055,
+        address: '0.0.0.0',
+        ipVersion: 'udp4',
+        exporters: [],
+        bufferSize: 20_000,
+      });
+    });
+
+    it('takes what an operator sets, from a file or the environment', () => {
+      const { config } = load({
+        enabled: true,
+        port: 9995,
+        address: '10.1.2.3',
+        ipVersion: 'udp6',
+        exporters: ['10.0.0.1'],
+        bufferSize: 500,
+      });
+      assert.deepEqual(config.flowListener, {
+        enabled: true,
+        port: 9995,
+        address: '10.1.2.3',
+        ipVersion: 'udp6',
+        exporters: ['10.0.0.1'],
+        bufferSize: 500,
+      });
+      const fromEnv = loadConfig({
+        schema: probeConfigSchema,
+        env: { MS_FLOW_LISTENER__ENABLED: 'true', MS_FLOW_LISTENER__PORT: '2056' },
+        argv: [],
+      });
+      assert.equal(fromEnv.config.flowListener.enabled, true);
+      assert.equal(fromEnv.config.flowListener.port, 2056);
+      assert.deepEqual(fromEnv.sources.ignoredEnv, []);
+    });
+
+    it('refuses a misspelt setting, a port that is not one and a buffer of nothing', () => {
+      const refused = (flowListener: Record<string, unknown>): string => {
+        const error = captureError(() => load(flowListener));
+        assert.ok(error instanceof ConfigError, JSON.stringify(flowListener));
+        return error.message;
+      };
+      assert.match(refused({ enable: true }), /unknown setting "enable"/);
+      assert.match(refused({ port: 0 }), /port/);
+      assert.match(refused({ port: 65_536 }), /port/);
+      assert.match(refused({ ipVersion: 'tcp4' }), /ipVersion/);
+      assert.match(refused({ bufferSize: 99 }), /bufferSize/);
+      assert.match(refused({ bufferSize: 200_001 }), /bufferSize/);
+      assert.match(refused({ exporters: [''] }), /exporters/);
+      assert.match(refused({ address: '' }), /address/);
+    });
+  });
 });
 
 describe('how long a session lasts (A-38)', () => {

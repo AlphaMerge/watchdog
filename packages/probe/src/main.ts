@@ -19,10 +19,11 @@ import { QueryRunner } from './queries/runner.js';
 import { resultSink } from './result-sink.js';
 import { LISTENER_ID, TrapListener } from './listeners/trap-listener.js';
 import { LISTENER_ID as SYSLOG_LISTENER_ID, SyslogListener } from './listeners/syslog-listener.js';
+import { LISTENER_ID as FLOW_LISTENER_ID, FlowListener } from './listeners/flow-listener.js';
 import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { AssignmentStore } from './scheduler/assignments.js';
-import { coreHandlers } from './core-handlers.js';
+import { coreHandlers, type CursorSweeper } from './core-handlers.js';
 import { dueDispatcher, type DueListener } from './due-dispatch.js';
 import { CheckFlowWatchdog } from './health/check-flow.js';
 import { poolSizer } from './pool-sizer.js';
@@ -304,13 +305,60 @@ async function main(): Promise<void> {
     });
   }
 
+  // The flow collector (`B-02`), which no probe constructed until `B-07`: the sensor type was
+  // registered, the health fields were declared, and nothing here built the listener both read.
+  //
+  // **Only in a build that carries a type it feeds** (`H-12`). `listenerFor` is this build's own
+  // catalogue, so a v1 probe — which refuses `flow.netflow` by name — opens no socket for flows
+  // no sensor of its could ever read, and says so rather than ignoring the setting in silence.
+  const flowCarried = [...listenerFor.values()].includes(FLOW_LISTENER_ID);
+  if (config.flowListener.enabled && !flowCarried) {
+    logger.warn(
+      { profile: BUILD.profile, port: config.flowListener.port },
+      'flowListener.enabled is set and this build carries no flow sensor type, so the flow ' +
+        'collector was not started and its port is not open',
+    );
+  }
+  const flowListener =
+    config.flowListener.enabled && flowCarried
+      ? new FlowListener({
+          logger,
+          port: config.flowListener.port,
+          address: config.flowListener.address,
+          ipVersion: config.flowListener.ipVersion,
+          exporters: config.flowListener.exporters,
+          bufferSize: config.flowListener.bufferSize,
+        })
+      : undefined;
+  if (flowListener !== undefined) {
+    await waitForLocalAddress({
+      address: config.flowListener.address,
+      what: 'flow listener',
+      logger,
+      starting: (status, ms) => {
+        lifecycle.starting(status, ms);
+      },
+    });
+    await flowListener.start();
+    lifecycle.onShutdown({
+      name: 'flow-listener',
+      timeoutMs: 5_000,
+      run: () => flowListener.stop(),
+    });
+  }
+
   // The scheduler hands due sensors to the pool and returns. `onDue` runs on the wheel's own
   // thread, so it must never wait for a check — `submit` is fire-and-forget by design.
   // A listener the operator disabled is simply absent, which is what lets the dispatcher do one
   // lookup rather than a chain of conditionals per listener kind.
-  const listeners = new Map<string, DueListener>();
+  //
+  // **One map, read twice** (`B-07`): the dispatcher drains from it and the config handlers sweep
+  // its cursors. They were two lists written out separately, which is the shape `P-42` was — a
+  // third listener added to one and not the other compiles, and loses or leaks quietly.
+  const listeners = new Map<string, DueListener & CursorSweeper>();
   if (trapListener !== undefined) listeners.set(LISTENER_ID, trapListener);
   if (syslogListener !== undefined) listeners.set(SYSLOG_LISTENER_ID, syslogListener);
+  if (flowListener !== undefined) listeners.set(FLOW_LISTENER_ID, flowListener);
 
   const wheel = new TimingWheel({
     logger,
@@ -463,6 +511,9 @@ async function main(): Promise<void> {
     // a quiet network rather than a receiver turning everything away (`P-64`).
     ...(trapListener === undefined ? {} : { trapListener: () => trapListener.stats() }),
     ...(syslogListener === undefined ? {} : { syslogListener: () => syslogListener.stats() }),
+    // `flowMissed` is the one with no equivalent above: what the exporter says it sent and this
+    // probe never received (`B-02`). Sent only to a core at protocol 23 (`B-07`).
+    ...(flowListener === undefined ? {} : { flowListener: () => flowListener.stats() }),
     spool: () => spool.stats(),
     // How much is waiting is the spool's; whether any of it is *moving* is only the drain's, and
     // the difference is the whole of `615c9f3` — a full spool and a healthy link read identically
@@ -493,8 +544,8 @@ async function main(): Promise<void> {
   const handlers = coreHandlers({
     logger,
     assignments,
-    // Both of them, together, so forgetting one is visible (`P-42`).
-    listeners: [trapListener, syslogListener].filter((one) => one !== undefined),
+    // Every listener the dispatcher drains, from the one map both read (`P-42`, `B-07`).
+    listeners: [...listeners.values()],
     sizePool: sizer.size,
     wakeDrain: () => {
       drain.wake();

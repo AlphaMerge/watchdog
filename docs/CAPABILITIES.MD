@@ -237,7 +237,9 @@ was not the answer for v1.
 | Packet Sniffer       | Passive capture and traffic classification        | `[OUT]` |
 
 Flow is `[V2]` because the Node ecosystem has no maintained NetFlow/IPFIX collector — this
-is a build-it-ourselves subsystem, not a library integration.
+is a build-it-ourselves subsystem, not a library integration. The collector is off until an operator sets
+`flowListener.enabled` on a probe (`B-07`), and a v1 build neither carries the sensor type nor
+opens the port.
 
 ### 3.10 Log and event ingestion
 

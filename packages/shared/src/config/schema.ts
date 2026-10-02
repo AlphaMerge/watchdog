@@ -721,6 +721,38 @@ export interface ProbeConfig {
     senders: string[];
     bufferSize: number;
   };
+  /**
+   * The probe's flow collector (`B-02`, wired by `B-07`): NetFlow v5 and v9, IPFIX and sFlow, on
+   * one UDP socket.
+   *
+   * Off by default for the reason the other two listeners are — a probe that opened a port nobody
+   * asked for is a surprise on somebody's firewall audit — and a `flow.netflow` sensor on a probe
+   * with this off fails its check naming `flowListener.enabled`, rather than reading a quiet link.
+   * A build that carries no flow sensor type (the v1 profile, `H-12`) binds nothing whatever this
+   * says, and logs that it did not.
+   */
+  flowListener: {
+    enabled: boolean;
+    /** 2055 is what exporters are most often pointed at, and it needs no privilege. */
+    port: number;
+    address: string;
+    /** udp4 or udp6. One socket, one family, as for traps. */
+    ipVersion: 'udp4' | 'udp6';
+    /**
+     * Exporter addresses whose flows are kept. Empty accepts any.
+     *
+     * A filter, not a lock. NetFlow authenticates nothing — a datagram claiming any source can be
+     * sent by anything that reaches the port — so this stops a misconfigured exporter filling
+     * the buffer and stops nothing else. What it turns away is counted (`flowRejected`).
+     */
+    exporters: string[];
+    /**
+     * Flow *records* held before the oldest is overwritten, across all sensors — not datagrams,
+     * which carry anything from one record to thirty. What is overwritten before a sensor read it
+     * is counted per sensor and fails that sensor's check, never dropped silently.
+     */
+    bufferSize: number;
+  };
   core: {
     host: string;
     port: number;
@@ -1407,6 +1439,23 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
         senders: { type: 'array', items: { type: 'string', minLength: 1 }, default: [] },
         // Syslog arrives far faster than traps do — a chatty firewall is thousands a second —
         // so the default buffer is larger, and what it loses is still counted rather than lost.
+        bufferSize: { type: 'integer', minimum: 100, maximum: 200_000, default: 20_000 },
+      },
+    },
+    flowListener: {
+      type: 'object',
+      default: {} as ProbeConfig['flowListener'],
+      additionalProperties: false,
+      required: ['enabled', 'port', 'address', 'ipVersion', 'exporters', 'bufferSize'],
+      properties: {
+        enabled: { type: 'boolean', default: false },
+        // Unprivileged, and the port an exporter's documentation most often suggests.
+        port: { type: 'integer', minimum: 1, maximum: 65_535, default: 2055 },
+        address: { type: 'string', minLength: 1, default: '0.0.0.0' },
+        ipVersion: { type: 'string', enum: ['udp4', 'udp6'], default: 'udp4' },
+        exporters: { type: 'array', items: { type: 'string', minLength: 1 }, default: [] },
+        // The syslog listener's bounds: a record is about the size of a syslog line, and what a
+        // sensor did not read in time is counted against that sensor rather than lost quietly.
         bufferSize: { type: 'integer', minimum: 100, maximum: 200_000, default: 20_000 },
       },
     },

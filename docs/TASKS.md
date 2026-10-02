@@ -20303,7 +20303,7 @@ analysis". `F-` is Phase 0.
       sensor's scaling removed, and a fragment's payload read as ports. 25 tests here and 31 on the
       sensor; the full suite is green at 3,669.
 
-- [ ] **B-07 — The flow collector has never run in a shipped probe** · M · B-02, B-06 ·
+- [x] **B-07 — The flow collector has never run in a shipped probe** · M · B-02, B-06 ·
       **Phase 11 is not complete, whatever `B-05` says.** Found on 2026-09-28 while scoping the
       release candidate (`H-10`). `packages/probe/src/main.ts` constructs `TrapListener` and
       `SyslogListener` and nothing else. `FlowListener` is referenced by its own test and by a type
@@ -20330,6 +20330,52 @@ analysis". `F-` is Phase 0.
       not the listener, sends it a datagram and sees a reading. Not a 1.0 blocker, because flow
       is not in the v1 profile (`H-12`) and `H-13` asserts a v1 probe refuses a flow assignment by
       name. Needed for v2 regardless, near the front of its queue.
+
+      **Done 2026-10-02.** In the order the ticket asks for.
+
+      **The gate, protocol 23.** A `flowCounters` capability, and `healthForPeer` strips the five
+      fields below it. 23 rather than 16, where the fields entered the schema: "16 to 22" names
+      cores built after `B-02` and cores built before it, a version cannot tell them apart, and
+      nothing was ever sent to either, so gating at the first version that *sends* costs nobody
+      anything. `SINCE` in `capabilities.test.ts` carries the five and its ungated count drops
+      from 49 to 44.
+
+      **The wiring.** `flowListener` in the probe's configuration — `enabled` (false), `port`
+      (2055), `address`, `ipVersion`, `exporters`, `bufferSize` — and `main.ts` constructs
+      `FlowListener` from it, waits for its address, registers its shutdown and gives Probe Health
+      its `stats()`. The dispatcher's listener map and the config handlers' cursor sweep were two
+      lists written out separately, the shape `P-42` was; they are now one map read twice, so a
+      listener cannot be in one and not the other. The sensor's error says to set
+      `flowListener.enabled` to true.
+
+      **A v1 build binds nothing whatever the setting says.** The listener is constructed only
+      when this build's own dispatch tables map a type to it, so a v1 probe with
+      `flowListener.enabled` logs a warning that the setting did nothing and opens no port. That
+      is a choice: refusing to start over a setting with no effect would stop a probe scanning to
+      make a point about a feature it does not have. `H-12` and `H-13` are unchanged and green.
+
+      **The test starts the probe.** `probe-flow.test.ts` runs `dist/src/main.js` from a
+      configuration file against a TLS core (`test/support/probe-process.ts`) that validates every
+      message with `parseProbeToCore`, assigns it a `flow.netflow` sensor and sends NetFlow v5 from
+      `@ms/simulators`: a reading of two flows with the exported 2:1 TCP to UDP ratio; a heartbeat
+      with `flowReceived` 3, `flowRejected` 1, `flowMalformed` 1 and `flowMissed` 5 from a
+      sequence gap, a truncated datagram and an exporter off the allow-list; the same probe
+      reconnected to a core at 22 sends health with none of the five; a probe with the key off
+      binds nothing and its sensor names the setting; a v1 probe with the key on binds nothing,
+      warns, and refuses the sensor by name. The reporter's flow mapping and the core's five
+      channels had no test either and have one each.
+
+      **Mutations 15/15**: the capability at 22, one field left out of the strip, the strip
+      inverted, the default flipped to on, port 0 allowed, the listener left out of the dispatch
+      map, its `stats()` left out of Probe Health, the v1 guard removed, the allow-list dropped,
+      the address ignored, the shutdown hook emptied, two counters swapped in the report, the
+      sensor's old wording, the v1 warning inverted, and a gap read as zero on the core.
+
+      **Not covered.** `bufferSize` and `ipVersion` reach the listener and no probe-level test
+      shows it: an overflow needs a scan not to land between datagrams, which a one-second
+      interval does not promise. v9, IPFIX and sFlow reach the probe through the same socket and
+      only v5 is sent to a running one. The web UI does not say a probe's collector is off before
+      a flow sensor is added to it.
 
 ## Phase 12 — Maps and dashboards (`V2-02`)
 
@@ -22161,7 +22207,7 @@ can still log in. No route returns a directory secret.
 
 Ordered by expected value. Not scheduled.
 
-- ~~**V2-01** NetFlow v5/v9/IPFIX collector (in-house template cache) and sFlow sensors~~ — **done 2026-09-09** as `B-01`…`B-06` under Phase 11 above, **and never started by a shipped probe** — `B-07`, found 2026-09-28
+- ~~**V2-01** NetFlow v5/v9/IPFIX collector (in-house template cache) and sFlow sensors~~ — **done 2026-09-09** as `B-01`…`B-06` under Phase 11 above, **and never started by a shipped probe** — `B-07`, found 2026-09-28; wired behind `flowListener.enabled` by `B-07` on 2026-10-02
 - ~~**V2-02** Maps and dashboard designer~~ — **started 2026-09-09**, broken into `G-01`…`G-09` under Phase 12 above
 - ~~**V2-03** Reporting engine (templates, scheduling, PDF/CSV, security context)~~ — **started 2026-09-11, landed 2026-09-13**: `E-01`…`E-11` under Phase 13 above, and `E-12` (report fonts beyond DejaVu's coverage) landed the same day
 - ~~**V2-04** Libraries (filter-rule alternate tree views)~~ — **scoped 2026-09-27** into `L-01`…`L-05` under Phase 14 above, behind `A-12`…`A-15`

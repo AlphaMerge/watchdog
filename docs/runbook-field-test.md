@@ -127,8 +127,11 @@ state trigger will ever see it.
 
 The v1 candidate does not, so skip this section when testing it.
 
-Adding a `flow.netflow` sensor starts the probe's collector, and five counters on Probe Health
-come with it: `flowReceived`, `flowRejected`, `flowMalformed`, `flowMissed` and `flowUndecodable`.
+A `flow.netflow` sensor does not start the probe's collector: set `flowListener.enabled` in the
+probe's configuration and restart it first (`docs/administration.md`, "The flow collector"), or
+every scan fails saying so. Five counters on Probe Health come with a running collector, on a
+probe and a core both at protocol 23: `flowReceived`, `flowRejected`, `flowMalformed`,
+`flowMissed` and `flowUndecodable`.
 **None of them has a declared limit**, so none of them will ever move a sensor's state — they need
 threshold triggers or they are numbers nobody reads.
 

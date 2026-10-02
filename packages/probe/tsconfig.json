@@ -11,6 +11,9 @@
     },
     {
       "path": "../sensors"
+    },
+    {
+      "path": "../simulators"
     }
   ]
 }

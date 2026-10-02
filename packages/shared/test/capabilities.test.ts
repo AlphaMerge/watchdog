@@ -47,6 +47,7 @@ describe('what a protocol version can do', () => {
       memorySinceLastReport: false,
       logOutput: false,
       credentialHostKeys: false,
+      flowCounters: false,
     });
   });
 
@@ -214,7 +215,21 @@ describe('the health a peer can be sent', () => {
     poolHeldBack: 179,
     logDropped: 1_204,
     logBacklogBytes: 8_388_000,
+    flowReceived: 4_812,
+    flowRejected: 3,
+    flowMalformed: 2,
+    flowMissed: 61,
+    flowUndecodable: 7,
   };
+  /** `health` as a core at 21 or 22 is sent it: everything but 23's flow counters (`B-07`). */
+  const {
+    flowReceived: _received,
+    flowRejected: _rejected,
+    flowMalformed: _malformed,
+    flowMissed: _missed,
+    flowUndecodable: _undecodable,
+    ...withoutFlow
+  } = health;
 
   it('leaves the machine’s memory and the limit out for a core older than protocol 17', () => {
     const sent = healthForPeer(health, 16);
@@ -249,8 +264,36 @@ describe('the health a peer can be sent', () => {
     assert.equal(sent.poolHeldBack, 179);
   });
 
+  it('leaves the flow collector’s counters out for a core at 22, and keeps 21’s log fields', () => {
+    // `B-07`. The fields have been in the schema since 16 and were never sent, so a core below 23
+    // may be one built before them — and that core refuses the heartbeat, not the field.
+    for (const version of [16, 21, 22]) {
+      const sent = healthForPeer(health, version);
+      for (const field of [
+        'flowReceived',
+        'flowRejected',
+        'flowMalformed',
+        'flowMissed',
+        'flowUndecodable',
+      ]) {
+        assert.equal(field in sent, false, `${field} sent to a core at ${String(version)}`);
+      }
+    }
+    assert.deepEqual(healthForPeer(health, 21), withoutFlow);
+    assert.deepEqual(healthForPeer(health, 22), withoutFlow);
+  });
+
+  it('sends the flow collector’s counters to a core at 23, each as it was reported', () => {
+    const sent = healthForPeer(health, 23);
+    assert.equal(sent.flowReceived, 4_812);
+    assert.equal(sent.flowRejected, 3);
+    assert.equal(sent.flowMalformed, 2);
+    assert.equal(sent.flowMissed, 61);
+    assert.equal(sent.flowUndecodable, 7);
+  });
+
   it('sends everything to a core that knows it', () => {
-    assert.deepEqual(healthForPeer(health, 21), health);
+    assert.deepEqual(healthForPeer(health, 23), health);
     assert.deepEqual(healthForPeer(health, PROTOCOL_VERSION), health);
   });
 
@@ -271,13 +314,19 @@ describe('the health a peer can be sent', () => {
       poolHeldBack: 19,
       logDropped: 21,
       logBacklogBytes: 21,
+      // `B-07`: in the schema since 16, and 23 is the first version any probe sends them at.
+      flowReceived: 23,
+      flowRejected: 23,
+      flowMalformed: 23,
+      flowMissed: 23,
+      flowUndecodable: 23,
     };
     // The rest predate `P-178`, and a core older than that refuses a newer probe at the handshake,
     // in words, so it is never sent a heartbeat at all. Pinned by count, so that a new field is
     // not quietly taken for one of them.
     assert.equal(
       PROBE_HEALTH_FIELDS.filter((field) => SINCE[field] === undefined).length,
-      49,
+      44,
       'a new health field: give it a version in SINCE, and gate it in healthForPeer',
     );
     const knownAt = (version: number): Set<string> =>
@@ -310,6 +359,12 @@ describe('the health a peer can be sent', () => {
     assert.equal(capabilitiesFor(20).memorySinceLastReport, true);
     assert.equal(versionFor('logOutput'), 21);
     assert.equal(versionFor('credentialHostKeys'), 22);
+    assert.equal(versionFor('flowCounters'), 23);
+    assert.ok(
+      missingCapabilities(22).includes(
+        'report what its flow collector received and what it missed',
+      ),
+    );
     assert.ok(missingCapabilities(20).includes('report the log lines it could not write'));
   });
 });

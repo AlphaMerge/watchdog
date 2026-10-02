@@ -107,6 +107,19 @@ export interface ProbeCapabilities {
    * a set at all, because a probe that ignored the list would log in to a server it does not name.
    */
   credentialHostKeys: boolean;
+  /**
+   * Reports what its flow collector received, turned away, could not read and never got (`B-07`).
+   *
+   * **The five `flow*` fields are older than this number, and it is still the first version that
+   * may carry them.** `B-02` put them in the health schema at protocol 16 with no capability, and
+   * no probe sent them, because no shipped probe ever constructed the collector. So "16 to 22"
+   * names both cores whose schema has the fields and cores built before `B-02` whose schema —
+   * `additionalProperties: false` — refuses them, and a version cannot tell those apart. Gating at
+   * the version that first *sends* them costs the cores that would have understood nothing, since
+   * nothing was ever sent to them, and spares the others every heartbeat. Stripped below this like
+   * the log output's fields; the five channels gap.
+   */
+  flowCounters: boolean;
 }
 
 /**
@@ -131,6 +144,7 @@ const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
   ['memorySinceLastReport', 20],
   ['logOutput', 21],
   ['credentialHostKeys', 22],
+  ['flowCounters', 23],
 ];
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -149,6 +163,7 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   memorySinceLastReport: 'report each memory low once, rather than the last thirty seconds',
   logOutput: 'report the log lines it could not write',
   credentialHostKeys: 'check an SSH server against more than one host key',
+  flowCounters: 'report what its flow collector received and what it missed',
 };
 
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
@@ -168,6 +183,7 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     memorySinceLastReport: has(20),
     logOutput: has(21),
     credentialHostKeys: has(22),
+    flowCounters: has(23),
   };
 }
 
@@ -184,6 +200,17 @@ export function healthForPeer(health: ProbeHealthReport, peerVersion: number): P
   let sent = health;
   // Newest first; each capability's fields are stripped on their own, so a peer one version
   // behind loses only that version's.
+  if (!capabilities.flowCounters) {
+    const {
+      flowReceived: _received,
+      flowRejected: _rejected,
+      flowMalformed: _malformed,
+      flowMissed: _missed,
+      flowUndecodable: _undecodable,
+      ...older
+    } = sent;
+    sent = older;
+  }
   if (!capabilities.logOutput) {
     const { logDropped: _dropped, logBacklogBytes: _backlog, ...older } = sent;
     sent = older;

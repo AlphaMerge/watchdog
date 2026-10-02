@@ -41,6 +41,12 @@ import { AppError } from '../errors/app-error.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
+ * Version 23 adds `flowCounters` (`B-07`): the first version whose heartbeat may carry
+ * `flowReceived`, `flowRejected`, `flowMalformed`, `flowMissed` and `flowUndecodable`. The fields
+ * themselves are older — `B-02` added them to the health schema at 16 with no capability — and
+ * were never sent, because no shipped probe constructed the flow collector. A core between 16 and
+ * 22 may or may not know them, so none is sent them: gated and stripped like 21's.
+ *
  * Version 22 adds `credentialHostKeys` (`A-41b`): an SSH credential set's `hostKeys`, the list
  * of server keys it may be used with, beside the one `hostKeyFingerprint`. Nothing on the wire
  * changes shape, since a set's values were always free-form; what changes is what a probe does
@@ -99,7 +105,7 @@ import { AppError } from '../errors/app-error.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 22;
+export const PROTOCOL_VERSION = 23;
 
 /**
  * The oldest peer version this build still understands.
@@ -485,6 +491,10 @@ export interface ProbeHealthReport {
   syslogReceived?: number;
   syslogRejected?: number;
   syslogMalformed?: number;
+  /**
+   * The flow collector's counters (`B-02`), absent unless this probe runs it — and sent only to a
+   * core at protocol 23 (`B-07`), where `healthForPeer` leaves them in.
+   */
   flowReceived?: number;
   flowRejected?: number;
   flowMalformed?: number;

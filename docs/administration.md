@@ -588,12 +588,53 @@ alarm.
 | `logDropped` | **Any value above zero is a warning.** Log lines the probe could not write since the last record — see [a journal that is not keeping up](#a-journal-that-is-not-keeping-up). **A gap on the local probe**, whose lines Core Health counts, and on a probe older than protocol 21. `logBacklog` is what is waiting, in MB, on every probe |
 | `memoryAvailable` | What the probe's *machine* has left, which `memory` — the probe's own share — cannot tell you. The probe `P-206` lost was the largest process on its VM, and was killed because a lint run and PostgreSQL had taken the rest. Warns below 20%, errors below 10%. Read every 2 s on the probe's own timer, because the fall from 8.5% to a kill took six, and each record is the lowest since the record before — see [what a record's memory channels cover](#what-a-records-memory-channels-cover). A gap for a probe older than protocol 17, on any platform but Linux and Windows, and where the machine claims more available than it has in total — a container whose `/proc/meminfo` is virtualised (`lxcfs`, OpenVZ) can (`P-224`). The machine's figure, not the probe's own ceiling — that is the next row. **A gap on the local probe** (`M-21`): its machine is the core's, and Core Health's `memoryAvailable` above carries the same reading with the same limits, so one squeeze on a single-host install is one alarm, on Core Health. The local probe's message still names the figure when it is below 20%. Only a probe flagged local at approval is treated this way; one on the core's host that is not flagged still reports both |
 | `memoryLimitUsage` | The probe's working set against the ceiling its own unit sets — `MemoryMax=6G` in `ms-probe.service`, whatever the machine has left. Warns above 80%. **Act on the warning**: at 100% the kernel kills the probe, and what follows is a link that drops, not a reading — see [a service at its memory ceiling](#a-service-at-its-memory-ceiling). Measured against the working set, not `memory.current`, because page cache fills a cgroup to its ceiling harmlessly. A gap where there is no limit, on cgroup v1 (RHEL 8 by default) and on Windows. `memoryLimit` beside it is the ceiling in MB |
+| `flowReceived`, `flowRejected`, `flowMalformed`, `flowMissed`, `flowUndecodable` | The probe's flow collector, when it runs one — see [the flow collector](#the-flow-collector). No limits, so none of them moves the sensor's state; put a threshold trigger on `flowMissed`, which counts flows the exporter says it sent and the probe never received and is the only evidence of UDP loss there is. **A gap on a probe with `flowListener.enabled` off, on a v1 build, on a probe older than protocol 23, and on any probe whose core is older than protocol 23** — a gap is "no collector", a zero is "a collector hearing nothing" |
 | `clockJumps` | The host's clock moved. Scheduling is monotonic, but data is wall-clock |
 | `clockOffset` | How far the probe's clock is behind the core's, in seconds; negative is ahead. Measured by the core from the send time on every heartbeat and batch, the smallest of five minutes, so a delayed message cannot make a probe look behind. **Warns beyond a minute either way.** A gap until the session has sent one. See [a probe whose clock is wrong](#a-probe-whose-clock-is-wrong) |
 | `sensorsFrozen` | **Any value above zero is an error**, so a frozen probe reads Down as a lost one does (`M-22`). Sensors whose last result is later than the probe's clock reads now, so they can accept nothing it sends until it catches up. They read Unknown meanwhile, like a lost probe's. The alarm when NTP pulls a fast clock back, which leaves `clockOffset` near zero |
 | `resultsFutureDated`, `resultsPastDated` | **Any value above zero is a warning.** The core refused this probe's results in the last five minutes because no clock could have stamped them: more than 15 minutes ahead of the core, or older than anything is kept. Counted on the core, per probe, so the warning clears five minutes after the clock is put right. See [a probe whose clock is wrong](#a-probe-whose-clock-is-wrong) |
 | `reportsRefused` | Everything the core refused from this probe because it was not the probe's to report: a result for a sensor not under it, an answer to a query put to another probe, a message about another probe's discovery run. A counter with no limit, because most refusals are ordinary — a probe whose spool still holds results for sensors that were moved away from it or deleted. See [a probe reporting on work it was not given](#a-probe-reporting-on-work-it-was-not-given) |
 | `reportsForeign` | **Any value above zero is a warning.** The part of the above no correct probe sends: work that was never this probe's. A count over the last five minutes, so it sees the first report after a restart or a reconnect and clears five minutes after the last one |
+
+### The flow collector
+
+Flow monitoring is v2: a v1 build carries no `flow.netflow` sensor type, and its probe opens no
+flow port whatever its configuration says — it logs *flowListener.enabled is set and this build
+carries no flow sensor type* at start and carries on.
+
+In a build that has it, the collector is **off until you turn it on**, like the SNMP trap and
+syslog listeners: a probe that opened a port nobody asked for is a surprise on a firewall audit.
+It is one UDP socket per probe, reading NetFlow v5 and v9, IPFIX and sFlow, set in the probe's
+configuration file (`/etc/ms/probe.json`) and read at start, so restart the probe after a change:
+
+```json
+"flowListener": {
+  "enabled": true,
+  "port": 2055,
+  "address": "0.0.0.0",
+  "ipVersion": "udp4",
+  "exporters": ["10.0.0.1", "10.0.0.2"],
+  "bufferSize": 20000
+}
+```
+
+| Setting | Default | What it is |
+| --- | --- | --- |
+| `enabled` | `false` | Whether the probe binds the port at all. A `flow.netflow` sensor on a probe with this off fails every scan naming this setting, rather than reading a link with no traffic |
+| `port` | `2055` | The UDP port exporters send to. Unprivileged; open it in the host's firewall for the exporters and nobody else |
+| `address` | `0.0.0.0` | The address to bind. A specific address the host does not have yet at boot is waited for, as for the other listeners (see [a core that is still starting](#a-core-that-is-still-starting)) |
+| `ipVersion` | `udp4` | `udp4` or `udp6`. One socket, one family |
+| `exporters` | `[]` | Addresses whose flows are kept; empty keeps any. **A filter, not access control**: NetFlow authenticates nothing, and a datagram can claim any source. It stops a misconfigured exporter filling the buffer. What it turns away is counted in `flowRejected` and not logged |
+| `bufferSize` | `20000` | Flow *records* held, across all sensors, before the oldest is overwritten; 100 to 200,000. A sensor that did not read a record before it was overwritten fails its scan saying how many it lost, so raise this or shorten the sensor's interval when you see that |
+
+`ms-probe config check` refuses a misspelt setting here before a restart does. Each setting can
+also be given in the environment, as `MS_FLOW_LISTENER__ENABLED=true`.
+
+The five `flow*` channels on Probe Health are what the collector counted, and they need **both
+ends at protocol 23**: a probe sends them only to a core that says it speaks 23, because an older
+core refuses a heartbeat carrying a field it does not know. Upgrade the core first and nothing is
+lost; upgrade a probe first and its flow sensors work while the five channels gap until the core
+follows.
 
 ### What a record's memory channels cover
 

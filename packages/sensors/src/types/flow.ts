@@ -321,8 +321,9 @@ export const flowCollector: SensorType = {
     if (batch === undefined || batch.listener !== FLOW_LISTENER) {
       // Never a zero. A collector nobody switched on must not look like a silent network.
       throw new Error(
-        'this probe’s flow collector is not running, so there is nothing to count — enable ' +
-          '`flowListener` in the probe’s configuration. A sensor reporting zero here would ' +
+        'this probe’s flow collector is not running, so there is nothing to count — set ' +
+          '`flowListener.enabled` to true in the probe’s configuration and restart it. A sensor ' +
+          'reporting zero here would ' +
           'say the link carried no traffic, which is not what is being observed',
       );
     }

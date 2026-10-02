@@ -19,5 +19,8 @@
   "dependencies": {
     "@ms/sensors": "0.1.0",
     "@ms/shared": "0.1.0"
+  },
+  "devDependencies": {
+    "@ms/simulators": "0.1.0"
   }
 }

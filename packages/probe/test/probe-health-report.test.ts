@@ -338,6 +338,46 @@ describe('the probe’s own health report', () => {
     assert.equal(report.syslogMalformed, 17);
   });
 
+  it('carries what the flow collector received, turned away, could not read and never got', () => {
+    // `B-07`. The mapping existed since `B-02` and nothing ran it: no probe constructed the
+    // collector, so no test had a reason to. Five different numbers, so that two of them swapped
+    // is a failure rather than a coincidence.
+    const report = new ProbeHealthReporter({
+      scheduler: () => WHEEL,
+      pool: () => POOL,
+      flowListener: () => ({
+        running: true,
+        received: 4_812,
+        rejected: 3,
+        malformed: 2,
+        missed: 61,
+        undecodable: 7,
+        buffered: 900,
+        cursors: 1,
+        overwritten: 0,
+      }),
+    }).report();
+
+    assert.equal(report.flowReceived, 4_812);
+    assert.equal(report.flowRejected, 3);
+    assert.equal(report.flowMalformed, 2);
+    assert.equal(report.flowMissed, 61, 'what did not arrive, which nothing else counts');
+    assert.equal(report.flowUndecodable, 7);
+  });
+
+  it('says nothing about a flow collector this probe does not run', () => {
+    const report = reporter({}).report();
+    for (const field of [
+      'flowReceived',
+      'flowRejected',
+      'flowMalformed',
+      'flowMissed',
+      'flowUndecodable',
+    ]) {
+      assert.equal(field in report, false, `${field} reported by a probe with no collector`);
+    }
+  });
+
   it('says nothing about a listener this probe does not run', () => {
     // Absent stays absent. A probe with no syslog listener must gap rather than report a zero that
     // cannot be told from a listener nothing is sending to — and both are separate keys because a

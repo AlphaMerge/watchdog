@@ -231,6 +231,42 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(reading['syslogMalformed'], 17);
     });
 
+    it('carries what the flow collector counted, and gaps all five for a probe without one', () => {
+      // `B-07`. Until a probe constructed the collector these five channels gapped on every
+      // probe there was, and nothing here said what they read when one did send them.
+      const flowing = build(() =>
+        connected({
+          health: {
+            ...FULL,
+            flowReceived: 4_812,
+            flowRejected: 3,
+            flowMalformed: 2,
+            flowMissed: 61,
+            flowUndecodable: 7,
+          },
+        }),
+      ).read(probeId).reading;
+      assert.equal(flowing['flowReceived'], 4_812);
+      assert.equal(flowing['flowRejected'], 3);
+      assert.equal(flowing['flowMalformed'], 2);
+      assert.equal(flowing['flowMissed'], 61);
+      assert.equal(flowing['flowUndecodable'], 7);
+
+      // No collector, an older probe, or a core below 23 on the other end: a gap, never a zero
+      // that reads as a collector hearing nothing.
+      const { reading } = build(() => connected()).read(probeId);
+      for (const key of [
+        'flowReceived',
+        'flowRejected',
+        'flowMalformed',
+        'flowMissed',
+        'flowUndecodable',
+      ]) {
+        assert.equal(reading[key], null, key);
+      }
+      assert.equal(reading['trapReceived'], 900, 'the other listeners are unaffected');
+    });
+
     it('carries what the probe’s machine has left, beside what the probe holds', () => {
       // `P-208`: the two numbers `P-206` needed and had one of. The probe was the largest process
       // on its VM when it was killed; what killed it was everything else, and only this says so.
