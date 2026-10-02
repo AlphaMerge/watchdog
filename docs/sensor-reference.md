@@ -995,6 +995,8 @@ cost: **light** · evaluated by the core, never by a probe
 | `streamRevoked` | Live sockets signed out: token revoked | sockets | 64-bit counter → rate |
 | `streamDisabled` | Live sockets signed out: account disabled | sockets | 64-bit counter → rate |
 | `streamCheckFailures` | Live socket sign-in checks failed | checks | 64-bit counter → rate |
+| `streamUnsure` | Live sockets closed to reconnect | sockets | 64-bit counter → rate |
+| `streamChecksOutstanding` | Live socket sweep queries unanswered | queries | — |
 | `dependencyPauses` | Dependency pauses | sensors | 64-bit counter → rate |
 | `probesDown` | Probes not connected | probes | — |
 | `probesSilent` | Probes not delivering | probes | — |

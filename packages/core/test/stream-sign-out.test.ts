@@ -726,6 +726,10 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
       const had = all.map((each) => each.frames.length);
       const before = { ...stream.stats.signedOut };
       const failures = stream.stats.credentialCheckFailures;
+      const unsure = stream.stats.unsure;
+      // The frame is asked about before it is read at all, so none of the three reads a
+      // snapshot it will not be sent.
+      const snapshots = t.mock.method(stream, 'snapshot');
 
       t.mock.method(sessions, 'lapsed', () => Promise.reject(new Error('the database went away')));
       for (const each of all) each.socket.send(JSON.stringify({ subscribe: {} }));
@@ -738,6 +742,94 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
       // Nobody was signed out by a question that had no answer, and each was counted.
       assert.deepEqual(stream.stats.signedOut, before);
       assert.equal(stream.stats.credentialCheckFailures, failures + 3);
+      // Counted as what they were, for Core Health: closed to reconnect, not cut off.
+      assert.equal(stream.stats.unsure, unsure + 3);
+      assert.equal(snapshots.mock.callCount(), 0, 'a snapshot was read for a frame not acted on');
+    });
+
+    it('serves a database that answers in three seconds late and once, and a lapsed socket nothing', async (t: TestContext) => {
+      // The scenario the bound on a frame's check broke. Every credential question takes three
+      // seconds, a second longer than the sweep waits. Held to the sweep's wait, each of these
+      // subscriptions was closed with 1013 two seconds in, and a browser came back half a
+      // second later to read a snapshot and be closed again, for as long as the database was
+      // slow. Before `U-26` they got a late snapshot, and they do again.
+      const open = async (login: string) => {
+        const socket = await app.injectWS('/api/v1/stream', { headers: as(login) });
+        sockets.push(socket);
+        const frames: Record<string, unknown>[] = [];
+        socket.on('message', (raw: Buffer) => {
+          frames.push(JSON.parse(raw.toString('utf8')) as Record<string, unknown>);
+        });
+        const ended: { code?: number } = {};
+        socket.on('close', (code: number) => {
+          ended.code = code;
+        });
+        return { socket, frames, ended };
+      };
+      const tabs = [await open('watcher'), await open('watcher'), await open('watcher')];
+      // Opened while signed in, and signed out before it asks for anything.
+      const lapsed = await open('bystander');
+      await logOut('bystander');
+
+      const ask = sessions.lapsed.bind(sessions);
+      t.mock.method(sessions, 'lapsed', async (...args: Parameters<SessionService['lapsed']>) => {
+        await new Promise((resolve) => setTimeout(resolve, 3_000));
+        return ask(...args);
+      });
+      const read = stream.snapshot.bind(stream);
+      const snapshots = t.mock.method(
+        stream,
+        'snapshot',
+        (...args: Parameters<StateBroadcaster['snapshot']>) => read(...args),
+      );
+      const before = {
+        unsure: stream.stats.unsure,
+        failures: stream.stats.credentialCheckFailures,
+      };
+      const signedOutBefore = signedOut('ended');
+
+      for (const each of [...tabs, lapsed]) each.socket.send(JSON.stringify({ subscribe: {} }));
+      // The sweep's tick falls in the middle of it: it waits its two seconds, counts a check
+      // that could not be made, and closes nobody — not the signed-out socket either.
+      await stream.sweep();
+      assert.equal(stream.stats.credentialCheckFailures, before.failures + 1);
+      assert.deepEqual(
+        [...tabs, lapsed].map((each) => each.ended),
+        [{}, {}, {}, {}],
+      );
+
+      const snapshotsOf = (frames: readonly Record<string, unknown>[]): number =>
+        frames.filter((frame) => frame['type'] === 'snapshot').length;
+      // Two questions a subscription, three seconds each: the snapshot is six seconds late.
+      await until(
+        () => tabs.every((tab) => snapshotsOf(tab.frames) === 1),
+        'three snapshots',
+        12_000,
+      );
+      await until(() => lapsed.ended.code !== undefined, 'the lapsed socket to close', 12_000);
+      for (const tab of tabs) await roundTrip(tab.socket);
+
+      // Served once each, on the socket they opened: nothing was closed, so nothing reconnects.
+      assert.deepEqual(
+        tabs.map((tab) => tab.ended),
+        [{}, {}, {}],
+        'a signed-in socket was closed',
+      );
+      assert.deepEqual(
+        tabs.map((tab) => snapshotsOf(tab.frames)),
+        [1, 1, 1],
+      );
+      assert.equal(snapshots.mock.callCount(), 3, 'a snapshot was read for nobody, or twice');
+      assert.equal(stream.stats.unsure, before.unsure, 'a slow check closed a socket to reconnect');
+      // And the one whose session had ended was told so by its own frame, having been sent
+      // nothing and having cost no snapshot.
+      assert.equal(lapsed.ended.code, STREAM_SIGNED_OUT);
+      assert.deepEqual(
+        lapsed.frames.filter((frame) => frame['type'] !== 'hello'),
+        [],
+        'something was sent to a signed-out socket',
+      );
+      assert.equal(signedOut('ended'), signedOutBefore + 1);
     });
 
     it('sends no snapshot and no `watching` to a socket it could not vouch for, and closes it the same way', async (t: TestContext) => {
@@ -776,40 +868,74 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
 
     it('asks nothing for a frame still waiting when its socket was severed', async (t: TestContext) => {
       const watcher = await watching(as('watcher'));
-      // Every question waits here, and is let go at the instant the socket is severed: the
-      // frames queued behind the first are then read with the socket closing and not yet gone.
-      let release = (): void => undefined;
-      const slow = new Promise<void>((resolve) => {
-        release = resolve;
+      // **Nothing here waits on the database or on the socket once the gate opens**, which is
+      // what makes the count mean something. The first frame's question is held at a gate and
+      // answers from memory; severing the socket opens the gate; and from there the queue
+      // drains in promise turns alone, before any I/O can run — so before the close handshake
+      // can finish and release the socket. Were the first answer a real query, the socket
+      // could be released by the time the queue moved on, and a frame that asked would find it
+      // gone and ask nothing: the count would be 1 with or without the guard.
+      let open = (): void => undefined;
+      const gate = new Promise<void>((resolve) => {
+        open = resolve;
       });
-      const ask = sessions.lapsed.bind(sessions);
       let asked = 0;
-      t.mock.method(sessions, 'lapsed', async (...args: Parameters<SessionService['lapsed']>) => {
+      t.mock.method(sessions, 'lapsed', async () => {
         asked += 1;
-        await slow;
-        return ask(...args);
+        await gate;
+        return new Map<string, Lapse>();
       });
+      // Whether the socket had been released when the queue had drained.
+      let releases = 0;
+      const admit = stream.admit.bind(stream);
+      t.mock.method(stream, 'admit', (...args: Parameters<StateBroadcaster['admit']>) => {
+        const admission = admit(...args);
+        return {
+          confirm: () => admission.confirm(),
+          release: () => {
+            releases += 1;
+            admission.release();
+          },
+        };
+      });
+      const late = await app.injectWS('/api/v1/stream', { headers: as('watcher') });
+      sockets.push(late);
+      const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+        late.on('close', (code: number, reason: Buffer) => {
+          resolve({ code, reason: reason.toString('utf8') });
+        });
+      });
+      const drained: { releases?: number; asked?: number } = {};
       const count = stream.severed.bind(stream);
       t.mock.method(stream, 'severed', () => {
         count();
-        release();
+        open();
+        // A thousand promise turns: more than the queue needs, and not one of them I/O.
+        void (async () => {
+          for (let turn = 0; turn < 1_000; turn += 1) await Promise.resolve();
+          drained.releases = releases;
+          drained.asked = asked;
+        })();
       });
       try {
         // As many as may wait: the first is being asked about, the rest are queued behind it.
-        for (let n = 0; n < STREAM_LIMITS.unread; n += 1) watcher.socket.send('5');
-        await roundTrip(watcher.socket);
+        for (let n = 0; n < STREAM_LIMITS.unread; n += 1) late.send('5');
+        await roundTrip(late);
         assert.equal(asked, 1);
         // One more severs the socket, which lets the first question go.
-        watcher.socket.send('5');
-        assert.equal((await closedWith(watcher.closed)).code, 1008);
-        // Whatever the queue was going to do, it has done.
-        for (let turn = 0; turn < 20; turn += 1) {
-          await new Promise((resolve) => setImmediate(resolve));
-        }
-        assert.equal(asked, 1, 'a frame behind the check asked about a socket already severed');
+        late.send('5');
+        assert.equal((await closedWith(closed)).code, 1008);
+        assert.equal(drained.releases, 0, 'the socket was released before the queue drained');
+        assert.equal(
+          drained.asked,
+          1,
+          'a frame behind the check asked about a socket already severed',
+        );
+        assert.equal(asked, 1);
       } finally {
-        release();
+        open();
       }
+      assert.deepEqual(watcher.ended, {});
     });
   });
 
@@ -999,8 +1125,8 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
 });
 
 /** Waits for a condition the socket's events will make true, or fails naming it. */
-async function until(condition: () => boolean, what: string): Promise<void> {
-  const deadline = Date.now() + 5_000;
+async function until(condition: () => boolean, what: string, ms = 5_000): Promise<void> {
+  const deadline = Date.now() + ms;
   while (!condition()) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
     await new Promise((resolve) => setTimeout(resolve, 10));

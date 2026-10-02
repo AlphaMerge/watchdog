@@ -392,9 +392,11 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
           '\n\nThe five seconds are from a database that answers. While the core cannot ask ' +
           'whether a credential still authenticates, no socket is closed with ' +
           `${String(STREAM_SIGNED_OUT)}; one already being sent nothing stays that way. A frame ` +
-          'the client sends while the question cannot be asked is not acted on, and the socket ' +
-          `is closed with ${String(STREAM_UNSURE)}, signed in or not: reconnect, and subscribe ` +
-          'again.',
+          'the client sends waits for that answer however long it takes, so a slow database ' +
+          'makes a late snapshot and closes nothing. Only when the question fails is the frame ' +
+          `not acted on and the socket closed with ${String(STREAM_UNSURE)}, signed in or not: ` +
+          'reconnect and subscribe again, waiting longer each time until a subscription is ' +
+          'answered — `hello` is sent to every socket and is not an answer.',
         // No `response`: the route upgrades rather than answering, and a schema describing a
         // 101 would be a shape no client ever parses.
         response: {},
@@ -491,7 +493,13 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
        * was away and learn which it was. The frame, or the answer, is not acted on, and the
        * socket is closed with `STREAM_UNSURE` whether it was silenced, lapsed, or signed in:
        * a client that reconnects is asked for its credential where a refusal can be said.
-       * Counted where the check failed, as `credentialCheckFailures`.
+       * Counted where the check failed, as `credentialCheckFailures`, and here, as
+       * `StreamStats.unsure`: Core Health's `streamUnsure`.
+       *
+       * **Only a check that failed — never one that is slow.** `confirm` waits for its answer
+       * however long, so a database answering in three seconds is a snapshot three seconds
+       * late, as it was before `U-26`. Held to two seconds it closed every signed-in tab that
+       * subscribed, each of which reconnected at once and read a snapshot to be closed again.
        */
       const vouched = async (admitted: Admission): Promise<boolean> => {
         try {
@@ -500,6 +508,7 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
           if (closed) return false;
           closed = true;
           unsubscribe();
+          stream.unsure();
           request.log.warn(
             { err: describeError(error), login: request.principal?.login },
             'could not check a stream socket’s credential; the socket is closed to reconnect',
@@ -651,6 +660,10 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         if (gone()) return;
         // Signed out while the snapshot was read (`A-34`). No published batch vouches for a
         // snapshot, and the sweep may be seconds away; asked here, it is closed and not sent.
+        //
+        // The second question about this subscription, not the first: `receive` asked before
+        // the frame was read at all, so a subscription that is refused, or whose socket cannot
+        // be vouched for, reads no snapshot (`U-26`). This one is for what happened since.
         if (admission !== undefined && !(await vouched(admission))) return;
         if (gone()) return;
         // Numbered once it has been read: every `state` frame sent before it is counted in it, and

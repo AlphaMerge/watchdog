@@ -17332,10 +17332,11 @@ because each is a decision rather than a defect:
       - **The sweep asks about silenced sockets too**, in the one query it made (one per
         credential check, however many sockets). A sweep with only silenced sockets now waits
         for the answer as a sweep that finds a lapse does. An edge still leaves them out.
-      - **A check that hangs: bounded, and nothing closed.** A sweep's check, and a client
-        frame's, wait at most `credentialWaitMs` (2 s by default, under the 5 s interval);
-        past it the check counts as failed, the sweep ends and the next tick asks again, and an
-        answer that arrives late is not acted on. Before, one query that never returned held
+      - **A check that hangs: bounded, and nothing closed.** A sweep's check waits at most
+        `credentialWaitMs` (2 s by default, under the 5 s interval); past it the check counts
+        as failed, the sweep ends, and an answer that arrives late is not acted on. A client
+        frame's check is not bounded, and a tick that finds the last question still out asks
+        nothing new: see the review round below, which corrected both. Before, one query that never returned held
         `sweep` for good: no later tick ran and no watcher was reviewed. **The silenced socket
         is not closed at the bound**, which is not what the finding asked for: closing it there,
         with an unsilenced lapsed socket necessarily left open, is exactly the difference the
@@ -17376,7 +17377,50 @@ because each is a decision rather than a defect:
       **Mutations 17/17**, two of which survived first and each got a case: an unjudged watcher
       attached while a read was in flight, and the bound applied to an edge.
 
-      **Found, not fixed.** A credential that lapses and comes back inside one sweep interval
+      **Review round, 2026-10-02: one medium and four low, all closed.**
+
+      - **A slow check closed every signed-in tab (medium, a regression of this ticket).**
+        The bound above was on a client frame's check too, and a check past its bound closed
+        the socket with `1013`. A database answering in two to three seconds failed every
+        subscription; the page reconnected half a second later, read a snapshot, and was
+        closed again, with the backoff reset at every socket that opened. **The rule now: a
+        frame's check waits for its answer however long it takes, as before `U-26`; only the
+        sweep is bounded. A check that fails still closes every socket alike with `1013`, and
+        a lapsed socket still gets nothing.** `Admission.confirm` is `#examine(…, false)`.
+        The frame's check already ran before `canSee` and the snapshot read, so a refused or
+        unvouchable subscription reads no snapshot; the second check, after the read, stays,
+        because `A-34` needs it (no snapshot read across a logout is sent). The web client
+        resets its backoff at the first frame that answers it (`#heard`), not at `onopen`, so
+        `hello` followed by `1013` climbs the ladder to its ceiling. The closes are counted:
+        `streamUnsure` on Core Health, `ms_core_stream_closed_to_reconnect_total` exported.
+      - **The review of probe watchers is bounded too.** The access-epoch read and each
+        watcher's re-resolution wait `credentialWaitMs`. A slow one leaves the watcher as it
+        was, to be reviewed on the next tick; it is not sent `overflow`, which would have every
+        watcher resubscribing into a database already behind. One epoch read is out at a time.
+      - **At most one sweep check outstanding per credential check.** A tick that finds its
+        last question unanswered asks nothing new and counts a failed check.
+        `streamChecksOutstanding` on Core Health (a gauge,
+        `ms_core_stream_sweep_queries_outstanding`) is how many are out, the epoch read
+        included.
+      - **A change folded into a read reaches a watcher that stood during it.** Such a
+        watcher was told of the edge that marked it and then left out of the frame the read
+        sent, which was the only word of the second edge. When anything was folded in, every
+        judged watcher is told.
+      - **The severed-frame test could not fail.** Its first answer was a real query, so the
+        close handshake could release the socket before the queue moved on. The answer now
+        comes from memory behind a gate the sever opens, the queue drains in promise turns
+        alone, and the case asserts the socket had not been released when it had.
+
+      Tests: `state-stream.test.ts` +4 and the hung-check case extended (three more ticks ask
+      nothing, four counted); `stream-sign-out.test.ts` +1 scenario — every credential
+      question takes 3 s, three signed-in sockets and one signed out: no close, one snapshot
+      each, three snapshot reads, `unsure` unmoved, the lapsed one closed `4401` with nothing
+      sent; `web/test/state-stream.test.ts` +2 and two changed; `core-health.test.ts` for the
+      two channels. **Mutations 23/23** (21 in the core, 2 in the web client), no survivor.
+      Still no migration and no protocol number; alarm volume untouched.
+
+      **Found, not fixed.** A frame's check that *hangs* holds that socket's frames until the
+      unread bound severs it with `1008`; nothing is sent meanwhile. A credential that lapses and comes back inside one sweep interval
       (an account disabled and re-enabled within five seconds, or a restore): a silenced socket
       is closed, an unsilenced one never knew. While the check *rejects* at an edge, a lapsed
       unsilenced socket is delivered the batch (`A-34`'s rule for a database that blinked) and

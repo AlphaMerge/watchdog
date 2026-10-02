@@ -51,6 +51,10 @@ export interface CoreHealthSources {
     probeCoalesced: number;
     signedOut: Readonly<Record<'ended' | 'expired' | 'revoked' | 'disabled', number>>;
     credentialCheckFailures: number;
+    /** Sockets closed to reconnect because their check could not be made (`U-26`). */
+    unsure: number;
+    /** The sweep's own queries that have not answered (`U-26`). */
+    checksOutstanding: number;
   };
   /** `ProbeReachability.stats()` — probes the core is not currently connected to. */
   probes: () => { probesDown: number; probesSilent: number };
@@ -404,6 +408,9 @@ export class CoreHealthService {
       streamRevoked: stream.signedOut.revoked,
       streamDisabled: stream.signedOut.disabled,
       streamCheckFailures: stream.credentialCheckFailures,
+      // Closed to reconnect on a check that failed, and the sweep's questions still out (`U-26`).
+      streamUnsure: stream.unsure,
+      streamChecksOutstanding: stream.checksOutstanding,
       dependencyPauses: ingestion.dependencyPauses,
       probesDown: probes.probesDown,
       probesSilent: probes.probesSilent,

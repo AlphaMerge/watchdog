@@ -168,10 +168,19 @@ counts checks that could not be made. **A check that fails closes nothing**: a d
 blinked is not a reason to sign everybody out, so a climbing `streamCheckFailures` means sockets
 are not being checked. That holds for a page the core had already stopped sending to: **the five
 seconds are from a database that answers**, and while it does not, such a page stays open and is
-sent nothing. A check still out after two seconds is counted as one that failed and asked again
-on the next tick. A page that sends the core something while the check cannot be made is closed
-with `1013`, signed in or not, and reconnects; nothing is closed with `4401` on a question nobody
-could answer.
+sent nothing. The core's own five-second check waits two seconds for its answer and then counts
+it as one that failed. While that question is still out the next tick asks nothing new and is
+counted the same way, so a database that has stopped answering holds one query of this kind and
+not one per tick; `streamChecksOutstanding` is how many are out, and is 0 on a healthy core.
+
+**A slow database closes nobody.** When a page asks the core for something, the core waits for
+the answer about that page's sign-in however long it takes, and the page gets what it asked for
+late. Only a check that *fails* closes the page's socket, with `1013`, signed in or not; nothing
+is closed with `4401` on a question nobody could answer. `streamUnsure` counts those closes. The
+page reconnects, and waits longer before each attempt until the core has answered it — not
+merely accepted the connection — so a core that keeps closing is asked less often, from half a
+second up to every ten. A climbing `streamUnsure` is pages being turned away by a database that
+is failing; `streamCutoffs` beside it is about a client that does not read, and is not this.
 
 The same socket tells a page that watches one probe — the add-sensor form does, for a sensor type
 that reads a listener — when that probe connects, drops, or reports a listener coming or going.

@@ -46,6 +46,8 @@ export function fixedCoreHealth(
         probeCoalesced: 0,
         signedOut: { ended: 0, expired: 0, revoked: 0, disabled: 0 },
         credentialCheckFailures: 0,
+        unsure: 0,
+        checksOutstanding: 0,
       }),
       probes: () => ({ probesDown: 1, probesSilent: 2 }),
       alarms: () => ({ fired: 6, overdueMs: 0 }),

@@ -270,7 +270,10 @@ export class StateStream {
         return;
       }
       this.#opened = true;
-      this.#attempt = 0;
+      // **The backoff is not reset here** (`U-26`), but where the core first says something
+      // about the subscription: see `#heard`. A socket that opens and is closed before it is
+      // answered has not worked, and one that reset the ladder would come back every half
+      // second for as long as the core went on closing it.
       this.#setStatus('live');
       this.#send();
     };
@@ -409,8 +412,16 @@ export class StateStream {
     }
   }
 
-  /** `#replace`, for a frame from the core: counted, where `subscribe`'s reset is not. */
+  /**
+   * `#replace`, for a frame from the core: counted, where `subscribe`'s reset is not.
+   *
+   * **And the connection has worked** (`U-26`): the backoff starts again from here, and not from
+   * the socket opening. The core answers `hello` to anything and may still close the socket
+   * before it answers the subscription — `1013`, when it cannot check who is asking — and a
+   * client that took the handshake for success would reconnect at the first rung for ever.
+   */
   #heard(states: ReadonlyMap<number, LiveState>): void {
+    this.#attempt = 0;
     this.#frames += 1;
     this.#replace(states);
   }

@@ -210,6 +210,17 @@ const CORE_METRICS: readonly Metric[] = [
     counter: true,
   },
   {
+    key: 'streamUnsure',
+    name: 'ms_core_stream_closed_to_reconnect_total',
+    help: 'Live-state sockets closed to reconnect because their sign-in check could not be made.',
+    counter: true,
+  },
+  {
+    key: 'streamChecksOutstanding',
+    name: 'ms_core_stream_sweep_queries_outstanding',
+    help: 'Queries the live-state sweep asked that have not answered.',
+  },
+  {
     key: 'dependencyPauses',
     name: 'ms_core_dependency_pauses_total',
     help: 'Sensors paused or released because a master sensor moved.',

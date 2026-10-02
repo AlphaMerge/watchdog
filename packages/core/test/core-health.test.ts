@@ -49,6 +49,8 @@ function sources(
     probeCoalesced: number;
     signedOut: { ended: number; expired: number; revoked: number; disabled: number };
     credentialCheckFailures: number;
+    unsure: number;
+    checksOutstanding: number;
     probesDown: number;
     probesSilent: number;
     pending: number;
@@ -98,6 +100,8 @@ function sources(
       probeCoalesced: overrides.probeCoalesced ?? 0,
       signedOut: overrides.signedOut ?? { ended: 0, expired: 0, revoked: 0, disabled: 0 },
       credentialCheckFailures: overrides.credentialCheckFailures ?? 0,
+      unsure: overrides.unsure ?? 0,
+      checksOutstanding: overrides.checksOutstanding ?? 0,
     }),
     alarms: () => ({
       fired: overrides.alarmsFired ?? 0,
@@ -391,6 +395,15 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(signedOut['streamDisabled'], 1);
       assert.equal(signedOut['streamCheckFailures'], 6);
       assert.equal(signedOut['streamCutoffs'], 0);
+      // Closed to reconnect on a check that failed, and the sweep's questions still out
+      // (`U-26`): neither a cut-off nor a sign-out, and each its own number.
+      const unsure = await build({ unsure: 7, checksOutstanding: 2 }).read();
+      assert.equal(unsure['streamUnsure'], 7);
+      assert.equal(unsure['streamChecksOutstanding'], 2);
+      assert.equal(unsure['streamCutoffs'], 0);
+      assert.equal(unsure['streamCheckFailures'], 0);
+      assert.equal(signedOut['streamUnsure'], 0);
+      assert.equal(signedOut['streamChecksOutstanding'], 0);
       // Probe changes folded into one frame (`U-24`): counted, and not as a cut-off — nothing was
       // lost and nobody was detached.
       const folded = await build({ probeCoalesced: 9, overflowed: 1 }).read();
@@ -826,6 +839,8 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
         streamRevoked: 2,
         streamDisabled: 1,
         streamCheckFailures: 3,
+        streamUnsure: 2,
+        streamChecksOutstanding: 1,
         dependencyPauses: 4,
         alarmsFired: 217,
         queriesRefused: 5,
@@ -840,7 +855,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
           assert.equal(reading.counter, undefined, reading.key);
         }
       }
-      assert.equal(readings.length, 13);
+      assert.equal(readings.length, 15);
 
       // Named rather than left to the loop above, which agrees with whatever the declaration
       // says and would go on passing if a channel quietly stopped being a counter. These
@@ -857,6 +872,8 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
           'streamRevoked',
           'streamDisabled',
           'streamCheckFailures',
+          // A count of closes. `streamChecksOutstanding` beside it is a level, and is not here.
+          'streamUnsure',
           'dependencyPauses',
           'alarmsFired',
           'queriesRefused',

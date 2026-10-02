@@ -269,6 +269,21 @@ const CHANNELS: readonly ChannelDef[] = [
     unit: 'checks',
     counter: { bits: 64 },
   },
+  // **Live sockets closed to reconnect because the check their own frame needed failed**
+  // (`U-26`). Nobody was signed out: the database refused the question, and the page comes back
+  // by itself. A rate here is browsers going round the reconnect ladder against a database
+  // that is refusing queries.
+  {
+    key: 'streamUnsure',
+    name: 'Live sockets closed to reconnect',
+    unit: 'sockets',
+    counter: { bits: 64 },
+  },
+  // **Questions the stream's five-second sweep asked that have not answered** (`U-26`). The
+  // sweep waits two seconds for each and goes on, and asks nothing new of a check while its
+  // last question is still out — so this is one or two on a database that has stopped
+  // answering, and zero otherwise. Held above zero, signed-out pages are not being closed.
+  { key: 'streamChecksOutstanding', name: 'Live socket sweep queries unanswered', unit: 'queries' },
   // A count that climbs steadily means a master is flapping — the alarm storm dependencies exist
   // to prevent, showing up as churn instead (`M-11`).
   {

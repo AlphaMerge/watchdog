@@ -1640,26 +1640,26 @@ describe(
       assert.deepEqual(unfound.log, []);
       assert.equal(bounded.stats.credentialCheckFailures, failures + 1, 'not counted');
 
-      // The sweep is not held: the next one runs, asks, and gives up in its turn.
+      // The sweep is not held: the next one runs. **And it asks nothing new**, because its
+      // last question is still out: one a tick, of a table that is locked, is a pool full of
+      // questions nobody is waiting for. It says how many are out, and counts itself as a
+      // check that could not be made.
+      assert.equal(bounded.stats.checksOutstanding, 1);
       const asked = held.asked.length;
-      await within(2_000, 'a second sweep', bounded.sweep());
-      assert.equal(held.asked.length, asked + 1, 'the sweep after a hung one did not run');
-      // A client's own frame waits no longer, and is "cannot tell" for both.
-      await assert.rejects(
-        within(2_000, 'a frame’s check', silenced.admission.confirm()),
-        /did not answer in 60 ms/,
-      );
-      await assert.rejects(
-        within(2_000, 'a frame’s check', unfound.admission.confirm()),
-        /did not answer in 60 ms/,
-      );
+      for (let tick = 2; tick <= 4; tick += 1) {
+        await within(2_000, `sweep ${String(tick)}`, bounded.sweep());
+      }
+      assert.equal(held.asked.length, asked, 'a sweep asked again with its last check still out');
+      assert.equal(bounded.stats.checksOutstanding, 1);
+      assert.equal(bounded.stats.credentialCheckFailures, failures + 4, 'a tick went uncounted');
       assert.deepEqual([silenced.log, unfound.log], [['silence:ended'], []]);
 
-      // **The late answers are not acted on.** They arrive now, between ticks, and say both
+      // **The late answer is not acted on.** It arrives now, between ticks, and says both
       // lapsed; a close here would be at no clock's instant.
       release();
       await turns();
       assert.deepEqual([silenced.log, unfound.log], [['silence:ended'], []]);
+      assert.equal(bounded.stats.checksOutstanding, 0, 'an answered check is still counted out');
 
       // The database is back: the next sweep closes both.
       await within(2_000, 'the sweep that can ask', bounded.sweep());
@@ -1667,6 +1667,142 @@ describe(
       assert.deepEqual(unfound.log, ['signOut:ended']);
       silenced.admission.release();
       unfound.admission.release();
+    });
+
+    it('gives a client’s own frame its answer however long the check takes', async () => {
+      // The wait is the sweep's. A frame held to it was "cannot tell" whenever the database
+      // took longer than the wait to answer, and "cannot tell" closes the socket: every
+      // signed-in tab that subscribed to a slow core was closed, reconnected and asked again.
+      const bounded = new StateBroadcaster({
+        logger: silent,
+        credentialSweepMs: 3_600_000,
+        credentialWaitMs: 40,
+      });
+      const held = credentials();
+      const allowed = admitted(bounded, 'allowed', held.check);
+      const lapsed = admitted(bounded, 'lapsed', held.check);
+      held.lapse('lapsed');
+      const failures = bounded.stats.credentialCheckFailures;
+
+      const release = held.hold();
+      const answers: string[] = [];
+      const asking = [allowed, lapsed].map(async (one, index) => {
+        answers.push(`${String(index)}:${String(await one.admission.confirm())}`);
+      });
+      // Six times the wait: neither has been answered, refused or closed.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      assert.deepEqual(answers, [], 'a frame’s check gave up at the sweep’s bound');
+      assert.deepEqual([allowed.log, lapsed.log], [[], []]);
+      assert.equal(bounded.stats.credentialCheckFailures, failures);
+      // A sweep meanwhile gives up at its bound, and holds nothing of theirs up.
+      await within(2_000, 'the sweep', bounded.sweep());
+      assert.equal(bounded.stats.credentialCheckFailures, failures + 1);
+      assert.deepEqual(answers, []);
+
+      release();
+      await within(2_000, 'the answers', Promise.all(asking));
+      assert.deepEqual(answers.sort(), ['0:true', '1:false']);
+      assert.deepEqual(allowed.log, []);
+      assert.deepEqual(lapsed.log, ['signOut:ended']);
+      allowed.admission.release();
+    });
+
+    it('bounds the review of probe watchers too, and reads the epoch once while it is out', async () => {
+      // With one watcher attached the sweep goes on to read the access epoch, and a read that
+      // hung held it as the credential check used to: no later tick ran.
+      let reads = 0;
+      let answer = (): void => undefined;
+      const hung = new Promise<void>((resolve) => {
+        answer = resolve;
+      });
+      let hanging = true;
+      const bounded = new StateBroadcaster({
+        logger: silent,
+        credentialSweepMs: 3_600_000,
+        credentialWaitMs: 60,
+        accessEpoch: async () => {
+          reads += 1;
+          if (hanging) await hung;
+          return epochNow();
+        },
+      });
+      const stale = await epochNow();
+      const moved = await grantsMoved();
+      const revoked = probeRecorder();
+      bounded.watchProbe(revoked.watcher, probeId, {
+        visibility: Visibility.everything(stale),
+        key: 'revoked',
+        resolve: () => Promise.resolve(Visibility.nothing(moved)),
+      });
+
+      const started = performance.now();
+      await within(2_000, 'a sweep whose epoch read hangs', bounded.sweep());
+      assert.ok(performance.now() - started >= 55, 'gave up before its bound');
+      assert.equal(reads, 1);
+      assert.deepEqual(revoked.overflows, [], 'told on a read that did not answer');
+      assert.equal(bounded.stats.checksOutstanding, 1);
+
+      // The next ticks run, and wait on the read that is out rather than making another.
+      await within(2_000, 'a second sweep', bounded.sweep());
+      await within(2_000, 'a third sweep', bounded.sweep());
+      assert.equal(reads, 1, 'the epoch was read again while a read was still out');
+      assert.deepEqual(revoked.overflows, []);
+
+      // It answers, and the tick after reviews as it always did.
+      hanging = false;
+      answer();
+      await within(
+        2_000,
+        'the read that was out to answer',
+        (async () => {
+          while (bounded.stats.checksOutstanding !== 0) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+        })(),
+      );
+      await within(2_000, 'the sweep that can read', bounded.sweep());
+      assert.equal(reads, 2);
+      assert.equal(revoked.overflows.length, 1);
+    });
+
+    it('leaves a watcher whose view is slow to come back as it was, and asks for it once', async () => {
+      const bounded = new StateBroadcaster({
+        logger: silent,
+        credentialSweepMs: 3_600_000,
+        credentialWaitMs: 60,
+        accessEpoch: epochNow,
+      });
+      const stale = await epochNow();
+      const moved = await grantsMoved();
+      let resolutions = 0;
+      let answer = (): void => undefined;
+      const hung = new Promise<void>((resolve) => {
+        answer = resolve;
+      });
+      const slow = probeRecorder();
+      bounded.watchProbe(slow.watcher, probeId, {
+        visibility: Visibility.everything(stale),
+        key: 'slow',
+        resolve: async () => {
+          resolutions += 1;
+          await hung;
+          return Visibility.nothing(moved);
+        },
+      });
+
+      await within(2_000, 'a sweep whose resolution hangs', bounded.sweep());
+      await within(2_000, 'the next', bounded.sweep());
+      assert.equal(resolutions, 1, 'asked again for a view still being asked for');
+      // Not sent back for being slow: that would be every watcher resubscribing into a
+      // database that is already behind.
+      assert.deepEqual(slow.overflows, [], 'a slow answer was taken for a refusal');
+      assert.equal(bounded.stats.subscribers, 1);
+
+      answer();
+      await turns();
+      await within(2_000, 'the sweep that is answered', bounded.sweep());
+      assert.deepEqual(slow.overflows, ['what this account may see has changed; subscribe again']);
+      assert.equal(bounded.stats.subscribers, 0);
     });
 
     it('does not bound an edge’s check: a batch nobody has vouched for is not delivered', async () => {
@@ -1816,6 +1952,34 @@ describe(
       const quiet = probeRecorder();
       stream.considerProbe(quiet.watcher, probeId, EVERYONE).stand();
       assert.equal(quiet.changes, 0);
+    });
+
+    it('tells a watcher that stood during a read of the change folded into that read after it', async () => {
+      // Two edges, one read. The first marks a watcher not yet judged; it stands, and is told
+      // of that one; the second arrives while the read is still out and is folded into it. The
+      // frame the read sends is then the only thing that will ever say the second happened,
+      // and the watcher was left out of it for having been marked by the first.
+      const judged = probeRecorder();
+      stream.watchProbe(judged.watcher, probeId, EVERYONE);
+      const late = probeRecorder();
+      const considered = stream.considerProbe(late.watcher, probeId, EVERYONE);
+      const slow = gated();
+      const folded = stream.stats.probeCoalesced;
+
+      const first = stream.publishProbe(slow.q, probeId);
+      await turns();
+      assert.equal(slow.asked(), 1);
+      considered.stand();
+      assert.equal(late.changes, 1, 'the first edge, said when it stood');
+
+      assert.equal(await stream.publishProbe(slow.q, probeId), 0);
+      assert.equal(stream.stats.probeCoalesced, folded + 1, 'the control: it was folded in');
+      assert.equal(slow.asked(), 1);
+
+      slow.release();
+      assert.equal(await within(2_000, 'the publish', first), 2);
+      assert.equal(judged.changes, 1);
+      assert.equal(late.changes, 2, 'the second edge never reached a watcher that had stood');
     });
 
     it('tells a watcher judged while a change is being read once, not twice', async () => {

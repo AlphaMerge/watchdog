@@ -119,6 +119,22 @@ export interface StreamStats {
    * A number that climbs is a probe whose link is flapping, or a browser that has stopped reading.
    */
   readonly probeCoalesced: number;
+  /**
+   * Sockets closed with "reconnect" because a check their own frame needed could not be made
+   * (`U-26`). Not signed out — nobody could say — and not severed, which is a client
+   * misbehaving. A number that climbs is browsers being sent round the reconnect ladder by a
+   * database that is refusing queries.
+   */
+  readonly unsure: number;
+  /**
+   * The sweep's own queries that were asked and have not answered: a credential check per
+   * `CredentialCheck`, and the read of the access epoch (`U-26`). The sweep gives each
+   * `credentialWaitMs` and then goes on without it, and **does not ask again while one is still
+   * out**: a tick that asked afresh every five seconds of a table that is locked would fill the
+   * pool with questions nobody is waiting for. Zero on a healthy core; anything else, held, is
+   * a database that has stopped answering the stream.
+   */
+  readonly checksOutstanding: number;
 }
 
 export interface StateBroadcasterOptions {
@@ -138,9 +154,10 @@ export interface StateBroadcasterOptions {
    */
   credentialSweepMs?: number;
   /**
-   * How long a sweep, or a client's own frame, waits for the credential check to answer before it
-   * is taken as one that could not be made (`U-26`): counted, and closing nothing. A check that
-   * never answers would otherwise hold the sweep, and every one after it, for good.
+   * How long a sweep waits for each of its queries — the credential check, the access epoch, a
+   * watcher's view — before it goes on without the answer (`U-26`): counted, and closing
+   * nothing. One that never answers would otherwise hold the sweep, and every one after it, for
+   * good. **The sweep's alone**: a client's own frame waits for its answer however long.
    */
   credentialWaitMs?: number;
   /**
@@ -180,20 +197,34 @@ const DEFAULT_SNAPSHOT_LIMIT = 20_000;
 const DEFAULT_CREDENTIAL_SWEEP_MS = 5_000;
 
 /**
- * Two seconds for a sweep's credential check, or a client frame's, to answer (`U-26`).
+ * Two seconds for a sweep's credential check to answer (`U-26`).
  *
  * A few hundred primary-key reads take well under a millisecond, so a check still out after two
  * seconds is a database that is not answering, and is treated as that: counted as a check that
- * could not be made, which closes nothing, and asked again on the next tick. Shorter than the
- * sweep's interval, so the tick after a check that hung is not skipped for it.
+ * could not be made, which closes nothing. Shorter than the sweep's interval, so the tick after
+ * a check that hung is not skipped for it.
+ *
+ * **Not the bound on a client's frame.** The pool has no query timeout and this wait includes
+ * the time a query spends queued for a connection, so a database answering in three seconds
+ * fails every check held to two. On the sweep that costs a tick. On a subscription it closed a
+ * signed-in socket whose only fault was a slow database, and the client came straight back to
+ * ask the same database again.
  */
 const DEFAULT_CREDENTIAL_WAIT_MS = 2_000;
 
-/** What a check that outlived `credentialWaitMs` is failed with. */
+/** What a sweep's query that outlived `credentialWaitMs` is failed with. */
 class CredentialCheckTimeout extends Error {
-  constructor(ms: number) {
-    super(`the credential check did not answer in ${String(ms)} ms`);
+  constructor(what: string, ms: number) {
+    super(`${what} did not answer in ${String(ms)} ms`);
     this.name = 'CredentialCheckTimeout';
+  }
+}
+
+/** A sweep's credential check that was not asked, because the last one is still out. */
+class CredentialCheckOutstanding extends Error {
+  constructor() {
+    super('the credential check before this one has not answered; nothing new was asked');
+    this.name = 'CredentialCheckOutstanding';
   }
 }
 
@@ -277,6 +308,10 @@ export interface Admission {
    * after the client's frame as it would have had nothing been published in between, so a
    * signed-out client cannot learn from how fast it is closed that something was.
    *
+   * **It waits for the answer however long that takes.** A slow database is a late answer, not
+   * a refusal: bounded, a check that took three seconds closed every signed-in socket that
+   * subscribed.
+   *
    * **And when the question cannot be answered, it rejects for a silenced socket as for any
    * other, and closes neither** (`U-26`). A silenced socket closed here while the database was
    * away, where a lapsed one nothing had been published to was not, is the same oracle by another
@@ -351,8 +386,13 @@ export class StateBroadcaster {
    */
   readonly #watchers = new Set<Watching>();
   /** Probes whose place in the tree is being read for a frame that has not gone yet (`U-24`). */
-  readonly #announcing = new Set<ObjectId>();
+  readonly #announcing = new Map<ObjectId, { folded: boolean }>();
   #probeCoalesced = 0;
+  #unsure = 0;
+  /** The sweep's credential checks that have not answered, by check (`U-26`). */
+  readonly #pending = new Map<CredentialCheck, Promise<unknown>>();
+  /** The sweep's read of the access epoch, while it has not answered (`U-26`). */
+  #epochRead: Promise<number | null> | undefined;
   /**
    * Resolutions in flight, by principal and the epoch that sent for them (`A-30`). Publishes run
    * concurrently — every committed batch is one — and each noticed the same grant change and asked
@@ -433,6 +473,8 @@ export class StateBroadcaster {
       signedOut: { ...this.#signedOut },
       credentialCheckFailures: this.#credentialCheckFailures,
       probeCoalesced: this.#probeCoalesced,
+      unsure: this.#unsure,
+      checksOutstanding: this.#pending.size + (this.#epochRead === undefined ? 0 : 1),
     };
   }
 
@@ -442,6 +484,14 @@ export class StateBroadcaster {
    */
   coalesced(): void {
     this.#probeCoalesced += 1;
+  }
+
+  /**
+   * Counts a socket the stream route closed to reconnect, because a check its own frame needed
+   * could not be made (`U-26`). See `StreamStats.unsure`.
+   */
+  unsure(): void {
+    this.#unsure += 1;
   }
 
   /** Counts a socket the stream route closed to protect the core (`A-30`). See `StreamStats`. */
@@ -465,8 +515,8 @@ export class StateBroadcaster {
       confirm: async () => {
         if (!this.#admitted.has(socket)) return false;
         // Rejects when it could not be asked about, decided already or not (`U-26`): "cannot
-        // tell" is the caller's, and is the same for every socket.
-        await this.#examine([socket], 'close');
+        // tell" is the caller's, and is the same for every socket. Unbounded: see `confirm`.
+        await this.#examine([socket], 'close', false);
         return this.#admitted.has(socket);
       },
       release: () => {
@@ -501,7 +551,14 @@ export class StateBroadcaster {
    * which of the two it was. So the five seconds are five seconds from a database that answers.
    *
    * **A check that does not answer is one that failed, after `credentialWaitMs`.** The sweep ends
-   * there and the next tick asks again; an answer that arrives later is not acted on.
+   * there, and an answer that arrives later is not acted on. **The next tick asks again only once
+   * that answer has come**: while it is still out, a tick asks nothing new and counts itself as
+   * a check that could not be made, so a database that has stopped answering holds one question
+   * of the sweep's and not one per tick. `StreamStats.checksOutstanding` says how many.
+   *
+   * **The review of probe watchers is bounded the same way** — the read of the access epoch, and
+   * each view asked for again — so a watcher attached does not put the sweep back at the mercy
+   * of one query.
    */
   async sweep(): Promise<void> {
     // One at a time: a sweep still waiting on a slow database is not joined by another.
@@ -529,13 +586,19 @@ export class StateBroadcaster {
    *
    * One read of the epoch per sweep while anybody watches, and no resolution unless it moved.
    * Never rejects: what could not be asked this time is asked on the next tick.
+   *
+   * **Each wait is `credentialWaitMs` at most** (`U-26`). A read of the epoch that is still out
+   * is waited on again by the next tick and not asked a second time; a view still being asked
+   * for is the same one `#resolve` already holds. A watcher whose view did not come back in time
+   * is left exactly as it was — told nothing, and reviewed on the next tick — where one whose
+   * view could not be asked for at all is sent back, as before.
    */
   async #review(): Promise<void> {
     const read = this.#accessEpoch;
     if (read === undefined || this.#watchers.size === 0) return;
     let epoch: number | null;
     try {
-      epoch = await read();
+      epoch = await this.#within(this.#readEpoch(read), 'the access epoch');
     } catch (error: unknown) {
       this.#logger.warn(
         { err: describeError(error), watchers: this.#watchers.size },
@@ -554,8 +617,19 @@ export class StateBroadcaster {
       stale.map(async (watching) => {
         let next: Visibility | null;
         try {
-          next = await this.#resolve(watching.sight, at);
+          next = await this.#within(
+            this.#resolve(watching.sight, at),
+            'what a probe watcher may see',
+          );
         } catch (error) {
+          // Slow is not wrong: its view is asked for again on the next tick, or is still being.
+          if (error instanceof CredentialCheckTimeout) {
+            this.#logger.warn(
+              { err: describeError(error) },
+              'a probe watcher’s view was not answered in time; it is reviewed on the next sweep',
+            );
+            return;
+          }
           this.#logger.warn(
             { err: describeError(error) },
             'could not re-resolve what a probe watcher may see; it must subscribe again',
@@ -580,6 +654,21 @@ export class StateBroadcaster {
   }
 
   /**
+   * The access epoch, asked once however many ticks wait for it (`U-26`): a read that has not
+   * answered is the one the next tick waits on.
+   */
+  #readEpoch(read: () => Promise<number | null>): Promise<number | null> {
+    if (this.#epochRead !== undefined) return this.#epochRead;
+    const reading = read();
+    this.#epochRead = reading;
+    const settle = (): void => {
+      if (this.#epochRead === reading) this.#epochRead = undefined;
+    };
+    reading.then(settle, settle);
+    return reading;
+  }
+
+  /**
    * `#examine` for every admitted socket, never rejecting. See `sweep`.
    *
    * `silence` is what an edge does — a published batch, a probe's change — and `close` what the
@@ -590,7 +679,8 @@ export class StateBroadcaster {
   async #vet(act: 'silence' | 'close'): Promise<void> {
     if (this.#admitted.size === 0) return;
     try {
-      await this.#examine([...this.#admitted.keys()], act);
+      // Bounded for the sweep and for nothing else: an edge that timed out would deliver.
+      await this.#examine([...this.#admitted.keys()], act, act === 'close');
     } catch (error: unknown) {
       this.#logger.warn(
         { err: describeError(error), sockets: this.#admitted.size },
@@ -606,12 +696,19 @@ export class StateBroadcaster {
    * open for the sweep, `close` signs it out — and signs out those silenced before. Rejects, each
    * failure counted, when a check cannot answer — after acting on what the others said.
    *
-   * **`silence` does not ask about a socket already silenced; `close` does** (`U-26`), and waits
-   * no longer than `credentialWaitMs` for the answer. What `close` does with a socket depends on
-   * its check having answered and on nothing else: one whose check could not, silenced or not,
-   * is left exactly as it was.
+   * **`silence` does not ask about a socket already silenced; `close` does** (`U-26`). What
+   * `close` does with a socket depends on its check having answered and on nothing else: one
+   * whose check could not, silenced or not, is left exactly as it was.
+   *
+   * **`bounded` is the sweep's**: it waits no longer than `credentialWaitMs`, and asks a check
+   * nothing while that check's last question from a sweep is still unanswered. A client's own
+   * frame and a published batch wait for their answer.
    */
-  async #examine(sockets: readonly StreamSocket[], act: 'silence' | 'close'): Promise<void> {
+  async #examine(
+    sockets: readonly StreamSocket[],
+    act: 'silence' | 'close',
+    bounded: boolean,
+  ): Promise<void> {
     const asking = new Map<CredentialCheck, Map<string, Credential>>();
     for (const socket of sockets) {
       const check = this.#admitted.get(socket);
@@ -626,8 +723,18 @@ export class StateBroadcaster {
     await Promise.all(
       [...asking].map(async ([check, asked]) => {
         try {
+          if (!bounded) {
+            answers.set(check, await check.lapsed([...asked.values()]));
+            return;
+          }
+          if (this.#pending.has(check)) throw new CredentialCheckOutstanding();
           const answer = check.lapsed([...asked.values()]);
-          answers.set(check, await (act === 'close' ? this.#within(answer) : answer));
+          this.#pending.set(check, answer);
+          const settle = (): void => {
+            if (this.#pending.get(check) === answer) this.#pending.delete(check);
+          };
+          answer.then(settle, settle);
+          answers.set(check, await this.#within(answer, 'the credential check'));
         } catch (error: unknown) {
           this.#credentialCheckFailures += 1;
           failures.push(error);
@@ -673,17 +780,19 @@ export class StateBroadcaster {
   }
 
   /**
-   * A credential check's answer, or a rejection once `credentialWaitMs` has passed (`U-26`).
+   * The answer to one of the sweep's queries, or a rejection once `credentialWaitMs` has passed
+   * (`U-26`).
    *
-   * The check itself is not stopped — there is nothing to stop it with — and what it says after
-   * the wait is dropped: acting on it would close a socket at an instant that is neither the
-   * sweep's tick nor the client's frame.
+   * The query itself is not stopped — there is nothing to stop it with — and what a credential
+   * check says after the wait is dropped: acting on it would close a socket at an instant that
+   * is neither the sweep's tick nor the client's frame. Its caller keeps hold of it, so that it
+   * is not asked again while it is out.
    */
-  async #within<T>(answer: Promise<T>): Promise<T> {
+  async #within<T>(answer: Promise<T>, what: string): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const late = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
-        reject(new CredentialCheckTimeout(this.#waitMs));
+        reject(new CredentialCheckTimeout(what, this.#waitMs));
       }, this.#waitMs).unref();
     });
     // The loser of the race has nobody else to catch it.
@@ -855,11 +964,14 @@ export class StateBroadcaster {
       early.add(watching);
     }
     if (!watched) return 0;
-    if (this.#announcing.has(probeId)) {
+    const inFlight = this.#announcing.get(probeId);
+    if (inFlight !== undefined) {
       this.#probeCoalesced += 1;
+      inFlight.folded = true;
       return 0;
     }
-    this.#announcing.add(probeId);
+    const announcing = { folded: false };
+    this.#announcing.set(probeId, announcing);
 
     // As `publish`: every socket's credential before anything is delivered (`A-34`), and a
     // lapsed one silenced, not closed — a close here is a frame at the instant of this edge.
@@ -892,8 +1004,17 @@ export class StateBroadcaster {
     //
     // Nor one that was not judged when this change arrived (`U-26`): it was marked above, and is
     // told once when it stands, or has been already.
+    //
+    // **Unless a later change was folded into this read.** A watcher that stood while the read
+    // was out has been told of the change that marked it, and the one folded in after it stood
+    // is told by nothing but this frame: left out, it would never hear of it. So with anything
+    // folded in, everybody judged by now is told; one told twice for one change has the second
+    // folded into the frame it has not taken yet, where the route counts it.
     const targets = [...this.#watchers].filter(
-      (watching) => watching.probeId === probeId && watching.judged && !early.has(watching),
+      (watching) =>
+        watching.probeId === probeId &&
+        watching.judged &&
+        (announcing.folded || !early.has(watching)),
     );
     const at = epoch;
     const views = await Promise.all(

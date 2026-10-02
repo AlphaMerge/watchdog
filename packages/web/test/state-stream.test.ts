@@ -222,8 +222,61 @@ describe('the live state stream', () => {
     latest().drop();
     fire();
     latest().open();
+    latest().deliver(SNAPSHOT);
     latest().drop();
-    expect(timers[0]?.ms, 'a connection that opened resets the backoff').toBe(10);
+    expect(timers[0]?.ms, 'a connection that was answered resets the backoff').toBe(10);
+  });
+
+  it('keeps climbing while the core closes each socket before it answers it (U-26)', () => {
+    // The core says `hello` to anything, and closes with 1013 when it cannot check who is
+    // asking. A client that took the socket opening for a connection that worked came back at
+    // the first rung every time: every open tab, every half second, each one an upgrade and a
+    // credential query against a database that was already refusing them.
+    let asked = 0;
+    const { stream, latest, timers, fire } = harness([10, 20, 30], () => {
+      asked += 1;
+    });
+    stream.subscribe(1);
+    const waits: number[] = [];
+    for (let round = 0; round < 5; round += 1) {
+      latest().open();
+      latest().deliver({ type: 'hello', seq: 0, protocol: 1 });
+      latest().drop(1013, 'could not confirm this session; reconnect');
+      waits.push(timers[0]?.ms ?? -1);
+      fire();
+    }
+    expect(waits, 'the ladder started again at every socket that opened').toEqual([
+      10, 20, 30, 30, 30,
+    ]);
+    // And at the ceiling it asks whether the session is still there, as for any other outage.
+    expect(asked).toBe(3);
+
+    // The first answer is what resets it: a refusal of the subscription does not.
+    latest().open();
+    latest().deliver({ type: 'problem', reason: 'this account may not read that object' });
+    latest().drop();
+    expect(timers[0]?.ms).toBe(30);
+    fire();
+    latest().open();
+    latest().deliver(SNAPSHOT);
+    latest().drop();
+    expect(timers[0]?.ms).toBe(10);
+  });
+
+  it('starts the wait again when a watch on a probe is answered (U-26)', () => {
+    const { stream, latest, timers, fire } = harness([10, 20]);
+    stream.watchProbe(7);
+    latest().open();
+    latest().drop();
+    fire();
+    latest().open();
+    latest().drop();
+    expect(timers[0]?.ms).toBe(20);
+    fire();
+    latest().open();
+    latest().deliver({ type: 'watching', probeId: 7 });
+    latest().drop();
+    expect(timers[0]?.ms).toBe(10);
   });
 
   it('resyncs by subscribing again when the server says it fell behind', () => {
@@ -543,8 +596,9 @@ describe('a stream that stays down', () => {
     failAgain(h);
     expect(asked).toBe(1);
 
-    // A successful handshake resets the ladder, so the next failure is an early rung again.
+    // A socket that is answered resets the ladder, so the next failure is an early rung again.
     h.latest().open();
+    h.latest().deliver(SNAPSHOT);
     h.latest().drop();
     expect(asked).toBe(1);
   });
