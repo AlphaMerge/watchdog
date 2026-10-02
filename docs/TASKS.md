@@ -17926,6 +17926,25 @@ because each is a decision rather than a defect:
       the count before and after, the tab says how many the save adds, and the sentence covers
       the unpinnable case in words.
 
+- [ ] **A-56 — the late-refusal record does not survive a core restart, and late refusals are
+      counted with the rest** · S · A-53 · Found 2026-10-02 by `A-53`. The record of which
+      sensors had a set narrowed, and when, is in memory: a core restarted inside the ten-minute
+      grace forgets it, and a probe's honest late refusal then reads as a sensor failure again.
+      A late refusal also counts into Probe Health's refused results beside the refusals that
+      mean something is wrong, so the channel cannot tell the two apart. **Done when** either
+      the record is rebuilt at start from what the database already holds or the runbook says
+      the bound in words with a test of what a restart does, and a late refusal is counted
+      where an operator can tell it from a standing one.
+
+- [ ] **A-57 — only HTTP and mail refuse a metadata address** · M · A-09, A-54 · Found
+      2026-10-02 by `A-54`. `A-09`'s link-local guard covers the HTTP and mail sensors. SSH,
+      SNMP and the port sensors connect to whatever a device's name resolves to, so a name that
+      answers 169.254.169.254 is reached by them. Less is at stake than on HTTP, where the
+      response body is the prize, and it is still a probe made to speak to an address the
+      policy names. **Done when** the policy is decided per transport and written down, the
+      transports it covers check the address they connect to with the same single lookup as
+      `A-54`, and a simulator test shows the refusal on each.
+
 ### Panel round two — notifications, schedules, triggers
 
 Eight lenses over `packages/core/src/{notifications,schedules,triggers}`, merged to 34 distinct
@@ -20072,6 +20091,13 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       shows `heartbeatFailures`; and the outside check has a variant that alerts once per
       outage, not every minute.
 
+- [ ] **H-26 — an upgrade does not show a passing config check's warnings** · S · B-08 ·
+      Found 2026-10-02 by `B-08`. `deploy/place-release.sh` runs `config check` and keeps the
+      output of a check that passes, so a warning — a 1.0 probe with `flowListener.enabled`
+      is the first — reaches a person who runs the check by hand and nobody who upgrades.
+      **Done when** the script prints a passing check's warnings, still exits 0, and the smoke
+      install shows one on an upgrade.
+
 ## Release 1.1 — Windows
 
 **Decided 2026-09-28 (`H-10`): 1.0 is Linux-only, and Windows is 1.1.** Nothing here is
@@ -20864,6 +20890,29 @@ analysis". `F-` is Phase 0.
       exporting both to one probe has each dialect's sequence read against the other's, and
       `flowMissed` counts losses that did not happen. Ring overwrites have no Probe Health
       channel: they are visible per sensor and in the stop line only.
+
+- [ ] **B-10 — NetFlow v9 and sFlow from one device share a sequence** · S · B-02, B-09 · Found
+      2026-10-02 by `B-09`, by reading; not reproduced. `FlowListener` keys an exporter's
+      expected sequence by address and by what the sequence counts, and v9 and sFlow both count
+      packets, so a device exporting both to one probe has each read against the other's and
+      `flowMissed` counts losses that did not happen. **Done when** a test sends both dialects
+      from one address and shows the false count, the key includes the dialect (and v9's source
+      id, sFlow's agent and sub-agent), and the same test shows none missed.
+
+- [ ] **B-11 — a flow ring that overwrites is not on Probe Health** · S · B-07, B-09 · Found
+      2026-10-02 by `B-09`. Records the probe received and its buffer overwrote fail the
+      sensor's scan and appear in the stop line, and nowhere an operator watching the probe
+      would look. A buffer is a queue, and the rule is that every one of them is on a health
+      sensor. **Done when** Probe Health carries an overwritten-flows channel fed from the
+      heartbeat, behind a capability so an older core ignores it, with the probe-level overflow
+      test reading it.
+
+- [ ] **B-12 — the add-sensor form reads the collector notice once** · S · B-08 · Found
+      2026-10-02 by `B-08`. The notice that a probe's flow collector is off is taken from the
+      probe's state when the form opens; a probe that reconnects with the collector on, or
+      drops, while the form is open leaves a stale sentence. **Done when** the notice follows
+      the probe's state on the push channel the page already holds, with a component test for
+      both directions.
 
 ## Phase 12 — Maps and dashboards (`V2-02`)
 
