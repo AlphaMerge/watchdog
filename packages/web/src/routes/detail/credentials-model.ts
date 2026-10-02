@@ -227,18 +227,27 @@ export function kindsToAdd(
 // What a write is about to do, and what it did.
 // ---------------------------------------------------------------------------------------------
 
+/** The four counts a write answers with: outside after it, before it, put there, brought back. */
+export type BoundsChange = Pick<
+  CredentialWrite,
+  'withholds' | 'withheldBefore' | 'newlyWithheld' | 'noLongerWithheld'
+>;
+
 /**
  * Whether a previewed write has to be confirmed before it is made.
  *
- * Two things a save can do that nobody asked for by name: keep the set from sensors that are
- * outside its bounds, which take them to Unknown and page as Unknown does, and clear a secret
- * because the bounds widened. Either is worth a second look; a save that does neither goes
- * straight through.
+ * Two things a save can do that nobody asked for by name: put sensors outside the set's bounds,
+ * which takes them to Unknown and pages as Unknown does, and clear a secret because the bounds
+ * widened. Either is worth a second look; a save that does neither goes straight through.
+ *
+ * **Sensors the save puts outside, not sensors that are outside** (`A-55`). A set with six
+ * sensors outside its bounds already asked for a confirmation on every save, whatever the save
+ * changed, and an operator learns to press "Save anyway" from being asked that way.
  */
 export function needsConfirmation(
-  preview: Pick<CredentialWrite, 'withholds' | 'secretsCleared'>,
+  preview: Pick<CredentialWrite, 'newlyWithheld' | 'secretsCleared'>,
 ): boolean {
-  return preview.withholds > 0 || preview.secretsCleared.length > 0;
+  return preview.newlyWithheld > 0 || preview.secretsCleared.length > 0;
 }
 
 function plural(count: number, one: string, many: string): string {
@@ -257,27 +266,72 @@ export function secretLabels(schema: JsonSchema, names: readonly string[]): stri
 }
 
 /**
- * How many sensors a set's bounds keep it from, before the save and after it.
+ * What "outside a set's bounds" means, for the confirmation that says a save puts sensors there.
  *
- * `withholds` counts the sensors outside the bounds as the write leaves them. It does not say
- * which of those were outside already, so the sentence does not either: it says how many are
- * outside, and what that does to them.
+ * Two cases, and the second is the one nobody guesses (`A-55`, `A-41c`): a device entered by name
+ * has no address for the core to compare with targets that are addresses. A sensor whose type
+ * can be held to an address its probe checked is left to the probe and is not counted. One whose
+ * type cannot is outside, whatever the name resolves to.
  */
-export function withholdsSentence(
-  count: number,
+export const OUTSIDE_MEANS =
+  "A sensor is outside a set's bounds when its device's address is not one the allowed targets " +
+  'cover. It is also outside when its device is entered by name, the targets are addresses, and ' +
+  "the sensor's type cannot be held to an address its probe has checked: whatever the name " +
+  'resolves to, the set is not sent.';
+
+/**
+ * What a save does to which sensors are outside a set's bounds, before the save and after it.
+ *
+ * Three numbers, each said only when it is not zero: the sensors this save puts outside, the
+ * ones it brings back, and the ones that were outside already and stay there. The first is what
+ * the operator is being asked about; the other two are said so that the first is not taken for
+ * the whole, and so that a save which moves the bounds without changing how many are outside
+ * does not read as a save that changes nothing.
+ */
+export function boundsSentence(
+  change: BoundsChange,
   objectName: string,
   tense: 'will' | 'now',
 ): string | null {
-  if (count === 0) return null;
-  const sensors = plural(count, 'sensor', 'sensors');
-  const outside = count === 1 ? 'is' : 'are';
-  return tense === 'will'
-    ? `After this save, ${sensors} beneath ${objectName} ${outside} outside this set's bounds. ` +
-        `${count === 1 ? 'It is' : 'They are'} not sent the set and ` +
-        `${count === 1 ? 'reads' : 'read'} Unknown until the bounds include ` +
-        `${count === 1 ? 'it' : 'them'}.`
-    : `${sensors} beneath ${objectName} ${outside} outside its bounds and ` +
-        `${count === 1 ? 'reads' : 'read'} Unknown.`;
+  const will = tense === 'will';
+  const added = change.newlyWithheld;
+  const back = change.noLongerWithheld;
+  const staying = Math.max(0, change.withholds - added);
+  const parts: string[] = [];
+  if (added > 0) {
+    const one = added === 1;
+    const sensors = plural(added, 'sensor', 'sensors');
+    parts.push(
+      will
+        ? `This save puts ${sensors} beneath ${objectName} outside this set's bounds. ` +
+            `${one ? 'It is' : 'They are'} not sent the set after it and ` +
+            `${one ? 'reads' : 'read'} Unknown until the bounds include ${one ? 'it' : 'them'}.`
+        : `This save put ${sensors} beneath ${objectName} outside its bounds: ` +
+            `${one ? 'it is' : 'they are'} not sent the set and ${one ? 'reads' : 'read'} Unknown.`,
+    );
+  }
+  if (back > 0) {
+    const sensors = plural(back, 'sensor', 'sensors');
+    const subject = added > 0 ? 'It' : 'This save';
+    parts.push(
+      will
+        ? `${subject} brings ${sensors}${added > 0 ? '' : ` beneath ${objectName}`} back ` +
+            'inside, to be sent the set again.'
+        : `${subject} brought ${sensors}${added > 0 ? '' : ` beneath ${objectName}`} back inside.`,
+    );
+  }
+  if (staying > 0) {
+    const one = staying === 1;
+    const sensors = plural(staying, 'sensor', 'sensors');
+    parts.push(
+      will
+        ? `${sensors} beneath ${objectName} ${one ? 'is' : 'are'} outside already, and this ` +
+            `save leaves ${one ? 'it' : 'them'} there.`
+        : `${sensors} beneath ${objectName} ${one ? 'was' : 'were'} outside already and still ` +
+            `${one ? 'is' : 'are'}.`,
+    );
+  }
+  return parts.length === 0 ? null : parts.join(' ');
 }
 
 /** Which secrets a widening clears, before the save and after it. */
@@ -300,7 +354,7 @@ export function savedSentence(
 ): string {
   return [
     `Saved the ${kind} set on ${objectName}.`,
-    withholdsSentence(result.withholds, objectName, 'now'),
+    boundsSentence(result, objectName, 'now'),
     clearedSentence(secretLabels(schema, result.secretsCleared), 'now'),
   ]
     .filter((part) => part !== null)

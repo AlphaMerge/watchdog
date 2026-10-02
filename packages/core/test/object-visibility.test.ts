@@ -3363,7 +3363,8 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       const payload = {
         values: { community: 'a-vault-community', allowedTargets: ['192.0.2.0/24'] },
       };
-      const put = async (login: string, dryRun: boolean): Promise<number> => {
+      /** The write's four counts (`A-55`): outside after, outside before, put there, brought back. */
+      const put = async (login: string, dryRun: boolean): Promise<number[]> => {
         const response = await app.inject({
           method: 'PUT',
           url: `${url}${dryRun ? '?dryRun=true' : ''}`,
@@ -3371,7 +3372,13 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
           payload,
         });
         assert.equal(response.statusCode, 200, response.body);
-        return response.json<{ withholds: number }>().withholds;
+        const body = response.json<Record<string, number>>();
+        return [
+          body['withholds'],
+          body['withheldBefore'],
+          body['newlyWithheld'],
+          body['noLongerWithheld'],
+        ].map((count) => count ?? Number.NaN);
       };
       const remove = async (login: string, dryRun: boolean): Promise<number> => {
         const response = await app.inject({
@@ -3411,11 +3418,15 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       assert.deepEqual(await harness.service.credentials(room, false), []);
 
       // The writer with the hole: one sensor, previewed and written. The administrator: three.
-      assert.equal(await put('operator', true), 1);
-      assert.equal(await put('admin', true), 3);
+      // The set every sensor here used until now has no bounds, so none was outside before and
+      // the first write puts them all there; the second finds them there. Each of the four
+      // counts is of what its caller sees, on both.
+      assert.deepEqual(await put('operator', true), [1, 0, 1, 0]);
+      assert.deepEqual(await put('admin', true), [3, 0, 3, 0]);
       assert.deepEqual(await harness.service.credentials(room, false), [], 'a preview stored');
-      assert.equal(await put('operator', false), 1);
-      assert.equal(await put('admin', false), 3);
+      assert.deepEqual(await put('operator', false), [1, 0, 1, 0]);
+      assert.deepEqual(await put('operator', true), [1, 1, 0, 0]);
+      assert.deepEqual(await put('admin', false), [3, 3, 0, 0]);
 
       // The history the API serves has the two writes and no count, for anybody: there is no
       // second place to read the number from.
@@ -3439,12 +3450,12 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       assert.equal((await harness.service.credentials(room, false)).length, 1, 'a preview removed');
       assert.equal(await remove('operator', false), 1);
       // Stored again, so that the administrator has one to remove.
-      assert.equal(await put('admin', false), 3);
+      assert.deepEqual(await put('admin', false), [3, 0, 3, 0]);
       assert.equal(await remove('admin', false), 3);
 
       // And with the hole filled, the writer counts what the administrator counts.
       await grant(carved, 'read');
-      assert.equal(await put('operator', true), 3);
+      assert.deepEqual(await put('operator', true), [3, 0, 3, 0]);
     });
 
     it('writes only a container’s own row for a setting on it, one at a time or in bulk', async () => {

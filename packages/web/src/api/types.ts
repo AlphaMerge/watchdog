@@ -271,6 +271,12 @@ export interface CredentialView {
 export interface CredentialWrite extends CredentialView {
   /** Sensors beneath that are outside its bounds now: not sent it, and read Unknown. */
   withholds: number;
+  /** Of the sensors the set reaches now, those a set's bounds kept it from before the write. */
+  withheldBefore: number;
+  /** Sensors this write puts outside: outside after it and not before (`A-55`). */
+  newlyWithheld: number;
+  /** Sensors this write brings back inside: outside before it and not after. */
+  noLongerWithheld: number;
   /** Secrets the write cleared because it widened where the set may go and did not send them. */
   secretsCleared: string[];
 }

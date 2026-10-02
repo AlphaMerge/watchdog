@@ -4,7 +4,9 @@ import type { CredentialView, CredentialWrite, EffectiveAccess } from '../src/ap
 import type { Session } from '../src/auth/session';
 import { isMultiline, type JsonSchema } from '../src/forms/schema';
 import {
+  OUTSIDE_MEANS,
   asksForRight,
+  boundsSentence,
   channelLinkFor,
   clearedSentence,
   draftFor,
@@ -21,7 +23,6 @@ import {
   secretChangeSentence,
   secretChanges,
   secretLabels,
-  withholdsSentence,
 } from '../src/routes/detail/credentials-model';
 import { tabsFor } from '../src/routes/detail/model';
 
@@ -244,30 +245,93 @@ describe('what a previewed save says', () => {
   const answer = (over: Partial<CredentialWrite>): CredentialWrite => ({
     ...SET,
     withholds: 0,
+    withheldBefore: 0,
+    newlyWithheld: 0,
+    noLongerWithheld: 0,
     secretsCleared: [],
     ...over,
   });
 
-  it('needs confirming when it keeps the set from a sensor or clears a secret, and only then', () => {
+  it('needs confirming when it puts a sensor outside or clears a secret, and only then', () => {
     expect(needsConfirmation(answer({}))).toBe(false);
-    expect(needsConfirmation(answer({ withholds: 1 }))).toBe(true);
+    expect(needsConfirmation(answer({ withholds: 1, newlyWithheld: 1 }))).toBe(true);
     expect(needsConfirmation(answer({ secretsCleared: ['password'] }))).toBe(true);
+    // `A-55`: sensors that were outside already, or that the save brings back, are not a reason
+    // to stop. A set with some outside asked on every save, whatever the save changed.
+    expect(needsConfirmation(answer({ withholds: 6, withheldBefore: 6 }))).toBe(false);
+    expect(needsConfirmation(answer({ withheldBefore: 6, noLongerWithheld: 6 }))).toBe(false);
   });
 
-  it('counts the sensors outside the bounds, in the singular and the plural', () => {
-    expect(withholdsSentence(0, 'Rack A', 'will')).toBeNull();
-    expect(withholdsSentence(0, 'Rack A', 'now')).toBeNull();
-    expect(withholdsSentence(1, 'Rack A', 'will')).toBe(
-      "After this save, 1 sensor beneath Rack A is outside this set's bounds. It is not sent the set and reads Unknown until the bounds include it.",
+  it('says how many sensors the save puts outside, in the singular and the plural', () => {
+    expect(boundsSentence(answer({}), 'Rack A', 'will')).toBeNull();
+    expect(boundsSentence(answer({}), 'Rack A', 'now')).toBeNull();
+    const one = answer({ withholds: 1, newlyWithheld: 1 });
+    const six = answer({ withholds: 6, newlyWithheld: 6 });
+    expect(boundsSentence(one, 'Rack A', 'will')).toBe(
+      "This save puts 1 sensor beneath Rack A outside this set's bounds. It is not sent the set after it and reads Unknown until the bounds include it.",
     );
-    expect(withholdsSentence(6, 'Rack A', 'will')).toBe(
-      "After this save, 6 sensors beneath Rack A are outside this set's bounds. They are not sent the set and read Unknown until the bounds include them.",
+    expect(boundsSentence(six, 'Rack A', 'will')).toBe(
+      "This save puts 6 sensors beneath Rack A outside this set's bounds. They are not sent the set after it and read Unknown until the bounds include them.",
     );
-    expect(withholdsSentence(1, 'Rack A', 'now')).toBe(
-      '1 sensor beneath Rack A is outside its bounds and reads Unknown.',
+    expect(boundsSentence(one, 'Rack A', 'now')).toBe(
+      'This save put 1 sensor beneath Rack A outside its bounds: it is not sent the set and reads Unknown.',
     );
-    expect(withholdsSentence(6, 'Rack A', 'now')).toBe(
-      '6 sensors beneath Rack A are outside its bounds and read Unknown.',
+    expect(boundsSentence(six, 'Rack A', 'now')).toBe(
+      'This save put 6 sensors beneath Rack A outside its bounds: they are not sent the set and read Unknown.',
+    );
+  });
+
+  it('says the sensors that were outside already apart from the ones the save puts there', () => {
+    const standing = answer({ withholds: 6, withheldBefore: 6 });
+    expect(boundsSentence(standing, 'Rack A', 'will')).toBe(
+      '6 sensors beneath Rack A are outside already, and this save leaves them there.',
+    );
+    expect(boundsSentence(standing, 'Rack A', 'now')).toBe(
+      '6 sensors beneath Rack A were outside already and still are.',
+    );
+    const single = answer({ withholds: 1, withheldBefore: 1 });
+    expect(boundsSentence(single, 'Rack A', 'will')).toBe(
+      '1 sensor beneath Rack A is outside already, and this save leaves it there.',
+    );
+    expect(boundsSentence(single, 'Rack A', 'now')).toBe(
+      '1 sensor beneath Rack A was outside already and still is.',
+    );
+    // Two more on top of four: the two are the save's, the four are not.
+    const more = answer({ withholds: 6, withheldBefore: 4, newlyWithheld: 2 });
+    expect(boundsSentence(more, 'Rack A', 'will')).toBe(
+      "This save puts 2 sensors beneath Rack A outside this set's bounds. They are not sent the set after it and read Unknown until the bounds include them. 4 sensors beneath Rack A are outside already, and this save leaves them there.",
+    );
+    expect(boundsSentence(more, 'Rack A', 'now')).toBe(
+      'This save put 2 sensors beneath Rack A outside its bounds: they are not sent the set and read Unknown. 4 sensors beneath Rack A were outside already and still are.',
+    );
+  });
+
+  it('says the sensors the save brings back, alone and beside the ones it puts outside', () => {
+    const back = answer({ withheldBefore: 3, noLongerWithheld: 3 });
+    expect(boundsSentence(back, 'Rack A', 'will')).toBe(
+      'This save brings 3 sensors beneath Rack A back inside, to be sent the set again.',
+    );
+    expect(boundsSentence(back, 'Rack A', 'now')).toBe(
+      'This save brought 3 sensors beneath Rack A back inside.',
+    );
+    // The bounds moved: as many outside as before, and not the same ones.
+    const moved = answer({
+      withholds: 1,
+      withheldBefore: 1,
+      newlyWithheld: 1,
+      noLongerWithheld: 1,
+    });
+    expect(boundsSentence(moved, 'Rack A', 'will')).toBe(
+      "This save puts 1 sensor beneath Rack A outside this set's bounds. It is not sent the set after it and reads Unknown until the bounds include it. It brings 1 sensor back inside, to be sent the set again.",
+    );
+    expect(boundsSentence(moved, 'Rack A', 'now')).toBe(
+      'This save put 1 sensor beneath Rack A outside its bounds: it is not sent the set and reads Unknown. It brought 1 sensor back inside.',
+    );
+  });
+
+  it('says in words that a named device can be outside whatever its name resolves to', () => {
+    expect(OUTSIDE_MEANS).toBe(
+      "A sensor is outside a set's bounds when its device's address is not one the allowed targets cover. It is also outside when its device is entered by name, the targets are addresses, and the sensor's type cannot be held to an address its probe has checked: whatever the name resolves to, the set is not sent.",
     );
   });
 
@@ -292,11 +356,11 @@ describe('what a previewed save says', () => {
       savedSentence(
         'SSH',
         'Rack A',
-        answer({ withholds: 2, secretsCleared: ['password'] }),
+        answer({ withholds: 2, newlyWithheld: 2, secretsCleared: ['password'] }),
         SCHEMA,
       ),
     ).toBe(
-      'Saved the SSH set on Rack A. 2 sensors beneath Rack A are outside its bounds and read Unknown. Cleared because the set may now go further: Password. Enter it again, or the sensors using this set cannot authenticate.',
+      'Saved the SSH set on Rack A. This save put 2 sensors beneath Rack A outside its bounds: they are not sent the set and read Unknown. Cleared because the set may now go further: Password. Enter it again, or the sensors using this set cannot authenticate.',
     );
   });
 });

@@ -458,6 +458,199 @@ describe(
       });
     });
 
+    describe('what a write changes, beside how things stand after it (A-55)', () => {
+      /** The four counts of one write's answer. */
+      const counts = (answer: {
+        withholds: number;
+        withheldBefore: number;
+        newlyWithheld: number;
+        noLongerWithheld: number;
+      }): { after: number; before: number; newly: number; noLonger: number } => ({
+        after: answer.withholds,
+        before: answer.withheldBefore,
+        newly: answer.newlyWithheld,
+        noLonger: answer.noLongerWithheld,
+      });
+      const write = async (
+        objectId: ObjectId,
+        values: Record<string, unknown>,
+        options: { preview?: boolean; visibility?: Visibility } = {},
+      ): Promise<ReturnType<typeof counts>> =>
+        counts(
+          await h.service.setCredential(
+            testActor,
+            objectId,
+            'snmp',
+            values,
+            { kind: 'none' },
+            options,
+          ),
+        );
+      const NEAR = ['10.0.0.0/24'];
+      const FAR = ['10.9.0.0/16'];
+
+      it('says a narrowing puts a sensor outside, and that saving it again puts none', async () => {
+        assert.deepEqual(await write(groupId, { community: COMMUNITY }), {
+          after: 0,
+          before: 0,
+          newly: 0,
+          noLonger: 0,
+        });
+        const narrowing = { after: 1, before: 0, newly: 1, noLonger: 0 };
+        assert.deepEqual(
+          await write(groupId, { allowedTargets: NEAR }, { preview: true }),
+          narrowing,
+        );
+        assert.deepEqual(await write(groupId, { allowedTargets: NEAR }), narrowing);
+        // The same bounds saved again, and another field changed beside them: one sensor is
+        // outside, as it was, and the save put none there.
+        const standing = { after: 1, before: 1, newly: 0, noLonger: 0 };
+        assert.deepEqual(await write(groupId, { allowedTargets: NEAR }), standing);
+        assert.deepEqual(
+          await write(groupId, { community: 'another', allowedTargets: NEAR }),
+          standing,
+        );
+      });
+
+      it('counts one in and one out when the bounds move, though the number outside is the same', async () => {
+        await write(groupId, { community: COMMUNITY, allowedTargets: NEAR });
+        assert.deepEqual(await write(groupId, { community: COMMUNITY, allowedTargets: FAR }), {
+          after: 1,
+          before: 1,
+          newly: 1,
+          noLonger: 1,
+        });
+      });
+
+      it('says a widening brings a sensor back', async () => {
+        await write(groupId, { community: COMMUNITY, allowedTargets: NEAR });
+        assert.deepEqual(
+          await write(groupId, { community: COMMUNITY, allowedTargets: [...NEAR, ...FAR] }),
+          { after: 0, before: 1, newly: 0, noLonger: 1 },
+        );
+        // And taking the bounds off altogether, from one sensor outside.
+        await write(groupId, { community: COMMUNITY, allowedTargets: NEAR });
+        assert.deepEqual(await write(groupId, { community: COMMUNITY, allowedTargets: [] }), {
+          after: 0,
+          before: 1,
+          newly: 0,
+          noLonger: 1,
+        });
+      });
+
+      it('does not call a sensor newly outside that an ancestor’s bounds already kept its set from', async () => {
+        // The probe's set already keeps itself from the far sensor. The first set on the group
+        // replaces it for both sensors.
+        assert.deepEqual(await write(probeId, { community: COMMUNITY, allowedTargets: NEAR }), {
+          after: 1,
+          before: 0,
+          newly: 1,
+          noLonger: 0,
+        });
+        // With the same bounds, nothing moves.
+        assert.deepEqual(
+          await write(groupId, { community: 'rack-wide', allowedTargets: NEAR }, { preview: true }),
+          { after: 1, before: 1, newly: 0, noLonger: 0 },
+        );
+        // With the other range, the far sensor comes back and the near one goes out.
+        assert.deepEqual(await write(groupId, { community: 'rack-wide', allowedTargets: FAR }), {
+          after: 1,
+          before: 1,
+          newly: 1,
+          noLonger: 1,
+        });
+        // And with none, a set unbounded here brings back the one the probe's kept out.
+        await h.service.clearCredential(testActor, groupId, 'snmp');
+        assert.deepEqual(await write(groupId, { community: 'rack-wide' }), {
+          after: 0,
+          before: 1,
+          newly: 0,
+          noLonger: 1,
+        });
+      });
+
+      it('leaves out a sensor that has a nearer set of its own, before and after', async () => {
+        // The far device has its own set, whose bounds keep it from its own sensor. That sensor
+        // never resolves to the group's set, so no write on the group counts it on either side.
+        await write(otherDeviceId, { community: 'far-only', allowedTargets: NEAR });
+        assert.deepEqual(await write(groupId, { community: COMMUNITY, allowedTargets: FAR }), {
+          after: 1,
+          before: 0,
+          newly: 1,
+          noLonger: 0,
+        });
+        assert.deepEqual(await write(groupId, { community: COMMUNITY, allowedTargets: NEAR }), {
+          after: 0,
+          before: 1,
+          newly: 0,
+          noLonger: 1,
+        });
+      });
+
+      it('counts each of the four among the sensors the caller sees', async () => {
+        // `write` on the group, and the far device carved out of it.
+        const carved = (): Visibility =>
+          Visibility.of(
+            new Map([
+              [groupId, true],
+              [otherDeviceId, false],
+            ]),
+            false,
+            null,
+          );
+        const NEITHER = ['192.0.2.0/24'];
+        await write(groupId, { community: COMMUNITY });
+
+        // The far sensor goes outside, and is not the caller's to count; previewed or written.
+        for (const preview of [true, false]) {
+          assert.deepEqual(
+            await write(groupId, { allowedTargets: NEAR }, { preview, visibility: carved() }),
+            { after: 0, before: 0, newly: 0, noLonger: 0 },
+            `preview ${String(preview)}`,
+          );
+        }
+        // Both outside: the caller is told of the one it sees, and that this save put it there.
+        assert.deepEqual(
+          await write(
+            groupId,
+            { allowedTargets: NEITHER },
+            { preview: true, visibility: carved() },
+          ),
+          { after: 1, before: 0, newly: 1, noLonger: 0 },
+        );
+        assert.deepEqual(
+          await write(groupId, { allowedTargets: NEITHER }, { visibility: Visibility.EVERYTHING }),
+          { after: 2, before: 1, newly: 1, noLonger: 0 },
+        );
+        // The seen one comes back and the hidden one stays out: the caller is told of the one
+        // that came back, which is in no count of what is outside now.
+        assert.deepEqual(
+          await write(groupId, { allowedTargets: NEAR }, { preview: true, visibility: carved() }),
+          { after: 0, before: 1, newly: 0, noLonger: 1 },
+        );
+        // The hidden one comes back and the seen one stays out. The caller with the hole is
+        // told nothing came back; everybody else is told one did.
+        const back = { community: COMMUNITY, allowedTargets: FAR };
+        assert.deepEqual(await write(groupId, back, { preview: true, visibility: carved() }), {
+          after: 1,
+          before: 1,
+          newly: 0,
+          noLonger: 0,
+        });
+        assert.deepEqual(await write(groupId, back, { preview: true }), {
+          after: 1,
+          before: 2,
+          newly: 0,
+          noLonger: 1,
+        });
+        // And a caller who sees nothing beneath is told of nothing.
+        assert.deepEqual(
+          await write(groupId, back, { preview: true, visibility: Visibility.nothing(null) }),
+          { after: 0, before: 0, newly: 0, noLonger: 0 },
+        );
+      });
+    });
+
     describe('the sets with no bounds', () => {
       beforeEach(async () => {
         await h.service.setCredential(testActor, probeId, 'snmp', { community: COMMUNITY });

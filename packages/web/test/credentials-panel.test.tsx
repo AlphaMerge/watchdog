@@ -13,6 +13,7 @@ import type {
 import { SessionContext, type Session, type SessionContextValue } from '../src/auth/session';
 import { ChannelTable } from '../src/routes/detail/ChannelTable';
 import { CredentialsPanel } from '../src/routes/detail/CredentialsPanel';
+import { OUTSIDE_MEANS } from '../src/routes/detail/credentials-model';
 import { UnboundedCredentialsView } from '../src/routes/UnboundedCredentialsView';
 
 /**
@@ -101,6 +102,9 @@ const OWN_SSH: CredentialView = {
 const written = (over: Partial<CredentialWrite> = {}): CredentialWrite => ({
   ...OWN_SNMP,
   withholds: 0,
+  withheldBefore: 0,
+  newlyWithheld: 0,
+  noLongerWithheld: 0,
   secretsCleared: [],
   ...over,
 });
@@ -549,17 +553,19 @@ describe('the credentials tab', () => {
 
     it('says how many sensors it takes to Unknown before anything is written, and writes on confirmation', async () => {
       const { calls, form } = await editSnmp({
-        preview: written({ withholds: 6 }),
-        write: written({ withholds: 6 }),
+        preview: written({ withholds: 6, newlyWithheld: 6 }),
+        write: written({ withholds: 6, newlyWithheld: 6 }),
       });
       narrow(form);
 
       const confirm = await screen.findByRole('group', { name: 'Confirm this save' });
       expect(
         within(confirm).getByText(
-          "After this save, 6 sensors beneath Rack A are outside this set's bounds. They are not sent the set and read Unknown until the bounds include them.",
+          "This save puts 6 sensors beneath Rack A outside this set's bounds. They are not sent the set after it and read Unknown until the bounds include them.",
         ),
       ).toBeDefined();
+      // And what "outside" covers, the named device included, where the decision is made.
+      expect(within(confirm).getByText(OUTSIDE_MEANS)).toBeDefined();
       // Asked, and not yet done: one request, and it is the preview.
       expect(writes(calls).map((call) => call.path)).toEqual([
         '/api/v1/objects/20/credentials/snmp?dryRun=true',
@@ -585,18 +591,20 @@ describe('the credentials tab', () => {
 
       // What the write answered, said where a screen reader hears it.
       const status = await screen.findByText(
-        'Saved the SNMP set on Rack A. 6 sensors beneath Rack A are outside its bounds and read Unknown.',
+        'Saved the SNMP set on Rack A. This save put 6 sensors beneath Rack A outside its bounds: they are not sent the set and read Unknown.',
       );
       expect(status.getAttribute('role')).toBe('status');
       expect(status.getAttribute('aria-live')).toBe('polite');
     });
 
     it('writes nothing when the operator goes back, and lets the fields be changed again', async () => {
-      const { calls, form } = await editSnmp({ preview: written({ withholds: 1 }) });
+      const { calls, form } = await editSnmp({
+        preview: written({ withholds: 1, newlyWithheld: 1 }),
+      });
       narrow(form);
       const confirm = await screen.findByRole('group', { name: 'Confirm this save' });
       expect(
-        within(confirm).getByText(/After this save, 1 sensor beneath Rack A is outside/u),
+        within(confirm).getByText(/This save puts 1 sensor beneath Rack A outside/u),
       ).toBeDefined();
 
       fireEvent.click(within(confirm).getByRole('button', { name: 'Go back' }));
@@ -611,7 +619,7 @@ describe('the credentials tab', () => {
 
     it('returns focus to the save button when a confirmed save is refused', async () => {
       const { calls, form } = await editSnmp({
-        preview: written({ withholds: 1 }),
+        preview: written({ withholds: 1, newlyWithheld: 1 }),
         write: REFUSED,
       });
       narrow(form);
@@ -763,6 +771,7 @@ describe('the credentials tab', () => {
         ),
       ).toBeDefined();
       expect(within(confirm).queryByText(/outside this set's bounds/u)).toBeNull();
+      expect(within(confirm).queryByText(OUTSIDE_MEANS)).toBeNull();
       expect(writes(calls)).toHaveLength(1);
 
       fireEvent.click(within(confirm).getByRole('button', { name: 'Save anyway' }));
@@ -773,16 +782,67 @@ describe('the credentials tab', () => {
       ).toBeDefined();
     });
 
+    it('saves without asking when the sensors outside were outside already, and says so after', async () => {
+      // `A-55`: six outside before and six after, none put there by this save. Nothing to
+      // confirm, and the sentence afterwards does not call them the save's.
+      const standing = written({ withholds: 6, withheldBefore: 6 });
+      const { calls, form } = await editSnmp({ preview: standing, write: standing });
+      narrow(form);
+      const status = await screen.findByText(
+        'Saved the SNMP set on Rack A. 6 sensors beneath Rack A were outside already and still are.',
+      );
+      expect(status.getAttribute('role')).toBe('status');
+      expect(screen.queryByRole('group', { name: 'Confirm this save' })).toBeNull();
+      expect(writes(calls).map((call) => call.path)).toEqual([
+        '/api/v1/objects/20/credentials/snmp?dryRun=true',
+        '/api/v1/objects/20/credentials/snmp',
+      ]);
+    });
+
+    it('says what the save adds apart from what was outside already and what it brings back', async () => {
+      const { form } = await editSnmp({
+        preview: written({
+          withholds: 5,
+          withheldBefore: 4,
+          newlyWithheld: 2,
+          noLongerWithheld: 1,
+        }),
+      });
+      narrow(form);
+      const confirm = await screen.findByRole('group', { name: 'Confirm this save' });
+      expect(
+        within(confirm).getByText(
+          "This save puts 2 sensors beneath Rack A outside this set's bounds. They are not sent the set after it and read Unknown until the bounds include them. It brings 1 sensor back inside, to be sent the set again. 3 sensors beneath Rack A are outside already, and this save leaves them there.",
+        ),
+      ).toBeDefined();
+    });
+
+    it('says the sensors still outside beside a secret a widening clears', async () => {
+      // Asked about for the secret; the sensors that stay outside are said, and what outside
+      // means with them, though the save puts none there.
+      const { form } = await editSnmp({
+        preview: written({ withholds: 2, withheldBefore: 2, secretsCleared: ['community'] }),
+      });
+      narrow(form);
+      const confirm = await screen.findByRole('group', { name: 'Confirm this save' });
+      expect(
+        within(confirm).getByText(
+          '2 sensors beneath Rack A are outside already, and this save leaves them there.',
+        ),
+      ).toBeDefined();
+      expect(within(confirm).getByText(OUTSIDE_MEANS)).toBeDefined();
+    });
+
     it('shows what the write answered, not what the preview did, when they differ', async () => {
       const { form } = await editSnmp({
-        preview: written({ withholds: 1 }),
-        write: written({ withholds: 3 }),
+        preview: written({ withholds: 1, newlyWithheld: 1 }),
+        write: written({ withholds: 3, newlyWithheld: 3 }),
       });
       narrow(form);
       const confirm = await screen.findByRole('group', { name: 'Confirm this save' });
       fireEvent.click(within(confirm).getByRole('button', { name: 'Save anyway' }));
       expect(
-        await screen.findByText(/3 sensors beneath Rack A are outside its bounds/u),
+        await screen.findByText(/This save put 3 sensors beneath Rack A outside its bounds/u),
       ).toBeDefined();
     });
 

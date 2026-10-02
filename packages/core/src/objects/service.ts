@@ -33,9 +33,9 @@ import type { ObjectRepository } from './repository.js';
 import type { CredentialVault } from '../vault/service.js';
 import type { ChannelDraft, SensorTypeGate } from './sensor-type-gate.js';
 import {
+  boundsBeneath,
   sensorsUsing,
   vouch as vouchForCredentials,
-  withheldByBounds,
 } from './credential-vouching.js';
 import {
   actorOf,
@@ -1407,7 +1407,7 @@ export class ObjectService {
     values: Readonly<Record<string, unknown>>,
     pre: Precondition = { kind: 'none' },
     options: CredentialWriteOptions = {},
-  ): Promise<CredentialView & { withholds: number; secretsCleared: readonly string[] }> {
+  ): Promise<CredentialWriteAnswer> {
     const vault = this.#requireVault();
     const actor = actorOf(writer);
     const preview = options.preview === true;
@@ -1418,6 +1418,11 @@ export class ObjectService {
         throw versionConflict(id, pre.expected, object.version);
       }
 
+      // What bounds kept from which sensors beneath, as the write finds it (`A-55`): the set
+      // stored here if there is one, an ancestor's if this write stores the first. Read before
+      // the write and in its transaction, so that the answer can say what the write changes
+      // and not only how things stand after it.
+      const before = await boundsBeneath(q, this.#sensorTypes, id, kind);
       const summary = await vault.write(q, id, kind, values, { preview });
       // Whoever may write where a set is stored vouches for everything beneath that it now
       // reaches (`A-41`): the sensors that inherited another set of this kind until now.
@@ -1425,7 +1430,13 @@ export class ObjectService {
       // How many sensors beneath its bounds now keep the set from (`A-41b`). Narrowing a set's
       // targets can take a whole group to Unknown at once, so the write says so, and so does the
       // audit entry, rather than leaving it to be found from the sensors.
-      const withheld = await withheldByBounds(q, this.#sensorTypes, id, kind);
+      const after = await boundsBeneath(q, this.#sensorTypes, id, kind);
+      // Over the sensors this set reaches now, before and after: a sensor beneath with a nearer
+      // set of its own is not this write's, and stands the same on both sides of it.
+      const withheld = [...after.withheld].filter((sensor) => after.reached.has(sensor));
+      const wasWithheld = [...before.withheld].filter((sensor) => after.reached.has(sensor));
+      const newly = withheld.filter((sensor) => !before.withheld.has(sensor));
+      const noLonger = wasWithheld.filter((sensor) => !after.withheld.has(sensor));
       // The audit record keeps the whole number: it is what the write did. It reaches the audit
       // log, which is the installation's; the history the API serves stores no count for a
       // credential write (`audit/store.ts`), so there is none there to trim.
@@ -1464,15 +1475,32 @@ export class ObjectService {
       );
       /* c8 ignore next -- the row was just written in this transaction */
       if (view === undefined) throw notFound(id);
+      // **Of the sensors this caller can see** (`A-12`), every one of the four. Asked with other
+      // targets, a whole number says where the devices in a hole beneath the object are, and a
+      // preview asks for nothing and leaves no trace. One question for all four: every sensor in
+      // `newly` is in `withheld` and every one in `noLonger` is in `wasWithheld`.
+      const seen = await this.#seenOf(q, options.visibility, [...withheld, ...wasWithheld]);
+      const count = (sensors: readonly ObjectId[]): number => sensors.filter(seen).length;
       return {
         ...credentialViewOf(view),
-        // **Of the sensors this caller can see** (`A-12`). Asked with other targets, the whole
-        // number says where the devices in a hole beneath the object are, and a preview asks
-        // for nothing and leaves no trace.
-        withholds: await this.#seenAmong(q, options.visibility, withheld),
+        withholds: count(withheld),
+        withheldBefore: count(wasWithheld),
+        newlyWithheld: count(newly),
+        noLongerWithheld: count(noLonger),
         secretsCleared: summary.secretsCleared,
       };
     });
+  }
+
+  /** Which of these sensors a caller can see, as `#seenAmong` counts them. */
+  async #seenOf(
+    q: Queryable,
+    visibility: Visibility | undefined,
+    sensors: readonly ObjectId[],
+  ): Promise<(sensor: ObjectId) => boolean> {
+    if (visibility === undefined || visibility.everything) return () => true;
+    const visible = await visibility.visibleAmong(q, [...new Set(sensors)]);
+    return (sensor) => visible.has(sensor);
   }
 
   /**
@@ -2720,6 +2748,26 @@ function diffSettings(
 }
 
 /** How a credential write is asked for (`U-21`). */
+/**
+ * What storing a set answers (`A-41b`, `A-55`): the set as a read shows it, and what the write
+ * did to where it goes. Every count is of the sensors the caller can see, among those that
+ * resolve to this set once it is written.
+ */
+export interface CredentialWriteAnswer extends CredentialView {
+  /** Sensors the set's bounds keep it from after the write. */
+  readonly withholds: number;
+  /**
+   * Of the same sensors, those a set's bounds kept it from before the write: this set's as it
+   * was, or an ancestor's where this write stores the first set here.
+   */
+  readonly withheldBefore: number;
+  /** Sensors the write put outside: withheld after it and not before. */
+  readonly newlyWithheld: number;
+  /** Sensors the write brought back inside: withheld before it and not after. */
+  readonly noLongerWithheld: number;
+  readonly secretsCleared: readonly string[];
+}
+
 export interface CredentialWriteOptions {
   /** Run it whole and roll it back: the answer, with nothing stored and nothing in the history. */
   readonly preview?: boolean;

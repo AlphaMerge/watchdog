@@ -575,10 +575,22 @@ export function boundRefusal(
   return null;
 }
 
+/** Where one kind's sets stand for the sensors at or beneath an object (`A-41b`, `A-55`). */
+export interface BoundsBeneath {
+  /** The sensors that resolve the kind to the set stored on the object itself. */
+  readonly reached: ReadonlySet<ObjectId>;
+  /**
+   * The sensors a set's bounds keep it from, **whichever object that set is stored on**: the one
+   * asked about, one nearer the sensor, or an ancestor's.
+   */
+  readonly withheld: ReadonlySet<ObjectId>;
+}
+
 /**
- * The sensors a set's bounds keep it from, after a write (`A-41b`): the ones that resolve to it
- * and are outside its targets, or undecided against them with a transport that cannot be held to
- * a checked address. None for an unrestricted set.
+ * The sensors at or beneath `ownerId` that a set's bounds keep this kind's set from (`A-41b`):
+ * the ones outside its targets, or undecided against them with a transport that cannot be held
+ * to a checked address. None for an unrestricted set. And which sensors resolve the kind to the
+ * set on `ownerId` itself, which are the ones a write there is about.
  *
  * **A named device a probe will check is not among them** (`A-41c`): whether its name resolves
  * inside the targets is the probe's to find out, at each scan, and the write cannot know.
@@ -587,33 +599,42 @@ export function boundRefusal(
  * set's targets says how many sensors it is about to take to Unknown before anybody finds out
  * from the sensors. The probe's version is not the write's business and is not counted.
  *
+ * **Every owner's bounds, so that a write can be compared with what stood before it** (`A-55`).
+ * Asked before a write and again after it, the two answers say which sensors the write took the
+ * set from and which it gave it back to. A set stored for the first time on a group replaces an
+ * ancestor's for everything beneath, and a sensor the ancestor's bounds already kept its set
+ * from is not one this write put outside: only an answer that reads the ancestor's bounds too
+ * can tell.
+ *
  * **The sensors, not their number** (`U-21`). The whole subtree is walked, whoever asks, because
  * that is what the set reaches. How many of them a caller is told about is the caller's view, and
- * the one who answers counts the ids it can see (`ObjectService.#seenAmong`).
+ * the one who answers counts the ids it can see (`ObjectService.#seenOf`).
  */
-export async function withheldByBounds(
+export async function boundsBeneath(
   q: Queryable,
   types: CredentialBoundTypes,
   ownerId: ObjectId,
   kind: string,
-): Promise<ObjectId[]> {
+): Promise<BoundsBeneath> {
   const routes = await routesAtOrUnder(q, types, [ownerId], { kinds: [kind] });
-  const sensors = new Set<ObjectId>();
+  const reached = new Set<ObjectId>();
+  const withheld = new Set<ObjectId>();
   for (const route of routes) {
-    if (route.ownerId !== ownerId || !isRestricted(route.restriction)) continue;
+    if (route.ownerId === ownerId) reached.add(route.sensorId);
+    if (!isRestricted(route.restriction)) continue;
     const pins = types.pinsAddress(route.sensorType, route.kind);
     if (boundRefusal(route.restriction, route.host, PROTOCOL_VERSION, pins) !== null) {
-      sensors.add(route.sensorId);
+      withheld.add(route.sensorId);
     }
   }
-  return [...sensors];
+  return { reached, withheld };
 }
 
 /**
  * The sensors at or beneath `ownerId` that resolve this kind to the set stored on it (`U-21`): what
  * removing that set takes it from. The nearest-set rule is `routesAtOrUnder`'s, so a sensor under
  * a device with a set of its own is not counted against the group's. The ids, for the same reason
- * `withheldByBounds` answers ids.
+ * `boundsBeneath` answers ids.
  */
 export async function sensorsUsing(
   q: Queryable,

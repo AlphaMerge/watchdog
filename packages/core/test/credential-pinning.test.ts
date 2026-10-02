@@ -1320,12 +1320,29 @@ describe(
         allowedTargets: ['10.20.0.0/16'],
       });
       assert.equal(snmp.withholds, 1);
+      // And it is this write that put it there (`A-55`): none before, one newly.
+      assert.equal(snmp.withheldBefore, 0);
+      assert.equal(snmp.newlyWithheld, 1);
       const database = await h.service.setCredential(testActor, group, 'database', {
         username: 'monitor',
         password: 'gate-password',
         allowedTargets: ['10.20.0.0/16'],
       });
       assert.equal(database.withholds, 1);
+      // Saved again as it stands: the sensor that cannot pin is outside as it was, the save
+      // put none there, and the one the probe decides is on neither side.
+      const again = await h.service.setCredential(
+        testActor,
+        group,
+        'snmp',
+        { allowedTargets: ['10.20.0.0/16'] },
+        { kind: 'none' },
+        { preview: true },
+      );
+      assert.deepEqual(
+        [again.withholds, again.withheldBefore, again.newlyWithheld, again.noLongerWithheld],
+        [1, 1, 0, 0],
+      );
 
       // A probe at 24 is sent the pinned sensor, with the targets it has to check against.
       const sensors = (await config.assignmentsFor(site, 24)).sensors;

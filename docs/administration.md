@@ -433,7 +433,15 @@ nobody, not even an administrator, can bring it outside.
   the `credential.set` audit entry, count the sensors beneath that are outside them after the
   write. The response counts the ones its caller can see, so an account with a `none` carved
   beneath the object is not told how many sensors are inside it; the audit log's entry counts
-  them all. A removal's `sensors` is counted the same way. Restricting a set to ranges when the
+  them all. A removal's `sensors` is counted the same way. **`withholds` is how things stand
+  after the write, and three more counts say what the write changed**: `withheldBefore` (of the
+  same sensors, how many were outside before), `newlyWithheld` (put outside by this write) and
+  `noLongerWithheld` (brought back by it), each over the sensors the caller can see. The
+  Credentials tab asks before a save only when `newlyWithheld` is above zero, says how many
+  the save puts outside, how many it brings back and how many were outside already, and says
+  what outside means. A set stored for the first time on a group is compared with the
+  ancestor's set its sensors used until then, so a sensor that set's targets already kept out
+  is not counted as newly outside. Restricting a set to ranges when the
   devices under it are named by host name takes every database and Windows sensor among them to
   Unknown, and the count is how you find that out before the pages do. **It does not count a
   named device its probe will check**: whether that name resolves inside is found out at the

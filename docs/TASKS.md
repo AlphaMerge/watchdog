@@ -18010,13 +18010,53 @@ because each is a decision rather than a defect:
         nothing is sent, and the rest is `A-58`. Three upper bounds on elapsed time had 300 ms
         of slack and have seconds.
 
-- [ ] **A-55 — a narrowing says how many sensors are outside the bounds, not how many it puts
+- [x] **A-55 — a narrowing says how many sensors are outside the bounds, not how many it puts
       there** · S · U-21, A-41b · Found 2026-10-02 by `U-21`. `withholds` counts the sensors
       outside a set's targets after the write, among those the caller sees, so the tab says "N
       sensors are outside this set's bounds" and cannot say what this save changes. "Outside" is
       also loose for a named device whose transport cannot pin. **Done when** the answer carries
       the count before and after, the tab says how many the save adds, and the sentence covers
       the unpinnable case in words.
+
+      **A-55 outcome.** The credential `PUT`, previewed or written, answers what the write
+      changes beside how things stand after it, and the tab asks only about what the save adds.
+      - **Three counts beside `withholds`** on `ms:credentialWrite`, all required:
+        `withheldBefore`, `newlyWithheld` and `noLongerWithheld`. `withholds` is unchanged and is
+        `withheldBefore + newlyWithheld − noLongerWithheld`. A before and an after alone cannot
+        say what a save adds: bounds moved from one range to another leave the same number
+        outside and none of the same sensors.
+      - **Before is read in the write's transaction, ahead of the write, over every owner's
+        bounds** (`boundsBeneath`, which replaces `withheldByBounds`). A set stored for the first
+        time on a group replaces an ancestor's for the sensors beneath, and a sensor the
+        ancestor's targets already kept out is not newly outside. All four counts are over the
+        sensors that resolve to this set once it is written, so a sensor with a nearer set of
+        its own is on neither side.
+      - **Each of the four is trimmed by the caller's `Visibility`** as `U-21`'s review required
+        of the one: the ids are worked out whole and counted among those the caller sees, with
+        one visibility question for all four. The audit entry is unchanged and keeps the whole
+        `withholds`.
+      - **The tab.** A confirmation is asked for when `newlyWithheld` is above zero (or a secret
+        would be cleared), where any sensor outside used to stop every save of that set. The
+        sentence says how many sensors the save puts outside, how many it brings back, and how
+        many were outside already and stay; after the save, the same in the past tense in the
+        status region. Where any sensor is outside after the save, the confirmation says what
+        outside means, the named device whose sensor type cannot be held to a checked address
+        included (`OUTSIDE_MEANS`). Plain text in the existing focused group and live region;
+        no new control, colour or state.
+      - **Docs:** `api-reference.md` regenerated; `administration.md`'s paragraph on narrowing.
+        `credentialViewSchema` is not touched, so `readonly-accounts.test.ts`'s key list stands.
+      - **Tests:** `credential-view.test.ts`, six new (27): a narrowing and the same save
+        again; bounds moved; a widening and bounds removed; an ancestor's bounded set; a nearer
+        set; the four counts under a carved visibility, previewed and written.
+        `credential-pinning.test.ts`: the named device whose type cannot pin is newly outside
+        on the first write and outside already on the second, and the one its probe decides
+        is in neither. `object-visibility.test.ts`'s sweep reads all four over the API for the
+        writer with a hole and the administrator. Web: `credentials-model.test.ts` (32) and
+        `credentials-panel.test.tsx` (43).
+      - **Mutation:** 23 of 23 killed (12 core, 11 web).
+      - **Not done.** The tab was not looked at in a browser. The audit entry does not carry
+        the three new counts. The count does not say how many of the sensors outside are the
+        named-device case; the sentence says the case in words, as the ticket asked.
 
 - [ ] **A-56 — the late-refusal record does not survive a core restart, and late refusals are
       counted with the rest** · S · A-53 · Found 2026-10-02 by `A-53`. The record of which

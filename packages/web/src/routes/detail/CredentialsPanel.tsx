@@ -15,8 +15,10 @@ import { SchemaForm } from '../../forms/SchemaForm';
 import { fieldsOf, readAt } from '../../forms/schema';
 import { allProblems, type FieldProblem } from '../../forms/validate';
 import {
+  OUTSIDE_MEANS,
   UNBOUNDED_PATH,
   asksForRight,
+  boundsSentence,
   clearedSentence,
   draftFor,
   isDirty,
@@ -34,7 +36,6 @@ import {
   secretChangeSentence,
   secretChanges,
   secretLabels,
-  withholdsSentence,
   type Owner,
 } from './credentials-model';
 
@@ -778,8 +779,7 @@ function CredentialForm({
   };
 
   const held = busy !== null || pending !== null;
-  const withheld =
-    pending === null ? null : withholdsSentence(pending.withholds, object.name, 'will');
+  const withheld = pending === null ? null : boundsSentence(pending, object.name, 'will');
   const cleared =
     pending === null ? null : clearedSentence(secretLabels(schema, pending.secretsCleared), 'will');
 
@@ -827,6 +827,7 @@ function CredentialForm({
         >
           <p className="font-medium">Before this is saved</p>
           {withheld !== null && <p>{withheld}</p>}
+          {pending.withholds > 0 && <p>{OUTSIDE_MEANS}</p>}
           {cleared !== null && <p>{cleared}</p>}
           <div className="flex flex-wrap gap-2">
             <button

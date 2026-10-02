@@ -347,15 +347,48 @@ export const credentialWriteSchema = {
   $id: 'ms:credentialWrite',
   type: 'object',
   additionalProperties: false,
-  required: [...credentialViewSchema.required, 'withholds', 'secretsCleared'],
+  required: [
+    ...credentialViewSchema.required,
+    'withholds',
+    'withheldBefore',
+    'newlyWithheld',
+    'noLongerWithheld',
+    'secretsCleared',
+  ],
   properties: {
     ...credentialViewSchema.properties,
     withholds: {
       type: 'integer',
       minimum: 0,
       description:
-        'How many sensors beneath this set are outside its allowed targets now, and are not sent ' +
-        'it, of those the caller can see. Zero for a set with none.',
+        'How many sensors beneath this set its allowed targets keep it from now, of those the ' +
+        "caller can see: a sensor whose device's address is outside them, or whose device is " +
+        'entered by name where the targets are addresses and the sensor’s type cannot be held ' +
+        'to an address its probe checked. They are not sent the set and read Unknown. Zero for ' +
+        'a set with no targets.',
+    },
+    withheldBefore: {
+      type: 'integer',
+      minimum: 0,
+      description:
+        'Of the sensors this set reaches now and the caller can see, how many a set’s targets ' +
+        'kept it from before this write (`A-55`): this set’s as it was, or an ancestor’s where ' +
+        'this write stores the first set of the kind here. `withholds` is this, plus ' +
+        '`newlyWithheld`, less `noLongerWithheld`.',
+    },
+    newlyWithheld: {
+      type: 'integer',
+      minimum: 0,
+      description:
+        'How many sensors this write puts outside (`A-55`): kept from the set after it and not ' +
+        'before, of those the caller can see. What a narrowing takes to Unknown.',
+    },
+    noLongerWithheld: {
+      type: 'integer',
+      minimum: 0,
+      description:
+        'How many sensors this write brings back inside (`A-55`): kept from a set before it ' +
+        'and sent this one after, of those the caller can see.',
     },
     secretsCleared: {
       type: 'array',
