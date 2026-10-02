@@ -17296,6 +17296,19 @@ because each is a decision rather than a defect:
       answer is sent `problem` or `overflow` if its credential lapsed in that gap and nothing
       was published, and nothing if something was.
 
+- [ ] **U-26 — what is left of telling a lapsed stream socket apart** · S · U-25 · Found
+      2026-10-02 by `U-25`'s review; each is low, and none delivers anything after a sign-out.
+      While the credential check is failing, a client frame closes a silenced socket and
+      answers a lapsed one that was not silenced. A sweep with only silenced sockets closes
+      them without the query a found lapse waits for. A check that hangs keeps a silenced
+      socket open past the five seconds the documents give. The close carries the reason
+      recorded at the edge, not the one that holds now. A frame waiting behind the check still
+      asks the database after its socket was severed. And from `U-24`: a watch is attached
+      before it is judged, a change between the add-sensor form's request and its watch
+      standing is not heard, and a subscription refused in the milliseconds between its check
+      and its answer is answered or not by whether something was published. **Done when** each
+      has a test and is closed, or is written down as accepted with the reason.
+
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
       siblings are substituted into any text a step sends: the path, every header and the body.
@@ -18851,6 +18864,28 @@ because each is a decision rather than a defect:
       check and have not been tried. **Done when** each has a test against a certificate
       listing `::1`, the ones that fail share one identity check with the delivery client, and
       a core addressed as `https://[::1]` accepts a probe.
+
+- [ ] **A-68 — a probe that changes its protocol version re-opens the late-refusal grace** · M
+      · A-61, A-53 · Found 2026-10-02 by `A-61`'s review. A probe that reconnects announcing a
+      version without `credentialAddressPinning` stops being left its named sensors, which
+      begins ten minutes for them; announcing the newer one ends it, and the older one again
+      begins another. The window is `A-53`'s; `A-61` made it a write a reconnect and one that
+      outlasts a restart. Also left by `A-61`: a core that stops between a change's commit and
+      the next configuration built for that probe has no row, which storing what each probe
+      was last left would close; and a write that gives way is a log line and no number.
+      **Done when** a window cannot be begun again for a sensor inside some bound of its last
+      one by a version change alone, with a test; the commit-to-build window is closed or
+      written down as accepted; and give-ways are a Core Health number.
+
+- [ ] **A-69 — four loose ends from discovery and SSH under the target policy** · S · A-63,
+      A-65 · Found 2026-10-02. The `identify-start` schema takes any 7 to 15 characters as an
+      address where it means IPv4. A host the policy refused is still given a device and a
+      Ping sensor by the built-in templates, and whether a site's template can add a
+      connecting sensor to it was not checked. The core bounds `refused` and no other
+      free-text field of a fingerprint (`sysDescr`, `sysName`, `reverseName`, `httpServer`,
+      `vendor`, `evidence`), which a probe cuts and a core takes at any length.
+      `SshSession.open` takes no `AbortSignal`, so a check cancelled in the handshake ends on
+      the connect timeout. **Done when** each is fixed with a test.
 
 ### Panel round two — notifications, schedules, triggers
 
