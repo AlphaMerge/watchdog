@@ -16905,6 +16905,48 @@ because each is a decision rather than a defect:
         of strings cannot be emptied by deleting its last character (`removeAt` does not
         descend into arrays); **Remove** works. That is the form's, and older than this ticket.
 
+      **Review.** An independent review of the first commit confirmed seven defects, fixed in a
+      second.
+      - **The counts are of the sensors the caller can see** (`A-12`). `withholds` on the `PUT`
+        and `sensors` on the `DELETE` walked the whole subtree, so a writer with a `none` carved
+        beneath the object learned how many sensors were inside it, and `?dryRun=true` with
+        other targets made that a free, unaudited question about where the hidden devices are.
+        `withheldByBounds` and `sensorsUsing` now answer ids, and `ObjectService` counts those
+        the caller's `Visibility` contains, previewed or written. The audit record keeps the
+        whole number. **The history the API serves stores no count for a credential write**
+        (`audit/store.ts` keeps the kind and the secret names), so there was nothing there to
+        trim; the test pins that.
+      - **A preview is held to `write` before anything is worked out**: the same `onObject`
+        declaration as the write, enforced before the handler. Tested for an account whose role
+        may write and holds only `read`, and for a read-only role granted `write`: 403, and no
+        count in the body.
+      - **One thing is asked about at a time.** A removal waiting to be confirmed left Edit and
+        Add open, and confirming it closed the form opened since, unsaved. Now the other rows
+        and the Add control are disabled until it is answered, and say why.
+      - **Nothing opens between a save and the list being read again**, so no form is drafted
+        from the set as it was. **A reload that fails keeps the list and the sentence saying
+        what was done**, says the list may be the old one, and offers to read it again; nothing
+        can be edited from it until it has been.
+      - **Focus returns to the control that opened what was closed**: Cancel to the Edit or Add
+        button, Go back and a refused save to the save button, Keep it and a refused removal to
+        Remove.
+      - **The multi-line box.** It is rendered only for a secret being entered or replaced, from
+        the form's own state; a stored secret is the sentence "set, write-only" with no box.
+        What was typed goes with the form, which is unmounted on a save, on Cancel and when the
+        tab is left. The one field in any schema that is write-only with room for more than
+        4,096 characters is the SSH credential kind's `privateKey`; no sensor type's form
+        changed.
+      - **The runbook's surface table** lists `GET /api/v1/credentials/unbounded`, which
+        `candidate-surface.test.ts` found missing. The table is of paths, so `?dryRun` has no
+        row.
+      - **Left as it is:** an inherited set's `source.objectId` when the owner is hidden, which
+        is `A-12`'s documented reference behaviour.
+      - **Tests.** `credential-view.test.ts` (21), `object-visibility.test.ts` (55, one new: a
+        writer with a hole against an administrator, both routes, both modes), and
+        `credentials-panel.test.tsx` (40). **Mutants: 22, 22 killed** (9 core, 13 web).
+        Four focus assertions in the panel test now wait for the effect that moves focus: read
+        as soon as the element appeared, they failed in some runs.
+
 - [x] **U-22 — the alarms list asks for itself two or three times on every page load** · S ·
       U-06, U-02 · Found 2026-09-29 in `M-18`'s view test: a socket that never opened still
       caused a second fetch, about 400 ms after mount. `useSettledReload` is meant to skip the

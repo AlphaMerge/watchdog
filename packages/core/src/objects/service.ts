@@ -1406,7 +1406,7 @@ export class ObjectService {
     kind: string,
     values: Readonly<Record<string, unknown>>,
     pre: Precondition = { kind: 'none' },
-    options: { preview?: boolean } = {},
+    options: CredentialWriteOptions = {},
   ): Promise<CredentialView & { withholds: number; secretsCleared: readonly string[] }> {
     const vault = this.#requireVault();
     const actor = actorOf(writer);
@@ -1425,7 +1425,11 @@ export class ObjectService {
       // How many sensors beneath its bounds now keep the set from (`A-41b`). Narrowing a set's
       // targets can take a whole group to Unknown at once, so the write says so, and so does the
       // audit entry, rather than leaving it to be found from the sensors.
-      const withholds = await withheldByBounds(q, this.#sensorTypes, id, kind);
+      const withheld = await withheldByBounds(q, this.#sensorTypes, id, kind);
+      // The audit record keeps the whole number: it is what the write did. It reaches the audit
+      // log, which is the installation's; the history the API serves stores no count for a
+      // credential write (`audit/store.ts`), so there is none there to trim.
+      const withholds = withheld.length;
       const bounded = isRestricted(restrictionOf(kind, summary.publicParams));
       // A preview changes nothing, so it has nothing to put in the history. Skipped rather than
       // left to the rollback: a sink is not obliged to keep its record in this transaction.
@@ -1462,7 +1466,10 @@ export class ObjectService {
       if (view === undefined) throw notFound(id);
       return {
         ...credentialViewOf(view),
-        withholds,
+        // **Of the sensors this caller can see** (`A-12`). Asked with other targets, the whole
+        // number says where the devices in a hole beneath the object are, and a preview asks
+        // for nothing and leaves no trace.
+        withholds: await this.#seenAmong(q, options.visibility, withheld),
         secretsCleared: summary.secretsCleared,
       };
     });
@@ -1479,6 +1486,21 @@ export class ObjectService {
    * confirming is the one that must not drift. The answer leaves the transaction as the reason it
    * failed, so nothing in it commits and no after-commit hook runs.
    */
+  /**
+   * How many of these sensors a caller can see (`U-21`, `A-12`): what a credential write may
+   * count for them. A write holds `write` on the object it names, and a `none` carved beneath
+   * it is still a hole: its sensors use the set, and their number is not the writer's to learn.
+   * No visibility is an internal caller, who sees everything.
+   */
+  async #seenAmong(
+    q: Queryable,
+    visibility: Visibility | undefined,
+    sensors: readonly ObjectId[],
+  ): Promise<number> {
+    if (visibility === undefined || visibility.everything) return sensors.length;
+    return (await visibility.visibleAmong(q, sensors)).size;
+  }
+
   async #txOrPreview<T>(preview: boolean, work: (q: Queryable) => Promise<T>): Promise<T> {
     if (!preview) return this.#db.tx(work);
     try {
@@ -1506,7 +1528,7 @@ export class ObjectService {
     id: ObjectId,
     kind: string,
     pre: Precondition = { kind: 'none' },
-    options: { preview?: boolean } = {},
+    options: CredentialWriteOptions = {},
   ): Promise<{ removed: boolean; sensors: number; nowInherited: CredentialView | null }> {
     const vault = this.#requireVault();
     const actor = actorOf(writer);
@@ -1519,8 +1541,13 @@ export class ObjectService {
       }
 
       // Counted while the set is still there to be resolved to (`U-21`): the sensors that lose
-      // it, which is what somebody removing it is asked to confirm.
-      const sensors = await sensorsUsing(q, this.#sensorTypes, id, kind);
+      // it, which is what somebody removing it is asked to confirm. Those of them the caller can
+      // see, as `withholds` is.
+      const sensors = await this.#seenAmong(
+        q,
+        options.visibility,
+        await sensorsUsing(q, this.#sensorTypes, id, kind),
+      );
       const removed = await vault.clear(q, id, kind);
       // What an ancestor stores now reaches everything this set did, and the remover has to be
       // able to vouch for sending it there (`A-41`).
@@ -2690,6 +2717,14 @@ function diffSettings(
     }
   }
   return changes;
+}
+
+/** How a credential write is asked for (`U-21`). */
+export interface CredentialWriteOptions {
+  /** Run it whole and roll it back: the answer, with nothing stored and nothing in the history. */
+  readonly preview?: boolean;
+  /** What the caller can see, which is what the answer's counts are over. Absent sees everything. */
+  readonly visibility?: Visibility;
 }
 
 /** What a preview's transaction is failed with: the answer it worked out (`U-21`). */

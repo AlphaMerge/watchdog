@@ -376,6 +376,88 @@ describe(
       });
     });
 
+    describe('what a write counts for a caller with a hole beneath the object', () => {
+      // `write` on the group, and the far device carved out of it: its sensor uses the group's
+      // set like the other, and is not the writer's to count.
+      const carved = (): Visibility =>
+        Visibility.of(
+          new Map([
+            [groupId, true],
+            [otherDeviceId, false],
+          ]),
+          false,
+          null,
+        );
+      /** Bounds that leave both devices outside, so both sensors are kept from the set. */
+      const values = { community: COMMUNITY, allowedTargets: ['192.0.2.0/24'] };
+
+      it('counts the sensors kept from a set among those the caller sees, previewed or written', async () => {
+        for (const preview of [true, false]) {
+          h.audit.recorded.length = 0;
+          const seen = await h.service.setCredential(
+            testActor,
+            groupId,
+            'snmp',
+            values,
+            { kind: 'none' },
+            { preview, visibility: carved() },
+          );
+          assert.equal(seen.withholds, 1, `preview ${String(preview)}`);
+          // The history says what the write did, whoever made it.
+          const [entry] = h.audit.recorded;
+          assert.equal(entry === undefined, preview);
+          if (entry !== undefined) {
+            assert.equal(entry.action === 'credential.set' ? entry.withholds : null, 2);
+          }
+        }
+        // Everybody else is told about both: an administrator, and a caller that names no view.
+        for (const visibility of [Visibility.EVERYTHING, undefined]) {
+          const all = await h.service.setCredential(
+            testActor,
+            groupId,
+            'snmp',
+            values,
+            { kind: 'none' },
+            { preview: true, ...(visibility === undefined ? {} : { visibility }) },
+          );
+          assert.equal(all.withholds, 2);
+        }
+        // And a caller who sees nothing beneath is told of nothing.
+        const none = await h.service.setCredential(
+          testActor,
+          groupId,
+          'snmp',
+          values,
+          { kind: 'none' },
+          { preview: true, visibility: Visibility.nothing(null) },
+        );
+        assert.equal(none.withholds, 0);
+      });
+
+      it('counts the sensors using a set among those the caller sees, previewed or removed', async () => {
+        await h.service.setCredential(testActor, groupId, 'snmp', { community: COMMUNITY });
+        const all = await h.service.clearCredential(
+          testActor,
+          groupId,
+          'snmp',
+          { kind: 'none' },
+          { preview: true, visibility: Visibility.EVERYTHING },
+        );
+        assert.equal(all.sensors, 2);
+        for (const preview of [true, false]) {
+          const seen = await h.service.clearCredential(
+            testActor,
+            groupId,
+            'snmp',
+            { kind: 'none' },
+            { preview, visibility: carved() },
+          );
+          assert.equal(seen.removed, true);
+          assert.equal(seen.sensors, 1, `preview ${String(preview)}`);
+        }
+      });
+    });
+
     describe('the sets with no bounds', () => {
       beforeEach(async () => {
         await h.service.setCredential(testActor, probeId, 'snmp', { community: COMMUNITY });

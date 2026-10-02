@@ -294,6 +294,16 @@ it uses the set in force on its device.
 - **Removing a set asks first**, and says how many sensors use it and what they will use
   instead: the set on an ancestor, or nothing. A removal the core would refuse (`A-41`) is
   refused before the confirmation.
+- **The numbers are of the sensors you can see.** With part of the tree beneath the object
+  hidden from your account, the sensors inside it are affected like the rest and are not in the
+  count.
+- **One thing is asked about at a time.** While a removal is waiting for its answer, no form
+  opens and no other removal starts, so confirming it cannot take an unsaved form with it.
+- **After a save or a removal the list is read again, and nothing opens until it has been.** If
+  that read fails, the tab keeps saying what was done, says the list may be the old one, and
+  offers **Try again**.
+- **Focus goes back to where it came from.** Cancelling a form returns to the button that opened
+  it; dismissing a confirmation, or having it refused, returns to the button it replaced.
 - **Without `write` on the object the tab is read-only.**
 
 On the **Settings** tab, each row is a toggle rather than a plain input, because the source is the

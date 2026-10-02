@@ -402,7 +402,9 @@ nobody, not even an administrator, can bring it outside.
   made the change.
 - **Narrowing the targets says how many sensors it takes out.** The response's `withholds`, and
   the `credential.set` audit entry, count the sensors beneath that are outside them after the
-  write. Restricting a set to ranges when the devices under it are named by host name takes every
+  write. The response counts the ones its caller can see, so an account with a `none` carved
+  beneath the object is not told how many sensors are inside it; the audit log's entry counts
+  them all. A removal's `sensors` is counted the same way. Restricting a set to ranges when the devices under it are named by host name takes every
   one of them to Unknown, and the count is how you find that out before the pages do. Unknown
   pages as it always has: once per sensor, collected into the template's digest, and nothing for a
   sensor a Down dependency already holds.

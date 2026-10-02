@@ -88,6 +88,16 @@ const INHERITED_SSH: CredentialView = {
   bounded: false,
 };
 
+/** Stored here with a private key, and bounded by the host key it lists. */
+const OWN_SSH: CredentialView = {
+  kind: 'ssh',
+  publicParams: { username: 'monitor', hostKeys: ['SHA256:abc'] },
+  source: { kind: 'own', objectId: 20 },
+  updatedAt: '2026-09-29T08:00:00.000Z',
+  bounded: true,
+  secretsSet: ['privateKey'],
+};
+
 const written = (over: Partial<CredentialWrite> = {}): CredentialWrite => ({
   ...OWN_SNMP,
   withholds: 0,
@@ -106,15 +116,35 @@ interface Stub {
   kinds?: CredentialKindSummary[];
   /** What `GET …/access/effective` answers; a number is a refusal with that status. */
   right?: 'none' | 'read' | 'write' | 'full' | number;
-  preview?: CredentialWrite | { status: number; body: unknown };
-  write?: CredentialWrite;
-  removalPreview?: CredentialRemoval | { status: number; body: unknown };
-  removal?: CredentialRemoval;
+  preview?: CredentialWrite | Refused;
+  write?: CredentialWrite | Refused;
+  removalPreview?: CredentialRemoval | Refused;
+  removal?: CredentialRemoval | Refused;
   unbounded?: UnboundedCredential[];
+  /**
+   * What each read of the object's sets answers, by its number from 1. In place of `sets`, for a
+   * list that changes after a save, fails to be read again, or takes its time.
+   */
+  listing?: (read: number) => CredentialView[] | Refused | Promise<CredentialView[]>;
 }
+
+interface Refused {
+  status: number;
+  body: unknown;
+}
+
+const REFUSED: Refused = {
+  status: 403,
+  body: { error: { code: 'AUTH_FORBIDDEN', message: 'needs write on that probe' } },
+};
+const UNREADABLE: Refused = {
+  status: 500,
+  body: { error: { code: 'INTERNAL', message: 'the database went away' } },
+};
 
 function stubApi(stub: Stub): { calls: Call[] } {
   const calls: Call[] = [];
+  let reads = 0;
   const reply = (status: number, data: unknown): Promise<Response> =>
     Promise.resolve(
       new Response(JSON.stringify(data), {
@@ -141,7 +171,13 @@ function stubApi(stub: Stub): { calls: Call[] } {
         ? reply(stub.right, { error: { code: 'AUTH_FORBIDDEN', message: 'refused' } })
         : reply(200, { right: stub.right ?? 'write', inherited: false, viaAdminGroup: false });
     }
-    if (path.endsWith('/objects/20/credentials')) return reply(200, { items: stub.sets ?? [] });
+    if (path.endsWith('/objects/20/credentials')) {
+      if (stub.listing === undefined) return reply(200, { items: stub.sets ?? [] });
+      reads += 1;
+      return Promise.resolve(stub.listing(reads)).then((answer) =>
+        Array.isArray(answer) ? reply(200, { items: answer }) : staged(answer),
+      );
+    }
     throw new Error(`no stub for ${method} ${path}`);
   });
   return { calls };
@@ -429,6 +465,76 @@ describe('the credentials tab', () => {
       expect(real?.path.endsWith('/objects/20/credentials/ssh')).toBe(true);
       expect((real?.body as { values: Record<string, unknown> }).values['privateKey']).toBe(key);
     });
+
+    it('never fills that box from what is stored, and takes what was typed with it on a save', async () => {
+      const key =
+        '-----BEGIN OPENSSH PRIVATE KEY-----\ntyped-just-now\n-----END OPENSSH PRIVATE KEY-----\n';
+      const api = await show({ sets: [OWN_SSH], write: written({ ...OWN_SSH }) });
+      fireEvent.click(within(row('SSH')).getByRole('button', { name: 'Edit SSH credentials' }));
+      const form = screen.getByRole('form', { name: 'Editing SSH credentials' });
+
+      // A stored key is a sentence saying one is stored: there is no box to hold it.
+      expect(form.querySelector('textarea')).toBeNull();
+      expect(within(form).getByText('set, write-only')).toBeDefined();
+
+      // Asked to replace it, the box opens empty.
+      fireEvent.click(within(form).getByRole('button', { name: 'Replace' }));
+      const box = within(form).getByLabelText<HTMLTextAreaElement>('Private key');
+      expect(box.tagName).toBe('TEXTAREA');
+      expect(box.value).toBe('');
+      fireEvent.change(box, { target: { value: key } });
+
+      fireEvent.click(within(form).getByRole('button', { name: 'Save changes' }));
+      await waitFor(() => {
+        expect(writes(api.calls)).toHaveLength(2);
+      });
+      // Saved: the form is gone, and what was typed is in the document nowhere.
+      await waitFor(() => {
+        expect(screen.queryByRole('form')).toBeNull();
+      });
+      expect(document.querySelector('textarea')).toBeNull();
+      expect(document.body.innerHTML.includes('typed-just-now')).toBe(false);
+      expect(api.calls.some((call) => call.path.includes('typed-just-now'))).toBe(false);
+
+      // And a form opened again starts from nothing typed.
+      await waitFor(() => {
+        expect(
+          within(row('SSH')).getByRole<HTMLButtonElement>('button', {
+            name: 'Edit SSH credentials',
+          }).disabled,
+        ).toBe(false);
+      });
+      fireEvent.click(within(row('SSH')).getByRole('button', { name: 'Edit SSH credentials' }));
+      const again = screen.getByRole('form', { name: 'Editing SSH credentials' });
+      expect(again.querySelector('textarea')).toBeNull();
+      fireEvent.click(within(again).getByRole('button', { name: 'Replace' }));
+      expect(within(again).getByLabelText<HTMLTextAreaElement>('Private key').value).toBe('');
+    });
+
+    it('takes what was typed with it when the tab is left', async () => {
+      const api = stubApi({ sets: [OWN_SSH] });
+      const view = render(
+        inSession(OPEN, <CredentialsPanel object={GROUP} ancestors={ANCESTORS} />),
+      );
+      await screen.findByRole('heading', { name: 'Credential sets' });
+      fireEvent.click(within(row('SSH')).getByRole('button', { name: 'Edit SSH credentials' }));
+      const form = screen.getByRole('form', { name: 'Editing SSH credentials' });
+      fireEvent.click(within(form).getByRole('button', { name: 'Replace' }));
+      fireEvent.change(within(form).getByLabelText('Private key'), {
+        target: { value: 'typed-and-abandoned' },
+      });
+
+      // Another tab is another panel: this one is unmounted, as `ObjectDetailView` does it.
+      view.unmount();
+      render(inSession(OPEN, <CredentialsPanel object={GROUP} ancestors={ANCESTORS} />));
+      await screen.findByRole('heading', { name: 'Credential sets' });
+      expect(screen.queryByRole('form')).toBeNull();
+      expect(document.body.innerHTML.includes('typed-and-abandoned')).toBe(false);
+      fireEvent.click(within(row('SSH')).getByRole('button', { name: 'Edit SSH credentials' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+      expect(screen.getByLabelText<HTMLTextAreaElement>('Private key').value).toBe('');
+      expect(writes(api.calls)).toEqual([]);
+    });
   });
 
   describe('a save', () => {
@@ -460,7 +566,10 @@ describe('the credentials tab', () => {
       ]);
       // The fields are held as they were previewed.
       expect(within(form).getByLabelText<HTMLSelectElement>('SNMP version').disabled).toBe(true);
-      expect(document.activeElement).toBe(confirm);
+      // Waited for: the group is in the document a moment before the effect that focuses it.
+      await waitFor(() => {
+        expect(document.activeElement).toBe(confirm);
+      });
 
       fireEvent.click(within(confirm).getByRole('button', { name: 'Save anyway' }));
       await waitFor(() => {
@@ -494,6 +603,134 @@ describe('the credentials tab', () => {
       expect(screen.queryByRole('group', { name: 'Confirm this save' })).toBeNull();
       expect(writes(calls)).toHaveLength(1);
       expect(within(form).getByLabelText<HTMLSelectElement>('SNMP version').disabled).toBe(false);
+      // Focus goes to the button the confirmation stood in for, not to the document.
+      expect(document.activeElement).toBe(
+        within(form).getByRole('button', { name: 'Save changes' }),
+      );
+    });
+
+    it('returns focus to the save button when a confirmed save is refused', async () => {
+      const { calls, form } = await editSnmp({
+        preview: written({ withholds: 1 }),
+        write: REFUSED,
+      });
+      narrow(form);
+      const confirm = await screen.findByRole('group', { name: 'Confirm this save' });
+      const anyway = within(confirm).getByRole('button', { name: 'Save anyway' });
+      anyway.focus();
+      fireEvent.click(anyway);
+
+      const alert = await screen.findByRole('alert');
+      expect(alert.textContent).toContain('needs write on that probe');
+      expect(writes(calls)).toHaveLength(2);
+      expect(screen.queryByRole('group', { name: 'Confirm this save' })).toBeNull();
+      // Waited for: the alert is in the document a moment before the effect that moves focus.
+      await waitFor(() => {
+        expect(document.activeElement).toBe(
+          within(form).getByRole('button', { name: 'Save changes' }),
+        );
+      });
+    });
+
+    it('returns focus to the control that opened a form when the form is cancelled', async () => {
+      const { form } = await editSnmp();
+      fireEvent.click(within(form).getByRole('button', { name: 'Cancel' }));
+      expect(screen.queryByRole('form')).toBeNull();
+      expect(document.activeElement).toBe(
+        within(row('SNMP')).getByRole('button', { name: 'Edit SNMP credentials' }),
+      );
+
+      // And a new set's form goes back to the button that offered it.
+      fireEvent.click(screen.getByRole('button', { name: 'Add SSH credentials' }));
+      const fresh = screen.getByRole('form', { name: 'New SSH credentials' });
+      fireEvent.click(within(fresh).getByRole('button', { name: 'Cancel' }));
+      expect(screen.queryByRole('form')).toBeNull();
+      expect(document.activeElement).toBe(
+        screen.getByRole('button', { name: 'Add SSH credentials' }),
+      );
+    });
+
+    /** The row's Edit button, which is how the tab says whether a form may be opened. */
+    const editButton = (name: string): HTMLButtonElement =>
+      within(row(name)).getByRole<HTMLButtonElement>('button', {
+        name: `Edit ${name} credentials`,
+      });
+
+    it('opens no form on the set as it was, until the list has been read again', async () => {
+      const saved: CredentialView = {
+        ...OWN_SNMP,
+        publicParams: { version: 'v2c', allowedTargets: ['10.0.0.0/24', '10.9.0.0/16'] },
+      };
+      let land: (sets: CredentialView[]) => void = () => undefined;
+      const { calls, form } = await editSnmp({
+        preview: written(),
+        write: written(saved),
+        listing: (read) =>
+          read === 1
+            ? [OWN_SNMP]
+            : new Promise<CredentialView[]>((resolve) => {
+                land = resolve;
+              }),
+      });
+      narrow(form);
+      expect(await screen.findByText('Saved the SNMP set on Rack A.')).toBeDefined();
+      expect(writes(calls)).toHaveLength(2);
+
+      // The list on screen is the one from before the save, and nothing opens on it.
+      expect(editButton('SNMP').disabled).toBe(true);
+      expect(
+        within(row('SNMP')).getByRole<HTMLButtonElement>('button', {
+          name: 'Remove SNMP credentials',
+        }).disabled,
+      ).toBe(true);
+      expect(screen.getByRole<HTMLButtonElement>('button', { name: /^Add / }).disabled).toBe(true);
+      fireEvent.click(editButton('SNMP'));
+      expect(screen.queryByRole('form')).toBeNull();
+
+      land([saved]);
+      await waitFor(() => {
+        expect(editButton('SNMP').disabled).toBe(false);
+      });
+      // Opened now, the form starts from what was saved: nothing in it to put the old set back.
+      fireEvent.click(editButton('SNMP'));
+      const reopened = screen.getByRole('form', { name: 'Editing SNMP credentials' });
+      expect(within(reopened).getByLabelText<HTMLInputElement>('Allowed targets 2').value).toBe(
+        '10.9.0.0/16',
+      );
+      expect(within(reopened).getByText('Nothing has changed yet.')).toBeDefined();
+    });
+
+    it('keeps saying what was saved when the list cannot be read again, and offers to read it', async () => {
+      let failing = true;
+      const { calls, form } = await editSnmp({
+        preview: written(),
+        write: written(),
+        listing: (read) => (read === 1 || !failing ? [OWN_SNMP] : UNREADABLE),
+      });
+      narrow(form);
+
+      const alert = await screen.findByRole('alert');
+      expect(alert.textContent).toContain('the database went away');
+      // The save was made, and the tab still says so, with the list it had.
+      expect(screen.getByText('Saved the SNMP set on Rack A.').getAttribute('role')).toBe('status');
+      expect(screen.getByRole('heading', { name: 'Credential sets' })).toBeDefined();
+      expect(
+        screen.getByText(/could not be read again, so it may not show the last change/u),
+      ).toBeDefined();
+      expect(row('SNMP')).toBeDefined();
+      // A list that may be the old one is not edited from.
+      expect(editButton('SNMP').disabled).toBe(true);
+
+      failing = false;
+      fireEvent.click(within(alert).getByRole('button', { name: 'Try again' }));
+      await waitFor(() => {
+        expect(screen.queryByRole('alert')).toBeNull();
+      });
+      expect(editButton('SNMP').disabled).toBe(false);
+      expect(screen.getByText('Saved the SNMP set on Rack A.')).toBeDefined();
+      expect(
+        calls.filter((call) => call.method === 'GET' && call.path.endsWith('/20/credentials')),
+      ).toHaveLength(3);
     });
 
     it('goes straight through when the preview has nothing to say', async () => {
@@ -612,7 +849,10 @@ describe('the credentials tab', () => {
       expect(writes(calls).map((call) => `${call.method} ${call.path}`)).toEqual([
         'DELETE /api/v1/objects/20/credentials/snmp?dryRun=true',
       ]);
-      expect(document.activeElement).toBe(confirm);
+      // Waited for: the group is in the document a moment before the effect that focuses it.
+      await waitFor(() => {
+        expect(document.activeElement).toBe(confirm);
+      });
 
       fireEvent.click(within(confirm).getByRole('button', { name: 'Remove the set' }));
       await waitFor(() => {
@@ -646,9 +886,86 @@ describe('the credentials tab', () => {
       fireEvent.click(within(confirm).getByRole('button', { name: 'Keep it' }));
       expect(screen.queryByRole('group', { name: 'Confirm removing SNMP credentials' })).toBeNull();
       expect(writes(calls)).toHaveLength(1);
-      expect(
+      // Focus goes back to the button that asked, not to the document.
+      expect(document.activeElement).toBe(
         within(row('SNMP')).getByRole('button', { name: 'Remove SNMP credentials' }),
+      );
+    });
+
+    it('returns focus to the Remove button when a confirmed removal is refused', async () => {
+      const { calls } = await askToRemove({ removalPreview: PREVIEW, removal: REFUSED });
+      const confirm = await screen.findByRole('group', {
+        name: 'Confirm removing SNMP credentials',
+      });
+      const sure = within(confirm).getByRole('button', { name: 'Remove the set' });
+      sure.focus();
+      fireEvent.click(sure);
+
+      const alert = await screen.findByRole('alert');
+      expect(alert.textContent).toContain('needs write on that probe');
+      expect(writes(calls)).toHaveLength(2);
+      expect(screen.queryByRole('group', { name: 'Confirm removing SNMP credentials' })).toBeNull();
+      await waitFor(() => {
+        expect(document.activeElement).toBe(
+          within(row('SNMP')).getByRole('button', { name: 'Remove SNMP credentials' }),
+        );
+      });
+    });
+
+    it('opens no form while a removal is waiting to be confirmed, so confirming it discards nothing', async () => {
+      const api = await show({
+        sets: [OWN_SNMP, OWN_SSH],
+        kinds: [...KINDS, { ...KINDS[0], id: 'windows', name: 'Windows' } as CredentialKindSummary],
+        removalPreview: PREVIEW,
+      });
+      const controls = (): HTMLButtonElement[] => [
+        within(row('SSH')).getByRole<HTMLButtonElement>('button', { name: 'Edit SSH credentials' }),
+        within(row('SSH')).getByRole<HTMLButtonElement>('button', {
+          name: 'Remove SSH credentials',
+        }),
+        screen.getByRole<HTMLButtonElement>('button', { name: 'Add Windows credentials' }),
+      ];
+      expect(controls().map((control) => control.disabled)).toEqual([false, false, false]);
+
+      fireEvent.click(within(row('SNMP')).getByRole('button', { name: 'Remove SNMP credentials' }));
+      const confirm = await screen.findByRole('group', {
+        name: 'Confirm removing SNMP credentials',
+      });
+      // Every other way into a form or a second confirmation is closed, and says why.
+      expect(controls().map((control) => control.disabled)).toEqual([true, true, true]);
+      expect(screen.getByLabelText<HTMLSelectElement>('Store a set here').disabled).toBe(true);
+      expect(
+        screen.getByText('Answer the removal above before storing another set.'),
       ).toBeDefined();
+      for (const control of controls()) fireEvent.click(control);
+      expect(screen.queryByRole('form')).toBeNull();
+      expect(writes(api.calls)).toHaveLength(1);
+
+      fireEvent.click(within(confirm).getByRole('button', { name: 'Keep it' }));
+      expect(controls().map((control) => control.disabled)).toEqual([false, false, false]);
+      expect(screen.queryByText('Answer the removal above before storing another set.')).toBeNull();
+    });
+
+    it('keeps saying what was removed when the list cannot be read again', async () => {
+      await askToRemove({
+        removalPreview: PREVIEW,
+        removal: PREVIEW,
+        listing: (read) => (read === 1 ? [OWN_SNMP] : UNREADABLE),
+      });
+      const confirm = await screen.findByRole('group', {
+        name: 'Confirm removing SNMP credentials',
+      });
+      fireEvent.click(within(confirm).getByRole('button', { name: 'Remove the set' }));
+
+      const alert = await screen.findByRole('alert');
+      expect(alert.textContent).toContain('the database went away');
+      expect(within(alert).getByRole('button', { name: 'Try again' })).toBeDefined();
+      expect(
+        screen.getByText(
+          'Removed the SNMP set from Rack A. 2 sensors beneath Rack A lost it. They now use the set on Local probe.',
+        ),
+      ).toBeDefined();
+      expect(screen.getByRole('heading', { name: 'Credential sets' })).toBeDefined();
     });
 
     it('says why when the core would refuse the removal, before anything is confirmed', async () => {

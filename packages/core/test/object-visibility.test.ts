@@ -3335,6 +3335,118 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       await act('DELETE', `${String(shown[0] ?? 0)}/pause`);
     });
 
+    it('counts for a credential write only the sensors its writer can see (U-21)', async () => {
+      // `write` on a group, one device in it the team sees, and one carved `none` with two
+      // sensors. All three sensors use the group's SNMP set.
+      const room = await create({ kind: 'group', parentId: branchId, name: 'a-vault-room' });
+      const seen = await create({
+        kind: 'device',
+        parentId: room,
+        name: 'a-vault-seen',
+        host: '10.0.4.1',
+      });
+      const carved = await create({
+        kind: 'device',
+        parentId: room,
+        name: `${MARK}-vault-hole`,
+        host: '10.0.4.2',
+      });
+      const snmp = (parentId: number, name: string): Promise<number> =>
+        create({ kind: 'sensor', parentId, name, sensorType: 'snmp.traffic', params: {} });
+      await snmp(seen, 'a-vault-s1');
+      await snmp(carved, `${MARK}-vault-s2`);
+      await snmp(carved, `${MARK}-vault-s3`);
+      await grant(carved, 'none');
+
+      const url = `/api/v1/objects/${String(room)}/credentials/snmp`;
+      // Bounds every device here is outside, so the set is kept from every sensor.
+      const payload = {
+        values: { community: 'a-vault-community', allowedTargets: ['192.0.2.0/24'] },
+      };
+      const put = async (login: string, dryRun: boolean): Promise<number> => {
+        const response = await app.inject({
+          method: 'PUT',
+          url: `${url}${dryRun ? '?dryRun=true' : ''}`,
+          headers: as(login),
+          payload,
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        return response.json<{ withholds: number }>().withholds;
+      };
+      const remove = async (login: string, dryRun: boolean): Promise<number> => {
+        const response = await app.inject({
+          method: 'DELETE',
+          url: `${url}${dryRun ? '?dryRun=true' : ''}`,
+          headers: as(login),
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        const body = response.json<{ removed: boolean; sensors: number }>();
+        assert.equal(body.removed, true);
+        return body.sensors;
+      };
+
+      // Without `write`, a preview is refused as the write is, before anything is counted.
+      const refusedTo = async (login: string): Promise<void> => {
+        for (const method of ['PUT', 'DELETE'] as const) {
+          for (const query of ['?dryRun=true', '']) {
+            const refused = await app.inject({
+              method,
+              url: `${url}${query}`,
+              headers: as(login),
+              ...(method === 'PUT' ? { payload } : {}),
+            });
+            assert.equal(refused.statusCode, 403, `${login} ${method} ${query}: ${refused.body}`);
+            const body = refused.json<Record<string, unknown>>();
+            assert.equal('withholds' in body, false, `${login} ${method} ${query}`);
+            assert.equal('sensors' in body, false, `${login} ${method} ${query}`);
+            assert.equal(/\d+ sensors?/.test(refused.body), false, refused.body);
+          }
+        }
+      };
+      // An account whose role may write, holding `read` here and no more; and one whose role
+      // may not, whatever it is granted.
+      await refusedTo('operator');
+      await grant(room, 'write');
+      await refusedTo('watcher');
+      assert.deepEqual(await harness.service.credentials(room, false), []);
+
+      // The writer with the hole: one sensor, previewed and written. The administrator: three.
+      assert.equal(await put('operator', true), 1);
+      assert.equal(await put('admin', true), 3);
+      assert.deepEqual(await harness.service.credentials(room, false), [], 'a preview stored');
+      assert.equal(await put('operator', false), 1);
+      assert.equal(await put('admin', false), 3);
+
+      // The history the API serves has the two writes and no count, for anybody: there is no
+      // second place to read the number from.
+      for (const login of ['admin', 'operator']) {
+        const sets = (await historyOf(room, as(login))).filter(
+          (entry) => entry.action === 'credential.set',
+        );
+        assert.equal(sets.length, 2, login);
+        assert.equal(/"withholds"/.test(JSON.stringify(sets)), false, login);
+      }
+      // What was recorded says what each write did, whoever made it.
+      assert.deepEqual(
+        harness.audit.recorded.flatMap((entry) =>
+          entry.action === 'credential.set' && entry.objectId === room ? [entry.withholds] : [],
+        ),
+        [3, 3],
+      );
+
+      assert.equal(await remove('operator', true), 1);
+      assert.equal(await remove('admin', true), 3);
+      assert.equal((await harness.service.credentials(room, false)).length, 1, 'a preview removed');
+      assert.equal(await remove('operator', false), 1);
+      // Stored again, so that the administrator has one to remove.
+      assert.equal(await put('admin', false), 3);
+      assert.equal(await remove('admin', false), 3);
+
+      // And with the hole filled, the writer counts what the administrator counts.
+      await grant(carved, 'read');
+      assert.equal(await put('operator', true), 3);
+    });
+
     it('writes only a container’s own row for a setting on it, one at a time or in bulk', async () => {
       // `write` on the device, and a sensor beneath it carved `none` (the fixture's). A setting
       // set on the device is inherited by the sensor, which is what inheritance is; its row is

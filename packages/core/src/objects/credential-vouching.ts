@@ -531,19 +531,23 @@ export function boundRefusal(
 }
 
 /**
- * How many sensors a set's bounds keep it from, after a write (`A-41b`): the sensors that resolve
- * to it and are outside its targets or undecided against them. Zero for an unrestricted set.
+ * The sensors a set's bounds keep it from, after a write (`A-41b`): the ones that resolve to it
+ * and are outside its targets or undecided against them. None for an unrestricted set.
  *
- * Counted in the write's transaction, for the response and the audit entry, so that narrowing a
+ * Read in the write's transaction, for the response and the audit entry, so that narrowing a
  * set's targets says how many sensors it is about to take to Unknown before anybody finds out
  * from the sensors. The probe's version is not the write's business and is not counted.
+ *
+ * **The sensors, not their number** (`U-21`). The whole subtree is walked, whoever asks, because
+ * that is what the set reaches. How many of them a caller is told about is the caller's view, and
+ * the one who answers counts the ids it can see (`ObjectService.#seenAmong`).
  */
 export async function withheldByBounds(
   q: Queryable,
   types: CredentialTypes,
   ownerId: ObjectId,
   kind: string,
-): Promise<number> {
+): Promise<ObjectId[]> {
   const routes = await routesAtOrUnder(q, types, [ownerId], { kinds: [kind] });
   const sensors = new Set<ObjectId>();
   for (const route of routes) {
@@ -552,23 +556,25 @@ export async function withheldByBounds(
       sensors.add(route.sensorId);
     }
   }
-  return sensors.size;
+  return [...sensors];
 }
 
 /**
- * How many sensors at or beneath `ownerId` resolve this kind to the set stored on it (`U-21`): what
+ * The sensors at or beneath `ownerId` that resolve this kind to the set stored on it (`U-21`): what
  * removing that set takes it from. The nearest-set rule is `routesAtOrUnder`'s, so a sensor under
- * a device with a set of its own is not counted against the group's.
+ * a device with a set of its own is not counted against the group's. The ids, for the same reason
+ * `withheldByBounds` answers ids.
  */
 export async function sensorsUsing(
   q: Queryable,
   types: CredentialTypes,
   ownerId: ObjectId,
   kind: string,
-): Promise<number> {
+): Promise<ObjectId[]> {
   const routes = await routesAtOrUnder(q, types, [ownerId], { kinds: [kind] });
-  return new Set(routes.filter((route) => route.ownerId === ownerId).map((route) => route.sensorId))
-    .size;
+  return [
+    ...new Set(routes.filter((route) => route.ownerId === ownerId).map((route) => route.sensorId)),
+  ];
 }
 
 /** One sensor a probe's configuration is about to send credentials to. */

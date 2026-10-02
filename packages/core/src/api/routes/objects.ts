@@ -1898,7 +1898,11 @@ export async function objectRoutes(
           'again, and `secretsCleared` names them. **`?dryRun=true` is the same write, rolled ' +
           'back** (`U-21`): the same checks, the same refusals and the same answer, with nothing ' +
           'stored and nothing in the history, so a form can say what a save will do before it ' +
-          'is confirmed.',
+          'is confirmed. It is held to `write` on the object before anything is worked out, as ' +
+          'the write is. **`withholds` counts the sensors the caller can see**: with a `none` ' +
+          'carved beneath the object, the sensors inside it are kept from the set and not ' +
+          'counted here. The audit log keeps the whole number; the history this API serves ' +
+          'carries no count for a credential write.',
         params: credentialKindParams,
         querystring: dryRunQuery,
         body: {
@@ -1918,7 +1922,7 @@ export async function objectRoutes(
           request.params.kind,
           request.body.values,
           optionalIfMatch(request.headers['if-match']),
-          { preview: request.query.dryRun === 'true' },
+          { preview: request.query.dryRun === 'true', visibility: await visibilityOf(request) },
         ),
       );
     },
@@ -1938,7 +1942,8 @@ export async function objectRoutes(
           "group's one is now in use rather than leaving it to be discovered. **403** when the " +
           'set that comes back into force would reach a sensor somewhere nobody with `write` on ' +
           'where it is stored vouched for, and you do not have that `write` either (`A-41`); ' +
-          'the set stays. `sensors` is how many sensors beneath were using the set. ' +
+          'the set stays. `sensors` is how many sensors beneath were using the set, **of ' +
+          'those the caller can see**. ' +
           '**`?dryRun=true` is the same removal, rolled back** (`U-21`): what would lose the ' +
           'set and what would come into force, or the same 403, with the set left where it is.',
         params: credentialKindParams,
@@ -1956,7 +1961,7 @@ export async function objectRoutes(
                 minimum: 0,
                 description:
                   'How many sensors at or beneath this object resolved this kind to the set ' +
-                  'removed. Zero when there was no set to remove.',
+                  'removed, of those the caller can see. Zero when there was no set to remove.',
               },
               nowInherited: {
                 oneOf: [{ $ref: 'ms:credentialView' }, { type: 'null' }],
@@ -1972,7 +1977,7 @@ export async function objectRoutes(
         request.params.id,
         request.params.kind,
         optionalIfMatch(request.headers['if-match']),
-        { preview: request.query.dryRun === 'true' },
+        { preview: request.query.dryRun === 'true', visibility: await visibilityOf(request) },
       );
       await reply.send({ kind: request.params.kind, ...outcome });
     },

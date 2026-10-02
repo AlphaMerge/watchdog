@@ -76,7 +76,7 @@ export function CredentialsPanel({
 }): React.JSX.Element {
   const { session } = useSession();
   const base = `/objects/${String(object.id)}`;
-  const [sets, reload] = useSets(`${base}/credentials`);
+  const { sets, reload, reloading, stale } = useSets(`${base}/credentials`);
   const kinds = useApi<{ items: CredentialKindSummary[] }>('/credential-kinds');
   const access = useApi<EffectiveAccess>(asksForRight(session) ? `${base}/access/effective` : null);
   const canWrite = mayWrite(session, access);
@@ -87,6 +87,22 @@ export function CredentialsPanel({
   /** What the last save or removal did, in the core's numbers. Announced, and left on screen. */
   const [notice, setNotice] = useState<string | null>(null);
   const noticeRef = useRef<HTMLParagraphElement>(null);
+  /** The kind whose removal is being checked or confirmed. One thing is asked about at a time. */
+  const [asking, setAsking] = useState<string | null>(null);
+  /**
+   * The control a form closed unsaved goes back to: a kind's Edit button, or the Add button.
+   * Without it focus falls to the document body, and a keyboard user starts the page again.
+   */
+  const [returnTo, setReturnTo] = useState<{ edit: string } | 'add' | null>(null);
+  const addButton = useRef<HTMLButtonElement>(null);
+  const returned = useCallback(() => {
+    setReturnTo(null);
+  }, []);
+  useEffect(() => {
+    if (returnTo !== 'add') return;
+    addButton.current?.focus();
+    setReturnTo(null);
+  }, [returnTo]);
 
   const finished = useCallback(
     (said: string) => {
@@ -108,6 +124,10 @@ export function CredentialsPanel({
 
   const items = sets.data;
   const catalogue = kinds.data.items;
+  // **What is on screen is not what is stored**, between a save and the list being read again:
+  // a form opened then would be drafted from the set as it was, and saving it would put the old
+  // values back. So nothing is opened until the list is the core's again.
+  const behind = reloading || stale !== null;
   const addable = kindsToAdd(catalogue, items);
   const chosen = addable.find((kind) => kind.id === adding) ?? addable[0];
   const newKind = catalogue.find(
@@ -141,6 +161,18 @@ export function CredentialsPanel({
         >
           {notice ?? ''}
         </p>
+
+        {/* A save or a removal that was made, and a list that could not be read after it. What
+            happened stays said above; this says the list is the old one, and offers to read it. */}
+        {stale !== null && (
+          <div className="mt-3 space-y-2">
+            <p className="text-sm text-text">
+              The list below could not be read again, so it may not show the last change. Nothing
+              can be changed here until it has been.
+            </p>
+            <ErrorPanel error={stale} retry={reload} />
+          </div>
+        )}
 
         {/* Not while the core is still being asked: the sentence would be up for a moment in
             front of every account that may write. */}
@@ -178,13 +210,21 @@ export function CredentialsPanel({
                 ancestors={ancestors}
                 canWrite={canWrite}
                 editing={editing === set.kind && set.source.kind === 'own'}
-                busyElsewhere={editing !== null}
+                busyElsewhere={
+                  editing !== null || behind || (asking !== null && asking !== set.kind)
+                }
+                focusEdit={returnTo !== null && returnTo !== 'add' && returnTo.edit === set.kind}
+                onFocused={returned}
+                onAsking={(open) => {
+                  setAsking(open ? set.kind : null);
+                }}
                 onEdit={() => {
                   setNotice(null);
                   setEditing(set.kind);
                 }}
                 onCancel={() => {
                   setEditing(null);
+                  setReturnTo({ edit: set.kind });
                 }}
                 onDone={finished}
               />
@@ -200,6 +240,7 @@ export function CredentialsPanel({
               set={null}
               onCancel={() => {
                 setEditing(null);
+                setReturnTo('add');
               }}
               onSaved={finished}
             />
@@ -211,7 +252,8 @@ export function CredentialsPanel({
             <label className="text-sm text-text">
               <span className="block font-medium">Store a set here</span>
               <select
-                className="mt-1 border border-control bg-surface px-2 py-1 text-sm text-text"
+                className="mt-1 border border-control bg-surface px-2 py-1 text-sm text-text disabled:opacity-50"
+                disabled={behind || asking !== null}
                 value={chosen.id}
                 onChange={(event) => {
                   setAdding(event.target.value);
@@ -228,8 +270,10 @@ export function CredentialsPanel({
               </select>
             </label>
             <button
+              ref={addButton}
               type="button"
               className={BUTTON}
+              disabled={behind || asking !== null}
               onClick={() => {
                 setNotice(null);
                 setEditing(chosen.id);
@@ -237,6 +281,12 @@ export function CredentialsPanel({
             >
               Add {chosen.name} credentials
             </button>
+            {/* A removal confirmed while a form is open would take the form with it, unsaved. */}
+            {asking !== null && (
+              <span className="text-xs text-text-muted">
+                Answer the removal above before storing another set.
+              </span>
+            )}
           </div>
         )}
       </Card>
@@ -251,10 +301,25 @@ export function CredentialsPanel({
  * in.** `useApi` goes back to `loading`, which would take the list down after every save, and the
  * live region and the focus placed on it with the list. Here the first read is the only one that
  * shows a loading line.
+ *
+ * **And a reload that fails keeps it too.** The save or the removal before it was made; replacing
+ * the tab with an error would take down the sentence that says so. The list stays, `stale` carries
+ * the error, and the panel says the list is the old one. Only a first read that fails has nothing
+ * to keep.
  */
-function useSets(path: string): [Loadable<CredentialView[]>, () => void] {
+function useSets(path: string): {
+  sets: Loadable<CredentialView[]>;
+  reload: () => void;
+  /** A read asked for after the first, and not answered yet. */
+  reloading: boolean;
+  /** Why the list on screen is not the newest: the last read of it failed. */
+  stale: ApiError | null;
+} {
   const [state, setState] = useState<Loadable<CredentialView[]>>({ status: 'loading' });
+  const [stale, setStale] = useState<ApiError | null>(null);
   const [nonce, setNonce] = useState(0);
+  /** The read that has been answered. Behind `nonce` while one is in flight. */
+  const [answered, setAnswered] = useState(-1);
   const reload = useCallback(() => {
     setNonce((n) => n + 1);
   }, []);
@@ -263,18 +328,29 @@ function useSets(path: string): [Loadable<CredentialView[]>, () => void] {
     const controller = new AbortController();
     request<{ items: CredentialView[] }>(path, controller.signal)
       .then((answer) => {
-        if (!controller.signal.aborted) setState({ status: 'ready', data: answer.items });
+        if (controller.signal.aborted) return;
+        setState({ status: 'ready', data: answer.items });
+        setStale(null);
+        setAnswered(nonce);
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
-        setState({ status: 'error', error: asApiError(error, 'the sets could not be read') });
+        const failed = asApiError(error, 'the sets could not be read');
+        setState((held) => (held.status === 'ready' ? held : { status: 'error', error: failed }));
+        setStale(failed);
+        setAnswered(nonce);
       });
     return () => {
       controller.abort();
     };
   }, [path, nonce]);
 
-  return [state, reload];
+  return {
+    sets: state,
+    reload,
+    reloading: answered !== nonce,
+    stale,
+  };
 }
 
 /** Where a set is stored. Text and a link, never a colour alone. */
@@ -305,6 +381,9 @@ function SetRow({
   canWrite,
   editing,
   busyElsewhere,
+  focusEdit,
+  onFocused,
+  onAsking,
   onEdit,
   onCancel,
   onDone,
@@ -318,6 +397,10 @@ function SetRow({
   canWrite: boolean;
   editing: boolean;
   busyElsewhere: boolean;
+  /** This row's form has just closed unsaved: focus goes back to the button that opened it. */
+  focusEdit: boolean;
+  onFocused: () => void;
+  onAsking: (open: boolean) => void;
   onEdit: () => void;
   onCancel: () => void;
   onDone: (said: string) => void;
@@ -392,6 +475,9 @@ function SetRow({
           editable={kind !== undefined}
           ancestors={ancestors}
           disabled={busyElsewhere}
+          focusEdit={focusEdit}
+          onFocused={onFocused}
+          onAsking={onAsking}
           onEdit={onEdit}
           onRemoved={onDone}
         />
@@ -425,6 +511,9 @@ function SetActions({
   editable,
   ancestors,
   disabled,
+  focusEdit,
+  onFocused,
+  onAsking,
   onEdit,
   onRemoved,
 }: {
@@ -434,6 +523,10 @@ function SetActions({
   editable: boolean;
   ancestors: readonly ObjectRef[] | null;
   disabled: boolean;
+  focusEdit: boolean;
+  onFocused: () => void;
+  /** Told while this row's removal is being checked or confirmed, so nothing else is opened. */
+  onAsking: (open: boolean) => void;
   onEdit: () => void;
   onRemoved: (said: string) => void;
 }): React.JSX.Element {
@@ -442,18 +535,41 @@ function SetActions({
   const [asked, setAsked] = useState<CredentialRemoval | null>(null);
   const [failure, setFailure] = useState<ApiError | null>(null);
   const confirmation = useRef<HTMLDivElement>(null);
+  const editButton = useRef<HTMLButtonElement>(null);
+  const removeButton = useRef<HTMLButtonElement>(null);
+  /** The confirmation was dismissed or refused, and focus is owed to the button that opened it. */
+  const [backToRemove, setBackToRemove] = useState(false);
 
   useEffect(() => {
     if (asked !== null) confirmation.current?.focus();
   }, [asked]);
+  useEffect(() => {
+    if (!backToRemove || asked !== null) return;
+    removeButton.current?.focus();
+    setBackToRemove(false);
+  }, [backToRemove, asked]);
+  useEffect(() => {
+    if (!focusEdit) return;
+    editButton.current?.focus();
+    onFocused();
+  }, [focusEdit, onFocused]);
+
+  /** Closes the confirmation without removing, and puts focus back where it was opened from. */
+  const dismiss = (): void => {
+    setAsked(null);
+    setBackToRemove(true);
+    onAsking(false);
+  };
 
   const ask = (): void => {
     setBusy(true);
     setFailure(null);
+    onAsking(true);
     send<CredentialRemoval>('DELETE', `${path}?dryRun=true`)
       .then(setAsked)
       .catch((error: unknown) => {
         setFailure(asApiError(error, 'the set could not be checked'));
+        onAsking(false);
       })
       .finally(() => {
         setBusy(false);
@@ -467,6 +583,7 @@ function SetActions({
       .then((outcome) => {
         setAsked(null);
         setBusy(false);
+        onAsking(false);
         onRemoved(
           `Removed the ${name} set from ${object.name}. ` +
             removalSentence(name, object, outcome, ancestors, 'now'),
@@ -474,8 +591,8 @@ function SetActions({
       })
       .catch((error: unknown) => {
         setFailure(asApiError(error, 'the set could not be removed'));
-        setAsked(null);
         setBusy(false);
+        dismiss();
       });
   };
 
@@ -484,11 +601,23 @@ function SetActions({
       {asked === null ? (
         <div className="flex flex-wrap items-center gap-2">
           {editable && (
-            <button type="button" className={BUTTON} disabled={disabled || busy} onClick={onEdit}>
+            <button
+              ref={editButton}
+              type="button"
+              className={BUTTON}
+              disabled={disabled || busy}
+              onClick={onEdit}
+            >
               Edit <span className="sr-only">{name} credentials</span>
             </button>
           )}
-          <button type="button" className={BUTTON} disabled={disabled || busy} onClick={ask}>
+          <button
+            ref={removeButton}
+            type="button"
+            className={BUTTON}
+            disabled={disabled || busy}
+            onClick={ask}
+          >
             {busy ? 'Checking…' : 'Remove'} <span className="sr-only">{name} credentials</span>
           </button>
         </div>
@@ -513,14 +642,7 @@ function SetActions({
             >
               {busy ? 'Removing…' : 'Remove the set'}
             </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => {
-                setAsked(null);
-              }}
-              className={BUTTON}
-            >
+            <button type="button" disabled={busy} onClick={dismiss} className={BUTTON}>
               Keep it
             </button>
           </div>
@@ -581,18 +703,26 @@ function CredentialForm({
   const [pending, setPending] = useState<CredentialWrite | null>(null);
   const [failure, setFailure] = useState<ApiError | null>(null);
   const [serverProblems, setServerProblems] = useState<readonly FieldProblem[]>([]);
+  /** The confirmation was dismissed or refused, and focus is owed to the button it replaced. */
+  const [backToSubmit, setBackToSubmit] = useState(false);
 
   // Under its set's own heading when it edits one, and under the card's when it writes a new
   // one, so the outline has no level missing either way.
   const Heading = set === null ? 'h3' : 'h4';
   const heading = useRef<HTMLHeadingElement>(null);
   const confirmation = useRef<HTMLDivElement>(null);
+  const submit = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     heading.current?.focus();
   }, []);
   useEffect(() => {
     if (pending !== null) confirmation.current?.focus();
   }, [pending]);
+  useEffect(() => {
+    if (!backToSubmit || pending !== null) return;
+    submit.current?.focus();
+    setBackToSubmit(false);
+  }, [backToSubmit, pending]);
 
   const problems = useMemo(() => allProblems(fields, values, readAt, fieldsOf), [fields, values]);
   const dirty = isDirty(values, set, schema);
@@ -611,6 +741,9 @@ function CredentialForm({
     const failed = asApiError(error, fallback);
     setFailure(failed);
     setServerProblems(refusedFields(failed));
+    // A save refused after it was confirmed takes the confirmation, and the button that had focus,
+    // away: focus goes to the save button the confirmation stood in for.
+    if (pending !== null) setBackToSubmit(true);
     setPending(null);
     setBusy(null);
   };
@@ -709,6 +842,7 @@ function CredentialForm({
               disabled={busy !== null}
               onClick={() => {
                 setPending(null);
+                setBackToSubmit(true);
               }}
               className={BUTTON}
             >
@@ -723,6 +857,7 @@ function CredentialForm({
       {pending === null && (
         <div className="flex flex-wrap items-center gap-3">
           <button
+            ref={submit}
             type="submit"
             disabled={held || !dirty || problems.length > 0}
             className={PRIMARY}

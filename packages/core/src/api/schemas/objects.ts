@@ -355,7 +355,7 @@ export const credentialWriteSchema = {
       minimum: 0,
       description:
         'How many sensors beneath this set are outside its allowed targets now, and are not sent ' +
-        'it. Zero for a set with none.',
+        'it, of those the caller can see. Zero for a set with none.',
     },
     secretsCleared: {
       type: 'array',
