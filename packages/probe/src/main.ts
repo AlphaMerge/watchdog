@@ -10,7 +10,6 @@ import {
   startFailure,
   waitForLocalAddress,
 } from '@ms/shared';
-import { TARGET_POLICY_ENV } from '@ms/sensors';
 import { SCRIPT_DIR_ENV } from '@ms/sensors/script';
 import { POWERSHELL_ENV } from '@ms/sensors/windows';
 import { CheckPool } from './runner/pool.js';
@@ -34,6 +33,7 @@ import { TimingWheel } from './scheduler/wheel.js';
 import { SweepRunner } from './discovery/sweep.js';
 import { pingOnce } from './discovery/ping-probe.js';
 import { IdentifyRunner } from './discovery/identify-runner.js';
+import { handTargetPolicy } from './target-policy-env.js';
 import { LIVE_SOURCES } from './discovery/sources.js';
 import { ProbeHealthReporter } from './health/report.js';
 import { CoreClient } from './transport/core-client.js';
@@ -192,8 +192,10 @@ async function main(): Promise<void> {
 
   // Which addresses a sensor may connect to (`A-57`). In this process's environment, before any
   // worker starts, for the reason PowerShell's path is: a check runs in a worker, a worker
-  // inherits the probe's environment, and its catalogue reads the policy from there.
-  process.env[TARGET_POLICY_ENV] = config.probe.targetPolicy;
+  // inherits the probe's environment, and its catalogue reads the policy from there. Discovery's
+  // identification reads it from there too (`A-63`). What comes back is the same setting for a
+  // check process, whose environment is built and not inherited.
+  const targetPolicyEnv = handTargetPolicy(config.probe.targetPolicy);
   if (config.probe.targetPolicy !== 'link-local') {
     logger.info(
       { targetPolicy: config.probe.targetPolicy },
@@ -241,7 +243,7 @@ async function main(): Promise<void> {
     // And the target policy (`A-57`), always: a child's environment is built, never inherited,
     // and a check that connects from one must be held to what the workers are.
     childEnv: {
-      [TARGET_POLICY_ENV]: config.probe.targetPolicy,
+      ...targetPolicyEnv,
       ...(config.probe.scriptDir === ''
         ? {}
         : { [SCRIPT_DIR_ENV]: resolve(config.probe.scriptDir) }),

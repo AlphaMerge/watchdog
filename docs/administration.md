@@ -671,7 +671,9 @@ as it stands and nothing is resolved, on every one of them.
   the one it used before.
 - **The lookup and the connection share the sensor's timeout**, as they did when the socket
   made the lookup: a TCP port, TLS or mail sensor never runs longer than its timeout for the
-  lookup's sake, and its connect or handshake time includes the lookup, as before.
+  lookup's sake, and its connect or handshake time includes the lookup, as before. An SSH
+  sensor's `connectTimeoutMs` is the same (`A-65`): when a connection has to be opened, what
+  the lookup took is taken from what the handshake has.
 - **A name that does not resolve** fails the scan in the guard, saying so. **A resolver that
   does not answer** is given half the sensor's timeout, ten seconds at most.
 - **A device whose name was checked against a credential set's targets** (`A-41c`) connects

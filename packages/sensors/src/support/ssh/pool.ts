@@ -1,5 +1,10 @@
 import { credentialFingerprint, type SshCredentials } from './credentials.js';
-import { SshSession, type SshSessionOptions, type SshTarget } from './session.js';
+import {
+  DEFAULT_CONNECT_TIMEOUT_MS,
+  SshSession,
+  type SshSessionOptions,
+  type SshTarget,
+} from './session.js';
 
 /**
  * SSH connections shared per device (`T-07`).
@@ -14,6 +19,18 @@ import { SshSession, type SshSessionOptions, type SshTarget } from './session.js
  * brings the problem that pool does not have: two sensors on the same device coming due on the
  * same tick would both find nothing cached and both start a handshake. So an *in-flight* open is
  * shared — the second caller awaits the first's connection rather than making a second one.
+ *
+ * **The callers that join an open share the first caller's guard, and so its `AbortSignal`**
+ * (`A-57`): were the first cancelled during the lookup, every joiner would fail with it. That
+ * cannot happen in a running probe, and `A-65` settled it with a test instead of a second
+ * mechanism: a pool belongs to one worker thread, a worker runs one check at a time (the check
+ * pool holds a slot until its worker answers, a timed-out check included), no SSH type runs in a
+ * check process, and a check only ever makes one `acquire`. So within a probe a join never
+ * happens at all: the second sensor on a device finds the connection the first one left.
+ * `ssh-shared-open.test.ts` in the probe fails if that stops being true, by a worker running
+ * two checks at once or by a join being counted, and whoever makes it fail has to run the shared
+ * open under a signal that aborts only when every joined caller has. Joining is kept for a
+ * caller that does overlap in one thread, which today is a test.
  *
  * Deliberately not shared code with `support/snmp/pool.ts`, and that is a decision rather than
  * an oversight: the lease counting and idle eviction are the same, but async open, in-flight
@@ -138,11 +155,19 @@ export class SshSessionPool {
     // was checked when it was opened, and is reused without a lookup. Callers that join this
     // open share its one lookup.
     const opening = (async (): Promise<SshSession> => {
+      // **The lookup and the handshake share the one connect timeout** (`A-65`), as they did
+      // when `ssh2`'s socket made the lookup: what the guard took is taken from what the
+      // handshake has, so a connection is never opened in more than `connectTimeoutMs`.
+      const startedAt = process.hrtime.bigint();
       const checked = await target.guard?.();
+      const spentMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+      const wholeMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
       return SshSession.open(
         checked === undefined ? target : { ...target, checked },
         credentials,
-        options,
+        target.guard === undefined
+          ? options
+          : { ...options, connectTimeoutMs: Math.max(1, Math.round(wholeMs - spentMs)) },
       );
     })();
     this.#opening.set(key, opening);

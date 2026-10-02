@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { createHash } from 'node:crypto';
+import { createServer, type Server, type Socket } from 'node:net';
 import { SshError, SshSession } from '../src/support/ssh/session.js';
 import { SshSessionPool, withSsh } from '../src/support/ssh/pool.js';
 import {
@@ -385,6 +386,102 @@ describe('reusing connections', () => {
     } finally {
       pool.closeAll();
     }
+  });
+
+  describe('opening behind the target policy’s lookup (A-65)', () => {
+    // A listener that accepts and never speaks: the handshake waits out its whole timeout.
+    let mute: Server;
+    let mutePort = 0;
+    const accepted: Socket[] = [];
+
+    before(async () => {
+      mute = createServer((socket) => {
+        accepted.push(socket);
+        socket.on('error', () => undefined);
+      });
+      await new Promise<void>((resolve) => {
+        mute.listen(0, '127.0.0.1', () => {
+          resolve();
+        });
+      });
+      const at = mute.address();
+      mutePort = typeof at === 'object' && at !== null ? at.port : 0;
+    });
+
+    after(async () => {
+      for (const socket of accepted) socket.destroy();
+      await new Promise<void>((resolve) => {
+        mute.close(() => {
+          resolve();
+        });
+      });
+    });
+
+    /** How long an open that cannot succeed took, behind a guard that takes `guardMs`. */
+    async function failedOpenMs(guardMs: number | null, connectTimeoutMs: number): Promise<number> {
+      const pool = new SshSessionPool();
+      const startedAt = performance.now();
+      try {
+        await assert.rejects(
+          pool.acquire(
+            {
+              host: '127.0.0.1',
+              port: mutePort,
+              ...(guardMs === null
+                ? {}
+                : {
+                    guard: async () => {
+                      await new Promise((resolve) => setTimeout(resolve, guardMs));
+                      return undefined;
+                    },
+                  }),
+            },
+            credentials({ hostKeyPolicy: 'accept-any' }),
+            { connectTimeoutMs },
+          ),
+          /could not connect to 127\.0\.0\.1/,
+        );
+        return performance.now() - startedAt;
+      } finally {
+        pool.closeAll();
+      }
+    }
+
+    it('gives the lookup and the handshake one connect timeout between them', async () => {
+      // 1,200 ms of lookup and a 2,000 ms timeout. Started after the lookup, the handshake's
+      // clock ran to 3,200 ms; shared, the open ends at 2,000.
+      const took = await failedOpenMs(1_200, 2_000);
+      assert.ok(took >= 1_900, `ended early, at ${String(Math.round(took))} ms`);
+      assert.ok(took < 2_800, `the lookup was not counted: ${String(Math.round(took))} ms`);
+    });
+
+    it('still gives a handshake with no lookup before it the whole timeout', async () => {
+      const took = await failedOpenMs(null, 1_000);
+      assert.ok(took >= 950, `ended early, at ${String(Math.round(took))} ms`);
+    });
+
+    it('leaves a handshake no time when the lookup used it all', async () => {
+      const took = await failedOpenMs(900, 600);
+      assert.ok(took >= 900);
+      assert.ok(took < 1_350, `the handshake was given time again: ${String(Math.round(took))} ms`);
+    });
+
+    it('opens a connection as before when the lookup is quick', async () => {
+      const pool = new SshSessionPool();
+      server.answer('uptime', { stdout: 'up\n' });
+      try {
+        const out = await withSsh(
+          { ...target(), guard: () => Promise.resolve(undefined) },
+          credentials(),
+          { connectTimeoutMs: 5_000 },
+          (s) => s.exec('uptime', signal()),
+          pool,
+        );
+        assert.equal(out.stdout, 'up\n');
+      } finally {
+        pool.closeAll();
+      }
+    });
   });
 
   it('releases the lease even when the check threw', async () => {

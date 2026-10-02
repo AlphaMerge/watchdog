@@ -18599,7 +18599,7 @@ because each is a decision rather than a defect:
       **Done when** that is decided and, if it is in, the setting reaches the probe with the
       assignment, is audited, and cannot be set by an account that may only edit the device.
 
-- [ ] **A-65 — three loose ends on the SSH and probe side of the target policy** · S · A-57 ·
+- [x] **A-65 — three loose ends on the SSH and probe side of the target policy** · S · A-57 ·
       Found 2026-10-02 by `A-57` and its review. Sensors that join one connection being opened
       share the first one's lookup and its `AbortSignal`, so the first being cancelled can fail
       the others for a scan (one reviewer traced it, one found it unreachable in a running
@@ -18607,6 +18607,42 @@ because each is a decision rather than a defect:
       lines in `packages/probe/src/main.ts` that hand the setting to workers and check
       processes have no test. **Done when** each has a test and the first two are fixed or
       shown not to happen.
+
+      **A-65 outcome.** One shown not to happen, one fixed, one given a function and a test.
+      - **Joined SSH opens: not reachable in a running probe, and pinned.** The SSH pool is a
+        module singleton, so one a worker thread; a worker has one check in hand at a time
+        (the check pool holds a slot until its worker answers, a timed-out check included);
+        no SSH type asks for a process of its own; and a check makes one `acquire`. So the
+        second SSH sensor on a device finds the connection the first left and never one half
+        open. `ssh-shared-open.test.ts` runs the shipped registry, pool and `ssh.load` in a
+        real worker against the SSH simulator, six sensors on one device submitted together:
+        the worker never had two checks in hand, six acquires, one open, five reused, **none
+        joined**, one connection at the server. A second case holds the four SSH types to no
+        `isolation`. The pool keeps the join (a caller that overlaps in one thread, which
+        today is a test) and its comment now says what it shares, why that is out of reach,
+        which test fails when it is not, and what to do then. No mechanism was added.
+      - **The SSH connect timeout covers the lookup.** `SshSessionPool.acquire` times the
+        guard and opens the session with what is left of `connectTimeoutMs` (at least 1 ms),
+        as `A-57` did for port, TLS and mail. With no guard the handshake has the whole
+        timeout, as before. The pool key still carries the sensor's own `connectTimeoutMs`.
+        Four cases in `ssh-session.test.ts`, against a listener that accepts and never
+        speaks: 1,200 ms of lookup under a 2,000 ms timeout ends at 2,000 and not 3,200.
+      - **The two lines in `main.ts` are `handTargetPolicy`** (`probe/src/target-policy-env.ts`),
+        which writes the setting to the probe's environment for the workers and returns it
+        for `childEnv`, and writes `link-local` for anything that is not one of the three
+        names. `target-policy-env.test.ts` starts a `CheckPool` and a `ProcessRunner` as
+        `main.ts` does, on a registry that is a real catalogue with one type that reports
+        `CheckTarget.policy`: a worker thread and a check process both run under `none`,
+        `private` and `link-local` as configured; unset, empty, `None` and `off` are
+        `link-local` in both, with `none` in the parent's environment for the check process;
+        a check that arrives claiming `none` is told the probe's. **`main.ts` itself is still
+        not run by a test**: it calls the function and spreads what comes back, and a mutant
+        of those two call sites would survive.
+      - **Mutation: 10/10** (five on the timeout arithmetic, five on `handTargetPolicy`), each
+        failing a test, with the source restored and the rebuilt `dist` compared after each.
+      - **Seen, not fixed.** `SshSession.open` takes no `AbortSignal`: a check cancelled
+        during the handshake is not ended by its signal, only by the connect timeout or by
+        the pool recycling the worker after its abort grace. Read from the code, not tested.
 
 - [ ] **A-66 — what one lookup a scan costs has not been measured** · S · A-57, P-15 · Found
       2026-10-02 by `A-57`. SNMP by name makes one `getaddrinfo` a scan in the probe where the

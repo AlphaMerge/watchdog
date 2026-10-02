@@ -71,8 +71,11 @@ export interface SshSessionOptions {
   readonly maxOutputBytes?: number;
 }
 
+/** What a handshake is given when nobody says. The pool reads it too (`A-65`). */
+export const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
+
 const DEFAULTS = {
-  connectTimeoutMs: 15_000,
+  connectTimeoutMs: DEFAULT_CONNECT_TIMEOUT_MS,
   commandTimeoutMs: 30_000,
   maxOutputBytes: 1_048_576,
 } as const;
