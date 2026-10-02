@@ -1391,6 +1391,7 @@ async function serve(): Promise<void> {
       credentialsToReenter: async (q) => (await vault.setsWithUndeclaredKeys(q)).length,
       unboundedCredentials: (q) => vault.unboundedSets(q),
       credentialsWithheld: () => credentialVouching.stats().withheld,
+      lateRefusalWritesGivenUp: () => credentialVouching.stats().recordWritesGivenUp,
       alarms: () => alarmScheduler.stats,
       disk: () => housekeeper.stats.disk,
       evictedChunks: () => housekeeper.stats.evictedChunks,

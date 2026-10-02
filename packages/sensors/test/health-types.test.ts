@@ -101,6 +101,29 @@ describe('the self-monitoring sensor types', () => {
     ]);
   });
 
+  it('carries the late-refusal record’s given-up writes as a number on Core Health and not an alarm', () => {
+    // `A-68`. A write that gave way to a delete is made again within the minute, and the running
+    // core has lost nothing meanwhile: a limit or a lookup would be an alarm for a group somebody
+    // deleted on purpose. Declared beside the sensors withheld for credentials.
+    const channels = coreHealth.channels({});
+    assert.deepEqual(
+      channels.find((one) => one.key === 'lateRefusalWritesGivenUp'),
+      {
+        key: 'lateRefusalWritesGivenUp',
+        name: 'Late-refusal record writes given up',
+        unit: 'writes',
+        counter: { bits: 64 },
+      },
+    );
+    const keys = channels.map((one) => one.key);
+    const from = keys.indexOf('credentialsWithheld');
+    assert.ok(from >= 0);
+    assert.deepEqual(keys.slice(from, from + 2), [
+      'credentialsWithheld',
+      'lateRefusalWritesGivenUp',
+    ]);
+  });
+
   it('keeps both out of every probe’s assignment list', () => {
     // The mechanism `T-21` built. For Probe Health it is not an optimisation but the whole
     // design: a probe cannot report its own absence, so the core has to be the one asking.

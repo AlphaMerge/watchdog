@@ -1325,6 +1325,104 @@ describe(
       }
     });
 
+    it('says what each probe was last left beside when a window began, and rolls back to the rows 067 would have written (068)', async () => {
+      // `A-68`: a row may say the probe is left the sensor (and under which version), when the
+      // sensor's last window began, or both, and never neither.
+      const fresh = await createScratchDatabase('late_refusal_left');
+      try {
+        const all = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 68),
+        );
+        await all.up();
+        const q = fresh.db;
+        const [root] = await q.query<{ id: string }>(`SELECT id FROM object WHERE kind = 'root'`);
+        const insert = async (kind: string, name: string, parent: string): Promise<string> => {
+          const [row] = await q.query<{ id: string }>(
+            'INSERT INTO object (parent_id, kind, name) VALUES ($1, $2, $3) RETURNING id::text',
+            [parent, kind, name],
+          );
+          return row?.id ?? assert.fail('no row');
+        };
+        const probe = await insert('probe', 'probe', root?.id ?? '');
+        const device = await insert('device', 'device', probe);
+        const sensors: string[] = [];
+        for (const name of ['left', 'stopped', 'both', 'neither']) {
+          sensors.push(await insert('sensor', name, device));
+        }
+        const [left, stopped, both, neither] = sensors as [string, string, string, string];
+        const put = (sensorId: string, at: string, version: string): Promise<unknown> =>
+          q.query(
+            `INSERT INTO late_refusal_grace (probe_id, sensor_id, stopped_at, left_version)
+             VALUES ($1, $2, ${at}, ${version})`,
+            [probe, sensorId],
+          );
+        const rows = async (): Promise<string[]> =>
+          (
+            await q.query<{ line: string }>(
+              `SELECT o.name || ':' || (g.stopped_at IS NOT NULL)::text AS line
+               FROM late_refusal_grace g JOIN object o ON o.id = g.sensor_id
+               ORDER BY o.name`,
+            )
+          ).map((row) => row.line);
+
+        await put(left, 'NULL', '24');
+        await put(stopped, 'now()', 'NULL');
+        await put(both, `now() - interval '20 minutes'`, '24');
+        await assert.rejects(put(neither, 'NULL', 'NULL'), /late_refusal_grace_says_something/);
+        await assert.rejects(put(neither, 'NULL', '0'), /late_refusal_grace_left_version_check/);
+        await assert.rejects(put(neither, 'NULL', '-3'), /late_refusal_grace_left_version_check/);
+        // 067's own check still holds for a time that is given.
+        await assert.rejects(
+          put(neither, `'infinity'`, '24'),
+          /late_refusal_grace_stopped_at_check/,
+        );
+        assert.deepEqual(await rows(), ['both:true', 'left:false', 'stopped:true']);
+        const [version] = await q.query<{ v: number | null }>(
+          'SELECT left_version AS v FROM late_refusal_grace WHERE sensor_id = $1',
+          [both],
+        );
+        assert.equal(version?.v, 24);
+
+        // Back: only what 067's build reads as "no longer left" is kept, with its time, and
+        // the column is as it was, so that build's insert works and a NULL time is refused.
+        await all.down(1);
+        assert.deepEqual(await rows(), ['stopped:true']);
+        await assert.rejects(
+          q.query('SELECT left_version FROM late_refusal_grace'),
+          /column "left_version" does not exist/,
+        );
+        await assert.rejects(
+          q.query(
+            'INSERT INTO late_refusal_grace (probe_id, sensor_id, stopped_at) VALUES ($1, $2, NULL)',
+            [probe, left],
+          ),
+          /null value in column "stopped_at"/,
+        );
+        await q.query(
+          'INSERT INTO late_refusal_grace (probe_id, sensor_id, stopped_at) VALUES ($1, $2, now())',
+          [probe, left],
+        );
+
+        // And forward again over rows 067's build wrote: each is a window and nothing else.
+        const again = await all.up();
+        assert.deepEqual(
+          again.applied.map((one) => one.id),
+          [68],
+        );
+        assert.deepEqual(await rows(), ['left:true', 'stopped:true']);
+        const versions = await q.query<{ v: number | null }>(
+          'SELECT left_version AS v FROM late_refusal_grace',
+        );
+        assert.deepEqual(
+          versions.map((row) => row.v),
+          [null, null],
+        );
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('applies the real migration set forward and all the way back', async () => {
       const fresh = await createScratchDatabase('roundtrip');
       try {

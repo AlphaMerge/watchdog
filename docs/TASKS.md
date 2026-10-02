@@ -19063,7 +19063,7 @@ because each is a decision rather than a defect:
         database sensors and the core's own database pool hand TLS to `pg`, `mysql2` and
         `tedious`, not tried: no simulator speaks their TLS.
 
-- [ ] **A-68 — a probe that changes its protocol version re-opens the late-refusal grace** · M
+- [x] **A-68 — a probe that changes its protocol version re-opens the late-refusal grace** · M
       · A-61, A-53 · Found 2026-10-02 by `A-61`'s review. A probe that reconnects announcing a
       version without `credentialAddressPinning` stops being left its named sensors, which
       begins ten minutes for them; announcing the newer one ends it, and the older one again
@@ -19074,6 +19074,103 @@ because each is a decision rather than a defect:
       **Done when** a window cannot be begun again for a sensor inside some bound of its last
       one by a version change alone, with a test; the commit-to-build window is closed or
       written down as accepted; and give-ways are a Core Health number.
+
+      **A-68 outcome.** All three parts, one commit. Migration 068, no protocol number, nothing
+      sent to or from a probe.
+      - **One window an hour by the version alone.** A window is remembered for an hour from
+        when it began: the ten minutes and `LATE_REFUSAL_COOL_OFF_MS`, fifty more. The entry is
+        kept when the sensor is left to the probe again, which is what a probe gets by
+        reconnecting under the newer version, and inside the hour a stop that only the version
+        caused leaves the time where it was. So a refusal is late for what remains of the one
+        window, and for nothing after it: the window is not cut short by the alternation and
+        not begun again. That is "resume", where the ticket's example said "no grace". Chosen
+        because it is one rule (the window is ten fixed minutes, and only a configured stop
+        moves it), it gives no more than the one window either way, and it does not turn an
+        honest probe's rollback, upgrade and rollback inside ten minutes into failed scans.
+      - **Why an hour.** The bound is what a probe gets by reconnecting: one window in it,
+        ten minutes in sixty. What it costs is an honest probe rolled back twice inside the
+        hour, whose spool still holds refusals after the second: those are failed scans of a
+        sensor the core is withholding, and two of them are a Down when the probe is upgraded.
+        People do not roll a probe back twice in an hour often; a shorter cool-off buys that
+        case and gives a reconnecting probe more.
+      - **The cause is told apart, exactly.** `withhold` asks its own check a second time, for
+        what this configuration would have left the probe had its version stayed
+        (`#leftUnderVersionBefore`). A sensor still left under the version before was stopped by
+        the version alone; one that is not was stopped by a change (targets, the device's host,
+        a move, a pause, a voucher), whatever the version did beside it, and **that stop begins
+        its grace at once, hour or no hour**. Asked only when the version differs and a
+        remembered window could begin again, so a steady build asks nothing more. The same
+        check decides both, so nothing here knows which capabilities a version carries, and
+        `A-62`'s changes to `boundRefusalReason` need nothing from it. **Where they cannot be
+        told apart** is when that second check fails (the database): then time alone decides,
+        no remembered window is begun again, and the log says so at `warn`.
+      - **Part 2 is closed, not accepted.** The same rows now say what each probe was last left
+        and the version it was left it under (`left_version`), written in the one statement
+        and read back by `restore()`. A core that stopped between a change's commit and the
+        next configuration compares its first configuration for the probe with the last one
+        the core before it built, finds the stop, and begins the ten minutes then. Storing the
+        version is what lets the restarted core tell the cause too, and a time past its ten
+        minutes is taken up as remembered, so the hour survives a restart as the grace does.
+      - **Migration 068**: `stopped_at` nullable, `left_version integer` (positive), and a check
+        that a row says one of the two. The rollback keeps exactly the rows 067's build would
+        have written (not left, with a time) and removes the rest.
+      - **What it writes now.** A probe's rows are written when a configuration changes what it
+        is left, the version it is left it under, or a window: so once at each probe's first
+        configuration on this build, and one statement for a reconnect under another version,
+        of no more rows than the probe has sensors, as `A-61` already bounded it. A steady
+        build still writes nothing. The version is kept only beside what the probe is left:
+        a probe left nothing has no row, and nothing that could stop. The give-way case on the
+        real table was moved to a sensor's first configuration, which is an insert and needs
+        the lock on the sensor's row that the case holds.
+      - **Part 3.** Core Health **Late-refusal record writes given up**
+        (`lateRefusalWritesGivenUp`): a 64-bit counter, no limit, no lookup, so no state and no
+        alarm, declared after `credentialsWithheld`. Counted once for each write that gave way
+        (lock, statement timeout, a deadlock lost), was not waited for (the 3 s client bound),
+        or failed, whichever came first, and not again if it then does both. Absent the
+        source, the channel gaps. `ms_core_late_refusal_writes_given_up_total`;
+        `sensor-reference.md` regenerated.
+      - **What a probe that misbehaves can and cannot do, now.** It can have its own
+        error-with-no-readings results for a sensor discarded for ten minutes after a
+        configuration stops leaving it that sensor, each counted on its Probe Health. By
+        reconnecting under an older protocol version it can begin those ten minutes itself,
+        **once in an hour for each sensor and no oftener**, and each such reconnect costs the
+        core one statement of no more rows than the probe has sensors. It cannot begin or
+        prolong an Unknown with such a mark, discard an `ok` or a reading, use it on a sensor it
+        was never left, use it past the ten minutes, move a window that has begun, or begin
+        one inside the hour of the last by anything it says. A core restart changes none of
+        that. Nothing a probe sends in a result writes to the table.
+      - **Found, and not this ticket's.** Alternating versions still pages, and the grace never
+        caused it: each downgrade withholds the probe's named sensors (Unknown, the Unknown
+        trigger's page) and each upgrade lets them go (its recovery). Five alternations are
+        three Unknown pages and two recoveries for a sensor, with or without a single refusal
+        sent, where one downgrade is one. The scenario pins that the refusals add nothing to
+        it. And a marked result that arrives past the window while the core is withholding the
+        sensor is taken as a failed scan: two are a Down, in no words, when the sensor is let
+        go, for a single downgrade as for an alternating probe.
+      - **Alarm volume** (`credential-pinning.test.ts`, four scenarios on the real tables).
+        Three probes, one downgraded once, two alternating five times in twelve minutes, one of
+        those sending marked refusals as the single one does: late refusals 4 and 4, refused 2
+        and 2, one time in the table and it is the first downgrade's, no Down for any, the
+        pages of the two alternating probes identical, and after the upgrade one Down and one
+        page each for the two that sent refusals and none for the one that did not. An
+        operator's name entry eleven minutes after a downgrade: two late refusals, still Up,
+        no transition, no page. A core restarted two minutes into a window: the next downgrade
+        begins nothing, late 2 and then refused 2. A core that stops between a change and the
+        next configuration: the restarted one finds the stop, two late refusals, still Up, no
+        Down, no page.
+      - **Tests.** 14 new unit cases (the hour and its last millisecond, five alternations, a
+        change beside a downgrade, the check that fails, a restart in the middle and one past
+        the grace, what is stored of what a probe is left, a refusal before the first
+        configuration after a restart), 2 more rows in the table of stored times, and the
+        `A-61` cases rewritten where the record now keeps a time or writes what a probe is
+        left; the four scenarios; the give-way case on the real table now counts; `migrator`
+        (068 up, the three checks, down to 067's rows, up again), `core-health`, `metrics`,
+        `health-types`. 424 passing in the eleven files run, none skipped.
+      - **Mutation:** 15 of 15 killed, one of them taken again after its line changed.
+      - **Not done.** The first start of a core upgraded to this schema has no row of what any
+        probe is left until it has built each a configuration, so the commit-to-build window
+        is open for that one start. A write that failed or gave way, and a restart before it is
+        made again, still loses what that write said; that is what the counter is for.
 
 - [x] **A-69 — four loose ends from discovery and SSH under the target policy** · S · A-63,
       A-65 · Found 2026-10-02. The `identify-start` schema takes any 7 to 15 characters as an

@@ -69,6 +69,7 @@ function sources(
     credentialsToReenter: number;
     unboundedCredentials: number;
     credentialsWithheld: number;
+    lateRefusalWritesGivenUp: number;
     disk: { freePercent: number; freeBytes: number; databaseBytes: number } | null;
     evictedChunks: number;
     machineMemory: AvailableMemoryLow | null;
@@ -126,6 +127,9 @@ function sources(
     ...(overrides.credentialsWithheld === undefined
       ? {}
       : { credentialsWithheld: () => overrides.credentialsWithheld ?? 0 }),
+    ...(overrides.lateRefusalWritesGivenUp === undefined
+      ? {}
+      : { lateRefusalWritesGivenUp: () => overrides.lateRefusalWritesGivenUp ?? 0 }),
     delivery: () => {
       if (overrides.deliveryThrows === true) {
         return Promise.reject(new Error('the notification queue would not answer'));
@@ -517,6 +521,18 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal((await build({}).read())['credentialsWithheld'], null);
     });
 
+    it('passes the late-refusal record’s given-up writes through as a counter, and gaps without a source to ask (A-68)', async () => {
+      // A running total since the core started, as the alarm scheduler's fired count is: the
+      // counter path makes it writes per minute, and a rate that stays up is the finding.
+      const read = async (given?: number): Promise<number | null | undefined> =>
+        (await build(given === undefined ? {} : { lateRefusalWritesGivenUp: given }).read())[
+          'lateRefusalWritesGivenUp'
+        ];
+      assert.equal(await read(7), 7);
+      assert.equal(await read(0), 0, 'none is a reading, not a gap');
+      assert.equal(await read(), null);
+    });
+
     it('counts what is actually queued in the housekeeping tables', async () => {
       await db.query(
         `INSERT INTO rollup_backfill (from_time, to_time, reason)
@@ -813,6 +829,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
         dependencyPauses: 4,
         alarmsFired: 217,
         queriesRefused: 5,
+        lateRefusalWritesGivenUp: 4,
         ingestQueue: 0,
       });
       for (const reading of readings) {
@@ -823,7 +840,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
           assert.equal(reading.counter, undefined, reading.key);
         }
       }
-      assert.equal(readings.length, 12);
+      assert.equal(readings.length, 13);
 
       // Named rather than left to the loop above, which agrees with whatever the declaration
       // says and would go on passing if a channel quietly stopped being a counter. These
@@ -843,6 +860,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
           'dependencyPauses',
           'alarmsFired',
           'queriesRefused',
+          'lateRefusalWritesGivenUp',
         ],
       );
     });

@@ -479,6 +479,20 @@ const CHANNELS: readonly ChannelDef[] = [
     name: 'Sensors withheld for credentials',
     unit: 'sensors',
   },
+  // `A-68`. Writes of the late-refusal record that were not made when they were due: the
+  // statement gave way for a lock or for time, a configuration stopped waiting for it, or it
+  // failed. Each is made again at the probe's next configuration or within the minute, and the
+  // running core judges by what it holds in memory, so nothing is wrong while it runs: what one
+  // costs is a core restarted before the write is made, which then reads a late refusal as a
+  // failed scan. A counter with no limit and no lookup, so no state and no alarm: a delete of a
+  // group makes a few on purpose. A rate that stays up is a database these writes cannot get
+  // into, which until this was a line in the log and no number.
+  {
+    key: 'lateRefusalWritesGivenUp',
+    name: 'Late-refusal record writes given up',
+    unit: 'writes',
+    counter: { bits: 64 },
+  },
   // **Log lines the core could not write since the last reading** (`P-216` part 3): refused at its
   // output's eight-megabyte bound while the journal was not reading, or lost to an output that
   // closed. A count per reading, not a running total and not a counter's rate: a total would warn

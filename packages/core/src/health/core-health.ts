@@ -187,6 +187,11 @@ export interface CoreHealthSources {
    * the probe, which found the device's name resolving outside the set's targets.
    */
   credentialsWithheld?: () => number;
+  /**
+   * `CredentialVouching.stats().recordWritesGivenUp` — writes of the late-refusal record that
+   * gave way, were not waited for, or failed (`A-68`). A running total; the channel is a counter.
+   */
+  lateRefusalWritesGivenUp?: () => number;
   /** `DeliveryHealthReader.read()` — undelivered alarms, and how old the oldest one is. */
   delivery: (q: Queryable) => Promise<{
     pending: number;
@@ -424,6 +429,7 @@ export class CoreHealthService {
       credentialsToReenter: queues.credentials,
       credentialsUnbounded: queues.unbounded,
       credentialsWithheld: this.#sources.credentialsWithheld?.() ?? null,
+      lateRefusalWritesGivenUp: this.#sources.lateRefusalWritesGivenUp?.() ?? null,
       logDropped: dropped,
       logBacklog: log === undefined ? null : round(log.backlogBytes / MB, 2),
       // Since the last reading, and the whole count on the first: the total started with this

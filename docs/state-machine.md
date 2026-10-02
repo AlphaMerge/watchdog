@@ -191,6 +191,40 @@ vanishes, which it already had by not sending it: it cannot begin or prolong an 
 and cannot use it on a result that is `ok` or has readings, on a sensor it was never left, or
 after the ten minutes.
 
+**A probe's protocol version alone begins one window an hour** (`A-68`). The version a probe
+connects with is the one thing it says that decides what it is left: under one without
+`credentialAddressPinning` it is left no named sensor, and under the newer one it is left them
+again. Each such stop used to begin the ten minutes, so a probe that alternated had them for as
+long as it kept reconnecting. A window is now **remembered for an hour from when it began**
+(the ten minutes and `LATE_REFUSAL_COOL_OFF_MS`, fifty more), and it stays remembered when the
+sensor is left to the probe again. Inside the hour a stop that only the version caused begins
+nothing: the window stays where it began, a refusal is late for what remains of it, and for
+nothing once it has run out. Five alternations give what one downgrade gives.
+
+- **A stop somebody configured is not held to the hour.** Targets narrowed, a device given its
+  address, moved or paused, a voucher lost: its grace begins when the configuration is built, as
+  it always did, remembered window or not.
+- **How the two are told apart.** The core asks its own check, the one that decides the
+  configuration, what this configuration would have left the probe had its version stayed what
+  the last one was built for. A sensor that would still be left was stopped by the version
+  alone. One that would not was stopped by a change, whatever the version did beside it. Asked
+  only when the version differs and a window to begin again is remembered, which is a probe
+  reconnecting under another version inside the hour.
+- **When that second check cannot be made** (the database did not answer it), the two cannot be
+  told apart and time alone decides: no remembered window is begun again, and the log says so
+  at `warn`. What that can cost is an operator's change made in the same configuration as the
+  probe's version change being judged by the window already there.
+- **What the hour costs a probe that is honest.** One rolled back, forward and back again inside
+  an hour has, at the second rollback, only what is left of the first window. A refusal its
+  spool still holds after that is a failed scan of a sensor the core is itself withholding for
+  the probe's age: the sensor stands Unknown meanwhile, and two such are a Down, with its one
+  alarm, when the probe is upgraded and the sensor let go, until its next scan. The same is
+  true of a single downgrade whose refusals arrive more than ten minutes late
+  (`credential-pinning.test.ts`, the alternating scenario, pins both as one Down each).
+- **What alternating still does, and the grace never caused**: each downgrade withholds the
+  probe's named sensors (Unknown, the Unknown trigger's page) and each upgrade lets them go (its
+  recovery). That is the reconnects' doing: a probe that sends no refusal at all raises the same.
+
 **The record survives a core restart** (`A-61`). Which sensors a configuration stopped leaving to
 a probe, and when, is held in the core's memory, which is what a refusal is judged by, and stored
 in `late_refusal_grace`: one row per (probe, sensor) with the time the first such configuration
@@ -208,10 +242,17 @@ sensor and not from the restart, the mark is one the probe has no claim to
   says does reach a configuration: the protocol version it connects with, which decides whether
   a named device is left to it at all. A probe that reconnects under a version that changes
   that causes one write, once per reconnect, of no more rows than it has sensors, and the stop
-  it records begins the ten minutes for those sensors as any stop does. That it can do so again
-  by alternating versions is `A-53`'s behaviour in memory and is not changed here; what storing
-  adds is the write, and that the ten minutes survive a restart. Otherwise what a probe that
-  misbehaves can and cannot do is the paragraph above, on either side of a restart.
+  it records begins the ten minutes for those sensors once in an hour and no oftener (`A-68`,
+  above). What storing adds is the write, and that the ten minutes and the hour survive a
+  restart. Otherwise what a probe that misbehaves can and cannot do is the paragraphs above, on
+  either side of a restart.
+- **What each probe was last left is in the same rows** (`A-68`). A row for a sensor the probe's
+  last configuration left to it carries the protocol version that configuration was built for
+  (`left_version`); a row for a remembered window carries its time (`stopped_at`); a sensor
+  that is both has both, and no row has neither. They are written in the one statement, when a
+  configuration changes what the probe is left, the version it is left it under, or a window.
+  A core reads them at start, so the first configuration it builds for a probe is compared with
+  the last one the core before it built: see the bound below.
 - **The write gives way, and holds nobody back.** It runs in its own transaction with a lock
   timeout of 300 ms and a statement timeout of 2 s, and the configuration waits for it 3 s at
   most, whatever the connection is doing. It takes its own rows and then a key-share lock on
@@ -222,9 +263,16 @@ sensor and not from the restart, the mark is one the probe has no claim to
   configuration or within the minute. Each probe's writes are in a line of their own: one
   probe's configuration never waits on another's write. An entry whose sensor or probe was
   deleted meanwhile is dropped rather than written again.
-- **Removed as the entry in memory is**: when the sensor is left to the probe again, at the
-  probe's first configuration after the ten minutes, and on a one-minute timer for a probe that
-  is never sent another. A deleted sensor or probe takes its rows with it.
+- **A time is removed as the entry in memory is**: an hour after the window began (`A-68`), at
+  the probe's first configuration after that, and on a one-minute timer for a probe that is
+  never sent another. Not when the sensor is left to the probe again: that is when it most needs
+  remembering. The row goes with its time unless the probe is left the sensor, and a deleted
+  sensor or probe takes its rows with it.
+- **A write that is not made when it is due is counted** (`A-68`): Core Health's **Late-refusal
+  record writes given up** (`lateRefusalWritesGivenUp`, `ms_core_late_refusal_writes_given_up_total`),
+  once for each write that gave way, was not waited for, or failed. A counter with no limit and
+  no lookup, so no state and no alarm: a delete of a group makes a few on purpose, and each is
+  made again within the minute. A rate that stays up is a database these writes cannot get into.
 - **Monotonic while running, wall clock across a restart.** The ten minutes are counted on the
   monotonic clock, which a new process starts from nothing, so the table holds the wall clock's
   reading. At start, what has run is the wall clock now less the stored time, and that is bounded
@@ -233,21 +281,36 @@ sensor and not from the restart, the mark is one the probe has no claim to
   does, and ends the grace early. A stored time later than now, which is a clock set back: nothing
   can be counted from it, so the entry gets the ten minutes from that start and no more, the row
   is written down again as now so that a second start does not give them twice, and the log says
-  so at `warn`. Neither side gives more than `LATE_REFUSAL_GRACE_MS`.
+  so at `warn`. Neither side gives more than `LATE_REFUSAL_GRACE_MS`. A time past its ten
+  minutes and inside its hour is taken up as remembered: nothing is late by it, and the probe's
+  version begins no window against it after the restart either. Past the hour it is spent.
 
-**The bound that is left: the record is of a configuration, and is written when one is built**
-(`A-61`). The change itself is decided in its own write, and what makes a refusal late is that
-the probe's *configuration* stopped leaving it the sensor, which the core knows when it next
-builds that configuration, from what the one before left the probe. That is in memory. For a
-connected probe the build follows the change by the notifier's quarter of a second. A core that
-stops inside that, or while the probe is away and before it has redialled, starts with no row for
-the change, and a late refusal for it is the mark the probe has no claim to: a failed scan, and
-as many as the sensor's failed-scan count (two, as shipped) are **one Down for that sensor, with
-the one alarm a Down raises**, in the probe's words ("Not scanned: ..."), until the next scan
-under the new configuration, counted on **Reports refused**. The same follows a write that
-failed or gave way, when the core is restarted before it is made again at the probe's next
-configuration or within the minute, and a clock set forward across the restart. Closing it would mean storing what each probe
-was last left, which is not done.
+**The record is of a configuration, and a core that stops between a change and the next
+configuration still finds the stop** (`A-61`, closed by `A-68`). The change itself is decided in
+its own write, and what makes a refusal late is that the probe's *configuration* stopped leaving
+it the sensor, which the core knows when it next builds that configuration, from what the one
+before left the probe. For a connected probe the build follows the change by the notifier's
+quarter of a second; for one that is away, at its next connection. What the one before left the
+probe used to be in memory only, so a core that stopped in between started with nothing to
+compare with, recorded no stop, and read the probe's late refusals as failed scans. It is now
+stored and read back: the restarted core's first configuration for the probe finds the sensor no
+longer left, begins its ten minutes then, and stores that before the probe is handed the
+configuration (`credential-pinning.test.ts`, the scenario of a core that stops between a change
+and the next configuration: no Down, no page). A refusal that reaches the restarted core before
+it has built that configuration is honoured as the probe's, since what was stored says the probe
+is still left the sensor: Unknown until its next scan, and not a failed scan either.
+
+**The bound that is left** is a write that was not made. A core restarted after a write of the
+record failed or gave way, and before it was made again at the probe's next configuration or
+within the minute, starts with the table one configuration behind: a stop that write recorded is
+not there, or, if it was the write of what the probe is left, the comparison is with the
+configuration before. A late refusal for such a sensor is then the mark the probe has no claim
+to: a failed scan, and as many as the sensor's failed-scan count (two, as shipped) are **one Down
+for that sensor, with the one alarm a Down raises**, in the probe's words ("Not scanned: ..."),
+until the next scan under the new configuration, counted on **Reports refused**. Core Health
+counts those writes (above). The same follows a clock set forward across the restart, and the
+first start on this schema of a core upgraded from before it, which has no row of what any probe
+was left until it has built each a configuration.
 
 **The next result that is not a refusal lets the sensor go, and that result decides it.** The
 hold is dropped without re-deciding anything, so there is one transition, from Unknown to what

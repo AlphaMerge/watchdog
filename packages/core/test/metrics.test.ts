@@ -515,6 +515,31 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       assert.equal(without.has(`ms_probe_reports_refused_total${label}`), false);
     });
 
+    it('exports the late-refusal record’s given-up writes as a core counter, and nothing where they are not counted (`A-68`)', async () => {
+      let givenUp = 2;
+      const core = fixedCoreHealth(db, { lateRefusalWritesGivenUp: () => givenUp });
+      const exports = new MetricsExporter({
+        db,
+        logger: silent,
+        coreHealth: () => core,
+        probeHealth: () => undefined,
+      });
+      const first = (await exports.scrape()).body;
+      assert.equal(parse(first).get('ms_core_late_refusal_writes_given_up_total'), 2);
+      assert.match(first, /^# TYPE ms_core_late_refusal_writes_given_up_total counter$/mu);
+      assert.match(first, /^# HELP ms_core_late_refusal_writes_given_up_total \S/mu);
+      givenUp = 5;
+      assert.equal(
+        parse((await exports.scrape()).body).get('ms_core_late_refusal_writes_given_up_total'),
+        5,
+      );
+      // A core with no source for it exports no series: absent, not zero.
+      assert.equal(
+        parse((await exporter().scrape()).body).has('ms_core_late_refusal_writes_given_up_total'),
+        false,
+      );
+    });
+
     it('still omits a counter the probe did not report at all', async () => {
       // The other half. A probe that is gone reports nothing, and nothing is not zero.
       const metrics = parse((await varying(() => ({ connected: false })).scrape()).body);

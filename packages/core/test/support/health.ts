@@ -16,6 +16,8 @@ export function fixedCoreHealth(
     readonly disk?: CoreHealthSources['disk'];
     /** False for a v1 core, which runs no reporting and so has no report source (`H-12`). */
     readonly reporting?: boolean;
+    /** Writes of the late-refusal record given up (`A-68`); no source, and a gap, when absent. */
+    readonly lateRefusalWritesGivenUp?: () => number;
   } = {},
 ): CoreHealthService {
   return new CoreHealthService({
@@ -66,6 +68,9 @@ export function fixedCoreHealth(
       }),
       delivery: () => Promise.resolve({ pending: 9, failed: 4, oldestPendingAgeMs: 125_000 }),
       credentialsToReenter: () => Promise.resolve(0),
+      ...(options.lateRefusalWritesGivenUp === undefined
+        ? {}
+        : { lateRefusalWritesGivenUp: options.lateRefusalWritesGivenUp }),
     },
     ingest: () => Promise.resolve(),
   });

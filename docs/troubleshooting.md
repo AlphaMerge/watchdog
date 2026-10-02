@@ -111,12 +111,16 @@ failed in**, and the underlying error, because "ETIMEDOUT" alone is not a diagno
   (a name entry added to the targets, the device given its address, a pause), a refusal the probe
   had already made is dropped. **The core stores that record and reads it back at start**
   (`A-61`), so an ordinary restart inside the ten minutes changes nothing: the refusals are
-  still dropped, and counted on **Refusals delivered late**. Three things can still lose it,
-  and then such a refusal is a failed scan, and two of them Down, with one alarm:
-  - **The core stopped before it built the probe's next configuration after the change.** The
-    record is written when that configuration is built: a quarter of a second after the change
-    for a connected probe, and at its next connection for one that was away. A core restarted
-    in between has nothing to read.
+  still dropped, and counted on **Refusals delivered late**. A core that stopped before it had
+  built the probe's next configuration after the change loses nothing either (`A-68`): what the
+  probe was last left is stored too, and the first configuration after the restart finds the
+  change and begins the ten minutes then. Three things can still lose it, and then such a
+  refusal is a failed scan, and two of them Down, with one alarm:
+  - **The probe changed its protocol version twice inside an hour** (rolled back, upgraded, and
+    rolled back again), and its spool still held refusals after the second rollback. A version
+    change alone begins the ten minutes once in an hour (`A-68`); after that such a refusal is a
+    failed scan of a sensor the core is withholding for the probe's age, and shows as Down when
+    the probe is upgraded, until the sensor's next scan.
   - **The core's clock was set forward across the restart**, by more than was left of the ten
     minutes. The stored time then reads as long past. (Set back, it gives the ten minutes from
     the restart and no more, and the log says so at `warn`.)
@@ -124,7 +128,9 @@ failed in**, and the underlying error, because "ETIMEDOUT" alone is not a diagno
     "could not store which sensors a configuration stopped leaving to a probe" at `error` and
     writes again within a minute. A write that only gave way to something else holding a row it
     needs (a device being deleted or edited at that moment) is logged at `warn` as "gave up
-    storing …", is expected now and then, and is made again the same way.
+    storing …", is expected now and then, and is made again the same way. Core Health's
+    **Late-refusal record writes given up** counts both; a rate that stays above zero is a
+    database these writes cannot get into.
 
   Nothing is wrong with the device or the probe, and the next scan under the new configuration
   clears it. It shows on the probe's Probe Health as **Reports refused** rising where

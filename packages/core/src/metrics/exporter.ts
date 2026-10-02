@@ -275,6 +275,12 @@ const CORE_METRICS: readonly Metric[] = [
     help: 'Report formatting refused because every worker was busy and the queue was full.',
     counter: true,
   },
+  {
+    key: 'lateRefusalWritesGivenUp',
+    name: 'ms_core_late_refusal_writes_given_up_total',
+    help: 'Writes of the late-refusal record that gave way, were not waited for, or failed. Each is made again within a minute.',
+    counter: true,
+  },
 ];
 
 const PROBE_METRICS: readonly Metric[] = [
