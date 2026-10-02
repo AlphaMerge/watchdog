@@ -18378,6 +18378,45 @@ because each is a decision rather than a defect:
       the record is stored (a migration, forward and back), read at start, pruned past the
       grace, and the restart scenario in `credential-pinning.test.ts` shows no Down.
 
+- [ ] **A-62 — database and Windows sensors connect to whatever a name resolves to** · M ·
+      A-57, A-41c · Found 2026-10-02 by `A-57`. `pg`, `mysql2` and `tedious` resolve a name
+      themselves and take no lookup, and PowerShell resolves for Kerberos, so the target policy
+      reads an address given as one and nothing else. **Done when** `pg` and `mysql2` are
+      handed a stream connected to a checked address, `tedious` and the Windows transport are
+      either given one or named in the administration guide as outside the policy with the
+      reason, and a simulator test shows the refusal for each that is covered.
+
+- [ ] **A-63 — discovery is not held to the target policy** · S · A-57 · Found 2026-10-02 by
+      `A-57`. `discovery/ping-probe.ts` and `identify.ts` reach whatever a range or a name
+      gives them. A ping is outside the policy on purpose; the identification that follows
+      opens SNMP and TCP connections. **Done when** identification goes through
+      `checkedTarget` under `probe.targetPolicy`, a refused address is reported as refused and
+      not as absent, and a test shows it.
+
+- [ ] **A-64 — the target policy has no exception for one device** · M · A-57 · Found
+      2026-10-02 by `A-57`. `probe.targetPolicy` is one setting for a probe, so a site with one
+      legitimate link-local device sets `none` for every sensor on it. **A decision first:**
+      whether an exception belongs on the device (an inherited setting, through the resolver,
+      that only an administrator may set) or stays out for good, written down either way.
+      **Done when** that is decided and, if it is in, the setting reaches the probe with the
+      assignment, is audited, and cannot be set by an account that may only edit the device.
+
+- [ ] **A-65 — three loose ends on the SSH and probe side of the target policy** · S · A-57 ·
+      Found 2026-10-02 by `A-57` and its review. Sensors that join one connection being opened
+      share the first one's lookup and its `AbortSignal`, so the first being cancelled can fail
+      the others for a scan (one reviewer traced it, one found it unreachable in a running
+      probe: settle which with a test). The SSH connect timeout starts after the lookup. The two
+      lines in `packages/probe/src/main.ts` that hand the setting to workers and check
+      processes have no test. **Done when** each has a test and the first two are fixed or
+      shown not to happen.
+
+- [ ] **A-66 — what one lookup a scan costs has not been measured** · S · A-57, P-15 · Found
+      2026-10-02 by `A-57`. SNMP by name makes one `getaddrinfo` a scan in the probe where the
+      socket made one a datagram, and a resolver that stops answering holds the shared thread
+      pool for every transport that resolves there, counted nowhere. **Done when** `test:perf`
+      has a case at the 5,000-sensor class with named devices and a slow resolver, the numbers
+      are in `docs/findings/`, and lookups in flight or given up are a Probe Health number.
+
 ### Panel round two — notifications, schedules, triggers
 
 Eight lenses over `packages/core/src/{notifications,schedules,triggers}`, merged to 34 distinct
