@@ -22,6 +22,16 @@ import { connectBudgetMs, tdsConnector } from './socket.js';
  * actually hangs a monitoring query — waiting behind somebody else's transaction — and `tedious`
  * cancels the request properly at the protocol level rather than dropping the socket, which is
  * the closest a client can get to stopping the work.
+ *
+ * **Its TLS is checked by Node's own identity check and no other** (`A-70`). `tedious` wraps
+ * the TLS it runs inside TDS itself (`lib/message-io.js` `startTls`: `tls.connect` with
+ * `servername`, a secure context and `rejectUnauthorized`, and nothing else of ours), so there
+ * is nowhere to hand it `serverIdentity`. A device given as an IPv4 address is checked against
+ * the addresses its certificate lists, because `tedious` names the address as the server name
+ * and Node checks an IPv4 one as an address. A device given as an IPv6 address is refused under
+ * any certificate: Node reads it as a name. The one way round is to turn the driver's own
+ * rejection off and check afterwards, which is verification that holds only while our own
+ * handler runs, and is not done.
  */
 export const mssqlDriver: DbDriver = {
   id: 'mssql',
@@ -87,7 +97,7 @@ export const mssqlDriver: DbDriver = {
               );
               return;
             }
-            reject(describeDbError(error, options, 'Microsoft SQL Server'));
+            reject(describeDbError(error, options, 'Microsoft SQL Server', 'query'));
             return;
           }
           resolve({ rows, columns });

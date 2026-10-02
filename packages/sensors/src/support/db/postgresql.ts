@@ -1,3 +1,5 @@
+import type { ConnectionOptions, PeerCertificate } from 'node:tls';
+import { serverIdentity } from '@ms/shared';
 import pg from 'pg';
 import {
   codeOf,
@@ -31,7 +33,20 @@ export const postgresqlDriver: DbDriver = {
     // TLS, accept plain text if the server has none. `require` refuses the downgrade.
     const client = clientFor(
       options,
-      options.encrypt === 'disable' ? false : { rejectUnauthorized: options.verifyTls },
+      options.encrypt === 'disable'
+        ? false
+        : {
+            rejectUnauthorized: options.verifyTls,
+            // **Who the certificate is for is asked about the device's host, by us** (`A-70`).
+            // `pg` upgrades a connected socket and names the host only when it is a name
+            // (`lib/connection.js` `upgradeToSSL`), so for a device given as an address Node
+            // had no host to check and fell back to the literal `localhost`: a certificate
+            // that lists the address was refused, and any trusted certificate for `localhost`
+            // was accepted. What Node hands this is therefore not read. And the shared check
+            // is the one that can read an IPv6 address at all.
+            checkServerIdentity: (_asked: string, certificate: PeerCertificate) =>
+              serverIdentity(options.host, certificate),
+          },
     );
 
     try {
@@ -56,7 +71,7 @@ export const postgresqlDriver: DbDriver = {
  */
 function clientFor(
   options: DbConnectOptions,
-  ssl: false | { rejectUnauthorized: boolean },
+  ssl: false | Pick<ConnectionOptions, 'rejectUnauthorized' | 'checkServerIdentity'>,
 ): pg.Client {
   const stream = unconnectedSocket(options);
   return new pg.Client({
@@ -120,7 +135,7 @@ function wrap(client: pg.Client, options: DbConnectOptions): DbConnection {
           );
         }
         if (signal.aborted) throw new DbError('the check was cancelled while querying');
-        throw describeDbError(error, options, 'PostgreSQL');
+        throw describeDbError(error, options, 'PostgreSQL', 'query');
       } finally {
         signal.removeEventListener('abort', onAbort);
       }

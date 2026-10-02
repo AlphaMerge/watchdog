@@ -1,4 +1,4 @@
-import type { LookupFunction } from 'node:net';
+import { isIP, type LookupFunction } from 'node:net';
 import { isCredentialsWithheld, type PinnedAddress } from '../pinned-target.js';
 import { TargetRefusedError } from '../checked-target.js';
 
@@ -80,11 +80,65 @@ export interface DbDriver {
   connect(options: DbConnectOptions, signal: AbortSignal): Promise<DbConnection>;
 }
 
+/** Where in a check a database failure happened, where the failure says. */
+export type DbPhase = 'connect' | 'query';
+
 export class DbError extends Error {
-  constructor(message: string) {
+  /** The phase the check failed in, when the failure is of one phase and no other. */
+  readonly phase: DbPhase | undefined;
+
+  constructor(message: string, phase?: DbPhase) {
     super(message);
     this.name = 'DbError';
+    this.phase = phase;
   }
+}
+
+/** What `DbRedirectRefusedError` says. It names both servers, and never the secret. */
+export const REDIRECT_OUTSIDE_TARGETS = (host: string, other: string): string =>
+  `${host} routed the login to ${other}, which is outside the allowed targets of the database ` +
+  'credentials this sensor uses, so nothing was sent there. Adding that server to the targets ' +
+  'by its address, its name or *.domain, or giving the device the server that answers, lets ' +
+  'the login through.';
+
+/**
+ * A login the server handed on to a server its credential set's targets do not cover, on a
+ * device the set's targets do cover (`A-70`). Nothing was sent to the routed server.
+ *
+ * **A failed check, and not `CredentialsWithheldError`.** The core believes a probe's refusal
+ * only for a sensor its configuration left to that probe: a named device facing targets that
+ * name only addresses. This device is an address inside the targets, or a name a name entry
+ * covers, so the core decided it and left the probe nothing. Marked as withheld, the result
+ * would be one the core has no reason to believe: it reads it as the failed scan it is without
+ * the mark and counts the mark against the probe, on Probe Health's refused results, as it
+ * would a probe that was hiding a failure. The probe did nothing wrong, so it says what
+ * happened as what it is: the device answered, and where it sent the login is not somewhere
+ * these credentials go. The sensor reads Down with this sentence, and nothing is counted.
+ */
+export class DbRedirectRefusedError extends DbError {
+  /** The device's host, as the device names it. */
+  readonly target: string;
+  /** The server the login was routed to. */
+  readonly routedTo: string;
+
+  constructor(target: string, routedTo: string) {
+    super(REDIRECT_OUTSIDE_TARGETS(target, routedTo), 'connect');
+    this.name = 'DbRedirectRefusedError';
+    this.target = target;
+    this.routedTo = routedTo;
+  }
+}
+
+/** What `pg` says when its connect timer ends a connection. */
+const PG_TIMED_OUT = 'timeout expired';
+
+/** What every driver's connect timeout reads as, whichever driver's timer it was. */
+function connectTimedOut(where: string, options: DbConnectOptions): DbError {
+  return new DbError(
+    `${where} accepted no connection within ${String(options.connectTimeoutMs)} ms — a ` +
+      'firewall dropping the packets looks exactly like this',
+    'connect',
+  );
 }
 
 /**
@@ -111,13 +165,21 @@ function chainOf(error: unknown): unknown[] {
 /** The codes a driver puts around a socket's own, which say nothing of what went wrong. */
 const WRAPPERS = new Set(['', 'ESOCKET']);
 
-export function describeDbError(error: unknown, options: DbConnectOptions, engine: string): Error {
+export function describeDbError(
+  error: unknown,
+  options: DbConnectOptions,
+  engine: string,
+  /** What the check was doing: a driver's connect timer is read as one only while connecting. */
+  phase: DbPhase = 'connect',
+): Error {
   const where = `${options.host}:${String(options.port)}`;
   const chain = chainOf(error);
   // **A refusal is not a database's failure, and keeps its class** (`A-62`): the runner reads a
   // set that was withheld as Unknown, and the policy's refusal says the address and the policy.
+  // And so does a redirect that was not followed (`A-70`): its sentence is the whole diagnosis.
   for (const one of chain) {
     if (isCredentialsWithheld(one) || one instanceof TargetRefusedError) return one;
+    if (one instanceof DbRedirectRefusedError) return one;
   }
   const code = chain.map(codeOf).find((one) => !WRAPPERS.has(one)) ?? '';
   const message = error instanceof Error ? error.message : String(error);
@@ -126,11 +188,19 @@ export function describeDbError(error: unknown, options: DbConnectOptions, engin
   if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
     return new DbError(`the device’s host name did not resolve, connecting to ${where}`);
   }
-  if (code === 'ETIMEDOUT' || code === 'ESOCKETTIMEDOUT') {
-    return new DbError(
-      `${where} accepted no connection within ${String(options.connectTimeoutMs)} ms — a ` +
-        'firewall dropping the packets looks exactly like this',
-    );
+  if (code === 'ETIMEDOUT' || code === 'ESOCKETTIMEDOUT') return connectTimedOut(where, options);
+  // **Each driver's own connect timer says it differently** (`A-70`), and neither said how
+  // long or where. `tedious` ends a connect with a `ConnectionError` coded `ETIMEOUT`, one
+  // letter short of the socket's (`lib/connection.js`, `initialiseConnection`); `pg` destroys
+  // its stream with an error that has a message and no code at all (`lib/client.js`,
+  // `connectionTimeoutMillis`). Read so only while connecting: `tedious` puts the same code
+  // on a request that timed out, which is the statement timeout and is another sentence.
+  if (
+    phase === 'connect' &&
+    (code === 'ETIMEOUT' ||
+      (code === '' && chain.some((one) => one instanceof Error && one.message === PG_TIMED_OUT)))
+  ) {
+    return connectTimedOut(where, options);
   }
   // 28P01 and 28000 are "invalid authorisation" in PostgreSQL and MySQL; 18456 is SQL Server's.
   if (
@@ -152,6 +222,25 @@ export function describeDbError(error: unknown, options: DbConnectOptions, engin
       `the certificate at ${where} is self-signed and this sensor verifies certificates — most ` +
         'database servers ship with exactly such a certificate, so turning verification off ' +
         'here is usually the right answer and is still encrypted',
+    );
+  }
+  // **`mysql2` and `tedious` take no identity check of ours** (`A-70`), and Node's own reads an
+  // IPv6 address as a name no certificate has (`serverIdentity` in `@ms/shared`). So a device
+  // given as an IPv6 address cannot be verified through either, and is refused, whatever its
+  // certificate lists. Said, because Node's sentence blames the certificate.
+  // By Node's code where the driver keeps it (`tedious`), and by Node's words where it does
+  // not: `mysql2` copies the message onto an error coded `HANDSHAKE_SSL_ERROR`.
+  if (
+    isIP(options.host) === 6 &&
+    engine !== 'PostgreSQL' &&
+    (chain.some((one) => codeOf(one) === 'ERR_TLS_CERT_ALTNAME_INVALID') ||
+      message.includes("does not match certificate's altnames"))
+  ) {
+    return new DbError(
+      `${engine} at ${where}: the certificate could not be checked against an IPv6 address — ` +
+        'this driver cannot verify one, whatever the certificate lists. Give the device a ' +
+        `name the certificate is for, or its IPv4 address. (${message})`,
+      'connect',
     );
   }
   return new DbError(`${engine} at ${where}: ${message}`);

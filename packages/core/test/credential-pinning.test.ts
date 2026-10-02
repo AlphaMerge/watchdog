@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import type { SensorType } from '@ms/sensors';
+import { REDIRECT_OUTSIDE_TARGETS, type SensorType } from '@ms/sensors';
 import { pino } from 'pino';
 import {
   capabilitiesFor,
@@ -3026,6 +3026,119 @@ describe(
         2,
         'where Probe Health counts refused results',
       );
+    });
+
+    describe('a SQL Server redirect outside a bounded set, on a device the core decided itself (A-70)', () => {
+      const DATABASE = versionFor('databaseAddressPinning');
+      /** A database sensor on a device given as an address inside its set's targets, and Up. */
+      async function addressed(name: string, host: string): Promise<number> {
+        const group = await create({ kind: 'group', parentId: site, name: `${name} group` });
+        await h.service.setCredential(testActor, group, 'database', {
+          username: 'monitor',
+          password: `${name}-password`,
+          allowedTargets: ['10.20.0.0/16'],
+        });
+        const device = await create({ kind: 'device', parentId: group, name, host });
+        const sensor = await create({
+          kind: 'sensor',
+          parentId: device,
+          name: `${name} query`,
+          sensorType: 'test.db.pinned',
+          params: { port: 1433 },
+        });
+        // Sent to its probe with the set, and the core decided that itself: the address is
+        // inside the targets, so there was no name to leave for the probe to check.
+        assert.equal(await sentTo(DATABASE, sensor), true);
+        await fromProbe([{ ...measured(sensor, at(-60)), message: '1 row in 3 ms' }]);
+        assert.deepEqual(await stateOf(sensor), { state: 'up', message: '1 row in 3 ms' });
+        return sensor;
+      }
+
+      it('marked as withheld it is a failed scan the core counts against the probe: what a probe did before', async () => {
+        // The probe refused to follow the redirect and sent the routed server nothing, which
+        // is right. It then marked the result `withheld`, as it does a pinned set's refusal.
+        // The core believes that mark only for a sensor its configuration left to the probe,
+        // and this one it did not: the mark is unearned, the result is the failed scan it is
+        // without it, and Probe Health's refused results count an honest probe as one that
+        // hides failures.
+        const sensor = await addressed('routed-before', '10.20.0.41');
+        const marked =
+          'Not scanned: 10.20.0.41 handed the connection on to replica.elsewhere.test, which ' +
+          'the allowed targets of the database credentials it would use do not cover, so they ' +
+          'are not sent there.';
+        const refusals = new ProbeRefusals();
+        await fromProbe(
+          [refused(sensor, at(-4), marked), refused(sensor, at(-3), marked)],
+          site,
+          refusals,
+        );
+        assert.deepEqual(await stateOf(sensor), { state: 'down', message: marked });
+        assert.equal(vouching.withheld().has(sensor), false, 'not held Unknown: not believed');
+        assert.equal(refusals.countsFor(site).refused, 2, 'and counted as unearned, each scan');
+      });
+
+      it('said as the failed check it is: one Down, one page, the sentence, and nothing counted against the probe', async () => {
+        const sensor = await addressed('routed', '10.20.0.42');
+        // What the probe says now: an ordinary error, unmarked, in the redirect's own words.
+        const sentence = REDIRECT_OUTSIDE_TARGETS('10.20.0.42', 'replica.elsewhere.test');
+        assert.match(
+          sentence,
+          /^10\.20\.0\.42 routed the login to replica\.elsewhere\.test, which is outside the allowed targets of the database credentials this sensor uses, so nothing was sent there\./,
+        );
+        const failed = (seconds: number): CheckResult => ({
+          ...measured(sensor, at(seconds), 'error'),
+          message: sentence,
+        });
+        // The pages this sensor is owed, and the messages that name it: the triggers are at
+        // the root, and the tests before this one left sensors of their own to page about.
+        const owed = (): Promise<{ reason: string; kind: string }[]> =>
+          db.query<{ reason: string; kind: string }>(
+            `SELECT reason, trigger_kind AS kind FROM notification_request
+             WHERE sensor_id = $1 ORDER BY id`,
+            [sensor],
+          );
+        const naming = (): number =>
+          seen.filter((message) => message.about.includes(sensor)).length;
+        await scheduler.sweep(later(3_600));
+        assert.deepEqual(await owed(), [], 'nothing owed for a sensor that is Up');
+        const held = credentials.stats().withheld;
+        seen.length = 0;
+        const refusals = new ProbeRefusals();
+
+        // Two scans, as the state machine asks before it calls a sensor Down.
+        const reply = await fromProbe([failed(-4), failed(-3)], site, refusals);
+        assert.equal((reply as { type: string }).type, 'results-ack');
+        assert.deepEqual(await stateOf(sensor), { state: 'down', message: sentence });
+        assert.equal(await downs([sensor]), 1, 'Down once');
+        assert.equal(vouching.withheld().has(sensor), false);
+        assert.equal(credentials.stats().withheld, held, 'nothing is held for it');
+        assert.equal(refusals.countsFor(site).refused, 0, 'an honest probe is counted nothing');
+        assert.equal(refusals.lateFor(site), 0);
+
+        // One page, from the Down trigger, and none from the Unknown one.
+        await scheduler.sweep(later(4_000));
+        assert.deepEqual(await owed(), [{ reason: 'initial', kind: 'state' }]);
+        // The digest's window opens at the first dispatch and is sent at one after it closes.
+        await drain(later(4_001));
+        await drain(later(4_300));
+        assert.equal(naming(), 1, 'one message names it');
+
+        // The server goes on routing the login there: every scan after is the same Down.
+        await fromProbe([failed(-2), failed(-1)], site, refusals);
+        assert.deepEqual(await stateOf(sensor), { state: 'down', message: sentence });
+        assert.equal(await downs([sensor]), 1, 'still the one Down');
+        await scheduler.sweep(later(4_600));
+        assert.equal((await owed()).length, 1, 'and nothing more to page about');
+        await drain(later(4_601));
+        await drain(later(4_900));
+        assert.equal(naming(), 1);
+        assert.equal(refusals.countsFor(site).refused, 0);
+
+        // The targets are widened to cover the routed server, the login goes through, and the
+        // sensor is Up at the scan that found out.
+        await fromProbe([{ ...measured(sensor, at(0)), message: '1 row in 4 ms' }], site, refusals);
+        assert.deepEqual(await stateOf(sensor), { state: 'up', message: '1 row in 4 ms' });
+      });
     });
 
     it('a previewed credential write leaves no trace in what is held, and counts as the write would', async () => {

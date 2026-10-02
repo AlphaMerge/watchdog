@@ -35,6 +35,8 @@ export const mysqlDriver: DbDriver = {
     let connection: Connection;
     // **Handed its socket when the device's name was checked** (`A-62`): `mysql2` takes no
     // `lookup`, and takes a `stream`. The host stays the name, which is what it names in TLS.
+    // And when a certificate is verified for a device given as an address (`A-70`): the
+    // socket is what tells Node which address that is.
     const stream = connectingSocket(options);
     try {
       connection = await createConnection({
@@ -47,7 +49,14 @@ export const mysqlDriver: DbDriver = {
         connectTimeout: connectBudgetMs(options),
         ...(options.encrypt === 'disable'
           ? {}
-          : { ssl: { rejectUnauthorized: options.verifyTls } }),
+          : {
+              // **The name too, where the certificate is verified at all** (`A-70`). `mysql2`
+              // checks the chain under `rejectUnauthorized` and who the certificate is for
+              // only under `verifyIdentity` (`lib/base/connection.js` `startTLS`: without it
+              // the `checkServerIdentity` it hands Node is a function that returns nothing).
+              // So "Verify the certificate" accepted any trusted certificate, for any name.
+              ssl: { rejectUnauthorized: options.verifyTls, verifyIdentity: options.verifyTls },
+            }),
         // Multiple statements stay off. A monitoring query is one question, and turning this on
         // would make a mistyped parameter able to run two.
         multipleStatements: false,
@@ -107,7 +116,7 @@ export const mysqlDriver: DbDriver = {
             );
           }
           if (querySignal.aborted) throw new DbError('the check was cancelled while querying');
-          throw describeDbError(error, options, 'MySQL');
+          throw describeDbError(error, options, 'MySQL', 'query');
         } finally {
           querySignal.removeEventListener('abort', onAbort);
         }

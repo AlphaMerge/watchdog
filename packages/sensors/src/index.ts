@@ -69,6 +69,7 @@ export {
   pinTarget,
   systemResolve,
 } from './support/pinned-target.js';
+export { REDIRECT_OUTSIDE_TARGETS } from './support/db/driver.js';
 export type {
   PinnedAddress,
   PinRequest,

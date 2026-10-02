@@ -438,7 +438,7 @@ nobody, not even an administrator, can bring it outside.
   | The database set | A redirect |
   | --- | --- |
   | Has `allowedTargets`, and the routed server is inside them: an address or range that covers its address, a name or `*.domain` that covers its name | Followed, after the probe's target policy has checked it. |
-  | Has `allowedTargets`, and the routed server is not inside them, or is a name where they name only addresses | **Not followed.** Nothing is sent to the routed server, and the check ends with a sentence naming it. The probe does not resolve a routed name to find out. |
+  | Has `allowedTargets`, and the routed server is not inside them, or is a name where they name only addresses | **Not followed.** Nothing is sent to the routed server, and the check fails with a sentence naming both servers. The probe does not resolve a routed name to find out. |
   | Was pinned for a named device | **Not followed**, wherever it points: the set was checked against one address. |
   | Has no `allowedTargets` | **Followed**, held only to the probe's target policy. Under `probe.targetPolicy: none` the driver follows it unchecked, as it always did. |
 
@@ -448,10 +448,25 @@ nobody, not even an administrator, can bring it outside.
   sensors' default, the redirect itself is unauthenticated: anyone on the path between the
   probe and the server can write it. Give a SQL Server set `allowedTargets` that name the
   servers it is for, the routed ones included, and turn verification on where the server has a
-  certificate you issued. A refusal reads **Unknown** on a named device the probe was left to
-  check, and **Down** with the same sentence on a device given as an address or covered by a
-  name entry, because the core takes a refusal from a probe only for a sensor it left to
-  that probe.
+  certificate you issued.
+
+  **What a redirect that is not followed reads as** (`A-70`):
+
+  | The device | The sensor reads | And says |
+  | --- | --- | --- |
+  | A name the probe was left to check against address targets (the pinned case) | **Unknown** | `Not scanned: … handed the connection on to …, which is not the address checked against the allowed targets of the database credentials it would use` |
+  | An address inside the targets, or a name a name entry covers | **Down** | `… routed the login to …, which is outside the allowed targets of the database credentials this sensor uses, so nothing was sent there.` |
+
+  The difference is who decided the sensor. The core takes "I did not scan this" from a probe
+  only for a sensor its configuration left to that probe, which is the first row: anything
+  wider would let a probe stand a sensor Unknown, or hide a failure, by its own say-so. In the
+  second row the core decided the device itself and left the probe nothing, so the probe
+  reports what happened as what it is: the device answered and sent the login somewhere these
+  credentials do not go. That is a failed check like any other. It pages once, as any Down
+  does, and is **not** counted on Probe Health's **Reports refused** (`reportsRefused`), which is for results a
+  probe had no claim to send. Either way nothing reaches the routed server, and the fix is the
+  one the sentence names: add that server to the targets, or give the device the server that
+  answers.
 
   For Windows sensors, give the device its address, or add its name or `*.domain` to the
   targets; the sensor's message says which. **A probe older than protocol 24 is not sent such a
@@ -682,8 +697,36 @@ resolves to a link-local address was Up, because the driver resolved the name an
 checked the answer, and now reads Down with the sentence above. One failed check a scan for
 each, no new state and no new notification, and `probe.targetPolicy: none` is the way back.
 A PostgreSQL sensor whose device's "host" is the path of a Unix socket directory on the probe's
-own machine fails under any policy but `none` too, saying the name did not resolve: a path is
-not a name.
+own machine (it begins with `/`) is not a network target, and is handed to the driver as it
+stands under every policy: nothing is resolved and nothing is checked (`A-70`). Between
+`A-62` and `A-70` it failed under any policy but `none`, saying the name did not resolve.
+
+**Three more things change for the database sensors at the upgrade that brings `A-70`.** Each
+can turn a sensor that was Up to Down, and each is the fix and not a fault:
+
+- **`db.mysql` with "Verify the certificate" on now checks who the certificate is for.** It
+  checked that the certificate was issued by an authority the probe trusts, and never that it
+  was issued *for this server*: any trusted certificate passed, for any name. A MySQL or
+  MariaDB sensor that was Up under a certificate for another name reads Down at its next scan,
+  saying `Hostname/IP does not match certificate's altnames`. Give the device the name the
+  certificate is for, or issue the server a certificate for the name it is reached by. With
+  verification off, which is the database sensors' default, nothing changes.
+- **A database given as an address, with verification on, is checked against that address.**
+  `db.postgresql` and `db.mysql` checked the certificate of a server at `10.0.0.5` against
+  the literal name `localhost`: a certificate that lists `10.0.0.5` was refused, and any
+  trusted certificate for `localhost` was accepted. A sensor that was Up that way reads Down;
+  one that was Down for a certificate that rightly lists its address comes Up. For an **IPv6**
+  address this holds on `db.postgresql` only. `db.mysql` and `db.mssql` cannot verify a
+  certificate against an IPv6 address at all and refuse every one, saying so: give such a
+  device a name the certificate is for.
+- **A SQL Server redirect outside a bounded set, on a device given as an address or covered
+  by a name entry, no longer counts against the probe.** It read Down before and reads Down
+  now, with a sentence of its own (the redirect rule, under the credential targets above), and
+  Probe Health's **Reports refused** (`reportsRefused`) stops rising by one at every scan of such a sensor.
+
+A connect that ran out of time also reads the same on all three engines now: `… accepted no
+connection within N ms`, where PostgreSQL said `timeout expired` and SQL Server `Failed to
+connect to … in Nms`. A trigger or a report that matches on the old words needs the new ones.
 
 What each transport does, for a device given as a name. A device given as an address is checked
 as it stands and nothing is resolved, on every one of them.
@@ -696,7 +739,7 @@ as it stands and nothing is resolved, on every one of them.
 | SNMP: `snmp.traffic`, `snmp.custom`, `snmp.custom.string`, `snmp.table`, `snmp.cpu`, `snmp.diskfree`, `snmp.memory`, `snmp.uptime` | Yes | UDP has no lookup to answer: each scan resolves the name once, checks every address, and asks the agent at a checked address. The session it has is kept while its address is still among the answers, so a name whose answers rotate keeps one session; it is replaced only when the name no longer has that address. Over IPv4 unless the device is set to IPv6, as before. |
 | TCP: `port.tcp`, `port.range` | Yes | The socket's lookup is answered with the checked addresses. A range is resolved once for all its ports. |
 | TLS: `tls.certificate`, `tls.security` | Yes | As TCP. Every handshake of a security check goes to the same checked addresses. |
-| Databases: `db.postgresql`, `db.mysql`, `db.mssql` | Yes (`A-62`) | None of the three drivers takes a lookup, and each takes the connection: `pg` and `mysql2` a `stream`, `tedious` a `connector`. The name is resolved once and checked, and the driver is handed a socket whose lookup is answered with the checked addresses. The driver still holds the name, so TLS sends it and checks the certificate against it, never against the address. PostgreSQL's second connection under `prefer`, when the server has no TLS, goes to the same checked addresses with no second lookup. **A server SQL Server redirects the login to** is another host: it is resolved and checked on a lookup of its own before it is followed, **whether the device was given as a name or as an address**, and a routed server the policy refuses is sent nothing. A credential set's `allowedTargets` bound the redirect too (the redirect rule, under the credential targets above). Whichever address family the name has, as before. |
+| Databases: `db.postgresql`, `db.mysql`, `db.mssql` | Yes (`A-62`) | None of the three drivers takes a lookup, and each takes the connection: `pg` and `mysql2` a `stream`, `tedious` a `connector`. The name is resolved once and checked, and the driver is handed a socket whose lookup is answered with the checked addresses. The driver still holds the name, so TLS sends it and checks the certificate against it, never against the address. PostgreSQL's second connection under `prefer`, when the server has no TLS, goes to the same checked addresses with no second lookup. **A server SQL Server redirects the login to** is another host: it is resolved and checked on a lookup of its own before it is followed, **whether the device was given as a name or as an address**, and a routed server the policy refuses is sent nothing. A credential set's `allowedTargets` bound the redirect too (the redirect rule, under the credential targets above). Whichever address family the name has, as before. **A PostgreSQL host that begins with `/`** is a Unix socket directory on the probe's own machine and not a network target: it is handed to `pg` unresolved and unchecked, under every policy (`A-70`). **TLS for a device given as an address** (`A-70`): with verification on, the certificate is checked against the address, and must list it as an address. `pg` is handed the same identity check the other TLS clients use, so both families work. `mysql2` and `tedious` take no check of ours: IPv4 works, and an IPv6 address is refused whatever the certificate lists. |
 | Windows: `windows.cpu`, `windows.memory`, `windows.service`, `windows.volume` | **An address only: a name is outside the policy** | A device given as a refused address is refused, and the sensor's own `host` parameter is checked as the device's is. **A name is not resolved or checked.** The probe starts PowerShell and hands it the name; PowerShell's `New-CimSession -ComputerName` resolves it inside that process, WinRM takes no address in its place without breaking Kerberos, which authenticates the *name*, and there is no socket or lookup the probe can hand a child process. A check made here would be of an answer the connection never uses. If a Windows device must not be able to point a probe at a link-local address, give the device its address. |
 | ICMP: `icmp.ping`, `icmp.jitter` | No | An echo carries no credential and brings back no content, so the guard would buy nothing. `ping` resolves the name in its own process, as before. Resolving it in the probe instead would put the largest sensor population on the probe's shared lookup threads, where a lookup cannot be cancelled and abandoned ones pile up uncounted while a resolver is down, and it would lose `ping`'s own choice of address family. |
 | DNS: `dns.record`, `dns.blocklist` | No | They ask a resolver about a name and connect to no device. The resolver is the probe's own or an address in the sensor's parameters, and on a cloud machine the provider's resolver is itself link-local. |

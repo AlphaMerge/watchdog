@@ -19,7 +19,9 @@ import { SensorCatalogue } from '../src/catalogue.js';
 import { TargetRefusedError } from '../src/support/checked-target.js';
 import {
   DbError,
+  DbRedirectRefusedError,
   describeDbError,
+  REDIRECT_OUTSIDE_TARGETS,
   type DbConnectOptions,
   type DbDriver,
 } from '../src/support/db/driver.js';
@@ -111,12 +113,51 @@ function slow(delayMs: number): Rebinding {
 let dir = '';
 let forName: { key: string; cert: string } | undefined;
 let forAnother: { key: string; cert: string } | undefined;
+/** Lists both loopback addresses, as addresses (`A-70`). */
+let forAddresses: { key: string; cert: string } | undefined;
+/** Lists two addresses that are neither loopback one. */
+let forOtherAddresses: { key: string; cert: string } | undefined;
+/** For the name `localhost`, and no address: what Node checks when nobody names a host. */
+let forLocalhost: { key: string; cert: string } | undefined;
+
+/** Whether there is an `openssl` to make certificates with. Asked on its own: see `before`. */
+const opensslAvailable = (() => {
+  try {
+    execFileSync('openssl', ['version'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+/** Whether `::1` can be listened on here. Asked once, with a bound. */
+const v6 = await new Promise<boolean>((resolve) => {
+  const server = createServer();
+  const timer = setTimeout(() => {
+    server.close();
+    resolve(false);
+  }, 2_000);
+  server.once('error', () => {
+    clearTimeout(timer);
+    resolve(false);
+  });
+  server.listen(0, '::1', () => {
+    clearTimeout(timer);
+    server.close(() => {
+      resolve(true);
+    });
+  });
+});
 const setTrusted = (tls as { setDefaultCACertificates?: (certs: string[]) => void })
   .setDefaultCACertificates;
 const getTrusted = (tls as { getCACertificates?: (type: string) => string[] }).getCACertificates;
 let trustedBefore: string[] | undefined;
 
-function certificate(file: string, name: string): { key: string; cert: string } {
+function certificate(
+  file: string,
+  name: string,
+  names = `DNS:${name}`,
+): { key: string; cert: string } {
   const keyFile = join(dir, `${file}.key`);
   const certFile = join(dir, `${file}.crt`);
   execFileSync(
@@ -136,7 +177,7 @@ function certificate(file: string, name: string): { key: string; cert: string } 
       '-subj',
       `/CN=${name}`,
       '-addext',
-      `subjectAltName=DNS:${name}`,
+      `subjectAltName=${names}`,
     ],
     { stdio: 'ignore' },
   );
@@ -144,23 +185,28 @@ function certificate(file: string, name: string): { key: string; cert: string } 
 }
 
 before(() => {
-  try {
-    dir = mkdtempSync(join(tmpdir(), 'ms-db-checked-'));
-    forName = certificate('name', NAME);
-    forAnother = certificate('another', 'another.policy.invalid');
-  } catch {
-    forName = undefined;
-    forAnother = undefined;
-  }
-  // Both trusted, so that what a verifying client refuses is the *name* on one of them.
-  if (
-    forName !== undefined &&
-    forAnother !== undefined &&
-    setTrusted !== undefined &&
-    getTrusted !== undefined
-  ) {
+  // **Only a missing `openssl` skips** (`A-67`'s rule, `A-70`). Anything else that goes wrong
+  // here throws, and every case fails with it: the TLS cases are the proof that verification
+  // was not weakened, and a certificate that could not be made must not turn them into skips
+  // that read as green.
+  if (!opensslAvailable) return;
+  dir = mkdtempSync(join(tmpdir(), 'ms-db-checked-'));
+  forName = certificate('name', NAME);
+  forAnother = certificate('another', 'another.policy.invalid');
+  forAddresses = certificate('addresses', 'ms-a70-test', 'IP:127.0.0.1,IP:::1');
+  forOtherAddresses = certificate('others', 'ms-a70-test', 'IP:127.0.0.2,IP:::2');
+  forLocalhost = certificate('localhost', 'localhost', 'DNS:localhost');
+  // All trusted, so that what a verifying client refuses is *who the certificate is for*.
+  if (setTrusted !== undefined && getTrusted !== undefined) {
     trustedBefore = getTrusted('default');
-    setTrusted([...trustedBefore, forName.cert, forAnother.cert]);
+    setTrusted([
+      ...trustedBefore,
+      forName.cert,
+      forAnother.cert,
+      forAddresses.cert,
+      forOtherAddresses.cert,
+      forLocalhost.cert,
+    ]);
   }
 });
 
@@ -289,7 +335,7 @@ const cstring = (text: string): Buffer => Buffer.concat([Buffer.from(text), Buff
  * PostgreSQL, far enough for `select 1`: the SSL request, the startup, one simple query.
  * Without a certificate it answers the SSL request `N`, as a server built without TLS does.
  */
-async function postgresServer(certificate?: Certificate): Promise<Fake> {
+async function postgresServer(certificate?: Certificate, address?: string): Promise<Fake> {
   const { fake } = await listen((raw, self) => {
     let stream: Socket | tls.TLSSocket = raw;
     let started = false;
@@ -352,7 +398,7 @@ async function postgresServer(certificate?: Certificate): Promise<Fake> {
       }
     };
     raw.on('data', onData);
-  });
+  }, address);
   return fake;
 }
 
@@ -374,7 +420,7 @@ const MY_EOF = Buffer.from([0xfe, 0x00, 0x00, 0x02, 0x00]);
  * MySQL, far enough for `select 1`: the greeting, the TLS upgrade when it has a certificate,
  * a handshake response accepted whatever it says, `SET` answered OK and anything else one row.
  */
-async function mysqlServer(certificate?: Certificate): Promise<Fake> {
+async function mysqlServer(certificate?: Certificate, address?: string): Promise<Fake> {
   const { fake } = await listen((raw, self) => {
     let stream: Socket | tls.TLSSocket = raw;
     let authorised = false;
@@ -458,7 +504,7 @@ async function mysqlServer(certificate?: Certificate): Promise<Fake> {
       }
     };
     raw.on('data', onData);
-  });
+  }, address);
   return fake;
 }
 
@@ -530,16 +576,74 @@ const preloginReply = (encryption: number): Buffer =>
  *   it by routing the login to another server, as Azure SQL does from inside its network.
  * - **With `login`** it takes the LOGIN7 and hangs up: a server a login arrived at.
  *
+ * - **With `secure`** it says encryption is on and then really negotiates it, as SQL Server
+ *   does below TDS 8: the TLS handshake travels inside PRELOGIN packets in both directions, and
+ *   once it is done the TLS records go on the socket bare, with TDS inside them. It takes the
+ *   LOGIN7 that arrives through TLS and hangs up. A client that refuses the certificate never
+ *   sends one.
+ *
  * `said` has `login7` for each login a server was sent, which is where the password is.
  */
 async function tdsServer(
-  mode: { route?: { server: string; port: number }; login?: true; address?: string } = {},
+  mode: {
+    route?: { server: string; port: number };
+    login?: true;
+    address?: string;
+    secure?: { key: string; cert: string };
+  } = {},
 ): Promise<Fake> {
   const plain = mode.route !== undefined || mode.login === true;
   const { fake } = await listen((socket, self) => {
     let pending = Buffer.alloc(0);
     let packets = 0;
+    /** The server's end of the TLS that runs inside TDS, once the PRELOGIN is answered. */
+    let handshake: { bridge: Duplex } | undefined;
+    const negotiate = (certificate: { key: string; cert: string }): { bridge: Duplex } => {
+      // What the TLS layer writes in one turn is one flight of the handshake, and `tedious`
+      // reads exactly one TDS message for each it sends: so a turn's writes go out together.
+      let flight: Buffer[] = [];
+      const bridge = new Duplex({
+        read: () => undefined,
+        write: (chunk: Buffer, _encoding, done) => {
+          if (flight.length === 0) {
+            setImmediate(() => {
+              const body = Buffer.concat(flight);
+              flight = [];
+              if (!socket.destroyed) socket.write(tdsReply(body));
+            });
+          }
+          flight.push(chunk);
+          done();
+        },
+      });
+      bridge.on('error', () => undefined);
+      socket.on('close', () => bridge.destroy());
+      const secured = new tls.TLSSocket(bridge, {
+        isServer: true,
+        secureContext: tls.createSecureContext(certificate),
+        SNICallback: (name, done) => {
+          self.serverNames.push(name);
+          done(null);
+        },
+      });
+      secured.on('error', () => undefined);
+      secured.once('secure', () => {
+        self.said.push('tls established');
+      });
+      secured.on('data', (clear: Buffer) => {
+        // TDS again, inside TLS. 0x10 is LOGIN7: the user name and the password are in it.
+        self.said.push(clear[0] === 0x10 ? 'login7' : `packet 0x${(clear[0] ?? 0).toString(16)}`);
+        socket.destroy();
+      });
+      return { bridge };
+    };
     socket.on('data', (chunk: Buffer) => {
+      // After the handshake the client sends TLS records bare: a record never begins with
+      // 0x12, which is what a PRELOGIN packet carrying handshake bytes begins with.
+      if (handshake !== undefined && pending.length === 0 && chunk[0] !== 0x12) {
+        handshake.bridge.push(chunk);
+        return;
+      }
       pending = Buffer.concat([pending, chunk]);
       for (;;) {
         if (pending.length < 8) return;
@@ -552,6 +656,11 @@ async function tdsServer(
         if (packets === 1) {
           self.said.push(`packet 0x${type.toString(16)}`);
           socket.write(preloginReply(plain ? 0x02 : 0x01));
+          if (mode.secure !== undefined) handshake = negotiate(mode.secure);
+          continue;
+        }
+        if (handshake !== undefined) {
+          handshake.bridge.push(Buffer.from(payload));
           continue;
         }
         if (plain) {
@@ -912,6 +1021,273 @@ describe('TLS to a database by name is still about the name', () => {
   });
 });
 
+describe('db.mysql verifies who the certificate is for, where it verifies at all (A-70)', () => {
+  // `mysql2` checks the chain under `rejectUnauthorized` and the name only under
+  // `verifyIdentity`, which this driver never set: "Verify the certificate" took any trusted
+  // certificate, whoever it was for. The right name is the case above, which ran before too.
+  it('refuses a trusted certificate that is for another name, and asks nothing of the server', async (t) => {
+    if (!needsTrust(t)) return;
+    const fake = await mysqlServer(forAnother);
+    try {
+      const dns = rebinding();
+      const error = await failure(
+        execute(dbMysql, dns, {
+          port: fake.port,
+          params: { encrypt: 'require', verifyTls: true },
+        }),
+      );
+      // Checked against the name the operator gave, and never against 127.0.0.1.
+      assert.match(error.message, /database\.policy\.invalid/);
+      assert.match(error.message, /does not match|altnames/i);
+      assert.equal(fake.connections, 1);
+      assert.deepEqual(fake.serverNames, [NAME]);
+      assert.deepEqual(fake.said, [], 'no query was sent to a server that is not the one named');
+      assert.equal(dns.calls.length, 1);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('with verification off takes that certificate as it always did', async (t) => {
+    if (!needsTrust(t)) return;
+    const fake = await mysqlServer(forAnother);
+    try {
+      const execution = await execute(dbMysql, rebinding(), {
+        port: fake.port,
+        params: { encrypt: 'require', verifyTls: false },
+      });
+      assert.equal(valueOf(execution, 'value'), 1);
+      assert.deepEqual(fake.said, ['select 1 as n']);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('refuses one for another name on a device pinned for a credential set too', async (t) => {
+    if (!needsTrust(t)) return;
+    const fake = await mysqlServer(forAnother);
+    try {
+      const error = await failure(
+        execute(dbMysql, rebinding(), {
+          port: fake.port,
+          targets: INSIDE,
+          params: { encrypt: 'require', verifyTls: true },
+        }),
+      );
+      assert.match(error.message, /does not match|altnames/i);
+      assert.ok(!isCredentialsWithheld(error), 'a failed check: the address was the pinned one');
+      assert.deepEqual(fake.said, []);
+    } finally {
+      await fake.close();
+    }
+  });
+});
+
+/**
+ * A database given as an address, under TLS with verification on (`A-70`, from `A-71`).
+ *
+ * `A-67` found that a mail server given by address was checked against the literal `localhost`
+ * after `STARTTLS`, because Node is handed a connected socket and no host. The database
+ * drivers upgrade a connected socket too, each in its own code, and none had been tried.
+ *
+ * What each does, read from the installed source and then run here:
+ * - `pg` 8.23 (`lib/connection.js` `upgradeToSSL`) spreads our `ssl` object into
+ *   `tls.connect`, so it takes a `checkServerIdentity`; it sets `servername` only for a name,
+ *   so an address was checked against `localhost`. It is handed the shared `serverIdentity`,
+ *   bound to the device's host: both families pass under a certificate that lists them.
+ * - `mysql2` 3.24 (`lib/base/connection.js` `startTLS`) picks named fields out of `ssl` and
+ *   hands Node `tls.checkServerIdentity` or nothing: no check of ours can be given. It names
+ *   no server for an address, so that was `localhost` too. The socket it is handed says which
+ *   address it went to: IPv4 passes, and IPv6 is refused by Node's own check (`A-60`).
+ * - `tedious` 20 (`lib/message-io.js` `startTls`) calls `tls.connect` with `servername`, a
+ *   secure context and `rejectUnauthorized`: no check of ours either. It names the address as
+ *   the server name, so IPv4 is checked as an address and passes; IPv6 is refused by Node.
+ *
+ * **The two IPv6 refusals are pinned as refusals**, not skipped: they are what happens, they
+ * fail on the side of refusing, and the day either driver or Node changes them these cases say.
+ */
+describe('TLS to a database given as an address is about the address (A-70)', () => {
+  type Pair = { key: string; cert: string };
+  interface Secured {
+    readonly name: string;
+    readonly type: SensorType;
+    readonly server: (certificate: Pair, address: string) => Promise<Fake>;
+    /** Whether a certificate that lists an IPv6 address can be verified through this driver. */
+    readonly verifiesV6: boolean;
+    /** The check, when the certificate was accepted and the login or the query went through. */
+    readonly accepted: (run: Promise<CheckExecution>, fake: Fake) => Promise<void>;
+    /** What the server had been sent when a check was refused before anything was said. */
+    readonly nothingSaid: (fake: Fake) => void;
+  }
+  const answered = async (run: Promise<CheckExecution>, fake: Fake): Promise<void> => {
+    assert.equal(valueOf(await run, 'value'), 1);
+    assert.deepEqual(fake.said, ['select 1 as n']);
+  };
+  const SECURED: readonly Secured[] = [
+    {
+      name: 'db.postgresql',
+      type: dbPostgresql,
+      server: (certificate, address) => postgresServer(certificate, address),
+      verifiesV6: true,
+      accepted: answered,
+      nothingSaid: (fake) => {
+        assert.deepEqual(fake.said, []);
+      },
+    },
+    {
+      name: 'db.mysql',
+      type: dbMysql,
+      server: (certificate, address) => mysqlServer(certificate, address),
+      verifiesV6: false,
+      accepted: answered,
+      nothingSaid: (fake) => {
+        assert.deepEqual(fake.said, []);
+      },
+    },
+    {
+      name: 'db.mssql',
+      type: dbMssql,
+      server: (certificate, address) => tdsServer({ secure: certificate, address }),
+      verifiesV6: false,
+      accepted: async (run, fake) => {
+        // The fake takes the login and hangs up: a database that went away, after a login
+        // that was sent through TLS, which is the certificate accepted.
+        const error = await failure(run);
+        assert.doesNotMatch(error.message, /altnames|does not match|certificate/i);
+        assert.deepEqual(fake.said, ['packet 0x12', 'tls established', 'login7']);
+      },
+      nothingSaid: (fake) => {
+        assert.equal(fake.said.includes('login7'), false, 'no login was sent');
+      },
+    },
+  ];
+  const HOSTS = [
+    { host: '127.0.0.1', family: 4 },
+    { host: '::1', family: 6 },
+  ] as const;
+  const REFUSED = /altnames|does not match|is not in the cert|is not cert's/i;
+
+  /** The certificates, or a skip saying why this case cannot run here. */
+  function ready(
+    t: { skip(reason: string): void },
+    family: 4 | 6,
+  ): { listed: Pair; others: Pair; localhost: Pair } | null {
+    if (!needsTrust(t)) return null;
+    if (family === 6 && !v6) {
+      t.skip('::1 cannot be listened on here');
+      return null;
+    }
+    if (
+      forAddresses === undefined ||
+      forOtherAddresses === undefined ||
+      forLocalhost === undefined
+    ) {
+      return assert.fail('the certificates were not made');
+    }
+    return { listed: forAddresses, others: forOtherAddresses, localhost: forLocalhost };
+  }
+
+  const verified = (engine: Secured, host: string, fake: Fake, dns: Rebinding, verify = true) =>
+    execute(engine.type, dns, {
+      host,
+      port: fake.port,
+      params: { encrypt: 'require', verifyTls: verify },
+    });
+
+  for (const engine of SECURED) {
+    for (const { host, family } of HOSTS) {
+      const passes = family === 4 || engine.verifiesV6;
+
+      it(
+        passes
+          ? `${engine.name} at ${host}: a certificate that lists the address is accepted`
+          : `${engine.name} at ${host}: refused whatever the certificate lists, and says the driver cannot check it`,
+        async (t) => {
+          const pairs = ready(t, family);
+          if (pairs === null) return;
+          const fake = await engine.server(pairs.listed, host);
+          try {
+            const dns = rebinding();
+            if (passes) {
+              await engine.accepted(verified(engine, host, fake, dns), fake);
+            } else {
+              const error = await failure(verified(engine, host, fake, dns));
+              assert.match(error.message, /could not be checked against an IPv6 address/);
+              assert.match(error.message, /this driver cannot verify one/);
+              engine.nothingSaid(fake);
+            }
+            assert.equal(fake.connections, 1);
+            assert.equal(dns.calls.length, 0, 'an address resolves nothing');
+          } finally {
+            await fake.close();
+          }
+        },
+      );
+
+      it(`${engine.name} at ${host}: a trusted certificate that lists other addresses is refused`, async (t) => {
+        const pairs = ready(t, family);
+        if (pairs === null) return;
+        const fake = await engine.server(pairs.others, host);
+        try {
+          const error = await failure(verified(engine, host, fake, rebinding()));
+          assert.match(error.message, REFUSED);
+          engine.nothingSaid(fake);
+          assert.equal(fake.connections, 1);
+        } finally {
+          await fake.close();
+        }
+      });
+
+      it(`${engine.name} at ${host}: a trusted certificate for \`localhost\` is refused`, async (t) => {
+        // What Node checks a connected socket against when nobody names a host. Before this
+        // ticket `pg` and `mysql2` accepted this one for any device given as an address.
+        const pairs = ready(t, family);
+        if (pairs === null) return;
+        const fake = await engine.server(pairs.localhost, host);
+        try {
+          const error = await failure(verified(engine, host, fake, rebinding()));
+          assert.match(error.message, REFUSED);
+          engine.nothingSaid(fake);
+        } finally {
+          await fake.close();
+        }
+      });
+
+      it(`${engine.name} at ${host}: with verification off, any certificate is taken as before`, async (t) => {
+        const pairs = ready(t, family);
+        if (pairs === null) return;
+        const fake = await engine.server(pairs.others, host);
+        try {
+          await engine.accepted(verified(engine, host, fake, rebinding(), false), fake);
+        } finally {
+          await fake.close();
+        }
+      });
+    }
+  }
+
+  it('db.postgresql by name is still checked against the name, by the same check', async (t) => {
+    // The check `pg` is handed is bound to the device's host, whatever Node passes it: a
+    // certificate that lists the address the name resolved to is not one for the name.
+    if (!needsTrust(t)) return;
+    if (forAddresses === undefined) return assert.fail('the certificates were not made');
+    const fake = await postgresServer(forAddresses);
+    try {
+      const error = await failure(
+        execute(dbPostgresql, rebinding(), {
+          port: fake.port,
+          params: { encrypt: 'require', verifyTls: true },
+        }),
+      );
+      assert.match(error.message, /database\.policy\.invalid/);
+      assert.match(error.message, REFUSED);
+      assert.deepEqual(fake.said, []);
+    } finally {
+      await fake.close();
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------------------------
 
 /**
@@ -975,6 +1351,33 @@ describe('the lookup and the connection share a database sensor’s connect time
       const ms = Number(process.hrtime.bigint() - started) / 1e6;
       assert.ok(error instanceof DbError, `threw ${String(error)}`);
       assert.ok(ms >= TIMEOUT - 150 && ms < TIMEOUT + 500, `took ${String(Math.round(ms))} ms`);
+    });
+  }
+
+  for (const engine of ENGINES) {
+    it(`${engine.name}: the driver’s own connect timer reads as the one sentence, in the connect phase (A-70)`, async (t) => {
+      if (hole === null) {
+        t.skip('this machine answers a connection to a listener that never accepts');
+        return;
+      }
+      // An address under `none`: the driver is handed nothing, so the timer that ends the
+      // connect is its own. `pg` says "timeout expired" with no code, `tedious` codes its
+      // error ETIMEOUT, `mysql2` ETIMEDOUT: one sentence for the three.
+      const error = await failure(
+        execute(engine.type, rebinding(), {
+          host: '127.0.0.1',
+          port: hole.port,
+          policy: 'none',
+          params: { connectTimeoutMs: 600 },
+        }),
+      );
+      assert.ok(error instanceof DbError, `threw ${String(error)}`);
+      assert.equal(
+        error.message,
+        `127.0.0.1:${String(hole.port)} accepted no connection within 600 ms — a firewall ` +
+          'dropping the packets looks exactly like this',
+      );
+      assert.equal(error.phase, 'connect');
     });
   }
 
@@ -1143,11 +1546,16 @@ describe('what a database driver is handed', () => {
       await runDbCheck(recording(seen), context);
       const redirect = seen[0]?.redirect ?? assert.fail('no redirect was handed over');
       const error = await failure(redirect(other));
-      assert.ok(error instanceof CredentialsWithheldError, String(error));
-      assert.equal(error.message, PIN_REFUSALS.redirectedOutside(context.target.host, other));
+      // **A failed check, and not a refusal over credentials** (`A-70`): the core left this
+      // device to nobody, so a mark on the result would be one it does not believe and counts
+      // against the probe. Nothing a runner reads as withheld.
+      assert.ok(error instanceof DbRedirectRefusedError, String(error));
+      assert.ok(!isCredentialsWithheld(error));
+      assert.equal((error as { code?: unknown }).code, undefined);
+      assert.equal(error.message, REDIRECT_OUTSIDE_TARGETS(context.target.host, other));
       assert.deepEqual(
-        [error.sensorId, error.target, error.phase, error.kind],
-        [62, context.target.host, 'connect', 'database'],
+        [error.target, error.routedTo, error.phase],
+        [context.target.host, other, 'connect'],
       );
     };
 
@@ -1191,7 +1599,7 @@ describe('what a database driver is handed', () => {
   it('a name that does not resolve fails in the guard, and the driver is not asked', async () => {
     const seen: DbConnectOptions[] = [];
     let lookups = 0;
-    const context = contextOf('/var/run/postgresql', rebinding(), { port: 5433 });
+    const context = contextOf('nowhere.policy.invalid', rebinding(), { port: 5433 });
     const error = await failure(
       runDbCheck(recording(seen), {
         ...context,
@@ -1207,10 +1615,112 @@ describe('what a database driver is handed', () => {
     assert.equal(
       error.message,
       'the device’s host name did not resolve to an address, connecting to ' +
-        '/var/run/postgresql:5433 (ENOTFOUND)',
+        'nowhere.policy.invalid:5433 (ENOTFOUND)',
     );
     assert.equal(lookups, 1);
     assert.deepEqual(seen, []);
+  });
+
+  describe('a PostgreSQL host that is a Unix socket directory is not a network target (A-70)', () => {
+    const SOCKETS = '/var/run/postgresql';
+    /** A resolver that fails the check if it is ever asked. */
+    const never = (): { context: CheckContext; lookups: () => number } => {
+      let lookups = 0;
+      const context = contextOf(SOCKETS, rebinding(), { port: 5433 });
+      return {
+        lookups: () => lookups,
+        context: {
+          ...context,
+          target: {
+            ...context.target,
+            resolve: () => {
+              lookups += 1;
+              return Promise.reject(Object.assign(new Error('nope'), { code: 'ENOTFOUND' }));
+            },
+          },
+        },
+      };
+    };
+
+    it('goes to the driver as it stands: nothing resolved, no lookup, no redirect, the whole timeout', async () => {
+      for (const policy of ['link-local', 'private', 'none'] as const) {
+        const seen: DbConnectOptions[] = [];
+        const { context, lookups } = never();
+        const execution = await runDbCheck(recording(seen), {
+          ...context,
+          target: { ...context.target, policy },
+        });
+        assert.equal(valueOf(execution, 'value'), 1, policy);
+        assert.equal(lookups(), 0, `${policy}: a path is not a name`);
+        assert.deepEqual(
+          seen.map((options) => [
+            options.host,
+            options.port,
+            options.lookup,
+            options.connectWithinMs,
+            options.redirect,
+            options.pinned,
+          ]),
+          [[SOCKETS, 5433, undefined, undefined, undefined, undefined]],
+          policy,
+        );
+      }
+    });
+
+    it('is PostgreSQL’s alone: the other two engines have no such host, and it is resolved as a name', async () => {
+      for (const id of ['mysql', 'mssql'] as const) {
+        const seen: DbConnectOptions[] = [];
+        const { context, lookups } = never();
+        const error = await failure(runDbCheck({ ...recording(seen), id }, context));
+        assert.match(error.message, /did not resolve to an address/, id);
+        assert.equal(lookups(), 1, id);
+        assert.deepEqual(seen, [], id);
+      }
+    });
+
+    it('a path that only contains a slash is a name like any other', async () => {
+      const seen: DbConnectOptions[] = [];
+      const { context, lookups } = never();
+      await failure(
+        runDbCheck(recording(seen), {
+          ...context,
+          target: { ...context.target, host: 'var/run/postgresql' },
+        }),
+      );
+      assert.equal(lookups(), 1);
+      assert.deepEqual(seen, []);
+    });
+
+    it('a target that was pinned is held to its pin, whatever its host looks like', async () => {
+      // A path is never pinned by `pinTarget`: it does not resolve. Were a pin handed over
+      // beside one all the same, the pin is what is checked, and not waved through as local.
+      const seen: DbConnectOptions[] = [];
+      const { context, lookups } = never();
+      const error = await failure(
+        runDbCheck(recording(seen), {
+          ...context,
+          target: { ...context.target, pinned: { address: METADATA, family: 4 } },
+        }),
+      );
+      assert.ok(error instanceof TargetRefusedError, String(error));
+      assert.equal(lookups(), 0);
+      assert.deepEqual(seen, []);
+    });
+
+    it('the real `pg` is handed the path and looks for the socket inside it', async () => {
+      // No server: what is shown is where `pg` went. It names the socket file in the
+      // directory, by the port, and nothing was resolved on the way.
+      const missing = join(tmpdir(), 'ms-a70-no-postgres-here');
+      const dns = rebinding();
+      const error = await failure(
+        execute(dbPostgresql, dns, { host: missing, port: 5433, params: { encrypt: 'disable' } }),
+      );
+      assert.ok(!(error instanceof TargetRefusedError), error.message);
+      assert.doesNotMatch(error.message, /did not resolve/);
+      assert.match(error.message, /ENOENT/);
+      assert.ok(error.message.includes(`${missing}/.s.PGSQL.5433`), error.message);
+      assert.equal(dns.calls.length, 0);
+    });
   });
 
   it('a pinned name: the pinned address, and only it', async () => {
@@ -1363,7 +1873,7 @@ describe('a SQL Server that routes the login to another server', () => {
     assert.deepEqual(onward.said, ['packet 0x12', 'login7']);
   });
 
-  it('a bounded set, a device given as an address inside it: the redirect is withheld, with nothing sent on', async () => {
+  it('a bounded set, a device given as an address inside it: the redirect is a failed check, with nothing sent on', async () => {
     reset();
     for (const to of [OTHER, '127.0.0.2']) {
       const dns = rebinding(v4('127.0.0.2'));
@@ -1373,25 +1883,33 @@ describe('a SQL Server that routes the login to another server', () => {
         dns,
       );
       loggedIn(device);
-      assert.ok(error instanceof CredentialsWithheldError, String(error));
-      assert.equal(error.message, PIN_REFUSALS.redirectedOutside('127.0.0.1', to));
+      // Through the real `tedious`, which wraps what its connector rejects with: the class
+      // and the sentence come out as they went in, and it is not a refusal over credentials.
+      assert.ok(error instanceof DbRedirectRefusedError, String(error));
+      assert.ok(!isCredentialsWithheld(error));
+      assert.equal(error.message, REDIRECT_OUTSIDE_TARGETS('127.0.0.1', to));
+      assert.match(
+        error.message,
+        /^127\.0\.0\.1 routed the login to \S+, which is outside the allowed targets of the database credentials this sensor uses, so nothing was sent there\./,
+      );
       assert.equal(dns.calls.length, 0, 'a server the set may not reach is not resolved');
     }
     assert.equal(onward.connections, 0);
   });
 
-  it('a bounded set, a device a name entry covers: the redirect is withheld, with nothing sent on', async () => {
+  it('a bounded set, a device a name entry covers: the redirect is a failed check, with nothing sent on', async () => {
     reset();
     const dns = rebinding(v4('127.0.0.1'), v4('127.0.0.2'));
     const { error, device } = await routed(OTHER, { targets: [NAME] }, dns);
     loggedIn(device);
-    assert.ok(error instanceof CredentialsWithheldError, String(error));
-    assert.equal(error.message, PIN_REFUSALS.redirectedOutside(NAME, OTHER));
+    assert.ok(error instanceof DbRedirectRefusedError, String(error));
+    assert.ok(!isCredentialsWithheld(error));
+    assert.equal(error.message, REDIRECT_OUTSIDE_TARGETS(NAME, OTHER));
     assert.deepEqual(dns.calls, [{ host: NAME, family: 0 }]);
     assert.equal(onward.connections, 0);
   });
 
-  it('a pinned set: the redirect is withheld, with nothing sent on', async () => {
+  it('a pinned set, which the core did leave to the probe: the redirect is withheld, with nothing sent on', async () => {
     reset();
     const dns = rebinding(v4('127.0.0.1'), v4('127.0.0.2'));
     const { error, device } = await routed('127.0.0.2', { targets: INSIDE }, dns);
@@ -1402,7 +1920,7 @@ describe('a SQL Server that routes the login to another server', () => {
     assert.equal(onward.connections, 0);
   });
 
-  it('a bounded set under `none` is withheld all the same', async () => {
+  it('a bounded set under `none` is refused all the same', async () => {
     reset();
     const dns = rebinding();
     const { error, device } = await routed(
@@ -1411,7 +1929,7 @@ describe('a SQL Server that routes the login to another server', () => {
       dns,
     );
     loggedIn(device);
-    assert.ok(error instanceof CredentialsWithheldError, String(error));
+    assert.ok(error instanceof DbRedirectRefusedError, String(error));
     assert.equal(onward.connections, 0);
   });
 
@@ -1713,6 +2231,110 @@ describe('what a database failure reads as', () => {
       describeDbError(Object.assign(new Error('nope'), { code: '28P01' }), options, 'PostgreSQL')
         .message,
       /refused the credential for “monitor”/,
+    );
+  });
+
+  it('a redirect that was not followed keeps its class and its sentence through a driver (A-70)', () => {
+    const redirect = new DbRedirectRefusedError(NAME, OTHER);
+    assert.equal(describeDbError(redirect, options, 'Microsoft SQL Server'), redirect);
+    const wrapped = Object.assign(new Error('Failed to connect', { cause: redirect }), {
+      code: 'ESOCKET',
+    });
+    assert.equal(describeDbError(wrapped, options, 'Microsoft SQL Server'), redirect);
+    // The sentence, written out: it names the device and then where the login was sent.
+    assert.equal(
+      redirect.message,
+      'database.policy.invalid routed the login to replica.policy.invalid, which is outside ' +
+        'the allowed targets of the database credentials this sensor uses, so nothing was ' +
+        'sent there. Adding that server to the targets by its address, its name or *.domain, ' +
+        'or giving the device the server that answers, lets the login through.',
+    );
+    assert.deepEqual([redirect.target, redirect.routedTo], [NAME, OTHER]);
+    assert.equal(redirect.phase, 'connect');
+    assert.ok(redirect instanceof DbError);
+    assert.ok(!isCredentialsWithheld(redirect));
+  });
+
+  describe('every driver’s connect timeout is the one sentence, in the connect phase (A-70)', () => {
+    const SENTENCE =
+      'database.policy.invalid:1433 accepted no connection within 2000 ms — a firewall ' +
+      'dropping the packets looks exactly like this';
+    const timedOut = (error: unknown, engine: string): void => {
+      const described = describeDbError(error, options, engine);
+      assert.ok(described instanceof DbError, engine);
+      assert.equal(described.message, SENTENCE, engine);
+      assert.equal(described.phase, 'connect', engine);
+    };
+
+    it('a socket’s ETIMEDOUT, as before', () => {
+      timedOut(Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT' }), 'MySQL');
+      timedOut(Object.assign(new Error('socket'), { code: 'ESOCKETTIMEDOUT' }), 'MySQL');
+    });
+
+    it('`pg`’s “timeout expired”, which has no code', () => {
+      timedOut(new Error('timeout expired'), 'PostgreSQL');
+    });
+
+    it('`tedious`’s ETIMEOUT, one letter short of the socket’s', () => {
+      timedOut(
+        Object.assign(new Error('Failed to connect to database.policy.invalid:1433 in 2000ms'), {
+          code: 'ETIMEOUT',
+        }),
+        'Microsoft SQL Server',
+      );
+    });
+
+    it('only those: another message with no code, and another code, are the driver’s own words', () => {
+      assert.equal(
+        describeDbError(new Error('timeout expired while idle'), options, 'PostgreSQL').message,
+        'PostgreSQL at database.policy.invalid:1433: timeout expired while idle',
+      );
+      assert.equal(
+        describeDbError(
+          Object.assign(new Error('timeout expired'), { code: '57P01' }),
+          options,
+          'PostgreSQL',
+        ).message,
+        'PostgreSQL at database.policy.invalid:1433: timeout expired',
+      );
+    });
+
+    it('and only while connecting: a request `tedious` timed out is not a connection refused', () => {
+      const request = Object.assign(new Error('Timeout: Request failed to complete in 2000ms'), {
+        code: 'ETIMEOUT',
+      });
+      const described = describeDbError(request, options, 'Microsoft SQL Server', 'query');
+      assert.doesNotMatch(described.message, /accepted no connection/);
+      assert.equal(
+        describeDbError(new Error('timeout expired'), options, 'PostgreSQL', 'query').message,
+        'PostgreSQL at database.policy.invalid:1433: timeout expired',
+      );
+    });
+  });
+
+  it('a driver that cannot check an IPv6 address says that, and not that the certificate is wrong (A-70)', () => {
+    const altname = (): Error =>
+      Object.assign(new Error('Hostname/IP does not match certificate’s altnames'), {
+        code: 'ERR_TLS_CERT_ALTNAME_INVALID',
+      });
+    const at = (host: string): DbConnectOptions => ({ ...options, host });
+    for (const engine of ['MySQL', 'Microsoft SQL Server']) {
+      const described = describeDbError(altname(), at('::1'), engine);
+      assert.match(described.message, /could not be checked against an IPv6 address/, engine);
+      assert.match(described.message, /this driver cannot verify one/, engine);
+      // An IPv4 address and a name are checked, so theirs is the certificate's own failure.
+      for (const host of ['127.0.0.1', NAME]) {
+        assert.doesNotMatch(
+          describeDbError(altname(), at(host), engine).message,
+          /could not be checked/,
+          `${engine} ${host}`,
+        );
+      }
+    }
+    // PostgreSQL is handed the shared check, which reads an IPv6 address.
+    assert.doesNotMatch(
+      describeDbError(altname(), at('::1'), 'PostgreSQL').message,
+      /could not be checked/,
     );
   });
 });

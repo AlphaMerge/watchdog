@@ -16,7 +16,13 @@ import {
   lookupFor,
 } from '../support/checked-target.js';
 import { CredentialsWithheldError, PIN_REFUSALS, pinnedLookup } from '../support/pinned-target.js';
-import type { DbConnectOptions, DbDriver, DbResult, DbRow } from '../support/db/driver.js';
+import {
+  DbRedirectRefusedError,
+  type DbConnectOptions,
+  type DbDriver,
+  type DbResult,
+  type DbRow,
+} from '../support/db/driver.js';
 
 /**
  * What the three database sensor types share, which is everything but the driver (`T-18`).
@@ -286,13 +292,21 @@ export async function runDbCheck(driver: DbDriver, context: CheckContext): Promi
   // the name is not resolved again. Whichever family the name has, as the drivers always
   // connected. A device given as an address is checked as it stands and resolves nothing.
   const pinned = context.target.pinned;
-  const checked = await checkedTarget({
-    ...guardOf(context.target),
-    timeoutMs: connectTimeoutMs,
-    signal: context.signal,
-    verb: 'connect to',
-    doing: `connecting to ${host}:${String(port)}`,
-  });
+  // **A PostgreSQL host that begins with `/` is a Unix socket directory on the probe's own
+  // machine, and not a network target** (`A-70`). `pg` connects to the socket inside it
+  // (`lib/client.js`: a host whose first character is `/`). There is no name to resolve and no
+  // address for the policy to read, so it goes to the driver as it stands, as it did before
+  // `A-62`, which sent it to the resolver and failed it as a name with no address.
+  const local = driver.id === 'postgresql' && host.startsWith('/') && pinned === undefined;
+  const checked = local
+    ? null
+    : await checkedTarget({
+        ...guardOf(context.target),
+        timeoutMs: connectTimeoutMs,
+        signal: context.signal,
+        verb: 'connect to',
+        doing: `connecting to ${host}:${String(port)}`,
+      });
   // The one address a credential set was checked against (`A-41c`), or the policy's addresses.
   const lookup =
     pinned === undefined ? lookupFor(host, checked).lookup : pinnedLookup(host, pinned);
@@ -313,8 +327,12 @@ export async function runDbCheck(driver: DbDriver, context: CheckContext): Promi
   const redirect = async (other: string): Promise<LookupFunction | undefined> => {
     // A set held to one address is not sent to a second.
     if (pinned !== undefined) throw withheld(PIN_REFUSALS.redirected(host, other));
+    // **A failed check, and not a refusal the core is asked to believe** (`A-70`). No pin was
+    // made, so the core decided this device itself (an address inside the targets, or a name a
+    // name entry covers) and left the probe nothing: it honours a mark only for a sensor it
+    // did leave, and counts any other as unearned. The sensor reads Down with the sentence.
     if (targets.length > 0 && targetVerdict(other, targets) !== 'inside') {
-      throw withheld(PIN_REFUSALS.redirectedOutside(host, other));
+      throw new DbRedirectRefusedError(host, other);
     }
     // And the probe's target policy, on a lookup of the routed name's own.
     const onward = await checkedTarget({
@@ -351,7 +369,7 @@ export async function runDbCheck(driver: DbDriver, context: CheckContext): Promi
     // address too, which has no lookup and whose redirect would otherwise be the driver's to
     // resolve and follow unchecked. Absent only where nothing is: `none`, and a set with no
     // bounds.
-    ...(guarded || targets.length > 0 || pinned !== undefined ? { redirect } : {}),
+    ...(!local && (guarded || targets.length > 0 || pinned !== undefined) ? { redirect } : {}),
     ...(pinned === undefined ? {} : { pinned }),
   };
 

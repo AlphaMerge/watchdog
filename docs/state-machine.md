@@ -173,6 +173,17 @@ the result is the result it would be without the mark, a failed scan included, a
 with the probe's refused results on Probe Health. A probe cannot turn the failure of a sensor it
 merely owns into a standing Unknown.
 
+**So a probe marks only what it was left** (`A-70`). The one refusal a probe makes for a sensor
+the core decided itself is a SQL Server login routed to a server outside a bounded set's
+targets, on a device given as an address inside them or covered by a name entry. Nothing is
+sent to the routed server, and the probe reports it **unmarked**, as the failed check it is:
+the device answered, and sent the login somewhere these credentials do not go. The sensor reads
+Down with that sentence and pages once, as any Down does. Marked, the result would have been the
+same Down and one more on **Reports refused** at every scan, against a probe that did nothing
+wrong. The core was not widened to believe it: "the set is bounded and the type is `db.mssql`"
+is something the core can check, but that a redirect *happened* is not, and a probe believed on
+that alone could stand any such sensor Unknown, and hide its failures, by saying so.
+
 **A refusal is judged against the configuration it was made under** (`A-53`). A check already
 running, or a result in the spool, when a configuration stops leaving a sensor to the probe (a
 name entry now covers the device, it was given an address, it was paused, the core withholds it

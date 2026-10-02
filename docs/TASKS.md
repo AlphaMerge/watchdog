@@ -19260,7 +19260,7 @@ because each is a decision rather than a defect:
         does not end an open in flight. The SSH simulator has no mode that accepts and never
         speaks; the tests use a bare listener, as `A-65`'s do.
 
-- [ ] **A-70 — four loose ends on the database sensors** · M · A-62 · Found 2026-10-02 by
+- [x] **A-70 — four loose ends on the database sensors** · M · A-62 · Found 2026-10-02 by
       `A-62` and its review. A bounded set's refusal of a SQL Server redirect, on a device the
       core did not leave to its probe (an address, or a name a name entry covers), is read by
       the core as a failed scan and counted as unearned: Down, where the same refusal on a
@@ -19272,10 +19272,95 @@ because each is a decision rather than a defect:
       followed through a real SQL Server login with TLS on. **Done when** each is fixed with a
       test or written down as accepted with the reason.
 
+      **A-70 outcome.** Four fixed with tests, one item taken over from `A-71` and done for
+      what the drivers allow, one left and said. No migration, no protocol number, nothing on
+      the wire, no schema: both generated references are untouched.
+      - **The redirect, first shown in the core** (`credential-pinning.test.ts`): a database
+        sensor on a device given as an address inside its set's targets, Up; two results
+        marked `withheld` in the words a probe sent before this; the sensor is Down with that
+        sentence, not held, and Probe Health's `reportsRefused` is 2. Read from the code by
+        `A-62`'s review, now driven.
+      - **Decided: the core believes nothing more, and the probe says what happened.** The
+        rule on offer, "the set is bounded and the type is `db.mssql`", is one the core can
+        check, but it is not what would be believed: that a redirect *happened* is the
+        probe's word alone. Honoured, a probe could stand any bounded SQL Server sensor
+        Unknown in its own words, and so hide a real failure of it, for as long as it liked,
+        on a sensor the configuration left it nothing to decide. That is what `A-53` says a
+        probe cannot do. So the probe is made honest instead: `runDbCheck` throws
+        `DbRedirectRefusedError` for a routed server outside a bounded set's targets where no
+        pin was made. It is a `DbError` with no `CREDENTIALS_WITHHELD` code, so no runner
+        marks it; `describeDbError` keeps its class through `tedious`'s wrapper. The sensor
+        reads **Down** with `<device> routed the login to <server>, which is outside the
+        allowed targets of the database credentials this sensor uses, so nothing was sent
+        there.` and the fix. A pinned set's redirect is unchanged: withheld, Unknown, which
+        the core did leave to the probe. `PIN_REFUSALS.redirectedOutside` is gone.
+        **A probe that is not upgraded** goes on marking it, and the core goes on counting it:
+        the count stops when the probe is the new build.
+      - **Alarm volume** (scenario, same file): the same sensor, two unmarked failed scans
+        with the new sentence: Down once, one `initial` request from the Down trigger and none
+        from Unknown, one message naming it, not held, `reportsRefused` 0 and `lateRefusals`
+        0; two more failed scans raise nothing; Up at the scan that gets through. It was Down
+        before and is Down now: no new state, no new notification.
+      - **`db.mysql` verified the chain and not the name.** `mysql2` 3.24.2,
+        `lib/base/connection.js` `startTLS`: `checkServerIdentity: verifyIdentity ?
+        Tls.checkServerIdentity : function () { return undefined; }` (lines 405-409), and the
+        second comparison at 417-428 is under `verifyIdentity` too. The driver set
+        `rejectUnauthorized` alone. It now sets `verifyIdentity` with it. **A sensor that was
+        Up under a trusted certificate for another name reads Down**, which is the fix, and is
+        in the upgrade notes. Verification off is as it was.
+      - **TLS for a device given as an address** (from `A-71`), each driver read and then run:
+        | Driver | A custom identity check | An address before | IPv4 now | `::1` now |
+        | --- | --- | --- | --- | --- |
+        | `pg` 8.23.0 | Yes: `upgradeToSSL` spreads `ssl` into `tls.connect` (`lib/connection.js` 96-121) | **Checked against `localhost`**, as mail was after `STARTTLS` (`A-67`): `servername` is set only for a name (117-119), so Node falls back to it. A certificate listing the address was refused and a trusted one for `localhost` accepted | Passes | Passes: handed the shared `serverIdentity`, bound to the device's host |
+        | `mysql2` 3.24.2 | **No**: it picks named fields from `ssl` and hands Node its own check or none | The chain only; with `verifyIdentity` on it would be `localhost` too (no `servername` for an address, 395-397) | Passes: the socket it is handed records the address as its host, which is what Node reads next | **Refused**, whatever the certificate lists: Node's own check reads an IPv6 address as a name (`A-60`) |
+        | `tedious` 20.0.0 | **No**: `startTls` calls `tls.connect` with `servername`, a context and `rejectUnauthorized` (`lib/message-io.js` 50-56) | Checked against the address: it names the address as the server name (Node warns `DEP0123`) | Passes, unchanged | **Refused**, for the same reason |
+        The two IPv6 refusals fail closed and say so: `the certificate could not be checked
+        against an IPv6 address — this driver cannot verify one`. Verification was not
+        weakened to get round them: for `tedious` the only way is to turn its rejection off
+        and check on its `secure` event, which holds only while our handler runs. `mysql2`'s
+        IPv4 case leans on `socket._host`, which Node reads and does not document
+        (`onConnectSecure`); the tests hold it, and it fails on the side of refusing.
+      - **A PostgreSQL host that begins with `/`** goes to `pg` as it stands: no
+        `checkedTarget`, no lookup, no redirect, the whole timeout, under every policy.
+        PostgreSQL's alone, and not for a target that carries a pin.
+      - **`describeDbError` takes the phase**, `connect` unless told `query`, and while
+        connecting reads `pg`'s codeless `timeout expired` (`lib/client.js` 170) and
+        `tedious`'s `ETIMEOUT` (`lib/connection.js` 1050) as the sentence `ETIMEDOUT` gives:
+        `host:port accepted no connection within N ms`. `DbError` carries `phase`, `connect`
+        on these. In the query phase neither is read so: `tedious` puts `ETIMEOUT` on a
+        request too.
+      - **Not done: a redirect through a real SQL Server login with TLS on.** No SQL Server
+        runs in development, and the TDS fake routes without encryption. As `A-62`'s review
+        left it. The fake does now negotiate TLS inside TDS and take a LOGIN7 through it,
+        which is what the address cases needed.
+      - **Docs:** `administration.md` (the redirect rule and what a refusal reads as, the
+        upgrade notes, the per-transport table), `state-machine.md`.
+      - **Tests:** `db-checked-target.test.ts`, 114, none skipped (71 at `A-62`'s review).
+        Through the real drivers, for each of the three and each of `127.0.0.1` and `::1`: a certificate
+        listing the address, one listing other addresses, one for `localhost`, and
+        verification off. `db.mysql` by name: the wrong name refused, pinned too, and
+        verification off. The driver's own connect timer for each engine against a port that
+        never answers. The socket path with a recording driver and the real `pg`. Certificates
+        are made at test time; only a missing `openssl` skips, and the file's older TLS cases
+        are held to that now too. `credential-pinning.test.ts`, 156 (it was 154).
+      - **Mutation:** 20 of 20 killed by a test, each planted alone, with the built file
+        compared against the baseline after every restore. 19 at the first pass: a sentence
+        that named the device twice and the routed server never survived, because the tests
+        compared it with the function that makes it; it is now written out in one.
+      - **Found, not fixed.** The core's own pool (`db/pool.ts`) hands `pg`
+        `{ rejectUnauthorized: true }` and nothing else, so a core whose database is given as
+        an address with `ssl` on checks its certificate against `localhost`, as the sensor
+        did; not measured there. A bounded database set facing a socket path is undecided to
+        the core and unresolvable to the probe, so it reads Unknown as a name that does not
+        resolve: read from the code, not tested.
+
 - [ ] **A-71 — what is left of an address under TLS** · S · A-67 · Found 2026-10-02 by `A-67`.
       The core's heartbeat uses `fetch`, which refuses `https://[::1]` for `A-60`'s reason and
-      has no identity hook. The database drivers' own TLS was not tried against an address,
-      and `pg` may check an address host as `localhost` after its upgrade, as mail did. The
+      has no identity hook. ~~The database drivers' own TLS was not tried against an address,
+      and `pg` may check an address host as `localhost` after its upgrade, as mail did.~~
+      **Moved to `A-70` and done there**: `pg` did, and is fixed for both families; `mysql2`
+      and `tedious` pass for IPv4 and refuse every certificate for an IPv6 address, which is
+      written down there as what those two drivers allow. The
       HTTP and TLS sensors send an address as the server name, which Node says it will stop
       doing. `tls.certificate`'s `hostMatches` is 0 for a device given by address whose
       certificate lists it. `mail.test.ts`'s STARTTLS case still turns verification off.

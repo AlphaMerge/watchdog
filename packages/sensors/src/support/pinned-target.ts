@@ -139,11 +139,6 @@ export const PIN_REFUSALS = {
     'checked against the allowed targets of the database credentials it would use, so they ' +
     'are not sent there. Giving the device the name or address of the server that answers, ' +
     'inside those targets, sends them again.',
-  redirectedOutside: (host: string, other: string): string =>
-    `Not scanned: ${host} handed the connection on to ${other}, which the allowed targets of ` +
-    'the database credentials it would use do not cover, so they are not sent there. Adding ' +
-    'that server to the targets by its address, its name or *.domain, or giving the device ' +
-    'the server that answers, sends them again.',
   otherPeer: (host: string, pinned: string, actual: string): string =>
     `Not scanned: the connection for ${host} went to ${actual}, not to ${pinned}, the address ` +
     'checked against the allowed targets of the credentials it would use, so its answer is ' +
