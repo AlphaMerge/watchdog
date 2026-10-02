@@ -19260,6 +19260,46 @@ because each is a decision rather than a defect:
         does not end an open in flight. The SSH simulator has no mode that accepts and never
         speaks; the tests use a bare listener, as `A-65`'s do.
 
+- [ ] **A-70 — four loose ends on the database sensors** · M · A-62 · Found 2026-10-02 by
+      `A-62` and its review. A bounded set's refusal of a SQL Server redirect, on a device the
+      core did not leave to its probe (an address, or a name a name entry covers), is read by
+      the core as a failed scan and counted as unearned: Down, where the same refusal on a
+      pinned target is Unknown. `db.mysql` with "Verify the certificate" on checks the chain
+      and not the name (`mysql2` compares it only under `ssl.verifyIdentity`); fixing it can
+      turn sensors Down and needs saying in the upgrade notes. A PostgreSQL host given as a
+      Unix socket directory fails as a name that does not resolve. `describeDbError` does not
+      know `pg`'s "timeout expired" or `tedious`'s `ETIMEOUT`. A redirect has not been
+      followed through a real SQL Server login with TLS on. **Done when** each is fixed with a
+      test or written down as accepted with the reason.
+
+- [ ] **A-71 — what is left of an address under TLS** · S · A-67 · Found 2026-10-02 by `A-67`.
+      The core's heartbeat uses `fetch`, which refuses `https://[::1]` for `A-60`'s reason and
+      has no identity hook. The database drivers' own TLS was not tried against an address,
+      and `pg` may check an address host as `localhost` after its upgrade, as mail did. The
+      HTTP and TLS sensors send an address as the server name, which Node says it will stop
+      doing. `tls.certificate`'s `hostMatches` is 0 for a device given by address whose
+      certificate lists it. `mail.test.ts`'s STARTTLS case still turns verification off.
+      **Done when** each has a test and is fixed, or is written down as accepted.
+
+- [ ] **A-72 — a probe that flaps its protocol version pages every time** · M · A-68, A-41c ·
+      Found 2026-10-02 by `A-68`, measured: five alternations raise three Unknown pages and two
+      recoveries, with or without a refusal sent, because each downgrade withholds the probe's
+      named sensors and each upgrade lets them go. And a marked result that arrives past the
+      window while the core withholds the sensor is a failed scan; two become a Down with an
+      empty message when the sensor is released. **A decision first:** whether a version flap
+      is damped, and whether results for a sensor the core is withholding count at all.
+      **Done when** that is decided and the scenario in `credential-pinning.test.ts` shows it.
+      Also: a sensor with two credential kinds, one version-dependent, has no case there, and
+      no test boots `main.ts`.
+
+- [ ] **A-73 — five loose ends from discovery text and the SSH pool** · S · A-69 · Found
+      2026-10-02 by `A-69`. `sweep-progress` takes any 7 to 15 characters as an address. A
+      fingerprint field this build does not know is carried at any size. The summary's vendor
+      breakdown reads stored rows, so one written before the bound shows uncut.
+      `SshSessionPool.closeAll` does not end an open in flight. The SSH simulator has no mode
+      that accepts and never speaks, so two tickets' tests use a bare listener. **Done when**
+      each is fixed with a test.
+
 ### Panel round two — notifications, schedules, triggers
 
 Eight lenses over `packages/core/src/{notifications,schedules,triggers}`, merged to 34 distinct
