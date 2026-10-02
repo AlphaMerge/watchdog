@@ -734,6 +734,13 @@ Health is what an exporter sent and the probe never received. What the probe rec
 buffer overwrote before a sensor read it is not in `flowMissed`: it fails that sensor's scan with
 the number, and is in the collector's stop line in the log as `overwritten`.
 
+`flowMissed` is read from each exporter's own running sequence, and a device keeps more than one.
+A sequence is followed per exporter address, per dialect, and within a dialect per NetFlow v9
+source id, IPFIX observation domain, or sFlow agent and sub-agent, so a switch that exports
+NetFlow v9 and sFlow to one probe, or a router with two line cards, is not read as losing flows
+it sent. NetFlow v5 has one sequence for an address. The probe follows 4,096 sequences at once and
+forgets the one silent longest, which costs that sequence one comparison when it speaks again.
+
 The five `flow*` channels on Probe Health are what the collector counted, and they need **both
 ends at protocol 23**: a probe sends them only to a core that says it speaks 23, because an older
 core refuses a heartbeat carrying a field it does not know. Upgrade the core first and nothing is

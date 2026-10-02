@@ -1,5 +1,10 @@
 import type { ReceivedBatch, ReceivedNotification } from '@ms/sensors';
-import type { FlowReceiver, FlowReceiverOptions, ReceivedFlow } from '@ms/sensors/flow';
+import type {
+  FlowMessage,
+  FlowReceiver,
+  FlowReceiverOptions,
+  ReceivedFlow,
+} from '@ms/sensors/flow';
 import type { Logger } from '@ms/shared';
 import { NotificationRing } from './ring.js';
 
@@ -27,6 +32,16 @@ import { NotificationRing } from './ring.js';
  */
 
 export const LISTENER_ID = 'flow';
+
+/**
+ * How many exporter sequences are followed at once (`B-10`).
+ *
+ * A sequence is an address, a dialect and a source id, observation domain or sub-agent, and the
+ * last of those is whatever the datagram says. Far above any real site — a thousand exporters
+ * with four domains each — and small enough that a device inventing one per datagram costs a
+ * fixed few hundred kilobytes rather than the probe.
+ */
+export const MAX_SEQUENCES = 4_096;
 
 export interface FlowListenerOptions {
   readonly logger: Logger;
@@ -79,7 +94,12 @@ export class FlowListener {
   readonly #options: FlowListenerOptions;
   readonly #now: () => Date;
   readonly #ring: NotificationRing;
-  /** Per exporter, the sequence number the next datagram should carry. */
+  /**
+   * Per sequence an exporter keeps, the number its next datagram should carry.
+   *
+   * Bounded (`B-10`): part of the key is read out of the datagram, so a device walking through
+   * observation domains would otherwise grow this for as long as it sent.
+   */
   readonly #expected = new Map<string, number>();
   #receiver: FlowReceiver | undefined;
   #received = 0;
@@ -176,12 +196,7 @@ export class FlowListener {
     }
 
     const { records, sequence, dialect, sysUptimeMs, unixSecs, undecodable } = received.message;
-    this.#countSequenceGap(
-      received.source,
-      sequence,
-      records.length,
-      received.message.sequenceCounts,
-    );
+    this.#countSequenceGap(received.source, received.message);
     this.#undecodable += undecodable;
 
     const at = this.#now().toISOString();
@@ -233,23 +248,35 @@ export class FlowListener {
    * have unrelated counters, and a single shared "expected next" would report a loss on every
    * alternate datagram — a number that looks like a failing network and is arithmetic.
    *
+   * **And per dialect, and per whatever the dialect counts within** (`B-10`). One device can
+   * export NetFlow v9 and sFlow to one collector, and both count packets, so "what the sequence
+   * counts" does not tell them apart: read against each other, every datagram of the one further
+   * on is a loss and every datagram of the other a restart. Within a dialect, v9 counts per
+   * source id, IPFIX per observation domain and sFlow per sub-agent of an agent, which the
+   * decoder hands over as `sequenceScope`.
+   *
    * A sequence that goes *backwards* is a reboot rather than a loss: the exporter restarted and
    * began again, and counting the difference would report billions of missing flows. Resynced
    * silently, because it is not an error and the operator's evidence of a reboot is `sysUptime`.
    */
-  #countSequenceGap(
-    source: string,
-    sequence: number,
-    records: number,
-    counts: 'packets' | 'data-records' | 'flows',
-  ): void {
+  #countSequenceGap(source: string, message: FlowMessage): void {
+    const { sequence, records, sequenceCounts, dialect, sequenceScope } = message;
     // **What the sequence advances by is not the same in every dialect** (`B-03`): v5 counts
-    // exported flows, IPFIX counts data records, and v9 counts *packets* — one per datagram. A
-    // single arithmetic for all three reports a healthy v9 exporter as losing every flow but one.
-    const advance = counts === 'packets' ? 1 : records;
-    const key = `${source}|${counts}`;
+    // exported flows, IPFIX counts data records, and v9 and sFlow count *packets* — one per
+    // datagram. A single arithmetic for all of them reports a healthy v9 exporter as losing every
+    // flow but one.
+    const advance = sequenceCounts === 'packets' ? 1 : records.length;
+    const key = `${source}|${dialect}|${sequenceScope ?? ''}`;
     const expected = this.#expected.get(key);
     if (expected !== undefined && sequence > expected) this.#missed += sequence - expected;
+    // Deleted and set again, so the map's own order is least recently heard first.
+    this.#expected.delete(key);
     this.#expected.set(key, (sequence + advance) >>> 0);
+    if (this.#expected.size > MAX_SEQUENCES) {
+      // The longest silent one is forgotten. It costs that sequence one comparison if it speaks
+      // again — its next datagram is taken as a first — and never invents a loss.
+      const [oldest] = this.#expected.keys();
+      if (oldest !== undefined) this.#expected.delete(oldest);
+    }
   }
 }

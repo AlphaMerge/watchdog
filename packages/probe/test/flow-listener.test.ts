@@ -1,8 +1,15 @@
 import assert from 'node:assert/strict';
 import { beforeEach, describe, it } from 'node:test';
 import { pino } from 'pino';
-import type { FlowReceiverOptions, ReceivedFlow } from '@ms/sensors/flow';
-import { FlowListener } from '../src/listeners/flow-listener.js';
+import {
+  decodeFlowDatagram,
+  TemplateCache,
+  type FlowDialect,
+  type FlowReceiverOptions,
+  type ReceivedFlow,
+} from '@ms/sensors/flow';
+import { renderIpfix, renderNetflowV9, renderSflow } from '@ms/simulators';
+import { FlowListener, MAX_SEQUENCES } from '../src/listeners/flow-listener.js';
 
 /**
  * The ring, the cursors and the sequence arithmetic, with no socket anywhere (`B-02`).
@@ -61,13 +68,16 @@ function datagram(
   sequence: number,
   count: number,
   counts: 'packets' | 'data-records' | 'flows' = 'flows',
+  dialect: FlowDialect = 'netflow5',
+  scope?: string,
 ): ReceivedFlow {
   return {
     source,
     message: {
-      dialect: 'netflow5',
+      dialect,
       sequence,
       sequenceCounts: counts,
+      ...(scope === undefined ? {} : { sequenceScope: scope }),
       undecodable: 0,
       sysUptimeMs: 3_600_000,
       unixSecs: 1_700_000_000,
@@ -199,11 +209,119 @@ describe('the flow listener', () => {
       // An exporter can send both; their counters are unrelated and interleaving them would
       // invent losses in whichever arrived second.
       const flow = await listener();
-      deliver(datagram('192.0.2.1', 0, 2, 'packets'));
-      deliver(datagram('192.0.2.1', 500, 2, 'data-records'));
-      deliver(datagram('192.0.2.1', 1, 2, 'packets'));
-      deliver(datagram('192.0.2.1', 502, 2, 'data-records'));
+      // Each named as the dialect it is: the key is the dialect since `B-10`, and what a
+      // sequence counts follows from it.
+      deliver(datagram('192.0.2.1', 0, 2, 'packets', 'netflow9'));
+      deliver(datagram('192.0.2.1', 500, 2, 'data-records', 'ipfix'));
+      deliver(datagram('192.0.2.1', 1, 2, 'packets', 'netflow9'));
+      deliver(datagram('192.0.2.1', 502, 2, 'data-records', 'ipfix'));
       assert.equal(flow.stats().missed, 0);
+    });
+
+    it('keeps NetFlow v9 and sFlow apart from one address, though both count packets (`B-10`)', async () => {
+      // A switch exporting both to one collector. Each sequence advances by one a datagram, so
+      // "what the sequence counts" cannot tell them apart, and read against each other every
+      // sFlow datagram is four hundred ahead of v9's and every v9 one is a restart.
+      const flow = await listener();
+      deliver(datagram('192.0.2.1', 0, 2, 'packets', 'netflow9'));
+      deliver(datagram('192.0.2.1', 400, 2, 'packets', 'sflow'));
+      deliver(datagram('192.0.2.1', 1, 2, 'packets', 'netflow9'));
+      deliver(datagram('192.0.2.1', 401, 2, 'packets', 'sflow'));
+      assert.equal(flow.stats().missed, 0);
+    });
+
+    it('keeps a sequence per v9 source id and per IPFIX observation domain (`B-10`)', async () => {
+      // Two line cards behind one address. The second is far ahead of the first, as in the
+      // per-exporter case above and for its reason.
+      const flow = await listener();
+      deliver(datagram('192.0.2.1', 0, 2, 'packets', 'netflow9', '1'));
+      deliver(datagram('192.0.2.1', 700, 2, 'packets', 'netflow9', '2'));
+      deliver(datagram('192.0.2.1', 1, 2, 'packets', 'netflow9', '1'));
+      deliver(datagram('192.0.2.1', 701, 2, 'packets', 'netflow9', '2'));
+      assert.equal(flow.stats().missed, 0);
+
+      deliver(datagram('192.0.2.1', 0, 2, 'data-records', 'ipfix', '1'));
+      deliver(datagram('192.0.2.1', 300, 2, 'data-records', 'ipfix', '2'));
+      deliver(datagram('192.0.2.1', 2, 2, 'data-records', 'ipfix', '1'));
+      deliver(datagram('192.0.2.1', 302, 2, 'data-records', 'ipfix', '2'));
+      assert.equal(flow.stats().missed, 0);
+    });
+
+    it('still reads a gap inside one source id while another runs unbroken (`B-10`)', async () => {
+      // Keyed apart is not the same as not compared at all.
+      const flow = await listener();
+      deliver(datagram('192.0.2.1', 0, 2, 'packets', 'netflow9', '1'));
+      deliver(datagram('192.0.2.1', 700, 2, 'packets', 'netflow9', '2'));
+      deliver(datagram('192.0.2.1', 4, 2, 'packets', 'netflow9', '1')); // 1, 2 and 3 never came
+      deliver(datagram('192.0.2.1', 701, 2, 'packets', 'netflow9', '2'));
+      assert.equal(flow.stats().missed, 3);
+    });
+
+    it('keeps a sequence per sFlow agent and per sub-agent (`B-10`)', async () => {
+      const flow = await listener();
+      deliver(datagram('192.0.2.1', 0, 1, 'packets', 'sflow', '10.1.1.1/0'));
+      deliver(datagram('192.0.2.1', 250, 1, 'packets', 'sflow', '10.1.1.1/1'));
+      deliver(datagram('192.0.2.1', 900, 1, 'packets', 'sflow', '10.2.2.2/0'));
+      deliver(datagram('192.0.2.1', 1, 1, 'packets', 'sflow', '10.1.1.1/0'));
+      deliver(datagram('192.0.2.1', 251, 1, 'packets', 'sflow', '10.1.1.1/1'));
+      deliver(datagram('192.0.2.1', 901, 1, 'packets', 'sflow', '10.2.2.2/0'));
+      assert.equal(flow.stats().missed, 0);
+    });
+
+    it('keeps one scope from two addresses apart (`B-10`)', async () => {
+      // Source id 0 is what most exporters send. The address is still part of the key.
+      const flow = await listener();
+      deliver(datagram('192.0.2.1', 0, 1, 'packets', 'netflow9', '0'));
+      deliver(datagram('198.51.100.9', 600, 1, 'packets', 'netflow9', '0'));
+      deliver(datagram('192.0.2.1', 1, 1, 'packets', 'netflow9', '0'));
+      deliver(datagram('198.51.100.9', 601, 1, 'packets', 'netflow9', '0'));
+      assert.equal(flow.stats().missed, 0);
+    });
+
+    it('reads real datagrams of three dialects from one address, each in its own sequence (`B-10`)', async () => {
+      // The bytes, through the decoder the socket uses: what names the sequence is read out of
+      // each header, and a fixture that passed a scope in would not show a decoder leaving it out.
+      const flow = await listener();
+      const cache = new TemplateCache();
+      const from = (bytes: Buffer): void => {
+        deliver({
+          source: '192.0.2.1',
+          message: decodeFlowDatagram(bytes, '192.0.2.1', cache),
+        });
+      };
+      for (const step of [0, 1, 2]) {
+        from(renderNetflowV9([], [], { sequence: step, observationDomain: 1 }));
+        from(renderNetflowV9([], [], { sequence: 5_000 + step, observationDomain: 2 }));
+        from(renderIpfix([], [], { sequence: 90, observationDomain: 1 }));
+        from(renderSflow([{}], { sequence: 300 + step }));
+        from(renderSflow([{}], { sequence: 7_000 + step, subAgent: 1 }));
+        from(renderSflow([{}], { sequence: 40 + step, agentAddress: '10.9.9.9' }));
+      }
+      assert.equal(flow.stats().missed, 0);
+
+      // And a datagram that did go missing, on one of the six: 3 was next from sub-agent 1's.
+      from(renderSflow([{}], { sequence: 7_005, subAgent: 1 }));
+      assert.equal(flow.stats().missed, 2);
+    });
+
+    it('follows a bounded number of sequences, and forgets the one silent longest (`B-10`)', async () => {
+      // The scope is read out of the datagram, so a device can name as many as it likes.
+      const flow = await listener();
+      deliver(datagram('192.0.2.1', 0, 1, 'packets', 'netflow9', 'first'));
+      deliver(datagram('192.0.2.1', 0, 1, 'packets', 'netflow9', 'second'));
+      // Heard again, so `second` is now the one silent longest.
+      deliver(datagram('192.0.2.1', 1, 1, 'packets', 'netflow9', 'first'));
+      for (let domain = 0; domain < MAX_SEQUENCES - 1; domain += 1) {
+        deliver(datagram('192.0.2.1', 0, 1, 'packets', 'netflow9', String(domain)));
+      }
+      assert.equal(flow.stats().missed, 0);
+
+      // `first` was kept, because it had spoken since: a gap in it is still a gap.
+      deliver(datagram('192.0.2.1', 12, 1, 'packets', 'netflow9', 'first'));
+      assert.equal(flow.stats().missed, 10, 'the sequence heard more recently was forgotten');
+      // `second` was forgotten: its next datagram is a first, and no loss is read into it.
+      deliver(datagram('192.0.2.1', 50, 1, 'packets', 'netflow9', 'second'));
+      assert.equal(flow.stats().missed, 10, 'a forgotten sequence was compared');
     });
 
     it('counts records this collector had no template for', async () => {

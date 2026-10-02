@@ -21095,13 +21095,44 @@ analysis". `F-` is Phase 0.
       `flowMissed` counts losses that did not happen. Ring overwrites have no Probe Health
       channel: they are visible per sensor and in the stop line only.
 
-- [ ] **B-10 — NetFlow v9 and sFlow from one device share a sequence** · S · B-02, B-09 · Found
+- [x] **B-10 — NetFlow v9 and sFlow from one device share a sequence** · S · B-02, B-09 · Found
       2026-10-02 by `B-09`, by reading; not reproduced. `FlowListener` keys an exporter's
       expected sequence by address and by what the sequence counts, and v9 and sFlow both count
       packets, so a device exporting both to one probe has each read against the other's and
       `flowMissed` counts losses that did not happen. **Done when** a test sends both dialects
       from one address and shows the false count, the key includes the dialect (and v9's source
       id, sFlow's agent and sub-agent), and the same test shows none missed.
+
+      **Done 2026-10-02. It reproduces.** Before any change, `flow-listener.test.ts` sent v9
+      datagrams 0 and 1 and sFlow datagrams 400 and 401 from one address, alternately, and
+      `missed` read 798 where nothing was lost: each sFlow datagram was 399 ahead of v9's count,
+      and each v9 one was taken as a restart.
+
+      **The key is the address, the dialect and the sequence's scope.** `FlowMessage` gains
+      `sequenceScope`, set by the decoder: v9's source id and IPFIX's observation domain (RFC
+      3954 §5.1, RFC 7011 §3.1), and for sFlow the agent address and sub-agent id from the
+      datagram, which the decoder read past until now. v5 has none. What a sequence advances by
+      is unchanged. The scope comes out of the datagram, so the map of followed sequences is
+      bounded at 4,096, least recently heard forgotten first; a forgotten sequence's next
+      datagram is taken as a first and reads no loss.
+
+      **Tests.** Seven cases at the listener: v9 beside sFlow, two source ids and two
+      observation domains, a gap inside one source id while another runs on, two sFlow
+      sub-agents and a second agent, one scope from two addresses, real bytes of all three
+      dialects through `decodeFlowDatagram` as six sequences, and the bound. Three at the
+      dispatch for what each decoder names. One existing case named both its datagrams NetFlow
+      v5 while giving them v9's and IPFIX's arithmetic, and names them now. At the probe,
+      `probe-flow.test.ts`'s `B-09` case sends its sFlow datagram as the agent's forty-first
+      after v9's datagram 0 and still reads `flowMissed` 0, so the file has no new case and no
+      new wait. **Mutations 11/11**: the dialect out of the key (once against the probe case
+      alone, once at the listener), the scope out, the address out, v9's scope not read from the
+      header, sFlow's without the sub-agent and without the agent, a sequence heard again not
+      moved to the back, no bound, the bound off by one, and packets advancing by the record
+      count.
+
+      **Not done.** NetFlow v5 keeps one sequence per address. Its header carries an engine
+      type and id, which the decoder reads, and a chassis exporting from two engines counts
+      flows per engine; v5 has no specification that says so, and the ticket did not ask.
 
 - [ ] **B-11 — a flow ring that overwrites is not on Probe Health** · S · B-07, B-09 · Found
       2026-10-02 by `B-09`. Records the probe received and its buffer overwrote fail the

@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import { renderIpfix, renderNetflowV5, renderNetflowV9 } from '@ms/simulators';
+import { renderIpfix, renderNetflowV5, renderNetflowV9, renderSflow } from '@ms/simulators';
 import { FlowDecodeError, TemplateCache, decodeFlowDatagram } from '../src/support/flow/index.js';
 
 /**
@@ -138,6 +138,45 @@ describe('what the sequence counts, which is not the same in every dialect', () 
       decodeFlowDatagram(renderIpfix([], []), EXPORTER, cache).sequenceCounts,
       'data-records',
     );
+  });
+});
+
+describe('which of an exporter’s sequences a datagram’s is (`B-10`)', () => {
+  it('is the source id for v9 and the observation domain for IPFIX', () => {
+    const cache = new TemplateCache();
+    assert.equal(
+      decodeFlowDatagram(renderNetflowV9([], [], { observationDomain: 7 }), EXPORTER, cache)
+        .sequenceScope,
+      '7',
+    );
+    assert.equal(
+      decodeFlowDatagram(renderIpfix([], [], { observationDomain: 65_536 }), EXPORTER, cache)
+        .sequenceScope,
+      '65536',
+    );
+  });
+
+  it('is the agent and its sub-agent for sFlow, not the address it came from', () => {
+    const cache = new TemplateCache();
+    assert.equal(
+      decodeFlowDatagram(
+        renderSflow([{}], { agentAddress: '198.51.100.7', subAgent: 3 }),
+        EXPORTER,
+        cache,
+      ).sequenceScope,
+      '198.51.100.7/3',
+    );
+    // An IPv6 agent, which the simulator writes as sixteen zero bytes.
+    assert.equal(
+      decodeFlowDatagram(renderSflow([{}], { addressType: 2, subAgent: 1 }), EXPORTER, cache)
+        .sequenceScope,
+      `${'00'.repeat(16)}/1`,
+    );
+  });
+
+  it('is absent for v5, which has one count for the exporter', () => {
+    const message = decodeFlowDatagram(renderNetflowV5([{}]), EXPORTER, new TemplateCache());
+    assert.equal('sequenceScope' in message, false);
   });
 });
 

@@ -49,6 +49,17 @@ export interface FlowMessage {
   /** The exporter's own running count, and what it counts — the two differ by dialect. */
   readonly sequence: number;
   readonly sequenceCounts: 'packets' | 'data-records' | 'flows';
+  /**
+   * Which of the exporter's running counts `sequence` is, where one address keeps several
+   * (`B-10`). Absent where the dialect has one for the whole exporter.
+   *
+   * NetFlow v9 counts per source id and IPFIX per observation domain (RFC 3954 §5.1, RFC 7011
+   * §3.1), so a router with two line cards exporting from one address sends two unrelated
+   * sequences. sFlow counts per sub-agent within an agent, and names the agent in the datagram
+   * because the address it arrives from need not be the agent's. Opaque to everything but the
+   * loss arithmetic, which compares a sequence only with the last one of the same scope.
+   */
+  readonly sequenceScope?: string;
   /** Records this collector could not read, almost always a template it has not learnt. */
   readonly undecodable: number;
   /** Milliseconds since the exporter booted, where the dialect carries it. */
@@ -167,6 +178,7 @@ export function fromFlowSets(decoded: DecodedFlowSets): FlowMessage {
     dialect: decoded.header.version === 10 ? 'ipfix' : 'netflow9',
     sequence: decoded.header.sequence,
     sequenceCounts: decoded.header.sequenceCounts,
+    sequenceScope: String(decoded.header.observationDomain),
     undecodable: decoded.undecodable,
     ...(decoded.header.sysUptimeMs === undefined
       ? {}

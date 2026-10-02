@@ -340,21 +340,27 @@ describe(
           'IPFIX octets per packet',
         );
 
-        // sFlow: two sampled TCP frames of 1,500 bytes, each standing for a thousand.
+        // sFlow: two sampled TCP frames of 1,500 bytes, each standing for a thousand. **Its
+        // datagram is the agent's forty-first** (`B-10`): sFlow counts datagrams as v9 does, and
+        // this address sent v9 datagram 0 above, so a collector that kept one count for both
+        // would read thirty-nine lost here. `flowMissed` below says none were.
         mark = core.received.length;
         await sendUdp(
-          renderSflow([
-            {
-              samplingRate: 1_000,
-              frameLength: 1_500,
-              frame: ethernetFrame({ srcAddr: '10.0.1.1', protocol: 6 }),
-            },
-            {
-              samplingRate: 1_000,
-              frameLength: 1_500,
-              frame: ethernetFrame({ srcAddr: '10.0.1.2', protocol: 6 }),
-            },
-          ]),
+          renderSflow(
+            [
+              {
+                samplingRate: 1_000,
+                frameLength: 1_500,
+                frame: ethernetFrame({ srcAddr: '10.0.1.1', protocol: 6 }),
+              },
+              {
+                samplingRate: 1_000,
+                frameLength: 1_500,
+                frame: ethernetFrame({ srcAddr: '10.0.1.2', protocol: 6 }),
+              },
+            ],
+            { sequence: 40 },
+          ),
           collector,
         );
         const sflow = await core.waitFor('a reading of the sFlow samples', ok, { from: mark });
@@ -377,7 +383,7 @@ describe(
         );
         assert.equal(heard.flowMalformed, 0, 'a dialect was refused');
         assert.equal(heard.flowUndecodable, 0, 'a template was not learnt');
-        assert.equal(heard.flowMissed, 0);
+        assert.equal(heard.flowMissed, 0, 'one dialect’s sequence was read against another’s');
 
         // **The overflow, in one datagram, so no scan can land in the middle of it.** IPFIX has no
         // thirty-record limit: a hundred and fifty records arrive as one message and go into a

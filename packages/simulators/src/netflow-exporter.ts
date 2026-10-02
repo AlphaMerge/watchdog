@@ -376,6 +376,8 @@ export interface SflowSampleSpec {
 export interface SflowExportOptions {
   version?: number;
   agentAddress?: string;
+  /** Which of the agent's sub-agents sent this; each keeps its own datagram sequence. */
+  subAgent?: number;
   /** 1 = IPv4, 2 = IPv6. Anything else is not an address type sFlow defines. */
   addressType?: number;
   sequence?: number;
@@ -460,7 +462,7 @@ export function renderSflow(samples: SflowSampleSpec[], options: SflowExportOpti
     xdrWord(options.version ?? 5),
     xdrWord(addressType),
     addressType === 1 || addressType === 2 ? agent : Buffer.alloc(0),
-    xdrWord(0), // sub-agent id
+    xdrWord(options.subAgent ?? 0),
     xdrWord(options.sequence ?? 0),
     xdrWord(options.sysUptimeMs ?? 3_600_000),
     xdrWord(options.claimSamples ?? bodies.length),
