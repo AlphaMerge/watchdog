@@ -2,7 +2,11 @@ import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
 import { ObjectError } from '../../objects/errors.js';
 import type { ProbeConfigService } from '../../probes/config.js';
-import type { ProbeQueryService } from '../../probes/queries.js';
+import {
+  PROBE_NOT_CONNECTED,
+  type ProbeQueryService,
+  type QueryOutcome,
+} from '../../probes/queries.js';
 import { notAudited, onObject } from '../authorization.js';
 
 /**
@@ -105,16 +109,25 @@ export function queryRoutes(app: FastifyInstance, options: QueryRoutesOptions): 
         );
       }
 
-      const outcome = await queries.ask(
-        found.probeObjectId,
-        { kind: 'check', assignment: found.assignment },
-        {
-          // And sent only to a session that still speaks it: a probe that reconnected older in
-          // between is not handed what was decided for the newer one.
-          peerVersion: found.peerVersion,
-          ...(request.body.timeoutMs === undefined ? {} : { timeoutMs: request.body.timeoutMs }),
-        },
-      );
+      // **Nobody on the line is `offline`, whatever the sensor's credentials would need of a
+      // probe** (`A-52`). Said here, before anything is asked: no assignment was built, and the
+      // answer is the one a query with no session to go to gets, in the same words and under the
+      // same code, so a client puts up a retry and not an upgrade prompt.
+      const outcome: QueryOutcome =
+        found.assignment === null
+          ? { kind: 'failed', failure: 'offline', message: PROBE_NOT_CONNECTED }
+          : await queries.ask(
+              found.probeObjectId,
+              { kind: 'check', assignment: found.assignment },
+              {
+                // And sent only to a session that still speaks it: a probe that reconnected older
+                // in between is not handed what was decided for the newer one.
+                peerVersion: found.peerVersion,
+                ...(request.body.timeoutMs === undefined
+                  ? {}
+                  : { timeoutMs: request.body.timeoutMs }),
+              },
+            );
 
       if (outcome.kind === 'failed') {
         // The failure is named in the code as well as the message, so a client can act on it

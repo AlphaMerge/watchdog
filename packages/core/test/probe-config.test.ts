@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
-import type { SensorAssignment } from '@ms/shared';
+import { PROTOCOL_VERSION, type SensorAssignment } from '@ms/shared';
 import type { Database } from '../src/db/pool.js';
 import { diffAssignments, fingerprint, ProbeConfigService } from '../src/probes/config.js';
 import { InheritanceResolver } from '../src/settings/inheritance.js';
@@ -309,15 +309,32 @@ describe(
      * the scheduled one does not, which is worse than having no button at all.
      */
     describe('one sensor at a time', () => {
+      /** A probe of this build on the line: an assignment is built only for one that is there. */
+      const onLine = (): number => PROTOCOL_VERSION;
+
       it('builds exactly what the scheduled path would send for that sensor', async () => {
         const sensor = await addSensor();
         const { sensors } = await config.assignmentsFor(probeId);
         const scheduled = sensors.find((s) => s.sensorId === sensor.id);
-        const one = await config.assignmentFor(sensor.id);
+        const one = await config.assignmentFor(sensor.id, onLine);
 
         assert.ok(one !== null);
         assert.equal(one.probeObjectId, probeId);
         assert.deepEqual(one.assignment, scheduled);
+      });
+
+      it('builds nothing for a probe that is not connected, and says whose sensor it is (A-52)', async () => {
+        const sensor = await addSensor();
+        assert.deepEqual(await config.assignmentFor(sensor.id), {
+          probeObjectId: probeId,
+          peerVersion: 0,
+          assignment: null,
+        });
+        assert.deepEqual(await config.assignmentFor(sensor.id, () => 0), {
+          probeObjectId: probeId,
+          peerVersion: 0,
+          assignment: null,
+        });
       });
 
       it('finds the probe however deep the sensor is under it', async () => {
@@ -348,10 +365,10 @@ describe(
           params: { count: 4 },
         });
 
-        const one = await config.assignmentFor(sensor.id);
+        const one = await config.assignmentFor(sensor.id, onLine);
         assert.ok(one !== null);
         assert.equal(one.probeObjectId, probeId);
-        assert.equal(one.assignment.target.host, '192.0.2.51');
+        assert.equal(one.assignment?.target.host, '192.0.2.51');
       });
 
       it('answers for a paused sensor, which the scheduled path deliberately does not', async () => {
@@ -367,7 +384,8 @@ describe(
           false,
           'a paused sensor is not in the scheduled set',
         );
-        assert.ok((await config.assignmentFor(sensor.id)) !== null);
+        const paused = await config.assignmentFor(sensor.id, onLine);
+        assert.equal(paused?.assignment?.sensorId, sensor.id);
       });
 
       it('answers nothing for what cannot be asked of a probe', async () => {

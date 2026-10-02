@@ -17832,20 +17832,83 @@ because each is a decision rather than a defect:
         kept; a clone's source kept; a master kept; a reverted master kept; only the after side
         rewritten; every id nulled, visible or not; and nothing asked about, so nothing seen.
 
-- [ ] **A-52 — "check now" with no probe connected says the probe is too old** · S · A-41c ·
+- [x] **A-52 — "check now" with no probe connected says the probe is too old** · S · A-41c ·
       Found 2026-10-02 by `A-41c`'s review fixes. With nobody on the line the live version is 0,
       so a sensor whose set leaves its host undecided is refused with the `probeCannotPin`
       sentence. The refusal is right and the sentence is wrong: the probe is not connected.
       **Done when** check now on such a sensor says the probe is not connected, and a test tells
       the two cases apart.
 
-- [ ] **A-53 — a probe's honest refusal that arrives after the configuration changed reads as a
+      **Outcome.** With nobody on the line, "check now" answers 503 `PROBE_QUERY_OFFLINE`, "the
+      probe that owns this sensor is not connected": the answer any sensor gets from a probe
+      that is not there, under the code a client retries on.
+      - `ProbeConfigService.assignmentFor` no longer decides a set against version 0. With no
+        session it asks the credential check as this build's own version, so the refusals no
+        probe would change (nobody vouches, outside the targets, a transport that cannot be
+        pinned) still answer 409 with their own sentence, and for everything else it returns
+        `assignment: null`: nothing is built, with or without credentials, for a probe that
+        is not there. The route answers `offline` from that, before `ask`, with the one
+        sentence `ask` uses (`PROBE_NOT_CONNECTED`).
+      - The same wrong sentence was given for a set bounded by its SSH host keys (`probeTooOld`),
+        and is closed by the same change. `boundRefusal` is unchanged: version 0 there is still
+        the oldest probe.
+      - The web UI has no "check now" control, so nothing there shows either sentence.
+      - `administration.md` said 409 "with the same sentence" for no probe connected; corrected.
+        The route's description already said 503 for a probe not connected; `api-reference.md`
+        is unchanged.
+      - **Tests:** `check-now.test.ts` presses the button on one sensor with a probe at 23 on
+        the line (409, `probeCannotPin`) and with nobody (503, not connected, no query built),
+        and on a device outside its targets with nobody (409, `outside`). `probe-config.test.ts`
+        and `credential-pinning.test.ts` pin `assignment: null` for targets and for host keys.
+      - **Mutation:** 3 of 3 killed.
+
+- [x] **A-53 — a probe's honest refusal that arrives after the configuration changed reads as a
       failed scan** · S · A-41c · Found 2026-10-02 by `A-41c`'s review fixes. `reported()` honours
       `withheld` only for a sensor the probe's last configuration left to it. A refusal made just
       before a configuration stopped leaving it, and delivered after, is kept as a plain error:
       one Down where Unknown was true. **Done when** a refusal is judged against the
       configuration it was made under (a configuration generation on the result, or a short
       grace), with a scenario test that the race raises no Down.
+
+      **Outcome.** For ten minutes after a configuration stops leaving a sensor to its probe, a
+      refusal from that probe for that sensor is dropped and counted: no failed scan, no hold.
+      - **No wire field, and protocol 25 is not used.** A result carries no configuration
+        version, and adding one would have decided nothing: a probe that follows its
+        configuration refuses only what that configuration left to it, so a refusal for a
+        sensor it is no longer left was made under an earlier one, and a probe that does not
+        follow it would write whatever version it liked. What the core needs is which sensors
+        it stopped leaving and when, which it knows itself.
+      - **The mechanism.** `CredentialVouching.withhold` records, per probe, each sensor the new
+        configuration stops leaving and the time, on a monotonic clock. The time is the first
+        such configuration's; a later one does not move it. `reported` drops a result that is
+        marked, an error, and without readings, for such a sensor inside
+        `LATE_REFUSAL_GRACE_MS` (600,000 ms, inclusive). The entry goes when the sensor is left
+        again, at the first configuration after the grace, and with its probe (`reconcile`).
+      - **Dropped, not held.** Held Unknown, a paused or core-withheld sensor would carry a hold
+        no result will come to release. Whatever the configuration now says speaks for it. A
+        dropped refusal measures nothing: it lets no hold go, this probe's or another's.
+      - **Counted** as `late` on the batch, and by `IngestionService` with Probe Health's
+        refused results, as a result for a sensor that moved away is.
+      - **What a probe that misbehaves can do:** for ten minutes after a configuration stops
+        leaving it a sensor, have its own error-with-no-readings results for that sensor
+        discarded, each counted on its Probe Health. That is what not sending them does. **What
+        it cannot do:** begin or prolong an Unknown with such a mark (`F5` stands: a hold is
+        still only for a sensor its last configuration left to it); discard a result that is
+        `ok` or has readings; use it on a sensor it was never left, or past the ten minutes,
+        where the mark is unearned and the result is the failed scan it reads as; or reopen the
+        window, which only a configuration change does.
+      - **Not covered:** the record is in memory, so a refusal that crosses a core restart is
+        judged as before. A spool replay that is still delivering refusals more than ten
+        minutes after the reconnect's configuration reads them as failed scans.
+      - **Alarm volume** (`credential-pinning.test.ts`): a sensor Up, a name entry added so the
+        probe is left nothing, two refusals delivered after: still Up, no row in its state
+        history, not held, no notification request, 2 on Probe Health's refused. Two real
+        failed scans after that: Down once, one request. Past the grace, two marked results:
+        Down, and counted.
+      - **Tests:** 14 unit cases on the bound, where the window starts, what forgets it, what
+        is and is not dropped, and that no hold moves; the scenario above. `state-machine.md`
+        says the rule and the bound.
+      - **Mutation:** 11 of 11 killed.
 
 - [ ] **A-54 — `A-09`'s link-local guard resolves, checks, and lets the socket resolve again** ·
       M · A-09, A-41c · Found 2026-10-02 by `A-41c`. For a request that is not pinned, the

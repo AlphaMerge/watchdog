@@ -417,8 +417,11 @@ nobody, not even an administrator, can bring it outside.
   targets; the sensor's message says which. **A probe older than protocol 24 is not sent such a
   set at all**: it would connect by name. Its sensors read Unknown, saying so, until the probe
   is upgraded. "Check now" is held to the same rule, against the probe that is connected at
-  that moment and not the version a probe last announced: with no probe connected it answers
-  409 with the same sentence. Core Health's **Sensors withheld for credentials** counts every
+  that moment and not the version a probe last announced. With no probe connected it answers
+  503 `PROBE_QUERY_OFFLINE`, "the probe that owns this sensor is not connected", as it does for
+  any sensor: nothing is sent, and it is not the probe's age. A sensor outside its targets, or
+  one whose transport cannot be pinned, still answers 409 with its own sentence, connected or
+  not. Core Health's **Sensors withheld for credentials** counts every
   sensor in this state, the ones the core withholds and the ones a probe refuses. With `IP version` on `auto` both families are checked, and the probe prefers an
   IPv4 address when the name has one. A name with one record inside the targets and one
   outside is refused whichever the probe would have used.

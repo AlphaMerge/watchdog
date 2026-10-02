@@ -66,6 +66,8 @@ export interface IngestionServiceOptions {
     ): Promise<{
       readonly results: readonly CheckResult[];
       readonly unearned: number;
+      /** Refusals made under the configuration before the probe's last, and dropped (`A-53`). */
+      readonly late: number;
       stored(landed: boolean): Promise<void>;
     }>;
   };
@@ -397,6 +399,17 @@ export class IngestionService {
             { source: origin.gid, probeObjectId: origin.probeObjectId, results: reported.unearned },
             'a probe marked results withheld for sensors it was not left to check, or that were ' +
               'not errors; taken as the results they are',
+          );
+        }
+        if (reported.late > 0) {
+          // **Refused under the configuration before the one the probe has now** (`A-53`). Not
+          // failed scans and not stored, so counted where a result the core did not take is
+          // counted, as one for a sensor that moved away is: dropped, and never silently.
+          this.#refusals?.refused(origin.probeObjectId, reported.late);
+          this.#logger.info(
+            { source: origin.gid, probeObjectId: origin.probeObjectId, results: reported.late },
+            'a probe refused to scan sensors its configuration has since stopped leaving to ' +
+              'it; dropped, as neither a failed scan nor a reason to hold them',
           );
         }
       } catch (error: unknown) {

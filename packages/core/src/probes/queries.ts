@@ -34,6 +34,12 @@ import type { ProbeRefusals } from './refusals.js';
  * so a probe that reconnects to a restarted core cannot answer an id this core has since reused.
  */
 
+/**
+ * What `offline` says. One sentence for every way of finding out (`A-52`): the query had no
+ * session to go to, or "check now" found nobody on the line before it built anything to send.
+ */
+export const PROBE_NOT_CONNECTED = 'the probe that owns this sensor is not connected';
+
 /** What the core did with a query. A discriminated union, because each arm is acted on. */
 export type QueryOutcome =
   { kind: 'ok'; result: CheckResult } | { kind: 'failed'; failure: QueryFailure; message: string };
@@ -204,11 +210,7 @@ export class ProbeQueryService {
       ...(options.peerVersion === undefined ? {} : { peerVersion: options.peerVersion }),
     });
     if (delivery.kind === 'offline') {
-      return {
-        kind: 'failed',
-        failure: 'offline',
-        message: 'the probe that owns this sensor is not connected',
-      };
+      return { kind: 'failed', failure: 'offline', message: PROBE_NOT_CONNECTED };
     }
     if (delivery.kind === 'too-old') {
       const needs = versionFor('onDemandQuery');

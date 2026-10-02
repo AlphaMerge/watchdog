@@ -172,6 +172,24 @@ the result is the result it would be without the mark, a failed scan included, a
 with the probe's refused results on Probe Health. A probe cannot turn the failure of a sensor it
 merely owns into a standing Unknown.
 
+**A refusal is judged against the configuration it was made under** (`A-53`). A check already
+running, or a result in the spool, when a configuration stops leaving a sensor to the probe (a
+name entry now covers the device, it was given an address, it was paused, the core withholds it
+itself) produces a refusal that arrives after that configuration. It was honest when it was made.
+A result does not say which configuration its check ran under, and a probe that follows its
+configuration refuses only what that configuration left to it, so for **ten minutes** after the
+configuration that stopped leaving the sensor (`LATE_REFUSAL_GRACE_MS`, counted on the core's
+monotonic clock from the first such configuration, and not started again by a later one) a
+refusal from that probe for that sensor is **dropped**: not a failed scan, so no Warning, no Down
+and no alarm, and not a hold, since what the configuration now says about the sensor is what
+speaks for it. It lets no hold go either. It is counted with the probe's refused results on Probe
+Health. After the ten minutes the mark is one the probe has no claim to, as above, and the result
+is the failed scan it reads as. What this gives a probe that misbehaves is a result that
+vanishes, which it already had by not sending it: it cannot begin or prolong an Unknown with it,
+and cannot use it on a result that is `ok` or has readings, on a sensor it was never left, or
+after the ten minutes. The core keeps this in memory, so a refusal that crosses a core restart
+is judged as before `A-53`.
+
 **The next result that is not a refusal lets the sensor go, and that result decides it.** The
 hold is dropped without re-deciding anything, so there is one transition, from Unknown to what
 the result says: Up at the scan that found the name inside again, Down if the device does not

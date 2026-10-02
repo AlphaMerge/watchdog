@@ -22,6 +22,7 @@ import { TriggerSync } from '../src/notifications/sync.js';
 import { TemplateService } from '../src/notifications/templates.js';
 import {
   CredentialVouching,
+  LATE_REFUSAL_GRACE_MS,
   WITHHELD_CREDENTIALS,
   boundRefusal,
   type SensorBeingSent,
@@ -224,7 +225,10 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
     control: { failSettle: boolean };
     /** When each settle said its change was decided. */
     stamps: (Date | undefined)[];
+    /** The clock the grace for a late refusal runs on (`A-53`), in milliseconds. */
+    clock: { ms: number };
   }> {
+    const clock = { ms: 5_000_000 };
     const stamps: (Date | undefined)[] = [];
     const settled: { owner: string; refused: Map<number, string> }[] = [];
     const released: { owner: string; sensorIds: number[] }[] = [];
@@ -237,6 +241,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       logger: silent,
       sensorTypes: catalogueSensorTypeGate(testCatalogue([snmpPinned])),
       rights: () => Promise.resolve(new Map()),
+      now: () => clock.ms,
       vouching: {
         // What the core withholds itself, which is not what these tests are about.
         settle: () => Promise.resolve(0),
@@ -264,7 +269,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
     for (const probeId of [7, 8]) {
       await credentials.withhold(probeId, [1, 2, 3].map(leftToProbe), PINNING);
     }
-    return { credentials, settled, released, outcomes, control, stamps };
+    return { credentials, settled, released, outcomes, control, stamps, clock };
   }
 
   const T = (seconds: number): string => new Date(1_790_000_000_000 + seconds * 1000).toISOString();
@@ -517,24 +522,223 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
     });
 
     it('honours nothing from a probe too old to have been sent such a set', async () => {
-      const { credentials, settled } = await holder();
+      const { credentials, settled, clock } = await holder();
       // The same sensors, to a probe at 23: the core withholds them itself, and none is left.
       await credentials.withhold(7, [1, 2, 3].map(leftToProbe), PINNING - 1);
+      // Past the grace for what the probe at 24 refused before it was replaced (`A-53`).
+      clock.ms += LATE_REFUSAL_GRACE_MS + 1;
       const reported = await credentials.reported(7, [refused(1, T(0))]);
       assert.equal(reported.unearned, 1);
+      assert.equal(reported.late, 0);
       assert.equal(reported.results.length, 1);
       assert.equal(settled.length, 0);
     });
 
-    it('honours nothing once a configuration no longer sends the sensor', async () => {
-      const { credentials } = await holder();
+    it('honours nothing once a configuration no longer sends the sensor, and its grace has run out', async () => {
+      const { credentials, clock } = await holder();
       await credentials.withhold(7, [leftToProbe(2)], PINNING);
+      clock.ms += LATE_REFUSAL_GRACE_MS + 1;
       const reported = await credentials.reported(7, [refused(1, T(0)), refused(2, T(0))]);
       assert.equal(reported.unearned, 1);
+      assert.equal(reported.late, 0);
       assert.deepEqual(
         reported.results.map((one) => one.sensorId),
         [1],
       );
+    });
+  });
+
+  describe('a refusal is judged against the configuration it was made under (A-53)', () => {
+    /** Probe 7's next configuration: sensor 1 is no longer left to it, 2 and 3 still are. */
+    const stopLeaving = (credentials: CredentialVouching): Promise<unknown> =>
+      credentials.withhold(7, [2, 3].map(leftToProbe), PINNING);
+
+    it('drops a refusal that arrives after the configuration stopped leaving the sensor: no failed scan, no hold', async () => {
+      const { credentials, settled, released } = await holder();
+      await stopLeaving(credentials);
+      const reported = await credentials.reported(7, [refused(1, T(0)), refused(2, T(0))]);
+      assert.deepEqual(reported.results, [], 'nothing for the machine to count as a failure');
+      assert.equal(reported.late, 1);
+      assert.equal(reported.unearned, 0);
+      // Sensor 2 is still the probe's to refuse, and is held; sensor 1 is not held by this.
+      assert.deepEqual(settled, [
+        { owner: 'credentials-probe:7', refused: new Map([[2, REFUSED]]) },
+      ]);
+      assert.equal(credentials.stats().withheld, 1);
+      assert.equal(released.length, 0);
+    });
+
+    it('drops one that is the whole batch, and one whose time cannot be read', async () => {
+      const { credentials, settled } = await holder();
+      await stopLeaving(credentials);
+      const reported = await credentials.reported(7, [refused(1, T(0)), refused(1, 'not a time')]);
+      assert.deepEqual(reported.results, []);
+      assert.equal(reported.late, 2);
+      assert.equal(settled.length, 0);
+      assert.equal(credentials.stats().withheld, 0);
+    });
+
+    it('takes a failed scan after the change as the failed scan it is', async () => {
+      const { credentials } = await holder();
+      await stopLeaving(credentials);
+      const failed = measured(1, T(5), 'error');
+      const reported = await credentials.reported(7, [refused(1, T(0)), failed]);
+      assert.deepEqual(reported.results, [failed]);
+      assert.equal(reported.late, 1);
+      assert.equal(reported.unearned, 0);
+    });
+
+    it('is bounded: to the last millisecond of the grace, and not one after', async () => {
+      const { credentials, clock } = await holder();
+      await stopLeaving(credentials);
+      clock.ms += LATE_REFUSAL_GRACE_MS;
+      const inside = await credentials.reported(7, [refused(1, T(0))]);
+      assert.equal(inside.late, 1);
+      assert.deepEqual(inside.results, []);
+
+      clock.ms += 1;
+      const after = await credentials.reported(7, [refused(1, T(1))]);
+      assert.equal(after.late, 0);
+      assert.equal(after.unearned, 1, 'a mark the probe has no claim to any more');
+      assert.deepEqual(after.results, [{ ...measured(1, T(1), 'error'), message: REFUSED }]);
+    });
+
+    it('takes the bound it is given', async () => {
+      const clock = { ms: 0 };
+      const credentials = new CredentialVouching({
+        db: { query: () => Promise.resolve([]), tx: () => Promise.reject(new Error('none')) },
+        logger: silent,
+        sensorTypes: catalogueSensorTypeGate(testCatalogue([snmpPinned])),
+        rights: () => Promise.resolve(new Map()),
+        now: () => clock.ms,
+        lateRefusalGraceMs: 2_000,
+      });
+      await credentials.withhold(7, [leftToProbe(1)], PINNING);
+      await credentials.withhold(7, [], PINNING);
+      clock.ms = 2_000;
+      assert.equal((await credentials.reported(7, [refused(1, T(0))])).late, 1);
+      clock.ms = 2_001;
+      assert.equal((await credentials.reported(7, [refused(1, T(0))])).late, 0);
+    });
+
+    it('is ten minutes unless told otherwise', () => {
+      assert.equal(LATE_REFUSAL_GRACE_MS, 600_000);
+    });
+
+    it('counts the grace from the configuration that stopped leaving the sensor, not from a later one', async () => {
+      const { credentials, clock } = await holder();
+      await stopLeaving(credentials);
+      // The same configuration again, built for another reason, six minutes on.
+      clock.ms += 360_000;
+      await stopLeaving(credentials);
+      clock.ms += LATE_REFUSAL_GRACE_MS - 360_000;
+      assert.equal((await credentials.reported(7, [refused(1, T(0))])).late, 1, 'still inside');
+      clock.ms += 1;
+      const after = await credentials.reported(7, [refused(1, T(0))]);
+      assert.equal(after.late, 0, 'the later configuration did not start it again');
+      assert.equal(after.unearned, 1);
+    });
+
+    it('forgets at the first configuration after the grace, and remembers until then', async () => {
+      const { credentials, clock } = await holder();
+      await stopLeaving(credentials);
+      clock.ms += LATE_REFUSAL_GRACE_MS + 1;
+      await stopLeaving(credentials);
+      // A clock set back does not bring it back: the entry is gone, not merely out of date.
+      clock.ms -= LATE_REFUSAL_GRACE_MS;
+      const reported = await credentials.reported(7, [refused(1, T(0))]);
+      assert.equal(reported.late, 0);
+      assert.equal(reported.unearned, 1);
+    });
+
+    it('starts again when the sensor is left to the probe and then is not', async () => {
+      const { credentials, clock, settled } = await holder();
+      await stopLeaving(credentials);
+      clock.ms += 300_000;
+      // Left again: a refusal is the probe's to make, and holds the sensor as any does.
+      await credentials.withhold(7, [1, 2, 3].map(leftToProbe), PINNING);
+      const held = await credentials.reported(7, [refused(1, T(0))]);
+      assert.equal(held.late, 0);
+      assert.equal(settled.length, 1);
+
+      clock.ms += 240_000;
+      await stopLeaving(credentials);
+      // Ten minutes after the first time it stopped, and one after the second.
+      clock.ms += 60_001;
+      assert.equal((await credentials.reported(7, [refused(1, T(60))])).late, 1);
+      clock.ms += LATE_REFUSAL_GRACE_MS;
+      assert.equal((await credentials.reported(7, [refused(1, T(120))])).late, 0);
+    });
+
+    it('is only for the probe whose configuration changed, and only for a sensor it was left', async () => {
+      const { credentials } = await holder();
+      await stopLeaving(credentials);
+      // Probe 8 is still left sensor 1: its refusal is honoured, as a hold.
+      const eight = await credentials.reported(8, [refused(1, T(0))]);
+      assert.equal(eight.late, 0);
+      assert.equal(credentials.stats().withheld, 1);
+      // Sensor 9 was never left to probe 7, before or after.
+      const seven = await credentials.reported(7, [refused(9, T(0))]);
+      assert.equal(seven.late, 0);
+      assert.equal(seven.unearned, 1);
+      assert.equal(seven.results.length, 1);
+    });
+
+    it('drops only what a refusal looks like: a mark beside a reading or an ok is the result it is', async () => {
+      const { credentials } = await holder();
+      await stopLeaving(credentials);
+      const ok: CheckResult = { ...refused(1, T(0)), outcome: 'ok' };
+      const readings: CheckResult = { ...refused(1, T(1)), channels: [{ key: 'a', value: 1 }] };
+      const reported = await credentials.reported(7, [ok, readings]);
+      assert.equal(reported.late, 0);
+      assert.equal(reported.unearned, 2);
+      assert.equal(reported.results.length, 2);
+      assert.equal(
+        reported.results.some((one) => 'withheld' in one),
+        false,
+      );
+    });
+
+    it('lets no hold go, another probe’s included: it measured nothing', async () => {
+      const { credentials, released } = await holder();
+      await credentials.reported(8, [refused(1, T(0))]);
+      await stopLeaving(credentials);
+      const reported = await credentials.reported(7, [refused(1, T(60))]);
+      assert.equal(reported.late, 1);
+      assert.equal(released.length, 0);
+      assert.equal(credentials.stats().withheld, 1, 'probe 8 still holds it');
+    });
+
+    it('neither renews nor lets go a hold the probe already had on a sensor it is still sent', async () => {
+      const { credentials, settled, released } = await holder();
+      await credentials.reported(7, [refused(1, T(0))]);
+      // Still sent, and no longer left: a name entry now covers the device.
+      const covered: SensorBeingSent = {
+        ...leftToProbe(1),
+        restrictions: new Map([['snmp', { targets: ['*.dc.test'], hostKeys: null }]]),
+      };
+      await credentials.withhold(7, [covered, leftToProbe(2), leftToProbe(3)], PINNING);
+      assert.equal(credentials.stats().withheld, 1, 'held until a result says otherwise');
+      const late = await credentials.reported(7, [refused(1, T(60), 'Not scanned: other words.')]);
+      assert.equal(late.late, 1);
+      assert.equal(settled.length, 1, 'the words it was held in are not replaced');
+      assert.equal(released.length, 0);
+
+      // The scan under the new configuration lets it go, and decides it.
+      const up = await credentials.reported(7, [measured(1, T(120))]);
+      assert.equal(up.results.length, 1);
+      assert.equal(released.length, 1);
+      assert.equal(credentials.stats().withheld, 0);
+    });
+
+    it('forgets with the probe', async () => {
+      const { credentials } = await holder();
+      await stopLeaving(credentials);
+      // Nothing in the tree: probe 7 is gone.
+      await credentials.reconcile();
+      const reported = await credentials.reported(7, [refused(1, T(0))]);
+      assert.equal(reported.late, 0);
+      assert.equal(reported.unearned, 1);
     });
   });
 });
@@ -741,6 +945,8 @@ describe(
     const gate = catalogueSensorTypeGate(testCatalogue([snmpPinned, dbQuery, sshLoad]));
     let site = 0;
     let batch = 0;
+    /** How far the clock `credentials` reads is ahead of the real one: a test moves it on. */
+    const ahead = { ms: 0 };
 
     async function count(sql: string, values: unknown[] = []): Promise<number> {
       const [row] = await db.query<{ n: string }>(sql, values);
@@ -915,6 +1121,7 @@ describe(
         sensorTypes: gate,
         rights: (principal, objectIds, q) => access.resolveManyFor(principal, objectIds, q),
         vouching,
+        now: () => performance.now() + ahead.ms,
       });
       config = new ProbeConfigService({
         db,
@@ -1152,11 +1359,18 @@ describe(
       assert.equal(await sentTo(24, pinned), true);
       assert.equal(vouching.withheld().has(pinned), false);
 
-      // "Check now" asks as the probe on the line: nobody, here, so as the oldest.
+      // "Check now" asks as the probe on the line. Nobody is, here: nothing is built, and
+      // nothing is said about how old a probe is (`A-52`).
+      assert.deepEqual(await config.assignmentFor(pinned), {
+        probeObjectId: site,
+        peerVersion: 0,
+        assignment: null,
+      });
+      // What no probe would change is refused in its own words, connected or not.
       await assert.rejects(
-        config.assignmentFor(pinned),
+        config.assignmentFor(query),
         (error: unknown) =>
-          error instanceof ObjectError && error.message === WITHHELD_CREDENTIALS.probeCannotPin,
+          error instanceof ObjectError && error.message === WITHHELD_CREDENTIALS.undecided,
       );
     });
 
@@ -1215,12 +1429,17 @@ describe(
         PINNING,
       ]);
       await assert.rejects(config.assignmentFor(sensor, live), cannotPin);
-      await assert.rejects(config.assignmentFor(sensor), cannotPin, 'nobody on the line');
+      // Nobody on the line: no set is sent, because nothing is. It is not the probe's age (`A-52`).
+      assert.deepEqual(await config.assignmentFor(sensor), {
+        probeObjectId: site,
+        peerVersion: 0,
+        assignment: null,
+      });
 
       // A probe at 24 on the line is asked, with the set, and the query says who it is for.
       const found = await config.assignmentFor(sensor, () => PINNING);
       assert.equal(found?.peerVersion, PINNING);
-      assert.equal(found.assignment.credentials?.['snmp']?.['community'], 'checknow-secret');
+      assert.equal(found.assignment?.credentials?.['snmp']?.['community'], 'checknow-secret');
     });
 
     it('a set bounded by its SSH keys is decided against the probe on the line too (A-41b)', async () => {
@@ -1248,7 +1467,12 @@ describe(
         (error: unknown) =>
           error instanceof ObjectError && error.message === WITHHELD_CREDENTIALS.probeTooOld,
       );
-      await assert.rejects(config.assignmentFor(sensor), 'nobody on the line');
+      // Nobody on the line: not the too-old sentence either, and nothing built (`A-52`).
+      assert.deepEqual(await config.assignmentFor(sensor), {
+        probeObjectId: site,
+        peerVersion: 0,
+        assignment: null,
+      });
       assert.equal((await config.assignmentFor(sensor, () => hostKeys))?.peerVersion, hostKeys);
     });
 
@@ -1579,6 +1803,77 @@ describe(
       );
       assert.equal(await sentTo(24, uptime), true);
       assert.equal(vouching.withheld().has(uptime), false);
+    });
+
+    // Last: it sweeps every alarm that is due on this probe, to count its own from nothing.
+    it('a refusal delivered after the configuration stopped leaving the sensor raises no Down and no page, and a failed scan after it does (A-53)', async () => {
+      const { group, sensor } = await named(site, 'late');
+      assert.equal(await sentTo(PINNING, sensor), true);
+      await fromProbe([{ ...measured(sensor, at(-60)), message: 'up 1 d' }]);
+      assert.deepEqual(await stateOf(sensor), { state: 'up', message: 'up 1 d' });
+
+      // A name entry now covers the device, so the core decides it and the probe is left
+      // nothing to check. The sensor is still sent. A check that was already running under the
+      // configuration before resolved the name outside, and its refusal arrives now, twice: two
+      // failed scans are what it takes to read Down (`M-03`).
+      await h.service.setCredential(testActor, group, 'snmp', {
+        version: 'v2c',
+        community: 'late-secret',
+        allowedTargets: ['10.20.0.0/16', '*.dc.test'],
+      });
+      assert.equal(await sentTo(PINNING, sensor), true);
+      await scheduler.sweep(later(3_600));
+      const asked = await requests();
+      const before = await history(sensor);
+      const held = credentials.stats().withheld;
+      const refusals = new ProbeRefusals();
+
+      const reply = await fromProbe(
+        [refused(sensor, at(-30)), refused(sensor, at(-20))],
+        site,
+        refusals,
+      );
+      assert.deepEqual(reply, {
+        type: 'results-ack',
+        batchId: `b${String(batch)}`,
+        storedSamples: 0,
+        retryAfterMs: 0,
+      });
+      assert.deepEqual(await stateOf(sensor), { state: 'up', message: 'up 1 d' });
+      assert.deepEqual(await history(sensor), before, 'no transition: not Warning, not Down');
+      assert.equal(await downs([sensor]), 0);
+      assert.equal(vouching.withheld().has(sensor), false, 'and not held Unknown either');
+      assert.equal(credentials.stats().withheld, held);
+      assert.equal(await scheduler.sweep(later(3_600)), 0, 'nothing to page about');
+      assert.equal(await requests(), asked);
+      assert.equal(refusals.countsFor(site).refused, 2, 'dropped, and counted on Probe Health');
+
+      // The device then does not answer the scan made under the new configuration. That is a
+      // failed scan: Down, once, and the one page a Down raises.
+      await fromProbe(
+        [
+          { ...measured(sensor, at(-10), 'error'), message: 'no response' },
+          { ...measured(sensor, at(-5), 'error'), message: 'no response' },
+        ],
+        site,
+        refusals,
+      );
+      assert.deepEqual(await stateOf(sensor), { state: 'down', message: 'no response' });
+      assert.equal(await downs([sensor]), 1);
+      assert.equal(await scheduler.sweep(later(3_600)), 1);
+      assert.equal(await requests(), asked + 1);
+      assert.equal(refusals.countsFor(site).refused, 2);
+
+      // And the bound: past the grace, a result marked this way is the probe's failed scan, as
+      // any mark on a sensor it is not left to check is.
+      await fromProbe([{ ...measured(sensor, at(-4)), message: 'up 2 d' }]);
+      assert.equal((await stateOf(sensor)).state, 'up');
+      ahead.ms += LATE_REFUSAL_GRACE_MS + 1;
+      await fromProbe([refused(sensor, at(-3)), refused(sensor, at(-2))], site, refusals);
+      assert.deepEqual(await stateOf(sensor), { state: 'down', message: REFUSED });
+      assert.equal(await downs([sensor]), 2);
+      assert.equal(vouching.withheld().has(sensor), false);
+      assert.equal(refusals.countsFor(site).refused, 4);
     });
   },
 );

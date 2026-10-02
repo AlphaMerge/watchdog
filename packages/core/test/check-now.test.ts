@@ -9,7 +9,11 @@ import type { Database } from '../src/db/pool.js';
 import { CredentialVouching, WITHHELD_CREDENTIALS } from '../src/objects/credential-vouching.js';
 import { catalogueSensorTypeGate } from '../src/objects/sensor-type-gate.js';
 import { ProbeConfigService } from '../src/probes/config.js';
-import { ProbeQueryService, type ProbeQuerySender } from '../src/probes/queries.js';
+import {
+  PROBE_NOT_CONNECTED,
+  ProbeQueryService,
+  type ProbeQuerySender,
+} from '../src/probes/queries.js';
 import { InheritanceResolver } from '../src/settings/inheritance.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import {
@@ -229,6 +233,77 @@ describe(
       assert.ok(query?.kind === 'check');
       assert.equal(query.assignment.credentials?.['snmp']?.['community'], 'bounded-secret');
       assert.deepEqual(sender.decidedFor, [pinning]);
+    });
+
+    it('says the probe is not connected, and not that it is too old, with nobody on the line (A-52)', async () => {
+      const group = await harness.service.create(testActor, {
+        kind: 'group',
+        parentId: probeId,
+        name: 'nobody on the line',
+      });
+      await harness.service.setCredential(testActor, group.id, 'snmp', {
+        version: 'v2c',
+        community: 'offline-secret',
+        allowedTargets: ['10.20.0.0/16'],
+      });
+      const pinnedSensor = async (name: string, host: string): Promise<number> => {
+        const device = await harness.service.create(testActor, {
+          kind: 'device',
+          parentId: group.id,
+          name,
+          host,
+        });
+        const sensor = await harness.service.create(testActor, {
+          kind: 'sensor',
+          parentId: device.id,
+          name: `${name} uptime`,
+          sensorType: 'test.snmp.pinned',
+          params: { port: 161 },
+        });
+        return sensor.id;
+      };
+      const named = await pinnedSensor('offline named', 'sw.offline.test');
+      const outside = await pinnedSensor('offline outside', '192.0.2.9');
+      const press = async (
+        id: number,
+      ): Promise<{ status: number; code: string; message: string }> => {
+        const response = await app.inject({
+          method: 'POST',
+          url: `/api/v1/sensors/${String(id)}/check`,
+          payload: {},
+        });
+        const { error } = response.json<{ error: { code: string; message: string } }>();
+        return { status: response.statusCode, code: error.code, message: error.message };
+      };
+
+      // On the line and one version short: too old, and upgrading it is the fix.
+      sender.speaks = versionFor('credentialAddressPinning') - 1;
+      assert.deepEqual(await press(named), {
+        status: 409,
+        code: 'OBJECT_CREDENTIALS_WITHHELD',
+        message: WITHHELD_CREDENTIALS.probeCannotPin,
+      });
+
+      // Nobody on the line: not connected, which a retry fixes and an upgrade does not.
+      sender.speaks = 0;
+      const offline = await press(named);
+      assert.deepEqual(offline, {
+        status: 503,
+        code: 'PROBE_QUERY_OFFLINE',
+        message: PROBE_NOT_CONNECTED,
+      });
+      assert.match(offline.message, /is not connected$/);
+      assert.doesNotMatch(offline.message, /too old|[Uu]pgrad|protocol/);
+      // The same answer a sensor with no credentials at all gets from a probe that is not there.
+      assert.deepEqual(await press(sensorId), offline);
+      assert.equal(sender.asked.length, 0, 'nothing was built for nobody, and nothing asked');
+
+      // What no probe would change is still said in its own words, connected or not.
+      assert.deepEqual(await press(outside), {
+        status: 409,
+        code: 'OBJECT_CREDENTIALS_WITHHELD',
+        message: WITHHELD_CREDENTIALS.outside,
+      });
     });
 
     const check = (body: Record<string, unknown> = {}) =>

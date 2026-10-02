@@ -66,6 +66,17 @@ export interface ProbeConfigOptions {
 }
 
 /**
+ * What "check now" sends, and to which probe (`R-09`).
+ *
+ * `assignment` is null, and `peerVersion` 0, when the probe that owns the sensor is not connected
+ * (`A-52`): there is nobody to build one for, and the caller answers that the probe is not
+ * connected, not anything about what a probe would have to speak.
+ */
+export type CheckNowAssignment =
+  | { probeObjectId: number; peerVersion: number; assignment: SensorAssignment }
+  | { probeObjectId: number; peerVersion: 0; assignment: null };
+
+/**
  * What a probe has been told to scan (R-04).
  *
  * The probe holds no copy of the object tree, so everything it needs is resolved here: the
@@ -236,10 +247,11 @@ export class ProbeConfigService {
      * a set bounded by its targets or its SSH keys may be sent, so it is the version of the
      * session the query goes to and nothing else. The registration row is not that: it records
      * what a probe last *said*, and a hello that was then refused says whatever it likes while
-     * an older probe holds the connection. Absent, nobody is on the line.
+     * an older probe holds the connection. Absent, nobody is on the line, and the answer carries
+     * no assignment (`A-52`).
      */
     peerVersionOf: (probeObjectId: number) => number = () => 0,
-  ): Promise<{ probeObjectId: number; assignment: SensorAssignment; peerVersion: number } | null> {
+  ): Promise<CheckNowAssignment | null> {
     const [row] = await this.#db.query<{
       probe_id: string | null;
       sensor_type: string;
@@ -279,13 +291,21 @@ export class ProbeConfigService {
       this.#credentialsFor([{ sensor_id: String(sensorId), sensor_type: row.sensor_type }]),
     ]);
     // Asked, and not held: pressing the button changes nothing about the sensor (`A-41`). The
-    // probe's version is its live session's; with nobody on the line it is asked as the oldest,
-    // which sends it nothing it might not check (`A-41b`, `A-41c`).
-    const peerVersion = peerVersionOf(Number(row.probe_id));
+    // probe's version is its live session's (`A-41b`, `A-41c`).
+    //
+    // **With nobody on the line there is no version to decide against** (`A-52`). Asked as the
+    // oldest probe, a set only a new enough probe may be sent was refused in the words for a
+    // probe that is too old, and upgrading a probe that is merely not connected fixes nothing. So
+    // the question is asked as this build's own version, which leaves the refusals no probe would
+    // change (nobody vouches, the device is outside the targets, the transport cannot be held to
+    // an address) with their sentences, and whatever is left is answered below: not connected.
+    const probeObjectId = Number(row.probe_id);
+    const peerVersion = peerVersionOf(probeObjectId);
+    const connected = peerVersion > 0;
     const refused = await this.#credentialCheck?.refusals(
-      Number(row.probe_id),
+      probeObjectId,
       beingSent([{ sensor_id: String(sensorId), ...row }], credentials),
-      peerVersion,
+      connected ? peerVersion : PROTOCOL_VERSION,
     );
     const withheld = refused?.get(sensorId);
     if (withheld !== undefined) {
@@ -293,10 +313,13 @@ export class ProbeConfigService {
         context: { objectId: sensorId, phase: 'check-now' },
       });
     }
+    // Nothing is built for a probe that is not there. What a set may be sent was decided for no
+    // probe, so there is no assignment to hand to one that connects a moment later.
+    if (!connected) return { probeObjectId, peerVersion: 0, assignment: null };
     const forSensor = credentials.values.get(sensorId);
 
     return {
-      probeObjectId: Number(row.probe_id),
+      probeObjectId,
       peerVersion,
       assignment: {
         sensorId,

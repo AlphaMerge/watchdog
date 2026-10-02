@@ -657,7 +657,28 @@ export interface CredentialVouchingOptions {
   vouching?: ProbeRefusalHolds;
   /** Where `adopt` records what it did, one entry per kind. */
   audit?: AuditSink;
+  /**
+   * How long after a configuration stops leaving a sensor to its probe a refusal from that probe
+   * is still taken as made under the one before (`A-53`). `LATE_REFUSAL_GRACE_MS` when absent.
+   */
+  lateRefusalGraceMs?: number;
+  /** Milliseconds on a clock that never goes back, for that window. Injected by a test. */
+  now?: () => number;
 }
+
+/**
+ * How long a refusal may trail the configuration that stopped leaving its sensor to the probe
+ * (`A-53`).
+ *
+ * A result does not say which configuration its check ran under, so this is the bound on how
+ * late one made under the last may arrive: the probe has to receive the new configuration, a
+ * check already running has to finish resolving (ten seconds at most, `resolveBoundMs`), and its
+ * batch has to be sent, or replayed from the spool behind what was written before it. Ten minutes
+ * is generous for all three and short against what it costs: for that long, and no longer, the
+ * probe can have an error with no readings for such a sensor discarded, which it could as well
+ * have not sent.
+ */
+export const LATE_REFUSAL_GRACE_MS = 10 * 60_000;
 
 /** What one boot's `adopt` did. */
 export interface Adoption {
@@ -717,6 +738,12 @@ export interface ReportedBatch {
    * the mark, and counted by the caller.
    */
   readonly unearned: number;
+  /**
+   * Refusals for a sensor a configuration stopped leaving to this probe within the grace
+   * (`A-53`): made under the configuration before, and delivered after. Not in `results`, and
+   * holding nothing: neither a failed scan nor a reason to stand Unknown. Counted by the caller.
+   */
+  readonly late: number;
   /**
    * Says what became of `results`. Stored, a master among the sensors they let go settles what
    * depends on it. Not stored, the sensors are held again as they were: the probe sends the batch
@@ -782,9 +809,20 @@ export class CredentialVouching {
    * (`A-41c`), at its last configuration. Only these can be refused by it.
    */
   readonly #leftToProbe = new Map<number, ReadonlySet<number>>();
+  /**
+   * The sensors a configuration stopped leaving to each probe, and when it did, by `#now`
+   * (`A-53`). A refusal for one of them inside the grace was made under the configuration before.
+   * An entry counts for nothing once the grace has run out, and goes at the probe's next
+   * configuration after that, when the sensor is left to the probe again, and with its probe.
+   */
+  readonly #stoppedLeaving = new Map<number, Map<number, number>>();
+  readonly #graceMs: number;
+  readonly #now: () => number;
   #checked = 0;
 
   constructor(options: CredentialVouchingOptions) {
+    this.#graceMs = options.lateRefusalGraceMs ?? LATE_REFUSAL_GRACE_MS;
+    this.#now = options.now ?? ((): number => performance.now());
     this.#db = options.db;
     this.#logger = options.logger.child({ component: 'credential-vouching' });
     this.#types = options.sensorTypes;
@@ -928,6 +966,7 @@ export class CredentialVouching {
     const refused = await this.#check(probeId, sensors, peerVersion, left);
     // A sensor refused for another of its kinds is not sent at all, and so not the probe's.
     for (const sensorId of refused.keys()) left.delete(sensorId);
+    this.#noteStopped(probeId, left);
     if (left.size === 0) this.#leftToProbe.delete(probeId);
     else this.#leftToProbe.set(probeId, left);
     const before = this.#withheldByProbe.get(probeId) ?? 0;
@@ -949,6 +988,33 @@ export class CredentialVouching {
   }
 
   /**
+   * Records which sensors this configuration stops leaving to the probe, and when (`A-53`).
+   * Called with what the probe is left now, before that replaces what it was left before.
+   *
+   * **The time is the first configuration's that stopped leaving the sensor, and no later one
+   * moves it**: the window is how long a refusal made under the one before may take to arrive,
+   * and a configuration built for another reason says nothing about that.
+   */
+  #noteStopped(probeId: number, left: ReadonlySet<number>): void {
+    const now = this.#now();
+    const stopped = new Map<number, number>();
+    for (const [sensorId, at] of this.#stoppedLeaving.get(probeId) ?? []) {
+      if (!left.has(sensorId) && now - at <= this.#graceMs) stopped.set(sensorId, at);
+    }
+    for (const sensorId of this.#leftToProbe.get(probeId) ?? []) {
+      if (!left.has(sensorId)) stopped.set(sensorId, now);
+    }
+    if (stopped.size === 0) this.#stoppedLeaving.delete(probeId);
+    else this.#stoppedLeaving.set(probeId, stopped);
+  }
+
+  /** Whether a configuration stopped leaving this sensor to the probe within the grace. */
+  #stoppedWithinGrace(probeId: number, sensorId: number): boolean {
+    const at = this.#stoppedLeaving.get(probeId)?.get(sensorId);
+    return at !== undefined && this.#now() - at <= this.#graceMs;
+  }
+
+  /**
    * Takes the checks a probe refused out of its batch, and holds their sensors Unknown with what
    * the probe said (`A-41c`). Returns the results that are left, for the state machine.
    *
@@ -962,6 +1028,19 @@ export class CredentialVouching {
    * readings, for a sensor this probe was sent with a set whose targets left the name for it to
    * check. Any other result that carries it is the result it would be without it, and is counted:
    * a probe cannot turn a failure of a sensor it merely owns into a standing Unknown.
+   *
+   * **A refusal is judged against the configuration it was made under** (`A-53`). A probe that
+   * follows its configuration refuses only a sensor that configuration left to it, so a refusal
+   * for a sensor the probe is no longer left was made under an earlier one: the check was
+   * running, or its result was in the spool, when the configuration changed. A result does not
+   * say which configuration it ran under, so that is taken to be the case for the grace after
+   * the configuration that stopped leaving the sensor, and not after it. Such a refusal is
+   * dropped and counted (`late`). It is not a failed scan, since nothing was asked of the device,
+   * and it holds nothing, since whatever the configuration now says about the sensor is what
+   * speaks for it. It measures nothing either, and lets no hold go. **What that gives a probe
+   * that misbehaves is a result that vanishes, which it had by not sending it**: no hold begins
+   * or lasts longer by it, only an error with no readings is taken, only for a sensor this probe
+   * was left, and only inside the grace.
    *
    * **The next result that is not a refusal lets it go, and that result decides the sensor.** The
    * hold is dropped without re-deciding anything, so the machine makes one transition, from
@@ -985,7 +1064,7 @@ export class CredentialVouching {
   ): Promise<ReportedBatch> {
     // Nothing held by anyone and nothing marked, which is every batch of every probe but a few.
     if (this.#refusedByProbe.size === 0 && !results.some((result) => result.withheld === true)) {
-      return { results, unearned: 0, stored: NOTHING_LET_GO };
+      return { results, unearned: 0, late: 0, stored: NOTHING_LET_GO };
     }
 
     const held = this.#refusedByProbe.get(probeId);
@@ -998,15 +1077,20 @@ export class CredentialVouching {
     /** When the first refusal that says something new was made, by the probe's clock. */
     let news: number | undefined;
     let unearned = 0;
+    let late = 0;
     const inOrder = [...results].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
     for (const result of inOrder) {
       const at = Date.parse(result.at);
       const holding = refused.get(result.sensorId);
-      const earned =
-        result.withheld === true &&
-        result.outcome === 'error' &&
-        result.channels.length === 0 &&
-        left?.has(result.sensorId) === true;
+      /** What a refusal looks like, whoever sent it: an error that measured nothing. */
+      const refusal =
+        result.withheld === true && result.outcome === 'error' && result.channels.length === 0;
+      const earned = refusal && left?.has(result.sensorId) === true;
+      if (refusal && !earned && this.#stoppedWithinGrace(probeId, result.sensorId)) {
+        // Made under the configuration before this one (`A-53`). Neither kept nor held.
+        late += 1;
+        continue;
+      }
       if (!earned) {
         if (result.withheld === true) {
           unearned += 1;
@@ -1073,10 +1157,11 @@ export class CredentialVouching {
       if (other !== probeId) release(other, [...measured]);
     }
 
-    if (releases.length === 0) return { results: kept, unearned, stored: NOTHING_LET_GO };
+    if (releases.length === 0) return { results: kept, unearned, late, stored: NOTHING_LET_GO };
     return {
       results: kept,
       unearned,
+      late,
       stored: async (landed) => {
         for (const { probeId: owner, was, hold } of releases) {
           if (landed) {
@@ -1106,6 +1191,7 @@ export class CredentialVouching {
       const probes = new Set([
         ...this.#refusedByProbe.keys(),
         ...this.#leftToProbe.keys(),
+        ...this.#stoppedLeaving.keys(),
         ...this.#withheldByProbe.keys(),
       ]);
       if (probes.size === 0) return;
@@ -1144,6 +1230,7 @@ export class CredentialVouching {
         if (!gone) continue;
         // Nothing is sent to a probe that does not exist, and nothing is withheld from it.
         this.#leftToProbe.delete(probeId);
+        this.#stoppedLeaving.delete(probeId);
         if (this.#withheldByProbe.delete(probeId)) {
           await this.#vouching?.settle(`credentials:${String(probeId)}`, new Map());
         }
