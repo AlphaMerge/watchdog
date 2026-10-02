@@ -152,7 +152,17 @@ the cookie for as long as the absolute timeout allows. The core decides when the
 signed in once, when it opens, and the core keeps asking whether what opened it still
 authenticates: before it delivers each state change, and every five seconds when nothing changes.
 When the answer is no, the socket is closed with `4401` and the page goes to the login form and
-says why. Nothing that changed after the logout is sent. Core Health counts these by reason
+says why. Nothing that changed after the logout is sent.
+
+**The page is closed on the five-second timer, never at the change that found it.** A change that
+finds the socket signed out stops the core sending it anything at all, and leaves it open; the
+timer's next tick closes it. So a signed-out page stays open, and silent, for at most five seconds
+and the moment one check takes — the same on a busy installation as on a quiet one. Closing it at
+the change would tell an account that had just been signed out or disabled the instant some
+sensor changed state or some probe's link moved, including ones it was never allowed to see. If
+the page sends the core anything in those seconds, it is closed there and not answered.
+
+Core Health counts these by reason
 (`streamEnded`, `streamExpired`, `streamRevoked`, `streamDisabled`), and `streamCheckFailures`
 counts checks that could not be made. **A check that fails closes nothing**: a database that
 blinked is not a reason to sign everybody out, so a climbing `streamCheckFailures` means sockets

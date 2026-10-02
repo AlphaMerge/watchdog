@@ -97,9 +97,10 @@ export interface StreamStats {
    */
   readonly severed: number;
   /**
-   * Sockets closed because what authenticated them no longer does (`A-34`), by why: a session
-   * ended or expired, a token revoked, an account disabled. Each is a stream that would otherwise
-   * have gone on serving whoever held it.
+   * Sockets found to be open on a credential that no longer authenticates (`A-34`), by why: a
+   * session ended or expired, a token revoked, an account disabled. Each is a stream that would
+   * otherwise have gone on serving whoever held it. Counted once, when it is found — which is
+   * when it stops being sent anything, and may be a sweep interval before it is closed (`U-25`).
    */
   readonly signedOut: Readonly<Record<Lapse, number>>;
   /**
@@ -130,7 +131,11 @@ export interface StateBroadcasterOptions {
   backlogLimitBytes?: number;
   /** How many sensors a snapshot may carry. */
   snapshotLimit?: number;
-  /** How often every admitted socket's credential is checked when nothing is published. */
+  /**
+   * How often every admitted socket's credential is checked when nothing is published, and how
+   * often a socket already found lapsed is closed (`U-25`): the longest a lapsed socket stays
+   * open, saying nothing.
+   */
   credentialSweepMs?: number;
   /**
    * The access epoch, read now (`U-24`). What the sweep compares every probe watcher's view
@@ -157,9 +162,12 @@ const DEFAULT_SNAPSHOT_LIMIT = 20_000;
  * The sweep is for the quiet installation; a busy one checks on every published batch. Its cost is
  * one query per sweep however many sockets are open: at `P-15`'s scale, with a few hundred
  * sockets, that is a few hundred primary-key probes into `user_session` and `user_account` — well
- * under a millisecond of database time every five seconds. Five seconds is how long a stream can
- * outlive a logout on an installation where nothing changed state, which is also a stream with
- * nothing new to say.
+ * under a millisecond of database time every five seconds.
+ *
+ * **And the only clock a lapsed socket is closed on** (`U-25`). A published batch that finds a
+ * socket lapsed stops sending to it and leaves it open; the sweep closes it. So five seconds, and
+ * the time one check takes, is the longest a socket stays open after its credential lapsed —
+ * busy installation or quiet — and in that time it is sent nothing.
  */
 const DEFAULT_CREDENTIAL_SWEEP_MS = 5_000;
 
@@ -220,6 +228,13 @@ export interface StreamSight {
  */
 export interface StreamSocket {
   readonly credential: Credential;
+  /**
+   * Its credential no longer authenticates anything, found where something was about to be sent
+   * (`U-25`). **Send it nothing from here on, and do not close it**: detach what it subscribed
+   * to, synchronously, and let nothing more out — no frame, no `overflow`, no answer. `signOut`
+   * follows, on the sweep's clock or at the socket's own next frame.
+   */
+  silence(lapse: Lapse): void;
   /** Its credential no longer authenticates anything. Close it, saying why. */
   signOut(lapse: Lapse): void;
 }
@@ -228,8 +243,13 @@ export interface StreamSocket {
 export interface Admission {
   /**
    * Whether the credential still authenticates, asked now; the socket is signed out if not. For a
-   * frame about to be sent that no published batch has vouched for — a snapshot. Rejects when it
-   * cannot tell, which closes nothing.
+   * frame about to be sent that no published batch has vouched for — a snapshot — and for a frame
+   * the client has just sent. Rejects when it cannot tell, which closes nothing.
+   *
+   * **A socket already silenced is asked about too, and then closed whatever the answer**
+   * (`U-25`). The question buys nothing — it was decided — except that the close comes as long
+   * after the client's frame as it would have had nothing been published in between, so a
+   * signed-out client cannot learn from how fast it is closed that something was.
    */
   confirm(): Promise<boolean>;
   /** The socket has closed. */
@@ -305,6 +325,13 @@ export class StateBroadcaster {
    * it. One check in a running core — the API server's — so one query however many sockets.
    */
   readonly #admitted = new Map<StreamSocket, CredentialCheck>();
+  /**
+   * Sockets found lapsed where something was about to be sent, and why (`U-25`): silenced there,
+   * still open, still admitted — so the sweep's timer stays armed for them — and closed by the
+   * next sweep. Never asked about again by a batch or a sweep: a credential that lapsed and came
+   * back has still missed what was not sent to it, and the close is how the client finds out.
+   */
+  readonly #silenced = new Map<StreamSocket, Lapse>();
   #sweeper: ReturnType<typeof setInterval> | undefined;
   #sweeping = false;
   readonly #signedOut: Record<Lapse, number> = { ended: 0, expired: 0, revoked: 0, disabled: 0 };
@@ -371,7 +398,10 @@ export class StateBroadcaster {
   /**
    * Puts an open socket under `check` (`A-34`): asked on every published batch before anything is
    * delivered, and on a sweep when nothing is published, so a quiet installation still closes it.
-   * Signed out — its `signOut` called, once — when the credential lapses.
+   *
+   * **Found lapsed by a batch, it is silenced; closing it is the sweep's** (`U-25`). `silence` is
+   * called once, where the batch found it, and `signOut` once, on the sweep's next tick — or
+   * `signOut` alone when it is the sweep, or `confirm`, that finds it.
    */
   admit(socket: StreamSocket, check: CredentialCheck): Admission {
     this.#admitted.set(socket, check);
@@ -380,11 +410,18 @@ export class StateBroadcaster {
     return {
       confirm: async () => {
         if (!this.#admitted.has(socket)) return false;
-        await this.#examine([socket]);
+        try {
+          await this.#examine([socket], 'close', true);
+        } catch (error: unknown) {
+          // It could not be asked about. Decided already, it is closed all the same; otherwise
+          // this is "cannot tell", and the caller's.
+          if (this.#admitted.has(socket)) throw error;
+        }
         return this.#admitted.has(socket);
       },
       release: () => {
         this.#admitted.delete(socket);
+        this.#silenced.delete(socket);
         this.#arm();
       },
     };
@@ -394,15 +431,26 @@ export class StateBroadcaster {
    * Checks every admitted socket's credential, and signs out those that lapsed (`A-34`). What the
    * timer runs; public so a test can run one without waiting for it.
    *
-   * **Never rejects, and a failure closes nothing.** It is counted and logged, and the sockets stay
-   * open until a check can answer — a database that blinked is not a reason to sign everybody out.
+   * **The only place a socket is closed for a lapse that a published batch found** (`U-25`).
+   * `publish` and `publishProbe` ask the same question so that nothing committed after a sign-out
+   * is delivered, and what they find they silence. Closing it there would tell an account that
+   * was signed out or disabled the instant some sensor changed state or some probe's link moved —
+   * including ones it could never see — as the timing of its own close frame. Here the instant
+   * is this timer's, armed when the first socket or watcher arrived and moved by nothing since.
+   *
+   * **A silenced socket and one this sweep finds are closed together, after the one question**:
+   * were the silenced closed first, which of the two a socket was would be in the gap.
+   *
+   * **Never rejects, and a failure closes nothing that was not already decided.** It is counted
+   * and logged, and the sockets stay open until a check can answer — a database that blinked is
+   * not a reason to sign everybody out.
    */
   async sweep(): Promise<void> {
     // One at a time: a sweep still waiting on a slow database is not joined by another.
     if (this.#sweeping) return;
     this.#sweeping = true;
     try {
-      await this.#vet();
+      await this.#vet('close');
       await this.#review();
     } finally {
       this.#sweeping = false;
@@ -473,11 +521,17 @@ export class StateBroadcaster {
     this.#arm();
   }
 
-  /** `#examine` for every admitted socket, never rejecting. See `sweep`. */
-  async #vet(): Promise<void> {
+  /**
+   * `#examine` for every admitted socket, never rejecting. See `sweep`.
+   *
+   * `silence` is what an edge does — a published batch, a probe's change — and `close` what the
+   * sweep does. Neither asks again about a socket already silenced, so an edge costs the one
+   * question it cost before `U-25`, less the sockets already decided.
+   */
+  async #vet(act: 'silence' | 'close'): Promise<void> {
     if (this.#admitted.size === 0) return;
     try {
-      await this.#examine([...this.#admitted.keys()]);
+      await this.#examine([...this.#admitted.keys()], act, false);
     } catch (error: unknown) {
       this.#logger.warn(
         { err: describeError(error), sockets: this.#admitted.size },
@@ -489,14 +543,22 @@ export class StateBroadcaster {
 
   /**
    * Asks each check once about these sockets' credentials, however many sockets share one, and
-   * signs out every socket whose credential lapsed. Rejects, each failure counted, when a check
-   * cannot answer — after signing out whatever the others said had lapsed.
+   * acts on every socket whose credential lapsed: `silence` stops sending to it and leaves it
+   * open for the sweep, `close` signs it out — and signs out those silenced before. Rejects, each
+   * failure counted, when a check cannot answer — after acting on what the others said.
+   *
+   * A socket already silenced is not asked about, unless `again`: see `Admission.confirm`.
    */
-  async #examine(sockets: readonly StreamSocket[]): Promise<void> {
+  async #examine(
+    sockets: readonly StreamSocket[],
+    act: 'silence' | 'close',
+    again: boolean,
+  ): Promise<void> {
     const asking = new Map<CredentialCheck, Map<string, Credential>>();
     for (const socket of sockets) {
       const check = this.#admitted.get(socket);
       if (check === undefined) continue;
+      if (!again && this.#silenced.has(socket)) continue;
       const asked = asking.get(check) ?? new Map<string, Credential>();
       asked.set(credentialKey(socket.credential), socket.credential);
       asking.set(check, asked);
@@ -517,12 +579,26 @@ export class StateBroadcaster {
       const check = this.#admitted.get(socket);
       // Released while the check was out — closed by its client, or signed out by another check.
       if (check === undefined) continue;
+      const decided = this.#silenced.get(socket);
+      if (decided !== undefined) {
+        // Found by an edge, and counted there. Whatever was answered now, it has missed frames.
+        if (act === 'silence') continue;
+        this.#silenced.delete(socket);
+        this.#admitted.delete(socket);
+        socket.signOut(decided);
+        continue;
+      }
       const lapse = answers.get(check)?.get(credentialKey(socket.credential));
       if (lapse === undefined) continue;
-      this.#admitted.delete(socket);
       this.#signedOut[lapse] += 1;
-      // Synchronous, and it detaches the socket's subscription: a batch waiting on this check
-      // delivers to nobody it signed out.
+      if (act === 'silence') {
+        // Synchronous, and it detaches the socket's subscription: a batch waiting on this check
+        // delivers to nobody it silenced. Still admitted, so the timer that closes it stays armed.
+        this.#silenced.set(socket, lapse);
+        socket.silence(lapse);
+        continue;
+      }
+      this.#admitted.delete(socket);
       socket.signOut(lapse);
     }
     this.#arm();
@@ -654,8 +730,9 @@ export class StateBroadcaster {
     }
     this.#announcing.add(probeId);
 
-    // As `publish`: every socket's credential before anything is delivered (`A-34`).
-    const vetting = this.#vet();
+    // As `publish`: every socket's credential before anything is delivered (`A-34`), and a
+    // lapsed one silenced, not closed — a close here is a frame at the instant of this edge.
+    const vetting = this.#vet('silence');
     let path: ObjectId[] | undefined;
     let epoch: number | null;
     try {
@@ -761,7 +838,10 @@ export class StateBroadcaster {
     // delivered** (`A-34`), so nothing committed after a logout reaches the socket it ended. Beside
     // the ancestry read rather than after it, so it costs this batch no time; and never rejecting,
     // so a check that fails delivers as before and is counted — see `sweep`.
-    const vetting = this.#vet();
+    //
+    // **A lapsed socket is silenced here and closed by the sweep** (`U-25`): it is sent nothing
+    // of this batch or of any later one, and the close that says so is not timed by this commit.
+    const vetting = this.#vet('silence');
     let ancestry: Map<ObjectId, { name: string; path: ObjectId[] }>;
     let epoch: number | null;
     try {

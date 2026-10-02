@@ -3,7 +3,7 @@ import { after, afterEach, before, beforeEach, describe, it, type TestContext } 
 import type { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
 import { ApiServer } from '../src/api/server.js';
-import { STREAM_SIGNED_OUT } from '../src/api/routes/stream.js';
+import { STREAM_LIMITS, STREAM_SIGNED_OUT } from '../src/api/routes/stream.js';
 import { AccountService } from '../src/auth/accounts.js';
 import { AccessService } from '../src/auth/access.js';
 import { credentialCheck, type Lapse } from '../src/auth/credentials.js';
@@ -38,6 +38,12 @@ import { buildHarness, silent, testActor, type Harness } from './support/tree.js
  * sent — neither a change nor a snapshot — even before the sweep comes round; a check that cannot
  * answer closes nothing and is counted; an open stream is not activity; and with authentication
  * off there is nothing to check.
+ *
+ * **And when it is closed says nothing about what changed** (`U-25`). A change published after a
+ * sign-out stops the socket being sent anything and does not close it; the sweep does, on its own
+ * timer, or the socket's own next frame does. Closed where the change was published, an account
+ * that had just been signed out or disabled was told the instant some sensor changed state or
+ * some probe's link moved — one it may never have been allowed to see.
  */
 
 const available = await databaseAvailable();
@@ -60,6 +66,7 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
   let lastingApp: FastifyInstance;
   const servers: ApiServer[] = [];
   let sensorId = 0;
+  let probeId = 0;
   /** The sessions' clock, moved by the expiry test. */
   let clock = Date.now();
 
@@ -134,6 +141,7 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
       parentId: h.rootId,
       name: 'probe',
     });
+    probeId = probe.id;
     const device = await h.service.create(testActor, {
       kind: 'device',
       parentId: probe.id,
@@ -206,29 +214,52 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
 
   const as = (login: string) => ({ cookie: cookies.get(login) ?? '' });
 
-  /** A socket that has subscribed to everything and been sent its snapshot. */
-  async function watching(
-    headers: Record<string, string>,
-    on: FastifyInstance = app,
-  ): Promise<{
+  interface Watching {
     socket: WebSocket;
     frames: Record<string, unknown>[];
     closed: Promise<{ code: number; reason: string }>;
-  }> {
+    /** How it closed, if it has: read now, where `closed` would have to be waited for. */
+    ended: { code?: number };
+  }
+
+  /** A socket that has subscribed — to everything, or to one probe — and been answered. */
+  async function watching(
+    headers: Record<string, string>,
+    on: FastifyInstance = app,
+    probe?: number,
+  ): Promise<Watching> {
     const socket = await on.injectWS('/api/v1/stream', { headers });
     sockets.push(socket);
     const frames: Record<string, unknown>[] = [];
     socket.on('message', (raw: Buffer) => {
       frames.push(JSON.parse(raw.toString('utf8')) as Record<string, unknown>);
     });
+    const ended: { code?: number } = {};
     const closed = new Promise<{ code: number; reason: string }>((resolve) => {
       socket.on('close', (code: number, reason: Buffer) => {
+        ended.code = code;
         resolve({ code, reason: reason.toString('utf8') });
       });
     });
-    socket.send(JSON.stringify({ subscribe: {} }));
-    await until(() => frames.some((frame) => frame['type'] === 'snapshot'), 'a snapshot');
-    return { socket, frames, closed };
+    socket.send(JSON.stringify({ subscribe: probe === undefined ? {} : { probeId: probe } }));
+    const answer = probe === undefined ? 'snapshot' : 'watching';
+    await until(() => frames.some((frame) => frame['type'] === answer), `a ${answer} frame`);
+    return { socket, frames, closed, ended };
+  }
+
+  /**
+   * One round trip on this socket, bounded. A socket is FIFO, so whatever the core sent it
+   * before the pong — a frame, or a close — has arrived by the time this returns: the wait that
+   * makes "it was sent nothing, and it is open" a claim about now rather than about a moment
+   * too early to tell.
+   */
+  async function roundTrip(socket: WebSocket): Promise<void> {
+    let ponged = false;
+    socket.once('pong', () => {
+      ponged = true;
+    });
+    socket.ping();
+    await until(() => ponged, 'a pong: the socket is not open');
   }
 
   /** A change to the one sensor, published as a commit would publish it. */
@@ -247,6 +278,8 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
 
   const states = (frames: readonly Record<string, unknown>[]): number =>
     frames.filter((frame) => frame['type'] === 'state').length;
+  const probes = (frames: readonly Record<string, unknown>[]): number =>
+    frames.filter((frame) => frame['type'] === 'probe').length;
 
   /** How a socket closed — or a failure naming what was expected, rather than a hang. */
   async function closedWith(
@@ -399,18 +432,214 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
   });
 
   describe('before the sweep comes round', () => {
-    it('sends no change committed after the logout', async () => {
+    // Until `U-25` this case pinned "closed by the batch that found it". What it was for is
+    // unchanged — nothing committed after the logout arrives — and the close moved to the sweep.
+    it('sends nothing committed after the logout, and closes nothing until the sweep', async () => {
+      // Two tabs on one session, a tree and a form watching the probe; and the same two for an
+      // account that stays signed in, which is how the edges are shown to have happened.
       const watcher = await watching(as('watcher'));
+      const form = await watching(as('watcher'), app, probeId);
       const bystander = await watching(as('bystander'));
+      const other = await watching(as('bystander'), app, probeId);
+      const had = [watcher.frames.length, form.frames.length];
+      const before = signedOut('ended');
+      // These four and no other: sockets an earlier case left behind have finished closing.
+      await until(() => stream.stats.subscribers === 4, 'four subscriptions');
 
-      // No sweep: the batch itself asks, before it delivers anything.
+      // No sweep: each batch itself asks, before it delivers anything.
+      await logOut('watcher');
+      for (let batch = 1; batch <= 3; batch += 1) {
+        await change();
+        await until(() => states(bystander.frames) === batch, `state change ${String(batch)}`);
+      }
+      for (let edge = 1; edge <= 3; edge += 1) {
+        await stream.publishProbe(db, probeId);
+        await until(() => probes(other.frames) === edge, `probe edge ${String(edge)}`);
+      }
+
+      // Six edges, each of which reached a socket still signed in. The signed-out ones were sent
+      // nothing at any of them — no change, no `probe`, no `overflow` — and are still open.
+      for (const lapsed of [watcher, form]) await roundTrip(lapsed.socket);
+      assert.deepEqual(
+        [watcher.frames.slice(had[0]), form.frames.slice(had[1])],
+        [[], []],
+        'something reached a socket after its logout',
+      );
+      assert.deepEqual(
+        [watcher.ended, form.ended],
+        [{}, {}],
+        'a socket was closed where a change was published',
+      );
+      // Detached, not merely muted: nothing is fanned out to a subscription nobody will be sent.
+      assert.equal(stream.stats.subscribers, 2, 'a silenced socket is still subscribed');
+      // Found there, and counted there: both of the session's sockets, by the first batch.
+      assert.equal(signedOut('ended'), before + 2);
+
+      // The sweep's tick, run by hand, is the close.
+      await stream.sweep();
+      for (const lapsed of [watcher, form]) {
+        assert.deepEqual(await closedWith(lapsed.closed), {
+          code: STREAM_SIGNED_OUT,
+          reason: 'this session has ended; sign in again',
+        });
+      }
+      assert.equal(watcher.frames.length, had[0]);
+      assert.equal(form.frames.length, had[1]);
+      assert.equal(signedOut('ended'), before + 2, 'counted again at the close');
+      // And the account that stayed signed in was never disturbed.
+      assert.deepEqual([bystander.ended, other.ended], [{}, {}]);
+    });
+
+    it('closes a silenced socket at its own next frame, without answering it', async () => {
+      const watcher = await watching(as('watcher'));
+      const form = await watching(as('watcher'), app, probeId);
+      const bystander = await watching(as('bystander'));
       await logOut('watcher');
       await change();
-
-      assert.equal((await closedWith(watcher.closed)).code, STREAM_SIGNED_OUT);
-      // Arrived on the other socket, so it would have arrived on this one by now too.
       await until(() => states(bystander.frames) === 1, 'the change on the other socket');
-      assert.equal(states(watcher.frames), 0, 'the change reached a socket after its logout');
+      for (const lapsed of [watcher, form]) await roundTrip(lapsed.socket);
+      const had = [watcher.frames.length, form.frames.length];
+
+      // Subscribing again is the client's own doing, so the instant says nothing: closed there,
+      // with no sweep, and with no snapshot — it may not subscribe in the window.
+      watcher.socket.send(JSON.stringify({ subscribe: {} }));
+      assert.deepEqual(await closedWith(watcher.closed), {
+        code: STREAM_SIGNED_OUT,
+        reason: 'this session has ended; sign in again',
+      });
+      assert.deepEqual(watcher.frames.slice(had[0]), [], 'a silenced socket was answered');
+      // Its own socket and no other: the session's second tab is still the sweep's to close.
+      await roundTrip(form.socket);
+      assert.deepEqual(form.ended, {});
+
+      // A watch is refused the same way: no `watching`.
+      form.socket.send(JSON.stringify({ subscribe: { probeId } }));
+      assert.equal((await closedWith(form.closed)).code, STREAM_SIGNED_OUT);
+      assert.deepEqual(form.frames.slice(had[1]), [], 'a silenced socket was allowed a watch');
+      assert.deepEqual(bystander.ended, {});
+    });
+
+    it('closes a lapsed socket nothing was published to at its own frame, just the same', async () => {
+      // **The same answer whether or not anything changed since the sign-out.** Were a silenced
+      // socket closed by its frame and an unsilenced one answered, one frame of junk would tell
+      // a signed-out client whether anything had changed state since.
+      const watcher = await watching(as('watcher'));
+      const bystander = await watching(as('bystander'));
+      await logOut('watcher');
+      const had = watcher.frames.length;
+
+      watcher.socket.send('not a subscription');
+      assert.deepEqual(await closedWith(watcher.closed), {
+        code: STREAM_SIGNED_OUT,
+        reason: 'this session has ended; sign in again',
+      });
+      assert.deepEqual(watcher.frames.slice(had), [], 'a signed-out socket was answered');
+
+      // Signed in, the same frame is answered and the socket stays.
+      const at = bystander.frames.length;
+      bystander.socket.send('not a subscription');
+      await until(() => bystander.frames.length > at, 'an answer');
+      assert.equal(bystander.frames[at]?.['type'], 'problem');
+      await roundTrip(bystander.socket);
+      assert.deepEqual(bystander.ended, {});
+    });
+
+    it('closes a socket that sends frames faster than its credential can be asked about', async (t: TestContext) => {
+      const watcher = await watching(as('watcher'));
+      const severed = stream.stats.severed;
+      // The database is slow: every question about a session waits here.
+      let release = (): void => undefined;
+      const slow = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const ask = sessions.lapsed.bind(sessions);
+      t.mock.method(sessions, 'lapsed', async (...args: Parameters<SessionService['lapsed']>) => {
+        await slow;
+        return ask(...args);
+      });
+      try {
+        const had = watcher.frames.length;
+        // As many as may wait, each held behind the first one's question; and one more.
+        for (let n = 0; n < STREAM_LIMITS.unread; n += 1) watcher.socket.send('5');
+        await roundTrip(watcher.socket);
+        assert.deepEqual(watcher.ended, {}, 'closed inside the bound');
+        watcher.socket.send('5');
+        assert.deepEqual(await closedWith(watcher.closed), {
+          code: 1008,
+          reason: 'it sent frames faster than they could be read',
+        });
+        assert.equal(stream.stats.severed, severed + 1);
+        assert.deepEqual(watcher.frames.slice(had), [], 'a frame was read before it was asked');
+      } finally {
+        release();
+      }
+    });
+
+    it('closes a subscription in flight when a change silenced it, as it would have unsilenced', async (t: TestContext) => {
+      // The socket's own subscribe is on its way when the session ends *and* a change is
+      // published. The change silences it; the subscription still asks before it answers, and
+      // that closes the socket — as the case below does with nothing published. No sweep.
+      const bystander = await watching(as('bystander'));
+      const read = stream.snapshot.bind(stream);
+      let crossed = false;
+      t.mock.method(
+        stream,
+        'snapshot',
+        async (...args: Parameters<StateBroadcaster['snapshot']>) => {
+          const rows = await read(...args);
+          if (!crossed) {
+            crossed = true;
+            await logOut('watcher');
+            await change();
+          }
+          return rows;
+        },
+      );
+      const socket = await app.injectWS('/api/v1/stream', { headers: as('watcher') });
+      sockets.push(socket);
+      const types: unknown[] = [];
+      socket.on('message', (raw: Buffer) => {
+        types.push((JSON.parse(raw.toString('utf8')) as Record<string, unknown>)['type']);
+      });
+      const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+        socket.on('close', (code: number, reason: Buffer) => {
+          resolve({ code, reason: reason.toString('utf8') });
+        });
+      });
+      socket.send(JSON.stringify({ subscribe: {} }));
+
+      assert.equal((await closedWith(closed)).code, STREAM_SIGNED_OUT);
+      await until(() => states(bystander.frames) === 1, 'the change on the other socket');
+      // `hello` may have gone before the listener was on; nothing else can have.
+      assert.deepEqual(
+        types.filter((type) => type !== 'hello'),
+        [],
+        'a silenced socket was sent something',
+      );
+    });
+
+    it('answers a silenced socket’s subscription in flight with nothing at all', async (t: TestContext) => {
+      // A subscription that would be refused — `problem` — had the socket not been silenced
+      // while the refusal was being decided. It is sent no frame; the sweep closes it.
+      const bystander = await watching(as('bystander'));
+      const watcher = await watching(as('watcher'));
+      const had = watcher.frames.length;
+      t.mock.method(stream, 'canSee', async () => {
+        await logOut('watcher');
+        await change();
+        return false;
+      });
+      watcher.socket.send(JSON.stringify({ subscribe: { objectId: sensorId } }));
+      await until(() => states(bystander.frames) === 1, 'the change on the other socket');
+      await roundTrip(watcher.socket);
+      // A second round trip: the refusal, had it been sent, follows the change by a turn or two.
+      await roundTrip(watcher.socket);
+      assert.deepEqual(watcher.frames.slice(had), [], 'a silenced socket was answered');
+      assert.deepEqual(watcher.ended, {});
+
+      await stream.sweep();
+      assert.equal((await closedWith(watcher.closed)).code, STREAM_SIGNED_OUT);
+      assert.deepEqual(watcher.frames.slice(had), []);
     });
 
     it('sends no snapshot read across the logout', async (t: TestContext) => {

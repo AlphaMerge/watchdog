@@ -52,12 +52,19 @@ export interface StreamLimits {
   readonly subscribesPerMinute: number;
   /** Frames refused as malformed before the socket stops being answered and is closed. */
   readonly problems: number;
+  /**
+   * Frames a signed-in socket may have sent and not yet had read (`U-25`). Each waits for the
+   * socket's credential to be asked about, one at a time, so a client sending faster than that
+   * is answered would otherwise queue them without limit.
+   */
+  readonly unread: number;
 }
 
 export const STREAM_LIMITS: StreamLimits = {
   socketBytes: 16 * 1024 * 1024,
   subscribesPerMinute: 30,
   problems: 5,
+  unread: 16,
 };
 
 /**
@@ -363,8 +370,12 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
           `${String(STREAM_LIMITS.socketBytes / 1024 / 1024)} MiB queue up unsent.` +
           `\n\nA socket is closed with ${String(STREAM_SIGNED_OUT)} when what authenticated it ` +
           'no longer does — its session ended or expired, its token was revoked or expired, or ' +
-          'its account was disabled — within seconds, and before anything that changed after it ' +
-          'is sent. Do not reconnect on it: sign in again. An open stream does not count as ' +
+          'its account was disabled. Nothing that changed after that is sent to it: from the ' +
+          'first change the core would have sent, the socket is sent nothing at all, and it is ' +
+          'closed on a timer of the core’s own, within five seconds, so that when the close ' +
+          'arrives says nothing about what changed or when. A frame the client sends in that ' +
+          'time is not answered, and closes the socket at once. Do not reconnect on ' +
+          `${String(STREAM_SIGNED_OUT)}: sign in again. An open stream does not count as ` +
           'activity, so a session used for nothing else reaches its idle timeout.',
         // No `response`: the route upgrades rather than answering, and a schema describing a
         // 101 would be a shape no client ever parses.
@@ -374,6 +385,11 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
     (socket, request) => {
       let detach: (() => void) | undefined;
       let closed = false;
+      /**
+       * Its credential lapsed, found where a change was about to be sent (`U-25`). Open still,
+       * and sent nothing: every frame goes through `send`, which lets none out from here on.
+       */
+      let silenced = false;
       /**
        * Which subscription is current. Resolving the caller's visibility is a query, so a second
        * `subscribe` can arrive while the first is still asking — and without this both would
@@ -391,8 +407,35 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
       };
 
       /**
-       * Closes a socket whose credential lapsed (`A-34`). Called synchronously from the check, and
-       * detaching here is what keeps the batch that ran the check from delivering to it.
+       * Stops sending to a socket whose credential lapsed, and leaves it open (`U-25`). Called
+       * synchronously from the check a published batch or a probe's change runs, and detaching
+       * here is what keeps that batch from delivering to it (`A-34`).
+       *
+       * **Not closed here**, because here is the instant something changed — a sensor's state, a
+       * probe's link, anywhere in the installation — and a close frame arriving now would say so
+       * to an account that has just been signed out or disabled. The broadcaster's sweep closes
+       * it, on its own timer, and until then a frame from the client does: see `receive`.
+       *
+       * **A subscription in flight is not abandoned here.** It goes on to ask about the
+       * credential before it answers, as it always did (`A-34`), and that closes the socket —
+       * exactly as it does for a socket that lapsed and was *not* silenced, so the two cannot be
+       * told apart by which of them a subscribe was answered with a close. Whatever it would
+       * send on the way there, `send` lets none of it out.
+       */
+      const silence = (lapse: Lapse): void => {
+        if (closed || silenced) return;
+        silenced = true;
+        unsubscribe();
+        request.log.info(
+          { login: request.principal?.login, lapse },
+          'a stream socket lost its credential; it is sent nothing more and closed on the sweep',
+        );
+      };
+
+      /**
+       * Closes a socket whose credential lapsed (`A-34`). Called from the sweep, or from the check
+       * a frame of the client's own asked for — never from the check a published change runs,
+       * which is `silence` (`U-25`).
        */
       const signOut = (lapse: Lapse): void => {
         if (closed) return;
@@ -417,7 +460,7 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
       const admission: Admission | undefined =
         credential === null || options.credentials === undefined
           ? undefined
-          : stream.admit({ credential, signOut }, options.credentials);
+          : stream.admit({ credential, silence, signOut }, options.credentials);
 
       /**
        * Stops serving this socket, and counts it on Core Health (`A-30`). `terminate` when it is not
@@ -440,7 +483,9 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
        * **Every frame is bounded here, whatever it is** (`A-30`): a snapshot, an event, a reply.
        */
       const send = (frame: ServerFrame, written?: () => void): number => {
-        if (closed || socket.readyState !== socket.OPEN) return 0;
+        // **Nothing, to a socket whose credential lapsed** (`U-25`): not a frame, not `overflow`,
+        // not a `problem`. One gate, so a frame added later cannot forget.
+        if (closed || silenced || socket.readyState !== socket.OPEN) return 0;
         if (socket.bufferedAmount > limits.socketBytes) {
           sever('it is not reading what it is sent', 'terminate');
           return 0;
@@ -675,7 +720,7 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         });
       };
 
-      const receive = (raw: Buffer): void => {
+      const read = (raw: Buffer): void => {
         if (closed) return;
         if (raw.length > MAX_CLIENT_FRAME_BYTES) {
           refuse('that frame is larger than any subscription');
@@ -714,6 +759,57 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         );
         hang();
         socket.close(1011, 'internal error');
+      };
+
+      /** Frames a signed-in socket has sent that are waiting to be read, for `limits.unread`. */
+      let unread = 0;
+      let reading: Promise<void> = Promise.resolve();
+      /**
+       * **A signed-in socket's frame is read once its credential has been asked about** (`U-25`),
+       * whatever the frame is — a subscription, or junk that would be answered with `problem`.
+       *
+       * A socket silenced by a published change must not subscribe, and must not be answered. It
+       * could simply be closed when it next sends a frame; but a socket that lapsed and has *not*
+       * been silenced — nothing was published since — would then be answered instead, and a
+       * signed-out client could send one frame to learn which it is: whether anything changed
+       * state, anywhere, since it was signed out. So the same thing is done for both. The
+       * credential is asked about, and a socket whose credential lapsed is closed with
+       * `STREAM_SIGNED_OUT` there, silenced or not, having been sent nothing. That instant is the
+       * client's own frame's, which tells it nothing it did not choose.
+       *
+       * One at a time and in order, so a subscription cannot overtake the one before it. A check
+       * that cannot answer closes nothing (`A-34`): the frame is read as before.
+       */
+      const receive = (raw: Buffer): void => {
+        if (closed) return;
+        if (admission === undefined) {
+          read(raw);
+          return;
+        }
+        if (unread >= limits.unread) {
+          sever('it sent frames faster than they could be read', 'close');
+          return;
+        }
+        unread += 1;
+        // Nothing past the bound is ever parsed, so nothing past it is kept while it waits.
+        const frame = raw.length > MAX_CLIENT_FRAME_BYTES ? null : raw;
+        reading = reading
+          .then(async () => {
+            let signedIn = true;
+            try {
+              signedIn = await admission.confirm();
+            } catch (error: unknown) {
+              request.log.warn(
+                { err: describeError(error) },
+                'could not check a stream socket’s credential before reading its frame',
+              );
+            }
+            unread -= 1;
+            if (!signedIn || closed) return;
+            if (frame === null) refuse('that frame is larger than any subscription');
+            else read(frame);
+          })
+          .catch(fault);
       };
 
       socket.on('message', contained(receive, fault));

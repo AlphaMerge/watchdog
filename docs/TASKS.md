@@ -17198,7 +17198,7 @@ because each is a decision rather than a defect:
       window. No frame reaches it and subscribe pacing bounds it; judging before attaching
       needs the held-frame order worked out again, and is a follow-up.
 
-- [ ] **U-25 — a socket whose credential lapsed is closed at the next thing that happens** · M ·
+- [x] **U-25 — a socket whose credential lapsed is closed at the next thing that happens** · M ·
       U-24, A-34 · Found 2026-10-02 by `U-24`'s second review. `publish` checks every admitted
       socket's credential before a state batch goes out, and `publishProbe` does the same at a
       watched probe's edge, and closes a lapsed one there. So an account signed out or disabled
@@ -17212,6 +17212,89 @@ because each is a decision rather than a defect:
       route attaches a watch before it is judged, so repeated subscribes to a hidden probe cost
       a path read each; and a change between the add-sensor form's own request and its watch
       standing is not heard.
+
+      **Done 2026-10-02.**
+
+      **Deciding and acting are two things now.** `publish` and `publishProbe` still ask about
+      every admitted socket before anything goes out, in the one query they asked before, and
+      what they find lapsed they *silence*: `StreamSocket.silence` detaches the socket's
+      subscription synchronously, so the batch that found it delivers nothing to it (`A-34`),
+      and the route's one `send` lets nothing out afterwards: no state frame, no `probe`, no
+      `overflow`, no `problem`, no snapshot. The socket stays open. `StateBroadcaster.sweep` is
+      the only place such a socket is closed (`4401`, with the reason), on the interval that
+      was armed when the first socket or watcher arrived and that no edge moves. A silenced
+      socket stays admitted, so it holds that timer.
+
+      **The bound.** A lapsed socket is open and silent for at most one sweep interval, five
+      seconds, plus the time one credential check takes, on a busy installation as on a quiet
+      one. `administration.md` (where `A-34`'s rule is written), `web-ui.md` and the route's
+      description in `api-reference.md` say so.
+
+      **Cost.** No extra credential query per edge: a silenced socket is left out of the
+      question a later edge or sweep asks, so an edge asks once, about fewer sockets.
+      `signedOut` (Core Health's `streamEnded` and its siblings) counts a socket once, where it
+      is found, which for a silenced one is before its close.
+
+      **A client frame, and a decision made beyond the brief.** A silenced socket may not
+      subscribe, re-subscribe or be sent `watching`. The first cut closed a silenced socket at
+      its next frame and went on answering a lapsed socket that had *not* been silenced, and
+      that difference is the oracle again: one frame of junk after a sign-out says whether
+      anything changed state since. So every frame from a signed-in socket now waits for its
+      credential to be asked about (`Admission.confirm`), in order, and a lapsed socket is
+      closed with `4401` there, silenced or not, unanswered; a silenced one is asked about too,
+      though it is decided, so the close is no quicker. That instant is the client's own
+      frame's. It costs one primary-key query per client frame, which is one per subscription
+      (paced at 30 a minute) or per refused frame (5), and nothing with authentication off.
+      Frames waiting on that question are bounded: more than `STREAM_LIMITS.unread` (16) and
+      the socket is closed with 1008 and counted in `streamSevered`. A check that cannot answer
+      closes nothing, and the frame is read as before. A subscription already in flight when
+      the socket is silenced goes on to its own credential check and is closed there, as an
+      unsilenced one is.
+
+      **A test of `A-34` changed, in what it pins and not in what it is for.** "sends no change
+      committed after the logout" asserted the socket was closed by the batch. It is now "sends
+      nothing committed after the logout, and closes nothing until the sweep".
+
+      **The timer test.** 'reviews watchers on the sweep's own timer, and only while somebody
+      watches' could not fail on a leaked interval and is renamed to what it shows ('… and
+      reads nothing for nobody'). The claim is a new case that spies on `setInterval` and
+      `clearInterval` and counts this broadcaster's live intervals: one for any number of
+      watchers and sockets, none after the last watcher detaches, after the review drops one,
+      after a release, after the sweep closes a socket; and one still while a silenced socket
+      waits. With the `#arm()` dropped from `#review`, only that case fails ("the timer
+      outlived a watcher the review sent back"); the old case passes.
+
+      **Alarm volume is untouched.** Nothing here writes state or queues a notification. No
+      migration, no protocol number: `PROTOCOL` stays 1, no frame was added.
+
+      **Tests.** `core/test/state-stream.test.ts` (+9, sweep an hour away and run by hand):
+      sign-out, three state batches and three probe edges, where an allowed socket hears all
+      six and the lapsed one is silenced once, sent nothing, closed on `sweep()`; the same with
+      only probe watches attached; what the check is asked; a credential that came back; a
+      sweep whose check fails; `confirm` on a silenced socket; one released before the sweep;
+      a mocked-`setInterval` case with edges at 1.2 s, 3.2 s and 9 s and closes at 5.0 s and
+      10.0 s exactly; and the timer case. `core/test/stream-sign-out.test.ts` (+6, one
+      changed), over real sockets: two tabs of a signed-out session against two of a signed-in
+      one through three batches and three edges, each bounded by a ping round trip on the
+      socket itself, closed only on the sweep; a silenced socket's subscribe and watch closed
+      at once and unanswered; an unsilenced lapsed socket's junk frame closed the same way; the
+      unread bound with a gated check; a subscription in flight when silenced (closed at its
+      check; and one that would have been refused, answered with nothing). Every wait is
+      `until`'s or `closedWith`'s five seconds. **Mutations 17/17**: closed at the state edge
+      (the finding), closed at the probe edge, silenced in name only, a silenced socket asked
+      about at every edge, a silenced socket never closed, `confirm` not asking, a silenced
+      socket not remembered, `#arm()` dropped from `#review`, from a watcher's detach and from
+      `#examine`, `confirm` rethrowing for a decided socket, the route closing in `silence`,
+      `send` not gated, an in-flight subscription abandoned when silenced, only silenced
+      sockets checked at a frame, no bound on unread frames, a silenced socket left subscribed.
+
+      **Not done, and still open from the list above.** The route attaches a watch before it
+      is judged (a path read per repeated subscribe to a hidden probe), and a change between
+      the add-sensor form's own request and its watch standing is not heard. Neither was
+      trivial; both are left for a ticket of their own. Found here and not fixed: a subscription
+      refused or resynced in the few milliseconds between its frame's credential check and its
+      answer is sent `problem` or `overflow` if its credential lapsed in that gap and nothing
+      was published, and nothing if something was.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

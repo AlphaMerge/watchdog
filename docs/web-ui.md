@@ -351,7 +351,9 @@ has "Graphs have gaps" and "Graphs are wrong only at wide time ranges".
 The live updates travel over a WebSocket that is signed in once, when the page opens, and the
 core closes it when the session behind it ends. That can be a logout in another tab, a password
 change, an administrator disabling the account, or the idle timeout. The page then goes to the
-login form and says why ("You were signed out: this session has expired; sign in again").
+login form and says why ("You were signed out: this session has expired; sign in again"). That
+happens within about five seconds, on a timer of the core's own; in those seconds the page is sent
+nothing, so what it shows stops moving before the login form appears.
 
 **It does not try to reconnect.** A reconnect would be refused, and a browser cannot tell a
 refused connection from a dropped network, so it would retry for ever while the header still said
