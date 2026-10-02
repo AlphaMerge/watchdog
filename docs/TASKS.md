@@ -20719,7 +20719,7 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       shows `heartbeatFailures`; and the outside check has a variant that alerts once per
       outage, not every minute.
 
-- [ ] **H-26 — an upgrade does not show a passing config check's warnings** · S · B-08 ·
+- [x] **H-26 — an upgrade does not show a passing config check's warnings** · S · B-08 ·
       Found 2026-10-02 by `B-08`. `deploy/place-release.sh` runs `config check` and keeps the
       output of a check that passes, so a warning — a 1.0 probe with `flowListener.enabled`
       is the first — reaches a person who runs the check by hand and nobody who upgrades.
@@ -20763,6 +20763,11 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       `place-release.sh` says nothing of a pass; the heading is `… is valid for <version>. The
       check says:`. The smoke assertion was rewritten to match and to count the warning once,
       and is still unrun. One smoke install settles this ticket and that one's tarball half.
+
+      **Smoke run 2026-10-02, on `8456fef`.** `scripts/smoke-install.sh` (Debian, v1 profile)
+      passed, and its re-run with `flowListener.enabled` set printed "a passing check's
+      warning: shown once (flowListener.enabled on a v1 probe)". That is the last of this
+      ticket's done-when, from the one place `H-27` left printing it.
 
 - [ ] **H-27 — a package upgrade does not show a passing config check's warnings** · S · H-26 ·
       Found 2026-10-02 by `H-26`. `deploy/setup.sh` runs the same check for the `.deb` and the
@@ -20823,9 +20828,10 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       Found 2026-10-02. `smoke-install.sh` carries an assertion for the tarball path that has
       never run. `smoke-packages.sh` upgrades under `MS_SETUP_NO_START=1`, which skips the
       check, and keeps four lines of output, so no package upgrade can show a warning there.
-      **Done when** `smoke-install.sh` has run with the assertion passing, `smoke-packages.sh`
-      upgrades a `.deb` and an `.rpm` with the check running and shows the warning once in
-      each, and `H-26` and `H-27` are ticked on those runs. `deploy/windows/ms-setup.ps1` gets
+      **Done when** `smoke-packages.sh` upgrades a `.deb` and an `.rpm` with the check running
+      and shows the warning once in each, and `H-27` is ticked on that run. The tarball half is
+      done: `smoke-install.sh` ran on 2026-10-02 with the assertion passing, and `H-26` is
+      ticked on it. `deploy/windows/ms-setup.ps1` gets
       the same question in Release 1.1.
 
 ## Release 1.1 — Windows
