@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
+import { probeHealth as probeHealthType } from '@ms/sensors';
 import { ApiServer } from '../src/api/server.js';
 import { AccountService } from '../src/auth/accounts.js';
 import { GroupService } from '../src/auth/groups.js';
@@ -393,6 +394,88 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       const without = parse((await varying(() => connected).scrape()).body);
       assert.equal(without.has(`ms_probe_traps_overwritten_total${label}`), false);
       assert.equal(without.has(`ms_probe_syslog_overwritten_total${label}`), false);
+    });
+
+    it('exports each listener’s malformed count beside its received count (`B-16`)', async () => {
+      const label = `{probe="${String(probeId)}"}`;
+      // Distinct values, so a series reading its neighbour's channel is seen.
+      const SERIES = [
+        ['trapReceived', 'ms_probe_traps_received_total', 900],
+        ['trapMalformed', 'ms_probe_traps_malformed_total', 41],
+        ['syslogReceived', 'ms_probe_syslog_received_total', 5_000],
+        ['syslogMalformed', 'ms_probe_syslog_malformed_total', 17],
+        ['flowReceived', 'ms_probe_flows_received_total', 70_000],
+        ['flowMalformed', 'ms_probe_flows_malformed_total', 3],
+      ] as const;
+      const listening = (): ProbeLink => ({
+        ...connected,
+        health: {
+          ...connected.health,
+          trapReceived: 900,
+          trapMalformed: 41,
+          syslogReceived: 5_000,
+          syslogMalformed: 17,
+          flowReceived: 70_000,
+          flowMalformed: 3,
+        },
+      });
+      const scrape = (await varying(listening).scrape()).body;
+      const metrics = parse(scrape);
+      for (const [, name, value] of SERIES) assert.equal(metrics.get(`${name}${label}`), value);
+      // One family each: HELP and TYPE once, and a counter.
+      const lines = scrape.split('\n');
+      for (const [, name] of SERIES) {
+        assert.equal(lines.filter((line) => line.startsWith(`# HELP ${name} `)).length, 1, name);
+        assert.deepEqual(
+          lines.filter((line) => line.startsWith(`# TYPE ${name} `)),
+          [`# TYPE ${name} counter`],
+        );
+      }
+
+      // A reported zero is a reading; a probe running no listener has no series, not a zero.
+      const quiet = (): ProbeLink => ({
+        ...connected,
+        health: { ...connected.health, trapMalformed: 0, syslogMalformed: 0, flowMalformed: 0 },
+      });
+      const zeroed = parse((await varying(quiet).scrape()).body);
+      const without = parse((await varying(() => connected).scrape()).body);
+      for (const [field, name] of SERIES) {
+        if (!field.endsWith('Malformed')) continue;
+        assert.equal(
+          zeroed.get(`${name}${label}`),
+          0,
+          `${name} for a listener that discarded none`,
+        );
+        assert.equal(without.has(`${name}${label}`), false, `${name} with no listener`);
+      }
+    });
+
+    it('has one series for every listener channel Probe Health declares (`B-16`)', async () => {
+      // The exporter's table is private, so it is read through a scrape: a probe that reported
+      // every listener channel has that many `ms_probe_(traps|syslog|flows)_` series, each
+      // carrying its own channel's value.
+      const keys = probeHealthType
+        .channels({})
+        .map((channel) => channel.key)
+        .filter((key) => /^(trap|syslog|flow)[A-Z]/.test(key));
+      assert.ok(keys.length >= 14, `found ${String(keys.length)} listener channels`);
+      const all = (): ProbeLink => ({
+        ...connected,
+        health: {
+          ...connected.health,
+          ...Object.fromEntries(keys.map((key, index) => [key, 1_000 + index])),
+        },
+      });
+      const metrics = parse((await varying(all).scrape()).body);
+      const exported = [...metrics.entries()]
+        .filter(([name]) => /^ms_probe_(traps|syslog|flows)_/.test(name))
+        .map(([, value]) => value)
+        .sort((a, b) => a - b);
+      assert.deepEqual(
+        exported,
+        keys.map((_, index) => 1_000 + index),
+        'each listener channel is one series, carrying its own value',
+      );
     });
 
     it('exports a probe’s late refusals apart from the reports refused from it (`A-56`)', async () => {

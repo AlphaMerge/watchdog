@@ -553,6 +553,60 @@ describe('the field-test runbook', () => {
 });
 
 /**
+ * The administration guide's Probe Health table names channels that exist, and every listener
+ * channel is in it (`B-16`).
+ *
+ * The table is a guide to what is worth watching and not a list of every channel, so it is not
+ * held to the whole declaration. The listener counters are held to it, because a gap in them has
+ * already happened once: `B-14` added the two overwritten counts beside six older counters the
+ * table had never had, and an operator whose trap sensor read zero had no row telling them the
+ * probe counts what it turned away. A listener channel added to the sensor type without a row
+ * fails here, and so does a row naming a channel that was renamed.
+ */
+describe("the administration guide's Probe Health table", () => {
+  /** The table under the Probe Health heading, up to the next heading. */
+  const SECTION = /^### Probe Health[^\n]*\n([\s\S]*?)(?=^#{1,6} )/m;
+  const LISTENER = /^(trap|syslog|flow)[A-Z]/;
+
+  it('names channels that exist, and has a row for every listener channel', async () => {
+    const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+    const guide = await readFile(join(repoRoot, 'docs', 'administration.md'), 'utf8');
+    const section = SECTION.exec(guide)?.[1];
+    assert.ok(section, 'docs/administration.md has no "### Probe Health" section');
+
+    // The first cell of each row: one channel or several, each in backticks.
+    const named = section
+      .split('\n')
+      .filter((line) => line.startsWith('| `'))
+      .flatMap((line) => [...(line.split('|')[1] ?? '').matchAll(/`([a-zA-Z]+)`/g)])
+      .map((match) => match[1] ?? '');
+    // A pattern that matched nothing would make every assertion below vacuous.
+    assert.ok(named.length >= 20, `parsed ${String(named.length)} channels from the table`);
+
+    const declared = probeHealth.channels({}).map((channel) => channel.key);
+    const listeners = declared.filter((key) => LISTENER.test(key));
+    // The control on that pattern: three listeners, and the fewest any of them declares is four.
+    assert.ok(listeners.length >= 14, `found ${String(listeners.length)} listener channels`);
+
+    assert.deepEqual(
+      named.filter((key) => !declared.includes(key)),
+      [],
+      "docs/administration.md's Probe Health table names channels the sensor does not declare",
+    );
+    assert.deepEqual(
+      listeners.filter((key) => !named.includes(key)),
+      [],
+      "listener channels on Probe Health with no row in docs/administration.md's table",
+    );
+    assert.deepEqual(
+      named.filter((key, index) => named.indexOf(key) !== index),
+      [],
+      'a channel with two rows in the table',
+    );
+  });
+});
+
+/**
  * Every GitHub workflow parses, and every job it defines has steps (`S-11`).
  *
  * **The workflow is the one file in this repository that nothing was checking.** It is also the

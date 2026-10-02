@@ -22344,12 +22344,38 @@ analysis". `F-` is Phase 0.
       capture from a chassis exporting from two engines is read and the rule is confirmed or
       turned back, with the capture's header fields in a findings file.
 
-- [ ] **B-16 — the older listener counters are missing from the table and from a scrape** · S ·
+- [x] **B-16 — the older listener counters are missing from the table and from a scrape** · S ·
       B-14 · Found 2026-10-02 by `B-14`. `docs/administration.md`'s Probe Health table has no
       rows for `trapReceived`, `trapRejected`, `trapMalformed` or the syslog three, and
       `trapMalformed`, `syslogMalformed` and `flowMalformed` have no Prometheus series.
       **Done when** the table has every listener channel, each malformed count is exported
       beside its received count, and the metrics test reads them.
+
+      **B-16 outcome.** All fourteen listener channels have a row and a series.
+      - **The table** gains two rows, one a listener: `trapReceived`, `trapRejected`,
+        `trapMalformed` and the syslog three, each saying what the listener counts under it,
+        that none has a limit and why, and that it gaps with its listener off. The syslog row
+        says what the code does and the name does not: a message the parser cannot read is
+        kept as text and counted received; malformed is an empty datagram, a TCP sender past
+        the frame limit, or a socket error.
+      - **Three series**, each after its received count in `exporter.ts`:
+        `ms_probe_traps_malformed_total`, `ms_probe_syslog_malformed_total`,
+        `ms_probe_flows_malformed_total`. Counters through the table every probe series goes
+        through, so absent for a probe that did not report the field and zero for one that
+        reported zero.
+      - **The table is now held to the code.** `build-hygiene.test.ts` already held the
+        field-test runbook's channel table to the sensor types; the same kind of case reads
+        the guide's Probe Health table: every channel a row names is declared, none is named
+        twice, and every channel of a listener (`trap`, `syslog`, `flow`) has a row. The 35
+        other channels the sensor declares and the table leaves out are not required to have
+        one: the table is what to watch, and making it the whole list is a different document.
+      - **Tests.** `metrics.test.ts`: the six received and malformed series with six distinct
+        values, HELP once and TYPE `counter` for each, zero for a reported zero, absent with no
+        listener; and one case that reports every listener channel the sensor declares and
+        reads back that many `ms_probe_(traps|syslog|flows)_` series with each channel's own
+        value, so a listener channel added without a series fails.
+      - **Mutation: 6/6.** A row without `trapMalformed`, a row naming `syslogRefused`, each
+        malformed series reading another channel (three), and one made a gauge.
 
 ## Phase 12 — Maps and dashboards (`V2-02`)
 

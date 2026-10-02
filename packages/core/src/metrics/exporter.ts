@@ -390,6 +390,14 @@ const PROBE_METRICS: readonly Metric[] = [
     help: 'SNMP traps this probe’s listener accepted.',
     counter: true,
   },
+  // Each listener's malformed count sits beside its received count (`B-16`): what reached the
+  // port and was discarded unread, which is neither accepted nor turned away by an accept list.
+  {
+    key: 'trapMalformed',
+    name: 'ms_probe_traps_malformed_total',
+    help: 'Datagrams at this probe’s trap port discarded because they did not decode as a notification.',
+    counter: true,
+  },
   {
     key: 'trapRejected',
     name: 'ms_probe_traps_rejected_total',
@@ -409,6 +417,12 @@ const PROBE_METRICS: readonly Metric[] = [
     counter: true,
   },
   {
+    key: 'syslogMalformed',
+    name: 'ms_probe_syslog_malformed_total',
+    help: 'Syslog input this probe discarded unread: an empty datagram, an oversized frame, a socket error.',
+    counter: true,
+  },
+  {
     key: 'syslogRejected',
     name: 'ms_probe_syslog_rejected_total',
     help: 'Syslog messages turned away because their sender is not in the accept list.',
@@ -424,6 +438,12 @@ const PROBE_METRICS: readonly Metric[] = [
     key: 'flowReceived',
     name: 'ms_probe_flows_received_total',
     help: 'NetFlow records this probe’s collector accepted.',
+    counter: true,
+  },
+  {
+    key: 'flowMalformed',
+    name: 'ms_probe_flows_malformed_total',
+    help: 'Flow datagrams this probe’s collector discarded because they did not decode.',
     counter: true,
   },
   {
