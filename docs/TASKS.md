@@ -17427,6 +17427,21 @@ because each is a decision rather than a defect:
       a silenced one is not. A check that *hangs* at an edge holds that batch, and every later
       one, for as long as it hangs.
 
+- [ ] **U-27 — a credential check that hangs or rejects at an edge, and one that never
+      answers a frame** · M · U-26 ·
+      Found 2026-10-02 by `U-26` and its review. **Decisions first.** (1) A check that
+      rejects at an edge delivers the batch to a lapsed socket no edge has silenced
+      (`A-34`'s rule for a database that blinked) and not to a silenced one: should a failed
+      edge check deliver to anyone. (2) A check that hangs at an edge holds that batch and
+      every later one, uncounted; bounding it means choosing between delivering unvetted and
+      dropping. (3) A frame's check that never answers holds that socket's frames until the
+      unread bound severs it with 1008. (4) A credential that lapses and comes back inside
+      one sweep interval closes a silenced socket and not one that never knew.
+      (5) `streamChecksOutstanding` does not count watcher re-resolutions in flight.
+      (6) The probe's `main.ts` is still not booted by a test, so `onProgress` to
+      `sendSweep` is read and not run. **Done when** (1) to (3) are decided and each has a
+      scenario, and the rest are fixed or written down.
+
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
       siblings are substituted into any text a step sends: the path, every header and the body.
@@ -19733,6 +19748,35 @@ because each is a decision rather than a defect:
         (3, new), `messages.test.ts` +20, `sweep.test.ts` +1. Each wait has its own bound.
       - **Mutation: 15/15.** After the last, the rebuilt `dist` matched its hashes from before
         the first.
+
+- [ ] **A-74 — what is left of a database sensor's address, certificate and wording**
+      · M · A-70 ·
+      Found 2026-10-02 by `A-70` and its three reviews. (1) `db.mysql` and `db.mssql` refuse a
+      device given as an IPv6 address once verification is on, because neither driver takes a
+      custom identity check: fail closed today, and a sensor that cannot be made to work.
+      (2) `mysql2`'s IPv4 check leans on `socket._host`, which Node reads and does not
+      document. (3) The core's own pool (`db/pool.ts`) hands `pg` `rejectUnauthorized` and
+      nothing else, so a core whose database is given as an address with `ssl` on checks the
+      certificate against `localhost`: read, not measured. (4) A bounded database set facing
+      a PostgreSQL socket path is undecided to the core and unresolvable to the probe: read,
+      not tested. (5) After a SQL Server redirect, a timeout in the query phase names the
+      device and not the routed server; the driver has to remember where the connector last
+      connected. (6) `describeDbError` takes the first coded error out of `tedious`'s
+      `AggregateError`, so a name with several addresses is diagnosed by whichever was tried
+      first (`ENETUNREACH` before `ECONNREFUSED` reads as neither). (7) Nothing here has run
+      against a real SQL Server: the PRELOGIN guard's 64 KiB bound, a redirect followed
+      through a login with TLS on, and TDS 8 `strict`. **Done when** each is fixed with a
+      test or written down as accepted, and (7) is run once against a real server.
+
+- [ ] **A-75 — three small things the heartbeat and the certificate sensor still say
+      wrongly** · S · A-71 ·
+      Found 2026-10-02 by `A-71`. The channel is still named "Host name matches" though it
+      now answers for an address: find out whether renaming touches stored channel rows
+      before doing it. The mismatch note in `tls.certificate`'s message lists the
+      certificate's DNS names and not its IP entries. A `101` answer to the heartbeat is
+      logged as phase `request` with a sentence, not as `refused` with its status. And the
+      heartbeat was never tried under `NODE_USE_ENV_PROXY`, which `fetch` honoured and
+      `node:https` does not. **Done when** each is fixed with a test or written down.
 
 ### Panel round two — notifications, schedules, triggers
 
