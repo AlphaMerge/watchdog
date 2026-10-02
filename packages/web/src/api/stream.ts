@@ -92,11 +92,19 @@ interface SnapshotEntry {
   since?: string;
 }
 
+/**
+ * What a stream is scoped to: a subtree's sensors (or every sensor, with `null`), or one probe's
+ * own link and report (`U-24`). Mirrors the two subscriptions the core's stream route takes.
+ */
+export type StreamScope = { readonly objectId: number | null } | { readonly probeId: number };
+
 interface ServerFrame {
   type?: string;
   seq?: number;
   entries?: SnapshotEntry[];
   reason?: string;
+  /** On `watching` and `probe` (`U-24`): the probe the frame is about. */
+  probeId?: number;
   sensorId?: number;
   sensorName?: string;
   path?: number[];
@@ -140,12 +148,12 @@ export class StateStream {
    *
    * The browser throws `InvalidStateError` on `send` before that rather than queueing, so this
    * is what a subscription made while connecting waits on. Nothing else needs queueing: the
-   * subscription *is* `#objectId`, and `onopen` sends whatever it says by the time it fires.
+   * subscription *is* `#scope`, and `onopen` sends whatever it says by the time it fires.
    */
   #opened = false;
   #timer: number | undefined;
   #attempt = 0;
-  #objectId: number | null = null;
+  #scope: StreamScope = { objectId: null };
   #closed = false;
   /** Counted so a test — and later Probe Health's browser-side cousin — can see churn. */
   #reconnects = 0;
@@ -179,7 +187,9 @@ export class StateStream {
   }
 
   /**
-   * How many frames from the core have changed `states`: snapshots, state changes and overflows.
+   * How many frames from the core have changed `states`: snapshots, state changes and overflows
+   * — and, on a watch of a probe, how many times the core said the watch stands or the probe
+   * changed (`U-24`), which change no state and are news all the same.
    *
    * `states` cannot say this by itself, because `subscribe` replaces it too, with an empty map. A
    * view that refetches on news (`U-06`'s list) would otherwise refetch for its own subscription
@@ -191,7 +201,7 @@ export class StateStream {
 
   /**
    * Scopes the stream to a subtree, or to everything. Safe to call before the socket opens —
-   * the subscription is held in `#objectId` and goes out from `onopen`.
+   * the subscription is held in `#scope` and goes out from `onopen`.
    *
    * **Reopens a closed stream**, which is what makes `close()` mean "I am not watching" rather
    * than "this object is spent". React's StrictMode mounts, unmounts and remounts every effect
@@ -200,8 +210,24 @@ export class StateStream {
    * worst way for a bug to behave.
    */
   subscribe(objectId: number | null): void {
+    this.#scopeTo({ objectId });
+  }
+
+  /**
+   * Scopes the stream to one probe itself: its link coming and going and its report changing,
+   * and none of the sensors beneath it (`U-24`). `states` stays empty; `frames` counts the news.
+   *
+   * A view that wants one sentence about a probe used to subscribe to the probe's whole branch,
+   * and was handed every sensor on it in a snapshot to learn nothing about the probe — and heard
+   * nothing at all from a probe with no sensor it could see.
+   */
+  watchProbe(probeId: number): void {
+    this.#scopeTo({ probeId });
+  }
+
+  #scopeTo(scope: StreamScope): void {
     this.#closed = false;
-    this.#objectId = objectId;
+    this.#scope = scope;
     // The states held are about the old subtree. Keeping them would leave a tree showing rows
     // from a branch nobody is looking at any more.
     this.#replace(new Map());
@@ -303,9 +329,15 @@ export class StateStream {
     // queue on our behalf. So a subscription made while connecting waits here and goes out from
     // `onopen`, which is the same path that replays it after every reconnect.
     if (!this.#opened) return;
+    const scope = this.#scope;
     this.#socket?.send(
       JSON.stringify({
-        subscribe: this.#objectId === null ? {} : { objectId: this.#objectId },
+        subscribe:
+          'probeId' in scope
+            ? { probeId: scope.probeId }
+            : scope.objectId === null
+              ? {}
+              : { objectId: scope.objectId },
       }),
     );
   }
@@ -351,6 +383,20 @@ export class StateStream {
           at: frame.at ?? '',
         });
         this.#heard(next);
+        return;
+      }
+      case 'watching':
+      case 'probe': {
+        // `watching` is the core's answer to a watch on a probe (`U-24`): to this client what a
+        // snapshot is, the first word on a subscription — and news when it follows a stream that
+        // was lost. `probe` is that probe's link or report changing. Neither carries a state to
+        // keep: whoever is listening asks the probe's own route what is true now.
+        //
+        // Only for the probe being watched. One sent for a watch this stream has since replaced
+        // is about something nobody here is asking after.
+        const scope = this.#scope;
+        if (!('probeId' in scope) || frame.probeId !== scope.probeId) return;
+        this.#heard(this.#states);
         return;
       }
       case 'overflow':
@@ -407,6 +453,23 @@ export interface LiveStates {
  * would be machinery earning nothing.
  */
 export function useStateStream(objectId: number | null, options?: StateStreamOptions): LiveStates {
+  return useStream(objectId, null, options);
+}
+
+/**
+ * One probe's own link and report, for a component (`U-24`): `frames` rises when the core says
+ * the probe changed, and `states` is always empty. Pair it with `useSettledReload`.
+ */
+export function useProbeStream(probeId: number, options?: StateStreamOptions): LiveStates {
+  return useStream(null, probeId, options);
+}
+
+/** Two numbers rather than a `StreamScope`, so the effect below depends on values, not identity. */
+function useStream(
+  objectId: number | null,
+  probeId: number | null,
+  options?: StateStreamOptions,
+): LiveStates {
   const url = options?.url;
   const open = options?.open;
   const stream = useMemo(
@@ -429,11 +492,12 @@ export function useStateStream(objectId: number | null, options?: StateStreamOpt
   );
 
   useEffect(() => {
-    stream.subscribe(objectId);
+    if (probeId === null) stream.subscribe(objectId);
+    else stream.watchProbe(probeId);
     return () => {
       stream.close();
     };
-  }, [stream, objectId]);
+  }, [stream, objectId, probeId]);
 
   const listen = useCallback((listener: () => void) => stream.listen(listener), [stream]);
   const snapshot = useRef<LiveStates>({ status: 'connecting', states: new Map(), frames: 0 });

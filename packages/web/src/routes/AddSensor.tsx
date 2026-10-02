@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { ApiError, problemPath, send, useApi } from '../api/client';
-import { useSettledReload, useStateStream } from '../api/stream';
+import { useProbeStream, useSettledReload } from '../api/stream';
 import type { AncestorsView, ObjectDetail, ProbeHealthView, SensorTypeSummary } from '../api/types';
 import { Card, ErrorPanel, Loading } from '../components/Panels';
 import { MappingPreview } from '../forms/MappingPreview';
@@ -61,11 +61,11 @@ export function AddSensor(): React.JSX.Element {
   const probeHealth = useApi<ProbeHealthView>(
     probe === null ? null : `/probes/${String(probe.id)}/health`,
   );
-  // **The answer is asked again when the stream says something under the probe changed**
-  // (`B-12`, `ProbeWatch` below), and the last one stands while the next is on its way. Without
-  // that, every re-ask would empty the notice and write the same sentence back, and a live
-  // region announces what is written into it: one sentence read out again for every sensor that
-  // changed state. A refusal is not held over — a reader who may no longer see the probe is
+  // **The answer is asked again when the stream says the probe changed** (`B-12`, `U-24`,
+  // `ProbeWatch` below), and the last one stands while the next is on its way. Without that,
+  // every re-ask would empty the notice and write the same sentence back, and a live region
+  // announces what is written into it: one sentence read out again for every time the probe's
+  // link moved. A refusal is not held over — a reader who may no longer see the probe is
   // told nothing about it, as before.
   const probeId = probe?.id ?? null;
   const held = useRef<{ probeId: number; health: ProbeHealthView } | null>(null);
@@ -276,22 +276,27 @@ export function AddSensor(): React.JSX.Element {
 }
 
 /**
- * Asks about the probe again when something under it changes state (`B-12`).
+ * Asks about the probe again when the core says the probe itself changed (`B-12`, `U-24`).
  *
  * The notice was read once, when the type was chosen, and a form is open for as long as somebody
  * takes to fill it in: a probe restarted with its collector on left "is not running" standing,
  * and a probe that dropped left a sentence about a setting nobody could any longer vouch for.
  *
- * **The stream is the prompt and `GET /probes/{id}/health` is still the answer.** The stream
- * carries sensor states and nothing about a probe's listeners, so a frame here means only "ask
- * again" — the same use the alarms list makes of it, with the same settle, so a probe going
- * away with five hundred sensors is one request. Scoped to the probe, which is the one branch
- * that holds both its Probe Health sensor and everything it scans.
+ * **The stream is the prompt and `GET /probes/{id}/health` is still the answer.** The frame says
+ * that the probe connected, dropped, or sent a report in which a listener came or went, and
+ * carries nothing else — so it means only "ask again", after the settle the alarms list uses, and
+ * a link that flaps is one request once it stops.
+ *
+ * **A watch on the probe, not a subscription to its branch** (`U-24`). `B-12` could only listen
+ * for a sensor under the probe changing state, which said nothing for a probe with no sensor the
+ * reader can see — exactly a probe getting its first — and which could prompt the form before a
+ * reconnected probe's first report with nothing to prompt it again when the report arrived. It
+ * also took a snapshot of every sensor on the probe for the sake of one sentence.
  *
  * **A component, so that it is a socket only while there is a probe to watch.** A hook cannot be
- * called conditionally, and `useStateStream(null)` is the whole tree: the form for a type that
- * reads no listener, or for a reader who cannot see the probe, opens nothing — as it made no
- * request before. Choosing another type unmounts this and closes the socket.
+ * called conditionally: the form for a type that reads no listener, or for a reader who cannot
+ * see the probe, opens nothing — as it made no request before. Choosing another type unmounts
+ * this and closes the socket.
  *
  * Renders nothing. What changes on the page is the notice's text, in the region that was already
  * announcing it; focus is never moved.
@@ -303,7 +308,7 @@ function ProbeWatch({
   readonly probeId: number;
   readonly onNews: () => void;
 }): null {
-  const live = useStateStream(probeId);
+  const live = useProbeStream(probeId);
   useSettledReload(live, onNews);
   return null;
 }

@@ -41,6 +41,7 @@ export function fixedCoreHealth(
       stream: () => ({
         overflowed: 2,
         severed: 0,
+        probeCoalesced: 0,
         signedOut: { ended: 0, expired: 0, revoked: 0, disabled: 0 },
         credentialCheckFailures: 0,
       }),

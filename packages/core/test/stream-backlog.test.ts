@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import { socketBacklog } from '../src/api/routes/stream.js';
+import { probeFrames, socketBacklog } from '../src/api/routes/stream.js';
 
 /**
  * How much of what a stream subscriber's socket holds is *events* (`P-60`, `P-66`, `P-70`).
@@ -108,5 +108,103 @@ describe('the backlog a stream subscriber reports', () => {
     backlog.wrote(400);
     socket.bufferedAmount += 400;
     assert.equal(backlog.report(), 400);
+  });
+});
+
+/**
+ * A watch on one probe never holds more than one frame for its socket (`U-24`).
+ *
+ * Pure for the reason the backlog above is: the rule is about a socket that has stopped taking
+ * what it is handed, and no real socket does that on demand.
+ */
+describe('the frames a probe watch sends', () => {
+  /** A socket that takes a frame and writes it out only when the test says so. */
+  function slowSocket(open = true) {
+    const pending: (() => void)[] = [];
+    let handed = 0;
+    let coalesced = 0;
+    const frames = probeFrames({
+      send: (written) => {
+        if (!socket.open) return false;
+        handed += 1;
+        pending.push(written);
+        return true;
+      },
+      coalesced: () => {
+        coalesced += 1;
+      },
+    });
+    const socket = {
+      open,
+      frames,
+      /** The socket puts everything it was handed on the wire. */
+      drain: (): void => {
+        for (const written of pending.splice(0)) written();
+      },
+      get handed() {
+        return handed;
+      },
+      get coalesced() {
+        return coalesced;
+      },
+    };
+    return socket;
+  }
+
+  it('sends a change straight away to a socket that is keeping up', () => {
+    const socket = slowSocket();
+    socket.frames.open();
+    assert.equal(socket.handed, 0, 'opening a watch nothing happened on sent a frame');
+    for (let edge = 1; edge <= 3; edge += 1) {
+      socket.frames.changed();
+      socket.drain();
+      assert.equal(socket.handed, edge);
+    }
+    assert.equal(socket.coalesced, 0);
+  });
+
+  it('holds one frame, however long the link flaps, for a socket that has stopped reading', () => {
+    const socket = slowSocket();
+    socket.frames.open();
+    for (let edge = 0; edge < 1_000; edge += 1) socket.frames.changed();
+    assert.equal(socket.handed, 1, 'a flapping link queued a frame per edge');
+    assert.equal(socket.coalesced, 999, 'and what was folded in is counted, every one');
+
+    // It reads again. The frame it takes was read after the last edge; the next edge is a frame.
+    socket.drain();
+    socket.frames.changed();
+    assert.equal(socket.handed, 2);
+    assert.equal(socket.coalesced, 999);
+  });
+
+  it('holds what changes before the watch is answered, as one frame after the answer', () => {
+    const socket = slowSocket();
+    socket.frames.changed();
+    socket.frames.changed();
+    socket.frames.changed();
+    assert.equal(socket.handed, 0, 'a frame went out before the watch was allowed');
+    assert.equal(socket.coalesced, 2);
+
+    socket.frames.open();
+    assert.equal(socket.handed, 1);
+    // That one is still unsent, so a change now is folded into it.
+    socket.frames.changed();
+    assert.equal(socket.handed, 1);
+    assert.equal(socket.coalesced, 3);
+    socket.drain();
+    socket.frames.changed();
+    assert.equal(socket.handed, 2);
+  });
+
+  it('does not wait for ever on a frame a closed socket never took', () => {
+    const socket = slowSocket(false);
+    socket.frames.open();
+    socket.frames.changed();
+    socket.frames.changed();
+    assert.equal(socket.handed, 0);
+    assert.equal(socket.coalesced, 0, 'a frame nobody took was counted as one outstanding');
+    socket.open = true;
+    socket.frames.changed();
+    assert.equal(socket.handed, 1);
   });
 });

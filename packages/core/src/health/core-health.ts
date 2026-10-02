@@ -42,11 +42,13 @@ export interface CoreHealthSources {
   };
   /**
    * `StateBroadcaster.stats()` — subscribers cut off for falling behind, sockets closed to protect
-   * the core (`A-30`), sockets signed out and the checks that could not say (`A-34`).
+   * the core (`A-30`), sockets signed out and the checks that could not say (`A-34`), and probe
+   * changes folded into a frame a watcher had not yet taken (`U-24`).
    */
   stream: () => {
     overflowed: number;
     severed: number;
+    probeCoalesced: number;
     signedOut: Readonly<Record<'ended' | 'expired' | 'revoked' | 'disabled', number>>;
     credentialCheckFailures: number;
   };
@@ -389,6 +391,8 @@ export class CoreHealthService {
       // Subscribers cut off, and sockets closed outright (`A-30`): a client the core stopped
       // serving either way.
       streamCutoffs: stream.overflowed + stream.severed,
+      // Not a cut-off: nothing was lost and nobody was detached. Its own number (`U-24`).
+      streamCoalesced: stream.probeCoalesced,
       // Signed out, by why, and the checks that could not say (`A-34`).
       streamEnded: stream.signedOut.ended,
       streamExpired: stream.signedOut.expired,

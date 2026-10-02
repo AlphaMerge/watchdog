@@ -152,6 +152,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       for (const name of [
         'ms_core_ingestion_refused_rows_total',
         'ms_core_stream_cutoffs_total',
+        'ms_core_stream_probe_changes_coalesced_total',
         'ms_core_dependency_pauses_total',
         'ms_core_alarm_steps_fired_total',
         'ms_core_probe_queries_refused_total',

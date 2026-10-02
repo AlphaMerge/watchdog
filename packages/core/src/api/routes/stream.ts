@@ -79,9 +79,14 @@ const SIGNED_OUT: Readonly<Record<Lapse, string>> = {
   disabled: 'this account can no longer sign in',
 };
 
-/** What a client sends. Anything else is answered with a `problem` frame and ignored. */
+/**
+ * What a client sends. Anything else is answered with a `problem` frame and ignored.
+ *
+ * `objectId` is a subtree's sensors; `probeId` is one probe's own link and report, and none of
+ * the sensors beneath it (`U-24`). Never both: they are two subscriptions, and a socket has one.
+ */
 interface ClientFrame {
-  readonly subscribe: { readonly objectId?: number };
+  readonly subscribe: { readonly objectId?: number; readonly probeId?: number };
 }
 
 /**
@@ -102,7 +107,9 @@ const clientFrameSchema = {
       additionalProperties: false,
       properties: {
         objectId: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+        probeId: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
       },
+      not: { required: ['objectId', 'probeId'] },
     },
   },
 } as const;
@@ -161,6 +168,17 @@ type ServerFrame =
   | { readonly type: 'hello'; readonly seq: number; readonly protocol: number }
   | ({ readonly type: 'snapshot'; readonly seq: number } & StateSnapshot)
   | ({ readonly type: 'state'; readonly seq: number } & StateEvent)
+  /** The answer to `{"subscribe":{"probeId":N}}`: the watch stands, and `probe` frames follow. */
+  | { readonly type: 'watching'; readonly probeId: number }
+  /**
+   * That probe's link came or went, or what its report leaves out changed (`U-24`).
+   *
+   * **The id and nothing else.** It is sent only on a watch the socket asked for by that id and
+   * was allowed, so the id tells it nothing; and it carries no value, so what a reader learns
+   * about the probe is still decided by `GET /probes/{id}/health` and nowhere else. Unnumbered:
+   * these are coalesced, and a count with holes in it would say a frame was lost when none was.
+   */
+  | { readonly type: 'probe'; readonly probeId: number }
   | { readonly type: 'overflow'; readonly reason: string }
   | { readonly type: 'problem'; readonly reason: string };
 
@@ -172,6 +190,10 @@ type ServerFrame =
  *
  * The end of a held return (`M-18`) is the only change to the alarms list with no state change
  * behind it, and the list covers it with a timer at the hold's end rather than a frame here.
+ *
+ * **Not raised for `watching` and `probe`** (`U-24`). Both are sent only on a subscription that
+ * names a `probeId`, which a client written before them cannot make, so no socket is ever sent a
+ * frame of a kind it did not ask for.
  */
 const PROTOCOL = 1;
 
@@ -219,6 +241,62 @@ export function socketBacklog(socket: { readonly bufferedAmount: number }): {
 }
 
 /**
+ * One probe watch's frames, coalesced (`U-24`).
+ *
+ * **A `probe` frame says "ask again" and nothing else, so two of them unread are one.** A link
+ * that flaps is an edge every few hundred milliseconds for as long as it flaps, and a browser tab
+ * in the background reads none of them: queued one per edge, that is a backlog with no bound and
+ * nothing in it. So at most one frame is ever outstanding per watch — while one has been handed
+ * to the socket and not yet written out, or while the answer to the subscription has not gone, a
+ * further change is counted and folded into it. The frame that does arrive is read after the
+ * last change, and is answered with whatever is true then.
+ *
+ * `send` hands a frame to the socket and returns whether it took it; `written` is called once
+ * the socket has put it on the wire. Apart from the route so the rule can be driven without one.
+ */
+export function probeFrames(options: {
+  send: (written: () => void) => boolean;
+  coalesced: () => void;
+}): {
+  /** The probe changed. */
+  changed: () => void;
+  /** The answer to the subscription has gone: a change held behind it follows it. */
+  open: () => void;
+} {
+  let live = false;
+  let held = false;
+  let unsent = false;
+  const put = (): void => {
+    unsent = true;
+    const taken = options.send(() => {
+      unsent = false;
+    });
+    // Refused — the socket is closed — so nothing will ever call `written`.
+    if (!taken) unsent = false;
+  };
+  return {
+    changed: (): void => {
+      if (!live) {
+        if (held) options.coalesced();
+        held = true;
+        return;
+      }
+      if (unsent) {
+        options.coalesced();
+        return;
+      }
+      put();
+    },
+    open: (): void => {
+      live = true;
+      if (!held) return;
+      held = false;
+      put();
+    },
+  };
+}
+
+/**
  * Live state changes over a WebSocket (`U-02`).
  *
  * **Push, not polling.** `PLAN.md`'s Phase 5 exit criterion is a tree that stays responsive at
@@ -261,6 +339,16 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
           'Subscribing to an object it cannot read is answered with a `problem` frame. When ' +
           'what the caller may see changes — a grant revoked, a group left — the socket is sent ' +
           '`overflow` with that reason, and subscribing again takes a snapshot of the new view.' +
+          '\n\nSend `{"subscribe":{"probeId":7}}` to watch one probe itself rather than the ' +
+          'sensors beneath it. The server answers `{"type":"watching","probeId":7}` and then ' +
+          'sends `{"type":"probe","probeId":7}` whenever that probe connects, drops, or sends a ' +
+          'report that differs in which listeners it says are running. The frame carries no ' +
+          'value: it means "ask `GET /probes/7/health` again", which is where what the caller ' +
+          'may know about the probe is decided. It is sent only to a caller who can read that ' +
+          'probe, and a watch on a probe the caller cannot read — or on an id that is not a ' +
+          'probe — is answered with `problem`. Changes that arrive faster than the socket takes ' +
+          'them are folded into one frame, so a `probe` frame means "at least once since the ' +
+          'last", and the frames are not numbered. `objectId` and `probeId` together are refused.' +
           '\n\n`seq` numbers the `state` frames this socket has been sent, from 1 and across ' +
           'every subscription it makes; `hello` carries 0 and a `snapshot` the number of the last ' +
           '`state` frame before it. It is the socket’s own count, so a gap means a frame was ' +
@@ -348,14 +436,17 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
        *
        * **Every frame is bounded here, whatever it is** (`A-30`): a snapshot, an event, a reply.
        */
-      const send = (frame: ServerFrame): number => {
+      const send = (frame: ServerFrame, written?: () => void): number => {
         if (closed || socket.readyState !== socket.OPEN) return 0;
         if (socket.bufferedAmount > limits.socketBytes) {
           sever('it is not reading what it is sent', 'terminate');
           return 0;
         }
         const text = JSON.stringify(frame);
-        socket.send(text);
+        // `written` is told when `ws` has put the frame on the wire, or failed to: either way it
+        // is no longer waiting in this process, which is all a caller counts (`U-24`).
+        if (written === undefined) socket.send(text);
+        else socket.send(text, written);
         return Buffer.byteLength(text);
       };
 
@@ -480,7 +571,67 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         for (const event of waiting) deliver(event);
       };
 
-      const subscribe = (objectId: number | null): void => {
+      /**
+       * A watch on one probe itself (`U-24`): `open`, without a snapshot, because there is no
+       * state here to hand over — what the frames prompt for is asked of the probe's own route.
+       *
+       * **Attached first and judged after**, as `open` attaches before it reads: a change that
+       * lands while the checks below are out is held by `frames` and follows `watching`.
+       * Attaching decides nothing — the broadcaster sends a frame only through a view that sees
+       * the probe, and nothing reaches the socket before the checks have passed.
+       */
+      const watch = async (mine: number, probeId: number): Promise<void> => {
+        const visibility = await sight();
+        if (superseded(mine)) return;
+        const cutOff = { dropped: false };
+        const frames = probeFrames({
+          send: (written) => send({ type: 'probe', probeId }, written) > 0,
+          coalesced: () => {
+            stream.coalesced();
+          },
+        });
+        const seeing: StreamSight = { visibility, key: sight.key, resolve: sight };
+        detach = stream.watchProbe(
+          {
+            changed: frames.changed,
+            overflow: (reason) => {
+              cutOff.dropped = true;
+              detach = undefined;
+              send({ type: 'overflow', reason: reason ?? 'subscribe again' });
+            },
+          },
+          probeId,
+          seeing,
+        );
+        const gone = (): boolean => superseded(mine) || cutOff.dropped;
+        const { visible, epoch } = await stream.canWatchProbe(db, probeId, visibility);
+        if (gone()) return;
+        if (!visible) {
+          unsubscribe();
+          // What a subscription to a hidden object is told, and for the same reason: one answer
+          // for a probe it may not read, an id nobody used and an object that is not a probe.
+          send({ type: 'problem', reason: 'this account may not read a probe with that id' });
+          return;
+        }
+        // Judged through a view that grants have since changed (`A-30`). Back to the start.
+        if (!(await stream.confirm(seeing, epoch))) {
+          if (gone()) return;
+          unsubscribe();
+          send({
+            type: 'overflow',
+            reason: 'what this account may see has changed; subscribe again',
+          });
+          return;
+        }
+        if (gone()) return;
+        // Signed out while that was asked (`A-34`): closed, and told nothing.
+        if (admission !== undefined && !(await admission.confirm())) return;
+        if (gone()) return;
+        send({ type: 'watching', probeId });
+        frames.open();
+      };
+
+      const subscribe = (scope: ClientFrame['subscribe']): void => {
         // **Paced** (`A-30`). Each one reads a snapshot, and one replacing another before it has
         // been read still costs the read; a client subscribing this often is not a tree.
         const now = performance.now();
@@ -492,7 +643,11 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         subscribed.push(now);
         unsubscribe();
         const mine = (generation += 1);
-        void open(mine, objectId).catch((error: unknown) => {
+        const opening =
+          scope.probeId === undefined
+            ? open(mine, scope.objectId ?? null)
+            : watch(mine, scope.probeId);
+        void opening.catch((error: unknown) => {
           // **Only the subscription that failed** (`A-30`). One replaced while it was reading has
           // nothing left on this socket; detaching here would detach its replacement, which is
           // healthy, and tell the client to resubscribe for no reason it could act on.
@@ -507,7 +662,13 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
           // to, which is worse than telling it to try again.
           unsubscribe();
           request.log.error({ err: describeError(error) }, 'a stream subscription failed');
-          send({ type: 'problem', reason: 'the snapshot could not be read; subscribe again' });
+          send({
+            type: 'problem',
+            reason:
+              scope.probeId === undefined
+                ? 'the snapshot could not be read; subscribe again'
+                : 'the probe could not be read; subscribe again',
+          });
         });
       };
 
@@ -526,12 +687,13 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         }
         if (!isClientFrame(frame)) {
           refuse(
-            'the only message this stream takes is {"subscribe":{}} or ' +
-              '{"subscribe":{"objectId":<a positive integer>}}',
+            'the only message this stream takes is {"subscribe":{}}, ' +
+              '{"subscribe":{"objectId":<a positive integer>}} or ' +
+              '{"subscribe":{"probeId":<a positive integer>}}',
           );
           return;
         }
-        subscribe(frame.subscribe.objectId ?? null);
+        subscribe(frame.subscribe);
       };
 
       const hang = (): void => {

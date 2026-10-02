@@ -223,6 +223,16 @@ const CHANNELS: readonly ChannelDef[] = [
     unit: 'subscribers',
     counter: { bits: 64 },
   },
+  // **Changes to a probe's link or report that were folded into one frame** (`U-24`). The frame
+  // says "ask again" and carries nothing, so folding loses nothing — but it is the stream
+  // declining to queue, and that is counted. A rate that stays up is a probe whose link is
+  // flapping, or a browser that has stopped reading what it is sent.
+  {
+    key: 'streamCoalesced',
+    name: 'Live probe changes folded together',
+    unit: 'changes',
+    counter: { bits: 64 },
+  },
   // **Live sockets closed because what authenticated them no longer does** (`A-34`), one channel
   // per reason, because the reasons mean different things to whoever reads them: sessions ending
   // and expiring are an ordinary day, while a burst of revoked tokens or disabled accounts is

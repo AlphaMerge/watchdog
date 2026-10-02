@@ -174,6 +174,12 @@ const CORE_METRICS: readonly Metric[] = [
     counter: true,
   },
   {
+    key: 'streamCoalesced',
+    name: 'ms_core_stream_probe_changes_coalesced_total',
+    help: 'Changes to a probe’s link or report folded into a frame a watcher had not yet taken.',
+    counter: true,
+  },
+  {
     key: 'streamEnded',
     name: 'ms_core_stream_signed_out_ended_total',
     help: 'Live-state sockets closed because their session ended.',

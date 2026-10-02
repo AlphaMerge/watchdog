@@ -420,6 +420,50 @@ describe('the live state stream', () => {
     stream.subscribe(3);
     expect(stream.frames).toBe(3);
   });
+
+  it('watches a probe itself: asks for it by id, and counts what the core says of it (U-24)', () => {
+    const { stream, latest, fire } = harness();
+    stream.watchProbe(7);
+    latest().open();
+    expect(latest().sent).toEqual([JSON.stringify({ subscribe: { probeId: 7 } })]);
+
+    latest().deliver({ type: 'watching', probeId: 7 });
+    expect(stream.frames, 'the watch standing is the first word, as a snapshot is').toBe(1);
+    latest().deliver({ type: 'probe', probeId: 7 });
+    latest().deliver({ type: 'probe', probeId: 7 });
+    expect(stream.frames).toBe(3);
+    expect(stream.states.size, 'a probe frame carries no state').toBe(0);
+
+    // About another probe, or with no probe named: nobody here asked.
+    latest().deliver({ type: 'probe', probeId: 8 });
+    latest().deliver({ type: 'watching', probeId: 8 });
+    latest().deliver({ type: 'probe' });
+    expect(stream.frames).toBe(3);
+
+    // An overflow — a grant moved — is answered by watching again, not by a tree subscription.
+    latest().deliver({ type: 'overflow', reason: 'what this account may see has changed' });
+    expect(latest().sent).toEqual([
+      JSON.stringify({ subscribe: { probeId: 7 } }),
+      JSON.stringify({ subscribe: { probeId: 7 } }),
+    ]);
+
+    // And a reconnect watches the same probe.
+    latest().drop();
+    fire();
+    latest().open();
+    expect(latest().sent).toEqual([JSON.stringify({ subscribe: { probeId: 7 } })]);
+  });
+
+  it('takes no probe frame as news while it is subscribed to a subtree (U-24)', () => {
+    const { stream, latest } = harness();
+    stream.watchProbe(7);
+    latest().open();
+    stream.subscribe(7);
+    expect(latest().sent.at(-1)).toBe(JSON.stringify({ subscribe: { objectId: 7 } }));
+    // One the core sent for the watch this stream has since replaced.
+    latest().deliver({ type: 'probe', probeId: 7 });
+    expect(stream.frames).toBe(0);
+  });
 });
 
 /**

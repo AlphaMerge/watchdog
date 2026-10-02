@@ -1284,6 +1284,13 @@ async function serve(): Promise<void> {
     reachability,
     probeConfig,
     queries: probeQueries,
+    // The browser stream says a probe's link or report changed, to whoever watches that probe
+    // and may see it (`U-24`). Never rejects, and reads nothing when nobody is watching.
+    links: {
+      changed: (probeObjectId) => {
+        void stream.publishProbe(db, probeObjectId);
+      },
+    },
   });
   probeEndpointRef = probeEndpoint;
   configNotifier.attach(probeEndpoint);

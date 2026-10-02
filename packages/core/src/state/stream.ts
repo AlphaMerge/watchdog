@@ -109,6 +109,15 @@ export interface StreamStats {
    * happening.
    */
   readonly credentialCheckFailures: number;
+  /**
+   * Changes to a probe's link or report that were folded into a frame already on its way to the
+   * same watcher, or into a publish already reading that probe's place in the tree (`U-24`).
+   *
+   * Counted, never silent (`CLAUDE.md`), and nothing is lost by it: the frame says "ask again"
+   * and carries no value, so the one that does arrive is answered with whatever is true by then.
+   * A number that climbs is a probe whose link is flapping, or a browser that has stopped reading.
+   */
+  readonly probeCoalesced: number;
 }
 
 export interface StateBroadcasterOptions {
@@ -170,6 +179,20 @@ export interface StateSubscriber {
 }
 
 /**
+ * What watches one probe's own link and report, rather than the sensors beneath it (`U-24`).
+ *
+ * **Told that it changed, and nothing about how.** What a reader may know of a probe's health is
+ * decided by `GET /probes/{id}/health` and by nothing else; a frame carrying a value would be a
+ * second place deciding it, and the one that is forgotten when the first changes.
+ */
+export interface ProbeWatcher {
+  /** The probe's link came or went, or what its report leaves out changed. */
+  changed(): void;
+  /** What its account may see has changed, or could not be confirmed (`A-12`): subscribe again. */
+  overflow(reason?: string): void;
+}
+
+/**
  * What a subscriber may see, and how to ask again (`A-12`).
  *
  * Resolved when it subscribes and held for as long as it stays attached — which can be days, so
@@ -215,6 +238,14 @@ interface Attached {
   readonly order: number;
 }
 
+/** A probe watcher's attachment: `Attached`, for the other kind of subscription (`U-24`). */
+interface Watching {
+  readonly subscriber: ProbeWatcher;
+  readonly probeId: ObjectId;
+  readonly sight: StreamSight;
+  readonly order: number;
+}
+
 /**
  * Live state changes, pushed rather than polled (`U-02`).
  *
@@ -238,6 +269,15 @@ export class StateBroadcaster {
   readonly #backlogLimit: number;
   readonly #snapshotLimit: number;
   readonly #attached = new Set<Attached>();
+  /**
+   * Who watches a probe itself (`U-24`). Apart from `#attached`, so that a state change never
+   * walks them and `watching` — the guard in front of every ancestry read — is not held open by
+   * a form that asked about one probe.
+   */
+  readonly #watchers = new Set<Watching>();
+  /** Probes whose place in the tree is being read for a frame that has not gone yet (`U-24`). */
+  readonly #announcing = new Set<ObjectId>();
+  #probeCoalesced = 0;
   /**
    * Resolutions in flight, by principal and the epoch that sent for them (`A-30`). Publishes run
    * concurrently — every committed batch is one — and each noticed the same grant change and asked
@@ -273,7 +313,7 @@ export class StateBroadcaster {
 
   get stats(): StreamStats {
     return {
-      subscribers: this.#attached.size,
+      subscribers: this.#attached.size + this.#watchers.size,
       published: this.#published,
       delivered: this.#delivered,
       overflowed: this.#overflowed,
@@ -282,7 +322,16 @@ export class StateBroadcaster {
       severed: this.#severed,
       signedOut: { ...this.#signedOut },
       credentialCheckFailures: this.#credentialCheckFailures,
+      probeCoalesced: this.#probeCoalesced,
     };
+  }
+
+  /**
+   * Counts a probe change the stream route folded into a frame the socket had not yet taken
+   * (`U-24`). See `StreamStats.probeCoalesced`.
+   */
+  coalesced(): void {
+    this.#probeCoalesced += 1;
   }
 
   /** Counts a socket the stream route closed to protect the core (`A-30`). See `StreamStats`. */
@@ -435,6 +484,125 @@ export class StateBroadcaster {
       values,
     );
     return rows[0]?.visible === true;
+  }
+
+  /**
+   * Attaches a watcher to one probe's own link and report (`U-24`). Returns how to detach it.
+   *
+   * Seen through `sight` exactly as a sensor's state is: the frame goes to a watcher whose
+   * visibility sees the probe **at the moment it is sent**, so attaching one is not a grant.
+   */
+  watchProbe(subscriber: ProbeWatcher, probeId: ObjectId, sight: StreamSight): () => void {
+    this.#attachments += 1;
+    const watching: Watching = { subscriber, probeId, sight, order: this.#attachments };
+    this.#watchers.add(watching);
+    return () => this.#watchers.delete(watching);
+  }
+
+  /**
+   * Whether this visibility can read a probe with this id, and the access epoch that was true at
+   * (`U-24`).
+   *
+   * `canSee`, and that the object is a probe: a watch on a device would be a subscription nothing
+   * is ever published to, which looks exactly like a probe where nothing changes. One answer for
+   * a probe that is hidden, an id that names nothing and an object that is not a probe, so the
+   * refusal says nothing about which.
+   *
+   * **The epoch is read in the same statement**, for the reason `snapshot`'s is: `visibility` was
+   * resolved in an earlier one, and `confirm` is how the caller learns it has moved since.
+   */
+  async canWatchProbe(
+    q: Queryable,
+    probeId: ObjectId,
+    visibility: Visibility,
+  ): Promise<{ visible: boolean; epoch: number | null }> {
+    const values: unknown[] = [probeId];
+    const visible = visibility.where('o.id', (value) => `$${String(values.push(value))}`);
+    const rows = await q.query<{ visible: boolean; epoch: string | null }>(
+      `SELECT EXISTS (
+                SELECT 1 FROM object o WHERE o.id = $1 AND o.kind = 'probe' AND ${visible}
+              ) AS visible,
+              (SELECT value::text FROM access_epoch) AS epoch`,
+      values,
+    );
+    const row = rows[0];
+    return {
+      visible: row?.visible === true,
+      epoch: row === undefined || row.epoch === null ? null : Number(row.epoch),
+    };
+  }
+
+  /**
+   * Says that a probe's link or report changed, to whoever watches that probe and may see it
+   * (`U-24`).
+   *
+   * **No transaction and no state**: a probe connecting is a fact about a socket, held in memory
+   * beside the link, and this is called when it changes. It writes nothing, so it raises nothing
+   * — the alarm for a lost probe is still Probe Health's, decided where it always was.
+   *
+   * **Nobody watching that probe costs one walk of the watchers and no query**, as an unwatched
+   * state change costs none.
+   *
+   * **One read in flight per probe.** A link that flaps calls this for every edge, and each call
+   * would otherwise hold a query of its own. A change that arrives while the probe's place is
+   * being read is covered by the frame that read is about to send: the frame goes after the
+   * change, and whoever receives it asks for what is true then. It is counted and folded in.
+   *
+   * **This never rejects**, for the reason `publish` does not: it is called from the probe
+   * endpoint's socket handlers, where a rejection has nobody to catch it.
+   */
+  async publishProbe(q: Queryable, probeId: ObjectId): Promise<number> {
+    let watched = false;
+    for (const watching of this.#watchers) {
+      if (watching.probeId !== probeId) continue;
+      watched = true;
+      break;
+    }
+    if (!watched) return 0;
+    if (this.#announcing.has(probeId)) {
+      this.#probeCoalesced += 1;
+      return 0;
+    }
+    this.#announcing.add(probeId);
+
+    // As `publish`: every socket's credential before anything is delivered (`A-34`).
+    const vetting = this.#vet();
+    let path: ObjectId[] | undefined;
+    let epoch: number | null;
+    try {
+      const read = await this.#ancestryOf(q, [probeId]);
+      path = read.ancestry.get(probeId)?.path;
+      epoch = read.epoch;
+    } catch (error) {
+      this.#logger.error(
+        { probeId, err: describeError(error) },
+        'could not read where a probe sits; nobody watching it was told that it changed',
+      );
+      await vetting;
+      return 0;
+    } finally {
+      // From here a new change is a new frame: this one's read is over, and what it is about to
+      // send may be on its way before the next change is.
+      this.#announcing.delete(probeId);
+    }
+    await vetting;
+    // Deleted between the change and this read. Its watchers learn that from the object's routes.
+    if (path === undefined) return 0;
+
+    const horizon = epoch === null ? this.#attachments : await this.#catchUp(epoch);
+
+    let sent = 0;
+    for (const watching of this.#watchers) {
+      if (watching.order > horizon) continue;
+      if (watching.probeId !== probeId) continue;
+      // **The hard rule.** The question a sensor's frame is asked, of the probe's own path: a
+      // watcher that may not see the probe is sent nothing, not even a frame with its id.
+      if (!watching.sight.visibility.sees(path)) continue;
+      watching.subscriber.changed();
+      sent += 1;
+      this.#delivered += 1;
+    }
+    return sent;
   }
 
   /**
@@ -692,7 +860,8 @@ export class StateBroadcaster {
    */
   async #catchUp(epoch: number): Promise<number> {
     const horizon = this.#attachments;
-    const stale = [...this.#attached].filter((attached) => {
+    // Both kinds of subscription (`U-24`): a probe watcher's view goes stale exactly as a tree's.
+    const stale = [...this.#attached, ...this.#watchers].filter((attached) => {
       const seen = attached.sight.visibility.epoch;
       // Different, not older (`A-25`): the counter only rises in a running database, but a
       // restore or a rollback can put it back, and a socket resolved at the higher number would
@@ -714,12 +883,12 @@ export class StateBroadcaster {
           next = null;
         }
         // Detached while this was being asked: nothing to update and nobody to tell.
-        if (!this.#attached.has(attached)) return;
+        if (!this.#holds(attached)) return;
         if (next?.sameAs(attached.sight.visibility) === true) {
           attached.sight.visibility = next;
           return;
         }
-        this.#attached.delete(attached);
+        this.#drop(attached);
         this.#resynced += 1;
         attached.subscriber.overflow(
           next === null
@@ -729,6 +898,16 @@ export class StateBroadcaster {
       }),
     );
     return horizon;
+  }
+
+  /** Whether this subscription, of either kind, is still attached. */
+  #holds(entry: Attached | Watching): boolean {
+    return 'probeId' in entry ? this.#watchers.has(entry) : this.#attached.has(entry);
+  }
+
+  #drop(entry: Attached | Watching): void {
+    if ('probeId' in entry) this.#watchers.delete(entry);
+    else this.#attached.delete(entry);
   }
 
   /**

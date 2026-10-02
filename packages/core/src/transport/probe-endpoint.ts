@@ -190,6 +190,39 @@ export interface ProbeEndpointOptions {
    * `sendQuery` still refuses politely, so a caller gets a reason rather than a hang.
    */
   queries?: ProbeQuerySink;
+  /**
+   * Told that what `linkFor` answers for a probe has changed in a way somebody watching it
+   * should ask about again (`U-24`): it claimed its branch, its link went, or its report now
+   * leaves out something it carried — or carries something it left out. Absent, nobody is told,
+   * and a page showing the probe reads it once.
+   */
+  links?: ProbeLinkWatch;
+}
+
+/**
+ * What the transport tells the live stream, and nothing more (`U-24`).
+ *
+ * **Synchronous and told nothing but the probe**: the link has already changed by the time this
+ * is called, so whoever is told reads it from `linkFor` — and reads what is true then, not what
+ * was true at the edge. It must not throw; it is called from a socket's handlers.
+ */
+export interface ProbeLinkWatch {
+  changed(probeObjectId: number): void;
+}
+
+/**
+ * What of a health report the core tells a watcher about, as one comparable value (`U-24`).
+ *
+ * **Which listeners the probe says are running, and whether it has reported at all** — a
+ * listener's counter is in the report exactly while that listener runs (`B-08`), and `scheduled`
+ * is in every report a probe has ever sent. Not the numbers: those change on every heartbeat,
+ * and a frame per heartbeat would be a poll with extra steps. `null` is no report yet.
+ */
+export function reportShape(health: ProbeHealthReport | undefined): string | null {
+  if (health === undefined) return null;
+  return [health.scheduled, health.flowReceived, health.syslogReceived, health.trapReceived]
+    .map((value) => (value === undefined ? '-' : '+'))
+    .join('');
 }
 
 /** What the transport tells `R-09`, and nothing more. */
@@ -704,8 +737,15 @@ export class ProbeEndpoint {
           // currently running, and a value read back from a table after a restart would be a
           // claim about a probe this core has not spoken to yet.
           if (message.health !== undefined) {
+            const before = reportShape(session.health);
             session.health = message.health;
             this.#foldMemory(session, message.health);
+            // The first report of a session, or one in which a listener came or went (`U-24`).
+            // Only for a probe that has claimed its branch: before that `linkFor` answers
+            // nothing for it, and claiming is itself an edge that is told.
+            if (session.probeObjectId !== null && reportShape(message.health) !== before) {
+              this.#options.links?.changed(session.probeObjectId);
+            }
           }
           connection.send({ type: 'heartbeat-ack', seq: message.seq });
           // **The heartbeat is where an interrupted push is actually caught** (`P-153`).
@@ -1394,6 +1434,8 @@ export class ProbeEndpoint {
                 logger.error(describeError(error), 'could not restore this probe’s sensors');
               });
             }
+            // `linkFor` answers `connected` for this probe from the assignment above (`U-24`).
+            this.#options.links?.changed(session.probeObjectId);
             // A probe that has just claimed its branch may have a sweep waiting, and a
             // reconnecting one almost certainly does — a run left `queued` by the disconnect
             // below. Offering it here rather than on a timer is what makes a resume immediate.
@@ -1703,6 +1745,10 @@ export class ProbeEndpoint {
     // core already knows is the slowest possible way to be told it (`R-09`).
     if (session?.probeObjectId != null) {
       this.#options.queries?.probeDisconnected(session.probeObjectId);
+      // After the session left `#sessions` above, so `linkFor` already answers without it
+      // (`U-24`). A session a newer one replaced tells too: one more "ask again" is harmless,
+      // and a watcher that was not told of a real drop is not.
+      this.#options.links?.changed(session.probeObjectId);
     }
     logger.info(
       { cause: close.cause, detail: close.detail, gid: session?.info.gid ?? null },

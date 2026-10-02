@@ -2341,6 +2341,123 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       }
     });
 
+    it('says a probe changed to a reader of that probe and to nobody else (U-24)', async () => {
+      // The branch account has sensors of its own under this probe and cannot see the probe —
+      // the reader `GET /probes/{id}/health` refuses, and who must be told nothing here either.
+      const branch = await app.injectWS('/api/v1/stream', { headers: as('watcher') });
+      const admin = await app.injectWS('/api/v1/stream', { headers: as('admin') });
+      const branchFrames: string[] = [];
+      const adminFrames: string[] = [];
+      branch.on('message', (raw: Buffer) => branchFrames.push(raw.toString('utf8')));
+      admin.on('message', (raw: Buffer) => adminFrames.push(raw.toString('utf8')));
+      const watch = (socket: WebSocket, id: number): void => {
+        socket.send(JSON.stringify({ subscribe: { probeId: id } }));
+      };
+      const about = (frames: readonly string[], from: number): Record<string, unknown>[] =>
+        frames
+          .slice(from)
+          .map((frame) => JSON.parse(frame) as Record<string, unknown>)
+          .filter((frame) => frame['type'] === 'probe' || frame['type'] === 'watching');
+      try {
+        // Refused, and in one answer whatever the id is: a probe out of view, an id nobody used,
+        // and an object it can read that is not a probe.
+        watch(branch, probeId);
+        const refused = await waitFor(branch, branchFrames, 'problem');
+        assert.match(String(refused['reason']), /may not read a probe with that id/);
+        for (const id of [2_000_000_000, deviceId]) {
+          const at = branchFrames.length;
+          watch(branch, id);
+          assert.deepEqual(await waitFor(branch, branchFrames, 'problem', at), refused);
+        }
+
+        watch(admin, probeId);
+        assert.deepEqual(await waitFor(admin, adminFrames, 'watching'), {
+          type: 'watching',
+          probeId,
+        });
+
+        // The probe's link moves, three times. The administrator is told each time, in a frame
+        // that is the id and nothing else.
+        for (let edge = 0; edge < 3; edge += 1) {
+          const at = adminFrames.length;
+          await stream.publishProbe(db, probeId);
+          assert.deepEqual(await waitFor(admin, adminFrames, 'probe', at), {
+            type: 'probe',
+            probeId,
+          });
+        }
+        // The branch account is not, and a frame it can be waited on proves it had the chance.
+        const barrier = branchFrames.length;
+        branch.send(JSON.stringify({ subscribe: {} }));
+        await waitFor(branch, branchFrames, 'snapshot', barrier);
+        assert.deepEqual(about(branchFrames, 0), [], 'a reader who cannot see the probe was told');
+        // Nor is a subscription to sensors a watch: the administrator's other probe says nothing
+        // to a socket watching this one.
+        const quiet = adminFrames.length;
+        await stream.publishProbe(db, secondProbeId);
+
+        // Access is granted: the watch is allowed, and the next change is sent.
+        await access.grant(probeId, teamId, 'read', actorNamed('visibility'));
+        const granted = branchFrames.length;
+        watch(branch, probeId);
+        assert.deepEqual(await waitFor(branch, branchFrames, 'watching', granted), {
+          type: 'watching',
+          probeId,
+        });
+        await stream.publishProbe(db, probeId);
+        assert.deepEqual(await waitFor(branch, branchFrames, 'probe', granted), {
+          type: 'probe',
+          probeId,
+        });
+        await waitFor(admin, adminFrames, 'probe', quiet);
+        assert.deepEqual(
+          about(adminFrames, quiet).map((frame) => frame['probeId']),
+          [probeId],
+          'a watch on one probe was told about another',
+        );
+
+        // And taken away while the socket is open: the change after it is not sent. The socket is
+        // sent back to the start, and watching again is refused as it was at first.
+        await access.grant(probeId, teamId, 'none', actorNamed('visibility'));
+        const revoked = branchFrames.length;
+        await stream.publishProbe(db, probeId);
+        const overflow = await waitFor(branch, branchFrames, 'overflow', revoked);
+        assert.match(String(overflow['reason']), /may see has changed/);
+        const again = branchFrames.length;
+        watch(branch, probeId);
+        assert.deepEqual(await waitFor(branch, branchFrames, 'problem', again), refused);
+        await stream.publishProbe(db, probeId);
+        const after = branchFrames.length;
+        branch.send(JSON.stringify({ subscribe: {} }));
+        await waitFor(branch, branchFrames, 'snapshot', after);
+        assert.deepEqual(
+          about(branchFrames, revoked),
+          [],
+          'a frame went to a reader whose access to the probe was taken away',
+        );
+
+        // The administrator's view never changed, so it was never disturbed.
+        assert.equal(
+          adminFrames.some((frame) => frame.includes('"type":"overflow"')),
+          false,
+        );
+        assert.equal(
+          branchFrames.some((frame) => frame.includes(MARK)),
+          false,
+          'the stream carried something outside the branch',
+        );
+
+        // A subtree and a probe are two subscriptions, and a socket has one.
+        const both = adminFrames.length;
+        admin.send(JSON.stringify({ subscribe: { objectId: probeId, probeId } }));
+        const problem = await waitFor(admin, adminFrames, 'problem', both);
+        assert.match(String(problem['reason']), /the only message this stream takes/);
+      } finally {
+        branch.terminate();
+        admin.terminate();
+      }
+    });
+
     it('notices a counter that went backwards, the way a restore puts it (A-25)', async () => {
       // A known state before subscribing, so that the failure below is a change to publish.
       await scan([pingId], true);

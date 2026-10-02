@@ -20,6 +20,7 @@ import {
 } from '@ms/shared';
 import {
   ProbeEndpoint,
+  reportShape,
   type ProbeQuerySink,
   type ResultReceiver,
 } from '../src/transport/probe-endpoint.js';
@@ -1655,6 +1656,139 @@ describe(
       } finally {
         await endpoint.stop();
       }
+    });
+
+    describe('what it tells a watcher of the link (U-24)', () => {
+      /** An endpoint that records each time it said a probe changed, and what `linkFor` said then. */
+      async function watched(
+        source: StubSource,
+        body: (
+          probe: TestProbe,
+          told: { probe: number; connected: boolean; reported: boolean }[],
+        ) => Promise<void>,
+      ): Promise<void> {
+        const told: { probe: number; connected: boolean; reported: boolean }[] = [];
+        const endpoint: ProbeEndpoint = new ProbeEndpoint({
+          config: endpointConfig(dir),
+          logger: silentLogger,
+          coreVersion: '9.9.9',
+          probeConfig: source,
+          links: {
+            changed: (probeObjectId) => {
+              // Read at the edge, as a watcher's request would be: the link has already changed.
+              const link = endpoint.linkFor(probeObjectId);
+              told.push({
+                probe: probeObjectId,
+                connected: link.connected,
+                reported: link.connected && link.health !== undefined,
+              });
+            },
+          },
+        });
+        const address = await endpoint.start();
+        try {
+          const probe = await TestProbe.connect(dir, address.port);
+          probe.send(hello());
+          await probe.waitFor((m) => m.type === 'welcome');
+          await body(probe, told);
+          probe.close();
+        } finally {
+          await endpoint.stop();
+        }
+      }
+
+      const beat = async (
+        probe: TestProbe,
+        seq: number,
+        health?: Record<string, number>,
+      ): Promise<void> => {
+        probe.send({
+          type: 'heartbeat',
+          seq,
+          sentAt: new Date().toISOString(),
+          ...(health === undefined ? {} : { health }),
+        });
+        await probe.waitFor((m) => m.type === 'heartbeat-ack' && m.seq === seq);
+      };
+
+      it('says so when a probe claims its branch, when its report changes shape, and when it goes', async () => {
+        await watched(new StubSource(), async (probe, told) => {
+          await waitUntil(() => told.length === 1);
+          assert.deepEqual(told[0], { probe: 7, connected: true, reported: false });
+
+          // Its first report: what the add-sensor form could not be prompted for.
+          await beat(probe, 1, { scheduled: 0 });
+          assert.deepEqual(told.slice(1), [{ probe: 7, connected: true, reported: true }]);
+          // The numbers moving is not news — a frame per heartbeat would be a poll.
+          await beat(probe, 2, { scheduled: 5 });
+          assert.equal(told.length, 2);
+          // The flow collector comes on.
+          await beat(probe, 3, { scheduled: 5, flowReceived: 0 });
+          assert.equal(told.length, 3);
+          await beat(probe, 4, { scheduled: 5, flowReceived: 17 });
+          assert.equal(told.length, 3);
+          // A heartbeat with no report is not a report that left everything out.
+          await beat(probe, 5);
+          assert.equal(told.length, 3);
+          // The syslog and trap listeners, each on its own.
+          await beat(probe, 6, { scheduled: 5, flowReceived: 17, syslogReceived: 0 });
+          assert.equal(told.length, 4);
+          await beat(probe, 7, {
+            scheduled: 5,
+            flowReceived: 17,
+            syslogReceived: 0,
+            trapReceived: 0,
+          });
+          assert.equal(told.length, 5);
+          // And the collector goes off again.
+          await beat(probe, 8, { scheduled: 5, syslogReceived: 0, trapReceived: 0 });
+          assert.equal(told.length, 6);
+
+          probe.close();
+          await waitUntil(() => told.length === 7);
+          assert.deepEqual(
+            told[6],
+            { probe: 7, connected: false, reported: false },
+            'told before the link read as gone',
+          );
+        });
+      });
+
+      it('says nothing for a probe no branch has claimed', async () => {
+        const source = new StubSource();
+        source.claimed = null;
+        await watched(source, async (probe, told) => {
+          await probe.waitFor((m) => m.type === 'config-set');
+          await beat(probe, 1, { scheduled: 0, flowReceived: 0 });
+          probe.close();
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          assert.deepEqual(told, []);
+        });
+      });
+
+      it('reads a report’s shape from the listeners it names and whether it reported at all', () => {
+        assert.equal(reportShape(undefined), null);
+        assert.notEqual(reportShape({}), null, 'an empty report is a report');
+        const shapes = [
+          reportShape({}),
+          reportShape({ scheduled: 3 }),
+          reportShape({ scheduled: 3, flowReceived: 0 }),
+          reportShape({ scheduled: 3, syslogReceived: 0 }),
+          reportShape({ scheduled: 3, trapReceived: 0 }),
+          reportShape({ scheduled: 3, flowReceived: 0, syslogReceived: 0, trapReceived: 0 }),
+        ];
+        assert.equal(new Set(shapes).size, shapes.length, 'two different shapes read alike');
+        // A zero is a value: a collector that has received nothing is running.
+        assert.equal(
+          reportShape({ scheduled: 0, flowReceived: 0 }),
+          reportShape({ scheduled: 12, flowReceived: 900 }),
+        );
+        // What the form does not read does not make a frame.
+        assert.equal(
+          reportShape({ scheduled: 3, poolBusy: 2, cpuPercent: 40 }),
+          reportShape({ scheduled: 3 }),
+        );
+      });
     });
 
     describe('the memory lows it folds for Probe Health (P-219)', () => {

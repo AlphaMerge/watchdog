@@ -46,6 +46,7 @@ function sources(
     p95: number;
     overflowed: number;
     severed: number;
+    probeCoalesced: number;
     signedOut: { ended: number; expired: number; revoked: number; disabled: number };
     credentialCheckFailures: number;
     probesDown: number;
@@ -93,6 +94,7 @@ function sources(
     stream: () => ({
       overflowed: overrides.overflowed ?? 0,
       severed: overrides.severed ?? 0,
+      probeCoalesced: overrides.probeCoalesced ?? 0,
       signedOut: overrides.signedOut ?? { ended: 0, expired: 0, revoked: 0, disabled: 0 },
       credentialCheckFailures: overrides.credentialCheckFailures ?? 0,
     }),
@@ -385,6 +387,12 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(signedOut['streamDisabled'], 1);
       assert.equal(signedOut['streamCheckFailures'], 6);
       assert.equal(signedOut['streamCutoffs'], 0);
+      // Probe changes folded into one frame (`U-24`): counted, and not as a cut-off — nothing was
+      // lost and nobody was detached.
+      const folded = await build({ probeCoalesced: 9, overflowed: 1 }).read();
+      assert.equal(folded['streamCoalesced'], 9);
+      assert.equal(folded['streamCutoffs'], 1);
+      assert.equal(reading['streamCoalesced'], 0);
       assert.equal(reading['probesDown'], 1);
       assert.equal(reading['notifyPending'], 9);
       assert.equal(reading['notifyFailed'], 4);
@@ -796,6 +804,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       const readings = readingsFrom({
         ingestRefused: 12,
         streamCutoffs: 1,
+        streamCoalesced: 6,
         streamEnded: 8,
         streamExpired: 7,
         streamRevoked: 2,
@@ -814,7 +823,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
           assert.equal(reading.counter, undefined, reading.key);
         }
       }
-      assert.equal(readings.length, 11);
+      assert.equal(readings.length, 12);
 
       // Named rather than left to the loop above, which agrees with whatever the declaration
       // says and would go on passing if a channel quietly stopped being a counter. These
@@ -825,6 +834,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
         [
           'ingestRefused',
           'streamCutoffs',
+          'streamCoalesced',
           'streamEnded',
           'streamExpired',
           'streamRevoked',

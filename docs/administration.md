@@ -158,6 +158,13 @@ counts checks that could not be made. **A check that fails closes nothing**: a d
 blinked is not a reason to sign everybody out, so a climbing `streamCheckFailures` means sockets
 are not being checked.
 
+The same socket tells a page that watches one probe — the add-sensor form does, for a sensor type
+that reads a listener — when that probe connects, drops, or reports a listener coming or going.
+It is told only that the probe changed, and only if its account can read that probe; it then asks
+the probe's health again. Changes that arrive faster than a page takes them are folded into one,
+and Core Health's `streamCoalesced` counts them: a rate that stays up is a probe whose link is
+flapping, or a browser that has stopped reading.
+
 **An open stream is not activity.** The stream asking does not extend the session. If it did, a
 browser left on a dashboard would never time out, and the idle timeout would mean nothing for the
 unattended screen it exists for. A page that makes requests of its own keeps its session: the

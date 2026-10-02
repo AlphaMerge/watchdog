@@ -11,8 +11,13 @@ import { AddSensor } from '../src/routes/AddSensor';
  * `B-08` read the notice once, when the type was chosen. A form stays open for as long as
  * somebody takes to fill it in, and in that time a probe restarted with its collector on left
  * "is not running" standing, and a probe that dropped left a sentence about a setting nobody
- * could vouch for any longer. The state stream is the prompt — a frame under the probe means
- * "ask again" — and `GET /probes/{id}/health` is still the answer.
+ * could vouch for any longer. The state stream is the prompt and `GET /probes/{id}/health` is
+ * still the answer.
+ *
+ * **The prompt is the probe's own frame** (`U-24`). `B-12` could only listen for a sensor under
+ * the probe changing state; the form now watches the probe itself, and the core says when its
+ * link came or went or its report changed. The two cases `B-12` wrote down as not doable on that
+ * stream are the last two here.
  */
 
 const health = (channels: Record<string, number | null>): ProbeHealthView => ({
@@ -22,6 +27,8 @@ const health = (channels: Record<string, number | null>): ProbeHealthView => ({
   channels,
 });
 
+/** The probe connected and not yet heard from: the first seconds of a link. */
+const CONNECTED = health({ connected: 1, scheduled: null, flowReceived: null });
 /** A probe that has reported, with its flow collector running. */
 const RUNNING = health({ connected: 1, scheduled: 12, flowReceived: 0 });
 /** The same probe with the collector off: reported, and no flow counter in the report. */
@@ -69,37 +76,17 @@ const ANCESTORS: ObjectRef[] = [
   { id: 3, kind: 'group', name: 'Routers' },
 ];
 
-/** The probe's branch as the form's own fetch saw it. */
-const SNAPSHOT = {
-  type: 'snapshot',
-  seq: 0,
-  objectId: 2,
-  truncated: false,
-  entries: [
-    {
-      sensorId: 9,
-      sensorName: 'Probe Health',
-      path: [1, 2, 9],
-      state: 'up',
-      cause: 'scan',
-      message: 'connected, 12 sensors scheduled',
-      since: '2026-10-02T09:00:00.000Z',
-    },
-  ],
-};
+/** The core's answer to the watch: it stands. The first word on the subscription. */
+const WATCHING = { type: 'watching', probeId: 2 };
 
-/** Something under the probe changed: its own health sensor, as when the probe drops. */
-const changed = (seq: number): unknown => ({
-  type: 'state',
-  seq,
-  sensorId: 9,
-  sensorName: 'Probe Health',
-  path: [1, 2, 9],
-  state: seq % 2 === 1 ? 'down' : 'up',
-  cause: 'scan',
-  message: '',
-  at: '2026-10-02T10:00:05.000Z',
-});
+/**
+ * The probe's link came or went, or its report changed. The id and nothing else: what is true
+ * now is asked of the probe's own route.
+ */
+const changed = (): unknown => ({ type: 'probe', probeId: 2 });
+
+/** What the form watches: the probe, and not every sensor beneath it. */
+const WATCH = JSON.stringify({ subscribe: { probeId: 2 } });
 
 interface Core {
   /** What `GET /probes/2/health` answers now; a number is a refusal with that status. */
@@ -238,7 +225,7 @@ async function watching(core: Core): Promise<DrivenSocket> {
   const socket = sockets[0];
   if (socket === undefined) throw new Error('no socket opened');
   socket.open();
-  socket.deliver(SNAPSHOT);
+  socket.deliver(WATCHING);
   return socket;
 }
 
@@ -258,15 +245,15 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     await waitFor(() => {
       expect(notice().textContent).toContain('The flow collector on probe “Berlin” is not running');
     });
-    // Scoped to the probe: its own health sensor and everything it scans, and nothing else.
-    expect(socket.sent).toEqual([JSON.stringify({ subscribe: { objectId: 2 } })]);
+    // The probe itself, and not its branch: no snapshot of every sensor it scans (`U-24`).
+    expect(socket.sent).toEqual([WATCH]);
 
-    // The first snapshot is the world the form's own request already asked about.
+    // The watch standing is the world the form's own request already asked about.
     await settled();
-    expect(core.healthAsked(), 'the first snapshot is not news').toBe(1);
+    expect(core.healthAsked(), 'the answer to the watch is not news').toBe(1);
 
     core.health = RUNNING;
-    socket.deliver(changed(1));
+    socket.deliver(changed());
     await waitFor(() => {
       expect(notice().textContent).toBe('');
     });
@@ -282,7 +269,7 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     });
     observer.observe(notice(), { childList: true, characterData: true, subtree: true });
     core.hold = true;
-    socket.deliver(changed(2));
+    socket.deliver(changed());
     await waitFor(() => {
       expect(core.healthAsked()).toBe(3);
     });
@@ -303,7 +290,7 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     });
 
     core.health = DROPPED;
-    socket.deliver(changed(1));
+    socket.deliver(changed());
     await waitFor(() => {
       expect(notice().textContent).toBe('');
     });
@@ -322,7 +309,7 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     expect(document.activeElement).toBe(name);
 
     core.health = OFF;
-    socket.deliver(changed(1));
+    socket.deliver(changed());
     await waitFor(() => {
       expect(notice().textContent).toContain('The flow collector on probe “Berlin” is not running');
     });
@@ -353,10 +340,10 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     });
     observer.observe(notice(), { childList: true, characterData: true, subtree: true });
 
-    // A sensor under the probe changed state and the collector is as it was. The answer is held
+    // The probe's link moved and the collector is as it was. The answer is held
     // back, so "while it asks" is a moment the test stands in.
     core.hold = true;
-    socket.deliver(changed(1));
+    socket.deliver(changed());
     await waitFor(() => {
       expect(core.healthAsked()).toBe(2);
     });
@@ -372,7 +359,7 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     expect(written, 'the same sentence was written again').toEqual([]);
   });
 
-  it('asks once for a burst: a probe going away takes every sensor with it', async () => {
+  it('asks once for a burst: a link that flaps is one request once it stops', async () => {
     const core = stubCore(OFF);
     const socket = await watching(core);
     await waitFor(() => {
@@ -380,7 +367,7 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     });
 
     core.health = DROPPED;
-    for (let seq = 1; seq <= 40; seq += 1) socket.deliver(changed(seq));
+    for (let edge = 1; edge <= 40; edge += 1) socket.deliver(changed());
     await waitFor(() => {
       expect(notice().textContent).toBe('');
     });
@@ -397,7 +384,7 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     });
 
     core.health = 403;
-    socket.deliver(changed(1));
+    socket.deliver(changed());
     await waitFor(() => {
       expect(notice().textContent).toBe('');
     });
@@ -405,7 +392,7 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
 
     // And the sentence is not brought back by the next ask being on its way.
     core.hold = true;
-    socket.deliver(changed(2));
+    socket.deliver(changed());
     await waitFor(() => {
       expect(core.healthAsked()).toBe(3);
     });
@@ -436,8 +423,8 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     const second = sockets[1];
     if (second === undefined) throw new Error('no second socket');
     second.open();
-    expect(second.sent).toEqual([JSON.stringify({ subscribe: { objectId: 2 } })]);
-    second.deliver(SNAPSHOT);
+    expect(second.sent).toEqual([WATCH]);
+    second.deliver(WATCHING);
     await waitFor(() => {
       expect(notice().textContent).toBe('');
     });
@@ -458,7 +445,7 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     const socket = sockets[0];
     if (socket === undefined) throw new Error('no socket opened');
     socket.open();
-    socket.deliver(SNAPSHOT);
+    socket.deliver(WATCHING);
     expect(socket.closed).toBe(false);
 
     pick('icmp.ping');
@@ -466,7 +453,7 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
       expect(socket.closed).toBe(true);
     });
     // A frame that was already on its way asks nothing: nobody is watching.
-    socket.deliver(changed(1));
+    socket.deliver(changed());
     await settled();
     expect(core.healthAsked()).toBe(1);
     expect(sockets.length).toBe(1);
@@ -482,5 +469,92 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(sockets.length).toBe(0);
     expect(core.healthAsked()).toBe(0);
+  });
+
+  it('follows a probe with no sensor the reader can see when its collector comes on (U-24)', async () => {
+    // Exactly a probe getting its first sensor. On `B-12`'s stream nothing under it could change
+    // state, so no frame ever came and the sentence read when the type was chosen stood for as
+    // long as the form was open. Nothing is delivered here but the probe's own frames.
+    const core = stubCore(OFF);
+    const socket = await watching(core);
+    await waitFor(() => {
+      expect(notice().textContent).toContain('The flow collector on probe “Berlin” is not running');
+    });
+    const name = screen.getByLabelText('Name');
+    name.focus();
+
+    // The operator sets `flowListener.enabled` and restarts the probe: the link goes…
+    core.health = DROPPED;
+    socket.deliver(changed());
+    await waitFor(() => {
+      expect(core.healthAsked()).toBe(2);
+    });
+    await waitFor(() => {
+      expect(notice().textContent).toBe('');
+    });
+    // …comes back, and the probe reports with its collector running.
+    core.health = CONNECTED;
+    socket.deliver(changed());
+    await waitFor(() => {
+      expect(core.healthAsked()).toBe(3);
+    });
+    core.health = RUNNING;
+    socket.deliver(changed());
+    await waitFor(() => {
+      expect(core.healthAsked()).toBe(4);
+    });
+    expect(notice().textContent).toBe('');
+    expect(describedBy()).toBeNull();
+    expect(document.activeElement).toBe(name);
+    // Never a subscription to the branch: the one thing sent is the watch.
+    expect(socket.sent).toEqual([WATCH]);
+  });
+
+  it('hears the first report of a probe that reconnected after the form had already asked (U-24)', async () => {
+    const core = stubCore(OFF);
+    const socket = await watching(core);
+    await waitFor(() => {
+      expect(notice().textContent).toContain('is not running');
+    });
+    const name = screen.getByLabelText('Name');
+    name.focus();
+
+    // The probe restarts with its collector still off. The link drops and comes back, and the
+    // form asks before the probe has reported: connected, and nothing can be said of a listener
+    // yet, so the sentence goes — correctly.
+    core.health = DROPPED;
+    socket.deliver(changed());
+    core.health = CONNECTED;
+    socket.deliver(changed());
+    await waitFor(() => {
+      expect(notice().textContent).toBe('');
+    });
+    await settled();
+    const askedBeforeTheReport = core.healthAsked();
+    expect(notice().textContent, 'nothing is said of a probe that has not reported').toBe('');
+
+    // Its first report arrives, without the collector. `B-12` had nothing to prompt it here.
+    core.health = OFF;
+    socket.deliver(changed());
+    await waitFor(() => {
+      expect(notice().textContent).toContain('The flow collector on probe “Berlin” is not running');
+    });
+    expect(core.healthAsked()).toBe(askedBeforeTheReport + 1);
+    expect(notice().getAttribute('role')).toBe('status');
+    expect(describedBy()).toBe('sensor-type-listener');
+    expect(document.activeElement).toBe(name);
+  });
+
+  it('asks nothing for a frame about a probe it is not watching', async () => {
+    const core = stubCore(OFF);
+    const socket = await watching(core);
+    await waitFor(() => {
+      expect(notice().textContent).toContain('is not running');
+    });
+    core.health = RUNNING;
+    socket.deliver({ type: 'probe', probeId: 3 });
+    await settled();
+    expect(core.healthAsked()).toBe(1);
+    expect(notice().textContent).toContain('is not running');
   });
 });

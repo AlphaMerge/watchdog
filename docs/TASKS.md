@@ -17097,7 +17097,7 @@ because each is a decision rather than a defect:
       move focus. **Done when** the tab is walked through in a browser with a keyboard and a
       screen reader, light and dark, and both edges are fixed with tests.
 
-- [ ] **U-24 — the state stream does not say a probe's link or report changed** · M · B-12 ·
+- [x] **U-24 — the state stream does not say a probe's link or report changed** · M · B-12 ·
       Found 2026-10-02 by `B-12`. The stream carries sensor state changes only. A probe with no
       sensor the reader can see — exactly a probe getting its first sensor — sends no frame, so
       the add-sensor form's collector notice is still read once there; and a probe that
@@ -17105,6 +17105,69 @@ because each is a decision rather than a defect:
       report arrives. **Done when** the stream has a frame for a probe connecting, dropping and
       reporting, sent only to a reader who may see that probe, the form follows it, and the
       subscription is the probe and not every sensor beneath it.
+
+      **Done 2026-10-02.**
+
+      **A second subscription, and two frames only it is sent.** `{"subscribe":{"probeId":N}}`
+      watches one probe itself: the core answers `{"type":"watching","probeId":N}` and then
+      sends `{"type":"probe","probeId":N}` when that probe claims its branch, when its link
+      goes, and when a report differs from the last in whether it reported at all or in which
+      listeners it names (`scheduled`, `flowReceived`, `syslogReceived`, `trapReceived` present
+      or absent — `reportShape` in `probe-endpoint.ts`; the numbers moving is not a frame). No
+      snapshot, and no sensor's state: the subscription is the probe. `objectId` and `probeId`
+      together are refused by the client-frame schema. The stream's own `PROTOCOL` stays 1,
+      because neither frame is ever sent on a subscription a client written before them can
+      make; no probe-protocol number and no migration are involved.
+
+      **The frame is the id and nothing else.** It means "ask `GET /probes/{id}/health`
+      again", so what a reader may know about a probe is still decided on that route alone.
+
+      **Visibility.** The frame goes through `Visibility.sees` on the probe's own root-first
+      path, read with the access epoch in the query sensor frames use, at the moment it is
+      sent; a watcher's view is re-resolved by the same `#catchUp` — on a probe change and on
+      any state batch — and a changed view is the same `overflow`. The route refuses a watch
+      with one `problem` for a probe out of view, an id nobody used and an object that is not
+      a probe, and confirms the epoch it judged at, as a snapshot's is confirmed. A reader
+      with sensors under a probe it cannot see is sent nothing, not a frame with an id.
+
+      **Backpressure.** Two folds, one count. A change that arrives while that probe's place
+      is being read is folded into the frame the read is about to send (one query in flight
+      per probe). And a watch holds at most one frame for its socket: while one is handed to
+      `ws` and not yet written out, or before `watching` has gone, further changes fold into
+      it (`probeFrames` in the stream route). Nothing is lost by either, since the frame that
+      arrives is read after the last change. Both are counted in `StreamStats.probeCoalesced`,
+      which is the new Core Health channel `streamCoalesced` (a counter, beside
+      `streamCutoffs`, and `ms_core_stream_probe_changes_coalesced_total` on the exporter). A
+      probe nobody watches costs no query, and a watch does not hold the state publish's
+      "anybody listening" guard open.
+
+      **The form.** `ProbeWatch` uses `useProbeStream(probeId)`; `StateStream.watchProbe`
+      sends the watch, replays it on reconnect and on `overflow`, and counts `watching` and
+      `probe` for the watched probe in `frames`, so `useSettledReload` is unchanged: the
+      settle, the held answer, the status region not rewritten and focus not moved are
+      `B-12`'s. Both cases `B-12` could not cover pass as component tests.
+
+      **Alarm volume is untouched.** `publishProbe` writes no state and queues no
+      notification; a lost probe is still Probe Health's one alarm.
+
+      **Tests.** `core/test/state-stream.test.ts` (+11: told and not told, a table of nine
+      views, grant then revoke mid-watch, a view moved noticed on a state batch, the horizon,
+      a flapping link, a failed read, a deleted probe, `canWatchProbe`),
+      `stream-backlog.test.ts` (+4, `probeFrames`), `object-visibility.test.ts` (+1, two real
+      sockets: refused three ways, told, granted, revoked, both scopes refused),
+      `probe-endpoint.test.ts` (+3: claim, report shape, drop; an unclaimed probe; the shape),
+      `core-health.test.ts` and `metrics.test.ts` (the channel), `web/test/state-stream.test.ts`
+      (+2), `web/test/add-sensor-live.test.tsx` (12, three new). Every socket wait is
+      `waitFor`'s ten seconds or `waitUntil`'s five. **Mutations 14/14**: the visibility check
+      dropped, the probe match dropped, no fold in flight, the in-flight mark never cleared,
+      watchers left out of the grant check, a watch allowed on a non-probe, the horizon
+      ignored, no fold per socket, both scopes accepted, a hidden probe's watch allowed, a
+      frame per heartbeat, no frame on a drop, a frame for another probe counted by the page,
+      the form back on the branch subscription.
+
+      **Not done.** A change between the form's own `GET` and its watch standing is not
+      heard, as on `B-12`'s stream: `watching` is not news, by `B-12`'s rule. A read of the
+      probe's place that fails is logged and the frame is not sent; the next change sends one.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
