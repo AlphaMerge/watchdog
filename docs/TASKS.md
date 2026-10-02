@@ -19354,7 +19354,7 @@ because each is a decision rather than a defect:
         the core and unresolvable to the probe, so it reads Unknown as a name that does not
         resolve: read from the code, not tested.
 
-- [ ] **A-71 — what is left of an address under TLS** · S · A-67 · Found 2026-10-02 by `A-67`.
+- [x] **A-71 — what is left of an address under TLS** · S · A-67 · Found 2026-10-02 by `A-67`.
       The core's heartbeat uses `fetch`, which refuses `https://[::1]` for `A-60`'s reason and
       has no identity hook. ~~The database drivers' own TLS was not tried against an address,
       and `pg` may check an address host as `localhost` after its upgrade, as mail did.~~
@@ -19365,6 +19365,59 @@ because each is a decision rather than a defect:
       doing. `tls.certificate`'s `hostMatches` is 0 for a device given by address whose
       certificate lists it. `mail.test.ts`'s STARTTLS case still turns verification off.
       **Done when** each has a test and is fixed, or is written down as accepted.
+
+      **A-71 outcome.** Four of the five are fixed with tests; the database drivers' TLS is
+      done under `A-70` and nothing under `support/db/` was touched here. No migration, no
+      protocol number.
+      - **The heartbeat reaches `https://[::1]`.** Reproduced first, against `fetch`: one
+        failure, "Host: ::1. is not cert's CN", under a certificate that lists `::1`. `undici`
+        is not a dependency, so the request is now `node:http`/`node:https` with
+        `serverIdentity` as its `checkServerIdentity`. Kept as `fetch` had it: `GET`, no body,
+        the same headers by name and value (pinned in the test, measured against `fetch`
+        before the move), one timeout over the lookup, connection, handshake and answer, a
+        stop that ends it and counts nothing, a redirect not followed and counted as refused
+        with its status, the count behind `heartbeatFailures`, the body not read. Trust is
+        Node's default and is still enforced. Three things did move: `connection` says
+        `close`, because a connection is made for each heartbeat; the logged error is the
+        error and no longer a `cause` under "fetch failed"; and `fetch`'s list of ports it
+        will not request (25, 6000 and the like) no longer applies. **The target policy does
+        not apply**: `heartbeat.url` is the operator's own configuration file, not a
+        monitored device's address.
+      - **No server name for an address.** The HTTP and TLS sensors sent the literal as SNI
+        (RFC 6066 forbids it; Node's DEP0123). They now send none for IPv4 or IPv6, as mail
+        and delivery never did, and the certificate is still checked against the address. In
+        the HTTP request it is the empty string and not an absent option: Node's agent fills
+        an absent one from the `Host` header, which a sensor's own headers can set, and would
+        check the certificate against that. In the TLS sensors the check is bound to what the
+        sensor asked for, so a *Server name* that is itself an address is checked and not
+        sent. A device given by name is unchanged.
+      - **`hostMatches` is 1 where the certificate lists the address**, IPv4 or IPv6, zone
+        taken off, by `certificateListsAddress` (the question `serverIdentity` already asked,
+        exported beside it). **This changes a reading**: a `tls.certificate` sensor on a
+        device given by address read 0 and reads 1 where the certificate is right, once its
+        probe runs this build. In the upgrade notes (`administration.md`). Names are compared
+        as before, and still for an address too, so a certificate whose common name is spelt
+        as the address goes on reading 1 (and `trusted` 0). `sensor-reference.md` is
+        unchanged: no schema moved, and the channel keeps its name, *Host name matches*.
+      - **`mail.test.ts` verifies.** The STARTTLS case trusts its `IP:127.0.0.1` certificate
+        and runs with verification on; the unverified path has a case of its own, under a
+        certificate that is refused the moment verification is on.
+      - **Tests.** `heartbeat.test.ts`, eight new cases against local TLS listeners: `[::1]`
+        and `127.0.0.1` reached under a certificate listing them with no server name in the
+        hello, each refused under one that does not (and nothing sent), a name unchanged with
+        its name in the hello, an untrusted certificate refused for all three, a timeout
+        after the request and one inside the handshake each one failure, an endless body
+        hung up on, a redirect over HTTPS not followed. `tls-address-identity.test.ts`: what
+        the server sees for `http.request`, `http.advanced` with a `Host` header,
+        `tls.certificate` and `tls.security`, by address and by name; `hostMatches` in both
+        families; and that Node raised no DEP0123 in the whole file. `server-identity.test.ts`
+        has the new function.
+      - **Mutation: 19/19.** Each failed a test, and after each restore the rebuilt `dist`
+        matched its hashes from before the first.
+      - **Found, not fixed.** The channel is still named *Host name matches* though it now
+        answers for an address. The mismatch note in `tls.certificate`'s message lists the
+        certificate's names and not its addresses. The heartbeat does not honour
+        `NODE_USE_ENV_PROXY`, which `fetch` did where it was set; not tried.
 
 - [ ] **A-72 — a probe that flaps its protocol version pages every time** · M · A-68, A-41c ·
       Found 2026-10-02 by `A-68`, measured: five alternations raise three Unknown pages and two

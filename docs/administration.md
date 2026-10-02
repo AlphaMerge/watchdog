@@ -1600,6 +1600,12 @@ there.
   No body, no credential, and nothing else about the installation. A receiver's token goes in the
   path or the query, where you put it; a URL carrying a user name or a password is refused at
   load, since sending those would mean a header nobody asked for. A redirect is not followed.
+- **Over HTTPS the receiver's certificate is verified**, against the trust store the core runs
+  with and against the host in the URL. A receiver named by address, as in `https://192.0.2.10/`
+  or `https://[2001:db8::10]/`, needs a certificate that lists that address as an IP subject
+  alternative name; a certificate for a name does not cover it. (Before `A-71` an IPv6 address
+  was refused under any certificate.) The URL is your own configuration, so the probes' target
+  policy does not bound it.
 - **When**: at the end of a housekeeping pass, once every `intervalSeconds` (300 by default, from
   10 to 86,400). **It has no timer of its own**, and that is the point: a core whose housekeeping
   has wedged goes on answering its API, and a timer would go on reporting it as well. So
@@ -1809,6 +1815,14 @@ Covered in [`docs/installation.md`](installation.md#upgrading). The two things w
   their probe speaks protocol 24, and database sensors once it speaks 27 (`A-62`), and for as
   long as every address the name resolves to is inside those targets. Before, those sensors read Unknown. The targets were written to say where the
   set may go, and it goes nowhere outside them.
+- **Two readings move on a device given by address** (`A-71`), once its probe runs this build.
+  `tls.certificate`'s *Host name matches* channel read 0 for every such device and now reads 1
+  where the certificate lists the address as an IP subject alternative name, so a limit set on
+  that channel can clear, and one that was silenced because it could never clear can be turned
+  back on. And the HTTP and TLS sensors no longer send the address as the TLS server name (SNI),
+  which no standard allowed: a server that picked a certificate by an address in SNI now
+  answers with its default one. A device given by name is as it was, and so is a TLS sensor
+  with a *Server name* set.
 
 ---
 

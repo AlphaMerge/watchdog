@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { execFileSync } from 'node:child_process';
+import { X509Certificate } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer as createTcpServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as tls from 'node:tls';
 import { HttpSimulator, Mailbox, imapServer, smtpServer, type RunningServer } from '@ms/simulators';
+import { inspectCertificate } from '../src/support/tls/handshake.js';
+import { httpAdvanced } from '../src/types/http-advanced.js';
 import { httpRequest } from '../src/types/http.js';
 import { mailImap } from '../src/types/mail-imap.js';
 import { mailSmtp } from '../src/types/mail-smtp.js';
@@ -22,10 +25,10 @@ import type { CheckExecution, SensorType } from '../src/contract.js';
  * the same kind of connection: each is run against `::1` under a certificate whose subject
  * alternative names list `::1`, and against the certificates that must still be refused.
  *
- * The device is the address itself, so nothing is resolved and nothing is pinned: `Host`, the
- * server name and the certificate check are all the literal. (A device given by *name* is
- * connected to at a checked address while all three stay the name; `pinned-transports.test.ts`
- * has those.)
+ * The device is the address itself, so nothing is resolved and nothing is pinned: `Host` and
+ * the certificate check are the literal, and no server name is sent at all (`A-71`: an address
+ * is not one, RFC 6066). (A device given by *name* is connected to at a checked address while
+ * `Host`, the server name and the check stay the name; `pinned-transports.test.ts` has those.)
  *
  * Certificates are made here with `openssl`, as `tls.test.ts` makes its own, and trusted through
  * `tls.setDefaultCACertificates` as `pinned-transports.test.ts` does, so that what a verifying
@@ -45,6 +48,10 @@ interface Pairs {
   readonly forLocalhost: Pair;
   /** For the name `device.a67.test`, and no address. */
   readonly forName: Pair;
+  /** Lists `127.0.0.1` and nothing else. */
+  readonly forV4Only: Pair;
+  /** Lists the link-local address `fe80::1`, which can only be reached with a zone. */
+  readonly forLinkLocal: Pair;
 }
 
 const NAME = 'device.a67.test';
@@ -65,6 +72,13 @@ const setTrusted = (tls as { setDefaultCACertificates?: (certs: string[]) => voi
   .setDefaultCACertificates;
 const getTrusted = (tls as { getCACertificates?: (type: string) => string[] }).getCACertificates;
 let trustedBefore: string[] | undefined;
+
+/**
+ * Every warning Node raised while this file ran. The last case reads it: a server name that is
+ * an address is warned about once a process (DEP0123), whichever sensor sent it.
+ */
+const warnings: Error[] = [];
+process.on('warning', (warning) => warnings.push(warning));
 
 function certificate(file: string, commonName: string, names: string): Pair {
   const keyFile = join(dir, `${file}.key`);
@@ -129,6 +143,8 @@ before(() => {
     speltLikeAnAddress: certificate('spelt', '::1', 'DNS:::1'),
     forLocalhost: certificate('localhost', 'localhost', 'DNS:localhost'),
     forName: certificate('name', NAME, `DNS:${NAME}`),
+    forV4Only: certificate('v4-only', 'ms-a67-test', 'IP:127.0.0.1'),
+    forLinkLocal: certificate('link-local', 'ms-a67-test', 'IP:fe80::1'),
   };
   if (setTrusted !== undefined && getTrusted !== undefined) {
     trustedBefore = getTrusted('default');
@@ -253,9 +269,43 @@ describe('http.request to a device given by address, over HTTPS', () => {
     const execution = await run(httpRequest, '::1', { ...HTTPS, port: simulator.port });
     assert.equal(valueOf(execution, 'statusCode'), 200);
     assert.equal(simulator.requests.length, 1);
-    // What this sensor has always sent as the server name for a device given by address, and
-    // still does: the check changed, and nothing about the hello.
-    assert.equal(simulator.requests[0]?.servername, '::1');
+    // No server name for an address (`A-71`). This sensor used to send the literal, which
+    // RFC 6066 forbids and Node warns it will stop doing; the certificate is checked against
+    // the address all the same, which is what the refusals below show.
+    assert.equal(simulator.requests[0]?.servername, undefined);
+    assert.equal(simulator.requests[0]?.headers['host'], `[::1]:${String(simulator.port)}`);
+  });
+
+  it('sends no server name for 127.0.0.1 either', async (t) => {
+    const certificates = ready(t, false);
+    if (certificates === null) return;
+    const simulator = await https(certificates.forAddresses, '127.0.0.1');
+    await run(httpRequest, '127.0.0.1', { ...HTTPS, port: simulator.port });
+    assert.equal(simulator.requests.length, 1);
+    assert.equal(simulator.requests[0]?.servername, undefined);
+  });
+
+  it('a Host header set on the sensor does not become the server name, or who the certificate is for', async (t) => {
+    // Node's agent takes the server name from the `Host` header when it is given none, and
+    // would then check the certificate against that name. A device given by address is
+    // checked against its address whatever the sensor's own headers say.
+    const certificates = ready(t, false);
+    if (certificates === null) return;
+    const asNamed = { ...HTTPS, requestHeaders: [{ name: 'Host', value: NAME }] };
+    const listed = await https(certificates.forAddresses, '127.0.0.1');
+    const execution = await run(httpAdvanced, '127.0.0.1', { ...asNamed, port: listed.port });
+    assert.equal(valueOf(execution, 'statusCode'), 200);
+    const [request] = listed.requests;
+    assert.ok(request !== undefined, 'no request arrived');
+    assert.equal(request.headers['host'], NAME, 'the header the sensor asked for');
+    assert.equal(request.servername, undefined);
+    // And the certificate for that name is not one for the address.
+    const named = await https(certificates.forName, '127.0.0.1');
+    await assert.rejects(
+      () => run(httpAdvanced, '127.0.0.1', { ...asNamed, port: named.port }),
+      /is not valid for 127\.0\.0\.1/,
+    );
+    assert.deepEqual(named.requests, []);
   });
 
   it('refuses, for ::1, every certificate that does not list that address', async (t) => {
@@ -313,10 +363,99 @@ describe('tls.certificate and tls.security on a device given by address', () => 
     const execution = await run(tlsCertificate, '::1', { port: server.port });
     assert.equal(valueOf(execution, 'trusted'), 1, execution.message);
     assert.ok((valueOf(execution, 'daysRemaining') ?? -1) >= 28);
-    assert.deepEqual(server.named, ['::1'], 'the server name it sends for an address is unchanged');
-    // `hostMatches` is the sensor's own reading, of names only (the common name and DNS
-    // entries), for either address family. Not Node's check, and not changed here.
-    assert.equal(valueOf(execution, 'hostMatches'), 0);
+    // No server name for an address (`A-71`); it used to send the literal.
+    assert.deepEqual(server.named, []);
+    // And the certificate lists the address, so it is for this device (`A-71`). This read 0
+    // for every device given by address: only names were compared.
+    assert.equal(valueOf(execution, 'hostMatches'), 1);
+    assert.doesNotMatch(execution.message ?? '', /this sensor asked for/);
+  });
+
+  it('reads hostMatches 0 under a certificate that lists other addresses, and says what was asked for', async (t) => {
+    const certificates = ready(t, true);
+    if (certificates === null) return;
+    for (const pair of [certificates.forOtherAddresses, certificates.forName]) {
+      const server = await handshakes(pair, '::1');
+      const execution = await run(tlsCertificate, '::1', { port: server.port });
+      assert.equal(valueOf(execution, 'hostMatches'), 0);
+      assert.match(execution.message ?? '', /this sensor asked for ::1/);
+    }
+  });
+
+  it('reads hostMatches for 127.0.0.1 by the same rule, and names nobody in its hello', async (t) => {
+    const certificates = ready(t, false);
+    if (certificates === null) return;
+    for (const [pair, matches] of [
+      [certificates.forAddresses, 1],
+      [certificates.forV4Only, 1],
+      [certificates.forOtherAddresses, 0],
+      [certificates.forLocalhost, 0],
+    ] as const) {
+      const server = await handshakes(pair, '127.0.0.1');
+      const execution = await run(tlsCertificate, '127.0.0.1', { port: server.port });
+      assert.equal(valueOf(execution, 'hostMatches'), matches, execution.message);
+      assert.equal(valueOf(execution, 'trusted'), matches, execution.message);
+      assert.deepEqual(server.named, []);
+    }
+  });
+
+  it('a name spelt like the address still reads hostMatches 1, as it did, and is still not trusted', async (t) => {
+    // Not the rule a verifying client uses, and not changed: `hostMatches` has always compared
+    // the common name and the DNS entries as text, and a sensor that read 1 goes on reading 1.
+    const certificates = ready(t, true);
+    if (certificates === null) return;
+    const server = await handshakes(certificates.speltLikeAnAddress, '::1');
+    const execution = await run(tlsCertificate, '::1', { port: server.port });
+    assert.equal(valueOf(execution, 'hostMatches'), 1);
+    assert.equal(valueOf(execution, 'trusted'), 0);
+  });
+
+  it('with an address declared as the server name, checks that address and sends no name', async (t) => {
+    // A sensor may ask for one address on a device at another. Nothing is sent for it, and it,
+    // not the device's own address, is what the certificate is read against.
+    const certificates = ready(t, true);
+    if (certificates === null) return;
+    const server = await handshakes(certificates.forV4Only, '::1');
+    const asked = await run(tlsCertificate, '::1', { port: server.port, servername: '127.0.0.1' });
+    assert.equal(valueOf(asked, 'trusted'), 1, asked.message);
+    assert.equal(valueOf(asked, 'hostMatches'), 1);
+    assert.deepEqual(server.named, []);
+    const own = await run(tlsCertificate, '::1', { port: server.port });
+    assert.equal(valueOf(own, 'trusted'), 0);
+    assert.equal(valueOf(own, 'hostMatches'), 0);
+  });
+
+  it('reads an address against the certificate itself: a zone taken off, another spelling, nothing to ask', (t) => {
+    const certificates = ready(t, false);
+    if (certificates === null) return;
+    const leafOf = (pair: Pair): Parameters<typeof inspectCertificate>[0] => {
+      const parsed = new X509Certificate(pair.cert);
+      return {
+        ...parsed.toLegacyObject(),
+        raw: parsed.raw,
+      } as unknown as Parameters<typeof inspectCertificate>[0];
+    };
+    const matches = (pair: Pair, asked: string): boolean =>
+      inspectCertificate(leafOf(pair), asked).hostMatches;
+    // `fe80::1%eth0` is the only way to reach `fe80::1`, and the certificate lists the address.
+    assert.equal(matches(certificates.forLinkLocal, 'fe80::1%eth0'), true);
+    assert.equal(matches(certificates.forLinkLocal, 'fe80::1'), true);
+    assert.equal(matches(certificates.forLinkLocal, 'fe80::2%eth0'), false);
+    assert.equal(matches(certificates.forAddresses, '0:0:0:0:0:0:0:1'), true);
+    assert.equal(matches(certificates.forAddresses, '127.0.0.1'), true);
+    assert.equal(matches(certificates.forAddresses, '127.0.0.2'), false);
+    assert.equal(matches(certificates.forV4Only, '::1'), false);
+    // A name is not asked of the address list, and an address is not a name the list covers.
+    assert.equal(matches(certificates.forAddresses, 'localhost'), false);
+    assert.equal(matches(certificates.forName, NAME), true);
+    assert.equal(matches(certificates.forName, '127.0.0.1'), false);
+    // No DER to ask: only the string a second parser would have had to trust.
+    const claimed = {
+      ...leafOf(certificates.forOtherAddresses),
+      raw: undefined,
+      subjectaltname: 'IP Address:127.0.0.1',
+    } as unknown as Parameters<typeof inspectCertificate>[0];
+    assert.equal(inspectCertificate(claimed, '127.0.0.1').hostMatches, false);
   });
 
   it('still reads a certificate for another address as not trusted, and still reads it', async (t) => {
@@ -370,8 +509,24 @@ describe('tls.certificate and tls.security on a device given by address', () => 
       const primary = execution.channels[0];
       assert.ok(primary !== undefined, 'no channel was reported');
       readings.push(primary.value);
+      // Every handshake of the probe, and none of them named the address (`A-71`).
+      assert.deepEqual(server.named, []);
     }
     assert.equal(readings[0], readings[1]);
+  });
+
+  it('tls.security on a device given by name still asks for it by name', async (t) => {
+    const certificates = ready(t, false);
+    if (certificates === null) return;
+    const server = await handshakes(certificates.forLocalhost, '127.0.0.1');
+    await run(tlsSecurity, 'localhost', { port: server.port }, 'v4');
+    assert.ok(server.named.length > 0, 'no handshake carried a server name');
+    assert.deepEqual([...new Set(server.named)], ['localhost']);
+    const certificate = await handshakes(certificates.forLocalhost, '127.0.0.1');
+    const execution = await run(tlsCertificate, 'localhost', { port: certificate.port }, 'v4');
+    assert.deepEqual(certificate.named, ['localhost']);
+    assert.equal(valueOf(execution, 'hostMatches'), 1);
+    assert.equal(valueOf(execution, 'trusted'), 1, execution.message);
   });
 });
 
@@ -508,5 +663,16 @@ describe('mail sensors on a device given by address, verifying the certificate',
       () => run(mailSmtp, 'localhost', { ...VERIFIED, port: bad, security: 'starttls' }, 'v4'),
       /is not valid for localhost/,
     );
+  });
+});
+
+describe('a server name that is an address', () => {
+  it('was sent by nothing in this file: Node did not warn (DEP0123)', async () => {
+    // Node warns once a process, at the first connection given an address as its server name.
+    // Every sensor type above has by now connected to one, so one that still sent it is here.
+    // Warnings are delivered on a later tick than the connection that caused them.
+    await new Promise((resolve) => setImmediate(resolve));
+    const codes = warnings.map((warning) => (warning as { code?: string }).code ?? warning.name);
+    assert.ok(!codes.includes('DEP0123'), warnings.map((warning) => warning.message).join('; '));
   });
 });

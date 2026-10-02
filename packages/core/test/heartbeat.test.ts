@@ -1,7 +1,13 @@
 import { strict as assert } from 'node:assert';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { afterEach, describe, it } from 'node:test';
+import { createServer as createSecureServer } from 'node:https';
+import { createServer as createTcpServer, type AddressInfo, type Socket } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { after, afterEach, before, describe, it } from 'node:test';
+import * as tls from 'node:tls';
 import { pino } from 'pino';
 import { ConfigError, type HousekeepingConfig, type Logger } from '@ms/shared';
 import type { Database } from '../src/db/pool.js';
@@ -147,6 +153,21 @@ describe('the heartbeat request (H-18)', () => {
       'sec-fetch-mode',
       'user-agent',
     ]);
+    // And by value, as `fetch` sent them before `A-71` moved this off it: a receiver, or what
+    // stands in front of one, that answered those headers is sent the same ones. `connection`
+    // is the one that moved, and says what is true: a connection is made for each heartbeat.
+    assert.deepEqual(
+      { ...request.headers, host: undefined, 'user-agent': undefined },
+      {
+        accept: '*/*',
+        'accept-encoding': 'gzip, deflate',
+        'accept-language': '*',
+        connection: 'close',
+        host: undefined,
+        'sec-fetch-mode': 'cors',
+        'user-agent': undefined,
+      },
+    );
     assert.equal(request.headers.host, new URL(target.origin).host, 'the receiver’s own name');
     assert.deepEqual(heartbeat.stats(), { sent: 1, failures: 0 });
   });
@@ -632,5 +653,394 @@ describe('the heartbeat rides the housekeeping loop (H-18)', () => {
     assert.equal(fake.passes.finished, 1);
     assert.equal(target.seen.length, 0);
     await direct.stop();
+  });
+});
+
+/**
+ * A receiver over HTTPS, by name and by address (`A-71`).
+ *
+ * `fetch` checked who a certificate was for with Node's own check and had nowhere to be handed
+ * another, so `https://[::1]` was refused under a certificate that lists `::1` (`A-60`'s
+ * defect). Certificates are made here with `openssl` and trusted through
+ * `tls.setDefaultCACertificates`, as `tls-address-identity.test.ts` does, so that what is
+ * refused is who the certificate is for and never who issued it — except the one left out of
+ * that list on purpose.
+ */
+describe('the heartbeat over HTTPS, to a name and to an address (A-71)', () => {
+  type Pair = { key: string; cert: string };
+  interface Pairs {
+    /** Lists both loopback addresses, as addresses. */
+    readonly forAddresses: Pair;
+    /** Lists two addresses that are neither loopback one. */
+    readonly forOtherAddresses: Pair;
+    /** Has `::1` as its common name and as a DNS name, and lists no address. */
+    readonly speltLikeAnAddress: Pair;
+    /** For the name `localhost`, and no address. */
+    readonly forLocalhost: Pair;
+    /** Lists both loopback addresses and `localhost`, and nothing here trusts it. */
+    readonly untrusted: Pair;
+  }
+
+  /** Whether there is an `openssl` to make certificates with. */
+  const opensslAvailable = (() => {
+    try {
+      execFileSync('openssl', ['version'], { stdio: 'ignore' });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  let dir = '';
+  let pairs: Pairs | undefined;
+  let v6 = false;
+  const setTrusted = (tls as { setDefaultCACertificates?: (certs: string[]) => void })
+    .setDefaultCACertificates;
+  const getTrusted = (tls as { getCACertificates?: (type: string) => string[] }).getCACertificates;
+  let trustedBefore: string[] | undefined;
+
+  function certificate(file: string, commonName: string, names: string): Pair {
+    const keyFile = join(dir, `${file}.key`);
+    const certFile = join(dir, `${file}.crt`);
+    execFileSync(
+      'openssl',
+      [
+        'req',
+        '-x509',
+        '-newkey',
+        'rsa:2048',
+        '-nodes',
+        '-keyout',
+        keyFile,
+        '-out',
+        certFile,
+        '-days',
+        '30',
+        '-subj',
+        `/CN=${commonName}`,
+        '-addext',
+        `subjectAltName=${names}`,
+      ],
+      { stdio: 'ignore' },
+    );
+    return { key: readFileSync(keyFile, 'utf8'), cert: readFileSync(certFile, 'utf8') };
+  }
+
+  before(async () => {
+    // Whether `::1` can be listened on here. Asked once, with a bound.
+    v6 = await new Promise<boolean>((resolve) => {
+      const server = createTcpServer();
+      const timer = setTimeout(() => {
+        server.close();
+        resolve(false);
+      }, 2_000);
+      server.once('error', () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
+      server.listen(0, '::1', () => {
+        clearTimeout(timer);
+        server.close(() => {
+          resolve(true);
+        });
+      });
+    });
+    // **Only a missing `openssl` skips.** Anything else that goes wrong here throws, and every
+    // case fails with it: a certificate that could not be made must not read as green.
+    if (!opensslAvailable) return;
+    dir = mkdtempSync(join(tmpdir(), 'ms-a71-'));
+    const made: Pairs = {
+      forAddresses: certificate('addresses', 'ms-a71-test', 'IP:127.0.0.1,IP:::1'),
+      forOtherAddresses: certificate('others', 'ms-a71-test', 'IP:127.0.0.2,IP:::2'),
+      speltLikeAnAddress: certificate('spelt', '::1', 'DNS:::1'),
+      forLocalhost: certificate('localhost', 'localhost', 'DNS:localhost'),
+      untrusted: certificate('untrusted', 'localhost', 'DNS:localhost,IP:127.0.0.1,IP:::1'),
+    };
+    pairs = made;
+    if (setTrusted !== undefined && getTrusted !== undefined) {
+      trustedBefore = getTrusted('default');
+      setTrusted([
+        ...trustedBefore,
+        ...Object.values(made)
+          .filter((pair: Pair) => pair !== made.untrusted)
+          .map((pair: Pair) => pair.cert),
+      ]);
+    }
+  });
+
+  after(() => {
+    if (trustedBefore !== undefined && setTrusted !== undefined) setTrusted(trustedBefore);
+    if (dir !== '') rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** The certificates, or a skip that says why there are none. */
+  function ready(t: { skip(reason: string): void }, needsV6: boolean): Pairs | null {
+    if (!opensslAvailable) {
+      t.skip('openssl is not on this machine');
+      return null;
+    }
+    assert.ok(pairs !== undefined, 'the certificates were not made, and openssl is here');
+    if (trustedBefore === undefined) {
+      t.skip('this Node has no tls.setDefaultCACertificates to trust a test certificate with');
+      return null;
+    }
+    if (needsV6 && !v6) {
+      t.skip('this machine has no IPv6 loopback (::1) to listen on');
+      return null;
+    }
+    return pairs;
+  }
+
+  interface Secure {
+    readonly port: number;
+    readonly seen: { url: string; host: unknown }[];
+    /** Every name a client put in its hello (SNI). Nothing is added for a hello without one. */
+    readonly named: string[];
+  }
+
+  /** An HTTPS receiver with one certificate. `listenHost` absent listens on every address. */
+  async function secure(
+    pair: Pair,
+    listenHost: string | undefined,
+    answer: (response: ServerResponse) => void = (response) => {
+      response.writeHead(200).end('OK');
+    },
+  ): Promise<Secure> {
+    const seen: Secure['seen'] = [];
+    const named: string[] = [];
+    const server = createSecureServer(
+      {
+        key: pair.key,
+        cert: pair.cert,
+        // Called only for a hello that carries a server name; with no context given back, the
+        // handshake goes on with the certificate above.
+        SNICallback: (servername, done) => {
+          named.push(servername);
+          done(null);
+        },
+      },
+      (request, response) => {
+        seen.push({ url: request.url ?? '', host: request.headers.host });
+        answer(response);
+      },
+    );
+    server.on('tlsClientError', () => undefined);
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      if (listenHost === undefined) server.listen(0, resolve);
+      else server.listen(0, listenHost, resolve);
+    });
+    open.push({
+      origin: '',
+      url: '',
+      seen: [],
+      close: () =>
+        new Promise<void>((resolve) => {
+          server.closeAllConnections();
+          server.close(() => {
+            resolve();
+          });
+        }),
+    });
+    return { port: (server.address() as AddressInfo).port, seen, named };
+  }
+
+  /** One heartbeat to `url`: what was counted, and the warning if there was one. */
+  async function once(
+    url: string,
+    timeoutMs = 5_000,
+  ): Promise<{
+    stats: { sent: number; failures: number };
+    warned: Record<string, unknown> | undefined;
+    text: string;
+  }> {
+    const { logger, lines } = capturing();
+    const heartbeat = new Heartbeat({
+      url,
+      intervalSeconds: 300,
+      passSeconds: 300,
+      version: '9.9.9',
+      logger,
+      timeoutMs,
+    });
+    heartbeat.passed();
+    // Its own bound, and well inside the test's: the request has `timeoutMs` and no longer.
+    await until(timeoutMs + 5_000, `the heartbeat to ${new URL(url).origin} to end`, () => {
+      const { sent, failures } = heartbeat.stats();
+      return sent + failures > 0;
+    });
+    await heartbeat.settled();
+    return {
+      stats: heartbeat.stats(),
+      warned: lines.find((one) => one['level'] === 40),
+      text: JSON.stringify(lines),
+    };
+  }
+
+  const refusedFor = (warned: Record<string, unknown> | undefined): string => {
+    assert.equal(warned?.['phase'], 'request', JSON.stringify(warned));
+    const err = warned['err'] as { code?: string; message: string };
+    return `${String(err.code)}: ${err.message}`;
+  };
+
+  it('reaches https://[::1] under a certificate that lists ::1, and names nobody in its hello', async (t) => {
+    // The reproduction. With `fetch` this was one failure, "Host: ::1. is not cert's CN".
+    const certificates = ready(t, true);
+    if (certificates === null) return;
+    const target = await secure(certificates.forAddresses, '::1');
+    const result = await once(`https://[::1]:${String(target.port)}/${TOKEN}?site=north`);
+    assert.deepEqual(result.stats, { sent: 1, failures: 0 }, JSON.stringify(result.warned));
+    assert.deepEqual(target.seen, [
+      { url: `/${TOKEN}?site=north`, host: `[::1]:${String(target.port)}` },
+    ]);
+    // An address is not a server name (RFC 6066), and none is sent for one.
+    assert.deepEqual(target.named, []);
+  });
+
+  it('refuses, for https://[::1], every certificate that does not list that address', async (t) => {
+    const certificates = ready(t, true);
+    if (certificates === null) return;
+    for (const [label, pair] of [
+      ['other addresses', certificates.forOtherAddresses],
+      ['the address as a DNS name and a common name', certificates.speltLikeAnAddress],
+      ['a name', certificates.forLocalhost],
+    ] as const) {
+      const target = await secure(pair, '::1');
+      const result = await once(`https://[::1]:${String(target.port)}/${TOKEN}`);
+      assert.deepEqual(result.stats, { sent: 0, failures: 1 }, label);
+      assert.match(
+        refusedFor(result.warned),
+        /^ERR_TLS_CERT_ALTNAME_INVALID: .*IP: ::1 is not in the cert's list/,
+        label,
+      );
+      assert.equal(result.warned?.['receiver'], `https://[::1]:${String(target.port)}`);
+      assert.deepEqual(target.seen, [], `${label}: the request, with its token, was sent`);
+      assert.ok(!result.text.includes('s3cret-token'), 'the token reached the log');
+    }
+  });
+
+  it('reaches https://127.0.0.1 under a certificate that lists it, and is refused under one that does not', async (t) => {
+    const certificates = ready(t, false);
+    if (certificates === null) return;
+    const listed = await secure(certificates.forAddresses, '127.0.0.1');
+    const good = await once(`https://127.0.0.1:${String(listed.port)}/${TOKEN}`);
+    assert.deepEqual(good.stats, { sent: 1, failures: 0 }, JSON.stringify(good.warned));
+    assert.deepEqual(listed.seen, [{ url: `/${TOKEN}`, host: `127.0.0.1:${String(listed.port)}` }]);
+    assert.deepEqual(listed.named, []);
+
+    for (const pair of [certificates.forOtherAddresses, certificates.forLocalhost]) {
+      const other = await secure(pair, '127.0.0.1');
+      const bad = await once(`https://127.0.0.1:${String(other.port)}/${TOKEN}`);
+      assert.deepEqual(bad.stats, { sent: 0, failures: 1 });
+      assert.match(
+        refusedFor(bad.warned),
+        /^ERR_TLS_CERT_ALTNAME_INVALID: .*IP: 127\.0\.0\.1 is not in the cert's list/,
+      );
+      assert.deepEqual(other.seen, []);
+    }
+  });
+
+  it('by name is as it was: the name asked for in the hello, and the certificate checked against it', async (t) => {
+    const certificates = ready(t, false);
+    if (certificates === null) return;
+    // On every address, because `localhost` may answer with either family here.
+    const named = await secure(certificates.forLocalhost, undefined);
+    const good = await once(`https://localhost:${String(named.port)}/${TOKEN}?site=north`);
+    assert.deepEqual(good.stats, { sent: 1, failures: 0 }, JSON.stringify(good.warned));
+    assert.deepEqual(named.seen, [
+      { url: `/${TOKEN}?site=north`, host: `localhost:${String(named.port)}` },
+    ]);
+    assert.deepEqual(named.named, ['localhost']);
+
+    // A certificate that lists the address the name resolves to is not one for the name.
+    const addressed = await secure(certificates.forAddresses, undefined);
+    const bad = await once(`https://localhost:${String(addressed.port)}/${TOKEN}`);
+    assert.deepEqual(bad.stats, { sent: 0, failures: 1 });
+    assert.match(refusedFor(bad.warned), /^ERR_TLS_CERT_ALTNAME_INVALID: .*localhost/);
+    assert.deepEqual(addressed.seen, []);
+  });
+
+  it('still refuses a certificate nothing here trusts, whoever it says it is for', async (t) => {
+    // The identity check is the only thing that changed. Who issued the certificate is asked
+    // as before, of a name and of an address.
+    const certificates = ready(t, false);
+    if (certificates === null) return;
+    const target = await secure(certificates.untrusted, undefined);
+    for (const host of ['localhost', '127.0.0.1', ...(v6 ? ['[::1]'] : [])]) {
+      const result = await once(`https://${host}:${String(target.port)}/${TOKEN}`);
+      assert.deepEqual(result.stats, { sent: 0, failures: 1 }, host);
+      assert.match(refusedFor(result.warned), /^DEPTH_ZERO_SELF_SIGNED_CERT: /, host);
+    }
+    assert.deepEqual(target.seen, []);
+  });
+
+  it('counts one failure for an HTTPS receiver that accepts and never answers', async (t) => {
+    const certificates = ready(t, false);
+    if (certificates === null) return;
+    const target = await secure(certificates.forAddresses, '127.0.0.1', hangs);
+    const started = process.hrtime.bigint();
+    const result = await once(`https://127.0.0.1:${String(target.port)}/${TOKEN}`, 200);
+    const waitedMs = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.deepEqual(result.stats, { sent: 0, failures: 1 });
+    assert.equal(result.warned?.['phase'], 'timeout');
+    assert.equal(result.warned['timeoutMs'], 200);
+    assert.ok(waitedMs >= 190, `given up after ${String(waitedMs)} ms, before its timeout`);
+    assert.equal(target.seen.length, 1, 'the request did arrive; nothing answered it');
+  });
+
+  it('counts one failure for a listener that accepts and never finishes a handshake', async () => {
+    // Nothing to do with a certificate: the timeout covers the connection and the handshake as
+    // it covers the answer.
+    const held: Socket[] = [];
+    const server = createTcpServer((socket) => {
+      socket.on('error', () => undefined);
+      held.push(socket);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    open.push({
+      origin: '',
+      url: '',
+      seen: [],
+      close: () =>
+        new Promise<void>((resolve) => {
+          for (const socket of held) socket.destroy();
+          server.close(() => {
+            resolve();
+          });
+        }),
+    });
+    const port = (server.address() as AddressInfo).port;
+    const result = await once(`https://127.0.0.1:${String(port)}/${TOKEN}`, 200);
+    assert.deepEqual(result.stats, { sent: 0, failures: 1 });
+    assert.equal(result.warned?.['phase'], 'timeout');
+  });
+
+  it('counts a 2xx whose body never ends as arrived and hangs up on it, and a redirect over HTTPS as refused and not followed', async (t) => {
+    const certificates = ready(t, false);
+    if (certificates === null) return;
+    // The status line is the heartbeat. A body that never ends is not waited on, and the
+    // connection it would hold open is closed from this end, well inside the timeout.
+    let hungUp = false;
+    const endless = await secure(certificates.forAddresses, '127.0.0.1', (response) => {
+      response.socket?.on('close', () => {
+        hungUp = true;
+      });
+      response.writeHead(200, { 'content-length': '1000' });
+      response.write('OK');
+    });
+    const arrived = await once(`https://127.0.0.1:${String(endless.port)}/${TOKEN}`, 30_000);
+    assert.deepEqual(arrived.stats, { sent: 1, failures: 0 }, JSON.stringify(arrived.warned));
+    await until(2_000, 'the heartbeat to hang up on a body it does not read', () => hungUp);
+
+    const elsewhere = await secure(certificates.forAddresses, '127.0.0.1');
+    const redirecting = await secure(certificates.forAddresses, '127.0.0.1', (response) => {
+      response.writeHead(302, { location: `https://127.0.0.1:${String(elsewhere.port)}/taken` });
+      response.end();
+    });
+    const refused = await once(`https://127.0.0.1:${String(redirecting.port)}/${TOKEN}`);
+    assert.deepEqual(refused.stats, { sent: 0, failures: 1 });
+    assert.equal(refused.warned?.['phase'], 'refused');
+    assert.equal(refused.warned['status'], 302);
+    assert.deepEqual(elsewhere.seen, [], 'the request, with its token, went where it was sent');
   });
 });

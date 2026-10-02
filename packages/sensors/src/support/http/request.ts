@@ -1,6 +1,7 @@
 import { Agent as HttpAgent, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { ClientRequestArgs, IncomingHttpHeaders } from 'node:http';
+import { isIP } from 'node:net';
 import { serverIdentity, type TargetPolicy } from '@ms/shared';
 import type { CheckTarget } from '../../contract.js';
 import { checkedTarget, type CheckedTarget } from '../checked-target.js';
@@ -255,7 +256,13 @@ export async function fetchHttp(
             ...(options.scheme === 'https'
               ? {
                   rejectUnauthorized: options.verifyTls,
-                  servername: options.host,
+                  // **An address is not a server name, and none is sent for one** (`A-71`):
+                  // RFC 6066 allows only a DNS name, and Node warns (DEP0123) that it will stop
+                  // sending a literal. The empty string and not an absent option, because
+                  // Node's agent fills an absent one in from the `Host` header, which a sensor's
+                  // own headers can set; with it empty nothing is sent, and the certificate is
+                  // checked against `host` above, the address. A name is sent as before.
+                  servername: isIP(options.host) === 0 ? options.host : '',
                   checkServerIdentity: serverIdentity,
                 }
               : {}),

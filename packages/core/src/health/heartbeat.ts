@@ -1,7 +1,10 @@
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import {
   ConfigError,
   describeError,
   heartbeatUrlProblem,
+  serverIdentity,
   type CoreConfig,
   type Logger,
 } from '@ms/shared';
@@ -84,6 +87,18 @@ type FailurePhase = 'request' | 'timeout' | 'refused' | 'withheld';
  * loop would be the timer this deliberately does not have. Core Health's `heartbeatFailures`
  * reads the count, so a heartbeat that has quietly stopped reaching its receiver is visible while
  * the core is up to show it.
+ *
+ * **The request is Node's own client and not `fetch`** (`A-71`). `fetch` checks who a
+ * certificate is for with Node's check and takes no other, and that check reads an IPv6 address
+ * as a name (`serverIdentity`): a receiver at `https://[::1]`, or at any IPv6 address, was
+ * refused under a certificate that lists the address, every time. Everything else is as `fetch`
+ * left it — one `GET`, the same headers, no body, no redirect followed, one timeout over the
+ * whole exchange — and whether the certificate is trusted is asked exactly as before.
+ *
+ * **The target policy does not apply here.** That policy bounds where a *monitored device's*
+ * address, which anybody who can edit a device can set, may lead a probe. This URL is the
+ * operator's own configuration file (`heartbeat.url`), read at start and reachable through no
+ * API: it goes where it says.
  */
 export class Heartbeat implements PassWitness {
   readonly #url: string;
@@ -168,33 +183,77 @@ export class Heartbeat implements PassWitness {
   async #send(): Promise<void> {
     const timeout = AbortSignal.timeout(this.#timeoutMs);
     try {
-      const response = await fetch(this.#url, {
-        method: 'GET',
-        // Not followed: the operator named one address, and a redirect is somebody else naming
-        // another for a request that carries the receiver's token.
-        redirect: 'manual',
-        headers: { 'user-agent': this.#userAgent },
-        signal: AbortSignal.any([this.#stop.signal, timeout]),
-      });
-      // The body is nothing this needs, and an unread one holds its socket open.
-      await response.body?.cancel();
-      if (response.status >= 200 && response.status < 300) {
+      const status = await this.#request(AbortSignal.any([this.#stop.signal, timeout]));
+      if (status >= 200 && status < 300) {
         this.#sent += 1;
-        this.#logger.debug({ receiver: this.#receiver, status: response.status }, 'heartbeat sent');
+        this.#logger.debug({ receiver: this.#receiver, status }, 'heartbeat sent');
         return;
       }
-      this.#fail('refused', { status: response.status });
+      // A redirect is one of these. Not followed: the operator named one address, and a
+      // redirect is somebody else naming another for a request that carries the receiver's
+      // token. Nothing here reads `Location`, so there is nothing to follow it with.
+      this.#fail('refused', { status });
     } catch (error: unknown) {
       if (this.#stop.signal.aborted) return;
       if (timeout.aborted) {
         this.#fail('timeout', { timeoutMs: this.#timeoutMs });
         return;
       }
-      // `fetch` says "fetch failed" and keeps the reason — ECONNREFUSED, a certificate, a name
-      // that does not resolve — in `cause`, so the cause is what is logged.
-      const cause = error instanceof Error && error.cause !== undefined ? error.cause : error;
-      this.#fail('request', { err: describeError(cause) });
+      // The reason itself — ECONNREFUSED, a certificate, a name that does not resolve.
+      this.#fail('request', { err: describeError(error) });
     }
+  }
+
+  /**
+   * One `GET`, and the status it was answered with. Rejects with what stopped it.
+   *
+   * `signal` ends it wherever it is: resolving the name, connecting, in the handshake, or
+   * waiting for an answer.
+   */
+  #request(signal: AbortSignal): Promise<number> {
+    return new Promise<number>((resolve, reject) => {
+      const url = new URL(this.#url);
+      const secure = url.protocol === 'https:';
+      // `URL` writes an IPv6 address in brackets; a socket wants it without.
+      const host = url.hostname.startsWith('[') ? url.hostname.slice(1, -1) : url.hostname;
+      const request = (secure ? httpsRequest : httpRequest)(
+        {
+          host,
+          ...(url.port === '' ? {} : { port: Number(url.port) }),
+          // Exactly as written: the path is the receiver's token, and the query is the operator's.
+          path: `${url.pathname}${url.search}`,
+          method: 'GET',
+          signal,
+          // A connection for each heartbeat. They are minutes apart, and one kept open between
+          // them would be one more thing that could be stale when it mattered.
+          agent: false,
+          headers: {
+            // What `fetch` sent, name for name and value for value, so that whatever answered
+            // those answers these. (`connection` is Node's own, and says `close`: true now.)
+            accept: '*/*',
+            'accept-language': '*',
+            'sec-fetch-mode': 'cors',
+            'user-agent': this.#userAgent,
+            'accept-encoding': 'gzip, deflate',
+          },
+          // Who the certificate has to be for: the check every TLS client here shares, which
+          // can answer for an IPv6 address where Node's own cannot (`A-60`, `A-67`). Whether
+          // the certificate is trusted is not decided there, and is Node's default: it is.
+          // No server name is given, so Node sends the name for a name and none for an address.
+          ...(secure ? { checkServerIdentity: serverIdentity } : {}),
+        },
+        (response) => {
+          // The status is the heartbeat. The body is nothing this needs, and an unread one
+          // holds its socket open: hung up on, here, whether or not it would ever have ended.
+          response.destroy();
+          resolve(response.statusCode ?? 0);
+        },
+      );
+      // Left on for the life of the request: an error after the answer has nowhere else to go,
+      // and rejecting a promise that has settled does nothing.
+      request.on('error', reject);
+      request.end();
+    });
   }
 
   #fail(phase: FailurePhase, detail: Record<string, unknown>): void {

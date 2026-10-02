@@ -34,15 +34,7 @@ import { checkServerIdentity, type PeerCertificate } from 'node:tls';
  */
 export function serverIdentity(host: string, certificate: PeerCertificate): Error | undefined {
   if (isIP(host) !== 6) return checkServerIdentity(host, certificate);
-  const zone = host.indexOf('%');
-  const address = zone < 0 ? host : host.slice(0, zone);
-  let listed = false;
-  try {
-    listed = new X509Certificate(certificate.raw).checkIP(address) !== undefined;
-  } catch {
-    listed = false;
-  }
-  if (listed) return undefined;
+  if (certificateListsAddress(host, certificate)) return undefined;
   const names = certificate.subjectaltname ?? '';
   return Object.assign(
     new Error(
@@ -50,4 +42,26 @@ export function serverIdentity(host: string, certificate: PeerCertificate): Erro
     ),
     { code: 'ERR_TLS_CERT_ALTNAME_INVALID' },
   );
+}
+
+/**
+ * Whether a certificate lists this address, of either family, as an address (`A-71`).
+ *
+ * The question `serverIdentity` asks for an IPv6 address, on its own, for a caller that reports
+ * the answer instead of refusing on it: `tls.certificate`'s `hostMatches`. OpenSSL is asked
+ * (`X509Certificate.checkIP`) with the zone taken off. A host that is not an address is false:
+ * OpenSSL does not take it for one. So is a certificate with nothing to ask (no DER). A DNS
+ * name or a common name spelt like the address is not the address.
+ */
+export function certificateListsAddress(
+  host: string,
+  certificate: Pick<PeerCertificate, 'raw'>,
+): boolean {
+  const zone = host.indexOf('%');
+  const address = zone < 0 ? host : host.slice(0, zone);
+  try {
+    return new X509Certificate(certificate.raw).checkIP(address) !== undefined;
+  } catch {
+    return false;
+  }
 }

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { checkServerIdentity, type PeerCertificate } from 'node:tls';
-import { serverIdentity } from '../src/net/server-identity.js';
+import { certificateListsAddress, serverIdentity } from '../src/net/server-identity.js';
 
 /**
  * The one identity check every TLS client here passes (`A-60`, `A-67`), and the measurement it
@@ -181,5 +181,31 @@ describe('who a certificate is for', () => {
     assert.equal(serverIdentity('127.0.0.1', pairs.addresses), undefined);
     assert.ok(serverIdentity('127.0.0.1', pairs.others) instanceof Error);
     assert.ok(serverIdentity('127.0.0.1', pairs.name) instanceof Error);
+  });
+
+  it('says whether a certificate lists an address, of either family, without refusing anything', (t) => {
+    // The same question, for a caller that reports the answer (`A-71`: `hostMatches`).
+    const pairs = certificates(t);
+    if (pairs === null) return;
+    assert.equal(certificateListsAddress('127.0.0.1', pairs.addresses), true);
+    assert.equal(certificateListsAddress('::1', pairs.addresses), true);
+    assert.equal(certificateListsAddress('0:0:0:0:0:0:0:1', pairs.addresses), true);
+    assert.equal(certificateListsAddress('127.0.0.1', pairs.others), false);
+    assert.equal(certificateListsAddress('::1', pairs.others), false);
+    // Spelt like the address, as a name: not the address.
+    assert.equal(certificateListsAddress('::1', pairs.spelt), false);
+    assert.equal(certificateListsAddress('127.0.0.1', pairs.name), false);
+    // A zone is taken off, and buys nothing.
+    assert.equal(certificateListsAddress('fe80::1%eth0', pairs.linkLocal), true);
+    assert.equal(certificateListsAddress('fe80::2%eth0', pairs.linkLocal), false);
+    // A name is not an address, whatever the certificate says, and neither is half of one.
+    for (const host of ['device.test', '', '%eth0', '127.0.0', 'localhost']) {
+      for (const certificate of Object.values(pairs)) {
+        assert.equal(certificateListsAddress(host, certificate), false, host);
+      }
+    }
+    // Nothing to ask: false, and no throw.
+    const claimed = { subjectaltname: 'IP Address:127.0.0.1' } as unknown as PeerCertificate;
+    assert.equal(certificateListsAddress('127.0.0.1', claimed), false);
   });
 });

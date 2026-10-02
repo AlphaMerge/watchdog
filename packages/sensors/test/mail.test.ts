@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as tls from 'node:tls';
 import { mailImap } from '../src/types/mail-imap.js';
 import { mailPop3 } from '../src/types/mail-pop3.js';
 import { mailRoundTrip } from '../src/types/mail-roundtrip.js';
@@ -25,6 +26,12 @@ const mailbox = new Mailbox();
 const running: RunningServer[] = [];
 let certificate: { key: string; cert: string } | undefined;
 let dir = '';
+// The certificate below is trusted for as long as this file runs, so that a case can verify it
+// (`A-71`). Absent on a Node that cannot be told to trust one, and then that case skips.
+const setTrusted = (tls as { setDefaultCACertificates?: (certs: string[]) => void })
+  .setDefaultCACertificates;
+const getTrusted = (tls as { getCACertificates?: (type: string) => string[] }).getCACertificates;
+let trustedBefore: string[] | undefined;
 
 before(() => {
   try {
@@ -53,9 +60,14 @@ before(() => {
   } catch {
     certificate = undefined;
   }
+  if (certificate !== undefined && setTrusted !== undefined && getTrusted !== undefined) {
+    trustedBefore = getTrusted('default');
+    setTrusted([...trustedBefore, certificate.cert]);
+  }
 });
 
 after(async () => {
+  if (trustedBefore !== undefined && setTrusted !== undefined) setTrusted(trustedBefore);
   for (const server of running) await server.close();
   if (dir !== '') rmSync(dir, { recursive: true, force: true });
 });
@@ -150,16 +162,64 @@ describe('mail.smtp', () => {
       t.skip('openssl is not on this machine');
       return;
     }
+    if (trustedBefore === undefined) {
+      t.skip('this Node has no tls.setDefaultCACertificates to trust a test certificate with');
+      return;
+    }
+    // Verified (`A-71`). This case turned verification off, under a certificate that lists the
+    // very address it connects to, because the upgrade used to check a device given by address
+    // against the name `localhost` (`A-67` fixed that) and no certificate for an address passed.
     const port = await start(smtpServer, { offerStartTls: true, tls: certificate });
     const execution = await run(mailSmtp, {
       port,
       security: 'starttls',
-      verifyTls: false,
+      verifyTls: true,
       requireAuth: true,
     });
     assert.ok((valueOf(execution, 'totalTime') ?? -1) >= 0);
+    assert.doesNotMatch(execution.message ?? '', /not being verified/);
+  });
+
+  it('upgrades without verifying when told to, and says so on every scan', async (t) => {
+    if (certificate === undefined) {
+      t.skip('openssl is not on this machine');
+      return;
+    }
+    // A certificate nothing trusts and that lists another address: only an unverified upgrade
+    // gets through it, and the same one is refused the moment verification is on.
+    const other = join(dir, 'other');
+    execFileSync(
+      'openssl',
+      [
+        'req',
+        '-x509',
+        '-newkey',
+        'rsa:2048',
+        '-nodes',
+        '-keyout',
+        `${other}.key`,
+        '-out',
+        `${other}.crt`,
+        '-days',
+        '30',
+        '-subj',
+        '/CN=127.0.0.2',
+        '-addext',
+        'subjectAltName=IP:127.0.0.2',
+      ],
+      { stdio: 'ignore' },
+    );
+    const untrusted = {
+      key: readFileSync(`${other}.key`, 'utf8'),
+      cert: readFileSync(`${other}.crt`, 'utf8'),
+    };
+    const port = await start(smtpServer, { offerStartTls: true, tls: untrusted });
+    const params = { port, security: 'starttls', requireAuth: true };
+    const execution = await run(mailSmtp, { ...params, verifyTls: false });
+    assert.ok((valueOf(execution, 'totalTime') ?? -1) >= 0);
     // Said on every scan rather than once at configuration time.
     assert.match(execution.message ?? '', /certificate is not being verified/);
+    await assert.rejects(() => run(mailSmtp, { ...params, verifyTls: true }));
   });
 
   it('authenticates, and says so when it cannot', async () => {

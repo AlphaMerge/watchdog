@@ -5,8 +5,8 @@ import {
   type PeerCertificate,
   type TLSSocket,
 } from 'node:tls';
-import type { LookupFunction } from 'node:net';
-import { serverIdentity } from '@ms/shared';
+import { isIP, type LookupFunction } from 'node:net';
+import { certificateListsAddress, serverIdentity } from '@ms/shared';
 
 /**
  * One TLS handshake, and what it revealed (`T-11`, `T-12`).
@@ -26,7 +26,12 @@ import { serverIdentity } from '@ms/shared';
 export interface TlsTarget {
   readonly host: string;
   readonly port: number;
-  /** SNI. Almost always the host; separate because a device addressed by IP still needs one. */
+  /**
+   * Who the certificate is asked to be for. Almost always the host; separate because a device
+   * addressed by IP usually serves a named certificate. Sent as the server name (SNI) when it
+   * is a name, and not sent when it is an address (`A-71`): the certificate is still checked
+   * against it either way.
+   */
   readonly servername: string;
   readonly timeoutMs: number;
   /**
@@ -87,7 +92,11 @@ export function handshake(
     const config: ConnectionOptions = {
       host: target.host,
       port: target.port,
-      servername: target.servername,
+      // **An address is not a server name, and none is sent for one** (`A-71`). RFC 6066
+      // allows only a DNS name there, Node warns (DEP0123) that it will stop sending a literal,
+      // and a server choosing a certificate by name has nothing to choose by an address with.
+      // The mail sensors and the delivery client never sent one. A name is sent as before.
+      ...(isIP(target.servername) === 0 ? { servername: target.servername } : {}),
       ...(target.lookup === undefined ? {} : { lookup: target.lookup }),
       // See the note above: verification is done *after* the fact so that a bad certificate is a
       // reading rather than a failed connection.
@@ -97,7 +106,10 @@ export function handshake(
       // address as a name, so a device at one read "not trusted" under a certificate that
       // lists the address (`A-67`). The shared check asks the certificate about the address;
       // for a name or an IPv4 address it is Node's, so nothing else this reports has moved.
-      checkServerIdentity: serverIdentity,
+      // Asked about `target.servername` and not about whatever Node would fall back to once no
+      // server name is sent: that fallback is the host, which is the same thing unless a sensor
+      // declares one address for a device at another.
+      checkServerIdentity: (_host, certificate) => serverIdentity(target.servername, certificate),
       ...(options.minVersion === undefined
         ? {}
         : { minVersion: options.minVersion as ConnectionOptions['minVersion'] }),
@@ -301,7 +313,7 @@ export interface CertificateVerdict {
 }
 
 /**
- * Everything a certificate sensor reports, from a certificate and a name.
+ * Everything a certificate sensor reports, from a certificate and who it was asked to be for.
  *
  * Pure, and separate from the handshake, because this is the half worth testing exhaustively and
  * the half that cannot be exercised against a real server without a time machine: an *expired*
@@ -312,6 +324,14 @@ export interface CertificateVerdict {
  * **The soonest expiry is taken across the whole chain.** An expiring intermediate takes a site
  * down exactly as an expiring leaf does, renews on somebody else's schedule, and is the one
  * nobody is watching.
+ *
+ * **`hostMatches` for an address is whether the certificate lists that address** (`A-71`), as
+ * an IP subject alternative name, by the rule every verifying client here uses
+ * (`certificateListsAddress`: OpenSSL asked, a zone taken off). It read 0 for every device given
+ * by address, in either family, because only names were compared — so a certificate that was
+ * exactly right read as a mismatch beside `trusted` 1. A name is compared as it always was, and
+ * an address is still compared with the names too: a certificate whose common name is spelt as
+ * the address read 1 before this and still does.
  */
 export function inspectCertificate(
   leaf: DetailedPeerCertificate,
@@ -334,7 +354,9 @@ export function inspectCertificate(
   return {
     daysRemaining: soonestDays,
     daysSinceIssued: -daysUntil(new Date(leaf.valid_from), now),
-    hostMatches: names.some((name) => nameMatches(name, servername)),
+    hostMatches:
+      names.some((name) => nameMatches(name, servername)) ||
+      certificateListsAddress(servername, leaf),
     names,
     // A certificate's subject fields are `string | string[]`: a name may legitimately appear
     // more than once, and the type reflects that even though it almost never happens.
