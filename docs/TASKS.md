@@ -18363,12 +18363,52 @@ because each is a decision rather than a defect:
         brings back are not said by reason on the tab; the answer has them. The audit entry
         carries the two counts whole and not by reason.
 
-- [ ] **A-60 — no test delivers a webhook over HTTPS to an address** · S · A-58 · Found
+- [x] **A-60 — no test delivers a webhook over HTTPS to an address** · S · A-58 · Found
       2026-10-02 by `A-58`. A URL whose host is an address is delivered to over HTTP in a test;
       over HTTPS it needs a certificate that names the address, and the file has none.
       **Done when** a fixture certificate with an IP subject alternative name exists and a test
       delivers to `https://127.0.0.1` and, where the machine has it, `https://[::1]`, with the
       certificate checked against the address.
+
+      **A-60 outcome.** A webhook, Slack or Teams URL that gives an address is delivered to over
+      HTTPS under a certificate that lists that address, and the test found that for an IPv6
+      address it could not be. No migration, no protocol number.
+      - **The defect, and it is Node's.** `https://127.0.0.1` worked as it stood.
+        `https://[::1]` failed under a certificate whose subject alternative names list `::1`:
+        "Host: ::1. is not cert's CN". Measured on the toolchain's Node 24.19:
+        `tls.checkServerIdentity` puts the host through `domainToASCII` before it asks whether
+        it is an address, an IPv6 address is not a domain and comes back empty, and the address
+        is then matched as a DNS name. No certificate can pass that, so an IPv6 literal over
+        HTTPS failed every attempt and was retried until they ran out.
+      - **The fix** (`serverIdentity`, `http-client.ts`), passed as the request's
+        `checkServerIdentity`. An IPv6 address is asked of the certificate itself by OpenSSL
+        (`X509Certificate.checkIP`), not read out of the `subjectaltname` string; everything
+        else — a name, an IPv4 address — is Node's check as before. Only an address the
+        certificate lists as an address passes, a certificate with nothing to ask is refused,
+        and the refusal reads as Node's does for IPv4 and carries its code. Whether the
+        certificate is trusted is not decided there and is unchanged.
+      - **The fixture** is made at test time with `openssl`, as `tls.test.ts` and
+        `pinned-transports.test.ts` make theirs, and trusted through
+        `tls.setDefaultCACertificates` as the second of those does; no key is committed. Five
+        certificates: both loopback addresses, a DNS name only, another address, `::1` as a
+        DNS name and common name, and one that names the addresses and is not trusted.
+      - **What a mismatch is.** A certificate that does not name the address fails the
+        handshake: `retryable: true`, the error Node's "IP: 127.0.0.1 is not in the cert's
+        list", nothing sent. It is not a target-policy refusal and is retried like any failed
+        attempt, as a wrong certificate for a name always was.
+      - **SNI, pinned.** The server sees no server name in the hello for either address, and
+        sees `webhook.test` for a name, on the same kind of server, so the empty list is the
+        client's doing.
+      - **Tests:** `webhook-delivery.test.ts`, eight new: delivery to `https://127.0.0.1` and
+        to `https://[::1]` (skips, saying so, where `::1` cannot be listened on; it ran in the
+        toolchain container); the name with its SNI; a DNS-only certificate and another
+        address's refused for `127.0.0.1`; three certificates refused for `[::1]`; the check
+        itself against real and empty certificates; an untrusted certificate refused. 64 in
+        the file, none skipped; `chat-delivery` and `test-send`, which share the client, pass.
+      - **Mutation:** 10 of 10 killed.
+      - **Not done.** The same Node check is what the sensor types, the probe's connection to
+        the core and mail delivery use, and none of them was looked at for an IPv6 address
+        over TLS.
 
 - [ ] **A-61 — a late refusal that crosses a core restart is a failed scan** · M · A-56 · Found
       2026-10-02 by `A-56`, which wrote the bound down and pinned it because nothing stored says

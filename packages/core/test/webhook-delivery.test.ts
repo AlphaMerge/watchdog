@@ -1,7 +1,15 @@
 import { strict as assert } from 'node:assert';
+import { execFileSync } from 'node:child_process';
+import { X509Certificate } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer as createSecureServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { after, before, beforeEach, describe, it } from 'node:test';
+import * as tls from 'node:tls';
+import type { PeerCertificate } from 'node:tls';
 import type { WebhookConfig } from '@ms/shared';
 import {
   isLinkLocal,
@@ -16,6 +24,7 @@ import {
   subjectHeaders,
   WebhookTransport,
 } from '../src/notifications/delivery/webhook.js';
+import { serverIdentity } from '../src/notifications/delivery/http-client.js';
 import type { OutgoingMessage } from '../src/notifications/delivery/transport.js';
 import { render, substitute, type MessageContext } from '../src/notifications/placeholders.js';
 import { messageContext } from './support/messages.js';
@@ -865,5 +874,369 @@ describe('the webhook transport', () => {
     const result = await transport().send(message({ settings: { url: url(), timeoutMs: 300 } }));
     assert.ok(!result.ok);
     assert.equal(result.retryable, true, 'an endpoint that hung once may answer next time');
+  });
+});
+
+// -------------------------------------------------------------------------------------------
+// HTTPS to a URL whose host is an address (`A-60`).
+// -------------------------------------------------------------------------------------------
+
+/**
+ * Certificates made here with `openssl`, as `tls.test.ts` and `pinned-transports.test.ts` make
+ * theirs: a committed one expires on a date nobody chose, and brings a private key into the
+ * repository with it. Each is self-signed, and the ones a test means to be believed are added to
+ * what this process trusts, so that what a refusal is about is the name on the certificate and
+ * not who issued it.
+ */
+describe('the webhook transport over HTTPS, to a URL whose host is an address', () => {
+  interface Pair {
+    readonly key: string;
+    readonly cert: string;
+  }
+  interface Pairs {
+    /** Names both loopback addresses, and no DNS name. */
+    readonly forAddresses: Pair;
+    /** Names `webhook.test`, and no address. */
+    readonly forName: Pair;
+    /** Names an address, and not the one the server is on. */
+    readonly forAnotherAddress: Pair;
+    /** Has `::1` as its common name and as a DNS name, and lists no address. */
+    readonly speltLikeAnAddress: Pair;
+    /** Names both loopback addresses, and nothing in this process trusts it. */
+    readonly untrusted: Pair;
+  }
+
+  let dir = '';
+  let made: Pairs | undefined;
+
+  /** Whether this Node can be told to trust a certificate from inside the process. */
+  const setTrusted = (tls as { setDefaultCACertificates?: (certs: string[]) => void })
+    .setDefaultCACertificates;
+  const getTrusted = (tls as { getCACertificates?: (type: string) => string[] }).getCACertificates;
+  let trustedBefore: string[] | undefined;
+
+  function certificate(file: string, commonName: string, names: string): Pair {
+    const keyFile = join(dir, `${file}.key`);
+    const certFile = join(dir, `${file}.crt`);
+    execFileSync(
+      'openssl',
+      [
+        'req',
+        '-x509',
+        '-newkey',
+        'rsa:2048',
+        '-nodes',
+        '-keyout',
+        keyFile,
+        '-out',
+        certFile,
+        '-days',
+        '30',
+        '-subj',
+        `/CN=${commonName}`,
+        '-addext',
+        `subjectAltName=${names}`,
+      ],
+      { stdio: 'ignore' },
+    );
+    return { key: readFileSync(keyFile, 'utf8'), cert: readFileSync(certFile, 'utf8') };
+  }
+
+  before(() => {
+    try {
+      dir = mkdtempSync(join(tmpdir(), 'ms-webhook-tls-'));
+      made = {
+        forAddresses: certificate('addresses', 'ms-webhook-test', 'IP:127.0.0.1,IP:::1'),
+        forName: certificate('name', 'webhook.test', 'DNS:webhook.test'),
+        forAnotherAddress: certificate('another', 'ms-webhook-test', 'IP:127.0.0.2'),
+        speltLikeAnAddress: certificate('spelt', '::1', 'DNS:::1'),
+        untrusted: certificate('untrusted', 'ms-webhook-test', 'IP:127.0.0.1,IP:::1'),
+      };
+    } catch {
+      made = undefined;
+    }
+    if (made !== undefined && setTrusted !== undefined && getTrusted !== undefined) {
+      trustedBefore = getTrusted('default');
+      setTrusted([
+        ...trustedBefore,
+        made.forAddresses.cert,
+        made.forName.cert,
+        made.forAnotherAddress.cert,
+        made.speltLikeAnAddress.cert,
+      ]);
+    }
+  });
+
+  after(() => {
+    if (trustedBefore !== undefined && setTrusted !== undefined) setTrusted(trustedBefore);
+    if (dir !== '') rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Skips, saying why, where the machine cannot make or trust a certificate. */
+  function pairs(t: { skip(reason: string): void }): Pairs | null {
+    if (made === undefined) {
+      t.skip('openssl is not on this machine');
+      return null;
+    }
+    if (trustedBefore === undefined) {
+      t.skip('this Node has no tls.setDefaultCACertificates to trust a test certificate with');
+      return null;
+    }
+    return made;
+  }
+
+  interface Secure {
+    readonly port: number;
+    /** Every request that arrived: its path and the `Host` it was sent with. */
+    readonly arrived: { url: string; host: unknown }[];
+    /** Every name a client put in its hello (SNI). Nothing is added for a hello without one. */
+    readonly named: string[];
+    close(): Promise<void>;
+  }
+
+  /** A TLS server with one certificate, or null where the address cannot be listened on. */
+  async function secure(pair: Pair, address: string): Promise<Secure | null> {
+    const arrived: Secure['arrived'] = [];
+    const named: string[] = [];
+    const server = createSecureServer(
+      {
+        key: pair.key,
+        cert: pair.cert,
+        // Called only for a hello that carries a server name; with no context given back, the
+        // handshake goes on with the certificate above.
+        SNICallback: (servername, done) => {
+          named.push(servername);
+          done(null);
+        },
+      },
+      (request, response) => {
+        arrived.push({ url: request.url ?? '', host: request.headers['host'] });
+        response.writeHead(204).end();
+      },
+    );
+    const listening = await new Promise<boolean>((resolve) => {
+      server.once('error', () => {
+        resolve(false);
+      });
+      server.listen(0, address, () => {
+        resolve(true);
+      });
+    });
+    if (!listening) return null;
+    return {
+      port: (server.address() as AddressInfo).port,
+      arrived,
+      named,
+      close: () =>
+        new Promise<void>((resolve) => {
+          server.close(() => {
+            resolve();
+          });
+        }),
+    };
+  }
+
+  /** An address is its own answer: any lookup at all fails the delivery, naming what was asked. */
+  const neverAsked = (hostname: string): Promise<string[]> =>
+    Promise.reject(new Error(`looked up ${hostname}`));
+
+  function toAddress(): WebhookTransport {
+    return new WebhookTransport({ config: config(), logger: silent, resolve: neverAsked });
+  }
+
+  const hook = (host: string, port: number): OutgoingMessage =>
+    message({ settings: { url: `https://${host}:${String(port)}/hook`, timeoutMs: 5_000 } });
+
+  it('delivers to https://127.0.0.1, checking the certificate against the address', async (t) => {
+    const certificates = pairs(t);
+    if (certificates === null) return;
+    const server = await secure(certificates.forAddresses, '127.0.0.1');
+    assert.ok(server !== null, '127.0.0.1 could not be listened on');
+    try {
+      const result = await toAddress().send(hook('127.0.0.1', server.port));
+      assert.ok(result.ok, result.ok ? '' : result.error);
+      assert.equal(result.detail, `204 from 127.0.0.1:${String(server.port)}`);
+      assert.deepEqual(server.arrived, [
+        { url: '/hook', host: `127.0.0.1:${String(server.port)}` },
+      ]);
+      // An address is not a server name, and Node puts none in the hello for one.
+      assert.deepEqual(server.named, []);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('delivers to https://[::1], checking the certificate against the address', async (t) => {
+    const certificates = pairs(t);
+    if (certificates === null) return;
+    const server = await secure(certificates.forAddresses, '::1');
+    if (server === null) {
+      t.skip('this machine has no IPv6 loopback to listen on');
+      return;
+    }
+    try {
+      const result = await toAddress().send(hook('[::1]', server.port));
+      assert.ok(result.ok, result.ok ? '' : result.error);
+      // `Host` keeps the URL's spelling, brackets and all; the certificate was matched without.
+      assert.deepEqual(server.arrived, [{ url: '/hook', host: `[::1]:${String(server.port)}` }]);
+      assert.deepEqual(server.named, []);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('names the server in its hello for a name, which the address tests show it does not for an address', async (t) => {
+    // The other half of "no server name for an address": the same server does see one when one
+    // is sent, so the empty list above is the client's doing and not the server's deafness.
+    const certificates = pairs(t);
+    if (certificates === null) return;
+    const server = await secure(certificates.forName, '127.0.0.1');
+    assert.ok(server !== null, '127.0.0.1 could not be listened on');
+    try {
+      const byName = new WebhookTransport({
+        config: config(),
+        logger: silent,
+        resolve: () => Promise.resolve(['127.0.0.1']),
+      });
+      const result = await byName.send(hook('webhook.test', server.port));
+      assert.ok(result.ok, result.ok ? '' : result.error);
+      assert.deepEqual(server.named, ['webhook.test']);
+      assert.deepEqual(server.arrived, [
+        { url: '/hook', host: `webhook.test:${String(server.port)}` },
+      ]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('refuses a certificate that names only a DNS name, for a URL that gives the address', async (t) => {
+    // The same certificate the name test was delivered under: reached by address, its server is
+    // nobody the certificate vouches for. The failure is the handshake's and not the target
+    // policy's, so it is a failed attempt like any other and is retried.
+    const certificates = pairs(t);
+    if (certificates === null) return;
+    const server = await secure(certificates.forName, '127.0.0.1');
+    assert.ok(server !== null, '127.0.0.1 could not be listened on');
+    try {
+      const result = await toAddress().send(hook('127.0.0.1', server.port));
+      assert.ok(!result.ok, 'a certificate for a name was taken for an address');
+      assert.match(result.error, /IP: 127\.0\.0\.1 is not in the cert's list/);
+      assert.doesNotMatch(result.error, /refused by the target policy/);
+      assert.equal(result.retryable, true);
+      assert.deepEqual(server.arrived, [], 'the request was sent before the certificate was read');
+      assert.deepEqual(server.named, []);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('refuses a certificate that names another address', async (t) => {
+    // Not "any certificate with an address on it": the one the URL gives.
+    const certificates = pairs(t);
+    if (certificates === null) return;
+    const server = await secure(certificates.forAnotherAddress, '127.0.0.1');
+    assert.ok(server !== null, '127.0.0.1 could not be listened on');
+    try {
+      const result = await toAddress().send(hook('127.0.0.1', server.port));
+      assert.ok(!result.ok, 'a certificate for 127.0.0.2 was taken for 127.0.0.1');
+      assert.match(result.error, /IP: 127\.0\.0\.1 is not in the cert's list: 127\.0\.0\.2/);
+      assert.equal(result.retryable, true);
+      assert.deepEqual(server.arrived, []);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('refuses, for https://[::1], every certificate that does not list that address', async (t) => {
+    // Node's own check takes an IPv6 address for a name (`serverIdentity`), so this address is
+    // checked here: against the addresses a certificate lists, and nothing spelt like one.
+    const certificates = pairs(t);
+    if (certificates === null) return;
+    for (const [label, pair, listed] of [
+      ['a DNS name only', certificates.forName, 'DNS:webhook.test'],
+      ['another address', certificates.forAnotherAddress, 'IP Address:127.0.0.2'],
+      ['the address as a DNS name and a common name', certificates.speltLikeAnAddress, 'DNS:::1'],
+    ] as const) {
+      const server = await secure(pair, '::1');
+      if (server === null) {
+        t.skip('this machine has no IPv6 loopback to listen on');
+        return;
+      }
+      try {
+        const result = await toAddress().send(hook('[::1]', server.port));
+        assert.ok(!result.ok, `${label}: taken for ::1`);
+        assert.equal(
+          result.error,
+          `Hostname/IP does not match certificate's altnames: IP: ::1 is not in the cert's list: ${listed}`,
+          label,
+        );
+        assert.equal(result.retryable, true, label);
+        assert.deepEqual(server.arrived, [], label);
+      } finally {
+        await server.close();
+      }
+    }
+  });
+
+  it('checks an IPv6 address itself, and leaves every other host to Node', (t) => {
+    const certificates = pairs(t);
+    if (certificates === null) return;
+    /** A certificate as the handshake hands one over, with only what the check reads. */
+    const peer = (fields: { pair?: Pair; subjectaltname?: string }): PeerCertificate =>
+      ({
+        ...(fields.pair === undefined ? {} : { raw: new X509Certificate(fields.pair.cert).raw }),
+        ...(fields.subjectaltname === undefined ? {} : { subjectaltname: fields.subjectaltname }),
+        subject: { CN: 'ms-webhook-test' },
+      }) as unknown as PeerCertificate;
+
+    // An IPv6 address: asked of the certificate, in any spelling of the address.
+    const both = peer({ pair: certificates.forAddresses });
+    assert.equal(serverIdentity('::1', both), undefined);
+    assert.equal(serverIdentity('0:0:0:0:0:0:0:1', both), undefined);
+    const refused = serverIdentity('::1', peer({ pair: certificates.forAnotherAddress }));
+    assert.ok(refused instanceof Error);
+    assert.equal((refused as { code?: unknown }).code, 'ERR_TLS_CERT_ALTNAME_INVALID');
+    assert.ok(serverIdentity('::2', both) instanceof Error, 'an address it does not list');
+    // A certificate there is nothing to ask of is refused, whatever its names say.
+    assert.ok(
+      serverIdentity('::1', peer({ subjectaltname: 'IP Address:0:0:0:0:0:0:0:1' })) instanceof
+        Error,
+    );
+
+    // Anything else is Node's to judge, which reads the names and has no use for the rest: an
+    // answer for a certificate with nothing but names is Node's answer.
+    assert.equal(
+      serverIdentity('127.0.0.1', peer({ subjectaltname: 'IP Address:127.0.0.1' })),
+      undefined,
+    );
+    assert.ok(
+      serverIdentity('127.0.0.1', peer({ subjectaltname: 'IP Address:127.0.0.2' })) instanceof
+        Error,
+    );
+    assert.equal(
+      serverIdentity('webhook.test', peer({ subjectaltname: 'DNS:webhook.test' })),
+      undefined,
+    );
+    assert.ok(
+      serverIdentity('other.test', peer({ subjectaltname: 'DNS:webhook.test' })) instanceof Error,
+    );
+  });
+
+  it('refuses a certificate that names the address and that nothing here trusts', async (t) => {
+    // What makes the deliveries above mean something: the client is verifying, and it believed
+    // the certificates this file told it to and no other.
+    const certificates = pairs(t);
+    if (certificates === null) return;
+    const server = await secure(certificates.untrusted, '127.0.0.1');
+    assert.ok(server !== null, '127.0.0.1 could not be listened on');
+    try {
+      const result = await toAddress().send(hook('127.0.0.1', server.port));
+      assert.ok(!result.ok, 'an untrusted certificate was believed');
+      assert.match(result.error, /self-signed certificate/);
+      assert.equal(result.retryable, true);
+      assert.deepEqual(server.arrived, []);
+    } finally {
+      await server.close();
+    }
   });
 });

@@ -1,7 +1,9 @@
+import { X509Certificate } from 'node:crypto';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { request as httpRequest, type ClientRequest, type IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
+import { checkServerIdentity, type PeerCertificate } from 'node:tls';
 import { describeError, type Logger, type WebhookConfig } from '@ms/shared';
 import { refusedAddresses, sameOrigin, schemeAllowed } from '@ms/shared';
 import { headerSafe, type DeliveryResult } from './transport.js';
@@ -280,6 +282,8 @@ export class GuardedHttpClient {
               : {}),
             ...options.headers,
           },
+          // Over TLS, who the certificate has to be for (`A-60`). Ignored for plain HTTP.
+          checkServerIdentity: serverIdentity,
           // The verified addresses, never the name. This hook exists only to stop a second
           // resolution — the answer was already decided and judged by `#check`.
           //
@@ -401,6 +405,45 @@ export function safeHeaders(value: unknown): Record<string, string> {
 function bareHost(target: URL): string {
   const host = target.hostname;
   return host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+}
+
+/**
+ * Whether a certificate is for the host a TLS connection was made to: Node's own check, except
+ * for an IPv6 address (`A-60`).
+ *
+ * **Node's check takes an IPv6 address for a name, and no certificate can pass it.** Measured on
+ * 24.19: `tls.checkServerIdentity` puts the host through `domainToASCII` before it asks whether
+ * it is an address, `::1` is not a domain, and what comes back is the empty string — so the
+ * address is matched as a DNS name against a certificate that rightly has none for it, and
+ * `https://[::1]` fails with "Host: ::1. is not cert's CN" under a certificate whose subject
+ * alternative names list that very address. An IPv4 address survives the conversion and is
+ * checked as one. So a webhook, Slack or Teams URL that gives an IPv6 address could not be
+ * delivered to over HTTPS at all, and was retried until its attempts ran out.
+ *
+ * The address is asked of the certificate itself, by OpenSSL (`X509Certificate.checkIP`), and
+ * not read out of the `subjectaltname` string: that string quotes and escapes what a hostile
+ * certificate puts in a name, and a second parser of it is a second thing to get wrong. Only
+ * an address the certificate lists as an address passes — never a DNS name or a common name
+ * spelt like one. A certificate with nothing to ask is refused.
+ *
+ * Whether the certificate is *trusted* is not decided here, and is as it was.
+ */
+export function serverIdentity(host: string, certificate: PeerCertificate): Error | undefined {
+  if (isIP(host) !== 6) return checkServerIdentity(host, certificate);
+  let listed = false;
+  try {
+    listed = new X509Certificate(certificate.raw).checkIP(host) !== undefined;
+  } catch {
+    listed = false;
+  }
+  if (listed) return undefined;
+  const names = certificate.subjectaltname ?? '';
+  return Object.assign(
+    new Error(
+      `Hostname/IP does not match certificate's altnames: IP: ${host} is not in the cert's list: ${names}`,
+    ),
+    { code: 'ERR_TLS_CERT_ALTNAME_INVALID' },
+  );
 }
 
 /** Every address the system resolver returns for a name. */
