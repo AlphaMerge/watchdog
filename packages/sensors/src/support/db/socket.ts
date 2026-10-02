@@ -1,6 +1,6 @@
 import { connect as netConnect, isIP, Socket, type LookupFunction } from 'node:net';
 import { pinnedPeerRefusal, type PinnedAddress } from '../pinned-target.js';
-import type { DbConnectOptions } from './driver.js';
+import { DbEncryptionRefusedError, type DbConnectOptions } from './driver.js';
 
 /**
  * The socket a database driver is handed in place of making its own (`A-62`).
@@ -134,6 +134,81 @@ export function connectingSocket(options: DbConnectOptions): (() => Socket) | un
   };
 }
 
+/** PRELOGIN's ENCRYPTION option, and the two answers under which `tedious` starts TLS. */
+const PRELOGIN_ENCRYPTION = 0x01;
+const PRELOGIN_END = 0xff;
+const ENCRYPT_ON = 0x01;
+const ENCRYPT_REQ = 0x03;
+/** More than any PRELOGIN answer is: a server still sending past this is not answering one. */
+const PRELOGIN_MAX_BYTES = 65_536;
+
+/**
+ * The encryption a server's PRELOGIN answer names, from the bytes received so far (`A-70`):
+ * the value, `incomplete` while the message has not all arrived, and undefined when it has and
+ * names none that can be read.
+ *
+ * A TDS packet is eight bytes of header (type, status, length in two bytes, and four more)
+ * and its payload; a message ends at the packet whose status has the low bit set. A PRELOGIN
+ * payload is a list of options, five bytes each (token, offset, length), ended by `0xff`, and
+ * then the data the offsets point into.
+ */
+export function preloginEncryption(received: Buffer): number | undefined | 'incomplete' {
+  const parts: Buffer[] = [];
+  for (let at = 0; ;) {
+    if (received.length - at < 8) return 'incomplete';
+    const length = received.readUInt16BE(at + 2);
+    if (length < 8) return undefined;
+    if (received.length - at < length) return 'incomplete';
+    parts.push(received.subarray(at + 8, at + length));
+    const last = (received.readUInt8(at + 1) & 0x01) !== 0;
+    at += length;
+    if (last) break;
+  }
+  const body = Buffer.concat(parts);
+  for (let option = 0; option < body.length; option += 5) {
+    const token = body.readUInt8(option);
+    if (token === PRELOGIN_END || option + 5 > body.length) return undefined;
+    if (token !== PRELOGIN_ENCRYPTION) continue;
+    const offset = body.readUInt16BE(option + 1);
+    const size = body.readUInt16BE(option + 3);
+    if (size < 1 || offset >= body.length) return undefined;
+    return body.readUInt8(offset);
+  }
+  return undefined;
+}
+
+/**
+ * Ends a connection whose server answers PRELOGIN saying it will not encrypt, before
+ * `tedious` can log in on it (`A-70`).
+ *
+ * **`tedious` takes that answer at its word.** Its `encrypt` is a boolean: it asks for
+ * encryption, and starts TLS only if the answer says ON or REQ (`lib/connection.js`,
+ * `performTlsNegotiation`). For NOT_SUP or OFF it starts none, raises nothing, and sends
+ * LOGIN7, with the password, on the bare socket. The answer is clear text, so anyone on the
+ * path between the probe and the server chooses it by rewriting one byte. Under `require`
+ * with the certificate verified, that was a login in clear and nothing verified.
+ *
+ * **Refused here, on the socket, because here is before the login.** This listens first, so
+ * it reads each chunk in the same turn `tedious`'s own reader is handed it, and `tedious`
+ * writes its login only in a later one. A socket destroyed in that turn sends nothing after.
+ * Checking once `tedious` says it has connected would be checking after the password left.
+ *
+ * An answer that cannot be read is refused too: under `require` nothing is assumed.
+ */
+function holdToEncryption(socket: Socket, where: string): void {
+  let received: Buffer = Buffer.alloc(0);
+  const onData = (chunk: Buffer): void => {
+    received = Buffer.concat([received, chunk]);
+    const answer = preloginEncryption(received);
+    if (answer === 'incomplete' && received.length <= PRELOGIN_MAX_BYTES) return;
+    socket.removeListener('data', onData);
+    if (answer !== ENCRYPT_ON && answer !== ENCRYPT_REQ) {
+      socket.destroy(new DbEncryptionRefusedError(where));
+    }
+  };
+  socket.on('data', onData);
+}
+
 /** A name as it is compared: lower case, without one trailing dot. */
 function nameOf(host: string): string {
   const lower = host.trim().toLowerCase();
@@ -166,15 +241,21 @@ export function tdsConnector(
   // **Handed over whenever a redirect has to be asked about**, which is not only when the
   // device's name was resolved: a device given as an address has no lookup, and left to itself
   // `tedious` would resolve the server it is routed to and connect there unchecked.
+  // And whenever encryption is required: the socket is the one place a server that says it
+  // has none can be refused before the login is written to it (`holdToEncryption`).
   const lookup = options.lookup;
-  if (lookup === undefined && options.redirect === undefined) return undefined;
+  const required = options.encrypt === 'require';
+  if (lookup === undefined && options.redirect === undefined && !required) return undefined;
   return async (...asked) => {
     const to = asked[0] as { host?: unknown; port?: unknown } | undefined;
     const signal = asked[2] instanceof AbortSignal ? asked[2] : undefined;
     const host = typeof to?.host === 'string' && to.host !== '' ? to.host : options.host;
     const port = typeof to?.port === 'number' ? to.port : options.port;
     const elsewhere = nameOf(host) !== nameOf(options.host);
-    const through = elsewhere ? await redirected(options, host) : lookup;
+    // Handed over for the encryption check alone, with nothing checked (`none`, no bounds),
+    // a redirect is followed as the driver itself would have: unresolved, by the socket.
+    const unchecked = lookup === undefined && options.redirect === undefined;
+    const through = elsewhere && !unchecked ? await redirected(options, host) : lookup;
 
     return new Promise<Socket>((resolve, reject) => {
       const socket =
@@ -210,6 +291,7 @@ export function tdsConnector(
           return;
         }
         settle(() => {
+          if (required) holdToEncryption(socket, `${host}:${String(port)}`);
           resolve(socket);
         });
       };
@@ -217,8 +299,14 @@ export function tdsConnector(
         giveUp(
           Object.assign(
             new Error(`connect to ${host}:${String(port)} timed out`),
-            // `describeDbError` reads this as the firewall that drops packets.
-            { code: 'ETIMEDOUT' },
+            // `describeDbError` reads this as the firewall that drops packets, and names the
+            // server the login was routed to when it is not the device that did not answer.
+            {
+              code: 'ETIMEDOUT',
+              ...(elsewhere || port !== options.port
+                ? { routedTo: `${host}:${String(port)}` }
+                : {}),
+            },
           ),
         );
       }, connectBudgetMs(options));

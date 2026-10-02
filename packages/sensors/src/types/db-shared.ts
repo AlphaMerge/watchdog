@@ -14,6 +14,7 @@ import {
   DEFAULT_TARGET_POLICY,
   guardOf,
   lookupFor,
+  refuseLocalSocket,
 } from '../support/checked-target.js';
 import { CredentialsWithheldError, PIN_REFUSALS, pinnedLookup } from '../support/pinned-target.js';
 import {
@@ -293,11 +294,13 @@ export async function runDbCheck(driver: DbDriver, context: CheckContext): Promi
   // connected. A device given as an address is checked as it stands and resolves nothing.
   const pinned = context.target.pinned;
   // **A PostgreSQL host that begins with `/` is a Unix socket directory on the probe's own
-  // machine, and not a network target** (`A-70`). `pg` connects to the socket inside it
-  // (`lib/client.js`: a host whose first character is `/`). There is no name to resolve and no
-  // address for the policy to read, so it goes to the driver as it stands, as it did before
-  // `A-62`, which sent it to the resolver and failed it as a name with no address.
+  // machine** (`A-70`). `pg` connects to the socket inside it (`lib/client.js`: a host whose
+  // first character is `/`). There is no name to resolve, so it is not sent to the resolver,
+  // which failed it as a name with no address. **It is the probe's own machine, and is held
+  // to what the policy says of that**: refused wherever loopback is, since the same server
+  // at 127.0.0.1 would be, and handed to the driver as it stands wherever loopback is allowed.
   const local = driver.id === 'postgresql' && host.startsWith('/') && pinned === undefined;
+  if (local) refuseLocalSocket(host, context.target.policy, 'connect to');
   const checked = local
     ? null
     : await checkedTarget({

@@ -49,6 +49,9 @@ export const mssqlDriver: DbDriver = {
         port: options.port,
         ...(connector === undefined ? {} : { connector }),
         ...(options.database === '' ? {} : { database: options.database }),
+        // **A boolean, which asks for encryption and does not insist on it**: `tedious` starts
+        // TLS only if the server's clear-text answer agrees. `require` is made to mean it on
+        // the socket, by the connector, before a login can be written (`holdToEncryption`).
         encrypt: options.encrypt !== 'disable',
         trustServerCertificate: !options.verifyTls,
         connectTimeout: connectBudgetMs(options),

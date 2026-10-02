@@ -132,13 +132,62 @@ export class DbRedirectRefusedError extends DbError {
 /** What `pg` says when its connect timer ends a connection. */
 const PG_TIMED_OUT = 'timeout expired';
 
-/** What every driver's connect timeout reads as, whichever driver's timer it was. */
-function connectTimedOut(where: string, options: DbConnectOptions): DbError {
+/**
+ * What every driver's connect timeout reads as, whichever driver's timer it was.
+ *
+ * **It names the server that did not answer**, which after a SQL Server redirect is not the
+ * device: the device answered, and routed the login to one that then said nothing. Naming the
+ * device there sends an operator to the machine that is working.
+ */
+function connectTimedOut(
+  where: string,
+  options: DbConnectOptions,
+  routedTo: string | undefined,
+): DbError {
+  const within = `within ${String(options.connectTimeoutMs)} ms`;
+  const firewall = 'a firewall dropping the packets looks exactly like this';
   return new DbError(
-    `${where} accepted no connection within ${String(options.connectTimeoutMs)} ms — a ` +
-      'firewall dropping the packets looks exactly like this',
+    routedTo === undefined
+      ? `${where} accepted no connection ${within} — ${firewall}`
+      : `${where} routed the login to ${routedTo}, which accepted no connection ${within} — ` +
+          firewall,
     'connect',
   );
+}
+
+/** What `tedious`'s connect timer says of a connection it had been redirected on. */
+const TDS_REDIRECTED = /^Failed to connect to (\S+) \(redirected from /;
+
+/**
+ * The server a connect that timed out had been routed to, or undefined when it was the device.
+ * From the connector's own error, which carries it (`tdsConnector`), or from the words of
+ * `tedious`'s timer (`lib/connection.js`, `initialiseConnection`), which has no field for it.
+ */
+function routedOf(chain: readonly unknown[]): string | undefined {
+  for (const one of chain) {
+    const carried = (one as { routedTo?: unknown } | null)?.routedTo;
+    if (typeof carried === 'string' && carried !== '') return carried;
+    const said = one instanceof Error ? TDS_REDIRECTED.exec(one.message) : null;
+    if (said?.[1] !== undefined) return said[1];
+  }
+  return undefined;
+}
+
+/**
+ * A server that answered a request for encryption by saying it has none, to a sensor whose
+ * encryption is `require` (`A-70`). No login was sent.
+ */
+export class DbEncryptionRefusedError extends DbError {
+  constructor(where: string) {
+    super(
+      `${where} answered that it does not encrypt, and this sensor requires encryption, so no ` +
+        'login was sent. That answer travels in clear text: a server that does encrypt and ' +
+        'reads so here has something on the path rewriting it. Set Encryption to `prefer` ' +
+        'only if the server really has no TLS.',
+      'connect',
+    );
+    this.name = 'DbEncryptionRefusedError';
+  }
 }
 
 /**
@@ -179,7 +228,9 @@ export function describeDbError(
   // And so does a redirect that was not followed (`A-70`): its sentence is the whole diagnosis.
   for (const one of chain) {
     if (isCredentialsWithheld(one) || one instanceof TargetRefusedError) return one;
-    if (one instanceof DbRedirectRefusedError) return one;
+    if (one instanceof DbRedirectRefusedError || one instanceof DbEncryptionRefusedError) {
+      return one;
+    }
   }
   const code = chain.map(codeOf).find((one) => !WRAPPERS.has(one)) ?? '';
   const message = error instanceof Error ? error.message : String(error);
@@ -188,7 +239,17 @@ export function describeDbError(
   if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
     return new DbError(`the device’s host name did not resolve, connecting to ${where}`);
   }
-  if (code === 'ETIMEDOUT' || code === 'ESOCKETTIMEDOUT') return connectTimedOut(where, options);
+  const socketTimedOut = code === 'ETIMEDOUT' || code === 'ESOCKETTIMEDOUT';
+  // **A socket that times out mid-query was connected** (`A-70`): the same code, in the other
+  // phase, is a server that stopped answering, and "accepted no connection" would be false.
+  if (socketTimedOut && phase === 'query') {
+    return new DbError(
+      `${engine} at ${where}: the connection was made and the query got no answer before the ` +
+        'socket timed out — the server stopped answering, or something between dropped the ' +
+        'connection without closing it',
+      'query',
+    );
+  }
   // **Each driver's own connect timer says it differently** (`A-70`), and neither said how
   // long or where. `tedious` ends a connect with a `ConnectionError` coded `ETIMEOUT`, one
   // letter short of the socket's (`lib/connection.js`, `initialiseConnection`); `pg` destroys
@@ -197,10 +258,11 @@ export function describeDbError(
   // on a request that timed out, which is the statement timeout and is another sentence.
   if (
     phase === 'connect' &&
-    (code === 'ETIMEOUT' ||
+    (socketTimedOut ||
+      code === 'ETIMEOUT' ||
       (code === '' && chain.some((one) => one instanceof Error && one.message === PG_TIMED_OUT)))
   ) {
-    return connectTimedOut(where, options);
+    return connectTimedOut(where, options, routedOf(chain));
   }
   // 28P01 and 28000 are "invalid authorisation" in PostgreSQL and MySQL; 18456 is SQL Server's.
   if (

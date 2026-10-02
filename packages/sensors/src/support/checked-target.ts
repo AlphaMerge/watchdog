@@ -155,6 +155,35 @@ export function refuseBlockedAddress(
 }
 
 /**
+ * Refuses a Unix socket path where the policy refuses the probe's own machine (`A-70`).
+ *
+ * A path is not a network target, and it is not nowhere either: it is a socket on the machine
+ * the probe runs on, which is what loopback is. A probe whose policy refuses `127.0.0.1` has
+ * been told it must not be pointed at itself, and a device whose host is `/var/run/postgresql`
+ * points it there as surely as one whose host is `127.0.0.1`: on a single-host installation,
+ * at the core's own database.
+ *
+ * **The policy's own answer for loopback decides it**, asked of `refuses` and not kept as a
+ * second list: wherever a policy refuses `127.0.0.1` it refuses a path, and where it allows
+ * one it allows the other.
+ */
+export function refuseLocalSocket(
+  path: string,
+  declared: TargetPolicy | undefined,
+  verb: string,
+): void {
+  const policy = declared ?? DEFAULT_TARGET_POLICY;
+  const reason = refuses(policy, '127.0.0.1');
+  if (reason === null) return;
+  throw refusal(
+    { host: path, verb },
+    policy,
+    path,
+    `a socket on this probe’s own machine, as 127.0.0.1 is, and that is ${reason}`,
+  );
+}
+
+/**
  * Refuses a host whose addresses the policy blocks, and says where the check may connect.
  *
  * Null when the transport is handed `host` as it is, because nothing would resolve it (an

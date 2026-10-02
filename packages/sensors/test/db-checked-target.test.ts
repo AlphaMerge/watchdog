@@ -18,6 +18,7 @@ import type { TargetPolicy } from '@ms/shared';
 import { SensorCatalogue } from '../src/catalogue.js';
 import { TargetRefusedError } from '../src/support/checked-target.js';
 import {
+  DbEncryptionRefusedError,
   DbError,
   DbRedirectRefusedError,
   describeDbError,
@@ -31,6 +32,7 @@ import { postgresqlDriver } from '../src/support/db/postgresql.js';
 import {
   connectBudgetMs,
   connectingSocket,
+  preloginEncryption,
   tdsConnector,
   unconnectedSocket,
 } from '../src/support/db/socket.js';
@@ -590,6 +592,8 @@ async function tdsServer(
     login?: true;
     address?: string;
     secure?: { key: string; cert: string };
+    /** The encryption byte of the PRELOGIN answer, in place of the mode's own. */
+    encryption?: number;
   } = {},
 ): Promise<Fake> {
   const plain = mode.route !== undefined || mode.login === true;
@@ -655,7 +659,7 @@ async function tdsServer(
         packets += 1;
         if (packets === 1) {
           self.said.push(`packet 0x${type.toString(16)}`);
-          socket.write(preloginReply(plain ? 0x02 : 0x01));
+          socket.write(preloginReply(mode.encryption ?? (plain ? 0x02 : 0x01)));
           if (mode.secure !== undefined) handshake = negotiate(mode.secure);
           continue;
         }
@@ -1381,6 +1385,68 @@ describe('the lookup and the connection share a database sensor’s connect time
     });
   }
 
+  for (const policy of ['link-local', 'none'] as const) {
+    it(`db.mssql routed to a server that never answers names that server and the redirect, under \`${policy}\` (A-70)`, async (t) => {
+      if (hole === null) {
+        t.skip('this machine answers a connection to a listener that never accepts');
+        return;
+      }
+      // The device answers and routes the login to a port that takes it and says nothing.
+      // Under `none` the timer is `tedious`'s own; otherwise the connector is in the way too.
+      const device = await tdsServer({ route: { server: '127.0.0.1', port: hole.port } });
+      try {
+        const error = await failure(
+          execute(dbMssql, rebinding(), {
+            host: '127.0.0.1',
+            port: device.port,
+            policy,
+            params: { connectTimeoutMs: 1_500 },
+          }),
+        );
+        assert.deepEqual(device.said, ['packet 0x12', 'login7'], 'the device was reached');
+        assert.ok(error instanceof DbError, `threw ${String(error)}`);
+        assert.equal(
+          error.message,
+          `127.0.0.1:${String(device.port)} routed the login to 127.0.0.1:${String(hole.port)}, ` +
+            'which accepted no connection within 1500 ms — a firewall dropping the packets ' +
+            'looks exactly like this',
+        );
+        assert.equal(error.phase, 'connect');
+      } finally {
+        await device.close();
+      }
+    });
+  }
+
+  it('the connector says which server it was routed to when that one does not answer (A-70)', async (t) => {
+    if (hole === null) {
+      t.skip('this machine answers a connection to a listener that never accepts');
+      return;
+    }
+    const base: DbConnectOptions = {
+      host: '127.0.0.1',
+      port: 1433,
+      database: '',
+      username: 'monitor',
+      password: 'secret',
+      encrypt: 'disable',
+      verifyTls: false,
+      connectTimeoutMs: 400,
+      statementTimeoutMs: 5_000,
+      redirect: () => Promise.resolve(undefined),
+    };
+    const connector = tdsConnector(base) ?? assert.fail('no connector');
+    // The same host on another port is a server the login was routed to.
+    const routed = await failure(connector({ host: '127.0.0.1', port: hole.port }));
+    assert.equal((routed as { routedTo?: unknown }).routedTo, `127.0.0.1:${String(hole.port)}`);
+    assert.equal((routed as NodeJS.ErrnoException).code, 'ETIMEDOUT');
+    // The device itself carries none: it is the device that did not answer.
+    const device = tdsConnector({ ...base, port: hole.port }) ?? assert.fail('no connector');
+    const own = await failure(device());
+    assert.equal((own as NodeJS.ErrnoException).code, 'ETIMEDOUT');
+    assert.equal((own as { routedTo?: unknown }).routedTo, undefined);
+  });
+
   it('the connector `tedious` waits on ends itself at what is left, with no signal to end it', async (t) => {
     if (hole === null) {
       t.skip('this machine answers a connection to a listener that never accepts');
@@ -1642,16 +1708,17 @@ describe('what a database driver is handed', () => {
       };
     };
 
-    it('goes to the driver as it stands: nothing resolved, no lookup, no redirect, the whole timeout', async () => {
-      for (const policy of ['link-local', 'private', 'none'] as const) {
+    it('where the policy allows loopback it goes to the driver as it stands: nothing resolved, no lookup, no redirect, the whole timeout', async () => {
+      // `undefined` is a probe that says nothing, which is `link-local`.
+      for (const policy of ['link-local', 'none', undefined] as const) {
         const seen: DbConnectOptions[] = [];
         const { context, lookups } = never();
         const execution = await runDbCheck(recording(seen), {
           ...context,
-          target: { ...context.target, policy },
+          target: { ...context.target, ...(policy === undefined ? {} : { policy }) },
         });
         assert.equal(valueOf(execution, 'value'), 1, policy);
-        assert.equal(lookups(), 0, `${policy}: a path is not a name`);
+        assert.equal(lookups(), 0, `${String(policy)}: a path is not a name`);
         assert.deepEqual(
           seen.map((options) => [
             options.host,
@@ -1665,6 +1732,67 @@ describe('what a database driver is handed', () => {
           policy,
         );
       }
+    });
+
+    it('where the policy refuses loopback it is refused: a socket path is the probe’s own machine', async () => {
+      // `private` refuses 127.0.0.1, which is an operator saying this probe is not to be
+      // pointed at itself. The same server by its socket is the same server.
+      const seen: DbConnectOptions[] = [];
+      const { context, lookups } = never();
+      const error = await failure(
+        runDbCheck(recording(seen), {
+          ...context,
+          target: { ...context.target, policy: 'private' },
+        }),
+      );
+      assert.ok(error instanceof TargetRefusedError, String(error));
+      assert.ok(!isCredentialsWithheld(error));
+      assert.deepEqual([error.target, error.address, error.policy], [SOCKETS, SOCKETS, 'private']);
+      assert.equal(
+        error.message,
+        'refusing to connect to /var/run/postgresql, which is a socket on this probe’s own ' +
+          'machine, as 127.0.0.1 is, and that is a private address; this probe’s target ' +
+          'policy (private) refuses it, as it does every cloud instance-metadata address, and ' +
+          'probe.targetPolicy “none” refuses nothing',
+      );
+      assert.equal(lookups(), 0);
+      assert.deepEqual(seen, [], 'the driver was not asked');
+    });
+
+    it('is decided by what the policy says of 127.0.0.1, for every policy there is', async () => {
+      for (const policy of ['link-local', 'private', 'none'] as const) {
+        const loopback = await runDbCheck(recording([]), {
+          ...contextOf('127.0.0.1', rebinding()),
+          target: { host: '127.0.0.1', ipVersion: 'auto', policy },
+        }).then(
+          () => 'allowed',
+          (error: unknown) => (error instanceof TargetRefusedError ? 'refused' : String(error)),
+        );
+        const { context } = never();
+        const path = await runDbCheck(recording([]), {
+          ...context,
+          target: { ...context.target, policy },
+        }).then(
+          () => 'allowed',
+          (error: unknown) => (error instanceof TargetRefusedError ? 'refused' : String(error)),
+        );
+        assert.equal(path, loopback, policy);
+        assert.equal(path, policy === 'private' ? 'refused' : 'allowed', policy);
+      }
+    });
+
+    it('the real `pg` is refused the path under `private`, and nothing is looked for', async () => {
+      const dns = rebinding();
+      const error = await failure(
+        execute(dbPostgresql, dns, {
+          host: join(tmpdir(), 'ms-a70-no-postgres-here'),
+          port: 5433,
+          policy: 'private',
+        }),
+      );
+      assert.ok(error instanceof TargetRefusedError, String(error));
+      assert.doesNotMatch(error.message, /ENOENT/);
+      assert.equal(dns.calls.length, 0);
     });
 
     it('is PostgreSQL’s alone: the other two engines have no such host, and it is resolved as a name', async () => {
@@ -1958,6 +2086,190 @@ describe('a SQL Server that routes the login to another server', () => {
   });
 });
 
+describe('`require` sends no login to a server that says it does not encrypt (A-70)', () => {
+  // `tedious` 20 starts TLS only when the server's PRELOGIN answer says ON or REQ
+  // (`lib/connection.js`, `performTlsNegotiation`); for anything else it starts none, raises
+  // nothing and sends LOGIN7. That answer is clear text, so whoever is on the path chooses it.
+  const RUNS = [
+    { name: 'a device given as an address', run: { host: '127.0.0.1' } },
+    { name: 'a named device', run: {} },
+    {
+      name: 'under `none`, where nothing else is checked',
+      run: { host: '127.0.0.1', policy: 'none' },
+    },
+  ] as const;
+
+  for (const { name, run } of RUNS) {
+    for (const [said, encryption] of [
+      ['NOT_SUP', 0x02],
+      ['OFF', 0x00],
+    ] as const) {
+      it(`db.mssql, ${name}, answered ${said}: refused before LOGIN7, verification on or off`, async () => {
+        for (const verifyTls of [true, false]) {
+          const fake = await tdsServer({ login: true, encryption });
+          try {
+            const error = await failure(
+              execute(dbMssql, rebinding(), {
+                ...run,
+                port: fake.port,
+                params: { encrypt: 'require', verifyTls },
+              }),
+            );
+            assert.deepEqual(fake.said, ['packet 0x12'], 'no login left the probe');
+            assert.ok(error instanceof DbEncryptionRefusedError, String(error));
+            assert.equal(error.phase, 'connect');
+          } finally {
+            await fake.close();
+          }
+        }
+      });
+    }
+
+    it(`db.mssql, ${name}, under \`prefer\`: logs in without encryption, as it always did`, async () => {
+      const fake = await tdsServer({ login: true });
+      try {
+        const error = await failure(
+          execute(dbMssql, rebinding(), { ...run, port: fake.port, params: { encrypt: 'prefer' } }),
+        );
+        assert.ok(!(error instanceof DbEncryptionRefusedError), String(error));
+        assert.deepEqual(fake.said, ['packet 0x12', 'login7']);
+      } finally {
+        await fake.close();
+      }
+    });
+  }
+
+  it('db.mssql under `require` and `none` still follows a redirect, as `tedious` would', async () => {
+    // The connector is handed over for the encryption check alone here. It has no redirect to
+    // ask about and no lookup, and connects where it is routed as the driver itself did.
+    const connector =
+      tdsConnector({
+        host: '127.0.0.1',
+        port: 1433,
+        database: '',
+        username: 'monitor',
+        password: 'secret',
+        encrypt: 'require',
+        verifyTls: false,
+        connectTimeoutMs: 2_000,
+        statementTimeoutMs: 2_000,
+      }) ?? assert.fail('no connector under `require`');
+    const onward = await tdsServer({ login: true, address: '127.0.0.2' });
+    try {
+      const socket = await connector({ host: '127.0.0.2', port: onward.port });
+      assert.equal(socket.remoteAddress, '127.0.0.2');
+      socket.destroy();
+    } finally {
+      await onward.close();
+    }
+  });
+
+  it('a server that never finishes its answer is refused at a bound, not read for ever', async () => {
+    // Two packets of 40,000 bytes, neither the last of its message: more than any PRELOGIN
+    // answer is, and still not one.
+    const { fake } = await listen((socket) => {
+      const packet = Buffer.alloc(40_000);
+      packet.writeUInt8(0x04, 0);
+      packet.writeUInt16BE(40_000, 2);
+      socket.write(Buffer.concat([packet, packet]));
+    });
+    try {
+      const connector =
+        tdsConnector({
+          host: '127.0.0.1',
+          port: fake.port,
+          database: '',
+          username: 'monitor',
+          password: 'secret',
+          encrypt: 'require',
+          verifyTls: true,
+          connectTimeoutMs: 2_000,
+          statementTimeoutMs: 2_000,
+        }) ?? assert.fail('no connector under `require`');
+      const socket = await connector();
+      const ended = await Promise.race([
+        new Promise<unknown>((resolve) => socket.once('error', resolve)),
+        new Promise<unknown>((resolve) => setTimeout(resolve, 3_000, 'still reading')),
+      ]);
+      socket.destroy();
+      assert.ok(ended instanceof DbEncryptionRefusedError, String(ended));
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('the other two engines refuse it too: the sentence in the schema is true of all three', async () => {
+    for (const [type, server] of [
+      [dbPostgresql, postgresServer],
+      [dbMysql, mysqlServer],
+    ] as const) {
+      const fake = await server();
+      try {
+        const error = await failure(
+          execute(type, rebinding(), { port: fake.port, params: { encrypt: 'require' } }),
+        );
+        assert.match(error.message, /SSL|secure|encrypt/i, type.id);
+        assert.deepEqual(fake.said, [], `${type.id}: no query was sent in clear text`);
+      } finally {
+        await fake.close();
+      }
+    }
+  });
+
+  describe('reading the encryption a PRELOGIN answer names', () => {
+    const answer = (encryption: number): Buffer => preloginReply(encryption);
+
+    it('reads the byte the ENCRYPTION option points at', () => {
+      for (const encryption of [0x00, 0x01, 0x02, 0x03]) {
+        assert.equal(preloginEncryption(answer(encryption)), encryption);
+      }
+    });
+
+    it('waits for the whole message, however it arrives', () => {
+      const whole = answer(0x02);
+      for (let cut = 0; cut < whole.length; cut += 1) {
+        assert.equal(preloginEncryption(whole.subarray(0, cut)), 'incomplete', String(cut));
+      }
+    });
+
+    it('reads a message sent in two packets, and one with the options in another order', () => {
+      const whole = answer(0x03);
+      const body = whole.subarray(8);
+      const packet = (status: number, part: Buffer): Buffer => {
+        const header = Buffer.from([0x04, status, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]);
+        header.writeUInt16BE(8 + part.length, 2);
+        return Buffer.concat([header, part]);
+      };
+      const split = Buffer.concat([
+        packet(0x00, body.subarray(0, 7)),
+        packet(0x01, body.subarray(7)),
+      ]);
+      assert.equal(preloginEncryption(split), 0x03);
+      assert.equal(preloginEncryption(split.subarray(0, 20)), 'incomplete');
+      // ENCRYPTION first, at offset 11 for one byte; VERSION after it, at 12 for six.
+      const reordered = packet(
+        0x01,
+        Buffer.concat([
+          Buffer.from([0x01, 0x00, 0x0b, 0x00, 0x01, 0x00, 0x00, 0x0c, 0x00, 0x06, 0xff]),
+          Buffer.from([0x02, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00]),
+        ]),
+      );
+      assert.equal(preloginEncryption(reordered), 0x02);
+    });
+
+    it('says so when the answer names no encryption at all, or points outside itself', () => {
+      const none = Buffer.from([
+        0x04, 0x01, 0x00, 0x0f, 0, 0, 1, 0, 0x00, 0x00, 0x06, 0x00, 0x01, 0xff, 0x09,
+      ]);
+      assert.equal(preloginEncryption(none), undefined);
+      const outside = Buffer.from([
+        0x04, 0x01, 0x00, 0x0e, 0, 0, 1, 0, 0x01, 0x00, 0x40, 0x00, 0x01, 0xff,
+      ]);
+      assert.equal(preloginEncryption(outside), undefined);
+    });
+  });
+});
+
 describe('the connector `tedious` is handed', () => {
   let fake: Fake;
   before(async () => {
@@ -1987,9 +2299,11 @@ describe('the connector `tedious` is handed', () => {
     ...over,
   });
 
-  it('is none only where nothing is checked: no lookup, and no redirect to ask about', () => {
+  it('is none only where nothing is checked: no lookup, no redirect to ask about, and no encryption to require', () => {
     const { lookup: _lookup, ...plain } = options();
     assert.equal(tdsConnector(plain), undefined);
+    assert.equal(tdsConnector({ ...plain, encrypt: 'prefer' }), undefined);
+    assert.notEqual(tdsConnector({ ...plain, encrypt: 'require' }), undefined);
   });
 
   it('for a device given as an address: connects to it as it stands, and asks about a redirect', async () => {
@@ -2234,6 +2548,20 @@ describe('what a database failure reads as', () => {
     );
   });
 
+  it('a server that would not encrypt keeps its class through a driver (A-70)', () => {
+    const refusal = new DbEncryptionRefusedError('database.policy.invalid:1433');
+    assert.equal(describeDbError(refusal, options, 'Microsoft SQL Server'), refusal);
+    const wrapped = Object.assign(new Error('Connection lost', { cause: refusal }), {
+      code: 'ESOCKET',
+    });
+    assert.equal(describeDbError(wrapped, options, 'Microsoft SQL Server'), refusal);
+    assert.equal(refusal.phase, 'connect');
+    assert.match(
+      refusal.message,
+      /^database\.policy\.invalid:1433 answered that it does not encrypt, and this sensor requires encryption, so no login was sent\./,
+    );
+  });
+
   it('a redirect that was not followed keeps its class and its sentence through a driver (A-70)', () => {
     const redirect = new DbRedirectRefusedError(NAME, OTHER);
     assert.equal(describeDbError(redirect, options, 'Microsoft SQL Server'), redirect);
@@ -2269,6 +2597,64 @@ describe('what a database failure reads as', () => {
     it('a socket’s ETIMEDOUT, as before', () => {
       timedOut(Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT' }), 'MySQL');
       timedOut(Object.assign(new Error('socket'), { code: 'ESOCKETTIMEDOUT' }), 'MySQL');
+    });
+
+    it('a socket that times out mid-query was connected: it says so, in the query phase', () => {
+      for (const code of ['ETIMEDOUT', 'ESOCKETTIMEDOUT']) {
+        const described = describeDbError(
+          Object.assign(new Error('read ETIMEDOUT'), { code }),
+          options,
+          'MySQL',
+          'query',
+        );
+        assert.ok(described instanceof DbError, code);
+        assert.equal(
+          described.message,
+          'MySQL at database.policy.invalid:1433: the connection was made and the query got ' +
+            'no answer before the socket timed out — the server stopped answering, or ' +
+            'something between dropped the connection without closing it',
+          code,
+        );
+        assert.equal(described.phase, 'query', code);
+      }
+    });
+
+    it('names the server a login was routed to, and that it was routed, when that is the one that did not answer', () => {
+      const ROUTED =
+        'database.policy.invalid:1433 routed the login to replica.policy.invalid:11000, which ' +
+        'accepted no connection within 2000 ms — a firewall dropping the packets looks exactly ' +
+        'like this';
+      // `tedious`'s own timer, which says it in words and has no field for it.
+      const timer = Object.assign(
+        new Error(
+          'Failed to connect to replica.policy.invalid:11000 (redirected from ' +
+            'database.policy.invalid:1433) in 2000ms',
+        ),
+        { code: 'ETIMEOUT' },
+      );
+      // And the connector's, wrapped by `tedious` as a socket error.
+      const connector = Object.assign(
+        new Error('Failed to connect', {
+          cause: Object.assign(new Error('connect to replica.policy.invalid:11000 timed out'), {
+            code: 'ETIMEDOUT',
+            routedTo: 'replica.policy.invalid:11000',
+          }),
+        }),
+        { code: 'ESOCKET' },
+      );
+      for (const error of [timer, connector]) {
+        const described = describeDbError(error, options, 'Microsoft SQL Server');
+        assert.ok(described instanceof DbError);
+        assert.equal(described.message, ROUTED);
+        assert.equal(described.phase, 'connect');
+      }
+      // Not routed: the device itself, in `tedious`'s words.
+      timedOut(
+        Object.assign(new Error('Failed to connect to database.policy.invalid:1433 in 2000ms'), {
+          code: 'ETIMEOUT',
+        }),
+        'Microsoft SQL Server',
+      );
     });
 
     it('`pg`’s “timeout expired”, which has no code', () => {

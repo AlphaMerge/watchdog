@@ -19320,9 +19320,9 @@ because each is a decision rather than a defect:
         and check on its `secure` event, which holds only while our handler runs. `mysql2`'s
         IPv4 case leans on `socket._host`, which Node reads and does not document
         (`onConnectSecure`); the tests hold it, and it fails on the side of refusing.
-      - **A PostgreSQL host that begins with `/`** goes to `pg` as it stands: no
-        `checkedTarget`, no lookup, no redirect, the whole timeout, under every policy.
-        PostgreSQL's alone, and not for a target that carries a pin.
+      - **A PostgreSQL host that begins with `/`** is not sent to the resolver. PostgreSQL's
+        alone, and not for a target that carries a pin. Where it goes from there is the
+        review's first finding, below.
       - **`describeDbError` takes the phase**, `connect` unless told `query`, and while
         connecting reads `pg`'s codeless `timeout expired` (`lib/client.js` 170) and
         `tedious`'s `ETIMEOUT` (`lib/connection.js` 1050) as the sentence `ETIMEDOUT` gives:
@@ -19353,6 +19353,60 @@ because each is a decision rather than a defect:
         did; not measured there. A bounded database set facing a socket path is undecided to
         the core and unresolvable to the probe, so it reads Unknown as a name that does not
         resolve: read from the code, not tested.
+
+      **A-70 review.** Four findings, each confirmed and closed in a second commit. Where the
+      outcome above says otherwise, this is what is true.
+      - **F1, a socket path was let through under every policy.** It is the probe's own
+        machine. Under `private`, which refuses `127.0.0.1`, a device whose host was
+        `/var/run/postgresql` ran its sensor's query against the local PostgreSQL, the core's
+        own on a single host, where the same server at `127.0.0.1` was refused; before `A-70`
+        the path failed, so `A-70` had opened it. `refuseLocalSocket` in `checked-target.ts`
+        asks `refuses(policy, '127.0.0.1')` and nothing else: refused as `TargetRefusedError`,
+        naming the path, wherever loopback is, and handed to `pg` as it stands wherever it is
+        not (`link-local`, `none`). No second list of policies.
+      - **F2, a redirect that timed out named the device.** `connectTimedOut` takes the
+        routed server, read from the connector's own error (`routedTo`, set when the host or
+        the port is not the device's) or from the words of `tedious`'s timer (`Failed to
+        connect to R (redirected from D) in Nms`): `D routed the login to R, which accepted
+        no connection within N ms`.
+      - **F3, a socket timeout mid-query read as a connect.** `ETIMEDOUT` and
+        `ESOCKETTIMEDOUT` are gated on the phase like the other two: in the query phase the
+        sentence is that the connection was made and the query got no answer, with phase
+        `query`.
+      - **F4, `require` did not require on `db.mssql`** (it was so before `A-70`). Reproduced
+        first: the TDS fake answering NOT_SUP to a sensor with `encrypt: require` and
+        verification on was sent `['packet 0x12', 'login7']`, the login in clear. `tedious`
+        20 starts TLS only when the server's clear-text PRELOGIN answer says ON or REQ
+        (`lib/connection.js`, `performTlsNegotiation`) and otherwise logs in. **Fixed on the
+        socket, before the login**: under `require` `tdsConnector` is always handed over, and
+        `holdToEncryption` listens on the socket it returns, reads the PRELOGIN answer's
+        encryption byte (`preloginEncryption`), and destroys the socket with
+        `DbEncryptionRefusedError` unless it is ON or REQ. It is registered before `tedious`
+        reads, runs in the same turn the chunk arrives, and `tedious` writes LOGIN7 only in
+        a later one, to a socket that is by then destroyed. An answer that cannot be read,
+        or is not finished within 64 KiB, is refused too. `prefer` is as it was. Under
+        `none` with no bounds the connector follows a redirect unresolved, as the driver did,
+        and the routed server is held to the same check. So the schema's "`require` refuses
+        the downgrade" is now true of all three engines, and is tested for all three; no
+        schema text changed.
+      - **Docs:** `administration.md`: the socket path, a fourth upgrade note (a SQL Server
+        sensor that was Up under `require` against a server saying it does not encrypt reads
+        Down, and was sending its password in clear), the timeout sentences, the
+        per-transport table.
+      - **Tests:** `db-checked-target.test.ts` is 139, none skipped. The path for each policy
+        value and for none said, against what the same policy says of `127.0.0.1`, and
+        through the real `pg`; the real `tedious` routed by the fake to a port that never
+        answers, under `link-local` and `none`, and the connector by itself; the query-phase
+        timeout; `require` against NOT_SUP and OFF for an address, a name and `none`, with
+        verification on and off, and `prefer` beside each; the PRELOGIN reader on every
+        prefix of an answer, two packets, another option order, and answers that name no
+        encryption; a server that never finishes its answer; PostgreSQL and MySQL under
+        `require` against a server with no TLS.
+      - **Mutation:** 20 of 20 killed by a test at the first pass, each planted alone, the
+        built file compared against the baseline after every restore.
+      - **Not proven:** that a real SQL Server never answers ON or REQ in more than 64 KiB
+        (it answers in one small packet), and the guard against TDS 8 `strict`, which this
+        driver never asks for.
 
 - [x] **A-71 — what is left of an address under TLS** · S · A-67 · Found 2026-10-02 by `A-67`.
       The core's heartbeat uses `fetch`, which refuses `https://[::1]` for `A-60`'s reason and
