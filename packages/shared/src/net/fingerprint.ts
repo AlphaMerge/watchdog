@@ -49,6 +49,17 @@ export interface Fingerprint {
   vendor?: string;
   /** Why the classifier decided what it did, in words. Shown to an operator who disagrees. */
   evidence: string[];
+  /**
+   * Why nothing was asked of this address: the probe's target policy refuses it (`A-63`).
+   *
+   * Present only then, and it is the whole sentence an operator reads: the address, the policy
+   * and how to allow it. A host with this is not one that said nothing. It answered the sweep,
+   * and identification sent it nothing, so `ports` is empty and `kind` is `unknown` because
+   * nobody looked, not because nothing was there. No protocol version: a fingerprint's fields
+   * are left open on the wire, and a core that has never heard of this one stores it and shows
+   * the same sentence from `evidence`.
+   */
+  refused?: string;
 }
 
 /**

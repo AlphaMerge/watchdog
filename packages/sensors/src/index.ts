@@ -77,6 +77,9 @@ export type {
   WithheldPhase,
 } from './support/pinned-target.js';
 export {
+  // For the probe's discovery (`A-63`), which connects to addresses no sensor was given and is
+  // held to the same policy by the same function.
+  checkedTarget,
   DEFAULT_TARGET_POLICY,
   TARGET_POLICY_ENV,
   TargetRefusedError,

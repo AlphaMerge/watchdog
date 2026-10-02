@@ -18533,12 +18533,63 @@ because each is a decision rather than a defect:
       either given one or named in the administration guide as outside the policy with the
       reason, and a simulator test shows the refusal for each that is covered.
 
-- [ ] **A-63 — discovery is not held to the target policy** · S · A-57 · Found 2026-10-02 by
+- [x] **A-63 — discovery is not held to the target policy** · S · A-57 · Found 2026-10-02 by
       `A-57`. `discovery/ping-probe.ts` and `identify.ts` reach whatever a range or a name
       gives them. A ping is outside the policy on purpose; the identification that follows
       opens SNMP and TCP connections. **Done when** identification goes through
       `checkedTarget` under `probe.targetPolicy`, a refused address is reported as refused and
       not as absent, and a test shows it.
+
+      **A-63 outcome.** Identification asks nothing of an address the probe's target policy
+      refuses, and says it refused. The sweep is as it was.
+      - **`ping-probe.ts` and `sweep.ts` are untouched**, on purpose and for `A-57`'s reason:
+        an echo carries no credential and brings back no content. A link-local address in a
+        range is pinged and listed among the hosts that answered; a test pins that.
+      - **`identify` puts each target through `checkedTarget` once, before any source.** Every
+        source it has (the SNMP get, the TCP connects, the `Server` header and the reverse
+        lookup) is behind that one check, so a refused address is sent nothing, a PTR query
+        about it included. An address is checked as it stands and resolved by nobody, which is
+        every target a real run has: the core sends dotted quads. A name, which the wire schema
+        would let through, is resolved once for IPv4, every answer checked, and the sources
+        are handed the first checked address and never the name. A name that does not resolve
+        is a host that said nothing. `none` checks and resolves nothing, as for a sensor.
+      - **The policy is the probe's, read where the sensors read it.** `IdentifyRunner` takes
+        `targetPolicyFrom()` at construction, the `MS_TARGET_POLICY` that `main.ts` sets
+        before anything is built, so `main.ts` has no new line and discovery cannot be told
+        something the workers were not. Unset or unreadable is `link-local`, never `none`.
+      - **A refusal is a fingerprint with `refused`**: the sentence a refused sensor gives
+        (address, policy, and that `probe.targetPolicy` "none" refuses nothing), `kind`
+        `unknown`, no ports, and the same sentence as its only `evidence`. **No protocol
+        number**: `identify-progress` leaves a fingerprint's fields open on the wire and
+        `checkFingerprint` carries one it does not know into the `jsonb` column, so an older
+        core stores it and still has the sentence in `evidence`. The core now requires
+        `refused` to be text.
+      - **Where an operator reads it.** `GET /discovery/:id/summary` lists a refused host in
+        `errors`, which the discovery page already shows as "addresses had problems", merged
+        with a provisioning problem for the same address; the host counts as `unidentified`
+        in `byKind`, not `unknown`, and is not added to `identified`. `GET
+        /discovery/:id/hosts` carries `fingerprint.refused`. No route's schema changed and no
+        migration. The probe counts refusals in the runner's stats and logs each at `info`.
+      - **Nothing blocks the scheduler**: the check is in the main process as identification
+        always was, a literal makes no lookup, and a test holds the runner to its concurrency
+        bound with refusals among the hosts (and shows the bound is still reached).
+      - **Tests.** `identify-policy.test.ts` (29 cases): the SNMP simulator and a listening
+        socket count what reached them, for an address the policy allows, one it refuses
+        (three spellings, IPv4-mapped among them), `none`, a name, a name resolving to a
+        metadata address and one that does not resolve; 169.254.169.254, `::ffff:` spellings
+        and `fe80::1` against counted sources, since nothing can listen there; the runner
+        under each policy and each reading of the environment. Core: two summary cases in
+        `discovery.test.ts`, one row in `fingerprint-check.test.ts`.
+      - **Mutation: 18/18.** Each failed a test, and after each the source was restored and
+        the rebuilt `dist` compared with its hash from before the mutant. One survived the
+        first run (a name that does not resolve going on to the sources: the test used the
+        real sources, which found nothing either way), and that test now counts what is asked.
+      - **Found, not fixed.** The identify job's schema takes any string of 7 to 15 characters
+        as an address, so a core could send a name; the probe is now safe against one, and the
+        schema still says "dotted-quads" only in a comment. A refused host is still
+        provisioned like any host nothing recognised (the built-in templates give it a
+        device and a Ping sensor), which is right for ping; whether a site's own template
+        can add a connecting sensor to such a host was not looked at.
 
 - [ ] **A-64 — the target policy has no exception for one device** · M · A-57 · Found
       2026-10-02 by `A-57`. `probe.targetPolicy` is one setting for a probe, so a site with one

@@ -707,20 +707,24 @@ export class DiscoveryService {
         values.push(one.address, JSON.stringify(one));
         return `($${String(at * 2 + 3)}::inet, $${String(at * 2 + 4)}::jsonb)`;
       });
-      const updated = await this.#db.query<{ address: string }>(
+      const updated = await this.#db.query<{ address: string; refused: boolean }>(
         `UPDATE discovery_host AS h
          SET fingerprint = v.fingerprint
          FROM (VALUES ${tuples.join(', ')}) AS v(address, fingerprint), discovery_run r
          WHERE h.run_id = $1 AND h.address = v.address AND h.fingerprint IS NULL
            AND r.id = h.run_id AND r.probe_id = $2
-         RETURNING host(h.address) AS address`,
+         RETURNING host(h.address) AS address, (h.fingerprint->>'refused') IS NOT NULL AS refused`,
         values,
       );
-      this.#identifiedCount += updated.length;
-      if (updated.length > 0) {
+      // A host the probe's target policy refused (`A-63`) is recorded, so the reason is kept and
+      // the pass moves on, and is not counted: nothing was asked of it, and "3 identified" beside
+      // three hosts nobody looked at would be the number an operator stops reading at.
+      const identified = updated.filter((one) => !one.refused).length;
+      this.#identifiedCount += identified;
+      if (identified > 0) {
         await this.#db.query(
           `UPDATE discovery_run SET identified = identified + $2 WHERE id = $1 AND probe_id = $3`,
-          [runId, updated.length, from],
+          [runId, identified, from],
         );
       }
     }
@@ -1014,7 +1018,10 @@ export class DiscoveryService {
     // distinct from the classifier's own `unknown`. Ordered by count so the breakdown reads as
     // "mostly Linux" without anybody having to sort it.
     const kinds = await this.#db.query<{ kind: string | null; count: number }>(
-      `SELECT fingerprint->>'kind' AS kind, count(*)::int AS count
+      // A host the target policy refused (`A-63`) carries a fingerprint to carry the reason, and
+      // was looked at by nobody: it counts with the unidentified, not as an `unknown`.
+      `SELECT CASE WHEN fingerprint->>'refused' IS NULL THEN fingerprint->>'kind' END AS kind,
+              count(*)::int AS count
        FROM discovery_host WHERE run_id = $1
        GROUP BY 1 ORDER BY count DESC, kind NULLS LAST`,
       [runId],
@@ -1032,7 +1039,33 @@ export class DiscoveryService {
     // `count(*)::int` rather than the default bigint, which node-postgres hands over as a
     // *string* to keep 64-bit values exact — and `"3" > "12"` would have sorted the breakdown
     // wrong in a way that only shows up past ten of something.
-    return describeRun(run, kinds, vendors, await this.problems(runId));
+    return describeRun(run, kinds, vendors, await this.#errors(runId));
+  }
+
+  /**
+   * What an operator is told went wrong, an entry an address: what provisioning could not
+   * create, and what the probe's target policy would not let identification ask (`A-63`).
+   *
+   * **A refusal is here and not only in the host's fingerprint** because this list is what the
+   * page shows, and "answered, and nothing known about it" with no reason reads as an empty
+   * host. Somebody who swept 169.254.0.0/16 on purpose is told that the probe refused, and the
+   * sentence names the setting that allows it.
+   */
+  async #errors(runId: number): Promise<{ address: string; problem: string }[]> {
+    const refused = await this.#db.query<{ address: string; problem: string }>(
+      `SELECT host(address) AS address, fingerprint->>'refused' AS problem
+       FROM discovery_host
+       WHERE run_id = $1 AND fingerprint->>'refused' IS NOT NULL
+       ORDER BY discovery_host.address`,
+      [runId],
+    );
+    const errors = await this.problems(runId);
+    for (const one of refused) {
+      const held = errors.find((error) => error.address === one.address);
+      if (held === undefined) errors.push({ address: one.address, problem: one.problem });
+      else held.problem = `${one.problem}; ${held.problem}`;
+    }
+    return errors;
   }
 
   /** What a provisioning pass could not create, and why. */

@@ -46,6 +46,8 @@ export async function snmpSystem(
   address: string,
   community: string,
   timeoutMs: number,
+  /** The agent's port. Only a test against the simulator gives one. */
+  port?: number,
 ): Promise<{ sysDescr?: string; sysObjectId?: string; sysName?: string } | null> {
   // Imported here rather than at the top: a probe that runs no discovery never loads the SNMP
   // stack, which is the same rule every sensor type follows.
@@ -56,7 +58,7 @@ export async function snmpSystem(
     controller.abort();
   }, timeoutMs);
   const session = SnmpSession.open(
-    { host: address, ipVersion: 'v4' },
+    { host: address, ipVersion: 'v4', ...(port === undefined ? {} : { port }) },
     { version: 'v2c', community },
     { timeoutMs, retries: 0 },
   );
@@ -85,5 +87,11 @@ export async function snmpSystem(
   }
 }
 
-/** The real sources, as `identify` takes them. */
-export const LIVE_SOURCES: IdentifyDeps = { reverseLookup, snmpSystem };
+/**
+ * The real sources, as `identify` takes them. Each is handed an address `identify` put through
+ * the target policy first (`A-63`), and never a name: nothing here resolves one.
+ */
+export const LIVE_SOURCES: IdentifyDeps = {
+  reverseLookup,
+  snmpSystem: (address, community, timeoutMs) => snmpSystem(address, community, timeoutMs),
+};

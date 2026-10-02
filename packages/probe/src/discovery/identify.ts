@@ -5,7 +5,9 @@ import {
   type Evidence,
   type Fingerprint,
   type OpenPort,
+  type TargetPolicy,
 } from '@ms/shared';
+import { checkedTarget, TargetRefusedError, type ResolveHost } from '@ms/sensors';
 
 /**
  * What one address is (`D-02`).
@@ -26,6 +28,14 @@ import {
  * service volunteers, and — for SNMP — the community an operator configured on the run, which is
  * the one credential it has. A host that refuses all of that is reported as it is, with `unknown`
  * and the evidence that led there.
+ *
+ * **Held to the probe's target policy** (`A-63`), as every sensor that connects is (`A-57`). The
+ * address goes through `checkedTarget` once, before any source is asked, and one the policy
+ * refuses is sent nothing at all: no SNMP get, no TCP connect, no PTR query about it. What comes
+ * back says so in `refused`, which is a different answer from a host that said nothing. The ping
+ * that found the address is outside the policy on purpose (`ping-probe.ts`): an echo carries no
+ * credential and brings back no content, where a community string is a credential and a banner
+ * is content.
  */
 
 export interface IdentifyOptions {
@@ -35,6 +45,8 @@ export interface IdentifyOptions {
   readonly community: string;
   /** Ports to try, defaulting to the bounded list in `@ms/shared`. */
   readonly ports?: readonly number[];
+  /** `probe.targetPolicy`. Absent, the default (`link-local`), as it is for a check. */
+  readonly policy?: TargetPolicy;
 }
 
 export interface IdentifyDeps {
@@ -58,17 +70,69 @@ export interface IdentifyDeps {
     port: number,
     timeoutMs: number,
   ) => Promise<string | null>;
+  /** What resolves a target given as a name. Absent, the system's resolver. */
+  readonly resolve?: ResolveHost;
+}
+
+/** A lookup here is ended by its own bound, like every source: nothing cancels one host. */
+const NEVER_ABORTED = new AbortController().signal;
+
+/**
+ * Where the sources may connect, or the refusal.
+ *
+ * **One lookup a target, and for most targets none**: a discovery run walks a range, so its
+ * targets are addresses, and an address is checked as it stands and resolved by nobody. A name
+ * is resolved once, every answer is checked, and the sources are handed the first address
+ * rather than the name, so nothing resolves it a second time and is answered differently.
+ */
+async function whereToConnect(
+  address: string,
+  options: IdentifyOptions,
+  deps: IdentifyDeps,
+): Promise<{ connectTo: string } | { refused: string } | null> {
+  try {
+    const checked = await checkedTarget({
+      host: address,
+      // Every source speaks IPv4 (`family: 4`, `ipVersion: 'v4'`), so that is what is asked for.
+      family: 4,
+      timeoutMs: options.timeoutMs,
+      signal: NEVER_ABORTED,
+      verb: 'identify',
+      doing: `identifying ${address}`,
+      ...(options.policy === undefined ? {} : { policy: options.policy }),
+      ...(deps.resolve === undefined ? {} : { resolve: deps.resolve }),
+    });
+    return { connectTo: checked?.addresses[0]?.address ?? address };
+  } catch (error) {
+    if (error instanceof TargetRefusedError) return { refused: `not identified: ${error.message}` };
+    // A name that did not resolve: there is nowhere to connect, and that is a host that said
+    // nothing, as a source that fails is.
+    return null;
+  }
 }
 
 /** Identifies one address. Never throws: an unidentifiable host is a result, not a failure. */
 export async function identify(
-  address: string,
+  target: string,
   options: IdentifyOptions,
   deps: IdentifyDeps,
 ): Promise<Fingerprint> {
   const tcp = deps.tcpProbe ?? probeTcp;
   const http = deps.httpServer ?? readHttpServer;
   const wanted = options.ports ?? IDENTIFY_PORTS.map((one) => one.port);
+
+  const where = await whereToConnect(target, options, deps);
+  if (where === null) return classify({ address: target, ports: [] });
+  if ('refused' in where) {
+    // In `evidence` as well as in its own field: a core built before the field shows an
+    // operator the evidence, and the reason must not depend on which core reads it.
+    return {
+      ...classify({ address: target, ports: [] }),
+      evidence: [where.refused],
+      refused: where.refused,
+    };
+  }
+  const address = where.connectTo;
 
   // All at once. Twelve ports plus a PTR plus an SNMP get, run in series at a one-second
   // timeout, is fourteen seconds a host — which on a /24 of two hundred hosts is nearly an hour
@@ -89,7 +153,7 @@ export async function identify(
     web === undefined ? null : await settle(http(address, web.port, options.timeoutMs), null);
 
   const evidence: Evidence = {
-    address,
+    address: target,
     ports: openPorts,
     ...(reverseName === null ? {} : { reverseName }),
     ...(snmp?.sysDescr === undefined ? {} : { sysDescr: snmp.sysDescr }),

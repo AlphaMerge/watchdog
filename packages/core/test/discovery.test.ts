@@ -852,6 +852,78 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       );
     });
 
+    it('reports a host the probe refused to identify as refused, not as identified (A-63)', async () => {
+      const run = await start();
+      await discovery.progress(
+        probeId,
+        run.id,
+        6,
+        [
+          { address: '10.0.0.1', rttMs: 1 },
+          { address: '10.0.0.2', rttMs: 1 },
+          { address: '10.0.0.3', rttMs: 1 },
+          { address: '10.0.0.4', rttMs: 1 },
+        ],
+        0,
+      );
+      await discovery.finished(probeId, run.id, 'done', 6, '');
+      const why = 'not identified: refusing to identify 10.0.0.2, which is a private address';
+      await discovery.identified(probeId, run.id, 3, [
+        fingerprint('10.0.0.1'),
+        fingerprint('10.0.0.2', { kind: 'unknown', confidence: 0, evidence: [why], refused: why }),
+        fingerprint('10.0.0.3', { kind: 'unknown', confidence: 0, evidence: [] }),
+      ]);
+      await discovery.recordProvisioning(run.id, {
+        devicesCreated: 0,
+        matched: 0,
+        sensorsCreated: 0,
+        problems: [
+          { address: '10.0.0.2', problem: 'no template matched' },
+          { address: '10.0.0.4', problem: 'no credential for snmp' },
+        ],
+      });
+
+      const summary = await discovery.summary(run.id);
+      assert.ok(summary !== null);
+      // Nothing was asked of it, so it is not among the identified...
+      assert.equal(summary.scanned.identified, 2);
+      // ...nor an `unknown`, which is a host that was looked at: it counts with the host
+      // identification never reached.
+      assert.deepEqual(
+        [...summary.found.byKind].sort((a, b) => a.kind.localeCompare(b.kind)),
+        [
+          { kind: 'linux', count: 1 },
+          { kind: 'unidentified', count: 2 },
+          { kind: 'unknown', count: 1 },
+        ],
+      );
+      // One entry an address, the refusal first, beside what provisioning could not do.
+      assert.deepEqual(summary.errors, [
+        { address: '10.0.0.2', problem: `${why}; no template matched` },
+        { address: '10.0.0.4', problem: 'no credential for snmp' },
+      ]);
+      // And the reason is on the host, for whoever reads the hosts.
+      const hosts = await discovery.hosts(run.id);
+      assert.equal(hosts.find((one) => one.address === '10.0.0.2')?.fingerprint?.refused, why);
+      assert.equal(
+        hosts.find((one) => one.address === '10.0.0.1')?.fingerprint?.refused,
+        undefined,
+      );
+    });
+
+    it('lists a refused host that provisioning had no complaint about', async () => {
+      const run = await start();
+      await discovery.progress(probeId, run.id, 6, [{ address: '10.0.0.5', rttMs: 1 }], 0);
+      await discovery.finished(probeId, run.id, 'done', 6, '');
+      const why = 'not identified: refusing to identify 10.0.0.5';
+      await discovery.identified(probeId, run.id, 1, [
+        fingerprint('10.0.0.5', { kind: 'unknown', confidence: 0, evidence: [why], refused: why }),
+      ]);
+      const summary = await discovery.summary(run.id);
+      assert.deepEqual(summary?.errors, [{ address: '10.0.0.5', problem: why }]);
+      assert.equal(summary.scanned.identified, 0);
+    });
+
     it('says where a run nobody started came from', async () => {
       // `D-07`. The schedule id is on the run row, because the question is asked from the run's
       // end and a schedule holds only its most recent one.

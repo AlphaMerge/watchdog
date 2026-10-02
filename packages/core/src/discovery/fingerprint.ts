@@ -24,6 +24,9 @@ const TEXT_FIELDS: ReadonlySet<string> = new Set([
   'sysName',
   'httpServer',
   'vendor',
+  // Why the probe's target policy stopped identification (`A-63`). Read as a string by the
+  // summary, which shows it to an operator.
+  'refused',
 ]);
 
 /** A fingerprint that can be matched, or the field that stops it and why (`D-12`). */

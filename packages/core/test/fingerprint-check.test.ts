@@ -46,6 +46,7 @@ describe('checking a fingerprint (D-12)', () => {
     ['a sysName that is a number', { ...valid, sysName: 7 }, 'sysName'],
     ['a reverseName that is a boolean', { ...valid, reverseName: true }, 'reverseName'],
     ['an httpServer that is a number', { ...valid, httpServer: 2 }, 'httpServer'],
+    ['a refusal that is not a sentence', { ...valid, refused: true }, 'refused'],
     ['ports that are not a list', { ...valid, ports: '22' }, 'ports'],
     ['a port that is nothing', { ...valid, ports: [null] }, 'ports[0].port'],
     [

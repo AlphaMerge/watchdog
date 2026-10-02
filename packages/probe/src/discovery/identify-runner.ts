@@ -1,5 +1,6 @@
 import type { Logger } from 'pino';
-import type { Fingerprint, IdentifyJob, SweepEnding } from '@ms/shared';
+import type { Fingerprint, IdentifyJob, SweepEnding, TargetPolicy } from '@ms/shared';
+import { targetPolicyFrom } from '@ms/sensors';
 import { identify, type IdentifyDeps } from './identify.js';
 
 /**
@@ -22,6 +23,14 @@ import { identify, type IdentifyDeps } from './identify.js';
 export interface IdentifyRunnerDeps {
   readonly logger: Logger;
   readonly sources: IdentifyDeps;
+  /**
+   * What identification will not connect to (`A-63`): nothing a sensor on this probe would be
+   * refused. Absent, `probe.targetPolicy` as the probe put it in its environment at start
+   * (`MS_TARGET_POLICY`), read the way every worker's catalogue reads it, so discovery and the
+   * sensors cannot be told different things. Unset or unreadable there, `link-local`, never
+   * `none`.
+   */
+  readonly policy?: TargetPolicy;
   /** How many checks are waiting for a worker. Identification stands down above zero. */
   readonly queueDepth: () => number;
   readonly onProgress: (runId: number, cursor: number, found: Fingerprint[]) => void;
@@ -46,6 +55,8 @@ const YIELD_MS = 250;
 export interface IdentifyStats {
   readonly running: number;
   readonly identified: number;
+  /** Addresses the target policy refused: reported to the core as refused, and sent nothing. */
+  readonly refused: number;
   readonly yieldedMs: number;
   readonly cancelled: number;
   readonly completed: number;
@@ -62,7 +73,9 @@ export class IdentifyRunner {
   readonly #deps: IdentifyRunnerDeps;
   readonly #logger: Logger;
   readonly #runs = new Map<number, Run>();
+  readonly #policy: TargetPolicy;
   #identified = 0;
+  #refused = 0;
   #yieldedMs = 0;
   #cancelled = 0;
   #completed = 0;
@@ -71,12 +84,14 @@ export class IdentifyRunner {
   constructor(deps: IdentifyRunnerDeps) {
     this.#deps = deps;
     this.#logger = deps.logger.child({ component: 'identify' });
+    this.#policy = deps.policy ?? targetPolicyFrom();
   }
 
   stats(): IdentifyStats {
     return {
       running: this.#runs.size,
       identified: this.#identified,
+      refused: this.#refused,
       yieldedMs: this.#yieldedMs,
       cancelled: this.#cancelled,
       completed: this.#completed,
@@ -200,11 +215,22 @@ export class IdentifyRunner {
           // `identify` falls back to the standard set — which is what such a core would have
           // meant anyway.
           ...(run.job.ports === undefined ? {} : { ports: run.job.ports }),
+          policy: this.#policy,
         },
         this.#deps.sources,
       );
+      // A refusal is reported like any fingerprint, so the core records why this host has
+      // nothing known about it and moves its cursor past it; it is counted apart.
       run.found.push(fingerprint);
-      this.#identified += 1;
+      if (fingerprint.refused === undefined) {
+        this.#identified += 1;
+      } else {
+        this.#refused += 1;
+        this.#logger.info(
+          { runId: run.job.runId, address, reason: fingerprint.refused },
+          'an address was not identified: the target policy refuses it',
+        );
+      }
     } catch (error) {
       // `identify` is written not to throw, so this is the belt to its braces. A host that
       // somehow failed anyway must not take the pass down: the sweep already proved it exists,

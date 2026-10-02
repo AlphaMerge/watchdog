@@ -683,6 +683,29 @@ as it stands and nothing is resolved, on every one of them.
   guard does, once. SNMP resolved it for each datagram, and now once a scan. SSH resolves when
   it opens a connection, as before, and not while it keeps one. Ping is unchanged.
 
+**Discovery is held to the same setting** (`A-63`). A discovery run has two halves, and the
+policy reads them as it reads sensors:
+
+- **The sweep is a ping, and is not held to it**, for the reason the ICMP row gives. A
+  link-local address in a range is pinged like any other and, if it answers, is listed among
+  the hosts that answered.
+- **Identification is held to it.** It opens TCP connections, reads banners and sends the run's
+  SNMP community, so each address goes through the same check a sensor's device does, once,
+  before anything is asked of it. An address is checked as it stands and nothing is resolved.
+  One the policy refuses is sent nothing at all: no SNMP request, no TCP connection, no reverse
+  lookup.
+- **A refused host is reported as refused, not as a host that said nothing.** The run's summary
+  lists it under the addresses that had problems, with the sentence a refused sensor gives:
+  `not identified: refusing to identify 169.254.10.20, which is link-local … this probe’s target
+  policy (link-local) refuses it … probe.targetPolicy “none” refuses nothing`. It is counted
+  with the unidentified hosts, not with the identified ones and not as an `unknown` kind, and
+  the same sentence is on the host in `GET /discovery/:id/hosts`, as `fingerprint.refused`.
+  The probe logs each refusal at `info`.
+- **Somebody sweeping `169.254.0.0/16` on purpose** sets `probe.targetPolicy` to `none` on that
+  probe, restarts it and runs discovery again. Without that, the built-in templates still give
+  each such host a device and a Ping sensor, which works, and any other sensor added to it
+  would be refused at its first scan.
+
 ---
 
 ## Inheritance
