@@ -496,11 +496,17 @@ if [ "${expected_profile}" = "v1" ]; then
   # and the upgrade went ahead all the same, which the assertions below are about. The probe
   # that was just started read the file with the setting in it, which a v1 probe starts on; the
   # file goes back now and the probe reads it at its next start.
-  if grep -q 'probe.json is valid for .*the upgrade goes ahead' /tmp/rerun.log && \
-     grep -q '^    warning: flowListener.enabled' /tmp/rerun.log; then
-    echo "    a passing check's warning: shown (flowListener.enabled on a v1 probe)"
+  #
+  # **Once** (`H-27`): the tarball asks the new build twice, in `place-release.sh` before the swap
+  # and in `ms-setup` after it, and `ms-setup` is the one that shows a pass its warnings. A count
+  # of two is the warning printed by both; `grep -c` prints 0 and exits 1 on none, which the
+  # comparison reads and `set -e` does not.
+  shown="$(grep -c '^    warning: flowListener.enabled' /tmp/rerun.log || true)"
+  if grep -q 'probe.json is valid for .*The check says:' /tmp/rerun.log && \
+     [ "${shown}" = "1" ]; then
+    echo "    a passing check's warning: shown once (flowListener.enabled on a v1 probe)"
   else
-    echo "    FAILED — the upgrade did not show the passing check's warning:" >&2
+    echo "    FAILED — the upgrade did not show the passing check's warning exactly once (${shown}):" >&2
     sed 's/^/      /' /tmp/rerun.log >&2
     failed=1
   fi

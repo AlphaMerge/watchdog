@@ -508,69 +508,79 @@ describe('ms-enrol', { skip: linux ? false : 'Linux only' }, () => {
   });
 });
 
+/**
+ * A launcher whose `config check` refuses any file that says `refused-port`. Letters a hex key
+ * cannot spell: setup writes one into every configuration it installs, and a marker of `bad`
+ * refused about 1.5% of runs for the key alone.
+ *
+ * A file that says `no-effect-setting` is warned about the way `runConfigCheck` warns (`B-08`):
+ * two lines marked `warning: ` on stderr, before anything else and whether or not the check then
+ * passes. A pass says what a real one says, on stdout, and one of its lines has the marker in
+ * the middle of it — which is not a warning. Every call is written to `STUB_LOG`.
+ */
+function launcher(svc: string, version: string): string {
+  return (
+    `#!/usr/bin/env bash\necho "ms-${svc} ${version} $*" >> "$STUB_LOG"\n` +
+    `if grep -q no-effect-setting "$4"; then\n` +
+    `  echo "warning: flowListener.enabled: is true, and this build carries no flow sensor type" >&2\n` +
+    `  echo "warning: a second thing ms-${svc} starts with" >&2\nfi\n` +
+    `grep -q refused-port "$4" && { echo "api.port: must be integer"; exit 1; }\n` +
+    `echo "configuration is valid for ms-${svc} ${version}"\n` +
+    `echo "  file            $4"\n` +
+    `echo "  ignored MS_*    MS_NOT_A_warning: line"\nexit 0\n`
+  );
+}
+
+/** What the stub launcher warns of first, as the check writes it. */
+const FIRST_WARNING =
+  'warning: flowListener.enabled: is true, and this build carries no flow sensor type';
+
+/** How many times `needle` is in `text`. */
+const count = (text: string, needle: string): number => text.split(needle).length - 1;
+
+/** An unpacked release, with the launcher above for each service. */
+function release(box: Sandbox, version: string): string {
+  const from = join(box.dir, `release-${version}`);
+  for (const sub of ['app', 'bin', 'etc', 'deploy/systemd', 'docs']) {
+    mkdirSync(join(from, sub), { recursive: true });
+  }
+  writeFileSync(join(from, 'VERSION'), `${version}\n`);
+  writeFileSync(join(from, 'app', 'marker'), version);
+  writeFileSync(join(from, 'docs', 'README.md'), version);
+  for (const svc of ['core', 'probe']) {
+    writeFileSync(join(from, 'bin', `ms-${svc}`), launcher(svc, version), { mode: 0o755 });
+    writeFileSync(join(from, 'etc', `${svc}.json`), '{}');
+    writeFileSync(join(from, 'deploy', 'systemd', `ms-${svc}.service`), '[Service]\n');
+  }
+  writeFileSync(join(from, 'deploy', 'setup.sh'), '#!/usr/bin/env bash\n');
+  return from;
+}
+
+function installed(box: Sandbox): { prefix: string; conf: string } {
+  const prefix = join(box.dir, 'opt-ms');
+  const conf = join(box.dir, 'etc-ms');
+  mkdirSync(join(prefix, 'app'), { recursive: true });
+  mkdirSync(join(prefix, 'bin'));
+  mkdirSync(conf);
+  writeFileSync(join(prefix, 'VERSION'), '1.0.0\n');
+  writeFileSync(join(prefix, 'app', 'marker'), '1.0.0');
+  writeFileSync(join(prefix, 'operators-own-notes.txt'), 'mine');
+  writeFileSync(join(conf, 'core.json'), '{"api":{"port":8080}}');
+  writeFileSync(join(conf, 'probe.json'), '{}');
+  return { prefix, conf };
+}
+
+const place = (box: Sandbox, from: string, prefix: string, conf: string, ...more: string[]) =>
+  box.run(
+    [script('place-release.sh'), '--from', from, '--prefix', prefix, '--confdir', conf, ...more],
+    {
+      STATE_ms_core: 'active',
+      STATE_ms_probe: 'active',
+      STUB_PREFIX: prefix,
+    },
+  );
+
 describe('placing a release', { skip: linux ? false : 'Linux only' }, () => {
-  /**
-   * An unpacked release whose launcher's `config check` refuses any file that says `refused-port`.
-   * Letters a hex key cannot spell: setup writes one into every configuration it installs, and a
-   * marker of `bad` refused about 1.5% of runs for the key alone.
-   *
-   * A file that says `no-effect-setting` is warned about the way `runConfigCheck` warns
-   * (`B-08`): two lines marked `warning: ` on stderr, before anything else and whether or not
-   * the check then passes. A pass says what a real one says, on stdout, and one of its lines has
-   * the marker in the middle of it — which is not a warning.
-   */
-  function release(box: Sandbox, version: string): string {
-    const from = join(box.dir, `release-${version}`);
-    for (const sub of ['app', 'bin', 'etc', 'deploy/systemd', 'docs']) {
-      mkdirSync(join(from, sub), { recursive: true });
-    }
-    writeFileSync(join(from, 'VERSION'), `${version}\n`);
-    writeFileSync(join(from, 'app', 'marker'), version);
-    writeFileSync(join(from, 'docs', 'README.md'), version);
-    for (const svc of ['core', 'probe']) {
-      writeFileSync(
-        join(from, 'bin', `ms-${svc}`),
-        `#!/usr/bin/env bash\necho "ms-${svc} ${version} $*" >> "$STUB_LOG"\n` +
-          `if grep -q no-effect-setting "$4"; then\n` +
-          `  echo "warning: flowListener.enabled: is true, and this build carries no flow sensor type" >&2\n` +
-          `  echo "warning: a second thing ms-${svc} starts with" >&2\nfi\n` +
-          `grep -q refused-port "$4" && { echo "api.port: must be integer"; exit 1; }\n` +
-          `echo "configuration is valid for ms-${svc} ${version}"\n` +
-          `echo "  file            $4"\n` +
-          `echo "  ignored MS_*    MS_NOT_A_warning: line"\nexit 0\n`,
-        { mode: 0o755 },
-      );
-      writeFileSync(join(from, 'etc', `${svc}.json`), '{}');
-      writeFileSync(join(from, 'deploy', 'systemd', `ms-${svc}.service`), '[Service]\n');
-    }
-    writeFileSync(join(from, 'deploy', 'setup.sh'), '#!/usr/bin/env bash\n');
-    return from;
-  }
-
-  function installed(box: Sandbox): { prefix: string; conf: string } {
-    const prefix = join(box.dir, 'opt-ms');
-    const conf = join(box.dir, 'etc-ms');
-    mkdirSync(join(prefix, 'app'), { recursive: true });
-    mkdirSync(join(prefix, 'bin'));
-    mkdirSync(conf);
-    writeFileSync(join(prefix, 'VERSION'), '1.0.0\n');
-    writeFileSync(join(prefix, 'app', 'marker'), '1.0.0');
-    writeFileSync(join(prefix, 'operators-own-notes.txt'), 'mine');
-    writeFileSync(join(conf, 'core.json'), '{"api":{"port":8080}}');
-    writeFileSync(join(conf, 'probe.json'), '{}');
-    return { prefix, conf };
-  }
-
-  const place = (box: Sandbox, from: string, prefix: string, conf: string, ...more: string[]) =>
-    box.run(
-      [script('place-release.sh'), '--from', from, '--prefix', prefix, '--confdir', conf, ...more],
-      {
-        STATE_ms_core: 'active',
-        STATE_ms_probe: 'active',
-        STUB_PREFIX: prefix,
-      },
-    );
-
   it('asks the new build first, and on a refusal changes nothing at all', () => {
     const box = sandbox();
     const { prefix, conf } = installed(box);
@@ -620,34 +630,18 @@ describe('placing a release', { skip: linux ? false : 'Linux only' }, () => {
     assert.equal(readFileSync(join(prefix, 'previous', 'VERSION'), 'utf8'), '2.0.0\n');
   });
 
-  it('shows the warnings of a check that passed, and goes ahead (`H-26`)', () => {
+  it('keeps a passing check’s warnings to itself, which are ms-setup’s to show (`H-27`)', () => {
     const box = sandbox();
     const { prefix, conf } = installed(box);
-    // The probe's file and not the core's, so the heading has a file to get wrong.
     writeFileSync(join(conf, 'probe.json'), '{"flowListener":{"enabled":"no-effect-setting"}}');
     const result = place(box, release(box, '2.0.0'), prefix, conf);
 
     assert.equal(result.status, 0, result.stderr);
-    // Every warning, each as the check wrote it, under a heading that names the file and says
-    // what is happening to the upgrade — on stderr, where the check put them.
-    const said = result.stderr.split('\n');
-    const heading = said.findIndex((line) => line.includes('probe.json is valid for 2.0.0'));
-    assert.ok(heading >= 0, result.stderr);
-    assert.match(
-      said[heading] ?? '',
-      /^==> .*etc-ms\/probe\.json is valid for 2\.0\.0, and the upgrade goes ahead/,
-    );
-    assert.equal(
-      said[heading + 1],
-      '    warning: flowListener.enabled: is true, and this build carries no flow sensor type',
-    );
-    assert.equal(said[heading + 2], '    warning: a second thing ms-probe starts with');
-    // And only the warnings: the rest of a pass is not news, marker in the middle or not.
-    assert.doesNotMatch(result.stderr + result.stdout, /configuration is valid for/);
-    assert.doesNotMatch(result.stderr + result.stdout, /MS_NOT_A_warning/);
-    // Nothing is said about the file that had none.
-    assert.doesNotMatch(result.stderr, /core\.json/);
-    assert.doesNotMatch(result.stderr, /not valid|Nothing was changed/);
+    // The check was asked, and warned; nothing of it is said here, on either stream. Said here
+    // and by ms-setup, which every tarball install runs next, it was said twice.
+    assert.ok(box.logged().includes('ms-probe 2.0.0 config check --config'), box.logged());
+    assert.equal(result.stderr, '');
+    assert.doesNotMatch(result.stdout, /warning|is valid for/);
 
     // The upgrade itself is the one a silent pass gets.
     const log = box.logged();
@@ -1106,6 +1100,43 @@ describe('what starts a crashed service again, and who ships it (`H-23`)', () =>
   });
 });
 
+describe('who shows a passing check’s warnings (`H-27`)', () => {
+  const read = (path: string): string => readFileSync(join(repoRoot, path), 'utf8');
+  /** The `grep` that picks a check's warnings out of what it said. */
+  const PICKS_WARNINGS = "grep '^warning: '";
+
+  it('is ms-setup, in one place, and no other installer script', () => {
+    assert.equal(count(read('deploy/setup.sh'), PICKS_WARNINGS), 1);
+    for (const other of ['place-release.sh', 'install.sh', 'install-probe.sh']) {
+      assert.equal(count(read(`deploy/${other}`), PICKS_WARNINGS), 0, other);
+    }
+  });
+
+  it('is reached by both tarball installers, after the release is placed', () => {
+    for (const installer of ['install.sh', 'install-probe.sh']) {
+      const text = read(`deploy/${installer}`);
+      const placed = text.indexOf('/deploy/place-release.sh" "$' + '{place_args[@]}"');
+      const setup = text.indexOf('/libexec/ms-setup" "$' + '{setup_args[@]}"');
+      assert.ok(placed >= 0, `${installer} does not place a release`);
+      assert.ok(setup >= 0, `${installer} does not run ms-setup`);
+      assert.ok(placed < setup, `${installer} runs ms-setup before the release is in`);
+      assert.equal(count(text, '/libexec/ms-setup" '), 1, `${installer} runs ms-setup twice`);
+    }
+  });
+
+  it('is all a package runs: once from the .deb’s postinst and once from the .rpm’s %post', () => {
+    for (const [packager, scriptlet] of [
+      ['scripts/package-deb.sh', /configure\)\n\s+\/opt\/ms\/libexec\/ms-setup --components /],
+      ['scripts/package-rpm.sh', /%post\n(?:#.*\n)*\/opt\/ms\/libexec\/ms-setup --components /],
+    ] as const) {
+      const text = read(packager);
+      assert.match(text, scriptlet, packager);
+      assert.equal(count(text, '/opt/ms/libexec/ms-setup --'), 1, `${packager} runs it twice`);
+      assert.doesNotMatch(text, /place-release/, `${packager} places a release as well`);
+    }
+  });
+});
+
 describe('the units an earlier release left in /etc', () => {
   it('are each one setup.sh knows as stock', () => {
     // `scripts/smoke/legacy-units` is what the smoke tests plant as "left by an earlier
@@ -1141,11 +1172,7 @@ describe(
       mkdirSync(conf);
       writeFileSync(join(prefix, 'VERSION'), '2.0.0\n');
       for (const svc of ['core', 'probe']) {
-        writeFileSync(
-          join(prefix, 'bin', `ms-${svc}`),
-          `#!/usr/bin/env bash\ngrep -q refused-port "$4" && { echo "api.port: must be integer"; exit 1; }\nexit 0\n`,
-          { mode: 0o755 },
-        );
+        writeFileSync(join(prefix, 'bin', `ms-${svc}`), launcher(svc, '2.0.0'), { mode: 0o755 });
         writeFileSync(
           join(prefix, 'etc', `${svc}.json`),
           readFileSync(join(repoRoot, 'deploy', 'examples', `${svc}.json`)),
@@ -1268,6 +1295,167 @@ describe(
         'the probe was abandoned',
       );
       assert.ok(box.logged().includes('systemctl reset-failed ms-core.service'));
+    });
+
+    /** The lines under the heading for `file`, up to the next line that is not indented. */
+    function saidOf(stderr: string, file: string, verdict: string): string[] {
+      const said = stderr.split('\n');
+      const heading = said.findIndex((line) => line.includes(`${file} ${verdict}`));
+      assert.ok(heading >= 0, `no heading for ${file} ${verdict}:\n${stderr}`);
+      const under: string[] = [];
+      for (const line of said.slice(heading + 1)) {
+        if (!line.startsWith('    ')) break;
+        under.push(line);
+      }
+      return under;
+    }
+
+    it('shows the warnings of a check that passed, once, and starts the services (`H-27`)', () => {
+      // What a .deb's postinst and an .rpm's %post run, and a person running ms-setup again:
+      // this script and `--components`, with nothing before it.
+      const box = sandbox();
+      const { prefix, conf } = installation(box, '{"api":{"port":8080}}');
+      // The probe's file and not the core's, so the heading has a file to get wrong.
+      writeFileSync(join(conf, 'probe.json'), '{"flowListener":{"enabled":"no-effect-setting"}}');
+      const result = setup(box, prefix, conf, ['--components', 'core,probe'], {
+        STATE_ms_core: 'active',
+        STATE_ms_probe: 'active',
+      });
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+
+      // Every warning, each as the check wrote it, under a heading that names the file and the
+      // version — on stderr, where the check put them.
+      assert.match(
+        result.stderr,
+        /^==> .*etc-ms\/probe\.json is valid for 2\.0\.0\. The check says:$/m,
+      );
+      assert.deepEqual(saidOf(result.stderr, 'probe.json', 'is valid for 2.0.0'), [
+        `    ${FIRST_WARNING}`,
+        '    warning: a second thing ms-probe starts with',
+      ]);
+      // Once, on either stream.
+      assert.equal(count(result.stdout + result.stderr, FIRST_WARNING), 1);
+      assert.equal(count(result.stdout + result.stderr, 'is valid for 2.0.0'), 1);
+      // And only the warnings: the rest of a pass is not news, marker in the middle or not.
+      assert.doesNotMatch(result.stderr + result.stdout, /configuration is valid for/);
+      assert.doesNotMatch(result.stderr + result.stdout, /MS_NOT_A_warning/);
+      // Nothing is said about the file that had none, and nothing is refused.
+      assert.doesNotMatch(result.stderr, /core\.json is valid/);
+      assert.doesNotMatch(result.stderr, /not valid|does not load/);
+
+      // The start is the one a silent pass gets.
+      const log = box.logged();
+      assert.ok(log.includes('systemctl restart ms-core.service'), log);
+      assert.ok(log.includes('systemctl restart ms-probe.service'), log);
+    });
+
+    it('says nothing about a check that passed with nothing to say', () => {
+      const box = sandbox();
+      const { prefix, conf } = installation(box, '{"api":{"port":8080}}');
+      const result = setup(box, prefix, conf, ['--components', 'core,probe'], {
+        STATE_ms_core: 'active',
+        STATE_ms_probe: 'active',
+      });
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+      assert.ok(box.logged().includes('ms-core 2.0.0 config check --config'), box.logged());
+      assert.doesNotMatch(result.stdout + result.stderr, /is valid for|warning: |The check says/);
+    });
+
+    it('shows a pass its warnings beside a refusal, and the refusal whole, each once', () => {
+      const box = sandbox();
+      const { prefix, conf } = installation(
+        box,
+        '{"api":{"port":"refused-port"},"x":"no-effect-setting"}',
+      );
+      writeFileSync(join(conf, 'probe.json'), '{"flowListener":{"enabled":"no-effect-setting"}}');
+      const result = setup(box, prefix, conf, ['--components', 'core,probe'], {
+        STATE_ms_core: 'inactive',
+        STATE_ms_probe: 'inactive',
+      });
+
+      assert.equal(result.status, 1, 'a warning beside a refusal let the refusal through');
+      // The refused file: the whole of what the check said, in the order it said it.
+      assert.deepEqual(saidOf(result.stderr, 'core.json', 'is not valid for 2.0.0'), [
+        `    ${FIRST_WARNING}`,
+        '    warning: a second thing ms-core starts with',
+        '    api.port: must be integer',
+      ]);
+      // The file that passed: its warnings and nothing else.
+      assert.deepEqual(saidOf(result.stderr, 'probe.json', 'is valid for 2.0.0'), [
+        `    ${FIRST_WARNING}`,
+        '    warning: a second thing ms-probe starts with',
+      ]);
+      assert.equal(count(result.stderr, 'warning: a second thing ms-core'), 1);
+      assert.equal(count(result.stderr, 'warning: a second thing ms-probe'), 1);
+      assert.match(result.stderr, /does not load under 2\.0\.0, so nothing was started/);
+      assert.ok(!box.logged().includes('restart'), 'something was started beside a refusal');
+    });
+
+    it('asks nothing and shows nothing where nothing is to be started', () => {
+      // `--no-start`, and the variable a package's scriptlet is given in its place.
+      for (const [args, extra] of [
+        [['--components', 'core,probe', '--no-start'], {}],
+        [['--components', 'core,probe'], { MS_SETUP_NO_START: '1' }],
+      ] as const) {
+        const box = sandbox();
+        const { prefix, conf } = installation(box, '{"api":{"port":8080}}');
+        writeFileSync(join(conf, 'probe.json'), '{"flowListener":{"enabled":"no-effect-setting"}}');
+        const result = setup(box, prefix, conf, args, extra);
+        assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+        assert.ok(!box.logged().includes('config check'), box.logged());
+        assert.doesNotMatch(result.stdout + result.stderr, /warning: |is valid for/);
+        assert.ok(!box.logged().includes('restart'), box.logged());
+      }
+    });
+
+    it('shows a tarball upgrade each warning once, though the check is asked twice (`H-27`)', () => {
+      // What `install.sh` and `install-probe.sh` run, in their order: `place-release.sh` from
+      // the unpacked release, then the `ms-setup` it put under the prefix — this tree's
+      // `setup.sh`, which is what a release ships.
+      const box = sandbox();
+      const { prefix, conf } = installed(box);
+      writeFileSync(join(conf, 'probe.json'), '{"flowListener":{"enabled":"no-effect-setting"}}');
+      const from = release(box, '2.0.0');
+      writeFileSync(join(from, 'deploy', 'setup.sh'), readFileSync(script('setup.sh')));
+      writeFileSync(
+        join(from, 'deploy', 'systemd', 'ms-recover@.service'),
+        readFileSync(join(repoRoot, 'deploy', 'systemd', 'ms-recover@.service')),
+      );
+
+      const placed = place(box, from, prefix, conf, '--components', 'core,probe');
+      assert.equal(placed.status, 0, placed.stderr);
+      const result = box.run(
+        [
+          join(prefix, 'libexec', 'ms-setup'),
+          '--prefix',
+          prefix,
+          '--confdir',
+          conf,
+          '--components',
+          'core,probe',
+        ],
+        {
+          MS_SETUP_UNIT_DIR: join(box.dir, 'usr-lib-units'),
+          MS_SETUP_LEGACY_UNIT_DIR: join(box.dir, 'etc-units'),
+          STATE_ms_core: 'active',
+          STATE_ms_probe: 'active',
+        },
+      );
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+
+      // Both asked the new build about the probe's file, and it warned both times.
+      assert.equal(count(box.logged(), 'ms-probe 2.0.0 config check --config'), 2, box.logged());
+      // The operator saw one heading and each warning once, in everything both scripts wrote.
+      const shown = placed.stdout + placed.stderr + result.stdout + result.stderr;
+      assert.equal(count(shown, FIRST_WARNING), 1, shown);
+      assert.equal(count(shown, 'warning: a second thing ms-probe starts with'), 1, shown);
+      assert.equal(count(shown, 'probe.json is valid for 2.0.0'), 1, shown);
+      assert.equal(placed.stderr, '', 'and it was not place-release.sh that showed it');
+      assert.deepEqual(saidOf(result.stderr, 'probe.json', 'is valid for 2.0.0'), [
+        `    ${FIRST_WARNING}`,
+        '    warning: a second thing ms-probe starts with',
+      ]);
+      assert.ok(box.logged().includes('systemctl restart ms-probe.service'), box.logged());
     });
 
     it('lists the machine’s own name in a fresh core’s api.allowedHosts, and never an address (A-47)', () => {

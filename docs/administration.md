@@ -777,8 +777,11 @@ flow port whatever its configuration says — it logs *flowListener.enabled is s
 carries no flow sensor type* at start and carries on. `ms-probe config check` says the same on
 stderr, in a line beginning `warning:` that names the setting, and still passes (`B-08`): the
 installer refuses an upgrade when that check fails, and a setting with no effect is not a reason
-to hold a probe on its old version. An installer does not print the output of a
-check that passed, so run the check by hand to see it. Set the key to `false` to be rid of it.
+to hold a probe on its old version. Every installer shows the warning once, on an install, an
+upgrade or `ms-setup` run again, under `==> /etc/ms/probe.json is valid for <version>. The check
+says:`, and starts the probe all the same; a staged install (`--no-start`, or
+`MS_SETUP_NO_START=1` for a package) does not run the check and shows nothing. Set the key to
+`false` to be rid of it.
 
 In a build that has it, the collector is **off until you turn it on**, like the SNMP trap and
 syslog listeners: a probe that opened a port nobody asked for is a surprise on a firewall audit.

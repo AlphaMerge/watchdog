@@ -16,7 +16,8 @@
 #   2. Ask the *new* build whether it can read the configuration on disk, with the new launcher,
 #      while the old services are still running on the old tree. A refusal removes the copy and
 #      leaves the installation exactly as it was, so "the old version is still running" is true.
-#      A pass with warnings goes ahead, and the warnings are shown (`H-26`).
+#      A pass goes ahead and says nothing here, warnings or none: `ms-setup` asks again once the
+#      release is in, and is the one place that shows them (`H-27`).
 #   3. Stop the services, move the release in — renames, not copies, so the window is short and
 #      cannot fail half-way for want of space — and keep the one it replaces at
 #      ${PREFIX}/previous, which is what a rollback starts from.
@@ -102,19 +103,13 @@ if [ "${start_services}" -eq 1 ]; then
   for svc in "${components[@]}"; do
     [ -f "${CONFDIR}/${svc}.json" ] || continue
     [ -x "${incoming}/bin/ms-${svc}" ] || continue
-    if out="$("${incoming}/bin/ms-${svc}" config check --config "${CONFDIR}/${svc}.json" 2>&1)"; then
-      # **A check that passes can still have something to say** (`H-26`): a setting the new build
-      # starts with and that does nothing under it, which the check marks `warning: ` and exits 0
-      # on (`B-08`). Kept to itself here, it reached a person who ran the check by hand and
-      # nobody who upgraded. Only the marked lines: the rest of a pass is "configuration is
-      # valid" and where it was read from, which is not news to somebody upgrading. `|| true`
-      # because a pass with no warning is the ordinary case and `grep` exits 1 on it.
-      warnings="$(printf '%s\n' "${out}" | grep '^warning: ' || true)"
-      if [ -n "${warnings}" ]; then
-        echo "==> ${CONFDIR}/${svc}.json is valid for ${version}, and the upgrade goes ahead. It says:" >&2
-        printf '%s\n' "${warnings}" | sed 's/^/    /' >&2
-      fi
-    else
+    # **A pass is kept to itself, warnings and all** (`H-27`). A check that passes can still warn
+    # (`B-08`), and somebody upgrading has to be shown it — once. `ms-setup` runs after this for
+    # every tarball install and is all a package runs, so it is the one place that prints a
+    # passing check's warnings; printed here as well (`H-26`), a tarball upgrade showed each one
+    # twice. Only a refusal is this script's to report, because only here can it still leave
+    # everything as it was.
+    if ! out="$("${incoming}/bin/ms-${svc}" config check --config "${CONFDIR}/${svc}.json" 2>&1)"; then
       echo "==> ${CONFDIR}/${svc}.json is not valid for ${version}:" >&2
       printf '%s\n' "${out}" | sed 's/^/    /' >&2
       config_bad=1

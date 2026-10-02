@@ -20643,12 +20643,65 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       the same way: a package upgrade still shows no warning. Fixing it there as well would
       show a tarball upgrade the same warning twice, so it wants deciding rather than copying.
 
+      **Moved by `H-27`, 2026-10-02.** The printing described above is now `ms-setup`'s and
+      `place-release.sh` says nothing of a pass; the heading is `… is valid for <version>. The
+      check says:`. The smoke assertion was rewritten to match and to count the warning once,
+      and is still unrun. One smoke install settles this ticket and that one's tarball half.
+
 - [ ] **H-27 — a package upgrade does not show a passing config check's warnings** · S · H-26 ·
       Found 2026-10-02 by `H-26`. `deploy/setup.sh` runs the same check for the `.deb` and the
       `.rpm`, which never go through `place-release.sh`, and keeps a passing check's output.
       Printing it there as well would show a tarball upgrade the warning twice. **Done when**
       one place prints it for every way of upgrading, once, and the smoke install shows it for
       a package and for a tarball.
+
+      **Written 2026-10-02 and left open: no smoke install has been run, and the package smoke
+      has no assertion for it.** The first half of the Done-when is met and tested.
+
+      **Every way the check is run on an upgrade, and who shows a pass its warnings.**
+
+      | Way | What runs the check | Shows the warnings |
+      | --- | --- | --- |
+      | Tarball, `install.sh` and `install-probe.sh` | `place-release.sh` before the swap, then `ms-setup` after it | `ms-setup` |
+      | `.deb`, `postinst configure` | `ms-setup` | `ms-setup` |
+      | `.rpm`, `%post` | `ms-setup` | `ms-setup` |
+      | `ms-setup` run again by hand, or `dpkg --configure -a` | `ms-setup` | `ms-setup` |
+
+      **The one place is `deploy/setup.sh`.** Every way ends there, and a package runs nothing
+      else, so the printing `H-26` put in `place-release.sh` moved to it and `place-release.sh`
+      keeps a pass to itself again: a refusal is still its to report, because only there can
+      it leave everything as it was. A flag from the installer telling `ms-setup` the warnings
+      had been shown would have kept two copies of the printing and a way for them to
+      disagree. The lines marked `warning: ` go to stderr, indented, under
+      `==> <file> is valid for <version>. The check says:`; a pass with none prints nothing; a
+      refusal shows the check's whole output as before, and a file that passed beside one
+      that was refused still has its warnings shown. Exit status and what is started are
+      unchanged. `--no-start` and `MS_SETUP_NO_START=1` skip the check, as before, and show
+      nothing.
+
+      **Tests.** `core/test/deploy-scripts.test.ts`, against the stub launcher, now one
+      launcher for both scripts. `place-release.sh`: a pass with warnings writes nothing to
+      either stream and swaps (replacing `H-26`'s test of the opposite). `ms-setup`, as a
+      package and a re-run call it: the warnings once under the probe's file, and both
+      services started; a silent pass; a refusal beside a pass with warnings, each shown once
+      and nothing started; nothing asked under `--no-start` or `MS_SETUP_NO_START`. The
+      tarball: `place-release.sh` and then the `ms-setup` it placed, this tree's `setup.sh` —
+      the check is asked twice, and each warning and the heading are in everything both wrote
+      exactly once. And three that read the scripts: one `grep '^warning: '`, in `setup.sh`;
+      both tarball installers run `place-release.sh` and then `ms-setup`, once; the `.deb`'s
+      `postinst` and the `.rpm`'s `%post` run `ms-setup` once and place nothing. The file is
+      55 of 55, none skipped. **Mutations 12/12.**
+
+      **Docs.** `administration.md`, the flow collector: it said an installer does not print a
+      passing check's output.
+
+      **The smoke assertions.** `scripts/smoke-install.sh` (tarball, v1 profile): `H-26`'s
+      assertion now looks for the new heading and fails unless `rerun.log` holds
+      `    warning: flowListener.enabled` exactly once. **Written and not run.**
+      `scripts/smoke-packages.sh` is **unchanged**: it upgrades under `MS_SETUP_NO_START=1`,
+      which skips the check, so showing a warning there means an upgrade that starts services
+      on boxes that have no database, and only the upgrade's last four lines are kept. That
+      is not a small change, and it is the part of the Done-when nothing here meets.
 
 ## Release 1.1 — Windows
 

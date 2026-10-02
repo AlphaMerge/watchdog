@@ -390,13 +390,29 @@ done
 # this is the same question for the packages, which cannot ask before they unpack, and for a
 # re-run by hand. A `.json.new` sits beside each file for the diff.
 #
+# **This is the one place that shows what a passing check had to say** (`H-27`). A check that
+# passes can still warn — a setting the new build starts with and that does nothing under it,
+# marked `warning: ` and exit 0 (`B-08`) — and every way of installing or upgrading ends here:
+# the tarball's installers run this after `place-release.sh`, the `.deb`'s `postinst` and the
+# `.rpm`'s `%post` run nothing else, and so does a person running `ms-setup` again. So the
+# warnings are printed here and `place-release.sh` keeps a pass to itself, and nobody is shown
+# one twice. Only the marked lines: the rest of a pass is "configuration is valid" and where it
+# was read from. `|| true` because a pass with no warning is the ordinary case and `grep` exits 1
+# on it. A warning changes nothing else: the services are started as they would have been.
+#
 # `--no-start` skips it: that mode exists for a machine that is being staged, and the
 # configuration it will run with is not necessarily the one on disk yet.
 if [ "${start_services}" -eq 1 ]; then
   config_bad=0
   for svc in "${components[@]}"; do
     [ -f "${CONFDIR}/${svc}.json" ] || continue
-    if ! out="$("${PREFIX}/bin/ms-${svc}" config check --config "${CONFDIR}/${svc}.json" 2>&1)"; then
+    if out="$("${PREFIX}/bin/ms-${svc}" config check --config "${CONFDIR}/${svc}.json" 2>&1)"; then
+      warnings="$(printf '%s\n' "${out}" | grep '^warning: ' || true)"
+      if [ -n "${warnings}" ]; then
+        echo "==> ${CONFDIR}/${svc}.json is valid for ${version}. The check says:" >&2
+        printf '%s\n' "${warnings}" | sed 's/^/    /' >&2
+      fi
+    else
       echo "==> ${CONFDIR}/${svc}.json is not valid for ${version}:" >&2
       echo "${out}" | sed 's/^/    /' >&2
       config_bad=1
