@@ -716,6 +716,11 @@ export interface CredentialVouchingOptions {
   lateRefusalGraceMs?: number;
   /** Milliseconds on a clock that never goes back, for that window. Injected by a test. */
   now?: () => number;
+  /**
+   * Milliseconds on the wall clock, which is what the stored record is written in and read back
+   * against at the next start (`A-61`). `Date.now` when absent. Injected by a test.
+   */
+  wallNow?: () => number;
 }
 
 /**
@@ -731,6 +736,55 @@ export interface CredentialVouchingOptions {
  * have not sent.
  */
 export const LATE_REFUSAL_GRACE_MS = 10 * 60_000;
+
+/** What a stored time says at a start (`A-61`): how much of the grace has run, or that it is spent. */
+export type StoredStop =
+  | {
+      /**
+       * `kept`: the time is in the past and inside the grace. `ahead`: it is later than the
+       * clock reads now, so the clock was set back, and nothing can be counted from it.
+       */
+      readonly verdict: 'kept' | 'ahead';
+      /** How much of the grace has already run. Never negative, never more than the grace. */
+      readonly elapsedMs: number;
+    }
+  | { readonly verdict: 'spent' };
+
+/**
+ * How much of its grace a record stored at `storedAtMs` has used when a core starts at
+ * `wallNowMs`, both on the wall clock (`A-61`). Pure, so the clock's jumps are a table.
+ *
+ * The record is counted on a monotonic clock while a core runs, and a monotonic clock starts
+ * again with the process, so what crosses a restart is the wall clock's reading: the time that
+ * has run is the difference between the two. **A wall clock can be set, so the difference is
+ * bounded on both sides, and neither side gives more than the grace.**
+ *
+ * - **Past the grace, by however much**: spent. A clock set forward between the two readings
+ *   lands here too, and ends the grace early. That is the safe side: the refusal is the failed
+ *   scan it was before any of this was stored.
+ * - **Later than now**: the clock was set back. Nothing has run that can be counted, so the whole
+ *   grace is given, from this start: the most a record is ever given, and not a millisecond more.
+ *   The caller writes the time down again as now, so a second start does not give it twice.
+ * - **Not a number, or not finite**: spent. The column refuses infinity; this is for whatever
+ *   reaches here regardless.
+ */
+export function storedStop(storedAtMs: number, wallNowMs: number, graceMs: number): StoredStop {
+  if (!Number.isFinite(storedAtMs) || !Number.isFinite(wallNowMs)) return { verdict: 'spent' };
+  const elapsedMs = wallNowMs - storedAtMs;
+  if (elapsedMs > graceMs) return { verdict: 'spent' };
+  if (elapsedMs < 0) return { verdict: 'ahead', elapsedMs: 0 };
+  return { verdict: 'kept', elapsedMs };
+}
+
+/** What one start read back from the stored record (`A-61`). */
+export interface RestoredStops {
+  /** Entries taken up, each with what was left of its grace. */
+  restored: number;
+  /** Of those, the ones stored at a time later than this clock reads: given the grace from now. */
+  ahead: number;
+  /** Rows whose grace had run out, or whose time could not be read: removed. */
+  spent: number;
+}
 
 /** What one boot's `adopt` did. */
 export interface Adoption {
@@ -867,20 +921,26 @@ export class CredentialVouching {
    * An entry counts for nothing once the grace has run out, and goes at the probe's next
    * configuration after that, when the sensor is left to the probe again, and with its probe.
    *
-   * **In memory, and a restart forgets it** (`A-56`). Nothing the database holds says that a
-   * sensor was left to its probe under the configuration before, or when that stopped: a set's
-   * and an object's `updated_at` move for any change and keep nothing of what was there. A core
-   * restarted inside the grace reads a late refusal as the failed scan it is marked over, which
-   * `docs/state-machine.md` says in words and `credential-pinning.test.ts` pins.
+   * **Stored as well, and read back at start** (`A-61`): `late_refusal_grace` holds one row per
+   * entry, written whenever a configuration changes a probe's entries, so a core restarted
+   * inside the grace still takes a late refusal as late. What is here is what is judged by;
+   * the table is this, as of the last write that landed, in wall-clock time (`#save`,
+   * `restore`).
    */
   readonly #stoppedLeaving = new Map<number, Map<number, number>>();
+  /** Probes whose entries here are not what the table holds: a write failed. Written again. */
+  readonly #unsaved = new Set<number>();
+  /** The writes to the table, one after another, so that the last one to land is the latest. */
+  #saving: Promise<void> = Promise.resolve();
   readonly #graceMs: number;
   readonly #now: () => number;
+  readonly #wallNow: () => number;
   #checked = 0;
 
   constructor(options: CredentialVouchingOptions) {
     this.#graceMs = options.lateRefusalGraceMs ?? LATE_REFUSAL_GRACE_MS;
     this.#now = options.now ?? ((): number => performance.now());
+    this.#wallNow = options.wallNow ?? ((): number => Date.now());
     this.#db = options.db;
     this.#logger = options.logger.child({ component: 'credential-vouching' });
     this.#types = options.sensorTypes;
@@ -1024,9 +1084,12 @@ export class CredentialVouching {
     const refused = await this.#check(probeId, sensors, peerVersion, left);
     // A sensor refused for another of its kinds is not sent at all, and so not the probe's.
     for (const sensorId of refused.keys()) left.delete(sensorId);
-    this.#noteStopped(probeId, left);
+    const moved = this.#noteStopped(probeId, left);
     if (left.size === 0) this.#leftToProbe.delete(probeId);
     else this.#leftToProbe.set(probeId, left);
+    // Stored before this configuration is handed to anybody (`A-61`), and only when it changed
+    // what is recorded, which most configurations do not: a steady build writes nothing.
+    if (moved || this.#unsaved.has(probeId)) await this.#saved(probeId);
     const before = this.#withheldByProbe.get(probeId) ?? 0;
     if (refused.size === 0) this.#withheldByProbe.delete(probeId);
     else this.#withheldByProbe.set(probeId, refused.size);
@@ -1053,10 +1116,11 @@ export class CredentialVouching {
    * moves it**: the window is how long a refusal made under the one before may take to arrive,
    * and a configuration built for another reason says nothing about that.
    */
-  #noteStopped(probeId: number, left: ReadonlySet<number>): void {
+  #noteStopped(probeId: number, left: ReadonlySet<number>): boolean {
     const now = this.#now();
+    const before = this.#stoppedLeaving.get(probeId);
     const stopped = new Map<number, number>();
-    for (const [sensorId, at] of this.#stoppedLeaving.get(probeId) ?? []) {
+    for (const [sensorId, at] of before ?? []) {
       if (!left.has(sensorId) && now - at <= this.#graceMs) stopped.set(sensorId, at);
     }
     for (const sensorId of this.#leftToProbe.get(probeId) ?? []) {
@@ -1064,6 +1128,149 @@ export class CredentialVouching {
     }
     if (stopped.size === 0) this.#stoppedLeaving.delete(probeId);
     else this.#stoppedLeaving.set(probeId, stopped);
+    // Whether what is recorded moved, which is whether there is anything to store (`A-61`).
+    if (stopped.size !== (before?.size ?? 0)) return true;
+    for (const [sensorId, at] of stopped) if (before?.get(sensorId) !== at) return true;
+    return false;
+  }
+
+  /**
+   * Has the table hold what is recorded here for one probe, and nothing else for it (`A-61`).
+   * Never throws: a write that fails is logged, and made again at the probe's next configuration
+   * or the next `prune`, whichever is first.
+   *
+   * **One statement**, so the table never holds half of a change. Each time is written as the
+   * wall clock's reading now less what the entry has already run on the monotonic one, which is
+   * the moment the configuration stopped leaving the sensor as this clock would have read it.
+   * A sensor or a probe deleted meanwhile is skipped by the join; its rows went with it.
+   *
+   * **The window between the decision and this write.** A configuration change is decided in the
+   * write's own transaction, and nothing here is part of that: the record is of what a probe's
+   * *configuration* stops leaving it, and that is known only when the configuration is next built
+   * for that probe, from what the one before left it, which is held in memory. For a connected
+   * probe that is the notifier's 250 ms after the commit, and this write is awaited before the
+   * configuration is handed over. A core that stops inside that window, or while the probe is
+   * away, starts with no entry for the change, and a late refusal for it is the failed scan it
+   * was before `A-61`. What is stored is every entry a configuration has been built for.
+   */
+  async #save(probeId: number): Promise<void> {
+    const stopped = this.#stoppedLeaving.get(probeId);
+    const sensorIds = [...(stopped?.keys() ?? [])];
+    const wall = this.#wallNow();
+    const now = this.#now();
+    const stoppedAtMs = [...(stopped?.values() ?? [])].map((at) => wall - (now - at));
+    try {
+      await this.#db.query(
+        `WITH gone AS (
+           DELETE FROM late_refusal_grace
+           WHERE probe_id = $1 AND sensor_id <> ALL($2::bigint[])
+         )
+         INSERT INTO late_refusal_grace (probe_id, sensor_id, stopped_at)
+         SELECT p.id, s.id, to_timestamp(r.stopped_ms / 1000.0)
+         FROM unnest($2::bigint[], $3::float8[]) AS r (sensor_id, stopped_ms)
+         JOIN object s ON s.id = r.sensor_id
+         JOIN object p ON p.id = $1
+         ON CONFLICT (probe_id, sensor_id) DO UPDATE SET stopped_at = EXCLUDED.stopped_at`,
+        [probeId, sensorIds, stoppedAtMs],
+      );
+      this.#unsaved.delete(probeId);
+    } catch (error: unknown) {
+      this.#unsaved.add(probeId);
+      this.#logger.error(
+        { probeId, entries: sensorIds.length, err: describeError(error) },
+        'could not store which sensors a configuration stopped leaving to a probe; a core ' +
+          'restarted before the next write reads a late refusal for them as a failed scan',
+      );
+    }
+  }
+
+  /** `#save`, after every write asked for before it. */
+  #saved(probeId: number): Promise<void> {
+    const run = this.#saving.then(() => this.#save(probeId));
+    this.#saving = run;
+    return run;
+  }
+
+  /**
+   * Reads the stored record back, once, at start (`A-61`): before the probe endpoint accepts a
+   * result, so that none is judged without it. Throws when the table cannot be read, and the
+   * core does not start: started without the record it would raise the alarms this exists to
+   * prevent, and say nothing of why.
+   *
+   * **How a stored time becomes what is left of a grace.** The grace runs on the monotonic
+   * clock, which a new process starts from nothing; the table holds wall-clock times. An entry
+   * is taken up as having stopped `elapsed` milliseconds before this clock's reading now, where
+   * `elapsed` is the wall clock's reading now less the stored time, bounded by `storedStop`:
+   * spent past the grace, and the whole grace and no more for a time that is ahead of the clock.
+   * From then on it is counted as any entry is.
+   *
+   * Spent rows are removed, and a time ahead of the clock is written down again as now, so the
+   * table agrees with what was taken up and a second start cannot give the same grace twice.
+   */
+  async restore(): Promise<RestoredStops> {
+    const rows = await this.#db.query<{ probe_id: string; sensor_id: string; stopped_ms: string }>(
+      `SELECT probe_id::text AS probe_id, sensor_id::text AS sensor_id,
+              (extract(epoch FROM stopped_at) * 1000)::float8::text AS stopped_ms
+       FROM late_refusal_grace`,
+    );
+    const wall = this.#wallNow();
+    const now = this.#now();
+    const tally: RestoredStops = { restored: 0, ahead: 0, spent: 0 };
+    const rewrite = new Set<number>();
+    for (const row of rows) {
+      const probeId = Number(row.probe_id);
+      const sensorId = Number(row.sensor_id);
+      const stop = storedStop(Number(row.stopped_ms), wall, this.#graceMs);
+      if (stop.verdict === 'spent') {
+        tally.spent += 1;
+        rewrite.add(probeId);
+        continue;
+      }
+      let stopped = this.#stoppedLeaving.get(probeId);
+      if (stopped === undefined) {
+        stopped = new Map();
+        this.#stoppedLeaving.set(probeId, stopped);
+      }
+      // Whatever this core has recorded itself, were it ever to have, is the later word.
+      if (!stopped.has(sensorId)) stopped.set(sensorId, now - stop.elapsedMs);
+      tally.restored += 1;
+      if (stop.verdict === 'ahead') {
+        tally.ahead += 1;
+        rewrite.add(probeId);
+      }
+    }
+    for (const probeId of rewrite) await this.#saved(probeId);
+    if (rows.length > 0) {
+      this.#logger[tally.ahead > 0 ? 'warn' : 'info'](
+        { ...tally },
+        tally.ahead > 0
+          ? 'read which sensors a configuration stopped leaving to a probe; some were stored at ' +
+              'a time ahead of this clock, which was set back, and are given the grace from now'
+          : 'read which sensors a configuration stopped leaving to a probe',
+      );
+    }
+    return tally;
+  }
+
+  /**
+   * Drops every entry whose grace has run out, here and in the table (`A-61`). Never throws.
+   *
+   * On a timer, because the other thing that drops one is the probe's next configuration, and a
+   * probe that is never sent another would keep its rows for good. It also writes again whatever
+   * an earlier write could not.
+   */
+  async prune(): Promise<void> {
+    const now = this.#now();
+    const moved = new Set(this.#unsaved);
+    for (const [probeId, stopped] of this.#stoppedLeaving) {
+      for (const [sensorId, at] of stopped) {
+        if (now - at <= this.#graceMs) continue;
+        stopped.delete(sensorId);
+        moved.add(probeId);
+      }
+      if (stopped.size === 0) this.#stoppedLeaving.delete(probeId);
+    }
+    for (const probeId of moved) await this.#saved(probeId);
   }
 
   /** Whether a configuration stopped leaving this sensor to the probe within the grace. */
@@ -1288,7 +1495,9 @@ export class CredentialVouching {
         if (!gone) continue;
         // Nothing is sent to a probe that does not exist, and nothing is withheld from it.
         this.#leftToProbe.delete(probeId);
+        // Its rows went with it, by the table's cascade (`A-61`).
         this.#stoppedLeaving.delete(probeId);
+        this.#unsaved.delete(probeId);
         if (this.#withheldByProbe.delete(probeId)) {
           await this.#vouching?.settle(`credentials:${String(probeId)}`, new Map());
         }

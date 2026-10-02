@@ -109,13 +109,23 @@ failed in**, and the underlying error, because "ETIMEDOUT" alone is not a diagno
   whose name resolves outside its credentials' allowed targets, and the core reads that as
   Unknown, never Down. For ten minutes after a change that takes the decision away from the probe
   (a name entry added to the targets, the device given its address, a pause), a refusal the probe
-  had already made is dropped. **The core keeps that record in memory only**: restarted inside
-  the ten minutes, it reads such a refusal as a failed scan, and two of them as Down, with one
-  alarm. Nothing is wrong with the device or the probe, and the next scan under the new
-  configuration clears it. It shows on the probe's Probe Health as **Reports refused** rising
-  where **Refusals delivered late** would have. To avoid it, do not restart the core within ten
-  minutes of narrowing or widening a credential set's targets (`docs/state-machine.md` has the
-  rule and why it is not stored).
+  had already made is dropped. **The core stores that record and reads it back at start**
+  (`A-61`), so an ordinary restart inside the ten minutes changes nothing: the refusals are
+  still dropped, and counted on **Refusals delivered late**. Three things can still lose it,
+  and then such a refusal is a failed scan, and two of them Down, with one alarm:
+  - **The core stopped before it built the probe's next configuration after the change.** The
+    record is written when that configuration is built: a quarter of a second after the change
+    for a connected probe, and at its next connection for one that was away. A core restarted
+    in between has nothing to read.
+  - **The core's clock was set forward across the restart**, by more than was left of the ten
+    minutes. The stored time then reads as long past. (Set back, it gives the ten minutes from
+    the restart and no more, and the log says so at `warn`.)
+  - **The write failed.** The core logs "could not store which sensors a configuration stopped
+    leaving to a probe" at `error` and writes again within a minute.
+
+  Nothing is wrong with the device or the probe, and the next scan under the new configuration
+  clears it. It shows on the probe's Probe Health as **Reports refused** rising where
+  **Refusals delivered late** would have (`docs/state-machine.md` has the rule).
 
 ## A sensor is Unknown, not Down
 

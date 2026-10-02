@@ -64,6 +64,7 @@ import { migration063 } from './063-alarm-recovering.js';
 import { migration064 } from './064-flat-names-per-viewer.js';
 import { migration065 } from './065-skipped-counts.js';
 import { migration066 } from './066-sibling-order-only.js';
+import { migration067 } from './067-late-refusal-grace.js';
 import { migration043 } from './043-request-settled-at.js';
 
 /**
@@ -139,6 +140,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration064,
   migration065,
   migration066,
+  migration067,
 ];
 
 export type { Migration } from './types.js';

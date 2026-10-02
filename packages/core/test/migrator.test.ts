@@ -1244,6 +1244,87 @@ describe(
       }
     });
 
+    it('keeps which sensors a configuration stopped leaving to a probe, and lets a row go with its sensor or its probe (067)', async () => {
+      // `A-61`: the record a core reads at start, so that a late refusal is still late after a
+      // restart. One row a pair, a time that is a moment, and no row outliving what it is about.
+      const fresh = await createScratchDatabase('late_refusal_grace');
+      try {
+        const all = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 67),
+        );
+        await all.up();
+        const q = fresh.db;
+        assert.equal(await tableExists(q, 'late_refusal_grace'), true);
+        const [root] = await q.query<{ id: string }>(`SELECT id FROM object WHERE kind = 'root'`);
+        const insert = async (kind: string, name: string, parent: string): Promise<string> => {
+          const [row] = await q.query<{ id: string }>(
+            'INSERT INTO object (parent_id, kind, name) VALUES ($1, $2, $3) RETURNING id::text',
+            [parent, kind, name],
+          );
+          return row?.id ?? assert.fail('no row');
+        };
+        const probe = await insert('probe', 'probe', root?.id ?? '');
+        const other = await insert('probe', 'other', root?.id ?? '');
+        const device = await insert('device', 'device', probe);
+        const first = await insert('sensor', 'first', device);
+        const second = await insert('sensor', 'second', device);
+        const stop = (probeId: string, sensorId: string, at = 'now()'): Promise<unknown> =>
+          q.query(
+            `INSERT INTO late_refusal_grace (probe_id, sensor_id, stopped_at) VALUES ($1, $2, ${at})`,
+            [probeId, sensorId],
+          );
+        const pairs = async (): Promise<string[]> =>
+          (
+            await q.query<{ pair: string }>(
+              `SELECT probe_id::text || ':' || sensor_id::text AS pair
+               FROM late_refusal_grace ORDER BY probe_id, sensor_id`,
+            )
+          ).map((row) => row.pair);
+
+        await stop(probe, first);
+        await stop(probe, second);
+        await stop(other, first);
+        await stop(other, second);
+        await assert.rejects(stop(probe, first), /late_refusal_grace_pkey/);
+        // A time nothing can be counted from is not stored at all.
+        await q.query('DELETE FROM late_refusal_grace WHERE probe_id = $1 AND sensor_id = $2', [
+          other,
+          second,
+        ]);
+        await assert.rejects(
+          stop(other, second, `'infinity'`),
+          /late_refusal_grace_stopped_at_check/,
+        );
+        await assert.rejects(
+          stop(other, second, `'-infinity'`),
+          /late_refusal_grace_stopped_at_check/,
+        );
+        await assert.rejects(stop(other, second, 'NULL'), /null value in column "stopped_at"/);
+        await assert.rejects(stop('999999', second), /foreign key/);
+        await assert.rejects(stop(other, '999999'), /foreign key/);
+        await stop(other, second);
+
+        // A deleted sensor takes its rows, under every probe; a deleted probe takes its own.
+        await q.query('DELETE FROM object WHERE id = $1', [first]);
+        assert.deepEqual(await pairs(), [`${probe}:${second}`, `${other}:${second}`]);
+        await q.query('DELETE FROM object WHERE id = $1', [other]);
+        assert.deepEqual(await pairs(), [`${probe}:${second}`]);
+
+        await all.down(1);
+        assert.equal(await tableExists(q, 'late_refusal_grace'), false);
+        assert.equal(await tableExists(q, 'object'), true, 'and nothing else');
+        const again = await all.up();
+        assert.deepEqual(
+          again.applied.map((one) => one.id),
+          [67],
+        );
+        assert.deepEqual(await pairs(), [], 'the record does not come back with the table');
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('applies the real migration set forward and all the way back', async () => {
       const fresh = await createScratchDatabase('roundtrip');
       try {

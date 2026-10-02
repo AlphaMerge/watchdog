@@ -1,4 +1,6 @@
 import { strict as assert } from 'node:assert';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import type { SensorType } from '@ms/sensors';
 import {
@@ -25,6 +27,7 @@ import {
   LATE_REFUSAL_GRACE_MS,
   WITHHELD_CREDENTIALS,
   boundRefusal,
+  storedStop,
   type SensorBeingSent,
 } from '../src/objects/credential-vouching.js';
 import { ObjectError } from '../src/objects/errors.js';
@@ -739,6 +742,422 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       const reported = await credentials.reported(7, [refused(1, T(0))]);
       assert.equal(reported.late, 0);
       assert.equal(reported.unearned, 1);
+    });
+  });
+});
+
+describe('what a configuration stopped leaving to a probe is stored, and read back at start (A-61)', () => {
+  /** The wall clock at the start of each case, in milliseconds. */
+  const WALL = 1_790_000_000_000;
+  const T = (seconds: number): string => new Date(WALL + seconds * 1000).toISOString();
+
+  /** A row of `late_refusal_grace`, as `restore` reads one. */
+  interface StoredRow {
+    probe_id: string;
+    sensor_id: string;
+    stopped_ms: string;
+  }
+  /** What one write had the table hold for a probe. */
+  interface Written {
+    probeId: number;
+    sensorIds: number[];
+    stoppedAtMs: number[];
+  }
+
+  /** A row for probe 7's sensor 1, stored `offsetMs` from the wall clock's reading at start. */
+  const storedAt = (offsetMs: number, sensorId = 1): StoredRow => ({
+    probe_id: '7',
+    sensor_id: String(sensorId),
+    stopped_ms: String(WALL + offsetMs),
+  });
+
+  /**
+   * A core over a table that holds `stored`, with both of its clocks in the test's hands. Nothing
+   * has been sent to any probe: `leave` sends probe 7 the sensors it is left.
+   */
+  function core(stored: readonly StoredRow[] = []): {
+    credentials: CredentialVouching;
+    clock: { ms: number; wall: number };
+    control: { failWrite: boolean; failRead: boolean; writeDelaysMs: number[] };
+    /** When each write to the table began and ended, in the order it happened. */
+    order: string[];
+    written: Written[];
+    leave: (sensorIds: readonly number[]) => Promise<unknown>;
+    /** How many of these refusals from probe 7 for sensor 1 are taken as late. */
+    late: (sensorId?: number, probeId?: number) => Promise<number>;
+  } {
+    const clock = { ms: 5_000_000, wall: WALL };
+    const control = { failWrite: false, failRead: false, writeDelaysMs: [] as number[] };
+    const written: Written[] = [];
+    const order: string[] = [];
+    const credentials = new CredentialVouching({
+      db: {
+        query: async <R>(sql: string, values: readonly unknown[] = []): Promise<R[]> => {
+          if (sql.includes('INSERT INTO late_refusal_grace')) {
+            const [probeId, sensorIds, stoppedAtMs] = values as [number, number[], number[]];
+            order.push(`begin ${sensorIds.join(',')}`);
+            const delay = control.writeDelaysMs.shift() ?? 0;
+            if (delay > 0) await new Promise((done) => setTimeout(done, delay));
+            order.push(`end ${sensorIds.join(',')}`);
+            if (control.failWrite) throw new Error('connection terminated');
+            written.push({ probeId, sensorIds: [...sensorIds], stoppedAtMs: [...stoppedAtMs] });
+            return [];
+          }
+          if (sql.includes('FROM late_refusal_grace')) {
+            if (control.failRead) throw new Error('relation "late_refusal_grace" does not exist');
+            return [...stored] as R[];
+          }
+          return [];
+        },
+        tx: () => Promise.reject(new Error('no transaction in this test')),
+      },
+      logger: silent,
+      sensorTypes: catalogueSensorTypeGate(testCatalogue([snmpPinned])),
+      rights: () => Promise.resolve(new Map()),
+      now: () => clock.ms,
+      wallNow: () => clock.wall,
+    });
+    return {
+      credentials,
+      clock,
+      control,
+      written,
+      order,
+      leave: (sensorIds) => credentials.withhold(7, sensorIds.map(leftToProbe), PINNING),
+      late: async (sensorId = 1, probeId = 7) =>
+        (await credentials.reported(probeId, [refused(sensorId, T(0))])).late,
+    };
+  }
+
+  describe('how a stored time becomes what is left of a grace', () => {
+    const GRACE = LATE_REFUSAL_GRACE_MS;
+    const cases: {
+      name: string;
+      stored: string;
+      /** What the start makes of it, and how long a refusal is still late after it. */
+      verdict: 'kept' | 'ahead' | 'spent';
+      leftMs?: number;
+    }[] = [
+      { name: 'this instant', stored: String(WALL), verdict: 'kept', leftMs: GRACE },
+      { name: 'two minutes ago', stored: String(WALL - 120_000), verdict: 'kept', leftMs: 480_000 },
+      { name: 'the last millisecond', stored: String(WALL - GRACE), verdict: 'kept', leftMs: 0 },
+      { name: 'one millisecond past', stored: String(WALL - GRACE - 1), verdict: 'spent' },
+      {
+        name: 'a day ago: down that long, or set forward',
+        stored: String(WALL - 86_400_000),
+        verdict: 'spent',
+      },
+      { name: 'the epoch', stored: '0', verdict: 'spent' },
+      {
+        name: 'one millisecond ahead: set back',
+        stored: String(WALL + 1),
+        verdict: 'ahead',
+        leftMs: GRACE,
+      },
+      {
+        name: 'an hour ahead: set back',
+        stored: String(WALL + 3_600_000),
+        verdict: 'ahead',
+        leftMs: GRACE,
+      },
+      { name: 'a century ahead', stored: String(WALL + 3.2e12), verdict: 'ahead', leftMs: GRACE },
+      { name: 'infinity', stored: 'Infinity', verdict: 'spent' },
+      { name: 'minus infinity', stored: '-Infinity', verdict: 'spent' },
+      { name: 'not a number', stored: 'NaN', verdict: 'spent' },
+      { name: 'not a time at all', stored: 'yesterday', verdict: 'spent' },
+    ];
+
+    for (const one of cases) {
+      it(`stored ${one.name}: ${one.verdict}`, async () => {
+        const stop = storedStop(Number(one.stored), WALL, GRACE);
+        assert.equal(stop.verdict, one.verdict);
+        if (stop.verdict !== 'spent') {
+          assert.equal(stop.elapsedMs, GRACE - (one.leftMs ?? Number.NaN));
+          assert.ok(stop.elapsedMs >= 0 && stop.elapsedMs <= GRACE, 'never more than the grace');
+        }
+
+        // And the same through a start: what it counts, what it writes, how long it lasts.
+        const { credentials, clock, written, late } = core([
+          { probe_id: '7', sensor_id: '1', stopped_ms: one.stored },
+        ]);
+        assert.deepEqual(await credentials.restore(), {
+          restored: one.verdict === 'spent' ? 0 : 1,
+          ahead: one.verdict === 'ahead' ? 1 : 0,
+          spent: one.verdict === 'spent' ? 1 : 0,
+        });
+        if (one.leftMs === undefined) {
+          assert.equal(await late(), 0, 'the failed scan it was before anything was stored');
+          assert.deepEqual(written, [{ probeId: 7, sensorIds: [], stoppedAtMs: [] }], 'removed');
+          return;
+        }
+        // Written down again as now when it was ahead, and left alone when it was not.
+        assert.deepEqual(
+          written,
+          one.verdict === 'ahead' ? [{ probeId: 7, sensorIds: [1], stoppedAtMs: [WALL] }] : [],
+        );
+        clock.ms += one.leftMs;
+        assert.equal(await late(), 1, 'to the last millisecond of what was left');
+        clock.ms += 1;
+        assert.equal(await late(), 0, 'and not one after: never more than the grace');
+      });
+    }
+
+    it('does not take the clock it starts at on trust either', () => {
+      assert.deepEqual(storedStop(WALL, Number.NaN, GRACE), { verdict: 'spent' });
+      assert.deepEqual(storedStop(WALL, Number.POSITIVE_INFINITY, GRACE), { verdict: 'spent' });
+    });
+
+    it('takes the bound it is given', () => {
+      assert.deepEqual(storedStop(WALL - 2_000, WALL, 2_000), {
+        verdict: 'kept',
+        elapsedMs: 2_000,
+      });
+      assert.deepEqual(storedStop(WALL - 2_001, WALL, 2_000), { verdict: 'spent' });
+    });
+  });
+
+  describe('what a start takes up is an entry like any other', () => {
+    it('is for the probe and the sensor the row names, and for no other', async () => {
+      const { credentials, late } = core([storedAt(-60_000)]);
+      await credentials.restore();
+      assert.equal(await late(1, 7), 1);
+      assert.equal(await late(2, 7), 0, 'another sensor of the same probe');
+      assert.equal(await late(1, 8), 0, 'the same sensor from another probe');
+    });
+
+    it('drops only what a refusal looks like, as before the restart', async () => {
+      const { credentials } = core([storedAt(-60_000)]);
+      await credentials.restore();
+      const ok: CheckResult = { ...refused(1, T(0)), outcome: 'ok' };
+      const readings: CheckResult = { ...refused(1, T(1)), channels: [{ key: 'a', value: 1 }] };
+      const failed = measured(1, T(2), 'error');
+      const reported = await credentials.reported(7, [ok, readings, failed, refused(1, T(3))]);
+      assert.equal(reported.late, 1);
+      assert.equal(reported.unearned, 2);
+      assert.equal(reported.results.length, 3, 'a failed scan after the restart is a failed scan');
+    });
+
+    it('is not started again by the configuration the restarted core builds', async () => {
+      const { credentials, clock, written, leave, late } = core([storedAt(-120_000)]);
+      await credentials.restore();
+      // The probe redials and is sent its configuration: sensor 1 is not left to it, as stored.
+      await leave([2, 3]);
+      assert.deepEqual(written, [], 'nothing moved, so nothing is written');
+      clock.ms += 480_000;
+      assert.equal(await late(), 1);
+      clock.ms += 1;
+      assert.equal(await late(), 0, 'eight minutes after the start, ten after it stopped');
+    });
+
+    it('goes when the sensor is left to the probe again, from the table too', async () => {
+      const { credentials, written, leave, late } = core([storedAt(-60_000), storedAt(-60_000, 2)]);
+      await credentials.restore();
+      await leave([1, 3]);
+      assert.equal(written.length, 1);
+      assert.deepEqual(written[0]?.sensorIds, [2], 'sensor 1 is gone, sensor 2 stays');
+      assert.equal(await late(1), 0, 'the probe’s to refuse again');
+      assert.equal(await late(2), 1);
+    });
+
+    it('does not start a core that cannot read the record', async () => {
+      const { credentials, control } = core([storedAt(-60_000)]);
+      control.failRead = true;
+      await assert.rejects(credentials.restore(), /late_refusal_grace/);
+    });
+
+    it('reads an empty table as nothing, and writes nothing', async () => {
+      const { credentials, written } = core();
+      assert.deepEqual(await credentials.restore(), { restored: 0, ahead: 0, spent: 0 });
+      assert.deepEqual(written, []);
+    });
+
+    it('keeps one probe’s rows when another’s are spent', async () => {
+      const { credentials, written, late } = core([
+        storedAt(-60_000),
+        { probe_id: '8', sensor_id: '1', stopped_ms: String(WALL - LATE_REFUSAL_GRACE_MS - 1) },
+      ]);
+      assert.deepEqual(await credentials.restore(), { restored: 1, ahead: 0, spent: 1 });
+      assert.deepEqual(written, [{ probeId: 8, sensorIds: [], stoppedAtMs: [] }]);
+      assert.equal(await late(1, 7), 1);
+      assert.equal(await late(1, 8), 0);
+    });
+  });
+
+  describe('what is written, and when', () => {
+    it('writes when a configuration stops leaving a sensor, and nothing when one changes nothing', async () => {
+      const { written, leave } = core();
+      await leave([1, 2, 3]);
+      assert.deepEqual(written, [], 'nothing has stopped being left');
+      await leave([2, 3]);
+      assert.deepEqual(written, [{ probeId: 7, sensorIds: [1], stoppedAtMs: [WALL] }]);
+      await leave([2, 3]);
+      await leave([2, 3]);
+      assert.equal(written.length, 1, 'the same configuration again writes nothing');
+    });
+
+    it('writes each time as the wall clock would have read it when the sensor stopped being left', async () => {
+      const { clock, written, leave } = core();
+      await leave([1, 2, 3]);
+      await leave([2, 3]);
+      clock.ms += 120_000;
+      clock.wall += 120_000;
+      await leave([3]);
+      assert.deepEqual(written.at(-1), {
+        probeId: 7,
+        sensorIds: [1, 2],
+        stoppedAtMs: [WALL, WALL + 120_000],
+      });
+      // A wall clock set forward an hour meanwhile: what has run is what the monotonic one says.
+      clock.ms += 60_000;
+      clock.wall += 3_660_000;
+      await leave([]);
+      assert.deepEqual(written.at(-1), {
+        probeId: 7,
+        sensorIds: [1, 2, 3],
+        stoppedAtMs: [WALL + 3_600_000, WALL + 3_720_000, WALL + 3_780_000],
+      });
+    });
+
+    it('takes the row away when the sensor is left again, and at the first configuration after its grace', async () => {
+      const { clock, written, leave } = core();
+      await leave([1, 2, 3]);
+      await leave([2, 3]);
+      await leave([1, 2, 3]);
+      assert.deepEqual(written.at(-1), { probeId: 7, sensorIds: [], stoppedAtMs: [] });
+      await leave([2, 3]);
+      assert.equal(written.length, 3);
+      clock.ms += LATE_REFUSAL_GRACE_MS + 1;
+      await leave([2, 3]);
+      assert.equal(written.length, 4);
+      assert.deepEqual(written.at(-1), { probeId: 7, sensorIds: [], stoppedAtMs: [] });
+    });
+
+    it('still judges by what it holds when a write fails, and writes again at the next configuration', async () => {
+      const { control, written, leave, late } = core();
+      await leave([1, 2, 3]);
+      control.failWrite = true;
+      await leave([2, 3]);
+      assert.deepEqual(written, []);
+      assert.equal(await late(), 1, 'the running core has lost nothing');
+      control.failWrite = false;
+      await leave([2, 3]);
+      assert.deepEqual(written, [{ probeId: 7, sensorIds: [1], stoppedAtMs: [WALL] }]);
+      await leave([2, 3]);
+      assert.equal(written.length, 1, 'and once it has landed, not again');
+    });
+
+    it('writes one after another, so the last to land is the latest', async () => {
+      const { control, written, order, leave } = core();
+      await leave([1, 2, 3]);
+      // The first write is slow, and another configuration is built while it is on its way.
+      control.writeDelaysMs.push(40, 0);
+      const first = leave([2, 3]);
+      await new Promise((done) => setTimeout(done, 5));
+      assert.deepEqual(order, ['begin 1']);
+      await Promise.all([first, leave([3])]);
+      // The second did not begin until the first had landed, and it is what the table holds.
+      assert.deepEqual(order, ['begin 1', 'end 1', 'begin 1,2', 'end 1,2']);
+      assert.deepEqual(written.at(-1)?.sensorIds, [1, 2]);
+    });
+
+    it('writes nothing a probe sends: a batch of marked results touches no row', async () => {
+      const { credentials, written, leave } = core();
+      await leave([1, 2, 3]);
+      await leave([2, 3]);
+      const before = written.length;
+      await credentials.reported(7, [
+        refused(1, T(0)),
+        refused(2, T(0)),
+        refused(9, T(0)),
+        measured(3, T(0), 'error'),
+      ]);
+      await credentials.reported(8, [refused(1, T(0))]);
+      assert.equal(written.length, before);
+    });
+  });
+
+  describe('the running core', () => {
+    it('reads the record before the probe endpoint exists, and prunes it on a timer', async () => {
+      // `main.ts` is not started by any test. What can be held to is its order: a result
+      // reaches `reported` only through the endpoint, which is built after the record is read.
+      const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
+      const main = await readFile(join(repoRoot, 'packages', 'core', 'src', 'main.ts'), 'utf8');
+      const adopted = main.indexOf('await credentialVouching.adopt();');
+      const restored = main.indexOf('await credentialVouching.restore();');
+      const endpoint = main.indexOf('new ProbeEndpoint(');
+      const ingestion = main.indexOf('credentialRefusals: credentialVouching');
+      for (const [what, where] of Object.entries({ adopted, restored, endpoint, ingestion })) {
+        assert.ok(where >= 0, `main.ts no longer has what this looks for: ${what}`);
+      }
+      assert.ok(adopted < restored, 'after the vouchers are adopted');
+      assert.ok(restored < ingestion, 'before anything that judges a result is built');
+      assert.ok(restored < endpoint, 'before the probe endpoint is built');
+      assert.match(main, /run: \(\) => credentialVouching\.prune\(\),\n\s+intervalMs: 60_000,/);
+      assert.match(main, /lateRefusalPrune\.start\(\);/);
+    });
+  });
+
+  describe('pruned past the grace, without waiting for a configuration', () => {
+    it('drops an entry one millisecond past its grace, here and in the table, and not before', async () => {
+      const { credentials, clock, written, leave, late } = core();
+      await leave([1, 2, 3]);
+      await leave([2, 3]);
+      await credentials.prune();
+      clock.ms += LATE_REFUSAL_GRACE_MS;
+      await credentials.prune();
+      assert.equal(written.length, 1, 'inside the grace there is nothing to prune or to write');
+      assert.equal(await late(), 1);
+
+      clock.ms += 1;
+      await credentials.prune();
+      assert.deepEqual(written.at(-1), { probeId: 7, sensorIds: [], stoppedAtMs: [] });
+      assert.equal(written.length, 2);
+      // Gone, not merely out of date: a clock set back does not bring it back.
+      clock.ms -= LATE_REFUSAL_GRACE_MS;
+      assert.equal(await late(), 0);
+      await credentials.prune();
+      assert.equal(written.length, 2, 'and nothing more to write');
+    });
+
+    it('keeps what is still inside its grace when it drops what is not', async () => {
+      const { credentials, clock, written, leave, late } = core();
+      await leave([1, 2, 3]);
+      await leave([2, 3]);
+      clock.ms += 300_000;
+      clock.wall += 300_000;
+      await leave([3]);
+      clock.ms += 300_001;
+      clock.wall += 300_001;
+      await credentials.prune();
+      assert.deepEqual(written.at(-1), {
+        probeId: 7,
+        sensorIds: [2],
+        stoppedAtMs: [WALL + 300_000],
+      });
+      assert.equal(await late(1), 0);
+      assert.equal(await late(2), 1);
+    });
+
+    it('prunes what a start took up, for a probe that never redials', async () => {
+      const { credentials, clock, written } = core([storedAt(-120_000)]);
+      await credentials.restore();
+      clock.ms += 480_001;
+      await credentials.prune();
+      assert.deepEqual(written, [{ probeId: 7, sensorIds: [], stoppedAtMs: [] }]);
+    });
+
+    it('writes again what an earlier write could not', async () => {
+      const { credentials, control, written, leave } = core();
+      await leave([1, 2, 3]);
+      control.failWrite = true;
+      await leave([2, 3]);
+      await credentials.prune();
+      assert.deepEqual(written, []);
+      control.failWrite = false;
+      await credentials.prune();
+      assert.deepEqual(written, [{ probeId: 7, sensorIds: [1], stoppedAtMs: [WALL] }]);
+      await credentials.prune();
+      assert.equal(written.length, 1);
     });
   });
 });
@@ -1827,6 +2246,80 @@ describe(
       assert.equal(vouching.withheld().has(uptime), false);
     });
 
+    it('stores which sensors a configuration stopped leaving to the probe, and reads them back by the clock it is started at (A-61)', async () => {
+      const { device, sensor } = await named(site, 'stored');
+      const row = async (): Promise<{ probe: number; ageMs: number }[]> =>
+        (
+          await db.query<{ probe_id: string; stopped_ms: string }>(
+            `SELECT probe_id::text AS probe_id,
+                    (extract(epoch FROM stopped_at) * 1000)::float8::text AS stopped_ms
+             FROM late_refusal_grace WHERE sensor_id = $1`,
+            [sensor],
+          )
+        ).map((one) => ({
+          probe: Number(one.probe_id),
+          ageMs: Date.now() - Number(one.stopped_ms),
+        }));
+      const near = (ms: number, expected: number): boolean => Math.abs(ms - expected) < 60_000;
+      const point = (host: string): Promise<unknown> =>
+        h.service.update(testActor, device, { kind: 'device', host }, { kind: 'none' });
+      const restarted = (wallNow?: () => number): CredentialVouching =>
+        new CredentialVouching({
+          db,
+          logger: silent,
+          sensorTypes: gate,
+          rights: () => Promise.resolve(new Map()),
+          ...(wallNow === undefined ? {} : { wallNow }),
+        });
+
+      // Left to the probe: nothing is recorded, and nothing was before.
+      assert.equal(await sentTo(PINNING, sensor), true);
+      assert.deepEqual(await row(), []);
+
+      // Given an address inside the targets, the core decides it: no longer the probe's.
+      await point('10.20.0.60');
+      assert.equal(await sentTo(PINNING, sensor), true);
+      const [first] = await row();
+      assert.equal(first?.probe, site);
+      assert.ok(near(first.ageMs, 0), `stored as now, and it reads ${String(first.ageMs)} ms old`);
+      const stamp = async (): Promise<string | undefined> =>
+        (
+          await db.query<{ at: string }>(
+            'SELECT stopped_at::text AS at FROM late_refusal_grace WHERE sensor_id = $1',
+            [sensor],
+          )
+        )[0]?.at;
+      const written = await stamp();
+      // A configuration built again for another reason moves nothing.
+      assert.equal(await sentTo(PINNING, sensor), true);
+      assert.equal(await stamp(), written);
+
+      // Named again, it is the probe's to check, and the row goes.
+      await point('stored.dc.test');
+      assert.equal(await sentTo(PINNING, sensor), true);
+      assert.deepEqual(await row(), []);
+
+      await point('10.20.0.60');
+      assert.equal(await sentTo(PINNING, sensor), true);
+      assert.equal((await row()).length, 1);
+
+      // A core started with its clock an hour behind the one that wrote the row: the time is
+      // ahead of it. It is given the grace from that start, and the row is written down again
+      // as that clock's now, so the next start counts from there.
+      const behind = await restarted(() => Date.now() - 3_600_000).restore();
+      assert.ok(behind.ahead >= 1 && behind.spent === 0, JSON.stringify(behind));
+      const [setBack] = await row();
+      assert.ok(
+        setBack !== undefined && near(setBack.ageMs, 3_600_000),
+        `rewritten as an hour ago by this clock, and it reads ${String(setBack?.ageMs)} ms old`,
+      );
+
+      // And a core started by the right clock finds a row an hour old: spent, and removed.
+      const later = await restarted().restore();
+      assert.ok(later.spent >= 1 && later.ahead === 0, JSON.stringify(later));
+      assert.deepEqual(await row(), []);
+    });
+
     // Last: it sweeps every alarm that is due on this probe, to count its own from nothing.
     it('a refusal delivered after the configuration stopped leaving the sensor raises no Down and no page, and a failed scan after it does (A-53)', async () => {
       const { group, sensor } = await named(site, 'late');
@@ -1904,24 +2397,30 @@ describe(
       assert.equal(refusals.lateFor(site), 2);
     });
 
-    // After it, and sweeping as it does: what a core restarted inside the grace does (`A-56`).
-    it('a core restarted inside the grace reads a late refusal as a failed scan: one Down and one page for the sensor, cleared by its next scan', async () => {
+    // After it, and sweeping as it does: what a core restarted inside the grace does (`A-61`).
+    it('a core restarted inside the grace still takes a late refusal as late: no failed scan, no Down, no page; a failed scan after it is Down once with one page, and past the grace the mark is a failed scan', async () => {
       const { group, sensor } = await named(site, 'restarted');
       assert.equal(await sentTo(PINNING, sensor), true);
       await fromProbe([{ ...measured(sensor, at(-60)), message: 'up 1 d' }]);
+      assert.deepEqual(await stateOf(sensor), { state: 'up', message: 'up 1 d' });
 
       // The same change as above, and the configuration that stops leaving the sensor to the
-      // probe is built: the core now holds, in memory, that a refusal for it may still arrive.
+      // probe is built: the core now holds that a refusal for it may still arrive, and has
+      // stored it.
       await h.service.setCredential(testActor, group, 'snmp', {
         version: 'v2c',
         community: 'restarted-secret',
         allowedTargets: ['10.20.0.0/16', '*.dc.test'],
       });
       assert.equal(await sentTo(PINNING, sensor), true);
+      const stored = (): Promise<number> =>
+        count('SELECT count(*)::text AS n FROM late_refusal_grace WHERE sensor_id = $1', [sensor]);
+      assert.equal(await stored(), 1);
 
       // The core restarts: the same database, and nothing of what the one before held in
-      // memory. The probe redials and is sent its configuration, in which the sensor is not
-      // left to it, by a core that never knew it was.
+      // memory. It reads the record before it takes a result, as `main.ts` does before the
+      // probe endpoint is built. The probe redials and is sent its configuration, in which the
+      // sensor is not left to it.
       const running = { credentials, config };
       const access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent });
       credentials = new CredentialVouching({
@@ -1940,37 +2439,83 @@ describe(
         credentialCheck: credentials,
       });
       try {
+        const restored = await credentials.restore();
+        assert.ok(restored.restored >= 1, JSON.stringify(restored));
+        assert.equal(restored.ahead, 0);
         assert.equal(await sentTo(PINNING, sensor), true);
+        assert.equal(await stored(), 1, 'the restarted core’s configuration leaves the row alone');
         await scheduler.sweep(later(3_600));
         const asked = await requests();
+        const before = await history(sensor);
+        const held = credentials.stats().withheld;
         const refusals = new ProbeRefusals();
 
-        // One late refusal is one failed scan: not Down yet, and no page.
+        // Two late refusals, which were one Down and one page before the record was stored.
+        // One at a time, as a spool replays them: neither is a failed scan.
         await fromProbe([refused(sensor, at(-30))], site, refusals);
-        assert.equal(await downs([sensor]), 0);
-        assert.equal(await scheduler.sweep(later(3_600)), 0);
-
-        // The second is Down, in the probe's words, with the one page a Down raises. Counted
-        // as marks the probe had no claim to, since this core cannot know they were late.
         await fromProbe([refused(sensor, at(-20))], site, refusals);
-        assert.deepEqual(await stateOf(sensor), { state: 'down', message: REFUSED });
+        assert.deepEqual(await stateOf(sensor), { state: 'up', message: 'up 1 d' });
+        assert.deepEqual(await history(sensor), before, 'no transition: not Warning, not Down');
+        assert.equal(await downs([sensor]), 0);
+        assert.equal(vouching.withheld().has(sensor), false, 'and not held Unknown either');
+        assert.equal(credentials.stats().withheld, held);
+        assert.equal(await scheduler.sweep(later(3_600)), 0, 'nothing to page about');
+        assert.equal(await requests(), asked);
+        // Counted where a late refusal is, and not as marks the probe had no claim to.
+        assert.equal(refusals.lateFor(site), 2);
+        assert.equal(refusals.countsFor(site).refused, 0);
+
+        // More of them inside the grace raise nothing either.
+        await fromProbe([refused(sensor, at(-15)), refused(sensor, at(-12))], site, refusals);
+        assert.equal(await downs([sensor]), 0);
+        assert.equal(await requests(), asked);
+        assert.equal(refusals.lateFor(site), 4);
+
+        // The device then does not answer the scan made under the new configuration. That is a
+        // failed scan after a restart as it was before one: Down, once, and the one page.
+        await fromProbe(
+          [
+            { ...measured(sensor, at(-10), 'error'), message: 'no response' },
+            { ...measured(sensor, at(-8), 'error'), message: 'no response' },
+          ],
+          site,
+          refusals,
+        );
+        assert.deepEqual(await stateOf(sensor), { state: 'down', message: 'no response' });
         assert.equal(await downs([sensor]), 1);
-        assert.equal(vouching.withheld().has(sensor), false, 'a failed scan, not a hold');
         assert.equal(await scheduler.sweep(later(3_600)), 1);
         assert.equal(await requests(), asked + 1);
-        assert.equal(refusals.countsFor(site).refused, 2);
-        assert.equal(refusals.lateFor(site), 0);
-
-        // More of them raise nothing further: one Down, one alarm, for the one sensor.
-        await fromProbe([refused(sensor, at(-15)), refused(sensor, at(-12))], site, refusals);
+        // And a third, with a late refusal beside it, is the same outage: no second alarm.
+        await fromProbe(
+          [
+            { ...measured(sensor, at(-7), 'error'), message: 'no response' },
+            refused(sensor, at(-6)),
+          ],
+          site,
+          refusals,
+        );
         assert.equal(await downs([sensor]), 1);
         assert.equal(await scheduler.sweep(later(3_600)), 0);
         assert.equal(await requests(), asked + 1);
+        assert.equal(refusals.lateFor(site), 5);
+        assert.equal(refusals.countsFor(site).refused, 0);
 
-        // And the scan made under the new configuration is what ends it.
-        await fromProbe([{ ...measured(sensor, at(-5)), message: 'up 1 d' }], site, refusals);
-        assert.deepEqual(await stateOf(sensor), { state: 'up', message: 'up 1 d' });
-        assert.equal(await downs([sensor]), 1);
+        // Past the grace, counted from when the configuration stopped leaving the sensor and
+        // not from the restart, a result marked this way is the failed scan it reads as.
+        await fromProbe([{ ...measured(sensor, at(-5)), message: 'up 2 d' }], site, refusals);
+        assert.equal((await stateOf(sensor)).state, 'up');
+        ahead.ms += LATE_REFUSAL_GRACE_MS + 1;
+        await fromProbe([refused(sensor, at(-4)), refused(sensor, at(-3))], site, refusals);
+        assert.deepEqual(await stateOf(sensor), { state: 'down', message: REFUSED });
+        assert.equal(await downs([sensor]), 2);
+        assert.equal(vouching.withheld().has(sensor), false, 'a failed scan, not a hold');
+        assert.equal(refusals.countsFor(site).refused, 2);
+        assert.equal(refusals.lateFor(site), 5);
+
+        // And the row does not outlive its grace, with no configuration to take it away.
+        assert.equal(await stored(), 1);
+        await credentials.prune();
+        assert.equal(await stored(), 0);
       } finally {
         ({ credentials, config } = running);
       }

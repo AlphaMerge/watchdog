@@ -190,25 +190,47 @@ vanishes, which it already had by not sending it: it cannot begin or prolong an 
 and cannot use it on a result that is `ok` or has readings, on a sensor it was never left, or
 after the ten minutes.
 
-**The bound: a core restart forgets it** (`A-56`). Which sensors a configuration stopped leaving
-to a probe, and when, is kept in the core's memory and nowhere else. A core restarted inside the
-ten minutes starts with nothing recorded, and a late refusal delivered to it is the mark the probe
-has no claim to: a failed scan. One is a Warning where the sensor's failed-scan count allows it,
-and as many as that count (two, as shipped) are **one Down for that sensor, with the one alarm a
-Down raises**, in the probe's words ("Not scanned: ..."), until the next scan under the new
-configuration reads what the device says. They are counted on **Reports refused**, not on
-**Refusals delivered late**. It needs all three at once: a change that stops leaving a sensor to
-its probe, refusals for it already made and not yet delivered, and a restart before they arrive.
+**The record survives a core restart** (`A-61`). Which sensors a configuration stopped leaving to
+a probe, and when, is held in the core's memory, which is what a refusal is judged by, and stored
+in `late_refusal_grace`: one row per (probe, sensor) with the time the first such configuration
+was built. A core restarted inside the ten minutes reads the table before the probe endpoint
+exists, so a late refusal delivered to it is still late: dropped, counted on **Refusals delivered
+late**, no failed scan, no Down, no alarm. A failed scan after the restart is the failed scan it
+always was, and past the ten minutes, counted from when the configuration stopped leaving the
+sensor and not from the restart, the mark is one the probe has no claim to
+(`credential-pinning.test.ts`, the alarm-volume scenario).
 
-**It is not rebuilt from the database, because nothing stored says it.** What would have to be
-known is that the sensor was left to the probe under the configuration before, and when that
-stopped. `credential_set.updated_at` and `object.updated_at` say that a row changed, for any
-reason, and not what the targets or the host were before; a set that was removed has no row; a
-pause, a move and the probe's protocol version stop leaving a sensor too. Read from those, the
-grace would go to every sensor near a recent change, the ones the probe was never left included,
-which is the one thing the rule above does not give a probe. Storing the record is a table and a
-migration, for a false Down that takes a restart inside ten minutes to see, and is not done.
-`credential-pinning.test.ts` pins what a restart does.
+- **Written by the core alone, from its own decision.** A row is written when a configuration the
+  core builds stops leaving a sensor to its probe, and the write is awaited before that
+  configuration is handed over. Nothing a probe sends writes to the table, so what a probe that
+  misbehaves can and cannot do is exactly the paragraph above, on either side of a restart. A
+  configuration that changes nothing recorded writes nothing.
+- **Removed as the entry in memory is**: when the sensor is left to the probe again, at the
+  probe's first configuration after the ten minutes, and on a one-minute timer for a probe that
+  is never sent another. A deleted sensor or probe takes its rows with it.
+- **Monotonic while running, wall clock across a restart.** The ten minutes are counted on the
+  monotonic clock, which a new process starts from nothing, so the table holds the wall clock's
+  reading. At start, what has run is the wall clock now less the stored time, and that is bounded
+  on both sides (`storedStop`, a table of cases in the test). More than ten minutes, by however
+  much: spent, and the row removed, which is also what a clock set forward across the restart
+  does, and ends the grace early. A stored time later than now, which is a clock set back: nothing
+  can be counted from it, so the entry gets the ten minutes from that start and no more, the row
+  is written down again as now so that a second start does not give them twice, and the log says
+  so at `warn`. Neither side gives more than `LATE_REFUSAL_GRACE_MS`.
+
+**The bound that is left: the record is of a configuration, and is written when one is built**
+(`A-61`). The change itself is decided in its own write, and what makes a refusal late is that
+the probe's *configuration* stopped leaving it the sensor, which the core knows when it next
+builds that configuration, from what the one before left the probe. That is in memory. For a
+connected probe the build follows the change by the notifier's quarter of a second. A core that
+stops inside that, or while the probe is away and before it has redialled, starts with no row for
+the change, and a late refusal for it is the mark the probe has no claim to: a failed scan, and
+as many as the sensor's failed-scan count (two, as shipped) are **one Down for that sensor, with
+the one alarm a Down raises**, in the probe's words ("Not scanned: ..."), until the next scan
+under the new configuration, counted on **Reports refused**. The same follows a write that
+failed, which is logged at `error` and made again at the probe's next configuration or within the
+minute, and a clock set forward across the restart. Closing it would mean storing what each probe
+was last left, which is not done.
 
 **The next result that is not a refusal lets the sensor go, and that result decides it.** The
 hold is dropped without re-deciding anything, so there is one transition, from Unknown to what

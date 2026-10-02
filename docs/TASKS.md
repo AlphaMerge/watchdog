@@ -18517,13 +18517,71 @@ because each is a decision rather than a defect:
         the core and mail delivery use, and none of them was looked at for an IPv6 address
         over TLS.
 
-- [ ] **A-61 — a late refusal that crosses a core restart is a failed scan** · M · A-56 · Found
+- [x] **A-61 — a late refusal that crosses a core restart is a failed scan** · M · A-56 · Found
       2026-10-02 by `A-56`, which wrote the bound down and pinned it because nothing stored says
       which sensors a configuration stopped leaving to a probe, or when. Inside the ten-minute
       grace, a core restart turns a probe's honest late refusals into failed scans: two of them
       are one Down and one notification for a change somebody made on purpose. **Done when**
       the record is stored (a migration, forward and back), read at start, pruned past the
       grace, and the restart scenario in `credential-pinning.test.ts` shows no Down.
+
+      **A-61 outcome.** The record is stored, and a core restarted inside the grace takes a late
+      refusal as late. Migration 067, no protocol number, nothing sent to or from a probe.
+      - **The table.** `late_refusal_grace`: (probe, sensor) as the key, `stopped_at`, both ids
+        cascading from `object` as `sensor_credential_voucher`'s do, an index on the sensor for
+        that cascade, and a check that the time is finite. The rollback drops it.
+      - **Written where the record is made, which is not where the change is decided.** A change
+        is decided in its own write; what makes a refusal late is that the probe's configuration
+        stopped leaving it the sensor, and the core knows that when it next builds that
+        configuration (`withhold`), from what the one before left the probe, which is in memory.
+        The row is written there, in one statement, awaited before the configuration is handed
+        over, and only when the build changed what is recorded: a steady build writes nothing.
+        **The window that remains** is from the change's commit to that build: the notifier's
+        250 ms for a connected probe, and until it redials for one that is away. A core that
+        stops inside it starts with no row, and the refusal is the failed scan it was before.
+        Accepted because closing it means storing what each probe was last left, which is a
+        second record and a different question; it is a follow-up.
+      - **Read once at start**: `restore()`, awaited in `main.ts` straight after `adopt()`, before
+        the ingestion service and the probe endpoint are built. It throws when the table cannot
+        be read, and the core does not start.
+      - **Wall clock across the restart, monotonic after it.** At start, what has run is the wall
+        clock now less the stored time, bounded both ways by `storedStop`: past the grace is
+        spent and the row removed (a clock set forward lands here, and ends the grace early); a
+        time later than now, a clock set back, gets the whole grace from that start and no more,
+        is written down again as now so a second start does not give it twice, and is logged at
+        `warn`; a time that is not finite is spent. No case gives more than
+        `LATE_REFUSAL_GRACE_MS`.
+      - **Pruned** on write (the statement removes every row of the probe that is no longer
+        recorded: left again, or past the grace at that build), at start, and by `prune()` on a
+        one-minute `PeriodicSweep` for a probe never sent another configuration. A write that
+        fails is logged at `error` and made again at the next build or the next prune.
+      - **What a probe that misbehaves can and cannot do is `A-53`'s, unchanged.** It can have its
+        own error-with-no-readings results for a sensor discarded for ten minutes after a
+        configuration stops leaving it that sensor. It cannot begin or prolong an Unknown,
+        discard an `ok` or a reading, use it on a sensor it was never left or past the ten
+        minutes, or reopen the window. Storing changes one thing: those ten minutes no longer
+        end at a restart. Nothing a probe sends writes to the table (a test sends marked batches
+        and counts no write), and a restart does not start the ten minutes again. The one case
+        that gives a fresh ten minutes is an operator's clock set back across a restart, once.
+      - **Alarm volume** (`credential-pinning.test.ts`, the restart scenario, rewritten): a
+        sensor Up, a name entry added, the row stored, then a second `CredentialVouching` on the
+        same database that reads it. Four late refusals: still Up, no row in its state history,
+        not held, no notification request, 4 on `lateRefusals` and 0 on `reportsRefused`. Two
+        real failed scans: Down once, one request; a third beside another late refusal raises
+        nothing more. Past the grace, two marked results are Down and counted as refused. Then
+        the row is pruned.
+      - **Tests:** `migrator.test.ts` (067 up, the key, the check, both foreign keys, both
+        cascades, down, up again); 33 unit cases in `credential-pinning.test.ts` (a table of 13
+        stored times through `storedStop` and through a start, what a start takes up, what is
+        written and when, writes in order, pruning, and that `main.ts` reads the record before
+        the endpoint is built); one case on the real table for the write, the row going when the
+        sensor is left again, a start an hour behind and a start after it; the scenario above.
+        `state-machine.md`, `troubleshooting.md` and `administration.md` say what holds now.
+      - **Mutation:** 17 of 17 killed.
+      - **Not done.** No Core Health channel for the rows held: a channel is a declaration, a
+        reference regeneration and its tests, for a table that holds a handful of rows for ten
+        minutes, and a failed write is logged. `main.ts` is not started by any test: its order is
+        pinned by reading the source. The window above.
 
 - [ ] **A-62 — database and Windows sensors connect to whatever a name resolves to** · M ·
       A-57, A-41c · Found 2026-10-02 by `A-57`. `pg`, `mysql2` and `tedious` resolve a name

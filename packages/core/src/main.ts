@@ -586,6 +586,28 @@ async function serve(): Promise<void> {
   // in use when this build first starts, so the upgrade withholds nothing (migration 060), and a
   // release that moves where a type sends a kind carries over only what it can show did not move.
   await credentialVouching.adopt();
+  // And which sensors a configuration stopped leaving to a probe, and when, as the core before
+  // this one stored it (`A-61`): a refusal for one of them inside the grace is late, not a failed
+  // scan. Awaited here, long before the probe endpoint below is built, so no result is judged
+  // without it.
+  await credentialVouching.restore();
+  // An entry goes at its probe's next configuration; this is for a probe that is never sent one.
+  const lateRefusalPrune = new PeriodicSweep({
+    logger,
+    component: 'late-refusal-prune',
+    what: 'pruning the record of late refusals failed',
+    run: () => credentialVouching.prune(),
+    intervalMs: 60_000,
+  });
+  lateRefusalPrune.start();
+  lifecycle.onShutdown({
+    name: 'late-refusal-prune',
+    timeoutMs: 1_000,
+    run: () => {
+      lateRefusalPrune.stop();
+      return Promise.resolve();
+    },
+  });
 
   // One instance, because `D-07` reads a schedule's definition through it as well: a rediscovery
   // may be constrained by a permission window, and what an evaluator needs is the definition
