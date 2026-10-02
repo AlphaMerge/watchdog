@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError, type Loadable } from '../src/api/client';
-import type { CredentialView, CredentialWrite, EffectiveAccess } from '../src/api/types';
+import type {
+  CredentialView,
+  CredentialWrite,
+  CredentialWriteCounts,
+  EffectiveAccess,
+} from '../src/api/types';
 import type { Session } from '../src/auth/session';
 import { isMultiline, type JsonSchema } from '../src/forms/schema';
 import {
-  OUTSIDE_MEANS,
   asksForRight,
   boundsSentence,
   channelLinkFor,
@@ -14,14 +18,16 @@ import {
   kindsToAdd,
   mayWrite,
   needsConfirmation,
+  OUTSIDE_MEANS,
   ownerName,
   ownerOf,
   publicRows,
+  reasonsPhrase,
   refusedFields,
   removalSentence,
   savedSentence,
-  secretChangeSentence,
   secretChanges,
+  secretChangeSentence,
   secretLabels,
 } from '../src/routes/detail/credentials-model';
 import { tabsFor } from '../src/routes/detail/model';
@@ -242,15 +248,33 @@ describe('what a save does to each secret', () => {
 });
 
 describe('what a previewed save says', () => {
-  const answer = (over: Partial<CredentialWrite>): CredentialWrite => ({
-    ...SET,
-    withholds: 0,
-    withheldBefore: 0,
-    newlyWithheld: 0,
-    noLongerWithheld: 0,
-    secretsCleared: [],
-    ...over,
-  });
+  const NONE = { withholds: 0, withheldBefore: 0, newlyWithheld: 0, noLongerWithheld: 0 };
+  /**
+   * A write's answer. Unless a test says otherwise, every sensor that is outside is on a device
+   * the targets do not cover, which is what the counts were before they were split (`A-59`).
+   */
+  const answer = (
+    over: Partial<CredentialWrite>,
+    unpinnable: Partial<CredentialWriteCounts> = {},
+  ): CredentialWrite => {
+    const all = { ...NONE, ...over };
+    const named = { ...NONE, ...unpinnable };
+    return {
+      ...SET,
+      ...all,
+      byReason: {
+        outside: {
+          withholds: all.withholds - named.withholds,
+          withheldBefore: all.withheldBefore - named.withheldBefore,
+          newlyWithheld: all.newlyWithheld - named.newlyWithheld,
+          noLongerWithheld: all.noLongerWithheld - named.noLongerWithheld,
+        },
+        unpinnable: named,
+      },
+      secretsCleared: [],
+      ...over,
+    };
+  };
 
   it('needs confirming when it puts a sensor outside or clears a secret, and only then', () => {
     expect(needsConfirmation(answer({}))).toBe(false);
@@ -268,41 +292,116 @@ describe('what a previewed save says', () => {
     const one = answer({ withholds: 1, newlyWithheld: 1 });
     const six = answer({ withholds: 6, newlyWithheld: 6 });
     expect(boundsSentence(one, 'Rack A', 'will')).toBe(
-      "This save puts 1 sensor beneath Rack A outside this set's bounds. It is not sent the set after it and reads Unknown until the bounds include it.",
+      "This save puts 1 sensor beneath Rack A outside this set's bounds: on a device the allowed targets do not cover. That sensor is not sent the set after the save and reads Unknown until the bounds include it.",
     );
     expect(boundsSentence(six, 'Rack A', 'will')).toBe(
-      "This save puts 6 sensors beneath Rack A outside this set's bounds. They are not sent the set after it and read Unknown until the bounds include them.",
+      "This save puts 6 sensors beneath Rack A outside this set's bounds: all on devices the allowed targets do not cover. Those sensors are not sent the set after the save and read Unknown until the bounds include them.",
     );
     expect(boundsSentence(one, 'Rack A', 'now')).toBe(
-      'This save put 1 sensor beneath Rack A outside its bounds: it is not sent the set and reads Unknown.',
+      'This save put 1 sensor beneath Rack A outside its bounds: on a device the allowed targets do not cover. That sensor is not sent the set and reads Unknown.',
     );
     expect(boundsSentence(six, 'Rack A', 'now')).toBe(
-      'This save put 6 sensors beneath Rack A outside its bounds: they are not sent the set and read Unknown.',
+      'This save put 6 sensors beneath Rack A outside its bounds: all on devices the allowed targets do not cover. Those sensors are not sent the set and read Unknown.',
     );
+  });
+
+  it('says why the sensors are outside: how many for each of the two reasons (A-59)', () => {
+    // The phrase alone: both reasons with their numbers, one reason without, none at all.
+    expect(reasonsPhrase(4, 2)).toBe(
+      ': 4 on devices the allowed targets do not cover, and 2 on devices entered by name, with a sensor type that cannot be held to a checked address',
+    );
+    expect(reasonsPhrase(1, 1)).toBe(
+      ': 1 on a device the allowed targets do not cover, and 1 on a device entered by name, with a sensor type that cannot be held to a checked address',
+    );
+    expect(reasonsPhrase(0, 3)).toBe(
+      ': all on devices entered by name, with a sensor type that cannot be held to a checked address',
+    );
+    expect(reasonsPhrase(0, 1)).toBe(
+      ': on a device entered by name, with a sensor type that cannot be held to a checked address',
+    );
+    expect(reasonsPhrase(2, 0)).toBe(': all on devices the allowed targets do not cover');
+    expect(reasonsPhrase(0, 0)).toBe('');
+
+    // Six put outside, two of them for the name.
+    const mixed = answer({ withholds: 6, newlyWithheld: 6 }, { withholds: 2, newlyWithheld: 2 });
+    expect(boundsSentence(mixed, 'Rack A', 'will')).toBe(
+      "This save puts 6 sensors beneath Rack A outside this set's bounds: 4 on devices the allowed targets do not cover, and 2 on devices entered by name, with a sensor type that cannot be held to a checked address. Those sensors are not sent the set after the save and read Unknown until the bounds include them.",
+    );
+    expect(boundsSentence(mixed, 'Rack A', 'now')).toBe(
+      'This save put 6 sensors beneath Rack A outside its bounds: 4 on devices the allowed targets do not cover, and 2 on devices entered by name, with a sensor type that cannot be held to a checked address. Those sensors are not sent the set and read Unknown.',
+    );
+    // One put outside, for the name.
+    const named = answer({ withholds: 1, newlyWithheld: 1 }, { withholds: 1, newlyWithheld: 1 });
+    expect(boundsSentence(named, 'Rack A', 'will')).toBe(
+      "This save puts 1 sensor beneath Rack A outside this set's bounds: on a device entered by name, with a sensor type that cannot be held to a checked address. That sensor is not sent the set after the save and reads Unknown until the bounds include it.",
+    );
+    // Two put outside for their address beside three that stay outside, one of those for the
+    // name: each number is said with the reason of the sensors it counts, and no other.
+    const beside = answer(
+      { withholds: 5, withheldBefore: 3, newlyWithheld: 2 },
+      { withholds: 1, withheldBefore: 1 },
+    );
+    expect(boundsSentence(beside, 'Rack A', 'will')).toBe(
+      "This save puts 2 sensors beneath Rack A outside this set's bounds: all on devices the allowed targets do not cover. Those sensors are not sent the set after the save and read Unknown until the bounds include them. 3 sensors beneath Rack A are outside already and this save leaves them there: 2 on devices the allowed targets do not cover, and 1 on a device entered by name, with a sensor type that cannot be held to a checked address.",
+    );
+    expect(boundsSentence(beside, 'Rack A', 'now')).toBe(
+      'This save put 2 sensors beneath Rack A outside its bounds: all on devices the allowed targets do not cover. Those sensors are not sent the set and read Unknown. 3 sensors beneath Rack A were outside already and still are: 2 on devices the allowed targets do not cover, and 1 on a device entered by name, with a sensor type that cannot be held to a checked address.',
+    );
+    // A sensor that stays outside for another reason than before is said under the reason
+    // that holds after the save: the two named ones are simply not covered now.
+    const changed: CredentialWrite = {
+      ...answer({ withholds: 2, withheldBefore: 2 }),
+      byReason: {
+        outside: { withholds: 2, withheldBefore: 0, newlyWithheld: 0, noLongerWithheld: 0 },
+        unpinnable: { withholds: 0, withheldBefore: 2, newlyWithheld: 0, noLongerWithheld: 0 },
+      },
+    };
+    expect(boundsSentence(changed, 'Rack A', 'will')).toBe(
+      '2 sensors beneath Rack A are outside already and this save leaves them there: all on devices the allowed targets do not cover.',
+    );
+  });
+
+  it('never says "it" where a listener could take it for the device, the targets or the save', () => {
+    // Read aloud in one line, each sentence after the first has to name what it is about.
+    const everything = answer(
+      { withholds: 3, withheldBefore: 3, newlyWithheld: 1, noLongerWithheld: 1 },
+      { withholds: 1, withheldBefore: 1 },
+    );
+    for (const tense of ['will', 'now'] as const) {
+      const said = boundsSentence(everything, 'Rack A', tense) ?? '';
+      const sentences = said.split(/(?<=\.) /u);
+      expect(sentences).toHaveLength(4);
+      for (const sentence of sentences.slice(1)) {
+        expect(sentence).not.toMatch(/^(It|They) /u);
+      }
+      expect(said).not.toMatch(/after it\b/u);
+      expect(sentences[1]).toMatch(/^That sensor is not sent the set/u);
+      expect(sentences[2]).toMatch(/^The save also /u);
+    }
   });
 
   it('says the sensors that were outside already apart from the ones the save puts there', () => {
     const standing = answer({ withholds: 6, withheldBefore: 6 });
     expect(boundsSentence(standing, 'Rack A', 'will')).toBe(
-      '6 sensors beneath Rack A are outside already, and this save leaves them there.',
+      '6 sensors beneath Rack A are outside already and this save leaves them there: all on devices the allowed targets do not cover.',
     );
     expect(boundsSentence(standing, 'Rack A', 'now')).toBe(
-      '6 sensors beneath Rack A were outside already and still are.',
+      '6 sensors beneath Rack A were outside already and still are: all on devices the allowed targets do not cover.',
     );
     const single = answer({ withholds: 1, withheldBefore: 1 });
     expect(boundsSentence(single, 'Rack A', 'will')).toBe(
-      '1 sensor beneath Rack A is outside already, and this save leaves it there.',
+      '1 sensor beneath Rack A is outside already and this save leaves it there: on a device the allowed targets do not cover.',
     );
     expect(boundsSentence(single, 'Rack A', 'now')).toBe(
-      '1 sensor beneath Rack A was outside already and still is.',
+      '1 sensor beneath Rack A was outside already and still is: on a device the allowed targets do not cover.',
     );
     // Two more on top of four: the two are the save's, the four are not.
     const more = answer({ withholds: 6, withheldBefore: 4, newlyWithheld: 2 });
     expect(boundsSentence(more, 'Rack A', 'will')).toBe(
-      "This save puts 2 sensors beneath Rack A outside this set's bounds. They are not sent the set after it and read Unknown until the bounds include them. 4 sensors beneath Rack A are outside already, and this save leaves them there.",
+      "This save puts 2 sensors beneath Rack A outside this set's bounds: all on devices the allowed targets do not cover. Those sensors are not sent the set after the save and read Unknown until the bounds include them. 4 sensors beneath Rack A are outside already and this save leaves them there: all on devices the allowed targets do not cover.",
     );
     expect(boundsSentence(more, 'Rack A', 'now')).toBe(
-      'This save put 2 sensors beneath Rack A outside its bounds: they are not sent the set and read Unknown. 4 sensors beneath Rack A were outside already and still are.',
+      'This save put 2 sensors beneath Rack A outside its bounds: all on devices the allowed targets do not cover. Those sensors are not sent the set and read Unknown. 4 sensors beneath Rack A were outside already and still are: all on devices the allowed targets do not cover.',
     );
   });
 
@@ -322,16 +421,16 @@ describe('what a previewed save says', () => {
       noLongerWithheld: 1,
     });
     expect(boundsSentence(moved, 'Rack A', 'will')).toBe(
-      "This save puts 1 sensor beneath Rack A outside this set's bounds. It is not sent the set after it and reads Unknown until the bounds include it. The save also brings 1 sensor back inside, to be sent the set again.",
+      "This save puts 1 sensor beneath Rack A outside this set's bounds: on a device the allowed targets do not cover. That sensor is not sent the set after the save and reads Unknown until the bounds include it. The save also brings 1 sensor back inside, to be sent the set again.",
     );
     expect(boundsSentence(moved, 'Rack A', 'now')).toBe(
-      'This save put 1 sensor beneath Rack A outside its bounds: it is not sent the set and reads Unknown. The save also brought 1 sensor back inside.',
+      'This save put 1 sensor beneath Rack A outside its bounds: on a device the allowed targets do not cover. That sensor is not sent the set and reads Unknown. The save also brought 1 sensor back inside.',
     );
   });
 
   it('says in words that a named device can be outside whatever its name resolves to', () => {
     expect(OUTSIDE_MEANS).toBe(
-      "A sensor is outside a set's bounds when its device's address is not one the allowed targets cover. It is also outside when its device is entered by name, the targets are addresses, and the sensor's type cannot be held to an address its probe has checked: whatever the name resolves to, the set is not sent.",
+      "A sensor is outside a set's bounds when its device's address is not one the allowed targets cover. A sensor is also outside when its device is entered by name, the targets are addresses, and the sensor's type cannot be held to an address its probe has checked: whatever the name resolves to, the set is not sent.",
     );
   });
 
@@ -360,7 +459,7 @@ describe('what a previewed save says', () => {
         SCHEMA,
       ),
     ).toBe(
-      'Saved the SSH set on Rack A. This save put 2 sensors beneath Rack A outside its bounds: they are not sent the set and read Unknown. Cleared because the set may now go further: Password. Enter it again, or the sensors using this set cannot authenticate.',
+      'Saved the SSH set on Rack A. This save put 2 sensors beneath Rack A outside its bounds: all on devices the allowed targets do not cover. Those sensors are not sent the set and read Unknown. Cleared because the set may now go further: Password. Enter it again, or the sensors using this set cannot authenticate.',
     );
   });
 });

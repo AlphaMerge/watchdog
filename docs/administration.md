@@ -436,7 +436,15 @@ nobody, not even an administrator, can bring it outside.
   them all. A removal's `sensors` is counted the same way. **`withholds` is how things stand
   after the write, and three more counts say what the write changed**: `withheldBefore` (of the
   same sensors, how many were outside before), `newlyWithheld` (put outside by this write) and
-  `noLongerWithheld` (brought back by it), each over the sensors the caller can see. The
+  `noLongerWithheld` (brought back by it), each over the sensors the caller can see.
+  **`byReason` gives each of the four for the two reasons a sensor is outside** (`A-59`):
+  `outside`, a device whose address or name the targets do not cover, and `unpinnable`, a
+  device entered by name whose sensor type cannot be held to a checked address. They are
+  mended differently, the first by the targets or the device's place, the second by giving the
+  device its address or naming it in the targets, and the tab says how many of each. The
+  `credential.set` entry in the installation's log carries `newlyWithheld` and
+  `noLongerWithheld` beside `withholds`, all three whole; an object's history, which anybody
+  with `read` on it can open, carries none of them. The
   Credentials tab asks before a save only when `newlyWithheld` is above zero, says how many
   the save puts outside, how many it brings back and how many were outside already, and says
   what outside means. A set stored for the first time on a group is compared with the

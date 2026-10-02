@@ -34,6 +34,7 @@ import type { CredentialVault } from '../vault/service.js';
 import type { ChannelDraft, SensorTypeGate } from './sensor-type-gate.js';
 import {
   boundsBeneath,
+  type WithheldReason,
   sensorsUsing,
   vouch as vouchForCredentials,
 } from './credential-vouching.js';
@@ -1433,13 +1434,16 @@ export class ObjectService {
       const after = await boundsBeneath(q, this.#sensorTypes, id, kind);
       // Over the sensors this set reaches now, before and after: a sensor beneath with a nearer
       // set of its own is not this write's, and stands the same on both sides of it.
-      const withheld = [...after.withheld].filter((sensor) => after.reached.has(sensor));
-      const wasWithheld = [...before.withheld].filter((sensor) => after.reached.has(sensor));
+      const withheld = [...after.withheld.keys()].filter((sensor) => after.reached.has(sensor));
+      const wasWithheld = [...before.withheld.keys()].filter((sensor) => after.reached.has(sensor));
       const newly = withheld.filter((sensor) => !before.withheld.has(sensor));
       const noLonger = wasWithheld.filter((sensor) => !after.withheld.has(sensor));
-      // The audit record keeps the whole number: it is what the write did. It reaches the audit
-      // log, which is the installation's; the history the API serves stores no count for a
-      // credential write (`audit/store.ts`), so there is none there to trim.
+      // The audit record keeps the whole numbers: they are what the write did (`A-59`: the
+      // sensors it put outside and brought back, beside how many are outside after it). It
+      // reaches the installation's log, which whoever reads the service's journal reads. **The
+      // history the API serves stores no count for a credential write** (`audit/store.ts`): an
+      // object's history is read with `read` on it, by an account that may have a hole beneath,
+      // and a whole count there would say how many sensors are inside the hole.
       const withholds = withheld.length;
       const bounded = isRestricted(restrictionOf(kind, summary.publicParams));
       // A preview changes nothing, so it has nothing to put in the history. Skipped rather than
@@ -1459,7 +1463,10 @@ export class ObjectService {
               ...(summary.secretsCleared.length === 0
                 ? {}
                 : { secretsCleared: summary.secretsCleared }),
-              ...(bounded ? { withholds } : {}),
+              ...(bounded ? { withholds, newlyWithheld: newly.length } : {}),
+              // A write that takes the bounds away brings sensors back and leaves a set that
+              // withholds nothing: said for a bounded set, and whenever there are any.
+              ...(bounded || noLonger.length > 0 ? { noLongerWithheld: noLonger.length } : {}),
               publicParams: summary.publicParams,
             },
           ],
@@ -1480,13 +1487,30 @@ export class ObjectService {
       // preview asks for nothing and leaves no trace. One question for all four: every sensor in
       // `newly` is in `withheld` and every one in `noLonger` is in `wasWithheld`.
       const seen = await this.#seenOf(q, options.visibility, [...withheld, ...wasWithheld]);
-      const count = (sensors: readonly ObjectId[]): number => sensors.filter(seen).length;
+      // **And each for the two reasons a sensor is outside** (`A-59`), over the same sensors
+      // the caller sees and from the same answer to the one question: a reason's count is of
+      // sensors already counted in its total, so no number here is of a sensor in a hole, and
+      // none is worked out from a whole one. Outside after the write, a sensor is counted for
+      // the reason that holds after it; outside before, for the one that held then.
+      const counts = (reason?: WithheldReason): CredentialWriteCounts => {
+        const count = (
+          sensors: readonly ObjectId[],
+          why: ReadonlyMap<ObjectId, WithheldReason>,
+        ): number =>
+          sensors.filter(
+            (sensor) => seen(sensor) && (reason === undefined || why.get(sensor) === reason),
+          ).length;
+        return {
+          withholds: count(withheld, after.withheld),
+          withheldBefore: count(wasWithheld, before.withheld),
+          newlyWithheld: count(newly, after.withheld),
+          noLongerWithheld: count(noLonger, before.withheld),
+        };
+      };
       return {
         ...credentialViewOf(view),
-        withholds: count(withheld),
-        withheldBefore: count(wasWithheld),
-        newlyWithheld: count(newly),
-        noLongerWithheld: count(noLonger),
+        ...counts(),
+        byReason: { outside: counts('outside'), unpinnable: counts('unpinnable') },
         secretsCleared: summary.secretsCleared,
       };
     });
@@ -2753,7 +2777,17 @@ function diffSettings(
  * did to where it goes. Every count is of the sensors the caller can see, among those that
  * resolve to this set once it is written.
  */
-export interface CredentialWriteAnswer extends CredentialView {
+export interface CredentialWriteAnswer extends CredentialView, CredentialWriteCounts {
+  /**
+   * The same four counts for each reason a sensor is outside (`A-59`), over the same sensors.
+   * Each of the four is the sum of its two parts.
+   */
+  readonly byReason: Readonly<Record<WithheldReason, CredentialWriteCounts>>;
+  readonly secretsCleared: readonly string[];
+}
+
+/** What a credential write did to which sensors its set's bounds keep it from. */
+export interface CredentialWriteCounts {
   /** Sensors the set's bounds keep it from after the write. */
   readonly withholds: number;
   /**
@@ -2765,7 +2799,6 @@ export interface CredentialWriteAnswer extends CredentialView {
   readonly newlyWithheld: number;
   /** Sensors the write brought back inside: withheld before it and not after. */
   readonly noLongerWithheld: number;
-  readonly secretsCleared: readonly string[];
 }
 
 export interface CredentialWriteOptions {

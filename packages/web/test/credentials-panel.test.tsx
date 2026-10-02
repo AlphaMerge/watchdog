@@ -7,6 +7,7 @@ import type {
   CredentialRemoval,
   CredentialView,
   CredentialWrite,
+  CredentialWriteCounts,
   ObjectRef,
   UnboundedCredential,
 } from '../src/api/types';
@@ -99,15 +100,34 @@ const OWN_SSH: CredentialView = {
   secretsSet: ['privateKey'],
 };
 
-const written = (over: Partial<CredentialWrite> = {}): CredentialWrite => ({
-  ...OWN_SNMP,
-  withholds: 0,
-  withheldBefore: 0,
-  newlyWithheld: 0,
-  noLongerWithheld: 0,
-  secretsCleared: [],
-  ...over,
-});
+const NO_COUNTS = { withholds: 0, withheldBefore: 0, newlyWithheld: 0, noLongerWithheld: 0 };
+
+/**
+ * A write's answer. Unless a test says otherwise, every sensor outside is on a device the
+ * targets do not cover; `unpinnable` moves some of each count to the named-device reason.
+ */
+const written = (
+  over: Partial<CredentialWrite> = {},
+  unpinnable: Partial<CredentialWriteCounts> = {},
+): CredentialWrite => {
+  const all = { ...NO_COUNTS, ...over };
+  const named = { ...NO_COUNTS, ...unpinnable };
+  return {
+    ...OWN_SNMP,
+    ...all,
+    byReason: {
+      outside: {
+        withholds: all.withholds - named.withholds,
+        withheldBefore: all.withheldBefore - named.withheldBefore,
+        newlyWithheld: all.newlyWithheld - named.newlyWithheld,
+        noLongerWithheld: all.noLongerWithheld - named.noLongerWithheld,
+      },
+      unpinnable: named,
+    },
+    secretsCleared: [],
+    ...over,
+  };
+};
 
 interface Call {
   method: string;
@@ -561,7 +581,7 @@ describe('the credentials tab', () => {
       const confirm = await screen.findByRole('group', { name: 'Confirm this save' });
       expect(
         within(confirm).getByText(
-          "This save puts 6 sensors beneath Rack A outside this set's bounds. They are not sent the set after it and read Unknown until the bounds include them.",
+          "This save puts 6 sensors beneath Rack A outside this set's bounds: all on devices the allowed targets do not cover. Those sensors are not sent the set after the save and read Unknown until the bounds include them.",
         ),
       ).toBeDefined();
       // And what "outside" covers, the named device included, where the decision is made.
@@ -591,7 +611,7 @@ describe('the credentials tab', () => {
 
       // What the write answered, said where a screen reader hears it.
       const status = await screen.findByText(
-        'Saved the SNMP set on Rack A. This save put 6 sensors beneath Rack A outside its bounds: they are not sent the set and read Unknown.',
+        'Saved the SNMP set on Rack A. This save put 6 sensors beneath Rack A outside its bounds: all on devices the allowed targets do not cover. Those sensors are not sent the set and read Unknown.',
       );
       expect(status.getAttribute('role')).toBe('status');
       expect(status.getAttribute('aria-live')).toBe('polite');
@@ -782,6 +802,30 @@ describe('the credentials tab', () => {
       ).toBeDefined();
     });
 
+    it('says how many sensors the save puts outside for each of the two reasons (A-59)', async () => {
+      const answer = written(
+        { withholds: 6, newlyWithheld: 6 },
+        { withholds: 2, newlyWithheld: 2 },
+      );
+      const { form } = await editSnmp({ preview: answer, write: answer });
+      narrow(form);
+
+      const confirm = await screen.findByRole('group', { name: 'Confirm this save' });
+      expect(
+        within(confirm).getByText(
+          "This save puts 6 sensors beneath Rack A outside this set's bounds: 4 on devices the allowed targets do not cover, and 2 on devices entered by name, with a sensor type that cannot be held to a checked address. Those sensors are not sent the set after the save and read Unknown until the bounds include them.",
+        ),
+      ).toBeDefined();
+      // Plain text in the group that takes focus: nothing a screen reader has to find apart.
+      expect(confirm.querySelectorAll('[aria-hidden], [role="img"], svg')).toHaveLength(0);
+
+      fireEvent.click(within(confirm).getByRole('button', { name: 'Save anyway' }));
+      const status = await screen.findByText(
+        'Saved the SNMP set on Rack A. This save put 6 sensors beneath Rack A outside its bounds: 4 on devices the allowed targets do not cover, and 2 on devices entered by name, with a sensor type that cannot be held to a checked address. Those sensors are not sent the set and read Unknown.',
+      );
+      expect(status.closest('[role="status"]')).not.toBeNull();
+    });
+
     it('saves without asking when the sensors outside were outside already, and says so after', async () => {
       // `A-55`: six outside before and six after, none put there by this save. Nothing to
       // confirm, and the sentence afterwards does not call them the save's.
@@ -789,7 +833,7 @@ describe('the credentials tab', () => {
       const { calls, form } = await editSnmp({ preview: standing, write: standing });
       narrow(form);
       const status = await screen.findByText(
-        'Saved the SNMP set on Rack A. 6 sensors beneath Rack A were outside already and still are.',
+        'Saved the SNMP set on Rack A. 6 sensors beneath Rack A were outside already and still are: all on devices the allowed targets do not cover.',
       );
       expect(status.getAttribute('role')).toBe('status');
       expect(screen.queryByRole('group', { name: 'Confirm this save' })).toBeNull();
@@ -812,7 +856,7 @@ describe('the credentials tab', () => {
       const confirm = await screen.findByRole('group', { name: 'Confirm this save' });
       expect(
         within(confirm).getByText(
-          "This save puts 2 sensors beneath Rack A outside this set's bounds. They are not sent the set after it and read Unknown until the bounds include them. The save also brings 1 sensor back inside, to be sent the set again. 3 sensors beneath Rack A are outside already, and this save leaves them there.",
+          "This save puts 2 sensors beneath Rack A outside this set's bounds: all on devices the allowed targets do not cover. Those sensors are not sent the set after the save and read Unknown until the bounds include them. The save also brings 1 sensor back inside, to be sent the set again. 3 sensors beneath Rack A are outside already and this save leaves them there: all on devices the allowed targets do not cover.",
         ),
       ).toBeDefined();
     });
@@ -827,7 +871,7 @@ describe('the credentials tab', () => {
       const confirm = await screen.findByRole('group', { name: 'Confirm this save' });
       expect(
         within(confirm).getByText(
-          '2 sensors beneath Rack A are outside already, and this save leaves them there.',
+          '2 sensors beneath Rack A are outside already and this save leaves them there: all on devices the allowed targets do not cover.',
         ),
       ).toBeDefined();
       expect(within(confirm).getByText(OUTSIDE_MEANS)).toBeDefined();

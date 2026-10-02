@@ -267,8 +267,8 @@ export interface CredentialView {
   secretsSet?: string[];
 }
 
-/** What storing a set answers (`A-41b`), and what `?dryRun=true` answers without storing it. */
-export interface CredentialWrite extends CredentialView {
+/** The four counts a credential write answers, whole or for one reason (`A-55`, `A-59`). */
+export interface CredentialWriteCounts {
   /** Sensors beneath that are outside its bounds now: not sent it, and read Unknown. */
   withholds: number;
   /** Of the sensors the set reaches now, those a set's bounds kept it from before the write. */
@@ -277,6 +277,18 @@ export interface CredentialWrite extends CredentialView {
   newlyWithheld: number;
   /** Sensors this write brings back inside: outside before it and not after. */
   noLongerWithheld: number;
+}
+
+/** What storing a set answers (`A-41b`), and what `?dryRun=true` answers without storing it. */
+export interface CredentialWrite extends CredentialView, CredentialWriteCounts {
+  /**
+   * The same four, for each of the two reasons a sensor is outside (`A-59`), and each adding up
+   * to its total: `outside` is a device whose address or name the targets do not cover, and
+   * `unpinnable` a device entered by name, facing targets that are addresses, whose sensor type
+   * cannot be held to an address its probe checked. Like the totals, over the sensors the
+   * caller can see.
+   */
+  byReason: { outside: CredentialWriteCounts; unpinnable: CredentialWriteCounts };
   /** Secrets the write cleared because it widened where the set may go and did not send them. */
   secretsCleared: string[];
 }

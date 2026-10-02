@@ -227,10 +227,13 @@ export function kindsToAdd(
 // What a write is about to do, and what it did.
 // ---------------------------------------------------------------------------------------------
 
-/** The four counts a write answers with: outside after it, before it, put there, brought back. */
+/**
+ * The four counts a write answers with: outside after it, before it, put there, brought back.
+ * And each of them for the two reasons a sensor is outside (`A-59`).
+ */
 export type BoundsChange = Pick<
   CredentialWrite,
-  'withholds' | 'withheldBefore' | 'newlyWithheld' | 'noLongerWithheld'
+  'withholds' | 'withheldBefore' | 'newlyWithheld' | 'noLongerWithheld' | 'byReason'
 >;
 
 /**
@@ -272,12 +275,40 @@ export function secretLabels(schema: JsonSchema, names: readonly string[]): stri
  * has no address for the core to compare with targets that are addresses. A sensor whose type
  * can be held to an address its probe checked is left to the probe and is not counted. One whose
  * type cannot is outside, whatever the name resolves to.
+ *
+ * "A sensor is also outside", not "It is": the sentence before ends on the targets (`A-59`).
  */
 export const OUTSIDE_MEANS =
   "A sensor is outside a set's bounds when its device's address is not one the allowed targets " +
-  'cover. It is also outside when its device is entered by name, the targets are addresses, and ' +
-  "the sensor's type cannot be held to an address its probe has checked: whatever the name " +
-  'resolves to, the set is not sent.';
+  'cover. A sensor is also outside when its device is entered by name, the targets are ' +
+  "addresses, and the sensor's type cannot be held to an address its probe has checked: " +
+  'whatever the name resolves to, the set is not sent.';
+
+/**
+ * Why some sensors are outside, as the end of a sentence about them (`A-59`): how many are on a
+ * device the targets do not cover, and how many on a device entered by name whose sensor type
+ * cannot be held to a checked address. The two want different remedies, and one number for both
+ * left an operator to open every sensor to find out which.
+ *
+ * Each number is said with what it counts, so the phrase reads the same aloud as on the page.
+ * One reason alone is said without its number, which the sentence before has just given. Empty
+ * when the core gave no reason for any of them, so the sentence before it stands as it is.
+ */
+export function reasonsPhrase(outside: number, unpinnable: number): string {
+  const covered = (count: number): string =>
+    count === 1
+      ? 'on a device the allowed targets do not cover'
+      : 'on devices the allowed targets do not cover';
+  const named = (count: number): string =>
+    `on ${count === 1 ? 'a device' : 'devices'} entered by name, with a sensor type that ` +
+    'cannot be held to a checked address';
+  if (outside > 0 && unpinnable > 0) {
+    return `: ${String(outside)} ${covered(outside)}, and ${String(unpinnable)} ${named(unpinnable)}`;
+  }
+  const count = outside + unpinnable;
+  if (count <= 0) return '';
+  return `: ${count === 1 ? '' : 'all '}${outside > 0 ? covered(count) : named(count)}`;
+}
 
 /**
  * What a save does to which sensors are outside a set's bounds, before the save and after it.
@@ -287,6 +318,13 @@ export const OUTSIDE_MEANS =
  * the operator is being asked about; the other two are said so that the first is not taken for
  * the whole, and so that a save which moves the bounds without changing how many are outside
  * does not read as a save that changes nothing.
+ *
+ * **The sensors outside after the save are said by reason** (`A-59`), the ones the save puts
+ * there and the ones it leaves there. The ones it brings back are not: why a sensor was outside
+ * is nothing to act on once it is inside.
+ *
+ * **Read aloud, every sentence names what it is about.** After a sentence that ends on devices
+ * and targets, "it" could be any of them: the next one says "that sensor" and "the save".
  */
 export function boundsSentence(
   change: BoundsChange,
@@ -297,17 +335,20 @@ export function boundsSentence(
   const added = change.newlyWithheld;
   const back = change.noLongerWithheld;
   const staying = Math.max(0, change.withholds - added);
+  const { outside, unpinnable } = change.byReason;
   const parts: string[] = [];
   if (added > 0) {
     const one = added === 1;
     const sensors = plural(added, 'sensor', 'sensors');
+    const why = reasonsPhrase(outside.newlyWithheld, unpinnable.newlyWithheld);
+    const those = one ? 'That sensor is' : 'Those sensors are';
     parts.push(
       will
-        ? `This save puts ${sensors} beneath ${objectName} outside this set's bounds. ` +
-            `${one ? 'It is' : 'They are'} not sent the set after it and ` +
+        ? `This save puts ${sensors} beneath ${objectName} outside this set's bounds${why}. ` +
+            `${those} not sent the set after the save and ` +
             `${one ? 'reads' : 'read'} Unknown until the bounds include ${one ? 'it' : 'them'}.`
-        : `This save put ${sensors} beneath ${objectName} outside its bounds: ` +
-            `${one ? 'it is' : 'they are'} not sent the set and ${one ? 'reads' : 'read'} Unknown.`,
+        : `This save put ${sensors} beneath ${objectName} outside its bounds${why}. ` +
+            `${those} not sent the set and ${one ? 'reads' : 'read'} Unknown.`,
     );
   }
   if (back > 0) {
@@ -324,12 +365,19 @@ export function boundsSentence(
   if (staying > 0) {
     const one = staying === 1;
     const sensors = plural(staying, 'sensor', 'sensors');
+    // Outside after the save and not put there by it, for each reason as the core gives it
+    // after the save: a sensor that stays outside for another reason than before is counted
+    // under the one that holds now.
+    const why = reasonsPhrase(
+      Math.max(0, outside.withholds - outside.newlyWithheld),
+      Math.max(0, unpinnable.withholds - unpinnable.newlyWithheld),
+    );
     parts.push(
       will
-        ? `${sensors} beneath ${objectName} ${one ? 'is' : 'are'} outside already, and this ` +
-            `save leaves ${one ? 'it' : 'them'} there.`
+        ? `${sensors} beneath ${objectName} ${one ? 'is' : 'are'} outside already and this ` +
+            `save leaves ${one ? 'it' : 'them'} there${why}.`
         : `${sensors} beneath ${objectName} ${one ? 'was' : 'were'} outside already and still ` +
-            `${one ? 'is' : 'are'}.`,
+            `${one ? 'is' : 'are'}${why}.`,
     );
   }
   return parts.length === 0 ? null : parts.join(' ');

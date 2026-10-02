@@ -3357,14 +3357,39 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       await snmp(carved, `${MARK}-vault-s2`);
       await snmp(carved, `${MARK}-vault-s3`);
       await grant(carved, 'none');
+      // And one device of each, entered by name (`A-59`): against targets that are addresses
+      // their sensors are outside for another reason, which is counted apart.
+      const seenNamed = await create({
+        kind: 'device',
+        parentId: room,
+        name: 'a-vault-named',
+        host: 'seen.vault.test',
+      });
+      const carvedNamed = await create({
+        kind: 'device',
+        parentId: room,
+        name: `${MARK}-vault-named`,
+        host: `${MARK}.vault.test`,
+      });
+      await snmp(seenNamed, 'a-vault-s4');
+      await snmp(carvedNamed, `${MARK}-vault-s5`);
+      await grant(carvedNamed, 'none');
 
       const url = `/api/v1/objects/${String(room)}/credentials/snmp`;
       // Bounds every device here is outside, so the set is kept from every sensor.
       const payload = {
         values: { community: 'a-vault-community', allowedTargets: ['192.0.2.0/24'] },
       };
-      /** The write's four counts (`A-55`): outside after, outside before, put there, brought back. */
-      const put = async (login: string, dryRun: boolean): Promise<number[]> => {
+      /**
+       * The write's four counts (`A-55`): outside after, outside before, put there, brought back.
+       * Whole, and for each of the two reasons a sensor is outside (`A-59`).
+       */
+      interface Counted {
+        all: number[];
+        outside: number[];
+        unpinnable: number[];
+      }
+      const put = async (login: string, dryRun: boolean): Promise<Counted> => {
         const response = await app.inject({
           method: 'PUT',
           url: `${url}${dryRun ? '?dryRun=true' : ''}`,
@@ -3372,13 +3397,17 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
           payload,
         });
         assert.equal(response.statusCode, 200, response.body);
-        const body = response.json<Record<string, number>>();
-        return [
-          body['withholds'],
-          body['withheldBefore'],
-          body['newlyWithheld'],
-          body['noLongerWithheld'],
-        ].map((count) => count ?? Number.NaN);
+        type Four = Record<string, number | undefined>;
+        const body = response.json<Four & { byReason?: Record<string, Four | undefined> }>();
+        const four = (counts: Four | undefined): number[] =>
+          ['withholds', 'withheldBefore', 'newlyWithheld', 'noLongerWithheld'].map(
+            (key) => counts?.[key] ?? Number.NaN,
+          );
+        return {
+          all: four(body),
+          outside: four(body.byReason?.['outside']),
+          unpinnable: four(body.byReason?.['unpinnable']),
+        };
       };
       const remove = async (login: string, dryRun: boolean): Promise<number> => {
         const response = await app.inject({
@@ -3405,6 +3434,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
             assert.equal(refused.statusCode, 403, `${login} ${method} ${query}: ${refused.body}`);
             const body = refused.json<Record<string, unknown>>();
             assert.equal('withholds' in body, false, `${login} ${method} ${query}`);
+            assert.equal('byReason' in body, false, `${login} ${method} ${query}`);
             assert.equal('sensors' in body, false, `${login} ${method} ${query}`);
             assert.equal(/\d+ sensors?/.test(refused.body), false, refused.body);
           }
@@ -3417,45 +3447,77 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       await refusedTo('watcher');
       assert.deepEqual(await harness.service.credentials(room, false), []);
 
-      // The writer with the hole: one sensor, previewed and written. The administrator: three.
-      // The set every sensor here used until now has no bounds, so none was outside before and
-      // the first write puts them all there; the second finds them there. Each of the four
-      // counts is of what its caller sees, on both.
-      assert.deepEqual(await put('operator', true), [1, 0, 1, 0]);
-      assert.deepEqual(await put('admin', true), [3, 0, 3, 0]);
+      // The writer with the holes: two sensors, previewed and written, one for each reason.
+      // The administrator: five, three on devices the targets do not cover and two on named
+      // ones. The set every sensor here used until now has no bounds, so none was outside
+      // before and the first write puts them all there; the second finds them there. Each
+      // count, whole and by reason, is of what its caller sees, on both.
+      const mine: Counted = { all: [2, 0, 2, 0], outside: [1, 0, 1, 0], unpinnable: [1, 0, 1, 0] };
+      const everybodys: Counted = {
+        all: [5, 0, 5, 0],
+        outside: [3, 0, 3, 0],
+        unpinnable: [2, 0, 2, 0],
+      };
+      assert.deepEqual(await put('operator', true), mine);
+      assert.deepEqual(await put('admin', true), everybodys);
       assert.deepEqual(await harness.service.credentials(room, false), [], 'a preview stored');
-      assert.deepEqual(await put('operator', false), [1, 0, 1, 0]);
-      assert.deepEqual(await put('operator', true), [1, 1, 0, 0]);
-      assert.deepEqual(await put('admin', false), [3, 3, 0, 0]);
+      assert.deepEqual(await put('operator', false), mine);
+      assert.deepEqual(await put('operator', true), {
+        all: [2, 2, 0, 0],
+        outside: [1, 1, 0, 0],
+        unpinnable: [1, 1, 0, 0],
+      });
+      assert.deepEqual(await put('admin', false), {
+        all: [5, 5, 0, 0],
+        outside: [3, 3, 0, 0],
+        unpinnable: [2, 2, 0, 0],
+      });
 
       // The history the API serves has the two writes and no count, for anybody: there is no
-      // second place to read the number from.
+      // second place to read a number from, whole or by reason.
       for (const login of ['admin', 'operator']) {
         const sets = (await historyOf(room, as(login))).filter(
           (entry) => entry.action === 'credential.set',
         );
         assert.equal(sets.length, 2, login);
-        assert.equal(/"withholds"/.test(JSON.stringify(sets)), false, login);
+        assert.equal(
+          /withholds|withheld|byReason|unpinnable/iu.test(JSON.stringify(sets)),
+          false,
+          login,
+        );
       }
-      // What was recorded says what each write did, whoever made it.
+      // What was recorded says what each write did, whoever made it: outside after it, put
+      // there by it, brought back by it (`A-59`), every sensor counted.
       assert.deepEqual(
         harness.audit.recorded.flatMap((entry) =>
-          entry.action === 'credential.set' && entry.objectId === room ? [entry.withholds] : [],
+          entry.action === 'credential.set' && entry.objectId === room
+            ? [[entry.withholds, entry.newlyWithheld, entry.noLongerWithheld]]
+            : [],
         ),
-        [3, 3],
+        [
+          [5, 5, 0],
+          [5, 0, 0],
+        ],
       );
 
-      assert.equal(await remove('operator', true), 1);
-      assert.equal(await remove('admin', true), 3);
+      assert.equal(await remove('operator', true), 2);
+      assert.equal(await remove('admin', true), 5);
       assert.equal((await harness.service.credentials(room, false)).length, 1, 'a preview removed');
-      assert.equal(await remove('operator', false), 1);
+      assert.equal(await remove('operator', false), 2);
       // Stored again, so that the administrator has one to remove.
-      assert.deepEqual(await put('admin', false), [3, 0, 3, 0]);
-      assert.equal(await remove('admin', false), 3);
+      assert.deepEqual(await put('admin', false), everybodys);
+      assert.equal(await remove('admin', false), 5);
 
-      // And with the hole filled, the writer counts what the administrator counts.
+      // One hole filled: the writer counts its sensors too, and still not the other's.
       await grant(carved, 'read');
-      assert.deepEqual(await put('operator', true), [3, 0, 3, 0]);
+      assert.deepEqual(await put('operator', true), {
+        all: [4, 0, 4, 0],
+        outside: [3, 0, 3, 0],
+        unpinnable: [1, 0, 1, 0],
+      });
+      // And with both filled, the writer counts what the administrator counts.
+      await grant(carvedNamed, 'read');
+      assert.deepEqual(await put('operator', true), everybodys);
     });
 
     it('writes only a container’s own row for a setting on it, one at a time or in bulk', async () => {

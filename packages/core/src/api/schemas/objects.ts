@@ -339,6 +339,21 @@ export const credentialViewSchema = {
   },
 } as const;
 
+/** One reason's part of a credential write's four counts (`A-59`). */
+const credentialWriteCounts = (which: string) =>
+  ({
+    type: 'object',
+    additionalProperties: false,
+    required: ['withholds', 'withheldBefore', 'newlyWithheld', 'noLongerWithheld'],
+    description: which,
+    properties: {
+      withholds: { type: 'integer', minimum: 0 },
+      withheldBefore: { type: 'integer', minimum: 0 },
+      newlyWithheld: { type: 'integer', minimum: 0 },
+      noLongerWithheld: { type: 'integer', minimum: 0 },
+    },
+  }) as const;
+
 /**
  * What storing a set answers (`A-41b`): the set as a read shows it, and what the write did to where
  * it goes. Still no field a secret could occupy — `secretsCleared` is names.
@@ -353,6 +368,7 @@ export const credentialWriteSchema = {
     'withheldBefore',
     'newlyWithheld',
     'noLongerWithheld',
+    'byReason',
     'secretsCleared',
   ],
   properties: {
@@ -389,6 +405,27 @@ export const credentialWriteSchema = {
       description:
         'How many sensors this write brings back inside (`A-55`): kept from a set before it ' +
         'and sent this one after, of those the caller can see.',
+    },
+    byReason: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['outside', 'unpinnable'],
+      description:
+        'The four counts above for each of the two reasons a sensor is outside (`A-59`), over ' +
+        'the same sensors the caller can see, so each count above is the sum of its two ' +
+        'parts. A sensor outside after the write is counted for the reason that holds after ' +
+        'it, and one outside before for the reason that held then, so a sensor that stays ' +
+        'outside for another reason moves between the two without being newly outside.',
+      properties: {
+        outside: credentialWriteCounts(
+          'Sensors on a device whose address, or whose name, the allowed targets do not cover.',
+        ),
+        unpinnable: credentialWriteCounts(
+          'Sensors on a device entered by name, where the targets that could cover it are ' +
+            'addresses and the sensor’s type cannot be held to an address its probe checked: ' +
+            'the set is not sent whatever the name resolves to.',
+        ),
+      },
     },
     secretsCleared: {
       type: 'array',

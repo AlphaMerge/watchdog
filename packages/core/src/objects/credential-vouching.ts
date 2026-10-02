@@ -554,26 +554,55 @@ export function boundRefusal(
    */
   pinsAddress = false,
 ): string | null {
+  const reason = boundRefusalReason(restriction, host, peerVersion, pinsAddress);
+  return reason === null ? null : WITHHELD_CREDENTIALS[reason];
+}
+
+/** Which of `WITHHELD_CREDENTIALS`' sentences a set's bounds refuse a sensor with. */
+export type BoundRefusalReason = 'outside' | 'undecided' | 'probeCannotPin' | 'probeTooOld';
+
+/**
+ * `boundRefusal`, as which refusal it is and not its sentence (`A-59`): a write that counts the
+ * sensors its bounds keep the set from says how many for each reason, and reads the reason here
+ * and not out of the words.
+ */
+export function boundRefusalReason(
+  restriction: CredentialRestriction,
+  host: string,
+  peerVersion: number,
+  pinsAddress = false,
+): BoundRefusalReason | null {
   if (restriction.targets.length > 0) {
     const verdict = targetVerdict(host, restriction.targets);
-    if (verdict === 'outside') return WITHHELD_CREDENTIALS.outside;
+    if (verdict === 'outside') return 'outside';
     if (verdict === 'undecided') {
       // **The probe decides it, and only a probe that can** (`A-41c`). It resolves the name once,
       // checks every address against the targets, and connects to one it checked. Two things
       // have to hold, and either failing withholds the set as before: the transport takes an
       // address to connect to, and the probe is new enough to do the check at all. A probe below
       // that version would be sent the set and connect by name.
-      if (!pinsAddress) return WITHHELD_CREDENTIALS.undecided;
-      if (!capabilitiesFor(peerVersion).credentialAddressPinning) {
-        return WITHHELD_CREDENTIALS.probeCannotPin;
-      }
+      if (!pinsAddress) return 'undecided';
+      if (!capabilitiesFor(peerVersion).credentialAddressPinning) return 'probeCannotPin';
     }
   }
   if (restriction.hostKeys !== null && !capabilitiesFor(peerVersion).credentialHostKeys) {
-    return WITHHELD_CREDENTIALS.probeTooOld;
+    return 'probeTooOld';
   }
   return null;
 }
+
+/**
+ * Why a set's bounds keep it from a sensor, as a write counts it (`A-59`).
+ *
+ * - `outside`: the device's address, or its name, is not one the targets cover.
+ * - `unpinnable`: the device is entered by name, the targets that could cover it are addresses,
+ *   and the sensor's type cannot be held to an address its probe checked. Whatever the name
+ *   resolves to, the set is not sent.
+ *
+ * Two, because they are mended differently: the first by widening the targets or moving the
+ * device, the second by giving the device its address or naming it in the targets.
+ */
+export type WithheldReason = 'outside' | 'unpinnable';
 
 /** Where one kind's sets stand for the sensors at or beneath an object (`A-41b`, `A-55`). */
 export interface BoundsBeneath {
@@ -581,9 +610,9 @@ export interface BoundsBeneath {
   readonly reached: ReadonlySet<ObjectId>;
   /**
    * The sensors a set's bounds keep it from, **whichever object that set is stored on**: the one
-   * asked about, one nearer the sensor, or an ancestor's.
+   * asked about, one nearer the sensor, or an ancestor's. Each with why (`A-59`).
    */
-  readonly withheld: ReadonlySet<ObjectId>;
+  readonly withheld: ReadonlyMap<ObjectId, WithheldReason>;
 }
 
 /**
@@ -618,14 +647,16 @@ export async function boundsBeneath(
 ): Promise<BoundsBeneath> {
   const routes = await routesAtOrUnder(q, types, [ownerId], { kinds: [kind] });
   const reached = new Set<ObjectId>();
-  const withheld = new Set<ObjectId>();
+  const withheld = new Map<ObjectId, WithheldReason>();
   for (const route of routes) {
     if (route.ownerId === ownerId) reached.add(route.sensorId);
     if (!isRestricted(route.restriction)) continue;
     const pins = types.pinsAddress(route.sensorType, route.kind);
-    if (boundRefusal(route.restriction, route.host, PROTOCOL_VERSION, pins) !== null) {
-      withheld.add(route.sensorId);
-    }
+    const reason = boundRefusalReason(route.restriction, route.host, PROTOCOL_VERSION, pins);
+    if (reason === null) continue;
+    // Asked as the newest probe, so the two refusals that are about a probe's age do not come
+    // up; anything that is not the name left undecided is the device outside the targets.
+    withheld.set(route.sensorId, reason === 'undecided' ? 'unpinnable' : 'outside');
   }
   return { reached, withheld };
 }

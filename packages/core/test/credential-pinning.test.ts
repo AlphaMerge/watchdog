@@ -1323,6 +1323,11 @@ describe(
       // And it is this write that put it there (`A-55`): none before, one newly.
       assert.equal(snmp.withheldBefore, 0);
       assert.equal(snmp.newlyWithheld, 1);
+      // For the reason that it cannot be pinned, and not for where its device is (`A-59`).
+      assert.deepEqual(snmp.byReason, {
+        outside: { withholds: 0, withheldBefore: 0, newlyWithheld: 0, noLongerWithheld: 0 },
+        unpinnable: { withholds: 1, withheldBefore: 0, newlyWithheld: 1, noLongerWithheld: 0 },
+      });
       const database = await h.service.setCredential(testActor, group, 'database', {
         username: 'monitor',
         password: 'gate-password',

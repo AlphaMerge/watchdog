@@ -935,6 +935,9 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
       return {
         ...base,
         objectKind: null,
+        // **None of the write's counts** (`U-21`, `A-59`): `withholds`, `newlyWithheld` and
+        // `noLongerWithheld` are whole, and this row is served to anybody with `read` on the
+        // object, who may not see every sensor beneath it. They go to the installation's log.
         summary: {
           credentialKind: mutation.credentialKind,
           created: mutation.created,

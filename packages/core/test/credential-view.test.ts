@@ -5,6 +5,7 @@ import { pino } from 'pino';
 import { ApiServer } from '../src/api/server.js';
 import { AuditRepository } from '../src/audit/store.js';
 import { Visibility } from '../src/auth/access.js';
+import { LoggingAuditSink } from '../src/objects/audit.js';
 import type { ObjectId } from '../src/objects/types.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import { VaultKeyring } from '../src/vault/keyring.js';
@@ -403,11 +404,17 @@ describe(
             { preview, visibility: carved() },
           );
           assert.equal(seen.withholds, 1, `preview ${String(preview)}`);
-          // The history says what the write did, whoever made it.
+          // The audit entry says what the write did, whoever made it: how many sensors are
+          // outside after it, and how many it put there and brought back (`A-59`), all whole.
           const [entry] = h.audit.recorded;
           assert.equal(entry === undefined, preview);
           if (entry !== undefined) {
-            assert.equal(entry.action === 'credential.set' ? entry.withholds : null, 2);
+            assert.deepEqual(
+              entry.action === 'credential.set'
+                ? [entry.withholds, entry.newlyWithheld, entry.noLongerWithheld]
+                : null,
+              [2, 2, 0],
+            );
           }
         }
         // Everybody else is told about both: an administrator, and a caller that names no view.
@@ -651,6 +658,245 @@ describe(
       });
     });
 
+    describe('what a write changes, for each reason a sensor is outside (A-59)', () => {
+      type Four = [after: number, before: number, newly: number, noLonger: number];
+      interface Split {
+        all: Four;
+        outside: Four;
+        unpinnable: Four;
+      }
+      const four = (counts: {
+        withholds: number;
+        withheldBefore: number;
+        newlyWithheld: number;
+        noLongerWithheld: number;
+      }): Four => [
+        counts.withholds,
+        counts.withheldBefore,
+        counts.newlyWithheld,
+        counts.noLongerWithheld,
+      ];
+      const write = async (
+        values: Record<string, unknown>,
+        options: { preview?: boolean; visibility?: Visibility } = {},
+      ): Promise<Split> => {
+        const answer = await h.service.setCredential(
+          testActor,
+          groupId,
+          'snmp',
+          { community: COMMUNITY, ...values },
+          { kind: 'none' },
+          options,
+        );
+        const split = {
+          all: four(answer),
+          outside: four(answer.byReason.outside),
+          unpinnable: four(answer.byReason.unpinnable),
+        };
+        // Whoever asks: every count is its two reasons added up, so neither part can say more
+        // than the whole does.
+        for (const index of [0, 1, 2, 3]) {
+          assert.equal(
+            (split.outside[index] ?? Number.NaN) + (split.unpinnable[index] ?? Number.NaN),
+            split.all[index],
+            `count ${String(index)}`,
+          );
+        }
+        return split;
+      };
+      const NONE: Four = [0, 0, 0, 0];
+      const NEAR = ['10.0.0.0/24'];
+      /** Names only: an address is outside them, and a name they cover is inside. */
+      const NAMES = ['*.rack.test'];
+      let hiddenNamedId: ObjectId;
+
+      // Beside the two devices given by address: two named ones. `snmp.traffic` here cannot be
+      // held to a checked address, so against targets that are addresses both are outside
+      // whatever their names resolve to.
+      beforeEach(async () => {
+        for (const [name, host] of [
+          ['named-router', 'core.rack.test'],
+          ['hidden-named-router', 'edge.rack.test'],
+        ] as const) {
+          const device = await h.service.create(testActor, {
+            kind: 'device',
+            parentId: groupId,
+            name,
+            host,
+          });
+          await h.service.create(testActor, {
+            kind: 'sensor',
+            parentId: device.id,
+            name: `${name} uptime`,
+            sensorType: 'snmp.traffic',
+            params: {},
+          });
+          hiddenNamedId = device.id;
+        }
+        await h.service.setCredential(testActor, groupId, 'snmp', { community: COMMUNITY });
+        h.audit.recorded.length = 0;
+      });
+
+      /** `write` on the group; the far device and the second named one carved out of it. */
+      const carved = (): Visibility =>
+        Visibility.of(
+          new Map([
+            [groupId, true],
+            [otherDeviceId, false],
+            [hiddenNamedId, false],
+          ]),
+          false,
+          null,
+        );
+
+      it('counts a device the targets do not cover apart from a named one whose type cannot be pinned', async () => {
+        assert.deepEqual(await write({}), { all: NONE, outside: NONE, unpinnable: NONE });
+        // Addresses for targets: the far router is outside them, and both named ones cannot
+        // be checked against them.
+        const narrowed: Split = {
+          all: [3, 0, 3, 0],
+          outside: [1, 0, 1, 0],
+          unpinnable: [2, 0, 2, 0],
+        };
+        assert.deepEqual(await write({ allowedTargets: NEAR }, { preview: true }), narrowed);
+        assert.deepEqual(await write({ allowedTargets: NEAR }), narrowed);
+        assert.deepEqual(await write({ allowedTargets: NEAR }), {
+          all: [3, 3, 0, 0],
+          outside: [1, 1, 0, 0],
+          unpinnable: [2, 2, 0, 0],
+        });
+      });
+
+      it('counts a sensor for the reason that holds after the write, and before it for the one that held then', async () => {
+        await write({ allowedTargets: [...NEAR, 'other.example.test'] });
+        // Names for targets, none of them these devices': both routers given by address go
+        // outside, the near one newly. The named ones stay outside and are now simply not
+        // covered: under `outside` after the write, under `unpinnable` before it, and newly
+        // outside under neither.
+        assert.deepEqual(await write({ allowedTargets: ['*.elsewhere.test'] }), {
+          all: [4, 3, 1, 0],
+          outside: [4, 1, 1, 0],
+          unpinnable: [0, 2, 0, 0],
+        });
+        // Names that cover them bring the two back, from under the reason they were outside for.
+        assert.deepEqual(await write({ allowedTargets: NAMES }), {
+          all: [2, 4, 0, 2],
+          outside: [2, 4, 0, 2],
+          unpinnable: NONE,
+        });
+        // And addresses again: the near router comes back, counted where it was, and the two
+        // named ones go out under the reason that is theirs now.
+        assert.deepEqual(await write({ allowedTargets: NEAR }), {
+          all: [3, 2, 2, 1],
+          outside: [1, 2, 0, 1],
+          unpinnable: [2, 0, 2, 0],
+        });
+      });
+
+      it('counts each reason among the sensors the caller sees, previewed or written', async () => {
+        // Hidden: one sensor outside by its address and one named. Seen: one of each kind,
+        // the near router inside.
+        for (const preview of [true, false]) {
+          assert.deepEqual(
+            await write({ allowedTargets: NEAR }, { preview, visibility: carved() }),
+            { all: [1, 0, 1, 0], outside: NONE, unpinnable: [1, 0, 1, 0] },
+            `preview ${String(preview)}`,
+          );
+        }
+        assert.deepEqual(
+          await write({ allowedTargets: NEAR }, { preview: true, visibility: carved() }),
+          { all: [1, 1, 0, 0], outside: NONE, unpinnable: [1, 1, 0, 0] },
+        );
+        // Names for targets. Seen: the near router goes out and the named one comes back.
+        // Hidden: the far router stays out and the hidden named one comes back, which the
+        // caller with the hole is told nothing of, under either reason.
+        const names = { allowedTargets: NAMES };
+        assert.deepEqual(await write(names, { preview: true, visibility: carved() }), {
+          all: [1, 1, 1, 1],
+          outside: [1, 0, 1, 0],
+          unpinnable: [0, 1, 0, 1],
+        });
+        assert.deepEqual(await write(names, { preview: true, visibility: Visibility.EVERYTHING }), {
+          all: [2, 3, 1, 2],
+          outside: [2, 1, 1, 0],
+          unpinnable: [0, 2, 0, 2],
+        });
+        assert.deepEqual(
+          await write(names, { preview: true, visibility: Visibility.nothing(null) }),
+          { all: NONE, outside: NONE, unpinnable: NONE },
+        );
+      });
+
+      it('records what each write put outside and brought back, whole, whoever made it', async () => {
+        const recorded = (): (number | undefined)[][] =>
+          h.audit.recorded.flatMap((entry) =>
+            entry.action === 'credential.set'
+              ? [[entry.withholds, entry.newlyWithheld, entry.noLongerWithheld]]
+              : [],
+          );
+        await write({ allowedTargets: NEAR }, { preview: true, visibility: carved() });
+        assert.deepEqual(recorded(), [], 'a preview recorded');
+        await write({ allowedTargets: NEAR }, { visibility: carved() });
+        await write({ allowedTargets: NAMES }, { visibility: Visibility.nothing(null) });
+        // The bounds taken off: a set that withholds nothing says so by leaving the two counts
+        // of what is outside out, and still says what it brought back.
+        await write({ allowedTargets: [] }, { visibility: carved() });
+        // And a set that never had bounds counts nothing.
+        await write({});
+        assert.deepEqual(recorded(), [
+          [3, 3, 0],
+          [2, 1, 2],
+          [undefined, undefined, 2],
+          [undefined, undefined, undefined],
+        ]);
+      });
+
+      it('writes the three whole counts to the installation’s log, and no secret', async () => {
+        const lines: string[] = [];
+        const sink = new LoggingAuditSink(
+          pino({ level: 'info' }, { write: (line: string) => lines.push(line) }),
+        );
+        await sink.record(
+          scratch.db,
+          { kind: 'system', component: 'credential-view-test' },
+          [
+            {
+              action: 'credential.set',
+              objectId: groupId,
+              credentialKind: 'snmp',
+              created: false,
+              secretsSet: [],
+              secretsKept: ['community'],
+              withholds: 7,
+              newlyWithheld: 4,
+              noLongerWithheld: 2,
+              publicParams: { allowedTargets: NEAR },
+            },
+            {
+              action: 'credential.set',
+              objectId: groupId,
+              credentialKind: 'snmp',
+              created: false,
+              secretsSet: [],
+              secretsKept: ['community'],
+              publicParams: {},
+            },
+          ],
+          new Date(),
+        );
+        const [bounded, unbounded] = lines.map(
+          (line) => JSON.parse(line) as Record<string, unknown>,
+        );
+        assert.deepEqual(
+          [bounded?.['withholds'], bounded?.['newlyWithheld'], bounded?.['noLongerWithheld']],
+          [7, 4, 2],
+        );
+        for (const key of ['withholds', 'newlyWithheld', 'noLongerWithheld']) {
+          assert.equal(key in (unbounded ?? {}), false, key);
+        }
+      });
+    });
+
     describe('the sets with no bounds', () => {
       beforeEach(async () => {
         await h.service.setCredential(testActor, probeId, 'snmp', { community: COMMUNITY });
@@ -728,6 +974,11 @@ describe(
         assert.equal(preview.statusCode, 200, preview.body);
         const previewed = preview.json<Record<string, unknown>>();
         assert.equal(previewed['withholds'], 1);
+        // Serialised whole (`A-59`): a reason the schema did not declare would be dropped.
+        assert.deepEqual(previewed['byReason'], {
+          outside: { withholds: 1, withheldBefore: 0, newlyWithheld: 1, noLongerWithheld: 0 },
+          unpinnable: { withholds: 0, withheldBefore: 0, newlyWithheld: 0, noLongerWithheld: 0 },
+        });
         assert.equal(previewed['bounded'], true);
         assert.deepEqual(previewed['secretsCleared'], []);
         assert.equal(preview.body.includes(COMMUNITY), false);

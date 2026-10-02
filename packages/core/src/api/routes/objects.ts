@@ -1899,17 +1899,20 @@ export async function objectRoutes(
           'brings back, so a save that touches no target answers zero for both whatever ' +
           '`withholds` is. A sensor on a device entered by name is outside targets that are ' +
           'addresses when its type cannot be held to an address its probe checked; one whose ' +
-          'type can is not counted, since its probe decides at each scan. ' +
+          'type can is not counted, since its probe decides at each scan. **`byReason` gives ' +
+          'each of the four for that case apart from a device the targets do not cover** ' +
+          '(`A-59`), as `unpinnable` and `outside`. ' +
           'A write that widens them (an entry added, the ' +
           'list emptied, strict key checking turned off) clears the secrets it does not send ' +
           'again, and `secretsCleared` names them. **`?dryRun=true` is the same write, rolled ' +
           'back** (`U-21`): the same checks, the same refusals and the same answer, with nothing ' +
           'stored and nothing in the history, so a form can say what a save will do before it ' +
           'is confirmed. It is held to `write` on the object before anything is worked out, as ' +
-          'the write is. **Every one of the four counts is of the sensors the caller can see**: ' +
-          'with a `none` carved beneath the object, the sensors inside it are kept from the set ' +
-          'and not counted here. The audit log keeps the whole number; the history this API serves ' +
-          'carries no count for a credential write.',
+          'the write is. **Every one of the four counts, whole and by reason, is of the sensors ' +
+          'the caller can see**: with a `none` carved beneath the object, the sensors inside it ' +
+          'are kept from the set and not counted here. The installation’s log keeps the whole ' +
+          'numbers (outside after the write, put there by it, brought back by it); the history ' +
+          'this API serves carries no count for a credential write.',
         params: credentialKindParams,
         querystring: dryRunQuery,
         body: {

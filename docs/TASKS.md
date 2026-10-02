@@ -18163,7 +18163,7 @@ because each is a decision rather than a defect:
       - **Not done:** HTTPS to an address literal has no test (no certificate fixture for an
         address in this file); nothing in the change is specific to the scheme.
 
-- [ ] **A-59 — the audit entry for a credential write does not say what the write changed** · S ·
+- [x] **A-59 — the audit entry for a credential write does not say what the write changed** · S ·
       A-55 · Found 2026-10-02 by `A-55`. The answer carries how many sensors a save puts outside
       the bounds and how many it brings back; `credential.set` in the audit log keeps only the
       total. The count is also one number for two reasons — an address outside the bounds, and
@@ -18171,6 +18171,60 @@ because each is a decision rather than a defect:
       audit entry carries the added and returned counts (whole, as it carries the total), and
       the answer and the tab give the two reasons separately, each trimmed by the caller's
       visibility.
+
+      **A-59 outcome.** The `credential.set` entry carries what the write put outside and
+      brought back, whole, and the answer and the tab give every count for each of the two
+      reasons. No migration, no protocol number.
+      - **The audit entry**: `newlyWithheld` and `noLongerWithheld` beside `withholds`, every
+        sensor counted whoever wrote. `newlyWithheld` is there for a bounded set, as
+        `withholds` is; `noLongerWithheld` also when a write that takes the bounds away
+        brought any back.
+      - **Why whole counts there do not reach a caller with a hole.** The entry goes two
+        places. `LoggingAuditSink` writes all three to the service's log, which is read on the
+        host by whoever runs the installation. `DatabaseAuditSink` stores **none** of them, as
+        it stored no `withholds`: the row is what `GET /objects/:id/history` serves under
+        `read` on the object, to accounts that may not see every sensor beneath it, and the
+        global list reads the same rows. So the history the API serves has no count for a
+        credential write, and the sweep asserts it for an administrator and for the writer
+        with holes; a mutant that stored one was killed there.
+      - **Two reasons**, read from the bound's verdict and not from its sentence
+        (`boundRefusalReason`): `outside`, a device whose address or name the targets do not
+        cover, and `unpinnable`, a device entered by name facing targets that are addresses,
+        with a sensor type that cannot be held to a checked address. `boundsBeneath` answers
+        the reason with each sensor.
+      - **The answer**: `byReason: { outside, unpinnable }` on `ms:credentialWrite`, required,
+        each with the same four counts. A sensor outside after the write is counted for the
+        reason that holds after it, and one outside before for the reason that held then, so
+        one that stays outside for another reason moves between the two and is newly outside
+        under neither. **Every one is trimmed as the four are**: the ids are worked out whole,
+        the caller's `Visibility` is asked once (`#seenOf`, one `visibleAmong`), and each
+        count is of the sensors that pass it. A reason's count is of sensors already in its
+        total, and each total is the sum of its two parts, which the tests assert on every
+        answer: no arithmetic between them says more than the totals did.
+      - **The tab** (`credentials-model.ts`; `CredentialsPanel.tsx` renders the same sentence
+        and needed no change). The sensors a save puts outside, and the ones it leaves there,
+        are followed by how many are "on devices the allowed targets do not cover" and how
+        many "on devices entered by name, with a sensor type that cannot be held to a checked
+        address"; one reason alone is said without its number. The ones it brings back are
+        not split. **Read aloud**: "That sensor is" and "Those sensors are" where "It is" and
+        "They are" followed a sentence that now ends on the targets, "after the save" for
+        "after it", and `OUTSIDE_MEANS` says "A sensor is also outside". Plain text in the
+        existing focused group and live region: no new control, colour or state.
+      - **Docs:** `api-reference.md` regenerated; `administration.md`'s paragraph on narrowing.
+      - **Tests:** `credential-view.test.ts`, five new and two extended: the split, a reason
+        that changes across a write, each reason under a carved visibility previewed and
+        written, the audit entry whole for three callers, the log line, and the route's
+        serialisation. `object-visibility.test.ts`'s sweep now has a named device seen and one
+        hidden, and reads all twelve counts over the API for the writer with holes and the
+        administrator, with one hole filled and with both. `credential-pinning.test.ts`: the
+        named device that cannot pin is under `unpinnable`. 308 passing in the ten core files
+        run, none skipped. Web: `credentials-model.test.ts` (34) and
+        `credentials-panel.test.tsx` (44).
+      - **Mutation:** 22 of 22 killed (13 core, 9 web); the one that stops trimming a reason's
+        count is killed by the service test and again by the sweep.
+      - **Not done.** The tab was not looked at in a browser (`U-23`). The sensors a save
+        brings back are not said by reason on the tab; the answer has them. The audit entry
+        carries the two counts whole and not by reason.
 
 - [ ] **A-60 — no test delivers a webhook over HTTPS to an address** · S · A-58 · Found
       2026-10-02 by `A-58`. A URL whose host is an address is delivered to over HTTP in a test;

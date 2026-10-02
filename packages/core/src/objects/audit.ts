@@ -302,6 +302,17 @@ export type Mutation =
        * the write. Absent for a set with no targets, which keeps it from none.
        */
       withholds?: number;
+      /**
+       * How many sensors the write put outside the set's targets, and how many it brought back
+       * inside (`A-59`): what the write changed, where `withholds` is how things stand after
+       * it. **Whole, like `withholds`**, whatever the writer could see: this is the
+       * installation's record, and `DatabaseAuditSink` stores none of the three, since an
+       * object's history is read by accounts that may not see every sensor beneath it.
+       * `newlyWithheld` is absent for a set with no targets; `noLongerWithheld` is present
+       * for one too when the write brought any back.
+       */
+      newlyWithheld?: number;
+      noLongerWithheld?: number;
       /** The half stored in the clear — an SNMP version, a user name. Never a key. */
       publicParams: Readonly<Record<string, unknown>>;
     }
@@ -1076,6 +1087,10 @@ function summarise(mutation: Mutation): Record<string, unknown> {
           ? {}
           : { secretsCleared: [...mutation.secretsCleared] }),
         ...(mutation.withholds === undefined ? {} : { withholds: mutation.withholds }),
+        ...(mutation.newlyWithheld === undefined ? {} : { newlyWithheld: mutation.newlyWithheld }),
+        ...(mutation.noLongerWithheld === undefined
+          ? {}
+          : { noLongerWithheld: mutation.noLongerWithheld }),
         publicParams: mutation.publicParams,
       };
     case 'credential.deleted':
