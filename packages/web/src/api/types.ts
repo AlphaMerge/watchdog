@@ -113,6 +113,21 @@ export interface SensorTypeSummary {
    * this file for every type with a mapping language added after it.
    */
   hasPreview: boolean;
+  /** The probe listener that feeds this type, where one does (`B-08`). */
+  listener?: string;
+}
+
+/**
+ * `GET /probes/:id/health` — Probe Health's channels, read live.
+ *
+ * A `null` is a gap, never a zero: a probe that is not connected has one in every channel but
+ * `connected`, and a listener that is off has one in each of its counters.
+ */
+export interface ProbeHealthView {
+  at: string;
+  probeId: number;
+  message: string;
+  channels: Record<string, number | null>;
 }
 
 export interface ChannelRecord {

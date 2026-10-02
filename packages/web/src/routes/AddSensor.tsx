@@ -1,13 +1,14 @@
 import { useCallback, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { ApiError, problemPath, send, useApi } from '../api/client';
-import type { ObjectDetail, SensorTypeSummary } from '../api/types';
+import type { AncestorsView, ObjectDetail, ProbeHealthView, SensorTypeSummary } from '../api/types';
 import { Card, ErrorPanel, Loading } from '../components/Panels';
 import { MappingPreview } from '../forms/MappingPreview';
 import { SchemaForm } from '../forms/SchemaForm';
 import { fieldsOf, readAt, seedDefaults, type JsonSchema } from '../forms/schema';
 import { allProblems, type FieldProblem } from '../forms/validate';
 import { PageTitle } from '../components/PageTitle';
+import { listenerNotice, probeAbove, readsListener } from './add-sensor-model';
 
 /**
  * Adding a sensor (`U-08`).
@@ -41,6 +42,32 @@ export function AddSensor(): React.JSX.Element {
   const schema = useMemo(() => (chosen?.paramsSchema ?? {}) as JsonSchema, [chosen]);
   const fields = useMemo(() => fieldsOf(schema), [schema]);
   const problems = useMemo(() => allProblems(fields, values, readAt, fieldsOf), [fields, values]);
+
+  // **Whether the probe this sensor would run on has the listener the type reads** (`B-08`).
+  // Asked only for a type that reads one, so the form for every other type makes no request it
+  // did not make before; and asked of routes that answer under the probe's own `read` right, so
+  // an account that cannot see the probe is told nothing — both requests simply do not answer.
+  const asksListener = readsListener(chosen?.listener);
+  const above = useApi<AncestorsView>(
+    asksListener && parent.status === 'ready' && parent.data.kind !== 'probe'
+      ? `/objects/${id}/ancestors`
+      : null,
+  );
+  const probe =
+    asksListener && parent.status === 'ready'
+      ? probeAbove(parent.data, above.status === 'ready' ? above.data.items : [])
+      : null;
+  const probeHealth = useApi<ProbeHealthView>(
+    probe === null ? null : `/probes/${String(probe.id)}/health`,
+  );
+  const listenerOff =
+    probe === null
+      ? null
+      : listenerNotice(
+          chosen?.listener,
+          probe.name,
+          probeHealth.status === 'ready' ? probeHealth.data : null,
+        );
 
   /** Picking a type replaces the parameters entirely — they belong to the type, not the form. */
   const pickType = useCallback(
@@ -143,6 +170,7 @@ export function AddSensor(): React.JSX.Element {
               id="sensor-type"
               value={typeId}
               disabled={saving}
+              aria-describedby={listenerOff === null ? undefined : 'sensor-type-listener'}
               onChange={(event) => {
                 pickType(event.target.value);
               }}
@@ -155,6 +183,16 @@ export function AddSensor(): React.JSX.Element {
                 </option>
               ))}
             </select>
+            {/* Always in the document, so that what appears in it is announced: a live region
+                added together with its text is one a screen reader may never have been watching.
+                The sentence is the notice; the colour only matches the form's other cautions. */}
+            <p
+              id="sensor-type-listener"
+              role="status"
+              className={listenerOff === null ? 'sr-only' : 'max-w-2xl text-xs text-warning-fg'}
+            >
+              {listenerOff}
+            </p>
             {catalogue.length === 0 && (
               // The core refuses to create any sensor with an empty catalogue and says so at
               // boot; a form that offered an empty select would let somebody find that out the

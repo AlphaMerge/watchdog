@@ -638,7 +638,10 @@ alarm.
 
 Flow monitoring is v2: a v1 build carries no `flow.netflow` sensor type, and its probe opens no
 flow port whatever its configuration says — it logs *flowListener.enabled is set and this build
-carries no flow sensor type* at start and carries on.
+carries no flow sensor type* at start and carries on. `ms-probe config check` does not carry on:
+it fails on that setting in a v1 build, naming it, because the file says something the probe will
+not do (`B-08`). An installer runs that check before it replaces anything, so an upgrade of a v1
+probe with the setting on stops there, with the old version still running — set it to `false`.
 
 In a build that has it, the collector is **off until you turn it on**, like the SNMP trap and
 syslog listeners: a probe that opened a port nobody asked for is a surprise on a firewall audit.
@@ -667,6 +670,18 @@ configuration file (`/etc/ms/probe.json`) and read at start, so restart the prob
 
 `ms-probe config check` refuses a misspelt setting here before a restart does. Each setting can
 also be given in the environment, as `MS_FLOW_LISTENER__ENABLED=true`.
+
+**The web UI says when a probe's collector is off, before a sensor is added to it.** Choosing a
+flow sensor type on the add-sensor form asks that probe's health, and a probe that has reported
+with no `flowReceived` in the report gets a sentence under the type naming the probe and this
+setting. The same is said for a syslog or SNMP trap sensor on a probe whose listener is off. The
+sensor can still be created. Nothing is said about a probe that is not connected, or one too old
+to report — its channels gap for a different reason — or to an account that cannot read the probe.
+
+Two different things can be lost, and they are counted in two places. `flowMissed` on Probe
+Health is what an exporter sent and the probe never received. What the probe received and its
+buffer overwrote before a sensor read it is not in `flowMissed`: it fails that sensor's scan with
+the number, and is in the collector's stop line in the log as `overwritten`.
 
 The five `flow*` channels on Probe Health are what the collector counted, and they need **both
 ends at protocol 23**: a probe sends them only to a core that says it speaks 23, because an older

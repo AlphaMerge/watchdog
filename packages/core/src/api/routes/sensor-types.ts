@@ -24,6 +24,12 @@ const sensorTypeListSchema = {
           costHint: { enum: ['light', 'medium', 'heavy'] },
           paramsSchema: { type: 'object', additionalProperties: true },
           hasPreview: { type: 'boolean' },
+          listener: {
+            type: 'string',
+            description:
+              'The probe listener that feeds this type (`snmp-trap`, `syslog`, `flow`), where ' +
+              'one does. A sensor of such a type reads nothing on a probe whose listener is off.',
+          },
         },
       },
     },

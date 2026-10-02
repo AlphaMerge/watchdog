@@ -4,7 +4,15 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { exportNetflowV5, renderNetflowV5 } from '@ms/simulators';
+import {
+  ethernetFrame,
+  exportNetflowV5,
+  renderIpfix,
+  renderNetflowV5,
+  renderNetflowV9,
+  renderSflow,
+  type TemplateSpec,
+} from '@ms/simulators';
 import {
   versionFor,
   type CheckResult,
@@ -16,6 +24,8 @@ import {
   FakeCore,
   freeUdpPort,
   generateCerts,
+  LOOPBACK_V6,
+  loopbackV6Available,
   opensslAvailable,
   sendUdp,
   startProbe,
@@ -31,7 +41,13 @@ import {
  * of it failed naming a configuration key the schema refused. Nothing below constructs a
  * `FlowListener`. Each case starts `ms-probe` from a configuration file, lets a core assign it a
  * `flow.netflow` sensor, and reads what the probe sends back.
+ *
+ * `B-09` is the rest of what reaches that socket and had only been sent to a listener: NetFlow v9,
+ * IPFIX and sFlow, the buffer's size and the socket's family.
  */
+
+/** Whether `::1` can be bound here. Asked once, before the cases are declared. */
+const v6 = await loopbackV6Available();
 
 const SENSOR_ID = 41;
 const FLOW_FIELDS = [
@@ -51,6 +67,32 @@ const flowSensor: SensorAssignment = {
   intervalSeconds: 1,
   timeoutMs: 10_000,
 };
+
+/**
+ * One template for both templated dialects: source, destination, protocol, octets, packets.
+ * RFC 7012's element ids, which v9 shares for these five.
+ */
+const TEMPLATE: TemplateSpec = {
+  templateId: 256,
+  fields: [
+    { id: 8, length: 4 },
+    { id: 12, length: 4 },
+    { id: 4, length: 1 },
+    { id: 1, length: 4 },
+    { id: 2, length: 4 },
+  ],
+};
+
+/** One data record laid out to `TEMPLATE`, from 10.0.x.y to 10.0.0.2. */
+function templated(source: number, protocol: number, octets: number, packets: number): Buffer {
+  const record = Buffer.alloc(17);
+  record.set([10, 0, (source >> 8) & 0xff, source & 0xff], 0);
+  record.set([10, 0, 0, 2], 4);
+  record.writeUInt8(protocol, 8);
+  record.writeUInt32BE(octets, 9);
+  record.writeUInt32BE(packets, 13);
+  return record;
+}
 
 const resultFor =
   (accept: (result: CheckResult) => boolean) =>
@@ -87,8 +129,9 @@ describe(
     async function probeWith(
       flowListener: Record<string, unknown> | undefined,
       profile?: 'v1' | 'full',
+      sensor: SensorAssignment = flowSensor,
     ): Promise<{ core: FakeCore; probe: RunningProbe }> {
-      const { core, port } = await FakeCore.start(dir, [flowSensor]);
+      const { core, port } = await FakeCore.start(dir, [sensor]);
       cores.push(core);
       const probe = startProbe({
         dir,
@@ -217,6 +260,230 @@ describe(
         assert.ok(stopped !== undefined, 'the collector was not closed in the probe’s shutdown');
         assert.equal(stopped['received'], 3, 'and it had counted every flow it was sent');
         assert.equal(await udpPortTaken(port), false, 'the flow port outlived the probe');
+      },
+    );
+
+    it(
+      'reads NetFlow v9, IPFIX and sFlow as it reads v5, and fails a scan its buffer was too small for (`B-09`)',
+      { timeout: 300_000 },
+      async () => {
+        const port = await freeUdpPort();
+        // The smallest buffer the schema allows, so one datagram can overrun it.
+        const BUFFER = 100;
+        const { core, probe } = await probeWith(
+          { enabled: true, port, address: '127.0.0.1', bufferSize: BUFFER },
+          'full',
+        );
+        const collector = { host: '127.0.0.1', port };
+        const ok = resultFor((result) => result.outcome === 'ok');
+        const near = (actual: number | undefined, expected: number, what: string): void => {
+          assert.ok(
+            actual !== undefined && expected > 0 && Math.abs(actual / expected - 1) < 1e-9,
+            `${what}: ${String(actual)} against ${String(expected)}`,
+          );
+        };
+
+        // The sensor's cursor exists from its first scan, and everything below is counted from it.
+        const silent = await core.waitFor(
+          'a first scan',
+          resultFor(() => true),
+        );
+        assert.match(silent.message, /no flows arrived from 127\.0\.0\.1/);
+
+        // **One datagram a dialect, and the next only once the last was read.** A datagram is
+        // decoded and buffered in one turn of the probe's loop, so a scan sees all of it or none,
+        // and each reading below is of exactly one dialect whenever its scan happened to land.
+
+        // NetFlow v9: template and data together, three UDP flows from three sources.
+        let mark = core.received.length;
+        await sendUdp(
+          renderNetflowV9(
+            [TEMPLATE],
+            [
+              {
+                templateId: 256,
+                records: [
+                  templated(1, 17, 300, 3),
+                  templated(2, 17, 300, 3),
+                  templated(3, 17, 300, 3),
+                ],
+              },
+            ],
+            { sequence: 0 },
+          ),
+          collector,
+        );
+        const v9 = await core.waitFor('a reading of the NetFlow v9 flows', ok, { from: mark });
+        assert.match(v9.message, /^3 flows, .* from 3 sources since /);
+        assert.equal(channel(v9, 'hosts'), 3);
+        assert.equal(channel(v9, 'tcp'), 0);
+        near(channel(v9, 'udp'), channel(v9, 'bytes') ?? 0, 'v9 was all UDP');
+        // 900 octets in 9 packets across 3 flows, as rates over one window.
+        near(channel(v9, 'bytes'), (channel(v9, 'flows') ?? 0) * 300, 'v9 octets per flow');
+        near(channel(v9, 'bytes'), (channel(v9, 'packets') ?? 0) * 100, 'v9 octets per packet');
+
+        // IPFIX: the same template under its own set id and header, one ICMP flow.
+        mark = core.received.length;
+        await sendUdp(
+          renderIpfix([TEMPLATE], [{ templateId: 256, records: [templated(7, 1, 640, 10)] }], {
+            sequence: 0,
+          }),
+          collector,
+        );
+        const ipfix = await core.waitFor('a reading of the IPFIX flow', ok, { from: mark });
+        assert.match(ipfix.message, /^1 flow, .* from 1 source since /);
+        assert.equal(channel(ipfix, 'udp'), 0);
+        near(channel(ipfix, 'icmp'), channel(ipfix, 'bytes') ?? 0, 'IPFIX was all ICMP');
+        near(
+          channel(ipfix, 'bytes'),
+          (channel(ipfix, 'packets') ?? 0) * 64,
+          'IPFIX octets per packet',
+        );
+
+        // sFlow: two sampled TCP frames of 1,500 bytes, each standing for a thousand.
+        mark = core.received.length;
+        await sendUdp(
+          renderSflow([
+            {
+              samplingRate: 1_000,
+              frameLength: 1_500,
+              frame: ethernetFrame({ srcAddr: '10.0.1.1', protocol: 6 }),
+            },
+            {
+              samplingRate: 1_000,
+              frameLength: 1_500,
+              frame: ethernetFrame({ srcAddr: '10.0.1.2', protocol: 6 }),
+            },
+          ]),
+          collector,
+        );
+        const sflow = await core.waitFor('a reading of the sFlow samples', ok, { from: mark });
+        assert.match(
+          sflow.message,
+          /^2 flows, .* from 2 sources since .*; estimated from 2 sampled$/,
+        );
+        near(channel(sflow, 'tcp'), channel(sflow, 'bytes') ?? 0, 'sFlow was all TCP');
+        // Scaled by the sampling rate: a sample is a thousand packets of 1,500 bytes, not one.
+        near(channel(sflow, 'packets'), (channel(sflow, 'flows') ?? 0) * 1_000, 'sFlow packets');
+        near(channel(sflow, 'bytes'), (channel(sflow, 'packets') ?? 0) * 1_500, 'sFlow octets');
+
+        const heard = await core.waitFor(
+          'a heartbeat carrying all three dialects',
+          (message) => {
+            const sent = healthOf(message);
+            return sent?.flowReceived === 6 ? sent : undefined;
+          },
+          { from: mark },
+        );
+        assert.equal(heard.flowMalformed, 0, 'a dialect was refused');
+        assert.equal(heard.flowUndecodable, 0, 'a template was not learnt');
+        assert.equal(heard.flowMissed, 0);
+
+        // **The overflow, in one datagram, so no scan can land in the middle of it.** IPFIX has no
+        // thirty-record limit: a hundred and fifty records arrive as one message and go into a
+        // buffer of a hundred in one turn of the loop, and whichever scan comes next finds its
+        // cursor fifty behind the oldest record still held. Nothing here depends on when it runs.
+        const SENT = 150;
+        // And the exporter's own count says ten records never arrived: 1 was next, this is 11.
+        mark = core.received.length;
+        await sendUdp(
+          renderIpfix(
+            [TEMPLATE],
+            [
+              {
+                templateId: 256,
+                records: Array.from({ length: SENT }, (_unused, index) =>
+                  templated(index + 1, 6, 100, 1),
+                ),
+              },
+            ],
+            { sequence: 11 },
+          ),
+          collector,
+        );
+        // The first scan that is not silence. One already drained when the datagram landed may
+        // still report "no flows arrived" after the mark, and that one is not about this.
+        const short = await core.waitFor(
+          'the scan after the overflow',
+          resultFor((result) => !/no flows arrived/.test(result.message)),
+          { from: mark },
+        );
+        assert.equal(short.outcome, 'error', short.message);
+        assert.match(
+          short.message,
+          new RegExp(`^${String(SENT - BUFFER)} flows reached this probe but were overwritten`),
+        );
+        assert.deepEqual(short.channels, [], 'a count known to be short was recorded');
+
+        // **What overflowed is the sensor's failure and not `flowMissed`.** That channel is what
+        // the exporter sent and the probe never received — the ten above. The fifty were received
+        // and counted, and lost to a buffer; adding them would report a local sizing mistake as a
+        // lossy network.
+        const overrun = await core.waitFor(
+          'a heartbeat carrying the overflow',
+          (message) => {
+            const sent = healthOf(message);
+            return sent?.flowReceived === 6 + SENT ? sent : undefined;
+          },
+          { from: mark },
+        );
+        assert.equal(overrun.flowMissed, 10);
+        assert.equal(overrun.flowMalformed, 0);
+
+        // One failed scan, not a sensor behind for ever: the cursor caught up when it failed.
+        mark = core.received.length;
+        await exportNetflowV5(collector, [{ octets: 64 }], { flowSequence: 0 });
+        const again = await core.waitFor('a reading after the overflow', ok, { from: mark });
+        assert.match(again.message, /^1 flow, /);
+
+        assert.deepEqual(core.refused, [], 'the probe sent something a core refuses');
+        assert.equal(await probe.stop(), 0, 'the probe did not stop cleanly');
+        const stopped = probe.logs().find((line) => line['msg'] === 'flow listener stopped');
+        assert.ok(stopped !== undefined);
+        assert.equal(stopped['buffered'], BUFFER, 'the buffer was not the size it was given');
+        assert.equal(stopped['overwritten'], 6 + SENT + 1 - BUFFER);
+      },
+    );
+
+    it(
+      'listens on the family `ipVersion` names (`B-09`)',
+      { timeout: 180_000, skip: v6 ? false : 'this machine has no IPv6 loopback to bind' },
+      async () => {
+        const port = await freeUdpPort(LOOPBACK_V6);
+        const { core, probe } = await probeWith(
+          { enabled: true, port, address: '::1', ipVersion: 'udp6' },
+          'full',
+          // The exporter is the device, and over this socket the device is `::1`.
+          { ...flowSensor, target: { host: '::1', ipVersion: 'auto' } },
+        );
+
+        assert.equal(await udpPortTaken(port, LOOPBACK_V6), true, 'nothing listens on [::1]');
+        // One socket, one family: the same port on 127.0.0.1 is nobody's.
+        assert.equal(await udpPortTaken(port), false, 'a udp6 collector also took the IPv4 port');
+
+        await core.waitFor(
+          'a first scan',
+          resultFor(() => true),
+        );
+        const mark = core.received.length;
+        // From an IPv6 socket, because the collector's address is one.
+        await exportNetflowV5({ host: '::1', port }, [{ octets: 640, packets: 10 }], {
+          flowSequence: 0,
+        });
+        const reading = await core.waitFor(
+          'a reading of a flow exported over IPv6',
+          resultFor((result) => result.outcome === 'ok'),
+          { from: mark },
+        );
+        assert.match(reading.message, /^1 flow, /);
+
+        assert.deepEqual(core.refused, [], 'the probe sent something a core refuses');
+        assert.equal(await probe.stop(), 0);
+        assert.equal(
+          await udpPortTaken(port, LOOPBACK_V6),
+          false,
+          'the flow port outlived the probe',
+        );
       },
     );
 

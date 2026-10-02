@@ -253,12 +253,20 @@ export class FakeCore {
   }
 }
 
-/** A UDP port on 127.0.0.1 that was free a moment ago. */
-export async function freeUdpPort(): Promise<number> {
-  const socket = createSocket('udp4');
+/** Which loopback a helper below binds: IPv4's, unless a test is about the other family. */
+export interface Loopback {
+  readonly type: 'udp4' | 'udp6';
+  readonly address: string;
+}
+const LOOPBACK_V4: Loopback = { type: 'udp4', address: '127.0.0.1' };
+export const LOOPBACK_V6: Loopback = { type: 'udp6', address: '::1' };
+
+/** A UDP port on a loopback address that was free a moment ago. */
+export async function freeUdpPort(on: Loopback = LOOPBACK_V4): Promise<number> {
+  const socket = createSocket(on.type);
   await new Promise<void>((resolve, reject) => {
     socket.once('error', reject);
-    socket.bind(0, '127.0.0.1', resolve);
+    socket.bind(0, on.address, resolve);
   });
   const { port } = socket.address();
   await new Promise<void>((resolve) => {
@@ -269,13 +277,26 @@ export async function freeUdpPort(): Promise<number> {
   return port;
 }
 
-/** Whether something already holds this UDP port on 127.0.0.1 — asked by trying to take it. */
-export async function udpPortTaken(port: number): Promise<boolean> {
-  const socket = createSocket('udp4');
+/**
+ * Whether this machine has an IPv6 loopback to bind at all. A container may have none, and a
+ * probe told to listen on `::1` there fails for a reason that is not the probe's.
+ */
+export async function loopbackV6Available(): Promise<boolean> {
+  try {
+    await freeUdpPort(LOOPBACK_V6);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether something already holds this UDP port on a loopback — asked by trying to take it. */
+export async function udpPortTaken(port: number, on: Loopback = LOOPBACK_V4): Promise<boolean> {
+  const socket = createSocket(on.type);
   try {
     await new Promise<void>((resolve, reject) => {
       socket.once('error', reject);
-      socket.bind(port, '127.0.0.1', resolve);
+      socket.bind(port, on.address, resolve);
     });
     return false;
   } catch (error) {

@@ -182,4 +182,63 @@ describe('checking a configuration', () => {
     assert.equal(code, 0);
     assert.ok(out[0]?.includes('ms-probe'));
   });
+
+  describe('what only the build can know (`B-08`)', () => {
+    // The schema accepts `flowListener.enabled` in every build, and a v1 probe does nothing with
+    // it. The service asks its own build and hands the check what it found.
+    const probeCheck = (
+      argv: readonly string[],
+      problems: (config: { flowListener: { enabled: boolean } }) => readonly string[],
+    ): { code: number; out: string[]; err: string[] } => {
+      const out: string[] = [];
+      const err: string[] = [];
+      const code = runConfigCheck({
+        schema: probeConfigSchema,
+        service: 'ms-probe',
+        version: '9.9.9',
+        argv,
+        env: {},
+        problems,
+        write: (line) => out.push(line),
+        writeError: (line) => err.push(line),
+      });
+      return { code, out, err };
+    };
+
+    it('fails on every problem the build reports, and says nothing that reads as a pass', () => {
+      const path = tempFile(JSON.stringify({ flowListener: { enabled: true } }));
+      const { code, out, err } = probeCheck(['--config', path], (config) =>
+        config.flowListener.enabled ? ['first: no', 'second: no'] : [],
+      );
+      assert.equal(code, 1);
+      assert.deepEqual(err, ['first: no', 'second: no']);
+      assert.deepEqual(out, [], 'a failed check printed "configuration is valid"');
+    });
+
+    it('is handed the configuration as loaded, defaults and all, and passes when it is fine', () => {
+      const path = tempFile(JSON.stringify({}));
+      const seen: boolean[] = [];
+      const { code, out, err } = probeCheck(['--config', path], (config) => {
+        seen.push(config.flowListener.enabled);
+        return [];
+      });
+      assert.equal(code, 0);
+      assert.deepEqual(seen, [false], 'the default the file did not spell out');
+      assert.deepEqual(err, []);
+      assert.ok(out[0]?.includes('configuration is valid'));
+    });
+
+    it('is not asked about a file that did not load', () => {
+      const path = tempFile(JSON.stringify({ flowListener: { enabled: 'perhaps' } }));
+      let asked = 0;
+      const { code, err } = probeCheck(['--config', path], () => {
+        asked += 1;
+        return ['never'];
+      });
+      assert.equal(code, 1);
+      assert.equal(asked, 0);
+      assert.match(err.join('\n'), /flowListener\.enabled/);
+      assert.ok(!err.includes('never'));
+    });
+  });
 });

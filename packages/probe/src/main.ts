@@ -38,6 +38,7 @@ import { ProbeHealthReporter } from './health/report.js';
 import { CoreClient } from './transport/core-client.js';
 import { BUILD, VERSION } from './version.js';
 import { dispatchTables } from './catalogue.js';
+import { buildProblems, carriesFlow } from './config-problems.js';
 
 /**
  * `ms-probe config check` — the only verb this service has, and it earns its place (`H-03`).
@@ -83,6 +84,8 @@ async function main(): Promise<void> {
       service: 'ms-probe',
       version: VERSION,
       argv: process.argv.slice(2),
+      // What this build cannot do with a setting its schema accepts (`B-08`).
+      problems: (config) => buildProblems(config, dispatchTables().listenerFor, BUILD.profile),
       write: (line) => process.stdout.write(`${line}\n`),
       writeError: (line) => process.stderr.write(`${line}\n`),
     });
@@ -311,8 +314,10 @@ async function main(): Promise<void> {
   // **Only in a build that carries a type it feeds** (`H-12`). `listenerFor` is this build's own
   // catalogue, so a v1 probe — which refuses `flow.netflow` by name — opens no socket for flows
   // no sensor of its could ever read, and says so rather than ignoring the setting in silence.
-  const flowCarried = [...listenerFor.values()].includes(FLOW_LISTENER_ID);
+  const flowCarried = carriesFlow(listenerFor);
   if (config.flowListener.enabled && !flowCarried) {
+    // Still a warning here and not a refusal: `config check` fails on it (`B-08`), and a probe
+    // that would not start over a setting with no effect would stop scanning to make the point.
     logger.warn(
       { profile: BUILD.profile, port: config.flowListener.port },
       'flowListener.enabled is set and this build carries no flow sensor type, so the flow ' +

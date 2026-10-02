@@ -20767,18 +20767,95 @@ analysis". `F-` is Phase 0.
       only v5 is sent to a running one. The web UI does not say a probe's collector is off before
       a flow sensor is added to it.
 
-- [ ] **B-08 — nothing says a probe's flow collector is off until a flow sensor fails** · S ·
+- [x] **B-08 — nothing says a probe's flow collector is off until a flow sensor fails** · S ·
       B-07 · Found 2026-10-02 by `B-07`. The web UI offers a flow sensor on any probe, and the
       operator learns from the first scan's error that `flowListener.enabled` is false. A v1
       probe with the key set logs a warning and binds nothing, and `config check` says nothing.
       **Done when** the add-sensor form says so for a probe whose collector is off, and
       `config check` reports the key under a v1 profile.
 
-- [ ] **B-09 — only NetFlow v5 has been sent to a running probe** · S · B-07 · Found 2026-10-02
+      **Done 2026-10-02.**
+
+      **`config check`.** `runConfigCheck` takes a `problems` hook — what only the running build
+      can know about a file its schema accepts — and fails on every line it returns. The probe
+      gives it `buildProblems` (`probe/src/config-problems.ts`), which asks this build's own
+      dispatch tables whether any type is fed by the flow collector, the question `main.ts` now
+      asks through the same function before it constructs one. A v1 probe with
+      `flowListener.enabled` true exits 1 naming the setting, the profile and the port. The
+      runtime warning stays. **A consequence to know**: installers gate on this exit code, so an
+      upgrade of a v1 probe with the setting on now stops before anything is replaced, the old
+      version still running, where the service itself would have started and warned.
+
+      **The form.** No protocol field: number 26 is unused. A probe reports a listener's counters
+      only while it runs and Probe Health gaps them otherwise, so `GET /probes/{id}/health` —
+      already `onObject('read')` on the probe — is the signal. The form needed one thing it did
+      not have, which types read a listener, and `GET /sensor-types` now publishes each type's
+      `listener` from its declaration rather than the form matching on `flow.netflow`. Choosing
+      such a type asks the object's ancestors for its probe and that probe's health; a probe that
+      has reported (`scheduled` is a number) with the listener's counter a gap gets a sentence
+      under **Sensor type** naming the probe and the setting. It covers syslog and SNMP traps as
+      well, which had the same hole and cost one table row each. Nothing is said for a probe that
+      is not connected or too old to report, and nothing to a reader who cannot see the probe:
+      the ancestors leave it out, and its health is refused. The sentence is in a `role="status"`
+      region that is always in the document and is the select's `aria-describedby`. Creating the
+      sensor is not blocked.
+
+      **Tests.** `config-check.test.ts` (3), `probe/test/config-problems.test.ts` (5, two of
+      them running `main.js config check` under each profile), `core/test/sensor-types.test.ts`
+      (1, through the closed response schema), `web/test/add-sensor-listener.test.tsx` (11).
+      **Mutations 15/15**: the check exiting 0 with problems, only the first written, the finding
+      inverted, `enabled` ignored, the verb asking tables that carry flow, `listener` out of the
+      route schema, a listener named for every type, an unreported probe called off, a running
+      listener called off, every listener judged by the flow counter, the notice untied from the
+      field, a probe asked about for every type, the live region removed, a sensor directly under
+      a probe, and the trap setting misnamed.
+
+      **Not done.** The notice is read once, when the type is chosen; it does not follow a probe
+      that reconnects while the form is open. The edit form says nothing, since a sensor that
+      exists already says it on every scan.
+
+- [x] **B-09 — only NetFlow v5 has been sent to a running probe** · S · B-07 · Found 2026-10-02
       by `B-07`. v9, IPFIX and sFlow are covered at the decoder and the listener, and
       `bufferSize` and `ipVersion` reach the listener with no probe-level test. **Done when**
       `probe-flow.test` sends each dialect to a started probe and sees a reading, and an
       overflow case shows `flowMissed` counting.
+
+      **Done 2026-10-02, with one correction to the ticket.** An overflow does not count into
+      `flowMissed` and should not: that channel is what the exporter's sequence says it sent and
+      the probe never received. Records the probe received and its buffer overwrote fail the
+      *sensor's* scan with the number, and the test pins both halves.
+
+      **One started probe, one datagram a dialect** (`probe-flow.test.ts`). `@ms/simulators`
+      already rendered all three, so nothing was added there. A probe with `bufferSize` 100 is
+      sent NetFlow v9 (three UDP flows, three sources), IPFIX (one ICMP flow) and sFlow (two TCP
+      samples at 1-in-1,000), each only after the last was read, and each reading is checked by
+      what only that dialect carried — protocol split, octets per packet, and for sFlow the
+      scaling and "estimated from 2 sampled". The heartbeat then says six received, none
+      malformed, none undecodable.
+
+      **The overflow is deterministic because it is one datagram.** IPFIX has no thirty-record
+      limit: 150 records arrive as one message and enter a ring of 100 in one turn of the probe's
+      loop, so no scan can land inside it and nothing depends on the interval. The next scan
+      fails with "50 flows reached this probe but were overwritten" and records no channels; the
+      heartbeat says `flowReceived` 156 and `flowMissed` 10 — the gap that datagram's own
+      sequence carried, and not 60; the scan after reads a v5 flow, so it is one failed scan and
+      not a sensor behind for ever; and the stop line says `buffered` 100, `overwritten` 57.
+
+      **`ipVersion`.** A probe with `udp6` on `::1` holds that port on `::1` and not on
+      127.0.0.1, and a v5 flow exported over IPv6 is read. Skipped, saying so, on a machine with
+      no IPv6 loopback; it ran in the development container.
+
+      **Mutations 8/8**: `bufferSize` and `ipVersion` each ignored in `main.ts`, the receiver
+      refusing v9, IPFIX and sFlow in turn, sampled octets unscaled, overwrites added to
+      `flowMissed`, and dropped flows no longer failing the scan. The file is five cases where it was
+      three and ran alone in 54 s, 25 s of it the two new ones; every wait has its own 60 s
+      bound under a 300 s or 180 s case.
+
+      **Found by reading, not fixed and not reproduced.** The listener keys an exporter's expected sequence by address and by
+      *what the sequence counts*, and NetFlow v9 and sFlow both count packets — so one device
+      exporting both to one probe has each dialect's sequence read against the other's, and
+      `flowMissed` counts losses that did not happen. Ring overwrites have no Probe Health
+      channel: they are visible per sensor and in the stop line only.
 
 ## Phase 12 — Maps and dashboards (`V2-02`)
 

@@ -258,6 +258,14 @@ environment or working directory, or an SNMP sensor's port. Then it is cleared u
 **Changes** tab says which (`A-40`). Giving its device a new host, or moving it to another probe or
 another device, clears it the same way (`A-41`).
 
+A type that reads from a probe listener — a flow, syslog or SNMP trap sensor — is checked against
+the probe it would run on as soon as it is chosen (`B-08`). If that probe has reported and its
+listener is not running, a sentence under **Sensor type** says so, naming the probe and the
+setting in its configuration file that turns the listener on; the sensor can still be created,
+and fails its scans until the probe is fixed. The sentence is text tied to the field and
+announced when it appears, not a colour. It is not shown for a probe that is not connected, and
+not to an account that cannot read the probe.
+
 A save that would send a group's inherited credentials somewhere new — a device's host, an SNMP
 sensor's port, a device moved under the group — needs `write` on the group, and is otherwise
 refused with a message naming the kind and the group (`A-41`). A sensor whose credentials nobody

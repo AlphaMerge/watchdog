@@ -44,6 +44,15 @@ export interface ConfigCheckOptions<T> {
   readonly env?: NodeJS.ProcessEnv;
   readonly write: (line: string) => void;
   readonly writeError: (line: string) => void;
+  /**
+   * What only the running build can know about a configuration the schema accepts (`B-08`).
+   *
+   * The schema is the same in every build and a build is not: a v1 probe carries no flow sensor
+   * type, so `flowListener.enabled: true` validates and does nothing. Each line returned is a
+   * problem, reported with the others and failing the check — the file would load, and it does
+   * not say what its author meant.
+   */
+  readonly problems?: (config: T) => readonly string[];
 }
 
 export function runConfigCheck<T>(options: ConfigCheckOptions<T>): number {
@@ -58,6 +67,12 @@ export function runConfigCheck<T>(options: ConfigCheckOptions<T>): number {
         `no configuration file was read, so nothing about this installation was checked — ` +
           `pass --config <file> or set MS_CONFIG_FILE (${options.service} reads /etc/ms when installed)`,
       );
+      return 1;
+    }
+    const problems = options.problems?.(loaded.config) ?? [];
+    if (problems.length > 0) {
+      // Every one, like the loader's own: nobody should run this twice to find two.
+      for (const problem of problems) options.writeError(problem);
       return 1;
     }
     options.write(`configuration is valid for ${options.service} ${options.version}`);

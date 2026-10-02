@@ -74,6 +74,14 @@ export interface SensorTypeSummary {
    * one-file job.
    */
   readonly hasPreview: boolean;
+  /**
+   * The probe listener that feeds this type, where one does (`B-08`): `snmp-trap`, `syslog`, `flow`.
+   *
+   * Published so the add-sensor form can say that the chosen probe's listener is off *before* the
+   * sensor is created, rather than leaving the first scan's error to say it. Absent on a type that
+   * runs its own check — which is nearly all of them.
+   */
+  readonly listener?: string;
 }
 
 /**
@@ -182,6 +190,7 @@ export class SensorCatalogue {
         costHint: type.costHint,
         paramsSchema: type.paramsSchema,
         hasPreview: type.preview !== undefined,
+        ...(type.listener === undefined ? {} : { listener: type.listener }),
       };
     });
   }

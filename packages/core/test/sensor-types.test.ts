@@ -74,7 +74,10 @@ describe(
       // untested at this level.
       const restCustom = BUILT_IN_SENSOR_TYPES.find((type) => type.id === 'rest.custom');
       assert.ok(restCustom !== undefined, 'rest.custom is not a built-in type any more');
-      mapping = await build(testCatalogue([restCustom]));
+      // And the shipped `flow.netflow`, the one type here that a probe listener feeds (`B-08`).
+      const flow = BUILT_IN_SENSOR_TYPES.find((type) => type.id === 'flow.netflow');
+      assert.ok(flow !== undefined, 'flow.netflow is not a built-in type any more');
+      mapping = await build(testCatalogue([restCustom, flow]));
     });
 
     after(async () => {
@@ -567,6 +570,19 @@ describe(
       }>().items;
       assert.equal(items.find((item) => item.id === 'rest.custom')?.hasPreview, true);
       assert.equal(items.find((item) => item.id === 'icmp.ping')?.hasPreview, false);
+    });
+
+    it('says which types a probe listener feeds, and says nothing for the rest (`B-08`)', async () => {
+      // The add-sensor form reads this to ask whether the probe's listener is running before
+      // the sensor exists. The response schema is closed, so a field the catalogue publishes
+      // and the route does not declare is stripped on the way out without a word.
+      const items = (await mapping.inject({ method: 'GET', url: '/api/v1/sensor-types' })).json<{
+        items: { id: string; listener?: string }[];
+      }>().items;
+      assert.equal(items.find((item) => item.id === 'flow.netflow')?.listener, 'flow');
+      const ping = items.find((item) => item.id === 'icmp.ping');
+      assert.ok(ping !== undefined);
+      assert.equal('listener' in ping, false, 'a type that runs its own check named a listener');
     });
 
     // ── the mapping preview (`U-13`) ────────────────────────────────────────────────────────
