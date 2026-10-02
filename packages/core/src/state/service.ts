@@ -282,6 +282,15 @@ export class SensorStateService {
     this.#policies.clear();
   }
 
+  /**
+   * Drops what is cached about these sensors (`A-41c`). Their next result is decided from the
+   * stored row, with the live facts as they are when it arrives: what a sensor released from a
+   * hold needs, since the cached copy still says it is withheld.
+   */
+  forgetSensors(sensorIds: readonly number[]): void {
+    for (const sensorId of sensorIds) this.#cache.delete(sensorId);
+  }
+
   /** The current state of a sensor as far as this process knows. Undefined if never seen. */
   peek(sensorId: number): SensorRuntime | undefined {
     return this.#cache.get(sensorId);

@@ -163,12 +163,32 @@ at each scan and checks every address. When one is outside the targets, or the n
 nothing, the probe sends the device nothing and marks its result `withheld`. **That result never
 reaches the state machine.** It is not a failed scan: counted as one it would be a Down, and an
 alarm, about a device nobody asked anything of. The core takes it out of the batch and holds the
-sensor in the same set, under a second per-probe name, with the probe's own sentence. The sensor
-is let go by its next result that is not a refusal, before the machine sees that result, so it is
-Up at the scan that found the name inside again, with no Down between. Results are ordered by the
-probe's clock, since a spool replays: an older refusal holds nothing, and an older reading lets
-nothing go. A sensor the core stops sending the probe (paused, moved, deleted, or withheld by the
-core itself) is dropped from what the probe refused at the next configuration.
+sensor in the same set, under a second per-probe name, with the probe's own sentence. The
+transition to Unknown is stamped as the probe measured the refusal, as a result's is.
+
+**The mark is honoured only where the probe could have refused**: on an error with no readings,
+for a sensor that probe was sent with a set whose targets left the name to it. On anything else
+the result is the result it would be without the mark, a failed scan included, and is counted
+with the probe's refused results on Probe Health. A probe cannot turn the failure of a sensor it
+merely owns into a standing Unknown.
+
+**The next result that is not a refusal lets the sensor go, and that result decides it.** The
+hold is dropped without re-deciding anything, so there is one transition, from Unknown to what
+the result says: Up at the scan that found the name inside again, Down if the device does not
+answer, and never a Down between for what the sensor read before it was held. Results are
+ordered by the probe's clock, since a spool replays: an older refusal holds nothing, and an older
+reading lets nothing go. If the batch carrying that result is not stored, the sensor is held
+again as it was, and let go when the probe sends the batch again.
+
+**A hold does not outlive the reason for it.** A sensor the core stops sending the probe (paused,
+deleted, or withheld by the core itself) is dropped from what the probe refused at the next
+configuration, an empty one included. A sensor moved to another probe is let go when the move
+commits, whether or not the probe it left is connected, and in any case by its first result from
+the probe it is under now. A deleted probe holds nothing.
+
+**The set and the record of what a probe refused move together.** A refusal is recorded only
+once the set has taken it; when that write fails the batch is refused back to the probe, which
+sends it again.
 
 ### 2.1 Query state — did the check run?
 

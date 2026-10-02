@@ -84,6 +84,25 @@ export interface WithheldReevaluator {
     at: Date,
     cause: { message: string; sources?: readonly SensorStateCause[] },
   ): Promise<number>;
+  /**
+   * Drops what is cached about these sensors, so the next result is decided from the stored row
+   * with the live facts as they are now (`A-41c`). Absent, `release` is only right for a caller
+   * whose cache holds nothing.
+   */
+  forgetSensors?(sensorIds: readonly number[]): void;
+}
+
+/** Sensors let go by `SensorVouching.release`, and the two things that can follow. */
+export interface ReleasedHold {
+  /** The sensors nothing withholds any more. */
+  readonly released: readonly number[];
+  /** Puts them back as they were held: the result that was to decide them was not stored. */
+  undo(): void;
+  /**
+   * The result was stored and has decided them: a master among them that held its dependents
+   * while it was withheld settles now, as any master evaluated again does (`M-23`).
+   */
+  evaluated(): Promise<void>;
 }
 
 /**
@@ -171,6 +190,11 @@ export class SensorVouching implements VoucherCheck {
    * the other's, in either order (`A-41`).
    */
   readonly #byOwner = new Map<string, ReadonlyMap<number, string>>();
+  /**
+   * Sensors let go by `release` whose dependents have not been settled yet, because that write
+   * failed. Tried again with the next release that is evaluated.
+   */
+  readonly #unreturned = new Set<number>();
 
   /** Resolved at `#epoch`; dropped whole when it moves. */
   #epoch: string | null = null;
@@ -320,6 +344,98 @@ export class SensorVouching implements VoucherCheck {
   }
 
   /**
+   * `settle`, for a caller that is not a sweep (`A-41c`): it throws when the re-decision did not
+   * land, with the set put back as it was.
+   *
+   * A sweep settles its whole answer every time, so a write that failed is made again by the next
+   * one, and `settle` only logs. A caller that settles when something changed has no next time:
+   * told nothing, it would believe a hold that was never made, or a release that was undone.
+   */
+  settleOrThrow(
+    owner: string,
+    refused: ReadonlyMap<number, string>,
+    /**
+     * When what changed was decided, if not now. A probe's refusal is stamped as the probe
+     * measured it, like the results either side of it: stamped with this core's clock, a hold
+     * replayed from a spool sorted after the reading that had already let it go, and the history
+     * that uptime is computed from ended on Unknown for a sensor that was Up.
+     */
+    at?: Date,
+  ): Promise<number> {
+    return this.#settleAll(new Map([[owner, refused]]), undefined, true, at);
+  }
+
+  /**
+   * Lets `owner`'s hold on these sensors go **without re-deciding them** (`A-41c`): a result for
+   * each is in hand, and the machine decides the sensor from that, once.
+   *
+   * Re-decided here, a sensor would first return to whatever it read before it was withheld. One
+   * that was Down then went Unknown, Down and Up in one batch: a transition and an alarm for an
+   * outage nobody saw at that moment. So only the live fact moves, in memory, and what is cached
+   * about the sensor is dropped so that the result is decided against the fact as it is now.
+   *
+   * Nothing is written, so nothing here can fail. The caller says what became of the result:
+   * `undo` when it was not stored, `evaluated` when it was.
+   */
+  release(owner: string, sensorIds: readonly number[]): ReleasedHold {
+    const before = this.#byOwner.get(owner);
+    const taken = new Map<number, string>();
+    for (const id of sensorIds) {
+      const message = before?.get(id);
+      if (message !== undefined) taken.set(id, message);
+    }
+    if (before === undefined || taken.size === 0) {
+      return { released: [], undo: () => undefined, evaluated: () => Promise.resolve() };
+    }
+    this.#byOwner.set(owner, new Map([...before].filter(([id]) => !taken.has(id))));
+    const released: number[] = [];
+    for (const id of taken.keys()) {
+      if (this.#recount(id) === undefined) released.push(id);
+    }
+    this.#states?.forgetSensors?.([...taken.keys()]);
+    this.#logger.info(
+      { owner, released: released.length },
+      'sensors released to the result that decides them',
+    );
+
+    return {
+      released,
+      undo: () => {
+        const now = new Map(this.#byOwner.get(owner));
+        // Whatever was held again meanwhile keeps its newer words.
+        for (const [id, message] of taken) if (!now.has(id)) now.set(id, message);
+        this.#byOwner.set(owner, now);
+        for (const id of taken.keys()) this.#recount(id);
+        this.#states?.forgetSensors?.([...taken.keys()]);
+      },
+      evaluated: async () => {
+        for (const id of released) this.#unreturned.add(id);
+        if (this.#dependencies === undefined) {
+          this.#unreturned.clear();
+          return;
+        }
+        // Not one withheld again since: that one is held, and settles when it is let go.
+        const returning = [...this.#unreturned].filter((id) => !this.#withheld.has(id));
+        if (returning.length === 0) return;
+        try {
+          await this.#db.tx(async (q) => {
+            const at = this.#now();
+            await this.#dependencies?.returnWithheld(q, returning, at);
+            await this.#dependencies?.recompute(q, at);
+          });
+          for (const id of returning) this.#unreturned.delete(id);
+        } catch (error) {
+          this.#logger.error(
+            { owner, sensors: returning.length, err: describeError(error) },
+            'could not settle what depends on sensors released to their results; the next ' +
+              'release tries again',
+          );
+        }
+      },
+    };
+  }
+
+  /**
    * Replaces what each owner withholds, and re-decides what crossed, in one transaction with
    * `alongside`, a set that holds sensors unevaluated for another reason and has already moved
    * (`M-28`).
@@ -332,9 +448,19 @@ export class SensorVouching implements VoucherCheck {
    * sweep. So what came in or went out is counted against all of them together: a sensor that
    * only moved between them is re-decided once, and neither holds nor lets go what depends on it.
    */
-  async settleTogether(
+  settleTogether(
     owners: ReadonlyMap<string, ReadonlyMap<number, string>>,
     alongside?: StagedSet,
+  ): Promise<number> {
+    return this.#settleAll(owners, alongside, false);
+  }
+
+  async #settleAll(
+    owners: ReadonlyMap<string, ReadonlyMap<number, string>>,
+    alongside: StagedSet | undefined,
+    /** Whether a write that failed is the caller's to hear about, after the sets are put back. */
+    strict: boolean,
+    stamped?: Date,
   ): Promise<number> {
     const had = new Map<string, ReadonlyMap<number, string> | undefined>();
     const touched = new Set<number>([...(alongside?.entered ?? []), ...(alongside?.left ?? [])]);
@@ -369,7 +495,7 @@ export class SensorVouching implements VoucherCheck {
 
     try {
       const moved = await this.#db.tx(async (q) => {
-        const at = this.#now();
+        const at = stamped ?? this.#now();
         // **A master withheld while Down keeps holding until it is evaluated again** (`M-23`).
         // Marked while its state still says Down: Unknown is not Down, and letting go would page
         // each dependent on the outage the master can no longer speak for.
@@ -410,6 +536,7 @@ export class SensorVouching implements VoucherCheck {
         { owners: [...owners.keys()], sensors: changed.length, err: describeError(error) },
         'could not re-decide sensors after a voucher check; the next sweep tries again',
       );
+      if (strict) throw error;
       return 0;
     }
   }

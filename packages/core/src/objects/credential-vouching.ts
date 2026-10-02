@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { isRestricted, restrictionOf, type CredentialRestriction } from '@ms/sensors';
 import {
   capabilitiesFor,
+  describeError,
   PROTOCOL_VERSION,
   targetVerdict,
   versionFor,
@@ -22,7 +23,12 @@ import {
 } from './sensor-reads.js';
 import type { SensorTypeGate } from './sensor-type-gate.js';
 import type { ObjectId } from './types.js';
-import { storedVoucher, type StoredVoucher, type VoucherCheck } from './vouching.js';
+import {
+  storedVoucher,
+  type ReleasedHold,
+  type StoredVoucher,
+  type VoucherCheck,
+} from './vouching.js';
 
 /**
  * Who stands behind sending an inherited credential set where a sensor sends it (`A-41`).
@@ -648,7 +654,7 @@ export interface CredentialVouchingOptions {
     q: Queryable,
   ) => Promise<ReadonlyMap<number, AccessRight>>;
   /** Where a withheld sensor is held Unknown: `A-29`'s set, which the state machine reads. */
-  vouching?: Pick<VoucherCheck, 'settle'>;
+  vouching?: ProbeRefusalHolds;
   /** Where `adopt` records what it did, one entry per kind. */
   audit?: AuditSink;
 }
@@ -691,6 +697,55 @@ interface ProbeRefusal {
   readonly message: string;
 }
 
+/**
+ * What this needs of `SensorVouching`: the sweep's `settle` for what the core withholds itself,
+ * and for what a probe refuses, a settle that says when it did not land and a release that
+ * re-decides nothing (`A-41c`).
+ */
+export interface ProbeRefusalHolds extends Pick<VoucherCheck, 'settle'> {
+  settleOrThrow(owner: string, refused: ReadonlyMap<number, string>, at?: Date): Promise<number>;
+  release(owner: string, sensorIds: readonly number[]): ReleasedHold;
+}
+
+/** What `reported` made of one probe's batch (`A-41c`). */
+export interface ReportedBatch {
+  /** The results left for the state machine. */
+  readonly results: readonly CheckResult[];
+  /**
+   * Results marked `withheld` that were not this probe's to mark: not an error with no readings,
+   * or for a sensor it was not left to check. Kept in `results`, as the results they are without
+   * the mark, and counted by the caller.
+   */
+  readonly unearned: number;
+  /**
+   * Says what became of `results`. Stored, a master among the sensors they let go settles what
+   * depends on it. Not stored, the sensors are held again as they were: the probe sends the batch
+   * again, and lets them go then. Never throws.
+   */
+  stored(landed: boolean): Promise<void>;
+}
+
+const NOTHING_LET_GO = (): Promise<void> => Promise.resolve();
+
+/** The result without the mark it had no claim to. */
+function unmarked(result: CheckResult): CheckResult {
+  const plain = { ...result };
+  delete plain.withheld;
+  return plain;
+}
+
+/** Whether two sets of refusals say the same words about the same sensors. */
+function sameWords(
+  a: ReadonlyMap<number, ProbeRefusal> | undefined,
+  b: ReadonlyMap<number, ProbeRefusal>,
+): boolean {
+  if ((a?.size ?? 0) !== b.size) return false;
+  for (const [sensorId, refusal] of b) {
+    if (a?.get(sensorId)?.message !== refusal.message) return false;
+  }
+  return true;
+}
+
 interface Account {
   readonly role: AccountRole;
   readonly disabled: boolean;
@@ -713,7 +768,7 @@ export class CredentialVouching {
   readonly #logger: Logger;
   readonly #types: CredentialBoundTypes;
   readonly #rights: CredentialVouchingOptions['rights'];
-  readonly #vouching: Pick<VoucherCheck, 'settle'> | undefined;
+  readonly #vouching: ProbeRefusalHolds | undefined;
   readonly #audit: AuditSink | undefined;
 
   #epoch: string | null = null;
@@ -722,6 +777,11 @@ export class CredentialVouching {
   readonly #withheldByProbe = new Map<number, number>();
   /** What each probe is refusing to scan, by sensor (`A-41c`). */
   readonly #refusedByProbe = new Map<number, Map<number, ProbeRefusal>>();
+  /**
+   * The sensors each probe was sent with a set whose targets left the host for it to check
+   * (`A-41c`), at its last configuration. Only these can be refused by it.
+   */
+  readonly #leftToProbe = new Map<number, ReadonlySet<number>>();
   #checked = 0;
 
   constructor(options: CredentialVouchingOptions) {
@@ -744,11 +804,21 @@ export class CredentialVouching {
    * Which of these sensors may not be sent their credentials by this probe, with the sentence
    * for each. Asks, and changes nothing: `withhold` is the one that holds them.
    */
-  async refusals(
+  refusals(
     probeId: number,
     sensors: readonly SensorBeingSent[],
     /** What the probe speaks, which decides whether it may be sent a set bounded by its keys. */
     peerVersion: number = PROTOCOL_VERSION,
+  ): Promise<Map<number, string>> {
+    return this.#check(probeId, sensors, peerVersion, new Set());
+  }
+
+  /** `refusals`, noting in `left` each sensor sent a set its probe has to check a name against. */
+  async #check(
+    probeId: number,
+    sensors: readonly SensorBeingSent[],
+    peerVersion: number,
+    left: Set<number>,
   ): Promise<Map<number, string>> {
     const refused = new Map<number, string>();
     const sent = sensors.filter((sensor) => sensor.owners.size > 0);
@@ -793,6 +863,9 @@ export class CredentialVouching {
             this.#types.pinsAddress(sensor.sensorType, kind),
           );
           if (refusal !== null) refused.set(sensor.sensorId, refusal);
+          else if (targetVerdict(sensor.host, restriction.targets) === 'undecided') {
+            left.add(sensor.sensorId);
+          }
           continue;
         }
         const vouched = recorded.get(`${String(sensor.sensorId)}:${kind}`);
@@ -851,9 +924,15 @@ export class CredentialVouching {
     sensors: readonly SensorBeingSent[],
     peerVersion: number = PROTOCOL_VERSION,
   ): Promise<Map<number, string>> {
-    const refused = await this.refusals(probeId, sensors, peerVersion);
+    const left = new Set<number>();
+    const refused = await this.#check(probeId, sensors, peerVersion, left);
+    // A sensor refused for another of its kinds is not sent at all, and so not the probe's.
+    for (const sensorId of refused.keys()) left.delete(sensorId);
+    if (left.size === 0) this.#leftToProbe.delete(probeId);
+    else this.#leftToProbe.set(probeId, left);
     const before = this.#withheldByProbe.get(probeId) ?? 0;
-    this.#withheldByProbe.set(probeId, refused.size);
+    if (refused.size === 0) this.#withheldByProbe.delete(probeId);
+    else this.#withheldByProbe.set(probeId, refused.size);
     if (refused.size !== before) {
       this.#logger.info(
         { probeId, withheld: refused.size, before },
@@ -864,10 +943,8 @@ export class CredentialVouching {
     // What the probe was refusing to scan stands only for a sensor it is still being sent
     // (`A-41c`): one paused, moved away, deleted or withheld here is no longer the probe's to
     // refuse, and its own reason is the one that speaks for it now.
-    await this.#keepReported(
-      probeId,
-      new Set(sensors.map((sensor) => sensor.sensorId).filter((id) => !refused.has(id))),
-    );
+    const sent = new Set(sensors.map((sensor) => sensor.sensorId).filter((id) => !refused.has(id)));
+    await this.#keepReported(probeId, (sensorId) => sent.has(sensorId));
     return refused;
   }
 
@@ -881,33 +958,66 @@ export class CredentialVouching {
    * it never reaches the machine: the sensor is held through the set `A-41` withholds with, under
    * this probe's own name, and reads Unknown with the probe's sentence.
    *
-   * **The next result that is not a refusal lets it go**, before the machine sees that result, so
-   * a name that resolves inside again is Up at the scan that found out. Ordered by the probe's
+   * **Only a refusal the probe could have made.** The mark is honoured on an error with no
+   * readings, for a sensor this probe was sent with a set whose targets left the name for it to
+   * check. Any other result that carries it is the result it would be without it, and is counted:
+   * a probe cannot turn a failure of a sensor it merely owns into a standing Unknown.
+   *
+   * **The next result that is not a refusal lets it go, and that result decides the sensor.** The
+   * hold is dropped without re-deciding anything, so the machine makes one transition, from
+   * Unknown to what the result says. Re-decided first, a sensor that was Down before the refusal
+   * would pass through Down again on its way to Up, with an alarm for it. Ordered by the probe's
    * clock, since a spool replays: a refusal older than the last thing known about the sensor
    * holds nothing, and an older reading lets nothing go.
+   *
+   * **A result from the probe a sensor is under now lets go what another probe refused.** The
+   * sensor was moved, and the probe it left may never be sent another configuration.
+   *
+   * **What this holds and what the set holds move together.** A new refusal is written here only
+   * once the set has taken it; when it does not, this throws, nothing has moved, and the caller
+   * has the probe send the batch again.
    */
   async reported(
     probeId: number,
     results: readonly CheckResult[],
     /** When the machine last took a result for a sensor, if it has. */
     lastResultAt: (sensorId: number) => Date | null | undefined = () => undefined,
-  ): Promise<readonly CheckResult[]> {
-    const held = this.#refusedByProbe.get(probeId);
-    // Nothing held and nothing refused, which is every batch of every probe but a few.
-    if (held === undefined && !results.some((result) => result.withheld === true)) return results;
+  ): Promise<ReportedBatch> {
+    // Nothing held by anyone and nothing marked, which is every batch of every probe but a few.
+    if (this.#refusedByProbe.size === 0 && !results.some((result) => result.withheld === true)) {
+      return { results, unearned: 0, stored: NOTHING_LET_GO };
+    }
 
+    const held = this.#refusedByProbe.get(probeId);
+    const left = this.#leftToProbe.get(probeId);
     const refused = new Map(held);
     const kept: CheckResult[] = [];
-    let changed = false;
+    /** Sensors with a result that is not a refusal, which is what lets a hold go. */
+    const measured = new Set<number>();
+    const letGo = new Set<number>();
+    /** When the first refusal that says something new was made, by the probe's clock. */
+    let news: number | undefined;
+    let unearned = 0;
     const inOrder = [...results].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
     for (const result of inOrder) {
       const at = Date.parse(result.at);
       const holding = refused.get(result.sensorId);
-      if (result.withheld !== true) {
-        kept.push(result);
+      const earned =
+        result.withheld === true &&
+        result.outcome === 'error' &&
+        result.channels.length === 0 &&
+        left?.has(result.sensorId) === true;
+      if (!earned) {
+        if (result.withheld === true) {
+          unearned += 1;
+          kept.push(unmarked(result));
+        } else {
+          kept.push(result);
+        }
+        if (!Number.isNaN(at)) measured.add(result.sensorId);
         if (holding !== undefined && at > holding.at) {
           refused.delete(result.sensorId);
-          changed = true;
+          letGo.add(result.sensorId);
         }
         continue;
       }
@@ -920,37 +1030,175 @@ export class CredentialVouching {
       const known = holding?.at ?? lastResultAt(result.sensorId)?.getTime();
       if (known !== undefined && at <= known) continue;
       refused.set(result.sensorId, { at, message: result.message });
-      // The same words at a later time move nothing anybody reads.
-      if (holding?.message !== result.message) changed = true;
+      letGo.delete(result.sensorId);
+      if (held?.get(result.sensorId)?.message !== result.message) news = Math.min(news ?? at, at);
     }
-    if (refused.size === 0) this.#refusedByProbe.delete(probeId);
-    else this.#refusedByProbe.set(probeId, refused);
-    if (changed) await this.#settleReported(probeId, refused);
-    return kept;
+
+    // What the set has to hold before anything is let go: every refusal that stands, and still
+    // the ones a result in this batch is about to release.
+    const holdsNow = new Map(refused);
+    for (const sensorId of letGo) {
+      const was = held?.get(sensorId);
+      if (was !== undefined) holdsNow.set(sensorId, was);
+    }
+    // The same words at a later time move nothing anybody reads, and settle nothing.
+    // Stamped as the probe measured it, as a result's transition is, so that the reading which
+    // lets it go sorts after it whatever the two clocks say. Never ahead of this core's clock: a
+    // refusal does not pass the gate that drops a result stamped in the future.
+    if (!sameWords(held, holdsNow)) {
+      await this.#settleReported(
+        probeId,
+        holdsNow,
+        news === undefined ? undefined : new Date(Math.min(news, Date.now())),
+      );
+    }
+
+    const releases: { probeId: number; was: Map<number, ProbeRefusal>; hold: ReleasedHold }[] = [];
+    const release = (owner: number, sensorIds: readonly number[]): void => {
+      const now = this.#refusedByProbe.get(owner);
+      const was = new Map<number, ProbeRefusal>();
+      for (const sensorId of sensorIds) {
+        const refusal = now?.get(sensorId);
+        if (refusal !== undefined) was.set(sensorId, refusal);
+      }
+      if (now === undefined || was.size === 0) return;
+      this.#store(owner, new Map([...now].filter(([sensorId]) => !was.has(sensorId))));
+      const hold = this.#vouching?.release(`credentials-probe:${String(owner)}`, [...was.keys()]);
+      if (hold !== undefined) releases.push({ probeId: owner, was, hold });
+    };
+
+    this.#store(probeId, holdsNow);
+    release(probeId, [...letGo]);
+    for (const other of [...this.#refusedByProbe.keys()]) {
+      if (other !== probeId) release(other, [...measured]);
+    }
+
+    if (releases.length === 0) return { results: kept, unearned, stored: NOTHING_LET_GO };
+    return {
+      results: kept,
+      unearned,
+      stored: async (landed) => {
+        for (const { probeId: owner, was, hold } of releases) {
+          if (landed) {
+            await hold.evaluated();
+            continue;
+          }
+          hold.undo();
+          const now = new Map(this.#refusedByProbe.get(owner));
+          // Whatever was refused again meanwhile keeps its newer words.
+          for (const [sensorId, refusal] of was) if (!now.has(sensorId)) now.set(sensorId, refusal);
+          this.#store(owner, now);
+        }
+      },
+    };
   }
 
-  /** Drops what a probe refused for every sensor not in `sensorIds`, and settles if any went. */
-  async #keepReported(probeId: number, sensorIds: ReadonlySet<number>): Promise<void> {
+  /**
+   * Drops what a probe refused for sensors that are no longer under it, and everything held for
+   * a probe that no longer exists (`A-41c`). Never throws.
+   *
+   * For a move or a delete, which no configuration may ever follow: the probe a sensor left has
+   * nothing left to scan, or is not connected, or is gone. Without this its last refusal held the
+   * sensor Unknown, under a probe that could no longer say otherwise, until the core restarted.
+   */
+  async reconcile(): Promise<void> {
+    try {
+      const probes = new Set([
+        ...this.#refusedByProbe.keys(),
+        ...this.#leftToProbe.keys(),
+        ...this.#withheldByProbe.keys(),
+      ]);
+      if (probes.size === 0) return;
+      const sensors = new Set<number>();
+      for (const refused of this.#refusedByProbe.values()) {
+        for (const sensorId of refused.keys()) sensors.add(sensorId);
+      }
+      const rows = await this.#db.query<{ kind: string; id: string; probe_id: string | null }>(
+        `WITH RECURSIVE up AS (
+           SELECT id AS sensor_id, id, parent_id, kind, 0 AS depth
+           FROM object WHERE id = ANY($1::bigint[]) AND kind = 'sensor'
+           UNION ALL
+           SELECT up.sensor_id, o.id, o.parent_id, o.kind, up.depth + 1
+           FROM object o JOIN up ON up.parent_id = o.id
+           WHERE up.depth < ${String(MAX_WALK_DEPTH)}
+         )
+         SELECT 'sensor' AS kind, s.sensor_id::text AS id,
+                (SELECT up.id::text FROM up
+                 WHERE up.sensor_id = s.sensor_id AND up.kind = 'probe'
+                 ORDER BY up.depth LIMIT 1) AS probe_id
+         FROM (SELECT DISTINCT sensor_id FROM up) s
+         UNION ALL
+         SELECT 'probe' AS kind, id::text AS id, NULL AS probe_id
+         FROM object WHERE id = ANY($2::bigint[]) AND kind = 'probe'`,
+        [[...sensors], [...probes]],
+      );
+      const under = new Map<number, number | null>();
+      const existing = new Set<number>();
+      for (const row of rows) {
+        if (row.kind === 'probe') existing.add(Number(row.id));
+        else under.set(Number(row.id), row.probe_id === null ? null : Number(row.probe_id));
+      }
+      for (const probeId of probes) {
+        const gone = !existing.has(probeId);
+        await this.#keepReported(probeId, (sensorId) => !gone && under.get(sensorId) === probeId);
+        if (!gone) continue;
+        // Nothing is sent to a probe that does not exist, and nothing is withheld from it.
+        this.#leftToProbe.delete(probeId);
+        if (this.#withheldByProbe.delete(probeId)) {
+          await this.#vouching?.settle(`credentials:${String(probeId)}`, new Map());
+        }
+      }
+    } catch (error: unknown) {
+      this.#logger.error(
+        { err: describeError(error) },
+        'could not check which refused sensors are still under their probe; the next move or ' +
+          'delete tries again',
+      );
+    }
+  }
+
+  /**
+   * Drops what a probe refused for every sensor `keep` does not answer for, in the set first and
+   * here only once the set has let them go. A settle that fails leaves both as they were, for
+   * the next configuration or the next move to try again.
+   */
+  async #keepReported(probeId: number, keep: (sensorId: number) => boolean): Promise<void> {
     const held = this.#refusedByProbe.get(probeId);
     if (held === undefined) return;
-    const refused = new Map([...held].filter(([sensorId]) => sensorIds.has(sensorId)));
+    const refused = new Map([...held].filter(([sensorId]) => keep(sensorId)));
     if (refused.size === held.size) return;
-    if (refused.size === 0) this.#refusedByProbe.delete(probeId);
-    else this.#refusedByProbe.set(probeId, refused);
-    await this.#settleReported(probeId, refused);
+    try {
+      await this.#settleReported(probeId, refused);
+    } catch (error: unknown) {
+      this.#logger.error(
+        { probeId, err: describeError(error) },
+        'could not let go the sensors a probe is no longer sent; they stay held until the next ' +
+          'configuration',
+      );
+      return;
+    }
+    this.#store(probeId, refused);
   }
 
+  #store(probeId: number, refused: Map<number, ProbeRefusal>): void {
+    if (refused.size === 0) this.#refusedByProbe.delete(probeId);
+    else this.#refusedByProbe.set(probeId, refused);
+  }
+
+  /** Has the set hold exactly these for the probe. Throws when it could not, with nothing moved. */
   async #settleReported(
     probeId: number,
     refused: ReadonlyMap<number, ProbeRefusal>,
+    at?: Date,
   ): Promise<void> {
     this.#logger.info(
       { probeId, refused: refused.size },
       'sensors a probe refuses to scan because of where their credentials may go',
     );
-    await this.#vouching?.settle(
+    await this.#vouching?.settleOrThrow(
       `credentials-probe:${String(probeId)}`,
       new Map([...refused].map(([sensorId, refusal]) => [sensorId, refusal.message])),
+      at,
     );
   }
 

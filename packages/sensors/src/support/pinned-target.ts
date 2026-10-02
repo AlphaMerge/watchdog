@@ -122,6 +122,11 @@ export const PIN_REFUSALS = {
     `Not scanned: ${host} did not resolve to any ${family}address${why}, so it could not be ` +
     `checked against the allowed targets of the ${kind} credentials it would use, and they ` +
     'are not sent. It is scanned again when the name resolves inside them.',
+  resolveTimedOut: (host: string, kind: string, ms: number): string =>
+    `Not scanned: ${host} did not resolve within ${String(ms)} ms, so it could not be checked ` +
+    `against the allowed targets of the ${kind} credentials it would use, and they are not ` +
+    'sent. The probe’s resolver is not answering; it is scanned again when the name resolves ' +
+    'inside them.',
   cancelled: (host: string): string =>
     `Not scanned: the check was cancelled while ${host} was being resolved to check it against ` +
     'the allowed targets of the credentials it would use.',
@@ -143,6 +148,32 @@ export interface PinRequest {
   /** The kinds this sensor type connects to a pinned address for (`SensorType.pinnedKinds`). */
   readonly pinnedKinds: readonly string[];
   readonly signal?: AbortSignal;
+  /**
+   * The check's own deadline, when the runner says. The resolution is given part of it: see
+   * `resolveBoundMs`.
+   */
+  readonly timeoutMs?: number;
+}
+
+/** What a resolution may take when the check does not say how long it has. */
+const DEFAULT_RESOLVE_MS = 5_000;
+/** And the most it may take whatever the check has: a resolver that slow is not answering. */
+const MAX_RESOLVE_MS = 10_000;
+
+/**
+ * How long the one lookup may take: half the check's time, and never more than ten seconds.
+ *
+ * **Shorter than the check's own timeout, so that the refusal is what the runner hears.**
+ * `getaddrinfo` cannot be cancelled, and against a resolver that does not answer it outlasts the
+ * check. The pool then settled the check as a plain timeout, a failed scan, and the sensor read
+ * Down for a device nothing had been sent to, where the same resolver answering "no such name"
+ * read Unknown. Half leaves the transport the other half once the name does resolve.
+ */
+export function resolveBoundMs(timeoutMs: number | undefined): number {
+  if (timeoutMs === undefined || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return DEFAULT_RESOLVE_MS;
+  }
+  return Math.max(1, Math.min(MAX_RESOLVE_MS, Math.floor(timeoutMs / 2)));
 }
 
 /**
@@ -196,7 +227,14 @@ export async function pinTarget(
   const familyName = family === 4 ? 'IPv4 ' : family === 6 ? 'IPv6 ' : '';
   let answers: readonly ResolvedAddress[];
   try {
-    answers = await resolving(resolve(host, family), host, sensorId, signal);
+    answers = await resolving(
+      resolve(host, family),
+      host,
+      sensorId,
+      signal,
+      first,
+      resolveBoundMs(request.timeoutMs),
+    );
   } catch (error: unknown) {
     if (isCredentialsWithheld(error)) throw error;
     const code = (error as NodeJS.ErrnoException | null)?.code;
@@ -241,37 +279,51 @@ export async function pinTarget(
   return { address: chosen.address, family: isIP(chosen.address) === 6 ? 6 : 4 };
 }
 
-/** The resolution, or a refusal as soon as the check is cancelled: `getaddrinfo` cannot be. */
+/**
+ * The resolution, or a refusal as soon as the check is cancelled or the resolution's own time is
+ * up: `getaddrinfo` cannot be cancelled, so it is left behind.
+ */
 function resolving(
   pending: Promise<readonly ResolvedAddress[]>,
   host: string,
   sensorId: number,
   signal: AbortSignal | undefined,
+  kind: string,
+  boundMs: number,
 ): Promise<readonly ResolvedAddress[]> {
-  if (signal === undefined) return pending;
-  const cancelled = (): CredentialsWithheldError =>
-    new CredentialsWithheldError(PIN_REFUSALS.cancelled(host), {
+  const refusal = (message: string, withKind: boolean): CredentialsWithheldError =>
+    new CredentialsWithheldError(message, {
       sensorId,
       target: host,
       phase: 'resolve',
+      ...(withKind ? { kind } : {}),
     });
-  if (signal.aborted) {
+  if (signal?.aborted === true) {
     // Nobody is waiting for it any more, and a rejection nobody handles ends the worker.
     pending.catch(() => undefined);
-    return Promise.reject(cancelled());
+    return Promise.reject(refusal(PIN_REFUSALS.cancelled(host), false));
   }
   return new Promise((resolve, reject) => {
-    const onAbort = (): void => {
-      reject(cancelled());
+    const done = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
     };
-    signal.addEventListener('abort', onAbort, { once: true });
+    const onAbort = (): void => {
+      done();
+      reject(refusal(PIN_REFUSALS.cancelled(host), false));
+    };
+    const timer = setTimeout(() => {
+      done();
+      reject(refusal(PIN_REFUSALS.resolveTimedOut(host, kind, boundMs), true));
+    }, boundMs);
+    signal?.addEventListener('abort', onAbort, { once: true });
     pending.then(
       (answers) => {
-        signal.removeEventListener('abort', onAbort);
+        done();
         resolve(answers);
       },
       (error: unknown) => {
-        signal.removeEventListener('abort', onAbort);
+        done();
         reject(error instanceof Error ? error : new Error(String(error)));
       },
     );

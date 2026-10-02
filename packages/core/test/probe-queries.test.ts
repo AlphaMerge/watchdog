@@ -42,15 +42,21 @@ class StubSender implements ProbeQuerySender {
   readonly sent: {
     probeObjectId: number;
     message:
-      | { kind: 'ask'; queryId: string; query: ProbeQuery; timeoutMs: number }
+      | { kind: 'ask'; queryId: string; query: ProbeQuery; timeoutMs: number; peerVersion?: number }
       | { kind: 'cancel'; queryId: string };
   }[] = [];
   delivery: ReturnType<ProbeQuerySender['sendQuery']> = { kind: 'sent' };
+  /** What the probe on the line speaks, by probe object; a probe absent here is not connected. */
+  readonly speaks = new Map<number, number>();
+
+  protocolVersionOf(probeObjectId: number): number {
+    return this.speaks.get(probeObjectId) ?? 0;
+  }
 
   sendQuery(
     probeObjectId: number,
     message:
-      | { kind: 'ask'; queryId: string; query: ProbeQuery; timeoutMs: number }
+      | { kind: 'ask'; queryId: string; query: ProbeQuery; timeoutMs: number; peerVersion?: number }
       | { kind: 'cancel'; queryId: string },
   ): ReturnType<ProbeQuerySender['sendQuery']> {
     this.sent.push({ probeObjectId, message });
@@ -394,7 +400,32 @@ describe('on-demand probe queries', { timeout: 20_000 }, () => {
     assert.equal(sent.probeObjectId, 1);
     assert.equal(sent.message.timeoutMs, 9_000);
     assert.deepEqual(sent.message.query, QUERY);
+    assert.equal('peerVersion' in sent.message, false, 'and no version nobody decided against');
 
+    clock.fire();
+    await waiting;
+  });
+
+  it('says what the probe on the line speaks, and 0 with nobody on it (A-41c)', () => {
+    const { service, sender } = build();
+    sender.speaks.set(1, 23);
+    assert.equal(service.peerVersion(1), 23);
+    assert.equal(service.peerVersion(2), 0);
+    // A sender with no sessions to ask is nobody on the line either.
+    const bare = new ProbeQueryService({
+      logger: silent,
+      sender: { sendQuery: () => ({ kind: 'offline' }) },
+    });
+    assert.equal(bare.peerVersion(1), 0);
+  });
+
+  it('sends a query with the version it was decided against (A-41c)', async () => {
+    const { service, sender, clock } = build();
+    const waiting = service.ask(1, QUERY, { timeoutMs: 9_000, peerVersion: 24 });
+    await Promise.resolve();
+    const sent = sender.sent[0];
+    assert.ok(sent?.message.kind === 'ask');
+    assert.equal(sent.message.peerVersion, 24);
     clock.fire();
     await waiting;
   });

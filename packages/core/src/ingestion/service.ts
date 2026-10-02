@@ -63,7 +63,11 @@ export interface IngestionServiceOptions {
       probeObjectId: number,
       results: readonly CheckResult[],
       lastResultAt: (sensorId: number) => Date | null | undefined,
-    ): Promise<readonly CheckResult[]>;
+    ): Promise<{
+      readonly results: readonly CheckResult[];
+      readonly unearned: number;
+      stored(landed: boolean): Promise<void>;
+    }>;
   };
   /**
    * The state machine (`M-02`). Absent stores readings and decides nothing, which is what a
@@ -372,15 +376,29 @@ export class IngestionService {
     // **Before the machine sees the batch** (`A-41c`). A check the probe refused over where its
     // credentials may go is not a failed scan, and is taken out here: its sensor is held Unknown
     // with the probe's sentence. A sensor that was held and has a real result in this batch is
-    // let go first, so the result decides its state.
+    // let go first, without being re-decided, so the result decides its state in one step.
     let results: readonly CheckResult[] = admitted.results;
+    let batch: { stored(landed: boolean): Promise<void> } | undefined;
     if (this.#credentialRefusals !== undefined && origin.probeObjectId !== null) {
       try {
-        results = await this.#credentialRefusals.reported(
+        const reported = await this.#credentialRefusals.reported(
           origin.probeObjectId,
           admitted.results,
           (sensorId) => this.#states?.peek(sensorId)?.facts.lastResultAt,
         );
+        results = reported.results;
+        batch = reported;
+        if (reported.unearned > 0) {
+          // **Marked withheld, and not this probe's to mark** (`A-41c`). Taken as the results
+          // they are and counted with what Probe Health counts as refused: a probe that marks
+          // what it should not is one to look at.
+          this.#refusals?.refused(origin.probeObjectId, reported.unearned);
+          this.#logger.warn(
+            { source: origin.gid, probeObjectId: origin.probeObjectId, results: reported.unearned },
+            'a probe marked results withheld for sensors it was not left to check, or that were ' +
+              'not errors; taken as the results they are',
+          );
+        }
       } catch (error: unknown) {
         this.#resultsReceived += message.results.length;
         this.#logger.error(
@@ -398,9 +416,14 @@ export class IngestionService {
     if (results.length === 0 && admitted.results.length > 0) {
       // Every result was a refusal, and each has been taken. Nothing to store.
       this.#resultsReceived += message.results.length;
+      await batch?.stored(true);
       return { type: 'results-ack', batchId: message.batchId, storedSamples: 0, retryAfterMs: 0 };
     }
-    return this.#accept(origin.gid, message, results);
+    const reply = await this.#accept(origin.gid, message, results);
+    // A sensor let go for a result in this batch stays let go only if the result was stored: the
+    // probe sends a refused batch again, and it is let go then.
+    await batch?.stored(reply.type === 'results-ack');
+    return reply;
   }
 
   /** Counts what `admit` refused, here and per probe. Returns how many results that was. */

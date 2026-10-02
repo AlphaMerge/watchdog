@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { LookupAddress } from 'node:dns';
+import { SensorCatalogue } from '../src/catalogue.js';
+import type { SensorType } from '../src/contract.js';
 import {
   CREDENTIALS_WITHHELD,
   CredentialsWithheldError,
   pinnedLookup,
   pinnedPeerRefusal,
   pinTarget,
+  resolveBoundMs,
   type PinRequest,
   type ResolvedAddress,
   type ResolveHost,
@@ -355,6 +358,98 @@ describe('a cancelled check', () => {
     const dns = resolver(new Error('late'));
     const error = await refusal(request({ signal: controller.signal }), dns.resolve);
     assert.match(error.message, /cancelled/);
+  });
+});
+
+describe('a resolver that does not answer', () => {
+  const never: ResolveHost = () => new Promise(() => undefined);
+
+  it('is a refusal in the resolve phase, well before the check’s own timeout', async () => {
+    // `getaddrinfo` against a resolver that is not answering outlasts the check. The runner then
+    // reported a plain timeout, a failed scan, for a device nothing had been sent to.
+    const started = Date.now();
+    const error = await refusal(request({ timeoutMs: 400 }), never);
+    const took = Date.now() - started;
+    assert.equal(error.phase, 'resolve');
+    assert.equal(error.code, CREDENTIALS_WITHHELD);
+    assert.equal(error.kind, 'snmp');
+    assert.equal(error.sensorId, 41);
+    assert.equal(error.target, 'switch.example.test');
+    assert.match(
+      error.message,
+      /^Not scanned: switch\.example\.test did not resolve within 200 ms/,
+    );
+    assert.ok(took >= 150 && took < 390, `refused after ${String(took)} ms of a 400 ms check`);
+  });
+
+  it('is cancelled first when the check is cancelled before the bound', async () => {
+    const controller = new AbortController();
+    const pending = refusal(request({ signal: controller.signal, timeoutMs: 60_000 }), never);
+    controller.abort();
+    assert.match((await pending).message, /cancelled/);
+  });
+
+  it('does not refuse a resolver that answers inside the bound', async () => {
+    const slow: ResolveHost = () =>
+      new Promise((resolve) => {
+        setTimeout(() => {
+          resolve([v4('10.20.0.9')]);
+        }, 30);
+      });
+    assert.deepEqual(await pinTarget(request({ timeoutMs: 2_000 }), slow), {
+      address: '10.20.0.9',
+      family: 4,
+    });
+  });
+
+  it('is bounded by the timeout the runner hands the check, before the type runs', async () => {
+    // The catalogue is what calls `pinTarget` on a probe, so it is what has to pass the time on.
+    let ran = false;
+    const type: SensorType = {
+      id: 'test.pinned',
+      category: 'SNMP',
+      costHint: 'light',
+      credentialKinds: ['snmp'],
+      pinnedKinds: ['snmp'],
+      secretDestinations: { 'kind:snmp': [] },
+      paramsSchema: { type: 'object', additionalProperties: false, properties: {} },
+      channels: () => [{ key: 'value', name: 'Value', unit: '', isPrimary: true }],
+      execute: () => {
+        ran = true;
+        return Promise.resolve({ channels: [] });
+      },
+    };
+    const catalogue = new SensorCatalogue({ resolve: never }).register(type).seal();
+    await assert.rejects(
+      catalogue.execute('test.pinned', {
+        sensorId: 41,
+        target: { host: 'switch.example.test', ipVersion: 'auto' },
+        params: {},
+        credentials: { snmp: { community: 'public', allowedTargets: ['10.20.0.0/16'] } },
+        signal: new AbortController().signal,
+        timeoutMs: 300,
+      }),
+      (error: unknown) =>
+        error instanceof CredentialsWithheldError &&
+        error.phase === 'resolve' &&
+        /did not resolve within 150 ms/.test(error.message),
+    );
+    assert.equal(ran, false, 'the type never ran, so nothing was sent');
+  });
+
+  it('gives the resolution half the check’s time, never more than ten seconds', () => {
+    assert.equal(resolveBoundMs(400), 200);
+    assert.equal(resolveBoundMs(5_000), 2_500);
+    assert.equal(resolveBoundMs(30_000), 10_000);
+    assert.equal(resolveBoundMs(120_000), 10_000);
+    assert.equal(resolveBoundMs(1), 1);
+    // A check that does not say how long it has: five seconds, and never no bound at all.
+    for (const unknown of [undefined, 0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.equal(resolveBoundMs(unknown), 5_000);
+    }
+    for (const timeoutMs of [2, 100, 999, 5_000, 30_000, 3_600_000]) {
+      assert.ok(resolveBoundMs(timeoutMs) < timeoutMs, `${String(timeoutMs)} ms`);
+    }
   });
 });
 

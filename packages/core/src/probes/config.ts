@@ -161,7 +161,14 @@ export class ProbeConfigService {
     // probe reads `listener` from it: a hardcoded `core.factory` here would be a second rule to
     // keep in step by hand the day there is a second such type.
     const evaluatedHere = rows.filter((row) => !this.#coreEvaluated(row.sensor_type));
-    if (evaluatedHere.length === 0) return EMPTY_ASSIGNMENTS;
+    if (evaluatedHere.length === 0) {
+      // **Still the whole answer for this probe, and it is nothing** (`A-41c`). Returned before
+      // this was said, whatever the probe's last configuration withheld, and whatever the probe
+      // itself had refused to scan, stayed held: its last sensor paused, deleted or moved to
+      // another probe read Unknown until the core restarted.
+      await this.#credentialCheck?.withhold(probeObjectId, [], peerVersion);
+      return EMPTY_ASSIGNMENTS;
+    }
 
     const resolved = await this.#credentialsFor(evaluatedHere);
     // A sensor whose credentials nobody still vouches for is not configured at all, rather than
@@ -224,7 +231,15 @@ export class ProbeConfigService {
    */
   async assignmentFor(
     sensorId: number,
-  ): Promise<{ probeObjectId: number; assignment: SensorAssignment } | null> {
+    /**
+     * What the probe **on the line now** speaks, or 0 when none is (`A-41c`). It decides whether
+     * a set bounded by its targets or its SSH keys may be sent, so it is the version of the
+     * session the query goes to and nothing else. The registration row is not that: it records
+     * what a probe last *said*, and a hello that was then refused says whatever it likes while
+     * an older probe holds the connection. Absent, nobody is on the line.
+     */
+    peerVersionOf: (probeObjectId: number) => number = () => 0,
+  ): Promise<{ probeObjectId: number; assignment: SensorAssignment; peerVersion: number } | null> {
     const [row] = await this.#db.query<{
       probe_id: string | null;
       sensor_type: string;
@@ -264,20 +279,13 @@ export class ProbeConfigService {
       this.#credentialsFor([{ sensor_id: String(sensorId), sensor_type: row.sensor_type }]),
     ]);
     // Asked, and not held: pressing the button changes nothing about the sensor (`A-41`). The
-    // probe's version is the one it last said hello with; a probe never seen is asked as the
-    // oldest, which sends it nothing it might not check (`A-41b`).
-    // Through the GID the probe object holds now: a revoked registration can still name it.
-    const [registered] = await this.#db.query<{ protocol_version: number }>(
-      `SELECT r.protocol_version
-       FROM probe_config c
-       JOIN probe_registration r ON r.gid = c.gid
-       WHERE c.object_id = $1`,
-      [Number(row.probe_id)],
-    );
+    // probe's version is its live session's; with nobody on the line it is asked as the oldest,
+    // which sends it nothing it might not check (`A-41b`, `A-41c`).
+    const peerVersion = peerVersionOf(Number(row.probe_id));
     const refused = await this.#credentialCheck?.refusals(
       Number(row.probe_id),
       beingSent([{ sensor_id: String(sensorId), ...row }], credentials),
-      registered?.protocol_version ?? 0,
+      peerVersion,
     );
     const withheld = refused?.get(sensorId);
     if (withheld !== undefined) {
@@ -289,6 +297,7 @@ export class ProbeConfigService {
 
     return {
       probeObjectId: Number(row.probe_id),
+      peerVersion,
       assignment: {
         sensorId,
         sensorType: row.sensor_type,

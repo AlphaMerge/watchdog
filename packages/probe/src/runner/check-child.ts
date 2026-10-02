@@ -54,6 +54,7 @@ async function main(): Promise<void> {
       params: request.params,
       credentials: request.credentials ?? {},
       signal: controller.signal,
+      timeoutMs: request.timeoutMs,
       ...(request.received === undefined ? {} : { received: request.received }),
     });
     emit({

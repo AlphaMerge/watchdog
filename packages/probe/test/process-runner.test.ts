@@ -168,6 +168,17 @@ describe('process runner', () => {
     assert.equal('withheld' in failed, false);
   });
 
+  it('reports a resolver that hangs as a refusal, from a process of its own', async () => {
+    // `A-41c`: the child is told its timeout and gives the resolution half of it.
+    const { runner, seen } = runnerOf();
+    runner.submit(request(23, 'test.resolve-hangs', { timeoutMs: 8_000 }));
+    await until(() => seen.length === 1, 'the refusal', 15_000);
+    const result = seen[0]?.result;
+    assert.ok(result !== undefined);
+    assert.equal(result.withheld, true, result.message);
+    assert.match(result.message, /did not resolve within 4000 ms/);
+  });
+
   it('finds its result past whatever a library printed', async () => {
     const { runner, seen } = runnerOf();
     runner.submit(request(9, 'test.print'));

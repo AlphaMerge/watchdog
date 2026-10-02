@@ -179,6 +179,12 @@ export interface CoreHealthSources {
    * warned from the first reading would be one nobody looks at.
    */
   unboundedCredentials?: (q: Queryable) => Promise<number>;
+  /**
+   * `CredentialVouching.stats().withheld` — sensors not being scanned because of their
+   * credentials (`A-41`, `A-41b`, `A-41c`): withheld from their probe by the core, or refused by
+   * the probe, which found the device's name resolving outside the set's targets.
+   */
+  credentialsWithheld?: () => number;
   /** `DeliveryHealthReader.read()` — undelivered alarms, and how old the oldest one is. */
   delivery: (q: Queryable) => Promise<{
     pending: number;
@@ -413,6 +419,7 @@ export class CoreHealthService {
       reactionsDeferred: ingestion.deferredReactions,
       credentialsToReenter: queues.credentials,
       credentialsUnbounded: queues.unbounded,
+      credentialsWithheld: this.#sources.credentialsWithheld?.() ?? null,
       logDropped: dropped,
       logBacklog: log === undefined ? null : round(log.backlogBytes / MB, 2),
       // Since the last reading, and the whole count on the first: the total started with this

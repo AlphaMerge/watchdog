@@ -27,6 +27,11 @@ export interface ResultCacheInvalidatorOptions {
   channels: ChannelResolver | ForgetsChannels;
   sensors?: ForgetsSensors;
   owners?: ForgetsOwners;
+  /**
+   * Called once a move or a delete has committed (`A-41c`): what is held against a sensor for the
+   * probe it was under is then held against the wrong probe, or against nothing.
+   */
+  afterMoveOrDelete?: () => void;
   logger: Logger;
   /**
    * How long after the mutation to invalidate a second time, when its `Queryable` cannot say
@@ -73,6 +78,7 @@ export class ResultCacheInvalidator implements AuditSink {
   readonly #channels: ForgetsChannels;
   readonly #sensors: ForgetsSensors | undefined;
   readonly #owners: ForgetsOwners | undefined;
+  readonly #afterMoveOrDelete: (() => void) | undefined;
   readonly #logger: Logger;
   readonly #settleMs: number;
   #stopped = false;
@@ -81,6 +87,7 @@ export class ResultCacheInvalidator implements AuditSink {
     this.#channels = options.channels;
     this.#sensors = options.sensors;
     this.#owners = options.owners;
+    this.#afterMoveOrDelete = options.afterMoveOrDelete;
     this.#logger = options.logger.child({ component: 'cache-invalidation' });
     this.#settleMs = options.settleMs ?? 250;
   }
@@ -153,6 +160,7 @@ export class ResultCacheInvalidator implements AuditSink {
     this.#owners?.clear();
     later(() => {
       this.#owners?.clear();
+      this.#afterMoveOrDelete?.();
     });
   }
 
@@ -166,6 +174,7 @@ export class ResultCacheInvalidator implements AuditSink {
       this.#channels.clear();
       this.#sensors?.clear();
       this.#owners?.clear();
+      this.#afterMoveOrDelete?.();
     });
   }
 

@@ -1,10 +1,13 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
-import type { CheckResult, ProbeQuery } from '@ms/shared';
+import type { SensorType } from '@ms/sensors';
+import { versionFor, type CheckResult, type ProbeQuery } from '@ms/shared';
 import { ApiServer } from '../src/api/server.js';
 import { AuditRepository } from '../src/audit/store.js';
 import type { Database } from '../src/db/pool.js';
+import { CredentialVouching, WITHHELD_CREDENTIALS } from '../src/objects/credential-vouching.js';
+import { catalogueSensorTypeGate } from '../src/objects/sensor-type-gate.js';
 import { ProbeConfigService } from '../src/probes/config.js';
 import { ProbeQueryService, type ProbeQuerySender } from '../src/probes/queries.js';
 import { InheritanceResolver } from '../src/settings/inheritance.js';
@@ -29,21 +32,47 @@ const available = await databaseAvailable();
  * prompt for a device that is merely down.
  */
 
+/** An SNMP type that connects to an address its probe checked (`A-41c`). */
+const snmpPinned: SensorType = {
+  id: 'test.snmp.pinned',
+  category: 'SNMP',
+  costHint: 'light',
+  credentialKinds: ['snmp'],
+  pinnedKinds: ['snmp'],
+  secretDestinations: { 'kind:snmp': ['port'] },
+  paramsSchema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: { port: { type: 'integer', minimum: 1, maximum: 65_535 } },
+  },
+  channels: () => [{ key: 'uptime', name: 'Uptime', unit: 's', isPrimary: true }],
+  execute: () => Promise.resolve({ channels: [] }),
+};
+
 /** Answers whatever a test tells it to, without a socket. */
 class StubSender implements ProbeQuerySender {
   delivery: ReturnType<ProbeQuerySender['sendQuery']> = { kind: 'sent' };
   answer: { result?: CheckResult; failure?: 'busy'; message?: string } | null = null;
   asked: ProbeQuery[] = [];
+  /** The version each query said it was decided against. */
+  decidedFor: (number | undefined)[] = [];
+  /** What the probe on the line speaks. */
+  speaks = versionFor('credentialAddressPinning');
   service: ProbeQueryService | undefined;
+
+  protocolVersionOf(): number {
+    return this.speaks;
+  }
 
   sendQuery(
     probeObjectId: number,
     message:
-      | { kind: 'ask'; queryId: string; query: ProbeQuery; timeoutMs: number }
+      | { kind: 'ask'; queryId: string; query: ProbeQuery; timeoutMs: number; peerVersion?: number }
       | { kind: 'cancel'; queryId: string },
   ): ReturnType<ProbeQuerySender['sendQuery']> {
     if (message.kind === 'cancel') return { kind: 'sent' };
     this.asked.push(message.query);
+    this.decidedFor.push(message.peerVersion);
     const delivery = this.delivery;
     const answer = this.answer;
     if (delivery.kind === 'sent' && answer !== null) {
@@ -68,11 +97,13 @@ describe(
     let sender: StubSender;
     let sensorId: number;
     let deviceId: number;
+    let probeId: number;
 
     before(async () => {
       scratch = await createScratchDatabase('checknow');
       db = scratch.db;
-      harness = await buildHarness(db);
+      harness = await buildHarness(db, { types: [snmpPinned] });
+      const gate = catalogueSensorTypeGate(testCatalogue([snmpPinned]));
 
       sender = new StubSender();
       const queries = new ProbeQueryService({ logger: silent, sender });
@@ -92,11 +123,19 @@ describe(
         history: new HistoryService({ db, logger: silent }),
         db,
         audit: new AuditRepository(),
-        catalogue: testCatalogue(),
+        catalogue: testCatalogue([snmpPinned]),
         queries,
         probeConfig: new ProbeConfigService({
           db,
           resolver: new InheritanceResolver({ db, logger: silent }),
+          vault: harness.vault,
+          credentialKindsFor: (sensorType) => gate.credentialKinds(sensorType),
+          credentialCheck: new CredentialVouching({
+            db,
+            logger: silent,
+            sensorTypes: gate,
+            rights: () => Promise.resolve(new Map()),
+          }),
         }),
       });
       await server.build('9.9.9', harness.service);
@@ -107,6 +146,7 @@ describe(
         parentId: harness.rootId,
         name: 'Check probe',
       });
+      probeId = probe.id;
       const device = await harness.service.create(testActor, {
         kind: 'device',
         parentId: probe.id,
@@ -134,6 +174,61 @@ describe(
       sender.delivery = { kind: 'sent' };
       sender.answer = null;
       sender.asked = [];
+      sender.decidedFor = [];
+      sender.speaks = versionFor('credentialAddressPinning');
+    });
+
+    it('decides a set bounded by its targets against the probe on the line (A-41c)', async () => {
+      const group = await harness.service.create(testActor, {
+        kind: 'group',
+        parentId: probeId,
+        name: 'bounded',
+      });
+      await harness.service.setCredential(testActor, group.id, 'snmp', {
+        version: 'v2c',
+        community: 'bounded-secret',
+        allowedTargets: ['10.20.0.0/16'],
+      });
+      const device = await harness.service.create(testActor, {
+        kind: 'device',
+        parentId: group.id,
+        name: 'named',
+        host: 'sw.dc.test',
+      });
+      const pinned = await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: device.id,
+        name: 'uptime',
+        sensorType: 'test.snmp.pinned',
+        params: { port: 161 },
+      });
+      const press = () =>
+        app.inject({
+          method: 'POST',
+          url: `/api/v1/sensors/${String(pinned.id)}/check`,
+          payload: {},
+        });
+      const pinning = versionFor('credentialAddressPinning');
+
+      // The probe on the line is one version short: it would connect by name. Nothing is sent.
+      sender.speaks = pinning - 1;
+      const withheld = await press();
+      assert.equal(withheld.statusCode, 409);
+      const error = withheld.json<{ error: { code: string; message: string } }>().error;
+      assert.equal(error.code, 'OBJECT_CREDENTIALS_WITHHELD');
+      assert.equal(error.message, WITHHELD_CREDENTIALS.probeCannotPin);
+      assert.equal(sender.asked.length, 0, 'no query, and so no secret, left the core');
+
+      // A probe that checks the name is asked, and the query says which probe it was decided for.
+      sender.speaks = pinning;
+      sender.answer = { result: { ...ok(), sensorId: pinned.id } };
+      const asked = await press();
+      assert.equal(asked.statusCode, 200);
+      assert.equal(sender.asked.length, 1);
+      const query = sender.asked[0];
+      assert.ok(query?.kind === 'check');
+      assert.equal(query.assignment.credentials?.['snmp']?.['community'], 'bounded-secret');
+      assert.deepEqual(sender.decidedFor, [pinning]);
     });
 
     const check = (body: Record<string, unknown> = {}) =>

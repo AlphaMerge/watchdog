@@ -266,8 +266,12 @@ still vouches for reads **Unknown** on its **Overview**, with a sentence saying 
 A set with **allowed targets**, or an SSH set with **host keys**, is not vouched for by anybody
 (`A-41b`). A device inside its bounds gets it whoever saved the device, and those saves are not
 refused. A device outside them does not get it, whoever saved it. Its sensors read **Unknown** on
-their **Overview** with the reason: outside the targets, a device named by host name where the
-targets name only addresses, or a probe too old to check more than one host key.
+their **Overview** with the reason: outside the targets, or a probe too old to check more than
+one host key. A device named by host name, where the targets name only addresses, is checked by
+its probe at each scan (`A-41c`): SNMP, SSH, HTTP and mail sensors are scanned at the address
+that was checked, and read **Unknown** only while the name resolves outside the targets, or to
+nothing, or while the probe is older than protocol 24. Database and Windows sensors on such a
+device read **Unknown** until it is given its address or its name is added to the targets.
 
 ### Credentials
 
@@ -288,7 +292,9 @@ it uses the set in force on its device.
   **Credential sets without targets** links there too. That channel counts the whole
   installation, so it can read higher than the list is long.
 - **A save is checked before it is made.** If it leaves sensors outside the set's bounds, the
-  form stops and says how many: they are not sent the set and read **Unknown**. If it widens the
+  form stops and says how many: they are not sent the set and read **Unknown**. The number does
+  not include a sensor on a device named by host name that its probe will check against address
+  targets: whether that name resolves inside is found out at the scan (`A-41c`). If it widens the
   bounds, it says which secrets that clears. Nothing is stored until you confirm. After the
   save the tab says what the core answered.
 - **Removing a set asks first**, and says how many sensors use it and what they will use

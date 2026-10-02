@@ -48,9 +48,24 @@ export interface ProbeQuerySender {
   sendQuery(
     probeObjectId: number,
     message:
-      | { kind: 'ask'; queryId: string; query: ProbeQuery; timeoutMs: number }
+      | {
+          kind: 'ask';
+          queryId: string;
+          query: ProbeQuery;
+          timeoutMs: number;
+          /**
+           * The protocol version the query was built for (`A-41c`). A session speaking any other
+           * is not the probe that was asked about, and is not sent it: answered `offline`.
+           */
+          peerVersion?: number;
+        }
       | { kind: 'cancel'; queryId: string },
   ): { kind: 'sent' } | { kind: 'offline' } | { kind: 'too-old'; protocolVersion: number };
+  /**
+   * What the probe on the line for this object speaks, or 0 when none is (`A-41c`). Absent on a
+   * sender with no sessions, which reads as none.
+   */
+  protocolVersionOf?(probeObjectId: number): number;
 }
 
 export interface ProbeQueryServiceOptions {
@@ -157,10 +172,19 @@ export class ProbeQueryService {
    * a mechanism whose failures arrive as exceptions is one where forgetting a `catch` turns a
    * probe being offline into a 500.
    */
+  /**
+   * What the probe that would be asked speaks now, or 0 with none connected (`A-41c`). What a
+   * check's credentials are decided against, and then handed to `ask` so that the probe that
+   * gets the query is the one they were decided for.
+   */
+  peerVersion(probeObjectId: number): number {
+    return this.#sender.protocolVersionOf?.(probeObjectId) ?? 0;
+  }
+
   async ask(
     probeObjectId: number,
     query: ProbeQuery,
-    options: { timeoutMs?: number } = {},
+    options: { timeoutMs?: number; peerVersion?: number } = {},
   ): Promise<QueryOutcome> {
     const timeoutMs = options.timeoutMs ?? this.#defaultTimeoutMs;
 
@@ -177,6 +201,7 @@ export class ProbeQueryService {
       queryId,
       query,
       timeoutMs,
+      ...(options.peerVersion === undefined ? {} : { peerVersion: options.peerVersion }),
     });
     if (delivery.kind === 'offline') {
       return {

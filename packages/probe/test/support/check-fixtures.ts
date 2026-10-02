@@ -54,6 +54,33 @@ const registry: CheckRegistry = {
           code: 'CREDENTIALS_WITHHELD',
         });
 
+      case 'test.resolve-hangs':
+        // A name that has to be checked against a set's address targets, and a resolver that
+        // never answers (`A-41c`). The real `pinTarget`, as the catalogue calls it before a type
+        // runs, with the timeout the runner handed the check.
+        //
+        // Imported here and not at the top: these tests time how fast a worker and a process
+        // start, and a fixture that loaded `@ms/shared`'s validators into every one of them made
+        // five of those tests fail. By its own path for the same reason: the package's index
+        // loads every sensor type and its libraries.
+        await (
+          await import('@ms/sensors/pinned-target')
+        ).pinTarget(
+          {
+            sensorId: context.sensorId,
+            target: { host: 'switch.invalid', ipVersion: 'auto' },
+            credentials: { snmp: { community: 'public', allowedTargets: ['10.20.0.0/16'] } },
+            pinnedKinds: ['snmp'],
+            signal: context.signal,
+            ...(context.timeoutMs === undefined ? {} : { timeoutMs: context.timeoutMs }),
+          },
+          () =>
+            new Promise<never>(() => {
+              /* a resolver that is not answering */
+            }),
+        );
+        throw new Error('unreachable');
+
       case 'test.limits':
         // What the thread running this check was started with (`P-207`). `resourceLimits` is empty
         // in the main thread, which is how a test tells a worker that was capped from one that was

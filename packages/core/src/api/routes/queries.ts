@@ -92,7 +92,10 @@ export function queryRoutes(app: FastifyInstance, options: QueryRoutesOptions): 
     },
     async (request, reply) => {
       const sensorId = request.params.id;
-      const found = await probeConfig.assignmentFor(sensorId);
+      // Decided against the probe on the line now, not the one last registered (`A-41c`).
+      const found = await probeConfig.assignmentFor(sensorId, (probeObjectId) =>
+        queries.peerVersion(probeObjectId),
+      );
       if (found === null) {
         throw new ObjectError(
           'OBJECT_NOT_FOUND',
@@ -105,7 +108,12 @@ export function queryRoutes(app: FastifyInstance, options: QueryRoutesOptions): 
       const outcome = await queries.ask(
         found.probeObjectId,
         { kind: 'check', assignment: found.assignment },
-        ...(request.body.timeoutMs === undefined ? [] : [{ timeoutMs: request.body.timeoutMs }]),
+        {
+          // And sent only to a session that still speaks it: a probe that reconnected older in
+          // between is not handed what was decided for the newer one.
+          peerVersion: found.peerVersion,
+          ...(request.body.timeoutMs === undefined ? {} : { timeoutMs: request.body.timeoutMs }),
+        },
       );
 
       if (outcome.kind === 'failed') {

@@ -16896,11 +16896,64 @@ because each is a decision rather than a defect:
         `MailConnection.open` (a real socket given the pinned address cannot arrive anywhere
         else; the function itself is tested), and `resultForPeer` at its two call sites in the
         probe's `CoreClient`, which no probe test drives.
-      - **Found, not fixed:** nothing on Core Health counts withheld sensors, the core's or a
-        probe's (`CredentialVouching.stats()` has no reader). `A-09`'s guard still resolves,
-        checks and then lets the socket resolve again for a request that is not pinned.
-        `sensor-vouching.test.ts` failed 2 of 19 once, at 01:40 UTC, on a hypertable chunk
-        constraint in its own `INSERT ... now()`, and passed 19 of 19 forty minutes later.
+      - **Found, not fixed:** `A-09`'s guard still resolves, checks and then lets the socket
+        resolve again for a request that is not pinned. `sensor-vouching.test.ts` failed 2 of 19
+        once, at 01:40 UTC, on a hypertable chunk constraint in its own `INSERT ... now()`, and
+        passed 19 of 19 forty minutes later.
+
+      **A-41c review.** An independent review confirmed six defects in the above, and each is
+      closed. Where a bullet above describes how a refused sensor is let go, this is what is true.
+      - **F1, check now sent a restricted set to a probe below 24.** `assignmentFor` read
+        `probe_registration.protocol_version`, which `ProbeRegistry.admit` wrote before deciding,
+        so a hello refused for its key left 24 in the row while a probe at 23 held the
+        connection. Closed three ways. `assignmentFor` takes the version of the live session
+        (`ProbeEndpoint.protocolVersionOf`, through `ProbeQueryService.peerVersion`), and nobody on
+        the line is version 0. The query carries the version it was decided for, and `sendQuery`
+        answers `offline` to a session that speaks another. And the row is written only for a
+        hello that was accepted, or refused over the version itself (`R-06`). The same gate
+        served `A-41b`'s `hostKeys`, and is closed by the same change.
+      - **F2, a settle that failed left the refusal map and the set disagreeing.** `reported`
+        wrote its map first and `SensorVouching.settle` swallows a failed write. Now the hold is
+        made through `settleOrThrow`, the map is written only after it, and a failure refuses
+        the batch back to the probe. A configuration that cannot let a hold go leaves both as
+        they were for the next one.
+      - **F3, a hold outlived its probe's last sensor.** `assignmentsFor` returned before
+        `withhold` for an empty branch. It now settles the empty answer first. A move or a delete
+        calls `CredentialVouching.reconcile` once it commits (`ResultCacheInvalidator
+        .afterMoveOrDelete`), which drops what a probe refused for sensors no longer under it and
+        everything held for a probe that is gone, connected or not. And a result from the probe a
+        sensor is under now lets go what another probe refused.
+      - **F4, releasing a hold re-decided the sensor before its result.** A sensor Down before
+        the refusal went Unknown, Down, Up, with a Down row and an alarm. `SensorVouching.release`
+        now drops the hold and the cached runtime and re-decides nothing; the result makes the one
+        transition. If the batch is not stored the hold is put back (`stored(false)`), and stored,
+        a master among them settles its dependents. A hold is stamped as the probe measured the
+        refusal, never ahead of the core's clock: stamped by the core it sorted after the reading
+        that let it go, and the history ended on Unknown.
+      - **F5, `withheld: true` was believed on any result.** The schema refuses it beside an
+        outcome other than `error` or beside readings. `reported` honours it only for a sensor
+        that probe's last configuration sent with a set whose targets left the name to it;
+        anything else is taken as the result it is and counted with Probe Health's refused
+        results.
+      - **F6, a resolver that hangs read Down.** `pinTarget` bounds the lookup at half the
+        check's timeout, ten seconds at most (`resolveBoundMs`), and refuses in the `resolve`
+        phase. The runners hand the check its `timeoutMs` (`CheckContext.timeoutMs`).
+      - **Core Health** gains `credentialsWithheld`, Sensors withheld for credentials, read from
+        `CredentialVouching.stats()`.
+      - **`probe-flow.test.ts`** (`B-07`) named "a core below `flowCounters`" as
+        `PROTOCOL_VERSION - 1`, which is 23 now and has them. It asks `versionFor` instead.
+      - **Tests:** 783 passing on the restored tree, none skipped: 234 in the shared, sensors and
+        probe suites touched, 546 in 19 core suites, and `probe-flow` 3. The alarm-volume
+        scenario: a sensor Down before the refusal has one Down row and two pages after it has
+        been Unknown and is Up again.
+      - **Mutation:** 35 mutants, 35 killed by a test, at least one for each of the six; one was
+        first caught by the compiler and run again in a form that compiles.
+      - **Not covered by a test:** the wiring in `main.ts` (the invalidator's hook, the sender's
+        `protocolVersionOf`, the Core Health source).
+      - **Found, not fixed:** a refusal made honestly just before a configuration stops leaving
+        the sensor to the probe, and delivered after it, is now a failed scan. With nobody
+        connected, "check now" on such a sensor says the probe is too old, where "not connected"
+        would be the better sentence.
 
 - [x] **U-21 — A credential view: each object's sets, where they may go, and which have no
       bounds** · M · A-05, A-41b · Found 2026-09-29 by `A-41b`. The web UI has no credential view

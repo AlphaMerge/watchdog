@@ -484,10 +484,16 @@ async function serve(): Promise<void> {
       catalogue.has(sensorType) && catalogue.declaration(sensorType).evaluatedBy === 'core',
   });
   const refusals = new ProbeRefusals();
+  // eslint-disable-next-line prefer-const -- assigned below, once the vouching exists.
+  let credentialVouchingRef: CredentialVouching | undefined;
   const cacheInvalidator = new ResultCacheInvalidator({
     channels,
     sensors: states,
     owners: ownership,
+    // What a probe refused to scan is held against that probe (`A-41c`). A sensor moved from
+    // under it, or deleted with it, is let go here: the probe it left may never be configured
+    // again. `reconcile` never throws.
+    afterMoveOrDelete: () => void credentialVouchingRef?.reconcile(),
     logger,
   });
 
@@ -564,6 +570,7 @@ async function serve(): Promise<void> {
     vouching,
     audit: new CompositeAuditSink(credentialAdoptionAuditSinks(auditSinks)),
   });
+  credentialVouchingRef = credentialVouching;
   // Before anything is sent, and before the API can write: the installation vouches for every set
   // in use when this build first starts, so the upgrade withholds nothing (migration 060), and a
   // release that moves where a type sends a kind carries over only what it can show did not move.
@@ -928,6 +935,8 @@ async function serve(): Promise<void> {
     sender: {
       sendQuery: (probeObjectId, message) =>
         probeEndpointRef?.sendQuery(probeObjectId, message) ?? { kind: 'offline' },
+      // The live session's, which is what "check now" decides a restricted set against (`A-41c`).
+      protocolVersionOf: (probeObjectId) => probeEndpointRef?.protocolVersionOf(probeObjectId) ?? 0,
     },
   });
   lifecycle.onShutdown({
@@ -1341,6 +1350,7 @@ async function serve(): Promise<void> {
       },
       credentialsToReenter: async (q) => (await vault.setsWithUndeclaredKeys(q)).length,
       unboundedCredentials: (q) => vault.unboundedSets(q),
+      credentialsWithheld: () => credentialVouching.stats().withheld,
       alarms: () => alarmScheduler.stats,
       disk: () => housekeeper.stats.disk,
       evictedChunks: () => housekeeper.stats.evictedChunks,

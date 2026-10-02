@@ -132,6 +132,25 @@ describe('check pool', () => {
     assert.equal('withheld' in failed, false, 'an ordinary failure carries no mark at all');
   });
 
+  it('reports a resolver that hangs as a refusal, not as the check timing out', async () => {
+    // `A-41c`. The pool settles a check that outlasts its timeout as a plain failure, and only
+    // then tells the worker to stop: a refusal raised by that abort arrives for a job already
+    // settled. So the resolution has its own, shorter bound, and its refusal gets here first.
+    const { pool, seen } = await poolOf();
+    // Six seconds, so that loading the module the fixture imports is well inside the half the
+    // resolution does not get.
+    pool.submit(request(5, 'test.resolve-hangs', { timeoutMs: 6_000 }));
+
+    await until(() => seen.length === 1, 'the refusal', 10_000);
+    const result = seen[0]?.result;
+    assert.ok(result !== undefined);
+    assert.equal(result.outcome, 'error');
+    assert.equal(result.withheld, true, result.message);
+    assert.match(result.message, /^Not scanned: switch\.invalid did not resolve within 3000 ms/);
+    assert.doesNotMatch(result.message, /did not finish within/);
+    assert.deepEqual(result.channels, []);
+  });
+
   it('reports an unknown sensor type rather than hanging on it', async () => {
     const { pool, seen } = await poolOf();
     pool.submit(request(3, 'nope.missing'));

@@ -1006,6 +1006,14 @@ const CHECK_RESULT_SCHEMA = {
   },
   required: ['sensorId', 'at', 'outcome', 'message', 'durationMs', 'channels'],
   additionalProperties: false,
+  // **A refused check is an error with no readings, and the schema says so** (`A-41c`). The mark
+  // takes a result out of the batch before the state machine sees it, so on anything else it
+  // would drop a reading, or hide a result that measured something. Refused here, a probe build
+  // that marks what it should not is told at the boundary instead of being quietly believed.
+  if: { required: ['withheld'] },
+  then: {
+    properties: { outcome: { const: 'error' }, channels: { type: 'array', maxItems: 0 } },
+  },
 } as const;
 
 const QUERY_FAILURES = ['offline', 'too-old', 'busy', 'timeout', 'unsupported', 'failed'] as const;

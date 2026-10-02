@@ -2055,6 +2055,75 @@ describe(
         assignment: sensor(1),
       };
 
+      it('speaks for the probe on the line, whatever a refused hello claimed (A-41c)', async () => {
+        // "Check now" decides whether a set bounded by its targets may be sent against this, and
+        // hands the version back with the query. The registration row was what it read: a hello
+        // refused for its key wrote 24 there while a probe at 23 held the connection.
+        const endpoint = new ProbeEndpoint({
+          config: endpointConfig(dir),
+          logger: silentLogger,
+          coreVersion: '9.9.9',
+          probeConfig: {
+            probeObjectFor: () => Promise.resolve(7),
+            assignmentsFor: () =>
+              Promise.resolve({ version: 'v1', sensors: [], stamps: new Map<number, string>() }),
+            touch: () => Promise.resolve(),
+          },
+          registry: {
+            admit: (said) =>
+              Promise.resolve(
+                said.protocolVersion === 23
+                  ? { kind: 'approved' as const, gid: 'probe-gid', objectId: 7 }
+                  : {
+                      kind: 'refused' as const,
+                      code: 'bad-access-key' as const,
+                      detail: 'the access key was not accepted',
+                    },
+              ),
+          },
+        });
+        const address = await endpoint.start();
+        try {
+          assert.equal(endpoint.protocolVersionOf(7), 0, 'nobody on the line');
+
+          const probe = await TestProbe.connect(dir, address.port);
+          probe.send(hello({ gid: 'probe-gid', protocolVersion: 23 }));
+          await probe.waitFor((m) => m.type === 'welcome');
+          assert.equal(endpoint.protocolVersionOf(7), 23);
+
+          const beside = await TestProbe.connect(dir, address.port);
+          beside.send(hello({ gid: 'probe-gid', protocolVersion: 24 }));
+          await beside.waitFor((m) => m.type === 'reject');
+          assert.equal(endpoint.protocolVersionOf(7), 23, 'the refused hello changed nothing');
+          assert.equal(endpoint.protocolVersionOf(8), 0, 'and another probe is nobody');
+
+          // A query decided for a probe at 24 is not sent to the one at 23.
+          const forNewer = endpoint.sendQuery(7, {
+            kind: 'ask',
+            queryId: 'q24',
+            query,
+            timeoutMs: 5_000,
+            peerVersion: 24,
+          });
+          assert.equal(forNewer.kind, 'offline');
+          const forThisOne = endpoint.sendQuery(7, {
+            kind: 'ask',
+            queryId: 'q23',
+            query,
+            timeoutMs: 5_000,
+            peerVersion: 23,
+          });
+          assert.equal(forThisOne.kind, 'sent');
+          const sent = await probe.waitFor((m) => m.type === 'query');
+          assert.ok(sent.type === 'query');
+          assert.equal(sent.queryId, 'q23', 'only the one decided for it arrived');
+          probe.close();
+          beside.close();
+        } finally {
+          await endpoint.stop();
+        }
+      });
+
       it('carries a query out and its answer back', async () => {
         const source = new StubSource();
         const answered: { queryId: string; result?: unknown }[] = [];

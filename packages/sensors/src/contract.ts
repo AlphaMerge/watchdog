@@ -149,6 +149,12 @@ export interface CheckContext {
    */
   readonly signal: AbortSignal;
   /**
+   * How long the check has, when the runner says (`A-41c`). `signal` is still what ends it; this
+   * is for giving one phase a share of the time, as the catalogue does for resolving a name it
+   * has to check before the type runs. Absent in a test that builds its own context.
+   */
+  readonly timeoutMs?: number;
+  /**
    * What a probe-side listener collected for this sensor since its last check (`T-06`).
    *
    * The second shape of sensor. Everything else here *asks* a device a question on a schedule;

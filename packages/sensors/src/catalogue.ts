@@ -231,6 +231,7 @@ export class SensorCatalogue {
           credentials: context.credentials,
           pinnedKinds: type.pinnedKinds ?? [],
           signal: context.signal,
+          ...(context.timeoutMs === undefined ? {} : { timeoutMs: context.timeoutMs }),
         },
         this.#resolve,
       );

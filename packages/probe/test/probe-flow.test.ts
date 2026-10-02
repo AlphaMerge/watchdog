@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { exportNetflowV5, renderNetflowV5 } from '@ms/simulators';
 import {
-  PROTOCOL_VERSION,
+  versionFor,
   type CheckResult,
   type ProbeHealthReport,
   type ProbeToCoreMessage,
@@ -191,9 +191,12 @@ describe(
         assert.equal(health.flowMissed, 5);
         assert.equal(health.flowUndecodable, 0);
 
-        // The same probe against a core one version older. That core's health schema may not
-        // have the five fields, and it refuses the whole heartbeat for one it does not know.
-        core.protocolVersion = PROTOCOL_VERSION - 1;
+        // The same probe against a core one version below the counters. That core's health schema
+        // may not have the five fields, and it refuses the whole heartbeat for one it does not
+        // know. Named by the capability and not as "this build's version less one": the build has
+        // moved on since (`A-41c` is 24), and one below it is a core that does have them.
+        const below = versionFor('flowCounters') - 1;
+        core.protocolVersion = below;
         const reconnect = core.received.length;
         core.dropLink();
         const older = await core.waitFor('a heartbeat to the older core', healthOf, {
@@ -201,7 +204,11 @@ describe(
         });
         assert.equal(typeof older.scheduled, 'number', 'the rest of the report still goes');
         for (const field of FLOW_FIELDS) {
-          assert.equal(field in older, false, `${field} was sent to a core at protocol 22`);
+          assert.equal(
+            field in older,
+            false,
+            `${field} was sent to a core at protocol ${String(below)}`,
+          );
         }
 
         assert.deepEqual(core.refused, [], 'the probe sent something a core refuses');

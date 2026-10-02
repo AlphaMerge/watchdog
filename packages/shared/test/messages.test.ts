@@ -201,6 +201,58 @@ describe('protocol message validation', () => {
     });
   });
 
+  describe('a check the probe refused over its credentials’ targets (A-41c)', () => {
+    const result = {
+      sensorId: 5,
+      at: '2026-10-02T10:00:00.000Z',
+      outcome: 'error',
+      message: 'Not scanned: sw.dc.test resolves to 192.0.2.77, outside the allowed targets.',
+      durationMs: 3,
+      channels: [] as { key: string; value: number }[],
+      withheld: true,
+    };
+    const batch = (one: Record<string, unknown>): Record<string, unknown> => ({
+      type: 'results',
+      batchId: 'b1',
+      results: [one],
+    });
+
+    it('is accepted as an error with no readings', () => {
+      assert.doesNotThrow(() => parseProbeToCore(batch(result)));
+      const { withheld: _mark, ...plain } = result;
+      assert.doesNotThrow(() => parseProbeToCore(batch(plain)), 'and a result without the mark');
+      assert.doesNotThrow(() =>
+        parseProbeToCore(
+          batch({ ...plain, outcome: 'ok', channels: [{ key: 'rtt', value: 1.2 }] }),
+        ),
+      );
+    });
+
+    it('is refused beside an outcome that is not an error', () => {
+      // The mark takes a result out of the batch before the state machine sees it: on a result
+      // that measured something it would drop the reading and hold the sensor Unknown.
+      assert.throws(() => parseProbeToCore(batch({ ...result, outcome: 'ok' })), ProtocolError);
+    });
+
+    it('is refused beside readings', () => {
+      assert.throws(
+        () => parseProbeToCore(batch({ ...result, channels: [{ key: 'rtt', value: 1.2 }] })),
+        ProtocolError,
+      );
+    });
+
+    it('is refused as anything but true, and in a query’s answer under the same rule', () => {
+      assert.throws(() => parseProbeToCore(batch({ ...result, withheld: false })), ProtocolError);
+      const answer = (one: Record<string, unknown>): Record<string, unknown> => ({
+        type: 'query-result',
+        queryId: 'q1',
+        result: one,
+      });
+      assert.doesNotThrow(() => parseProbeToCore(answer(result)));
+      assert.throws(() => parseProbeToCore(answer({ ...result, outcome: 'ok' })), ProtocolError);
+    });
+  });
+
   it('rejects an unknown message type', () => {
     assert.throws(() => parseProbeToCore({ type: 'exec', command: 'rm -rf /' }), ProtocolError);
   });

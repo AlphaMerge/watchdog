@@ -870,6 +870,20 @@ export class ProbeEndpoint {
   }
 
   /**
+   * What the probe on the line for this object speaks, or 0 when none is (`A-41c`).
+   *
+   * The session's version, which is what the handshake settled with the probe that holds the
+   * connection. `probe_registration.protocol_version` is what a probe last claimed, and is for
+   * showing to an operator: nothing that decides what a probe is sent reads it.
+   */
+  protocolVersionOf(probeObjectId: number): number {
+    for (const session of this.#sessions.values()) {
+      if (session.probeObjectId === probeObjectId) return session.protocolVersion;
+    }
+    return 0;
+  }
+
+  /**
    * Sends one on-demand query, or says why it could not (`R-09`).
    *
    * The same three answers as `sendSweep`, and for the same reason — `offline` waits, `too-old`
@@ -881,13 +895,23 @@ export class ProbeEndpoint {
   sendQuery(
     probeObjectId: number,
     message:
-      | { kind: 'ask'; queryId: string; query: ProbeQuery; timeoutMs: number }
+      | { kind: 'ask'; queryId: string; query: ProbeQuery; timeoutMs: number; peerVersion?: number }
       | { kind: 'cancel'; queryId: string },
   ): { kind: 'sent' } | { kind: 'offline' } | { kind: 'too-old'; protocolVersion: number } {
     for (const session of this.#sessions.values()) {
       if (session.probeObjectId !== probeObjectId) continue;
       if (!capabilitiesFor(session.protocolVersion).onDemandQuery) {
         return { kind: 'too-old', protocolVersion: session.protocolVersion };
+      }
+      // **Built for one probe, sent to that one** (`A-41c`). What a query may carry was decided
+      // against a session's version; a session that speaks another is a probe that connected in
+      // between, and the one the answer was for is gone.
+      if (
+        message.kind === 'ask' &&
+        message.peerVersion !== undefined &&
+        message.peerVersion !== session.protocolVersion
+      ) {
+        return { kind: 'offline' };
       }
       session.connection.send(
         message.kind === 'ask'

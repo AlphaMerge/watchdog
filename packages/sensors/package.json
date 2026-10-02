@@ -33,6 +33,10 @@
     "./flow": {
       "types": "./dist/src/support/flow/index.d.ts",
       "default": "./dist/src/support/flow/index.js"
+    },
+    "./pinned-target": {
+      "types": "./dist/src/support/pinned-target.d.ts",
+      "default": "./dist/src/support/pinned-target.js"
     }
   },
   "scripts": {

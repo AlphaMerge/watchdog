@@ -1094,6 +1094,9 @@ export class CheckPool {
       sensorType: job.request.sensorType,
       target: job.request.target,
       params: job.request.params,
+      // So that a phase can be given a share of it: the name's resolution, bounded below the
+      // check's timeout so that a resolver that hangs is a refusal and not a failed scan (`A-41c`).
+      timeoutMs: job.request.timeoutMs,
       ...(job.request.credentials === undefined ? {} : { credentials: job.request.credentials }),
       ...(job.request.received === undefined ? {} : { received: job.request.received }),
     });

@@ -204,7 +204,8 @@ export class ProbeRegistry {
   async admit(hello: ProbeHello): Promise<ProbeDecision> {
     const existing = hello.gid === '' ? null : await this.get(hello.gid);
 
-    // Recorded before the decision, so a refused attempt is still visible in the queue.
+    // Recorded before the decision, so a refused attempt is still visible in the queue. Not the
+    // protocol version: see `#speaks`.
     if (existing !== null) await this.#touch(existing.gid, hello);
 
     // **Version skew is a refusal like every other one here, so it is recorded like every other
@@ -229,6 +230,8 @@ export class ProbeRegistry {
         },
         'refusing a probe whose protocol this core cannot speak',
       );
+      // `R-06`: the one refusal whose whole content is the version, so the queue shows it.
+      if (existing !== null) await this.#speaks(existing.gid, hello.protocolVersion);
       return { kind: 'refused', code: 'protocol-version', detail: explainSkew(skew) };
     }
 
@@ -271,6 +274,7 @@ export class ProbeRegistry {
           detail: 'the access key was not accepted',
         };
       }
+      await this.#speaks(existing.gid, hello.protocolVersion);
       return { kind: 'pending', gid: existing.gid };
     }
 
@@ -283,6 +287,7 @@ export class ProbeRegistry {
       this.#logger.warn({ gid: existing.gid }, 'an approved probe presented the wrong key');
       return { kind: 'refused', code: 'bad-access-key', detail: 'the access key was not accepted' };
     }
+    await this.#speaks(existing.gid, hello.protocolVersion);
 
     // **An approved probe that has never used a key of its own is given one now**, in the welcome
     // it is about to receive. This is the only moment a key can be delivered to a machine that
@@ -695,17 +700,33 @@ export class ProbeRegistry {
   async #touch(gid: string, hello: ProbeHello): Promise<void> {
     await this.#db.query(
       `UPDATE probe_registration
-       SET display_name = $2, agent_version = $3, protocol_version = $4, last_address = $5,
-           last_seen_at = now()
+       SET display_name = $2, agent_version = $3, last_address = $4, last_seen_at = now()
        WHERE gid = $1`,
       [
         gid,
         hello.displayName.slice(0, 200),
         hello.agentVersion.slice(0, 64),
-        hello.protocolVersion,
         hello.remoteAddress.slice(0, 64),
       ],
     );
+  }
+
+  /**
+   * Records the protocol version a probe speaks (`A-41c`).
+   *
+   * **Only for a hello that was accepted, and for one refused over the version itself.** It used
+   * to be written with the rest of `#touch`, before any decision, so a hello that was then
+   * refused for its key, its address or a revocation left its claim in the row while an older
+   * probe held the connection. "Check now" read that row to decide whether a set bounded by its
+   * targets could be sent, and sent it to a probe that connects by name. Nothing that decides
+   * what a probe is sent reads this now; it stays what an operator is shown, and so it says what
+   * the probe that got in speaks.
+   */
+  async #speaks(gid: string, protocolVersion: number): Promise<void> {
+    await this.#db.query('UPDATE probe_registration SET protocol_version = $2 WHERE gid = $1', [
+      gid,
+      protocolVersion,
+    ]);
   }
 }
 

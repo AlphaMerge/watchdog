@@ -399,7 +399,10 @@ nobody, not even an administrator, can bring it outside.
   runs the name's DNS cannot answer the check with one address and the connection with another.
   Any one outside, or none at all, and the scan sends the device nothing: the sensor reads
   Unknown, with a sentence naming the address and what to correct. It is scanned again at its
-  next interval, and is Up at the scan where the name resolves inside.
+  next interval, and is Up at the scan where the name resolves inside. **A resolver that does
+  not answer is a refusal too**: the lookup is given half the sensor's timeout, ten seconds at
+  most, and the sensor reads Unknown saying the name did not resolve in that time, where it
+  would otherwise read Down for a device nothing was sent to.
 
   | Sensors | A named device, address-only targets |
   | --- | --- |
@@ -413,7 +416,10 @@ nobody, not even an administrator, can bring it outside.
   For the withheld kinds, give the device its address, or add its name or `*.domain` to the
   targets; the sensor's message says which. **A probe older than protocol 24 is not sent such a
   set at all**: it would connect by name. Its sensors read Unknown, saying so, until the probe
-  is upgraded. With `IP version` on `auto` both families are checked, and the probe prefers an
+  is upgraded. "Check now" is held to the same rule, against the probe that is connected at
+  that moment and not the version a probe last announced: with no probe connected it answers
+  409 with the same sentence. Core Health's **Sensors withheld for credentials** counts every
+  sensor in this state, the ones the core withholds and the ones a probe refuses. With `IP version` on `auto` both families are checked, and the probe prefers an
   IPv4 address when the name has one. A name with one record inside the targets and one
   outside is refused whichever the probe would have used.
 - **Outside the targets, a sensor reads Unknown** with a sentence saying why and what sends the

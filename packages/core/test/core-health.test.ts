@@ -67,6 +67,7 @@ function sources(
     resultsUnreadableTime: number;
     credentialsToReenter: number;
     unboundedCredentials: number;
+    credentialsWithheld: number;
     disk: { freePercent: number; freeBytes: number; databaseBytes: number } | null;
     evictedChunks: number;
     machineMemory: AvailableMemoryLow | null;
@@ -120,6 +121,9 @@ function sources(
     ...(overrides.unboundedCredentials === undefined
       ? {}
       : { unboundedCredentials: () => Promise.resolve(overrides.unboundedCredentials ?? 0) }),
+    ...(overrides.credentialsWithheld === undefined
+      ? {}
+      : { credentialsWithheld: () => overrides.credentialsWithheld ?? 0 }),
     delivery: () => {
       if (overrides.deliveryThrows === true) {
         return Promise.reject(new Error('the notification queue would not answer'));
@@ -495,6 +499,14 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal((await build({ unboundedCredentials: 3 }).read())['credentialsUnbounded'], 3);
       assert.equal((await build({ unboundedCredentials: 0 }).read())['credentialsUnbounded'], 0);
       assert.equal((await build({}).read())['credentialsUnbounded'], null);
+    });
+
+    it('counts the sensors withheld for their credentials, and gaps without a source to ask (A-41c)', async () => {
+      // By the core, and by a probe that found a name resolving outside a set's targets: each
+      // says why on its own page, and this is the one place that says how many.
+      assert.equal((await build({ credentialsWithheld: 4 }).read())['credentialsWithheld'], 4);
+      assert.equal((await build({ credentialsWithheld: 0 }).read())['credentialsWithheld'], 0);
+      assert.equal((await build({}).read())['credentialsWithheld'], null);
     });
 
     it('counts what is actually queued in the housekeeping tables', async () => {

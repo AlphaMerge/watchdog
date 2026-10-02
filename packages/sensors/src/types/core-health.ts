@@ -459,6 +459,16 @@ const CHANNELS: readonly ChannelDef[] = [
     name: 'Credential sets without targets',
     unit: 'sets',
   },
+  // `A-41c`. Sensors not being scanned because of their credentials: withheld from their probe by
+  // the core, for who vouched for them or for what bounds the set, and refused by a probe that
+  // found a device's name resolving outside the set's targets. Each reads Unknown and says why on
+  // its own page; this is how many there are, which nothing else says in one place. No limit: a
+  // set narrowed on purpose leaves some here for good, and the Unknown trigger pages for the rest.
+  {
+    key: 'credentialsWithheld',
+    name: 'Sensors withheld for credentials',
+    unit: 'sensors',
+  },
   // **Log lines the core could not write since the last reading** (`P-216` part 3): refused at its
   // output's eight-megabyte bound while the journal was not reading, or lost to an output that
   // closed. A count per reading, not a running total and not a counter's rate: a total would warn

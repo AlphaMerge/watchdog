@@ -26,6 +26,7 @@ interface RunMessage {
   params: Record<string, unknown>;
   credentials?: Record<string, Record<string, unknown>>;
   received?: ReceivedBatch;
+  timeoutMs?: number;
 }
 
 interface AbortMessage {
@@ -66,6 +67,7 @@ async function run(message: RunMessage): Promise<void> {
       params: message.params,
       credentials: message.credentials ?? {},
       signal: controller.signal,
+      ...(message.timeoutMs === undefined ? {} : { timeoutMs: message.timeoutMs }),
       ...(message.received === undefined ? {} : { received: message.received }),
     });
     port.postMessage({

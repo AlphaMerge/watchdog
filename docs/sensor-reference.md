@@ -1012,6 +1012,7 @@ cost: **light** · evaluated by the core, never by a probe
 | `reactionsDeferred` | Alarm reactions waiting on a catch-up | sensors | — |
 | `credentialsToReenter` | Credential sets to re-enter | sets | default limits: warn above 0 |
 | `credentialsUnbounded` | Credential sets without targets | sets | — |
+| `credentialsWithheld` | Sensors withheld for credentials | sensors | — |
 | `logDropped` | Log lines dropped | lines | default limits: warn above 0 |
 | `logBacklog` | Log waiting to be written | MB | — |
 | `hostsRefused` | Requests refused for an unknown Host | requests | — |
