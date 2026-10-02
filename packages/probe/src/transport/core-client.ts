@@ -11,6 +11,7 @@ import {
   parseCoreToProbe,
   PROTOCOL_VERSION,
   rejectionStopsMonitoring,
+  serverIdentity,
   type ConnectionClose,
   type CoreToProbeMessage,
   type Logger,
@@ -362,6 +363,11 @@ export class CoreClient {
       // The core must prove itself too — a probe streams monitoring data outward and must not
       // hand it to whoever answers the port.
       rejectUnauthorized: true,
+      // And prove it is the core this probe was pointed at. The check every TLS client here
+      // shares: Node's own for a name or an IPv4 address, and one that can answer for an IPv6
+      // address, which Node's reads as a name and refuses under any certificate (`A-67`) — so
+      // a probe given its core as `::1` or `2001:db8::5` never connected.
+      checkServerIdentity: serverIdentity,
       minVersion: 'TLSv1.2',
     });
     this.#socket = socket;

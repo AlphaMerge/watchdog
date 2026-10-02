@@ -56,6 +56,13 @@ export interface MailServerOptions {
   readonly tls?: { readonly key: string; readonly cert: string };
   /** Offer STARTTLS at all. False is the "server does not support it" case. */
   readonly offerStartTls?: boolean;
+  /**
+   * TLS from the first byte (`A-67`), as on 465, 993 and 995: the handshake comes before the
+   * greeting. Needs `tls`. The name asked for is recorded in `servernames` as for STARTTLS.
+   */
+  readonly implicitTls?: boolean;
+  /** The address to listen on (`A-67`). Default `127.0.0.1`; `::1` for the IPv6 loopback. */
+  readonly listenHost?: string;
   /** Refuse at this stage, to prove the sensor names the step rather than "the check failed". */
   readonly refuseAt?: 'greeting' | 'mail-from' | 'rcpt-to' | 'data' | 'quit';
   /** Milliseconds before the greeting, for the timeout case. */
@@ -95,10 +102,15 @@ function serve(
     socket.on('close', () => {
       sockets.delete(socket);
     });
-    handle(wrap(socket, options), options);
+    const wrapped = wrap(socket, options);
+    if (options.implicitTls === true) wrapped.upgrade();
+    handle(wrapped, options);
   });
-  return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => {
+  return new Promise((resolve, reject) => {
+    // An address this machine does not have (`::1` with no IPv6) is the caller's to skip on.
+    server.once('error', reject);
+    server.listen(0, options.listenHost ?? '127.0.0.1', () => {
+      server.removeListener('error', reject);
       const address = server.address();
       resolve({
         port: typeof address === 'object' && address !== null ? address.port : 0,

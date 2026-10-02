@@ -18856,7 +18856,7 @@ because each is a decision rather than a defect:
       has a case at the 5,000-sensor class with named devices and a slow resolver, the numbers
       are in `docs/findings/`, and lookups in flight or given up are a Probe Health number.
 
-- [ ] **A-67 — an IPv6 address under TLS has only been tried on webhook delivery** · S · A-60 ·
+- [x] **A-67 — an IPv6 address under TLS has only been tried on webhook delivery** · S · A-60 ·
       Found 2026-10-02 by `A-60`. Node's `checkServerIdentity` (v24.19 in the toolchain) reads
       an IPv6 host as a name and refuses a certificate that lists the address; the delivery
       client now asks the certificate itself. The HTTP, `tls.certificate` and mail sensors, mail
@@ -18864,6 +18864,67 @@ because each is a decision rather than a defect:
       check and have not been tried. **Done when** each has a test against a certificate
       listing `::1`, the ones that fail share one identity check with the delivery client, and
       a core addressed as `https://[::1]` accepts a probe.
+
+      **A-67 outcome.** Every TLS client named above was run against `::1` under a certificate
+      that lists `::1`; five failed for `A-60`'s reason and now pass one shared check. No
+      migration, no protocol number.
+      - **The measurement, taken again first.** On the toolchain's Node 24.19 a direct
+        `tls.checkServerIdentity('::1', certificate)` refuses a certificate whose subject
+        alternative names list `::1` ("Host: ::1. is not cert's CN"), accepts the same one for
+        `127.0.0.1`, and `X509Certificate.checkIP('::1')` on it answers `::1`. It is a test
+        (`server-identity.test.ts`), so the day Node checks an IPv6 address itself that test
+        fails and says the workaround can go.
+      - **One check.** `serverIdentity` moved from the delivery client to
+        `packages/shared/src/net/server-identity.ts`, unchanged, and is passed as
+        `checkServerIdentity` at each site. `rejectUnauthorized`, the trusted authorities and
+        what is sent as the server name are as they were everywhere.
+      - **Per site.**
+        | Site | Tried | Before | Now |
+        | --- | --- | --- | --- |
+        | Webhook, Slack, Teams (`http-client.ts`) | `A-60` | fixed by `A-60` | imports the shared check |
+        | HTTP sensors (`support/http/request.ts`) | yes | failed: "not valid for ::1" | fixed |
+        | `tls.certificate` (`support/tls/handshake.ts`) | yes | read `trusted` 0 for a trusted certificate that lists `::1` | fixed; nothing refused, as before |
+        | `tls.security` (same handshake) | yes | unaffected | not applicable: it reads protocol versions and nothing of who the certificate is for |
+        | Mail sensors, implicit TLS (`support/mail/connection.ts`) | yes | failed | fixed |
+        | Mail sensors, after `STARTTLS` | yes | failed, and for a second reason (below) | fixed |
+        | Email delivery (`delivery/email.ts`, both modes) | yes | failed every send | fixed |
+        | Probe to core (`core-client.ts`) | yes | never said hello | fixed |
+        | Core's probe endpoint | yes | not applicable: it judges the probe's certificate by its CA, and listens on `::1` as on anything | a test connects to it there as the probe does |
+      - **`tls.certificate` keeps its meaning.** It still verifies nothing and refuses nothing.
+        `trusted` is Node's verdict on the connection, which includes who the certificate is
+        for, so it read 0 on any device at an IPv6 address; it now reads as it always did for
+        an IPv4 one. `hostMatches` is the sensor's own reading of names only (common name and
+        DNS entries) and is 0 for a device given by address in either family, as before — pinned
+        in the test, not changed.
+      - **Found: after `STARTTLS` a device given by address was checked against `localhost`.**
+        Not an IPv6 matter. The upgrade handed Node a connected socket and no host; with no
+        server name either (none is sent for an address) Node falls back to the literal name
+        `localhost`. So a mail server at any address, `127.0.0.1` included, was refused under a
+        certificate that lists its address and *accepted* under any trusted certificate for
+        `localhost`. The upgrade now names the host, as nodemailer's does. A sensor that
+        verified a mail server by address after `STARTTLS` and was Up can only have been Up
+        under a certificate for `localhost`; one that was Down for "not valid for" its own
+        address comes Up.
+      - **Server names, pinned as they are.** Mail and email send none for an address. The HTTP
+        and TLS sensors send the address itself as the server name (`::1`), which RFC 6066
+        forbids and Node warns about (`DEP0123`, "will be ignored in a future version");
+        left as it is and pinned, since changing what a hello carries was not this ticket.
+      - **Tests:** `server-identity.test.ts` (shared, 5), `tls-address-identity.test.ts`
+        (sensors, 17: HTTP, both TLS sensors, SMTP and IMAP in both modes, each with the
+        certificates that must still be refused — other addresses, `::1` as a DNS name and
+        common name, a name — and `127.0.0.1` and a named device as controls),
+        `email-relay-identity.test.ts` (core, 6, against a relay of the file's own because
+        MailHog speaks no TLS), four in `core-client.test.ts`, two in `probe-endpoint.test.ts`.
+        Certificates are made with `openssl` at test time; the `::1` cases skip, saying so,
+        where it cannot be listened on, and ran in the toolchain container. The simulators
+        gained `listenHost` (HTTP, mail) and `implicitTls` (mail).
+      - **Mutation:** 11 of 11 killed — the option dropped at each of the seven call sites
+        (two in the mail connection), the host dropped from the `STARTTLS` upgrade, and three
+        in the shared check.
+      - **Not done.** The heartbeat (`health/heartbeat.ts`) uses `fetch`, which fails for
+        `https://[::1]` the same way (measured) and has no `checkServerIdentity` to pass. The
+        database sensors and the core's own database pool hand TLS to `pg`, `mysql2` and
+        `tedious`, not tried: no simulator speaks their TLS.
 
 - [ ] **A-68 — a probe that changes its protocol version re-opens the late-refusal grace** · M
       · A-61, A-53 · Found 2026-10-02 by `A-61`'s review. A probe that reconnects announcing a

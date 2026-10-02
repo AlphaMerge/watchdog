@@ -1,6 +1,6 @@
 import { connect as netConnect, type Socket } from 'node:net';
 import { connect as tlsConnect, type TLSSocket } from 'node:tls';
-import type { TargetPolicy } from '@ms/shared';
+import { serverIdentity, type TargetPolicy } from '@ms/shared';
 import { checkedTarget, lookupFor } from '../checked-target.js';
 import {
   isCredentialsWithheld,
@@ -160,6 +160,9 @@ export class MailConnection {
               // configured by address simply sends none, which is what every other client does.
               ...(isAddress(options.host) ? {} : { servername: options.host }),
               rejectUnauthorized: options.verifyTls,
+              // Who the certificate has to be for: the check every TLS client here shares,
+              // which can answer for an IPv6 address where Node's own cannot (`A-67`).
+              checkServerIdentity: serverIdentity,
               ...(family === 0 ? {} : { family }),
               ...pin,
             })
@@ -225,8 +228,15 @@ export class MailConnection {
       const upgraded = tlsConnect(
         {
           socket: plain,
+          // **The host, though the socket is already connected** (`A-67`). It connects
+          // nothing; it is what the certificate is checked against when no server name is
+          // sent, which is every device given by address. Without it Node falls back to the
+          // literal name `localhost`: a relay at an address was refused under a certificate
+          // that lists the address, and accepted under any trusted one for `localhost`.
+          host: this.#options.host,
           ...(isAddress(this.#options.host) ? {} : { servername: this.#options.host }),
           rejectUnauthorized: this.#options.verifyTls,
+          checkServerIdentity: serverIdentity,
         },
         () => {
           clearTimeout(timer);

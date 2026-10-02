@@ -158,6 +158,7 @@ export {
   targetVerdict,
 } from './net/allowed-targets.js';
 export type { AllowedTarget, TargetVerdict } from './net/allowed-targets.js';
+export { serverIdentity } from './net/server-identity.js';
 export { loadTlsMaterial } from './protocol/tls-files.js';
 export type { LoadedTlsMaterial } from './protocol/tls-files.js';
 

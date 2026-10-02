@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Socket } from 'node:net';
+import { createServer as createTcpServer, Socket } from 'node:net';
 import { connect, type TLSSocket } from 'node:tls';
 import { before, describe, it } from 'node:test';
 import { pino } from 'pino';
@@ -14,6 +14,7 @@ import {
   PROTOCOL_VERSION,
   type CoreConfig,
   parseCoreToProbe,
+  serverIdentity,
   type CoreToProbeMessage,
   type ProbeToCoreMessage,
   type SensorAssignment,
@@ -96,6 +97,8 @@ function generateCerts(dir: string): void {
 
   // `ms-core.unlisted.example`: a name the core's API has not been told it answers to (`A-47`).
   issue('core', 'ms-core', 'DNS:localhost,DNS:ms-core.unlisted.example,IP:127.0.0.1');
+  // A core that probes reach by its IPv6 address (`A-67`).
+  issue('core-v6', 'ms-core', 'IP:::1');
   issue('probe', 'ms-probe', null);
   // A second CA, to prove an untrusted client certificate is refused.
   run([
@@ -190,8 +193,29 @@ class TestProbe {
     dir: string,
     port: number,
     certName = 'probe',
-    options: { wedged?: boolean; servername?: string } = {},
+    options: { wedged?: boolean; servername?: string; address?: string } = {},
   ): Promise<TestProbe> {
+    // **By address, as the probe's own client connects** (`A-67`): the host, no server name,
+    // and the identity check that client passes. Everything else here dials 127.0.0.1 and asks
+    // for `localhost`, which is a different certificate check from the one a probe configured
+    // with an address makes.
+    if (options.address !== undefined) {
+      const byAddress = connect({
+        host: options.address,
+        port,
+        cert: await readIfPresent(join(dir, `${certName}.crt`)),
+        key: await readIfPresent(join(dir, `${certName}.key`)),
+        ca: await readIfPresent(join(dir, 'ca.crt')),
+        rejectUnauthorized: true,
+        checkServerIdentity: serverIdentity,
+        minVersion: 'TLSv1.2',
+      });
+      await new Promise<void>((resolve, reject) => {
+        byAddress.once('secureConnect', resolve);
+        byAddress.once('error', reject);
+      });
+      return new TestProbe(byAddress);
+    }
     // A wedged peer is one that never answers our FIN. `allowHalfOpen` is a `net.Socket` option
     // rather than a TLS one, so the socket is built first and handed to `connect` — which is also
     // the only honest way to model a probe that has stopped reading (`P-67`).
@@ -288,6 +312,25 @@ const opensslAvailable = (() => {
   }
 })();
 
+/** Whether `::1` can be listened on here. Asked once, with a bound, before the cases are declared. */
+const v6 = await new Promise<boolean>((resolve) => {
+  const server = createTcpServer();
+  const timer = setTimeout(() => {
+    server.close();
+    resolve(false);
+  }, 2_000);
+  server.once('error', () => {
+    clearTimeout(timer);
+    resolve(false);
+  });
+  server.listen(0, '::1', () => {
+    clearTimeout(timer);
+    server.close(() => {
+      resolve(true);
+    });
+  });
+});
+
 describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not available' }, () => {
   let dir: string;
 
@@ -347,6 +390,76 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
       await endpoint.stop();
     }
   });
+
+  it(
+    'accepts a probe that dialled it at ::1, under a certificate that lists ::1 (A-67)',
+    { skip: v6 ? false : 'this machine has no IPv6 loopback (::1) to listen on' },
+    async () => {
+      // The core's half of a core given to its probes by IPv6 address: it listens there, the
+      // probe's check of who it is passes on a certificate that lists the address, and the
+      // probe's own certificate is judged as it always was — by this endpoint's CA.
+      const v6Tls = {
+        certFile: join(dir, 'core-v6.crt'),
+        keyFile: join(dir, 'core-v6.key'),
+        caFile: join(dir, 'ca.crt'),
+      };
+      const endpoint = new ProbeEndpoint({
+        config: endpointConfig(dir, { host: '::1', tls: v6Tls }),
+        logger: silentLogger,
+        coreVersion: '9.9.9',
+      });
+      const address = await endpoint.start();
+      try {
+        const probe = await TestProbe.connect(dir, address.port, 'probe', { address: '::1' });
+        probe.send(hello());
+        const welcome = await probe.waitFor((m) => m.type === 'welcome');
+        assert.equal(welcome.type, 'welcome');
+        assert.equal(endpoint.connectedProbes.length, 1);
+        assert.equal(endpoint.remoteAddressOf(welcome.gid), '::1');
+        probe.close();
+
+        // A certificate no CA of this endpoint signed is refused at ::1 as anywhere: by the
+        // endpoint's own rule, which who the *core* is has no part in. Under TLS 1.3 the client
+        // can reach 'secureConnect' before it is judged, so what is asserted is no welcome.
+        let rogue: TestProbe | undefined;
+        try {
+          rogue = await TestProbe.connect(dir, address.port, 'rogue', { address: '::1' });
+        } catch {
+          // Refused during the handshake, which is also correct.
+        }
+        if (rogue !== undefined) {
+          rogue.send(hello());
+          await rogue.waitForClose();
+          assert.deepEqual(rogue.received, [], 'an unknown CA’s certificate was answered');
+        }
+      } finally {
+        await endpoint.stop();
+      }
+    },
+  );
+
+  it(
+    'is refused by a probe that dialled it at ::1 when its certificate does not list ::1 (A-67)',
+    { skip: v6 ? false : 'this machine has no IPv6 loopback (::1) to listen on' },
+    async () => {
+      // The ordinary certificate: `localhost` and 127.0.0.1. Trusted, and for somewhere else.
+      const endpoint = new ProbeEndpoint({
+        config: endpointConfig(dir, { host: '::1' }),
+        logger: silentLogger,
+        coreVersion: '9.9.9',
+      });
+      const address = await endpoint.start();
+      try {
+        await assert.rejects(
+          TestProbe.connect(dir, address.port, 'probe', { address: '::1' }),
+          /IP: ::1 is not in the cert's list/,
+        );
+        assert.equal(endpoint.connectedProbes.length, 0);
+      } finally {
+        await endpoint.stop();
+      }
+    },
+  );
 
   it('answers heartbeats and records the last one seen', async () => {
     const endpoint = new ProbeEndpoint({

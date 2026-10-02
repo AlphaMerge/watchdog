@@ -19,6 +19,7 @@ import {
   type SensorAssignment,
 } from '@ms/shared';
 import { CoreClient, type ConfigUpdate } from '../src/transport/core-client.js';
+import { loopbackV6Available } from './support/probe-process.js';
 
 const silentLogger = pino({ level: 'silent' });
 
@@ -93,29 +94,41 @@ function generateCerts(dir: string): void {
   };
 
   issue('core', 'ms-core', 'DNS:localhost,IP:127.0.0.1');
+  // A core reached by its IPv6 address (`A-67`), and one whose certificate is for elsewhere.
+  issue('core-v6', 'ms-core', 'IP:::1');
+  issue('core-elsewhere', '::1', 'DNS:::1,IP:::2,IP:127.0.0.2');
   issue('probe', 'ms-probe', null);
 }
 
 /** A minimal core: enough to drive the real client without pulling in the whole endpoint. */
 class TestCore {
   readonly received: ProbeToCoreMessage[] = [];
+  /** Handshakes completed: a probe that presented a certificate this core's CA signed. */
+  secured = 0;
   #server: Server | undefined;
   #socket: TLSSocket | undefined;
   #onMessage: (() => void) | undefined;
   #decoder = new FrameDecoder();
 
-  static async start(dir: string): Promise<{ core: TestCore; port: number }> {
+  static async start(
+    dir: string,
+    listen: { host: string; certificate: string } = { host: '127.0.0.1', certificate: 'core' },
+  ): Promise<{ core: TestCore; port: number }> {
     const core = new TestCore();
     const { readFile } = await import('node:fs/promises');
     const server = createServer({
-      cert: await readFile(join(dir, 'core.crt')),
-      key: await readFile(join(dir, 'core.key')),
+      cert: await readFile(join(dir, `${listen.certificate}.crt`)),
+      key: await readFile(join(dir, `${listen.certificate}.key`)),
       ca: await readFile(join(dir, 'ca.crt')),
       requestCert: true,
       rejectUnauthorized: true,
       minVersion: 'TLSv1.2',
     });
+    // A probe that refuses this core's certificate ends the handshake; that is the probe's
+    // verdict, read from its own log, and nothing for the server to throw.
+    server.on('tlsClientError', () => undefined);
     server.on('secureConnection', (socket) => {
+      core.secured += 1;
       core.#socket = socket;
       // Per connection: a reconnect starts a new byte stream, and carrying a half-read frame
       // across would desynchronise the one thing this harness has to get right.
@@ -128,8 +141,12 @@ class TestCore {
       });
       socket.on('error', () => undefined);
     });
-    await new Promise<void>((resolve) => {
-      server.listen(0, '127.0.0.1', resolve);
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, listen.host, () => {
+        server.removeListener('error', reject);
+        resolve();
+      });
     });
     core.#server = server;
     return { core, port: (server.address() as AddressInfo).port };
@@ -180,13 +197,13 @@ class TestCore {
   }
 }
 
-function probeConfig(dir: string, port: number): ProbeConfig {
+function probeConfig(dir: string, port: number, host = '127.0.0.1'): ProbeConfig {
   // Every default from the schema, then only what this test actually cares about. Hand-writing
   // the whole shape would go stale the first time a field was added.
   const { config } = loadConfig({ schema: probeConfigSchema, env: {}, argv: [] });
   config.probe.spoolDir = mkdtempSync(join(tmpdir(), 'ms-probe-spool-'));
   config.probe.displayName = 'test probe';
-  config.core.host = '127.0.0.1';
+  config.core.host = host;
   config.core.port = port;
   config.core.heartbeatIntervalMs = 60_000;
   // Short enough that a reconnect lands inside the test, long enough not to spin.
@@ -403,6 +420,132 @@ describe(
         await core.waitFor((m) => m.type === 'heartbeat');
         assert.equal(asked[0]?.peerVersion, 19);
       });
+    });
+  },
+);
+
+/** Whether `::1` can be bound here. Asked once, before the cases are declared. */
+const v6 = await loopbackV6Available();
+const needsV6 = { skip: v6 ? false : 'this machine has no IPv6 loopback (::1) to listen on' };
+
+describe(
+  'the probe’s core client, proving the core is the one it was pointed at (A-67)',
+  { skip: opensslAvailable ? false : 'openssl is not available' },
+  () => {
+    let dir: string;
+
+    before(() => {
+      dir = mkdtempSync(join(tmpdir(), 'ms-probe-tls-'));
+      generateCerts(dir);
+    });
+
+    /**
+     * A real client pointed at `host`, against a core listening on `listen.host` under
+     * `listen.certificate`. `lines` is everything the client logged at `warn` and above.
+     */
+    async function pointedAt(
+      host: string,
+      listen: { host: string; certificate: string },
+      body: (ctx: { core: TestCore; client: CoreClient; lines: string[] }) => Promise<void>,
+    ): Promise<void> {
+      const { core, port } = await TestCore.start(dir, listen);
+      const lines: string[] = [];
+      const client = new CoreClient({
+        config: probeConfig(dir, port, host),
+        logger: pino(
+          { level: 'warn' },
+          {
+            write: (line: string) => {
+              lines.push(line);
+            },
+          },
+        ),
+        agentVersion: '0.1.0',
+        onConfig: () => 0,
+      });
+      try {
+        client.start();
+        await body({ core, client, lines });
+      } finally {
+        await client.stop();
+        await core.stop();
+      }
+    }
+
+    /**
+     * Waits, with a bound, for the client to log a failed connection that says `what`, and
+     * returns the line. On a timeout the error carries what it did log.
+     */
+    async function failure(lines: string[], what: RegExp): Promise<string> {
+      const failed = (): string | undefined =>
+        lines.find((line) => line.includes('connection to core failed') && what.test(line));
+      try {
+        await waitUntil(() => failed() !== undefined, `no failed connection said ${String(what)}`);
+      } catch (error: unknown) {
+        throw new Error(`${String(error)}; logged ${JSON.stringify(lines)}`);
+      }
+      return failed() ?? '';
+    }
+
+    it('connects to a core given as ::1 whose certificate lists ::1', needsV6, async () => {
+      // Before `A-67` this never said hello: Node read `::1` as a name, no certificate has that
+      // name, and the probe retried for ever against a core that was exactly right.
+      await pointedAt('::1', { host: '::1', certificate: 'core-v6' }, async ({ core, lines }) => {
+        const hello = await core.waitFor((m) => m.type === 'hello');
+        assert.equal(hello.type, 'hello');
+        // Mutual: the core saw a certificate its own CA signed, by its own rule.
+        assert.equal(core.secured, 1);
+        assert.deepEqual(lines, [], 'the client complained on the way');
+      });
+    });
+
+    it(
+      'refuses a core at ::1 whose certificate does not list ::1, and says nothing to it',
+      needsV6,
+      async () => {
+        // The same CA, so the chain is trusted and only who the certificate is for can refuse
+        // it: one for 127.0.0.1 and `localhost`, and one that has `::1` only as a name and lists
+        // other addresses.
+        for (const certificate of ['core', 'core-elsewhere']) {
+          await pointedAt('::1', { host: '::1', certificate }, async ({ core, client, lines }) => {
+            const line = await failure(lines, /IP: ::1 is not in the cert's list/);
+            assert.match(line, /ERR_TLS_CERT_ALTNAME_INVALID/, certificate);
+            assert.deepEqual(core.received, [], `${certificate}: the probe spoke to it`);
+            assert.notEqual(client.state, 'connected');
+            assert.notEqual(client.state, 'handshaking');
+          });
+        }
+      },
+    );
+
+    it('still refuses a core at 127.0.0.1 whose certificate is for another address', async () => {
+      await pointedAt(
+        '127.0.0.1',
+        { host: '127.0.0.1', certificate: 'core-v6' },
+        async ({ core, lines }) => {
+          await failure(lines, /IP: 127\.0\.0\.1 is not in the cert's list/);
+          assert.deepEqual(core.received, []);
+        },
+      );
+    });
+
+    it('checks a core given by name against the name, as Node does', async () => {
+      // `localhost` is in the first certificate and not in the second, which lists only an
+      // address: refused in Node's own words for a name, not in the shared check's for an address. Whichever loopback the name resolves to first, the core is on 127.0.0.1 and
+      // Node tries both.
+      const listen = { host: '127.0.0.1', certificate: 'core' };
+      await pointedAt('localhost', listen, async ({ core }) => {
+        await core.waitFor((m) => m.type === 'hello');
+      });
+      await pointedAt(
+        'localhost',
+        { host: '127.0.0.1', certificate: 'core-v6' },
+        async ({ core, lines }) => {
+          // No name at all in that certificate but its common name, which is what Node says.
+          await failure(lines, /Host: localhost\. is not cert's CN: ms-core/);
+          assert.deepEqual(core.received, []);
+        },
+      );
     });
   },
 );

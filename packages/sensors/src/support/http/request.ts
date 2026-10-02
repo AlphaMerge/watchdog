@@ -1,7 +1,7 @@
 import { Agent as HttpAgent, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { ClientRequestArgs, IncomingHttpHeaders } from 'node:http';
-import type { TargetPolicy } from '@ms/shared';
+import { serverIdentity, type TargetPolicy } from '@ms/shared';
 import type { CheckTarget } from '../../contract.js';
 import { checkedTarget, type CheckedTarget } from '../checked-target.js';
 import {
@@ -249,8 +249,15 @@ export async function fetchHttp(
               options.createConnection === undefined
                 ? (false as const)
                 : Object.assign(new HttpAgent(), { createConnection: options.createConnection }),
+            // Who the certificate has to be for is the check every TLS client here shares
+            // (`A-67`): Node's own for a name or an IPv4 address, and for an IPv6 address one
+            // that Node's cannot make. Whether it is enforced is `verifyTls`, as before.
             ...(options.scheme === 'https'
-              ? { rejectUnauthorized: options.verifyTls, servername: options.host }
+              ? {
+                  rejectUnauthorized: options.verifyTls,
+                  servername: options.host,
+                  checkServerIdentity: serverIdentity,
+                }
               : {}),
             headers: {
               accept: '*/*',

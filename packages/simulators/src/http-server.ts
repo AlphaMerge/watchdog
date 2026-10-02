@@ -89,6 +89,8 @@ export interface HttpSimulatorOptions {
   fallback?: HttpResponseScript;
   /** TLS material. Present, the simulator speaks HTTPS. */
   tls?: { key: string | Buffer; cert: string | Buffer };
+  /** The address to listen on (`A-67`). Default `127.0.0.1`; `::1` for the IPv6 loopback. */
+  listenHost?: string;
 }
 
 const DEFAULT_DRIP_CHUNKS = 4;
@@ -149,7 +151,7 @@ export class HttpSimulator {
       });
     });
     this.#server = server;
-    this.#port = await listen(this.#server);
+    this.#port = await listen(this.#server, this.#options.listenHost);
     return this.#port;
   }
 

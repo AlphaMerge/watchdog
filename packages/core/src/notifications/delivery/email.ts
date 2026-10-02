@@ -1,5 +1,11 @@
 import { createTransport, type Transporter } from 'nodemailer';
-import { describeError, type Logger, type SmtpConfig, type SmtpRelay } from '@ms/shared';
+import {
+  describeError,
+  serverIdentity,
+  type Logger,
+  type SmtpConfig,
+  type SmtpRelay,
+} from '@ms/shared';
 import { EMAIL_METHOD } from '../methods.js';
 import {
   headerSafe,
@@ -406,7 +412,12 @@ function buildTransport(relay: SmtpRelay, config: SmtpConfig): Transporter {
     secure: relay.security === 'tls',
     requireTLS: relay.security === 'starttls',
     ignoreTLS: relay.security === 'none',
-    tls: { rejectUnauthorized: relay.verifyCertificate },
+    // Who the certificate has to be for is the check every TLS client here shares (`A-67`):
+    // Node's own for a name or an IPv4 address, and for a relay given by IPv6 address one that
+    // Node's cannot make — it reads the address as a name, so such a relay failed every send
+    // under a certificate that lists it. nodemailer hands these options to both of its TLS
+    // connections, implicit and after STARTTLS. Whether it is enforced is `verifyCertificate`.
+    tls: { rejectUnauthorized: relay.verifyCertificate, checkServerIdentity: serverIdentity },
     ...(relay.heloName === '' ? {} : { name: headerSafe(relay.heloName) }),
     ...(relay.auth === 'none'
       ? {}

@@ -18,13 +18,13 @@ import {
   refuses,
   sameOrigin,
   schemeAllowed,
+  serverIdentity,
 } from '@ms/shared';
 import {
   SUBJECT_ENCODING,
   subjectHeaders,
   WebhookTransport,
 } from '../src/notifications/delivery/webhook.js';
-import { serverIdentity } from '../src/notifications/delivery/http-client.js';
 import type { OutgoingMessage } from '../src/notifications/delivery/transport.js';
 import { render, substitute, type MessageContext } from '../src/notifications/placeholders.js';
 import { messageContext } from './support/messages.js';

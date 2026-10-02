@@ -6,6 +6,7 @@ import {
   type TLSSocket,
 } from 'node:tls';
 import type { LookupFunction } from 'node:net';
+import { serverIdentity } from '@ms/shared';
 
 /**
  * One TLS handshake, and what it revealed (`T-11`, `T-12`).
@@ -91,6 +92,12 @@ export function handshake(
       // See the note above: verification is done *after* the fact so that a bad certificate is a
       // reading rather than a failed connection.
       rejectUnauthorized: false,
+      // Node still forms a verdict it does not enforce, and `authorized` is that verdict: the
+      // chain *and* who the certificate is for. Its own check of the second reads an IPv6
+      // address as a name, so a device at one read "not trusted" under a certificate that
+      // lists the address (`A-67`). The shared check asks the certificate about the address;
+      // for a name or an IPv4 address it is Node's, so nothing else this reports has moved.
+      checkServerIdentity: serverIdentity,
       ...(options.minVersion === undefined
         ? {}
         : { minVersion: options.minVersion as ConnectionOptions['minVersion'] }),
