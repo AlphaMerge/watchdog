@@ -1,14 +1,18 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { IncomingHttpHeaders } from 'node:http';
-import { lookup as dnsLookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 import { refuses, type TargetPolicy } from '@ms/shared';
 import type { CheckTarget } from '../../contract.js';
 import {
   isCredentialsWithheld,
   pinnedLookup,
   pinnedPeerRefusal,
+  resolveBoundMs,
+  resolveWithin,
+  systemResolve,
   type PinnedAddress,
+  type ResolveHost,
 } from '../pinned-target.js';
 
 /**
@@ -78,6 +82,12 @@ export interface HttpRequestOptions {
    * `targetPolicy` guard included: it checks this address instead.
    */
   readonly pinned?: PinnedAddress;
+  /**
+   * How the `targetPolicy` guard resolves `host` (`A-54`). The system's resolver when absent; a
+   * test hands in its own. Asked at most once per request, redirects included, and never when
+   * `pinned` is set, when `host` is an address, or under the `none` policy.
+   */
+  readonly resolve?: ResolveHost;
 }
 
 export interface HttpResponse {
@@ -99,45 +109,106 @@ export interface HttpResponse {
 const round = (value: number): number => Math.round(value * 100) / 100;
 
 /**
- * Refuses a host whose addresses the policy blocks.
+ * Where a request may connect: the addresses that were checked, in the order to try them. Null
+ * when the socket is handed `host` as it is, because nothing would resolve it (an address) or
+ * nothing is checked (`none`).
+ */
+interface CheckedTarget {
+  readonly addresses: readonly PinnedAddress[];
+  /** Resolved here by the guard, rather than pinned above for a credential set (`A-41c`). */
+  readonly byGuard: boolean;
+}
+
+/** A resolution the guard gave up on. Its message is already the whole diagnosis. */
+class ResolveGivenUp extends Error {}
+
+/**
+ * Connect failures that say nothing was sent, after which the next checked address is tried.
+ * The socket used to do this itself, across every address a name has; it is handed one now.
+ */
+const NOT_CONNECTED = new Set([
+  'ECONNREFUSED',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ENETDOWN',
+  'EADDRNOTAVAIL',
+]);
+
+/**
+ * Refuses a host whose addresses the policy blocks, and says where the request may connect.
+ *
+ * **One lookup, and the connection goes to an address it answered with** (`A-54`). This used to
+ * resolve the name, check the answers, and hand the name to the socket, which resolved it again:
+ * whoever runs the name's DNS answered the check with a harmless address and the connection with
+ * `169.254.169.254`. Now the answers that were checked are the only places the request can go,
+ * through `pinnedLookup`, as for a target pinned for a credential set.
  *
  * A literal address needs no resolution and is checked directly; a name is resolved and *every*
  * address it answers with is checked, because a name with an A record inside the network and one
  * pointing at metadata is refused on the second.
  */
-async function refuseBlockedTarget(
-  host: string,
-  policy: TargetPolicy,
-  pinned: PinnedAddress | undefined,
-): Promise<void> {
-  if (policy === 'none') return;
-
-  let addresses: string[];
-  // A pinned request goes to one address and resolves nothing (`A-41c`), so that address is the
-  // whole of what there is to check, and a second lookup here would be the one nobody checked.
-  if (pinned !== undefined) {
-    addresses = [pinned.address];
-  } else {
-    try {
-      const resolved = await dnsLookup(host, { all: true });
-      addresses = resolved.map((entry) => entry.address);
-    } catch {
-      // Not this guard's business: a name that will not resolve is the request's own failure,
-      // and reporting it here would replace a diagnosis the caller already produces with a
-      // worse one.
-      return;
-    }
-  }
-
-  for (const address of addresses) {
-    const reason = refuses(policy, address);
+async function checkedTarget(
+  options: HttpRequestOptions,
+  signal: AbortSignal,
+): Promise<CheckedTarget | null> {
+  const host = options.host;
+  const policy = options.targetPolicy ?? 'link-local';
+  const check = (address: string): void => {
+    const reason = policy === 'none' ? null : refuses(policy, address);
     if (reason !== null) {
       throw new Error(
         `refusing to request ${host}: it resolves to ${address}, which is ${reason} — ` +
           'this range is where cloud instance-metadata services live',
       );
     }
+  };
+
+  // A pinned request goes to one address and resolves nothing (`A-41c`), so that address is the
+  // whole of what there is to check, and a second lookup here would be the one nobody checked.
+  if (options.pinned !== undefined) {
+    check(options.pinned.address);
+    return { addresses: [options.pinned], byGuard: false };
   }
+  if (policy === 'none') return null;
+  if (isIP(host) !== 0) {
+    check(host);
+    return null;
+  }
+
+  const where = `${options.scheme}://${host}:${String(options.port)}${options.path}`;
+  // Bounded, and ended with the check: `getaddrinfo` cannot be cancelled, and a resolver that
+  // does not answer would otherwise hold the check until its runner gave up on it.
+  const boundMs = resolveBoundMs(options.timeoutMs);
+  let answers: Awaited<ReturnType<ResolveHost>>;
+  try {
+    answers = await resolveWithin((options.resolve ?? systemResolve)(host, 0), signal, boundMs, {
+      cancelled: () => new ResolveGivenUp(`the check was cancelled while requesting ${where}`),
+      timedOut: () =>
+        new ResolveGivenUp(
+          `the device’s host name did not resolve within ${String(boundMs)} ms, requesting ` +
+            `${where} — the probe’s resolver is not answering`,
+        ),
+    });
+  } catch (error: unknown) {
+    // **Not handed to the socket to try again.** A name that would not resolve used to be left
+    // to the request, which is a second lookup nobody checks. It fails here, in the words the
+    // request has always used for it.
+    throw error instanceof ResolveGivenUp ? error : describeFailure(error, options, options.path);
+  }
+
+  // Every answer is checked before any is used. One that is not an address is never connected
+  // to, so there is nothing of it to check.
+  const addresses: PinnedAddress[] = [];
+  for (const answer of answers) {
+    const version = isIP(answer.address);
+    if (version === 0) continue;
+    check(answer.address);
+    addresses.push({ address: answer.address, family: version === 6 ? 6 : 4 });
+  }
+  if (addresses.length === 0) {
+    throw new Error(`the device’s host name did not resolve, requesting ${where}`);
+  }
+  return { addresses, byGuard: true };
 }
 
 export async function fetchHttp(
@@ -161,8 +232,12 @@ export async function fetchHttp(
   // **Checked before the first byte leaves, and the addresses are the thing checked, not the
   // name.** A guard that inspected the hostname would be defeated by any name that resolves to a
   // blocked address, which is a DNS record away.
-  const pinned = options.pinned;
-  await refuseBlockedTarget(options.host, options.targetPolicy ?? 'link-local', pinned);
+  // **And resolved once, here, for the whole request** (`A-54`): every hop of a redirect goes to
+  // an address this checked. A redirect is only ever followed on this host, so there is no
+  // other name to resolve; one that names another host is reported and not followed.
+  const checked = await checkedTarget(options, signal);
+  // Which checked address is in use. It moves on only when a connection could not be made.
+  let at = 0;
 
   let redirects = 0;
   let size = 0;
@@ -173,8 +248,10 @@ export async function fetchHttp(
 
   for (;;) {
     const send = options.scheme === 'https' ? httpsRequest : httpRequest;
-    const outcome = await new Promise<{ status: number; headers: IncomingHttpHeaders }>(
-      (resolve, reject) => {
+    const exchange = (
+      pinned: PinnedAddress | undefined,
+    ): Promise<{ status: number; headers: IncomingHttpHeaders }> =>
+      new Promise<{ status: number; headers: IncomingHttpHeaders }>((resolve, reject) => {
         const req = send(
           {
             host: options.host,
@@ -182,13 +259,13 @@ export async function fetchHttp(
             path,
             method,
             signal,
-            // **The checked address, answered to the socket's own lookup** (`A-41c`). `host`
-            // above stays the name, so it is what `Host` carries, what SNI sends and what the
-            // certificate is checked against; only where the bytes go comes from the pin. No
-            // agent: one would be free to connect somewhere else on this request's behalf.
-            ...(pinned === undefined
-              ? {}
-              : { lookup: pinnedLookup(options.host, pinned), agent: false as const }),
+            // **The checked address, answered to the socket's own lookup** (`A-41c`, `A-54`).
+            // `host` above stays the name, so it is what `Host` carries, what SNI sends and what
+            // the certificate is checked against; only where the bytes go comes from the pin.
+            ...(pinned === undefined ? {} : { lookup: pinnedLookup(options.host, pinned) }),
+            // No agent, for any request: a pooled connection is one made for another check, to
+            // wherever that check's lookup answered, and this request would ride it unchecked.
+            agent: false as const,
             ...(options.scheme === 'https'
               ? { rejectUnauthorized: options.verifyTls, servername: options.host }
               : {}),
@@ -240,10 +317,29 @@ export async function fetchHttp(
         req.on('error', reject);
         if (body !== '') req.write(body);
         req.end();
-      },
-    ).catch((error: unknown) => {
-      throw describeFailure(error, options, path);
-    });
+      });
+
+    let outcome: { status: number; headers: IncomingHttpHeaders };
+    for (;;) {
+      try {
+        outcome = await exchange(checked?.addresses[at]);
+        break;
+      } catch (error: unknown) {
+        // Nothing was sent, and the name has another address that was checked: the socket would
+        // have tried it, when it was the one resolving. Never an address that was not checked.
+        const code = (error as NodeJS.ErrnoException | null)?.code ?? '';
+        if (
+          checked !== null &&
+          at + 1 < checked.addresses.length &&
+          NOT_CONNECTED.has(code) &&
+          !signal.aborted
+        ) {
+          at += 1;
+          continue;
+        }
+        throw describeFailure(error, options, path, checked?.byGuard === true);
+      }
+    }
 
     status = outcome.status;
     headers = outcome.headers;
@@ -379,11 +475,26 @@ export function resolveRedirect(
 }
 
 /** Turns a socket or TLS failure into something that names the cause. */
-function describeFailure(error: unknown, options: HttpRequestOptions, path: string): Error {
-  // A refusal over where the credentials may go is not a failure of the request (`A-41c`): it
-  // keeps its class, which is what makes the sensor read Unknown rather than Down.
-  if (isCredentialsWithheld(error)) return error;
+function describeFailure(
+  error: unknown,
+  options: HttpRequestOptions,
+  path: string,
+  byGuard = false,
+): Error {
   const where = `${options.scheme}://${options.host}:${String(options.port)}${path}`;
+  // A refusal over where the credentials may go is not a failure of the request (`A-41c`): it
+  // keeps its class, which is what makes the sensor read Unknown rather than Down. **Unless the
+  // address was the guard's own** (`A-54`): no credential set is behind that pin, so the same
+  // refusal is a failed request, said without the words about credentials.
+  if (isCredentialsWithheld(error)) {
+    return byGuard
+      ? new Error(
+          `requesting ${where} was refused: the connection was not made to the address of ` +
+            `${options.host} that was checked against the target policy, so nothing it ` +
+            'answered is used — a proxy between the probe and the device does this',
+        )
+      : error;
+  }
   const code = (error as NodeJS.ErrnoException).code ?? '';
   const message = error instanceof Error ? error.message : String(error);
 
@@ -435,5 +546,6 @@ export function readCommon(
     // The whole target, not its host, so that no HTTP type can read one and forget the other
     // (`A-41c`): the pinned address goes wherever the host goes.
     ...(target.pinned === undefined ? {} : { pinned: target.pinned }),
+    ...(target.resolve === undefined ? {} : { resolve: target.resolve }),
   };
 }

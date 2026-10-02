@@ -1,5 +1,5 @@
 import type { ChannelReading } from '@ms/shared';
-import type { PinnedAddress } from './support/pinned-target.js';
+import type { PinnedAddress, ResolveHost } from './support/pinned-target.js';
 
 /**
  * A JSON Schema document. Deliberately not a structural type: `paramsSchema` is handed to Ajv,
@@ -123,6 +123,13 @@ export interface CheckTarget {
    * always has.
    */
   readonly pinned?: PinnedAddress;
+  /**
+   * How a transport resolves `host` when it has to check the addresses itself and nothing above
+   * pinned one (`A-54`): the HTTP target-policy guard, which resolves once, checks every answer
+   * and connects to an address it checked. Set by the catalogue to the resolver `pinTarget`
+   * uses, so a test that injects one sees every lookup a check makes. Absent, the system's.
+   */
+  readonly resolve?: ResolveHost;
 }
 
 /** What a check is handed when it runs. */

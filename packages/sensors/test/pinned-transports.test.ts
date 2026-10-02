@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { globalAgent } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as tls from 'node:tls';
@@ -21,8 +22,9 @@ import {
   type ResolvedAddress,
   type ResolveHost,
 } from '../src/support/pinned-target.js';
-import { fetchHttp } from '../src/support/http/request.js';
+import { fetchHttp, type HttpRequestOptions } from '../src/support/http/request.js';
 import { httpAdvanced } from '../src/types/http-advanced.js';
+import { httpTransaction } from '../src/types/http-transaction.js';
 import { mailImap } from '../src/types/mail-imap.js';
 import { mailSmtp } from '../src/types/mail-smtp.js';
 import { snmpUptime } from '../src/types/snmp-uptime.js';
@@ -585,7 +587,8 @@ describe('HTTP', () => {
     assert.equal(simulator.requests[0]?.servername, NAME);
   });
 
-  it('a request that is not pinned resolves as it always has', async () => {
+  it('a name no set bounds is resolved once, by the target policy; an address not at all', async () => {
+    // `A-54`: the metadata guard's lookup is the only one, and it is this resolver's.
     const simulator = await start({ routes: { '/status': { status: 200, body: 'ok' } } });
     const dns = rebinding();
     await execute(httpAdvanced, dns, {
@@ -593,13 +596,14 @@ describe('HTTP', () => {
       credentials: credentials(),
       host: 'localhost',
     });
+    assert.deepEqual(dns.calls, [{ host: 'localhost', family: 0 }]);
     await execute(httpAdvanced, dns, {
       params: { scheme: 'http', port: simulator.port, path: '/status' },
       credentials: credentials(INSIDE),
       host: '127.0.0.1',
     });
     assert.equal(simulator.requests.length, 2);
-    assert.equal(dns.calls.length, 0);
+    assert.equal(dns.calls.length, 1);
   });
 
   it('a pinned request whose address is not where the device listens does not fall back to the name', async () => {
@@ -629,6 +633,336 @@ describe('HTTP', () => {
       /nothing is listening|failed/,
     );
     assert.equal(simulator.requests.length, 0);
+  });
+});
+
+/**
+ * The metadata guard on a request no credential set pins (`A-54`).
+ *
+ * `A-09`'s guard resolved the name, checked the answers, and handed the name to the socket,
+ * which resolved it again. The resolver here is the attacker's: harmless when it is first asked
+ * and the metadata address ever after. One lookup, and a connection to what it answered.
+ */
+describe('HTTP, held to the address the target policy checked', () => {
+  const METADATA = '169.254.169.254';
+  /** Loopback, and nothing listens on it: a connection there is refused at once. */
+  const DEAD = '127.0.0.9';
+  const running: HttpSimulator[] = [];
+  const start = async (
+    options: ConstructorParameters<typeof HttpSimulator>[0],
+  ): Promise<HttpSimulator> => {
+    const simulator = new HttpSimulator(options);
+    await simulator.start();
+    running.push(simulator);
+    return simulator;
+  };
+  after(async () => {
+    for (const simulator of running) await simulator.stop();
+  });
+  const ok = { routes: { '/status': { status: 200, body: 'ok' } } };
+  const v4 = (...addresses: string[]): ResolvedAddress[] =>
+    addresses.map((address) => ({ address, family: 4 }));
+
+  /** Straight at the transport, with a resolver of the test's own. */
+  const request = (
+    port: number,
+    dns: Rebinding,
+    overrides: Partial<HttpRequestOptions> = {},
+    signal: AbortSignal = new AbortController().signal,
+  ): ReturnType<typeof fetchHttp> =>
+    fetchHttp(
+      {
+        host: NAME,
+        port,
+        scheme: 'http',
+        path: '/status',
+        method: 'GET',
+        headers: {},
+        body: '',
+        timeoutMs: 2_000,
+        verifyTls: true,
+        followRedirects: true,
+        maxRedirects: 5,
+        maxBodyBytes: 64,
+        resolve: dns.resolve,
+        ...overrides,
+      },
+      signal,
+    );
+
+  it('asks the resolver once, and connects to what it answered then', async () => {
+    const simulator = await start(ok);
+    const dns = rebinding(v4('127.0.0.1'), v4(METADATA));
+    await execute(httpAdvanced, dns, {
+      params: { scheme: 'http', port: simulator.port, path: '/status' },
+      credentials: {},
+    });
+    // `.invalid` resolves nowhere, so the request arrived by the address that was checked.
+    assert.equal(simulator.requests.length, 1);
+    assert.equal(simulator.requests[0]?.headers.host, `${NAME}:${String(simulator.port)}`);
+    assert.deepEqual(dns.calls, [{ host: NAME, family: 0 }]);
+  });
+
+  it('refuses a name whose first answer is the metadata address, whatever it would say next', async () => {
+    const simulator = await start(ok);
+    const dns = rebinding(v4(METADATA), v4('127.0.0.1'));
+    await assert.rejects(
+      () => request(simulator.port, dns),
+      /refusing to request device\.pinned\.invalid: it resolves to 169\.254\.169\.254.*link-local/,
+    );
+    assert.equal(simulator.requests.length, 0);
+    assert.equal(dns.calls.length, 1);
+  });
+
+  it('refuses the whole name when any one of its addresses is refused', async () => {
+    const simulator = await start(ok);
+    for (const answers of [
+      v4('127.0.0.1', METADATA),
+      v4(METADATA, '127.0.0.1'),
+      [
+        { address: '127.0.0.1', family: 4 },
+        { address: 'fe80::1', family: 6 },
+      ],
+    ]) {
+      const dns = rebinding(answers, answers);
+      await assert.rejects(() => request(simulator.port, dns), /refusing to request/);
+      assert.equal(dns.calls.length, 1);
+    }
+    assert.equal(simulator.requests.length, 0);
+  });
+
+  it('follows a redirect on the device to the same checked address, with no second lookup', async () => {
+    const simulator = await start({
+      routes: { '/old': { redirectTo: '/new' }, '/new': { status: 200, body: 'ok' } },
+    });
+    const dns = rebinding(v4('127.0.0.1'), v4(METADATA));
+    const response = await request(simulator.port, dns, { path: '/old' });
+    assert.equal(response.status, 200);
+    assert.deepEqual(simulator.paths, ['/old', '/new']);
+    assert.equal(dns.calls.length, 1);
+  });
+
+  it('does not follow a redirect to another name, and never resolves it', async () => {
+    // The other name is the metadata service's. A redirect that leaves the device is reported
+    // and not followed, so there is no second name to resolve, check or connect to.
+    const simulator = await start({ routes: { '/old': { redirectTo: '/unset' } } });
+    const elsewhere = `http://metadata.pinned.invalid:${String(simulator.port)}/latest/meta-data`;
+    const hop = await start({ routes: { '/old': { redirectTo: elsewhere } } });
+    const dns = rebinding(v4('127.0.0.1'), v4(METADATA));
+    const response = await request(hop.port, dns, { path: '/old' });
+    assert.equal(response.status, 302);
+    assert.equal(response.unfollowedLocation, elsewhere);
+    assert.deepEqual(dns.calls, [{ host: NAME, family: 0 }]);
+    assert.equal(hop.requests.length, 1);
+    assert.equal(simulator.requests.length, 0);
+  });
+
+  it('each step of a transaction resolves once, and a step whose answer is refused sends nothing', async () => {
+    const simulator = await start({
+      routes: { '/one': { status: 200, body: 'one' }, '/two': { status: 200, body: 'two' } },
+    });
+    const params = {
+      scheme: 'http',
+      port: simulator.port,
+      steps: [
+        { name: 'one', path: '/one' },
+        { name: 'two', path: '/two' },
+      ],
+    };
+    // A steady resolver: two steps, two lookups, both checked, both arrive.
+    const steady = rebinding(v4('127.0.0.1'), v4('127.0.0.1'));
+    await execute(httpTransaction, steady, { params, credentials: {} });
+    assert.deepEqual(simulator.paths, ['/one', '/two']);
+    assert.equal(steady.calls.length, 2);
+
+    // One that moves between the steps: step two is checked on its own answer, and refused.
+    const moving = rebinding(v4('127.0.0.1'), v4(METADATA));
+    await assert.rejects(
+      () => execute(httpTransaction, moving, { params, credentials: {} }),
+      /step 2 of 2 \(two\) failed: refusing to request .* 169\.254\.169\.254/,
+    );
+    assert.deepEqual(simulator.paths, ['/one', '/two', '/one']);
+    assert.equal(moving.calls.length, 2);
+  });
+
+  it('over TLS, SNI, Host and the certificate check stay on the name', async (t) => {
+    if (!needsTrust(t) || forName === undefined) return;
+    const simulator = await start({ tls: forName, ...ok });
+    const dns = rebinding(v4('127.0.0.1'), v4(METADATA));
+    await execute(httpAdvanced, dns, {
+      params: { scheme: 'https', port: simulator.port, path: '/status', verifyTls: true },
+      credentials: {},
+    });
+    assert.equal(simulator.requests.length, 1);
+    assert.equal(simulator.requests[0]?.servername, NAME);
+    assert.equal(simulator.requests[0].headers.host, `${NAME}:${String(simulator.port)}`);
+    assert.equal(dns.calls.length, 1);
+  });
+
+  it('over TLS, a certificate for another name is refused though the address was checked', async (t) => {
+    if (!needsTrust(t) || forAnother === undefined) return;
+    const simulator = await start({ tls: forAnother, ...ok });
+    const dns = rebinding(v4('127.0.0.1'), v4(METADATA));
+    await assert.rejects(
+      () =>
+        execute(httpAdvanced, dns, {
+          params: { scheme: 'https', port: simulator.port, path: '/status', verifyTls: true },
+          credentials: {},
+        }),
+      /is not valid for device\.pinned\.invalid/,
+    );
+    assert.equal(simulator.requests.length, 0);
+    assert.equal(dns.calls.length, 1);
+  });
+
+  it('tries the next checked address when the first refuses the connection', async () => {
+    const simulator = await start(ok);
+    const dns = rebinding(v4(DEAD, '127.0.0.1'), v4(METADATA));
+    const response = await request(simulator.port, dns);
+    assert.equal(response.status, 200);
+    assert.equal(simulator.requests.length, 1);
+    assert.equal(dns.calls.length, 1);
+  });
+
+  it('does not send a request again that a server took and dropped', async () => {
+    // Only a connection that was never made moves on: this one was, and the request went.
+    const simulator = await start({ routes: { '/status': { reset: true } } });
+    const dns = rebinding(v4('127.0.0.1', '127.0.0.1'), v4(METADATA));
+    await assert.rejects(() => request(simulator.port, dns), /requesting .* failed/);
+    assert.equal(simulator.requests.length, 1);
+  });
+
+  it('never goes past the addresses it checked: with none left, the request fails', async () => {
+    const simulator = await start(ok);
+    // What a second lookup would say is where the simulator is. Nobody asks.
+    const dns = rebinding(v4(DEAD), v4('127.0.0.1'));
+    await assert.rejects(() => request(simulator.port, dns), /nothing is listening at/);
+    assert.equal(simulator.requests.length, 0);
+    assert.equal(dns.calls.length, 1);
+  });
+
+  it('a name that does not resolve fails there, and the socket is not left to try', async () => {
+    // `localhost` does resolve, for a socket handed the name: the simulator would be reached.
+    const simulator = await start(ok);
+    for (const answer of [
+      (): Promise<ResolvedAddress[]> =>
+        Promise.reject(Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' })),
+      (): Promise<ResolvedAddress[]> => Promise.resolve([]),
+      (): Promise<ResolvedAddress[]> => Promise.resolve([{ address: 'localhost', family: 4 }]),
+    ]) {
+      let asked = 0;
+      const dns: Rebinding = {
+        calls: [],
+        resolve: () => {
+          asked += 1;
+          return answer();
+        },
+      };
+      await assert.rejects(
+        () => request(simulator.port, dns, { host: 'localhost' }),
+        /the device’s host name did not resolve, requesting http:\/\/localhost:\d+\/status/,
+      );
+      assert.equal(asked, 1);
+    }
+    assert.equal(simulator.requests.length, 0);
+  });
+
+  it('an answer that is not an address is never connected to, beside one that is', async () => {
+    const simulator = await start(ok);
+    const dns = rebinding(
+      [
+        { address: 'localhost', family: 4 },
+        { address: '127.0.0.1', family: 4 },
+      ],
+      v4(METADATA),
+    );
+    assert.equal((await request(simulator.port, dns)).status, 200);
+    assert.equal(dns.calls.length, 1);
+  });
+
+  it('a resolver that does not answer is given half the request’s time, and no more', async () => {
+    const simulator = await start(ok);
+    let asked = 0;
+    const dns: Rebinding = {
+      calls: [],
+      resolve: () => {
+        asked += 1;
+        return new Promise<ResolvedAddress[]>(() => undefined);
+      },
+    };
+    const started = Date.now();
+    await assert.rejects(
+      () => request(simulator.port, dns, { timeoutMs: 600 }),
+      /did not resolve within 300 ms, requesting http:\/\/device\.pinned\.invalid/,
+    );
+    assert.ok(Date.now() - started < 590, `took ${String(Date.now() - started)} ms`);
+    assert.equal(asked, 1);
+    assert.equal(simulator.requests.length, 0);
+  });
+
+  it('a check cancelled while its name is resolving ends then', async () => {
+    const simulator = await start(ok);
+    const dns: Rebinding = {
+      calls: [],
+      resolve: () => new Promise<ResolvedAddress[]>(() => undefined),
+    };
+    const controller = new AbortController();
+    const started = Date.now();
+    setTimeout(() => {
+      controller.abort();
+    }, 50);
+    await assert.rejects(
+      () => request(simulator.port, dns, { timeoutMs: 20_000 }, controller.signal),
+      /the check was cancelled while requesting http:\/\/device\.pinned\.invalid/,
+    );
+    assert.ok(Date.now() - started < 2_000);
+    assert.equal(simulator.requests.length, 0);
+  });
+
+  it('an address, and any host under the `none` policy, make no lookup', async () => {
+    const simulator = await start(ok);
+    const dns = rebinding(v4(METADATA), v4(METADATA));
+    assert.equal((await request(simulator.port, dns, { host: '127.0.0.1' })).status, 200);
+    await assert.rejects(
+      () => request(simulator.port, dns, { host: '169.254.1.1' }),
+      /refusing to request 169\.254\.1\.1/,
+    );
+    const open = await request(simulator.port, dns, { host: 'localhost', targetPolicy: 'none' });
+    assert.equal(open.status, 200);
+    assert.equal(dns.calls.length, 0);
+    assert.equal(simulator.requests.length, 2);
+  });
+
+  it('a stricter policy is applied to the same one answer', async () => {
+    const simulator = await start(ok);
+    const dns = rebinding(v4('127.0.0.1'), v4('127.0.0.1'));
+    await assert.rejects(
+      () => request(simulator.port, dns, { targetPolicy: 'private' }),
+      /refusing to request device\.pinned\.invalid: it resolves to 127\.0\.0\.1, which is a private/,
+    );
+    assert.equal(dns.calls.length, 1);
+    assert.equal(simulator.requests.length, 0);
+  });
+
+  it('no request goes through the shared agent, so none rides another check’s connection', async () => {
+    const simulator = await start(ok);
+    const agent = globalAgent as unknown as { createConnection: (...args: unknown[]) => unknown };
+    const original = agent.createConnection;
+    let pooled = 0;
+    agent.createConnection = function (this: unknown, ...args: unknown[]): unknown {
+      pooled += 1;
+      return original.apply(this, args);
+    };
+    try {
+      const dns = rebinding(v4('127.0.0.1'), v4(METADATA));
+      await request(simulator.port, dns);
+      await request(simulator.port, dns, { host: '127.0.0.1' });
+      await request(simulator.port, dns, { host: 'localhost', targetPolicy: 'none' });
+    } finally {
+      agent.createConnection = original;
+    }
+    assert.equal(simulator.requests.length, 3);
+    assert.equal(pooled, 0);
   });
 });
 

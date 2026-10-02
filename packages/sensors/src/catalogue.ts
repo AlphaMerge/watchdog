@@ -252,6 +252,9 @@ export class SensorCatalogue {
           host: context.target.host,
           ipVersion: context.target.ipVersion,
           ...(pinned === null ? {} : { pinned }),
+          // What a transport that checks addresses itself resolves with (`A-54`): the same
+          // resolver, so one injected here is the only one a check ever asks.
+          resolve: this.#resolve,
         },
         scrub: (text: string) => scrubSecrets(text, secrets),
       });

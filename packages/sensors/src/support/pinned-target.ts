@@ -227,14 +227,18 @@ export async function pinTarget(
   const familyName = family === 4 ? 'IPv4 ' : family === 6 ? 'IPv6 ' : '';
   let answers: readonly ResolvedAddress[];
   try {
-    answers = await resolving(
-      resolve(host, family),
-      host,
-      sensorId,
-      signal,
-      first,
-      resolveBoundMs(request.timeoutMs),
-    );
+    const boundMs = resolveBoundMs(request.timeoutMs);
+    const refusal = (message: string, withKind: boolean): CredentialsWithheldError =>
+      new CredentialsWithheldError(message, {
+        sensorId,
+        target: host,
+        phase: 'resolve',
+        ...(withKind ? { kind: first } : {}),
+      });
+    answers = await resolveWithin(resolve(host, family), signal, boundMs, {
+      cancelled: () => refusal(PIN_REFUSALS.cancelled(host), false),
+      timedOut: () => refusal(PIN_REFUSALS.resolveTimedOut(host, first, boundMs), true),
+    });
   } catch (error: unknown) {
     if (isCredentialsWithheld(error)) throw error;
     const code = (error as NodeJS.ErrnoException | null)?.code;
@@ -280,28 +284,22 @@ export async function pinTarget(
 }
 
 /**
- * The resolution, or a refusal as soon as the check is cancelled or the resolution's own time is
- * up: `getaddrinfo` cannot be cancelled, so it is left behind.
+ * The resolution, or the caller's own error as soon as the check is cancelled or the
+ * resolution's time is up: `getaddrinfo` cannot be cancelled, so it is left behind.
+ *
+ * Shared by the two places that resolve a name in order to check it: `pinTarget` above, and the
+ * HTTP transport's target-policy guard (`A-54`). Each says what its own refusal reads as.
  */
-function resolving(
+export function resolveWithin(
   pending: Promise<readonly ResolvedAddress[]>,
-  host: string,
-  sensorId: number,
   signal: AbortSignal | undefined,
-  kind: string,
   boundMs: number,
+  errors: { readonly cancelled: () => Error; readonly timedOut: () => Error },
 ): Promise<readonly ResolvedAddress[]> {
-  const refusal = (message: string, withKind: boolean): CredentialsWithheldError =>
-    new CredentialsWithheldError(message, {
-      sensorId,
-      target: host,
-      phase: 'resolve',
-      ...(withKind ? { kind } : {}),
-    });
   if (signal?.aborted === true) {
     // Nobody is waiting for it any more, and a rejection nobody handles ends the worker.
     pending.catch(() => undefined);
-    return Promise.reject(refusal(PIN_REFUSALS.cancelled(host), false));
+    return Promise.reject(errors.cancelled());
   }
   return new Promise((resolve, reject) => {
     const done = (): void => {
@@ -310,11 +308,11 @@ function resolving(
     };
     const onAbort = (): void => {
       done();
-      reject(refusal(PIN_REFUSALS.cancelled(host), false));
+      reject(errors.cancelled());
     };
     const timer = setTimeout(() => {
       done();
-      reject(refusal(PIN_REFUSALS.resolveTimedOut(host, kind, boundMs), true));
+      reject(errors.timedOut());
     }, boundMs);
     signal?.addEventListener('abort', onAbort, { once: true });
     pending.then(

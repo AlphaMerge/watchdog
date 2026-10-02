@@ -545,6 +545,38 @@ script together.
 
 ---
 
+## HTTP sensors and the cloud metadata address
+
+An HTTP sensor requests whatever device it is put on, and what it reads is stored and shown. So
+no HTTP sensor (`http.request`, `http.advanced`, `http.content`, `http.transaction`, `rest.custom`)
+requests a **link-local** address, `169.254.0.0/16` or `fe80::/10`: that is where a cloud
+provider's instance-metadata service answers, with credentials, to anything that asks (`A-09`).
+Private addresses are not refused. Monitoring them is the job.
+
+- **A device given as an address** is checked as it stands. Nothing is resolved.
+- **A device given as a name is resolved once per request, and the request goes to an address
+  that lookup answered with** (`A-54`). Every address the name has is checked; one link-local
+  address among them refuses the whole name, and the sensor is Down saying which address. The
+  probe then connects to a checked address and never asks for the name again, so whoever runs
+  the name's DNS cannot answer the check with one address and the connection with another. The
+  request still names the device: `Host`, TLS SNI and the certificate check are on the name.
+- **A name with several addresses** is tried at the first the resolver gave, and at the next
+  only when a connection is refused or has no route. A first address that accepts nothing and
+  refuses nothing uses the sensor's timeout, and the sensor is Down.
+- **A redirect** is followed only on the same device, scheme and port, to the same checked
+  address, without another lookup. One that points anywhere else is not followed, and the
+  sensor reports where it pointed. Each step of an `http.transaction` is a request of its own:
+  it resolves once and is checked on its own answer.
+- **A resolver that does not answer** is given half the sensor's timeout, ten seconds at most.
+  The sensor is then Down saying the name did not resolve in that time.
+- **A device whose name was already checked against a credential set's targets** (above,
+  `A-41c`) is not resolved a second time: the guard reads the address that check pinned.
+
+Mail, SSH, SNMP and the other sensors are not held to this rule: they do not fetch a URL, and a
+device on a link-local address is theirs to monitor.
+
+---
+
 ## Inheritance
 
 Intervals, credentials, dependency behaviour, notification settings and access rights all inherit

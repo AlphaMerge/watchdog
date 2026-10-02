@@ -17910,13 +17910,75 @@ because each is a decision rather than a defect:
         says the rule and the bound.
       - **Mutation:** 11 of 11 killed.
 
-- [ ] **A-54 — `A-09`'s link-local guard resolves, checks, and lets the socket resolve again** ·
+- [x] **A-54 — `A-09`'s link-local guard resolves, checks, and lets the socket resolve again** ·
       M · A-09, A-41c · Found 2026-10-02 by `A-41c`. For a request that is not pinned, the
       metadata-address guard looks the name up and checks it, and the connection then looks it up
       again: the rebinding gap `A-41c` closed for bounded sets is still open on this guard, and
       is older than that ticket. **Done when** the guard's check and the connection use one
       lookup (`pinnedLookup` already does this for a pinned target), on HTTP and mail, and a test
       with a resolver that answers differently the second time shows one lookup and a refusal.
+
+      **A-54 outcome.** An HTTP request no credential set pins resolves its device's name once,
+      checks every answer, and connects to an address that lookup answered with.
+      - **Where the guard is.** One place: `fetchHttp` (`support/http/request.ts`), which every
+        HTTP type goes through (`http.request`, `http.advanced`, `http.content`, `rest.custom`,
+        and each step of `http.transaction`). **Mail has no such guard and never had**, so
+        there was nothing there to close, and none was added: refusing a mail device on a
+        link-local address is a change of policy, not this defect. The webhook client in
+        `@ms/core` already pinned what it checked.
+      - **`checkedTarget`** replaces `refuseBlockedTarget`. It resolves through the catalogue's
+        resolver (`CheckTarget.resolve`, set where `pinTarget` is called), checks every answer
+        that is an address, and hands the socket `pinnedLookup` for one of them. SNI, `Host`
+        and the certificate check stay on the name. A target `A-41c` pinned is checked at that
+        address and not resolved again.
+      - **Lookups per request, before and after.**
+
+        | Request | Before | After |
+        | --- | --- | --- |
+        | A name, no redirect | 2: the guard's, the socket's | 1 |
+        | A name, n redirects followed | 2 + n | 1 |
+        | `http.transaction`, s steps on a name | 2 per step, more with redirects | 1 per step |
+        | An address | 1 call to `dns.lookup`, which answers an address with itself | 0 |
+        | A name pinned by `A-41c` | 1, in `pinTarget` | 1, unchanged |
+        | Any host under the `none` policy | 1, the socket's | 1, unchanged |
+
+      - **Redirects and steps.** A redirect is followed only on the same host, scheme and port
+        (`resolveRedirect`), so every hop goes to the address already checked and there is no
+        second name to pin. A redirect to another name is reported and not followed, and that
+        name is never resolved. A transaction's steps cannot name another host: each step is
+        its own `fetchHttp`, resolved and checked on its own answer.
+      - **A name that does not resolve fails in the guard**, in the words the request used for
+        it. It used to be left to the socket, which is a second lookup. The lookup is bounded by
+        `resolveBoundMs` and ends with the check's signal (`resolveWithin`, `pinTarget`'s own
+        bound, now shared).
+      - **No agent on any request.** `agent: false` for every one, where only a pinned request
+        had it. `connection: close` was already sent.
+      - **Changed for a name with several addresses.** The socket used to try each address
+        itself. It is now tried at the resolver's first, and at the next checked address only
+        when the connection is refused or has no route (`NOT_CONNECTED`). A first address that
+        drops packets silently takes the whole timeout, where Node moved on after 250 ms.
+      - **Docs:** `administration.md` gains "HTTP sensors and the cloud metadata address"; the
+        guard was not described there before. No schema or route changed.
+      - **Tests:** 18 new in `pinned-transports.test.ts` and one rewritten: a resolver that
+        answers 127.0.0.1 once and 169.254.169.254 after is asked once and the request arrives;
+        one refused answer among several refuses the name; a redirect on the device and one to
+        another name; a transaction whose second step's answer is refused; TLS with SNI, `Host`
+        and a certificate for another name; the next address after a refused connection and
+        never past the checked ones; a resolver that fails, answers nothing, hangs, or is
+        cancelled; an address and the `none` policy; the shared agent. 269 passing, none
+        skipped, in the nine sensors suites touched.
+      - **Mutation:** 23 mutants, 23 killed. Two were killed by a test that then never ended
+        and failed its file at the run's timeout (the retry that does not advance, the
+        resolution timer that does not reject), the other 21 by an assertion.
+      - **Not covered by a test:** the peer check on a guard-pinned socket and the sentence
+        `describeFailure` gives it (`byGuard`): a socket handed the address cannot arrive
+        anywhere else.
+      - **Found, not fixed:** `isLinkLocal` (`@ms/shared`) does not read an IPv4-mapped IPv6
+        address, so `::ffff:169.254.169.254`, as a device's host or as an AAAA answer, passes
+        the guard and the webhook guard both, while `isPrivate` does unwrap it. And the
+        `link-local` policy does not cover `fd00:ec2::254`, which the comment on `isLinkLocal`
+        names as a metadata address. Mail, SSH, SNMP and the port sensors have no metadata
+        guard at all.
 
 - [ ] **A-55 — a narrowing says how many sensors are outside the bounds, not how many it puts
       there** · S · U-21, A-41b · Found 2026-10-02 by `U-21`. `withholds` counts the sensors
