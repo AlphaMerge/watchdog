@@ -741,10 +741,13 @@ with every flow on any buffer that has filled once.
 
 `flowMissed` is read from each exporter's own running sequence, and a device keeps more than one.
 A sequence is followed per exporter address, per dialect, and within a dialect per NetFlow v9
-source id, IPFIX observation domain, or sFlow agent and sub-agent, so a switch that exports
-NetFlow v9 and sFlow to one probe, or a router with two line cards, is not read as losing flows
-it sent. NetFlow v5 has one sequence for an address. The probe follows 4,096 sequences at once and
-forgets the one silent longest, which costs that sequence one comparison when it speaks again.
+source id, IPFIX observation domain, sFlow agent and sub-agent, or NetFlow v5 engine type and
+engine id, so a switch that exports NetFlow v9 and sFlow to one probe, or a router with two line
+cards, is not read as losing flows it sent. NetFlow v5 was never specified, only documented as a
+header layout, and the layout does not say what its sequence is counted within: the probe reads
+one count per engine named in the header, which is the same as one for the address on a device
+with a single engine. The probe follows 4,096 sequences at once and forgets the one silent
+longest, which costs that sequence one comparison when it speaks again.
 
 The five `flow*` channels on Probe Health are what the collector counted, and they need **both
 ends at protocol 23**: a probe sends them only to a core that says it speaks 23, because an older

@@ -21275,12 +21275,48 @@ analysis". `F-` is Phase 0.
       number, and none was assigned here. The subscription is the whole probe's branch, so its
       snapshot is every sensor on the probe for the sake of one sentence.
 
-- [ ] **B-13 — NetFlow v5 keeps one sequence for an address with two engines** · S · B-10 ·
+- [x] **B-13 — NetFlow v5 keeps one sequence for an address with two engines** · S · B-10 ·
       Found 2026-10-02 by `B-10`, by reading; not reproduced. A v5 header carries an engine type
       and id, which the decoder reads, and a chassis exporting from two engines counts flows per
       engine: read as one sequence, `flowMissed` counts losses that did not happen. **Done
       when** a test shows the false count from two engines at one address, or shows there is
       none and the ticket is closed saying so; if it is real, the engine joins the key.
+
+      **Done 2026-10-02. The arithmetic reproduces; the device behaviour is taken on trust.**
+      Before any change, `flow-listener.test.ts` rendered v5 datagrams from one address as two
+      engines — 0/0 at flows 0 and 5, 0/1 at 900 and 905, five flows each, through
+      `decodeFlowDatagram` — and `missed` read 1,790 where nothing was lost: each datagram of
+      the engine further on was 895 ahead of the other's count, and each of the other's was
+      taken as a restart.
+
+      **What that does and does not show.** It shows what the listener does *if* a chassis
+      counts `flow_sequence` per engine. Nothing in this repository says a device does: v5 has
+      no specification, the decoder's own comments call it a layout Cisco froze in 1996 and say
+      only that bytes 20 and 21 are an engine type and an engine id, and no capture of a
+      two-engine exporter is here to read. The per-engine reading is this ticket's and `B-10`'s
+      premise, not a cited fact. It is safe either way round only in one direction — see below.
+
+      **The engine is v5's `sequenceScope`.** `fromNetflowV5` names it as `type/id`, both bytes,
+      since an id is unique only within a type; the listener's key and `MAX_SEQUENCES` are
+      `B-10`'s, unchanged. An exporter with one engine sends the same pair in every datagram
+      and is followed exactly as before. `docs/administration.md` says v5 is followed per engine
+      and why.
+
+      **Tests.** One case at the listener, on real bytes: two engines of one type, a third with
+      the same id on another type, none missed across ten datagrams, then a three-flow gap
+      inside one engine while the others run on, read as 3. One at the dispatch for what the
+      decoder names (`0/0` by default, each byte on its own side), replacing the case that
+      pinned v5's scope as absent. `probe-flow.test.ts` passes unchanged. **Mutations 10/10**:
+      no scope, the id alone, the type alone, the two swapped, a constant, no separator, the
+      scope out of the listener's key against the new case alone, each header byte read from
+      the other's offset, and no bound.
+
+      **Not done, and the cost if the premise is wrong.** A device that keeps *one* count for
+      the address and stamps each datagram with whichever engine switched the flows would now
+      be split into sequences that each see only some of the datagrams, and every datagram the
+      other engine sent in between reads as a gap: false `flowMissed` in the other direction.
+      Deciding between the two needs a capture from a multi-engine chassis, which the field
+      test has not had.
 
 - [ ] **B-14 — trap and syslog buffers that overwrite unread messages are not on Probe Health**
       · S · B-11 · Found 2026-10-02 by `B-11`. They share `NotificationRing`, which now counts

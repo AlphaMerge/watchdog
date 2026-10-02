@@ -63,6 +63,14 @@ export interface NetflowV5Header {
    * never arrived. `B-04` turns that into a channel.
    */
   readonly flowSequence: number;
+  /**
+   * Which of the exporter's flow-switching engines sent this datagram: bytes 20 and 21 of
+   * Cisco's header layout, the kind of engine and its slot.
+   *
+   * `flowSequence` is followed per pair of these (`B-13`). v5 was never specified, only
+   * documented as a layout, and the layout does not say what the sequence is counted within; a
+   * chassis exporting from two engines at one address is the case where it matters.
+   */
   readonly engineType: number;
   readonly engineId: number;
   readonly samplingMode: SamplingMode;

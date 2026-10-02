@@ -174,9 +174,23 @@ describe('which of an exporter’s sequences a datagram’s is (`B-10`)', () => 
     );
   });
 
-  it('is absent for v5, which has one count for the exporter', () => {
-    const message = decodeFlowDatagram(renderNetflowV5([{}]), EXPORTER, new TemplateCache());
-    assert.equal('sequenceScope' in message, false);
+  it('is the engine type and the engine id for v5, read from its header (`B-13`)', () => {
+    const scope = (engineType?: number, engineId?: number): string | undefined =>
+      decodeFlowDatagram(
+        renderNetflowV5([{}], {
+          ...(engineType === undefined ? {} : { engineType }),
+          ...(engineId === undefined ? {} : { engineId }),
+        }),
+        EXPORTER,
+        new TemplateCache(),
+      ).sequenceScope;
+    // What nearly every exporter sends: one engine, and both bytes zero.
+    assert.equal(scope(), '0/0');
+    assert.equal(scope(1, 3), '1/3');
+    // Each byte on its own side: type 3 with id 1 is not type 1 with id 3.
+    assert.equal(scope(3, 1), '3/1');
+    assert.equal(scope(0, 255), '0/255');
+    assert.equal(scope(255, 0), '255/0');
   });
 });
 

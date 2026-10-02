@@ -51,12 +51,16 @@ export interface FlowMessage {
   readonly sequenceCounts: 'packets' | 'data-records' | 'flows';
   /**
    * Which of the exporter's running counts `sequence` is, where one address keeps several
-   * (`B-10`). Absent where the dialect has one for the whole exporter.
+   * (`B-10`). Absent where the dialect has one for the whole exporter, which none of the four
+   * decoded here does.
    *
    * NetFlow v9 counts per source id and IPFIX per observation domain (RFC 3954 §5.1, RFC 7011
    * §3.1), so a router with two line cards exporting from one address sends two unrelated
    * sequences. sFlow counts per sub-agent within an agent, and names the agent in the datagram
-   * because the address it arrives from need not be the agent's. Opaque to everything but the
+   * because the address it arrives from need not be the agent's. NetFlow v5 names an engine
+   * type and an engine id in its header and its scope is the two together (`B-13`): no
+   * specification says what `flow_sequence` is counted within, and one count per engine is the
+   * reading that costs a single-engine exporter nothing. Opaque to everything but the
    * loss arithmetic, which compares a sequence only with the last one of the same scope.
    */
   readonly sequenceScope?: string;
@@ -120,6 +124,11 @@ export function fromNetflowV5(datagram: NetflowV5Datagram): FlowMessage {
     sequence: header.flowSequence,
     // v5's sequence counts exported *flows*, which is neither of the other two dialects' meanings.
     sequenceCounts: 'flows',
+    // **Per engine (`B-13`).** The header names the engine that exported the datagram, by type
+    // and by id, and a chassis exporting from two of them at one address sends two running
+    // counts. Both bytes, because an id is only unique within a type. An exporter with one
+    // engine sends the same pair in every datagram and is followed exactly as before.
+    sequenceScope: `${String(header.engineType)}/${String(header.engineId)}`,
     undecodable: 0,
     sysUptimeMs: header.sysUptimeMs,
     unixSecs: header.unixSecs,

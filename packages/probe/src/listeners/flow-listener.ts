@@ -36,8 +36,8 @@ export const LISTENER_ID = 'flow';
 /**
  * How many exporter sequences are followed at once (`B-10`).
  *
- * A sequence is an address, a dialect and a source id, observation domain or sub-agent, and the
- * last of those is whatever the datagram says. Far above any real site — a thousand exporters
+ * A sequence is an address, a dialect and a source id, observation domain, sub-agent or v5
+ * engine, and the last of those is whatever the datagram says. Far above any real site — a thousand exporters
  * with four domains each — and small enough that a device inventing one per datagram costs a
  * fixed few hundred kilobytes rather than the probe.
  */
@@ -262,8 +262,8 @@ export class FlowListener {
    * export NetFlow v9 and sFlow to one collector, and both count packets, so "what the sequence
    * counts" does not tell them apart: read against each other, every datagram of the one further
    * on is a loss and every datagram of the other a restart. Within a dialect, v9 counts per
-   * source id, IPFIX per observation domain and sFlow per sub-agent of an agent, which the
-   * decoder hands over as `sequenceScope`.
+   * source id, IPFIX per observation domain, sFlow per sub-agent of an agent and v5 per engine
+   * type and id (`B-13`), which the decoder hands over as `sequenceScope`.
    *
    * A sequence that goes *backwards* is a reboot rather than a loss: the exporter restarted and
    * began again, and counting the difference would report billions of missing flows. Resynced

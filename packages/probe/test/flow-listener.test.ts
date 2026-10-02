@@ -8,7 +8,7 @@ import {
   type FlowReceiverOptions,
   type ReceivedFlow,
 } from '@ms/sensors/flow';
-import { renderIpfix, renderNetflowV9, renderSflow } from '@ms/simulators';
+import { renderIpfix, renderNetflowV5, renderNetflowV9, renderSflow } from '@ms/simulators';
 import { FlowListener, MAX_SEQUENCES } from '../src/listeners/flow-listener.js';
 
 /**
@@ -389,6 +389,46 @@ describe('the flow listener', () => {
       // And a datagram that did go missing, on one of the six: 3 was next from sub-agent 1's.
       from(renderSflow([{}], { sequence: 7_005, subAgent: 1 }));
       assert.equal(flow.stats().missed, 2);
+    });
+
+    it('keeps a sequence per NetFlow v5 engine at one address (`B-13`)', async () => {
+      // A chassis exporting from two engines: each header names its engine type and id, and each
+      // engine counts its own flows. The bytes, through the decoder the socket uses, because
+      // the engine is read out of the header and a fixture handing a scope in would not show a
+      // decoder leaving it out. The second engine is far ahead of the first, as in the
+      // per-exporter case above and for its reason.
+      const flow = await listener(64);
+      const cache = new TemplateCache();
+      const from = (
+        flowSequence: number,
+        engineType: number,
+        engineId: number,
+        flows = 5,
+      ): void => {
+        const bytes = renderNetflowV5(
+          Array.from({ length: flows }, () => ({})),
+          { flowSequence, engineType, engineId },
+        );
+        deliver({ source: '192.0.2.1', message: decodeFlowDatagram(bytes, '192.0.2.1', cache) });
+      };
+      from(0, 0, 0); // engine 0/0: flows 0..4
+      from(900, 0, 1); // engine 0/1: flows 900..904
+      from(5, 0, 0);
+      from(905, 0, 1);
+      assert.equal(flow.stats().missed, 0, 'one engine’s count was read against the other’s');
+
+      // The type is part of what names an engine: the same id on another type is a third count.
+      from(40_000, 1, 1);
+      from(10, 0, 0);
+      from(910, 0, 1);
+      from(40_005, 1, 1);
+      assert.equal(flow.stats().missed, 0, 'two engine types with one id shared a sequence');
+
+      // Keyed apart is not the same as not compared: engine 0/1 was at 915, and 915..917 are lost.
+      from(918, 0, 1);
+      from(15, 0, 0);
+      assert.equal(flow.stats().missed, 3);
+      assert.equal(flow.stats().received, 50);
     });
 
     it('follows a bounded number of sequences, and forgets the one silent longest (`B-10`)', async () => {
