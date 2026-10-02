@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import {
   connect as netConnect,
@@ -21,6 +22,7 @@ import {
   DbEncryptionRefusedError,
   DbError,
   DbRedirectRefusedError,
+  DbRoutedUnresolvedError,
   describeDbError,
   REDIRECT_OUTSIDE_TARGETS,
   type DbConnectOptions,
@@ -594,12 +596,17 @@ async function tdsServer(
     secure?: { key: string; cert: string };
     /** The encryption byte of the PRELOGIN answer, in place of the mode's own. */
     encryption?: number;
+    /** The whole PRELOGIN answer, byte for byte, in place of one this would write. */
+    answer?: Buffer;
+    /** Bytes written the moment a connection is accepted, before the client has asked. */
+    early?: Buffer;
   } = {},
 ): Promise<Fake> {
   const plain = mode.route !== undefined || mode.login === true;
   const { fake } = await listen((socket, self) => {
     let pending = Buffer.alloc(0);
     let packets = 0;
+    if (mode.early !== undefined) socket.write(mode.early);
     /** The server's end of the TLS that runs inside TDS, once the PRELOGIN is answered. */
     let handshake: { bridge: Duplex } | undefined;
     const negotiate = (certificate: { key: string; cert: string }): { bridge: Duplex } => {
@@ -659,7 +666,7 @@ async function tdsServer(
         packets += 1;
         if (packets === 1) {
           self.said.push(`packet 0x${type.toString(16)}`);
-          socket.write(preloginReply(mode.encryption ?? (plain ? 0x02 : 0x01)));
+          socket.write(mode.answer ?? preloginReply(mode.encryption ?? (plain ? 0x02 : 0x01)));
           if (mode.secure !== undefined) handshake = negotiate(mode.secure);
           continue;
         }
@@ -2086,6 +2093,173 @@ describe('a SQL Server that routes the login to another server', () => {
   });
 });
 
+describe('a routed server that fails is named, and not the device that routed to it (A-70)', () => {
+  /** A loopback port nothing listens on: one that was listened on, and closed. */
+  const closedPort = async (): Promise<number> => {
+    const { fake } = await listen(() => undefined);
+    await fake.close();
+    return fake.port;
+  };
+
+  for (const policy of ['link-local', 'none'] as const) {
+    it(`db.mssql routed to a port nothing listens on, under \`${policy}\``, async () => {
+      // Under `none` the connect is `tedious`'s own; otherwise the connector's.
+      const closed = await closedPort();
+      const device = await tdsServer({ route: { server: '127.0.0.1', port: closed } });
+      try {
+        const error = await failure(
+          execute(dbMssql, rebinding(), { host: '127.0.0.1', port: device.port, policy }),
+        );
+        assert.deepEqual(device.said, ['packet 0x12', 'login7'], 'the device was reached');
+        assert.ok(error instanceof DbError, `threw ${String(error)}`);
+        assert.equal(
+          error.message,
+          `127.0.0.1:${String(device.port)} routed the login to 127.0.0.1:${String(closed)}, ` +
+            'where nothing is listening',
+        );
+      } finally {
+        await device.close();
+      }
+    });
+  }
+
+  it('a device nothing listens at is still the device, under `none` too', async () => {
+    const closed = await closedPort();
+    for (const policy of ['link-local', 'none'] as const) {
+      const error = await failure(
+        execute(dbMssql, rebinding(), { host: '127.0.0.1', port: closed, policy }),
+      );
+      assert.equal(error.message, `nothing is listening at 127.0.0.1:${String(closed)}`, policy);
+    }
+  });
+
+  it('db.mssql routed to a name that does not resolve', async () => {
+    const device = await tdsServer({ route: { server: OTHER, port: 11_000 } });
+    const calls: string[] = [];
+    try {
+      const error = await failure(
+        execute(
+          dbMssql,
+          {
+            calls: [],
+            resolve: (host) => {
+              calls.push(host);
+              return Promise.reject(Object.assign(new Error('nope'), { code: 'ENOTFOUND' }));
+            },
+          },
+          { host: '127.0.0.1', port: device.port },
+        ),
+      );
+      assert.deepEqual(device.said, ['packet 0x12', 'login7']);
+      assert.ok(error instanceof DbRoutedUnresolvedError, `threw ${String(error)}`);
+      assert.equal(
+        error.message,
+        `127.0.0.1:${String(device.port)} routed the login to replica.policy.invalid, a host ` +
+          'name that did not resolve (ENOTFOUND)',
+      );
+      assert.equal(error.phase, 'connect');
+      assert.deepEqual(calls, [OTHER], 'asked once, and only about the routed name');
+    } finally {
+      await device.close();
+    }
+  });
+
+  it('the connector says which server it was routed to, whatever went wrong there', async () => {
+    const closed = await closedPort();
+    const base: DbConnectOptions = {
+      host: '127.0.0.1',
+      port: 1433,
+      database: '',
+      username: 'monitor',
+      password: 'secret',
+      encrypt: 'disable',
+      verifyTls: false,
+      connectTimeoutMs: 2_000,
+      statementTimeoutMs: 2_000,
+      redirect: () => Promise.resolve(undefined),
+    };
+    const connector = tdsConnector(base) ?? assert.fail('no connector');
+    const routed = await failure(connector({ host: '127.0.0.1', port: closed }));
+    assert.equal((routed as NodeJS.ErrnoException).code, 'ECONNREFUSED');
+    assert.equal((routed as { routedTo?: unknown }).routedTo, `127.0.0.1:${String(closed)}`);
+    // The device itself carries none.
+    const device = tdsConnector({ ...base, port: closed }) ?? assert.fail('no connector');
+    const own = await failure(device());
+    assert.equal((own as NodeJS.ErrnoException).code, 'ECONNREFUSED');
+    assert.equal((own as { routedTo?: unknown }).routedTo, undefined);
+  });
+
+  it('reads as the routed server from either source, and as the device where nothing was routed', () => {
+    const options: DbConnectOptions = {
+      host: NAME,
+      port: 1433,
+      database: '',
+      username: 'monitor',
+      password: 'secret',
+      encrypt: 'prefer',
+      verifyTls: false,
+      connectTimeoutMs: 2_000,
+      statementTimeoutMs: 2_000,
+    };
+    const ROUTED = 'replica.policy.invalid:11000';
+    /** As the connector hands it over, inside `tedious`'s wrapper. */
+    const carried = (code: string): Error =>
+      Object.assign(
+        new Error('Failed to connect', {
+          cause: Object.assign(new Error('socket'), { code, routedTo: ROUTED }),
+        }),
+        { code: 'ESOCKET' },
+      );
+    /** As `tedious` words its own connect, with no field for where. */
+    const worded = (code: string): Error =>
+      Object.assign(
+        new Error(
+          `Failed to connect to ${ROUTED} (redirected from database.policy.invalid:1433) - x`,
+          {
+            cause: new AggregateError(
+              [Object.assign(new Error('socket'), { code })],
+              'Could not connect (sequence)',
+            ),
+          },
+        ),
+        { code: 'ESOCKET' },
+      );
+    const plain = (code: string): Error => Object.assign(new Error('socket'), { code });
+    const read = (error: Error): string =>
+      describeDbError(error, options, 'Microsoft SQL Server').message;
+    const HERE = 'database.policy.invalid:1433';
+    for (const from of [carried, worded]) {
+      assert.equal(
+        read(from('ECONNREFUSED')),
+        `${HERE} routed the login to ${ROUTED}, where nothing is listening`,
+      );
+      for (const code of ['ENOTFOUND', 'EAI_AGAIN']) {
+        assert.equal(
+          read(from(code)),
+          `${HERE} routed the login to ${ROUTED}, a host name that did not resolve`,
+          code,
+        );
+      }
+    }
+    assert.equal(read(plain('ECONNREFUSED')), `nothing is listening at ${HERE}`);
+    assert.equal(
+      read(plain('ENOTFOUND')),
+      `the device’s host name did not resolve, connecting to ${HERE}`,
+    );
+    // Once connected there is no redirect to speak of: the query phase names the device.
+    assert.equal(
+      describeDbError(carried('ECONNREFUSED'), options, 'Microsoft SQL Server', 'query').message,
+      `nothing is listening at ${HERE}`,
+    );
+    const unresolved = new DbRoutedUnresolvedError(HERE, 'replica.policy.invalid', '');
+    assert.equal(describeDbError(unresolved, options, 'Microsoft SQL Server'), unresolved);
+    assert.equal(
+      unresolved.message,
+      `${HERE} routed the login to replica.policy.invalid, a host name that did not resolve`,
+    );
+  });
+});
+
 describe('`require` sends no login to a server that says it does not encrypt (A-70)', () => {
   // `tedious` 20 starts TLS only when the server's PRELOGIN answer says ON or REQ
   // (`lib/connection.js`, `performTlsNegotiation`); for anything else it starts none, raises
@@ -2103,6 +2277,8 @@ describe('`require` sends no login to a server that says it does not encrypt (A-
     for (const [said, encryption] of [
       ['NOT_SUP', 0x02],
       ['OFF', 0x00],
+      // A value `tedious` has no name for, which it also logs in to in clear.
+      ['a value that is none of the four', 0x04],
     ] as const) {
       it(`db.mssql, ${name}, answered ${said}: refused before LOGIN7, verification on or off`, async () => {
         for (const verifyTls of [true, false]) {
@@ -2187,6 +2363,10 @@ describe('`require` sends no login to a server that says it does not encrypt (A-
           statementTimeoutMs: 2_000,
         }) ?? assert.fail('no connector under `require`');
       const socket = await connector();
+      // Handed over paused, so that `tedious` and the guard read from the same first byte.
+      assert.equal(socket.isPaused(), true, 'nothing is read before `tedious` reads it');
+      // As `tedious` does when it pipes the socket into its reader.
+      queueMicrotask(() => socket.resume());
       const ended = await Promise.race([
         new Promise<unknown>((resolve) => socket.once('error', resolve)),
         new Promise<unknown>((resolve) => setTimeout(resolve, 3_000, 'still reading')),
@@ -2214,6 +2394,276 @@ describe('`require` sends no login to a server that says it does not encrypt (A-
         await fake.close();
       }
     }
+  });
+
+  describe('the guard and `tedious` read one answer alike, or the answer is refused', () => {
+    /** A PRELOGIN payload: the option table, its terminator unless told otherwise, the data. */
+    const payload = (
+      options: readonly (readonly [token: number, offset: number, size: number])[],
+      data: readonly number[],
+      terminator = true,
+    ): Buffer =>
+      Buffer.concat([
+        ...options.map(([token, offset, size]) => {
+          const option = Buffer.alloc(5);
+          option.writeUInt8(token, 0);
+          option.writeUInt16BE(offset, 1);
+          option.writeUInt16BE(size, 3);
+          return option;
+        }),
+        Buffer.from(terminator ? [0xff] : []),
+        Buffer.from(data),
+      ]);
+    const ON = 0x01;
+    const NOT_SUP = 0x02;
+    const OFF = 0x00;
+    /** VERSION, then two ENCRYPTION options: `tedious` believes the second. */
+    const twice = (first: number, second: number): Buffer =>
+      tdsReply(
+        payload(
+          [
+            [0x00, 16, 6],
+            [0x01, 22, 1],
+            [0x01, 23, 1],
+          ],
+          [0x0f, 0, 0, 0, 0, 0, first, second],
+        ),
+      );
+    const required = (fake: Fake): Promise<Error> =>
+      failure(
+        execute(dbMssql, rebinding(), {
+          host: '127.0.0.1',
+          port: fake.port,
+          params: { encrypt: 'require', verifyTls: true },
+        }),
+      );
+
+    for (const [name, second] of [
+      ['NOT_SUP', NOT_SUP],
+      ['OFF', OFF],
+    ] as const) {
+      it(`an answer that says ON and then ${name}: \`tedious\` believes the second, and no login is sent`, async () => {
+        const fake = await tdsServer({ login: true, answer: twice(ON, second) });
+        try {
+          const error = await required(fake);
+          assert.deepEqual(fake.said, ['packet 0x12'], 'no login left the probe');
+          assert.ok(error instanceof DbEncryptionRefusedError, String(error));
+        } finally {
+          await fake.close();
+        }
+      });
+    }
+
+    it('an answer that names encryption twice is refused whichever way round, and whatever both say', async () => {
+      for (const [first, second] of [
+        [NOT_SUP, ON],
+        [ON, ON],
+      ] as const) {
+        assert.equal(preloginEncryption(twice(first, second)), undefined);
+        const fake = await tdsServer({ login: true, answer: twice(first, second) });
+        try {
+          const error = await required(fake);
+          assert.deepEqual(fake.said, ['packet 0x12']);
+          assert.ok(error instanceof DbEncryptionRefusedError, String(error));
+        } finally {
+          await fake.close();
+        }
+      }
+    });
+
+    it('an answer sent before anything was asked is read by both, and the later one by neither', async () => {
+      // ON the moment the connection is accepted, NOT_SUP when the PRELOGIN arrives. Were the
+      // early bytes to reach the guard alone, it would pass on ON and `tedious` log in on
+      // NOT_SUP. Both read ON: `tedious` starts TLS, and what follows is its hello.
+      const fake = await tdsServer({ login: true, early: preloginReply(ON) });
+      try {
+        await required(fake);
+        assert.equal(fake.said.includes('login7'), false, 'no login in clear');
+        assert.deepEqual(fake.said, ['packet 0x12', 'packet 0x12'], 'a PRELOGIN, then a TLS hello');
+      } finally {
+        await fake.close();
+      }
+    });
+
+    it('a second message behind the answer is not the answer, to either', async () => {
+      const both = Buffer.concat([preloginReply(ON), preloginReply(NOT_SUP)]);
+      assert.equal(preloginEncryption(both), ON);
+      const fake = await tdsServer({ login: true, answer: both });
+      try {
+        await required(fake);
+        // `tedious` starts TLS on the first, and takes the second for the handshake's answer.
+        assert.equal(fake.said[0], 'packet 0x12');
+        assert.deepEqual(
+          fake.said.filter((one) => one !== 'packet 0x12'),
+          [],
+          'no login in clear',
+        );
+      } finally {
+        await fake.close();
+      }
+    });
+
+    it('refuses every answer the two readers could take differently', () => {
+      const good = payload(
+        [
+          [0x00, 11, 6],
+          [0x01, 17, 1],
+        ],
+        [0x0f, 0, 0, 0, 0, 0, ON],
+      );
+      assert.equal(preloginEncryption(tdsReply(good)), ON, 'the control');
+      const refused: readonly (readonly [string, Buffer])[] = [
+        ['no terminator: the table runs into the data', payload([[0x01, 5, 1]], [ON], false)],
+        ['no terminator and no data', payload([[0x01, 5, 1]], [], false)],
+        ['an empty payload', Buffer.alloc(0)],
+        ['half an option', Buffer.from([0x01, 0x00])],
+        ['no encryption named', payload([[0x00, 6, 6]], [0x0f, 0, 0, 0, 0, 0])],
+        ['an encryption of no length', payload([[0x01, 6, 0]], [ON])],
+        ['an encryption of two bytes', payload([[0x01, 6, 2]], [ON, ON])],
+        ['an encryption that points into the option table', payload([[0x01, 0, 1]], [ON])],
+        ['an encryption that points at the terminator', payload([[0x01, 5, 1]], [ON])],
+        ['an encryption that points past the end', payload([[0x01, 7, 1]], [ON])],
+        [
+          'another option that points past the end',
+          payload(
+            [
+              [0x01, 11, 1],
+              [0x04, 40, 1],
+            ],
+            [ON],
+          ),
+        ],
+        [
+          'a version `tedious` reads six bytes of, with two there',
+          payload(
+            [
+              [0x01, 11, 1],
+              [0x00, 12, 1],
+            ],
+            [ON, 0x0f, 0],
+          ),
+        ],
+        [
+          'a thread id `tedious` reads four bytes of, with one there',
+          payload(
+            [
+              [0x01, 11, 1],
+              [0x03, 12, 1],
+            ],
+            [ON, 0x07],
+          ),
+        ],
+        [
+          'an option that declares more bytes than there are, where `tedious` would read one',
+          payload(
+            [
+              [0x01, 11, 1],
+              [0x04, 11, 200],
+            ],
+            [ON],
+          ),
+        ],
+        [
+          'an option of a kind nobody knows that points past the end',
+          payload(
+            [
+              [0x01, 11, 1],
+              [0x77, 90, 4],
+            ],
+            [ON],
+          ),
+        ],
+      ];
+      for (const [name, body] of refused) {
+        assert.equal(preloginEncryption(tdsReply(body)), undefined, name);
+      }
+      // The packet's own type: anything but a tabular result.
+      for (const type of [0x12, 0x10, 0x01, 0x00]) {
+        const other = tdsReply(good);
+        other.writeUInt8(type, 0);
+        assert.equal(preloginEncryption(other), undefined, `type 0x${type.toString(16)}`);
+      }
+      // A packet shorter than its own header, which `tedious` ends the connection on: here
+      // one of four bytes, with a whole answer saying ON four bytes in.
+      const short = Buffer.concat([Buffer.from([0x04, 0x00, 0x00, 0x04]), tdsReply(good)]);
+      assert.equal(preloginEncryption(short), undefined, 'a packet of four bytes');
+      // And of a later packet of the same message.
+      const first = tdsReply(good.subarray(0, 5));
+      first.writeUInt8(0x00, 1);
+      const second = tdsReply(good.subarray(5));
+      assert.equal(preloginEncryption(Buffer.concat([first, second])), ON);
+      second.writeUInt8(0x12, 0);
+      assert.equal(preloginEncryption(Buffer.concat([first, second])), undefined);
+    });
+
+    it('whenever it accepts an answer, `tedious`’s own parser reads ON or REQ from the same bytes', () => {
+      // The parser `tedious` runs, from the installed package: `lib/prelogin-payload.js`.
+      const load = createRequire(import.meta.url);
+      const PreloginPayload = load('tedious/lib/prelogin-payload.js') as new (data: Buffer) => {
+        encryption?: number;
+        encryptionString?: string;
+      };
+      // A fixed sequence, so that a failure is the same failure every run.
+      let state = 0x2f6e2b1;
+      const next = (below: number): number => {
+        state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+        return Math.floor((state / 0x1_0000_0000) * below);
+      };
+      const pick = <T>(from: readonly T[]): T => from[next(from.length)] as T;
+      const TOKENS = [0x00, 0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x77];
+      const need = (token: number): number => (token === 0x00 ? 6 : token === 0x03 ? 4 : 1);
+
+      /** A table laid out as a server lays one out, then damaged in up to three places. */
+      const generated = (): Buffer => {
+        const tokens = Array.from({ length: next(5) }, () => pick(TOKENS));
+        // Most have exactly one ENCRYPTION, which is the only kind that can be accepted.
+        if (next(4) !== 0 && !tokens.includes(0x01))
+          tokens.splice(next(tokens.length + 1), 0, 0x01);
+        let at = tokens.length * 5 + 1;
+        const options: [number, number, number][] = [];
+        const data: number[] = [];
+        for (const token of tokens) {
+          const size = need(token);
+          options.push([token, at, size]);
+          for (let index = 0; index < size; index += 1)
+            data.push(pick([0, 1, 1, 2, 3, 3, 4, 0xff]));
+          at += size;
+        }
+        const body = payload(options, data, next(12) !== 0);
+        for (let damage = next(4); damage > 0 && body.length > 0; damage -= 1) {
+          body.writeUInt8(pick([0, 1, 2, 3, 5, 6, 11, 0xff, next(256)]), next(body.length));
+        }
+        return body;
+      };
+
+      let accepted = 0;
+      let refusedCount = 0;
+      const values = new Set<number>();
+      for (let round = 0; round < 40_000; round += 1) {
+        const body = generated();
+        const verdict = preloginEncryption(tdsReply(body));
+        assert.notEqual(verdict, 'incomplete');
+        if (verdict !== 0x01 && verdict !== 0x03) {
+          refusedCount += 1;
+          continue;
+        }
+        accepted += 1;
+        values.add(verdict);
+        const hex = body.toString('hex');
+        let read: { encryption?: number; encryptionString?: string };
+        try {
+          read = new PreloginPayload(body);
+        } catch (error: unknown) {
+          return assert.fail(`accepted ${hex}, which tedious cannot parse: ${String(error)}`);
+        }
+        assert.equal(read.encryption, verdict, hex);
+        assert.ok(read.encryptionString === 'ON' || read.encryptionString === 'REQ', hex);
+      }
+      // Not vacuous: thousands of each, both values, and the damaged ones mostly refused.
+      assert.ok(accepted > 2_000, `accepted ${String(accepted)}`);
+      assert.ok(refusedCount > 2_000, `refused ${String(refusedCount)}`);
+      assert.deepEqual([...values].sort(), [0x01, 0x03]);
+    });
   });
 
   describe('reading the encryption a PRELOGIN answer names', () => {

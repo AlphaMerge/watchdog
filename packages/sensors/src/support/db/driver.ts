@@ -159,6 +159,22 @@ function connectTimedOut(
 const TDS_REDIRECTED = /^Failed to connect to (\S+) \(redirected from /;
 
 /**
+ * A name a login was routed to that did not resolve, as the redirect's own lookup found
+ * (`runDbCheck`): the guard's words for it are about "the device's host name", which this
+ * is not.
+ */
+export class DbRoutedUnresolvedError extends DbError {
+  constructor(where: string, routedTo: string, code: string) {
+    super(
+      `${where} routed the login to ${routedTo}, a host name that did not resolve` +
+        (code === '' ? '' : ` (${code})`),
+      'connect',
+    );
+    this.name = 'DbRoutedUnresolvedError';
+  }
+}
+
+/**
  * The server a connect that timed out had been routed to, or undefined when it was the device.
  * From the connector's own error, which carries it (`tdsConnector`), or from the words of
  * `tedious`'s timer (`lib/connection.js`, `initialiseConnection`), which has no field for it.
@@ -205,9 +221,15 @@ export function codeOf(error: unknown): string {
 /** The error and what it was made from: `tedious` wraps a socket's error in one of its own. */
 function chainOf(error: unknown): unknown[] {
   const chain: unknown[] = [];
-  for (let at: unknown = error; at instanceof Error && chain.length < 5; at = at.cause) {
+  const visit = (at: unknown): void => {
+    if (!(at instanceof Error) || chain.length >= 8) return;
     chain.push(at);
-  }
+    // `tedious`'s own connect gathers one failure per address tried into an `AggregateError`
+    // ("Could not connect (sequence)"), and the socket's code is on those and nowhere else.
+    if (at instanceof AggregateError) for (const one of at.errors as unknown[]) visit(one);
+    visit(at.cause);
+  };
+  visit(error);
   return chain.length === 0 ? [error] : chain;
 }
 
@@ -231,13 +253,27 @@ export function describeDbError(
     if (one instanceof DbRedirectRefusedError || one instanceof DbEncryptionRefusedError) {
       return one;
     }
+    if (one instanceof DbRoutedUnresolvedError) return one;
   }
   const code = chain.map(codeOf).find((one) => !WRAPPERS.has(one)) ?? '';
   const message = error instanceof Error ? error.message : String(error);
 
-  if (code === 'ECONNREFUSED') return new DbError(`nothing is listening at ${where}`);
+  // **Named for the server that failed**, which after a redirect is the routed one: the
+  // device answered, and it is where it sent the login that nothing listens or resolves.
+  const routedTo = phase === 'connect' ? routedOf(chain) : undefined;
+  if (code === 'ECONNREFUSED') {
+    return new DbError(
+      routedTo === undefined
+        ? `nothing is listening at ${where}`
+        : `${where} routed the login to ${routedTo}, where nothing is listening`,
+    );
+  }
   if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
-    return new DbError(`the device’s host name did not resolve, connecting to ${where}`);
+    return new DbError(
+      routedTo === undefined
+        ? `the device’s host name did not resolve, connecting to ${where}`
+        : `${where} routed the login to ${routedTo}, a host name that did not resolve`,
+    );
   }
   const socketTimedOut = code === 'ETIMEDOUT' || code === 'ESOCKETTIMEDOUT';
   // **A socket that times out mid-query was connected** (`A-70`): the same code, in the other
@@ -262,7 +298,7 @@ export function describeDbError(
       code === 'ETIMEOUT' ||
       (code === '' && chain.some((one) => one instanceof Error && one.message === PG_TIMED_OUT)))
   ) {
-    return connectTimedOut(where, options, routedOf(chain));
+    return connectTimedOut(where, options, routedTo);
   }
   // 28P01 and 28000 are "invalid authorisation" in PostgreSQL and MySQL; 18456 is SQL Server's.
   if (

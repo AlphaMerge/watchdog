@@ -18,7 +18,9 @@ import {
 } from '../support/checked-target.js';
 import { CredentialsWithheldError, PIN_REFUSALS, pinnedLookup } from '../support/pinned-target.js';
 import {
+  codeOf,
   DbRedirectRefusedError,
+  DbRoutedUnresolvedError,
   type DbConnectOptions,
   type DbDriver,
   type DbResult,
@@ -345,6 +347,8 @@ export async function runDbCheck(driver: DbDriver, context: CheckContext): Promi
       signal: context.signal,
       verb: 'follow a redirect to',
       doing: `following a redirect from ${host} to ${other}`,
+      unresolved: (error) =>
+        new DbRoutedUnresolvedError(`${host}:${String(port)}`, other, codeOf(error ?? {})),
     });
     return lookupFor(other, onward).lookup;
   };

@@ -741,7 +741,10 @@ can turn a sensor that was Up to Down, and each is the fix and not a fault:
   by rewriting one byte. Under `require` the probe now reads that answer itself and ends the
   connection before a login is written: the sensor reads Down, saying `… answered that it
   does not encrypt, and this sensor requires encryption, so no login was sent`. A SQL Server
-  sensor that was Up that way was sending its password in clear. If the server really has no
+  sensor that was Up that way was sending its password in clear. An answer the probe cannot
+  be certain the driver reads the same way (encryption named twice, or not at all, an option
+  that points outside the answer, anything but the one well-formed answer a SQL Server
+  gives) is refused the same way and with the same sentence. If the server really has no
   TLS, `prefer` is the setting that says so, and it behaves as before. PostgreSQL and MySQL
   already refused.
 
@@ -749,7 +752,10 @@ A connect that ran out of time also reads the same on all three engines now: `�
 connection within N ms`, where PostgreSQL said `timeout expired` and SQL Server `Failed to
 connect to … in Nms`. When SQL Server had routed the login on and it is the routed server
 that did not answer, the sentence names both: `<device> routed the login to <server>, which
-accepted no connection within N ms`. A socket that times out once the query is running says
+accepted no connection within N ms`. The same holds when the routed server refuses the
+connection or has a name that does not resolve: `<device> routed the login to <server>, where
+nothing is listening`, and `<device> routed the login to <server>, a host name that did not
+resolve`, where both used to be said of the device. A socket that times out once the query is running says
 that the connection was made and the query got no answer. A trigger or a report that matches
 on the old words needs the new ones.
 

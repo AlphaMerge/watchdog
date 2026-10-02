@@ -139,18 +139,57 @@ const PRELOGIN_ENCRYPTION = 0x01;
 const PRELOGIN_END = 0xff;
 const ENCRYPT_ON = 0x01;
 const ENCRYPT_REQ = 0x03;
+/** The packet type a server answers PRELOGIN with: a tabular result. */
+const TDS_TABULAR_RESULT = 0x04;
 /** More than any PRELOGIN answer is: a server still sending past this is not answering one. */
 const PRELOGIN_MAX_BYTES = 65_536;
 
 /**
+ * How many bytes `tedious` reads at an option's offset, whatever length the option declares
+ * (`lib/prelogin-payload.js` 194-221): six for VERSION, four for a THREADID that declares
+ * any, one for ENCRYPTION, INSTOPT, MARS and FEDAUTHREQUIRED, none it can fail on otherwise.
+ */
+function readByTedious(token: number, declared: number): number {
+  if (token === 0x00) return 6;
+  if (token === 0x03) return declared > 0 ? 4 : 0;
+  if (token === 0x01 || token === 0x02 || token === 0x04 || token === 0x06) return 1;
+  return 0;
+}
+
+/**
  * The encryption a server's PRELOGIN answer names, from the bytes received so far (`A-70`):
  * the value, `incomplete` while the message has not all arrived, and undefined when it has and
- * names none that can be read.
+ * is not an answer this and `tedious` are certain to read alike.
  *
  * A TDS packet is eight bytes of header (type, status, length in two bytes, and four more)
  * and its payload; a message ends at the packet whose status has the low bit set. A PRELOGIN
  * payload is a list of options, five bytes each (token, offset, length), ended by `0xff`, and
  * then the data the offsets point into.
+ *
+ * **This is a second reader of bytes `tedious` reads for itself, and the two must never
+ * disagree in the direction of "encrypted".** Whoever writes the answer is the attacker this
+ * is here for, so wherever the two readers could differ the answer is refused, not
+ * interpreted. What `tedious` 20 does, and what is done about it here:
+ * - It walks **every** option to the terminator, and each ENCRYPTION option overwrites the
+ *   last (`lib/prelogin-payload.js` 160-193, 203-206): the last one decides. An answer with a
+ *   first option saying ON and a second saying NOT_SUP was read here as ON, and logged in to
+ *   in clear. The whole table is walked here too, and **more than one ENCRYPTION option is
+ *   refused**, as is none.
+ * - It never looks at an option's declared length for ENCRYPTION, and reads one byte at the
+ *   offset. A length other than one is refused, as is an offset inside the option table.
+ * - It checks no bounds: a table with no terminator, or an offset past the end, throws out of
+ *   the parser and no login follows. Both are refused here, for every option and for the
+ *   bytes `tedious` reads at each, so that an answer accepted here is one it parses.
+ * - It maps the byte through a table of four names and starts TLS for ON and REQ alone
+ *   (`lib/connection.js` 2263); any other value, the unknown ones included, is a login in
+ *   clear. Only those two are accepted (`holdToEncryption`).
+ * - It reassembles the message as this does (`lib/incoming-message-stream.js` 40-78): the
+ *   length at bytes 2-3, refused under eight, the payload after the eighth byte, to the first
+ *   packet whose status has the end-of-message bit. It does not look at the packet type; a
+ *   type other than a tabular result is refused here.
+ * - Bytes after the end of the message are a second message to it, read later as TLS
+ *   handshake data or as the answer to a login, and never as PRELOGIN
+ *   (`lib/connection.js` 2276-2311 reads one message). They are not read here either.
  */
 export function preloginEncryption(received: Buffer): number | undefined | 'incomplete' {
   const parts: Buffer[] = [];
@@ -158,6 +197,7 @@ export function preloginEncryption(received: Buffer): number | undefined | 'inco
     if (received.length - at < 8) return 'incomplete';
     const length = received.readUInt16BE(at + 2);
     if (length < 8) return undefined;
+    if (received.readUInt8(at) !== TDS_TABULAR_RESULT) return undefined;
     if (received.length - at < length) return 'incomplete';
     parts.push(received.subarray(at + 8, at + length));
     const last = (received.readUInt8(at + 1) & 0x01) !== 0;
@@ -165,16 +205,29 @@ export function preloginEncryption(received: Buffer): number | undefined | 'inco
     if (last) break;
   }
   const body = Buffer.concat(parts);
-  for (let option = 0; option < body.length; option += 5) {
+
+  const named: number[] = [];
+  let tableEnd = 0;
+  for (let option = 0; ; option += 5) {
+    // No terminator before the end of the payload.
+    if (option >= body.length) return undefined;
     const token = body.readUInt8(option);
-    if (token === PRELOGIN_END || option + 5 > body.length) return undefined;
-    if (token !== PRELOGIN_ENCRYPTION) continue;
+    if (token === PRELOGIN_END) {
+      tableEnd = option + 1;
+      break;
+    }
+    if (option + 5 > body.length) return undefined;
     const offset = body.readUInt16BE(option + 1);
     const size = body.readUInt16BE(option + 3);
-    if (size < 1 || offset >= body.length) return undefined;
-    return body.readUInt8(offset);
+    // What the option declares, and what `tedious` reads there whatever it declares.
+    if (offset + Math.max(size, readByTedious(token, size)) > body.length) return undefined;
+    if (token !== PRELOGIN_ENCRYPTION) continue;
+    if (size !== 1) return undefined;
+    named.push(offset);
   }
-  return undefined;
+  const [offset] = named;
+  if (named.length !== 1 || offset === undefined || offset < tableEnd) return undefined;
+  return body.readUInt8(offset);
 }
 
 /**
@@ -188,10 +241,16 @@ export function preloginEncryption(received: Buffer): number | undefined | 'inco
  * path between the probe and the server chooses it by rewriting one byte. Under `require`
  * with the certificate verified, that was a login in clear and nothing verified.
  *
- * **Refused here, on the socket, because here is before the login.** This listens first, so
- * it reads each chunk in the same turn `tedious`'s own reader is handed it, and `tedious`
- * writes its login only in a later one. A socket destroyed in that turn sends nothing after.
- * Checking once `tedious` says it has connected would be checking after the password left.
+ * **Refused here, on the socket, because here is before the login.** This reads each chunk
+ * in the same turn `tedious`'s own reader is handed it, and `tedious` writes its login only
+ * in a later one. A socket destroyed in that turn sends nothing after. Checking once
+ * `tedious` says it has connected would be checking after the password left.
+ *
+ * **Both read the same bytes, from the first.** The socket is paused before this listens, so
+ * nothing flows until `tedious` pipes it (`lib/message-io.js` 27), and from then every chunk
+ * goes to both. Left flowing, bytes a server sent before it was asked anything could reach
+ * this reader alone: an answer saying ON for the guard, and another saying NOT_SUP for
+ * `tedious`.
  *
  * An answer that cannot be read is refused too: under `require` nothing is assumed.
  */
@@ -206,6 +265,7 @@ function holdToEncryption(socket: Socket, where: string): void {
       socket.destroy(new DbEncryptionRefusedError(where));
     }
   };
+  socket.pause();
   socket.on('data', onData);
 }
 
@@ -275,8 +335,12 @@ export function tdsConnector(
           reject(error instanceof Error ? error : new Error(String(error)));
         });
       };
+      // A server the login was routed to is named with its failure, whatever the failure:
+      // `describeDbError` says that server and the redirect, and not the device.
+      const routedTo =
+        elsewhere || port !== options.port ? { routedTo: `${host}:${String(port)}` } : {};
       const onError = (error: Error): void => {
-        giveUp(error);
+        giveUp(Object.assign(error, routedTo));
       };
       const onAbort = (): void => {
         giveUp(signal?.reason);
@@ -301,12 +365,7 @@ export function tdsConnector(
             new Error(`connect to ${host}:${String(port)} timed out`),
             // `describeDbError` reads this as the firewall that drops packets, and names the
             // server the login was routed to when it is not the device that did not answer.
-            {
-              code: 'ETIMEDOUT',
-              ...(elsewhere || port !== options.port
-                ? { routedTo: `${host}:${String(port)}` }
-                : {}),
-            },
+            { code: 'ETIMEDOUT', ...routedTo },
           ),
         );
       }, connectBudgetMs(options));

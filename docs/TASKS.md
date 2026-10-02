@@ -19482,6 +19482,71 @@ because each is a decision rather than a defect:
         (it answers in one small packet), and the guard against TDS 8 `strict`, which this
         driver never asks for.
 
+      **A-70 second review.** Two findings, both confirmed and closed in a third commit.
+      - **High: the guard read the first ENCRYPTION option and `tedious` believes the last.**
+        Reproduced first, through the TDS fake under `require` with verification on: an
+        answer whose option table names encryption twice, ON and then NOT_SUP (or OFF), was
+        sent `['packet 0x12', 'login7']`. `preloginEncryption` now accepts one shape of
+        answer and refuses the rest, so the two readers cannot differ on one it accepts.
+        Each difference checked against `tedious` 20, in `node_modules/tedious/lib`:
+        1. `prelogin-payload.js` 160-193: walks every option to the terminator, and each
+           ENCRYPTION option overwrites the last (169-170, 202-205). The guard walks the
+           whole table and refuses more than one ENCRYPTION option, and none.
+        2. `prelogin-payload.js` 162-165: reads the offset and never the declared length
+           for ENCRYPTION, one byte (202-205). A length other than 1 is refused.
+        3. `prelogin-payload.js` 160-193: no bounds are checked and no terminator is
+           required; a read past the end throws and no login follows. Refused: no
+           terminator, half an option, any option whose offset and length leave the
+           payload, and an ENCRYPTION offset inside the option table.
+        4. `prelogin-payload.js` 194-221: the bytes it reads whatever an option declares
+           (six for VERSION, four for a THREADID of any length, one for INSTOPT, MARS and
+           FEDAUTHREQUIRED). An option with fewer than that behind its offset is refused,
+           so an answer the guard accepts is one `tedious` parses.
+        5. `connection.js` 2263 and `prelogin-payload.js` 23-33: TLS starts for ON and REQ
+           and for nothing else; a value with no name is a login in clear. Only 0x01 and
+           0x03 are accepted.
+        6. `incoming-message-stream.js` 40-78: the message is reassembled from the length
+           at bytes 2-3 (under eight is an error), to the first packet with the
+           end-of-message bit. The guard reassembles the same way, several packets
+           included, and refuses a length under eight.
+        7. `incoming-message-stream.js` 40-78: the packet type is never looked at. The
+           guard refuses any type but 0x04, in any packet of the message.
+        8. `connection.js` 2276-2311: exactly one message is read as the PRELOGIN answer.
+           Bytes after its last packet, a second message included, are TLS handshake data
+           or a login's answer to `tedious` and are not read by the guard either.
+        9. `message-io.js` 27 and `connection.js` 1101-1107: `tedious` reads from the
+           moment it pipes the socket, after the connector returns. The guard now pauses
+           the socket before it listens, so bytes a server sends before it is asked
+           anything reach both readers or neither, never the guard alone.
+      - **Low: a routed server that refuses, or whose name does not resolve, was reported
+        as the device.** `describeDbError` reads the routed server in those branches too:
+        `D routed the login to R, where nothing is listening`, and `…, a host name that did
+        not resolve`. The connector marks every socket error from a routed server, not only
+        its timeout; the redirect's own lookup failing is `DbRoutedUnresolvedError`. Under
+        `none` the socket's code sits inside `tedious`'s `AggregateError` (`connector.js`
+        108), which the error chain did not look into, so a refused connect there read as
+        `Failed to connect … Could not connect (sequence)`, for the device as well. It is
+        read now.
+      - **Docs:** `administration.md`: the two sentences, and that an answer the probe
+        cannot be sure of is refused like one that says no.
+      - **Tests:** `db-checked-target.test.ts` is 155, none skipped. ON then NOT_SUP and ON
+        then OFF through the fake with no login sent; both orders and ON twice; an answer
+        sent before anything was asked; a second message behind the answer; each refusal
+        in the list above by itself; a value with no name through the fake; and a
+        generated test, 40,000 option tables from a fixed seed, laid out as a server would
+        and then damaged, asserting that whenever the guard accepts, `tedious`'s own
+        `PreloginPayload` parses the same bytes and reads ON or REQ, with more than 2,000
+        accepted and more than 2,000 refused. The routed sentences through the real
+        `tedious` under `link-local` and `none`, a routed name that does not resolve, the
+        device's own refusal under both, and the connector by itself.
+      - **Mutation:** 28 planted, each alone. 26 killed at the first pass; two survived (a
+        packet length under eight, and an option's declared length past the end where
+        `tedious` reads less), a test was added for each, and both are killed. Sources
+        compared against the baseline afterwards.
+      - **Not done here:** the query-phase timeout sentence still names the device after a
+        redirect (left to the coordinator to ticket). Not proven: any of this against a
+        real SQL Server.
+
 - [x] **A-71 — what is left of an address under TLS** · S · A-67 · Found 2026-10-02 by `A-67`.
       The core's heartbeat uses `fetch`, which refuses `https://[::1]` for `A-60`'s reason and
       has no identity hook. ~~The database drivers' own TLS was not tried against an address,
