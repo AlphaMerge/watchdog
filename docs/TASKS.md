@@ -17296,7 +17296,7 @@ because each is a decision rather than a defect:
       answer is sent `problem` or `overflow` if its credential lapsed in that gap and nothing
       was published, and nothing if something was.
 
-- [ ] **U-26 — what is left of telling a lapsed stream socket apart** · S · U-25 · Found
+- [x] **U-26 — what is left of telling a lapsed stream socket apart** · S · U-25 · Found
       2026-10-02 by `U-25`'s review; each is low, and none delivers anything after a sign-out.
       While the credential check is failing, a client frame closes a silenced socket and
       answers a lapsed one that was not silenced. A sweep with only silenced sockets closes
@@ -17308,6 +17308,80 @@ because each is a decision rather than a defect:
       standing is not heard, and a subscription refused in the milliseconds between its check
       and its answer is answered or not by whether something was published. **Done when** each
       has a test and is closed, or is written down as accepted with the reason.
+
+      **Done 2026-10-02.** Six closed with a test, one decided against the wording it was found
+      under, one accepted. The rule each is held to: what a socket whose credential lapsed is
+      told, and when, is the same whether or not an edge silenced it first; and nothing
+      committed after a sign-out is delivered (`A-34`).
+
+      **A check that cannot be made signs nobody out, silenced or not.** This is the one
+      decision the rest follow from. `#examine` acts on a socket only when its check answered:
+      on a failed or unanswered check a silenced socket is left as it is, like any other.
+      Before, a failing check closed a silenced socket with `4401` (on the sweep and at its own
+      frame) and left a lapsed, unsilenced one open or answered.
+
+      - **A client frame while the check is failing** (first finding). The frame is not acted
+        on and the socket is closed with `1013` ("could not confirm this session; reconnect",
+        `STREAM_UNSURE`), the same for a silenced socket, a lapsed unsilenced one and one still
+        signed in. Dropping the frame in silence was the other candidate and was not chosen: a
+        signed-in client would wait for a snapshot that never came, where a close puts it on
+        the reconnect path it already has. The same for the check made before a snapshot or
+        `watching` goes: it used to send `problem` to an unsilenced socket and `4401` to a
+        silenced one. One helper in the route (`vouched`). Counted in
+        `credentialCheckFailures`; not in `streamSevered`, which is about a client misbehaving.
+      - **The sweep asks about silenced sockets too**, in the one query it made (one per
+        credential check, however many sockets). A sweep with only silenced sockets now waits
+        for the answer as a sweep that finds a lapse does. An edge still leaves them out.
+      - **A check that hangs: bounded, and nothing closed.** A sweep's check, and a client
+        frame's, wait at most `credentialWaitMs` (2 s by default, under the 5 s interval);
+        past it the check counts as failed, the sweep ends and the next tick asks again, and an
+        answer that arrives late is not acted on. Before, one query that never returned held
+        `sweep` for good: no later tick ran and no watcher was reviewed. **The silenced socket
+        is not closed at the bound**, which is not what the finding asked for: closing it there,
+        with an unsilenced lapsed socket necessarily left open, is exactly the difference the
+        ticket is about. So the documents changed instead: the five seconds are from a database
+        that answers, and until it does such a socket stays open and is sent nothing
+        (`administration.md`, `web-ui.md`, the route's description). If closing on the tick is
+        wanted over indistinguishability during an outage, it is one line in `#examine`.
+        **An edge's check is not bounded**: timed out it would be a failed check, and a failed
+        check delivers; a case pins that.
+      - **One rule for the close reason**: why the credential fails now, for both kinds. What
+        the edge recorded is used only when the credential has since come back.
+      - **A frame queued behind the check asks nothing once its socket is closed.**
+      - **The watch attached before it is judged** (from `U-24`). Kept attach-first, since
+        judging first reopens the gap the order closes. `StateBroadcaster.considerProbe`
+        attaches a watcher as *not yet judged*: `publishProbe` marks it and reads nothing on
+        its account, and `stand()`, called by the route once `canWatchProbe` says yes, says a
+        marked change once. A refused subscription now costs its own `canWatchProbe` query
+        (paced at 30 a minute) and nothing at any edge. `watchProbe` is `considerProbe` and
+        `stand` together.
+      - **A change between the form's `GET` and its watch standing** (from `U-24`).
+        `useSettledReload(live, reload, 'news')`: the add-sensor form asks the probe's health
+        once more when `watching` arrives, one extra request per watch opened. An unchanged
+        answer writes nothing into the status region (`B-12`'s held answer). The alarms list
+        keeps the default.
+      - **Accepted: the subscription refused in the milliseconds between its check and its
+        answer** (from `U-25`). Closing it needs the credential asked a second time before
+        every `problem` and `overflow`, a query per refused frame, to hide whether a batch was
+        published inside a window of one query's length that the client cannot place.
+
+      **Alarm volume is untouched**: nothing here writes state or queues a notification. No
+      migration, no protocol number, `PROTOCOL` stays 1; `1013` is a close code, not a frame.
+
+      **Tests.** `state-stream.test.ts` +8, 3 changed (sweeps by hand with the timer an hour
+      away; one case with `setInterval` and `setTimeout` mocked: a hung check at 5.0 s given up
+      at 7.0 s, nothing closed, both kinds closed at 10.0 s). `stream-sign-out.test.ts` +5 over
+      real sockets, every wait `until`'s or `closedWith`'s five seconds.
+      `web/test/add-sensor-live.test.tsx` +2, and every count there moved by the one request.
+      **Mutations 17/17**, two of which survived first and each got a case: an unjudged watcher
+      attached while a read was in flight, and the bound applied to an edge.
+
+      **Found, not fixed.** A credential that lapses and comes back inside one sweep interval
+      (an account disabled and re-enabled within five seconds, or a restore): a silenced socket
+      is closed, an unsilenced one never knew. While the check *rejects* at an edge, a lapsed
+      unsilenced socket is delivered the batch (`A-34`'s rule for a database that blinked) and
+      a silenced one is not. A check that *hangs* at an edge holds that batch, and every later
+      one, for as long as it hangs.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

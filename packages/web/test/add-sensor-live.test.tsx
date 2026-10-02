@@ -212,8 +212,8 @@ const notice = (): HTMLElement => {
 const describedBy = (): string | null =>
   screen.getByLabelText('Sensor type').getAttribute('aria-describedby');
 
-/** The form open on a flow sensor, the probe's first answer in, and its stream live. */
-async function watching(core: Core): Promise<DrivenSocket> {
+/** The form open on a flow sensor, the probe's first answer in, and a socket not yet open. */
+async function chosen(core: Core): Promise<DrivenSocket> {
   await open();
   pick('flow.netflow');
   await waitFor(() => {
@@ -224,8 +224,28 @@ async function watching(core: Core): Promise<DrivenSocket> {
   });
   const socket = sockets[0];
   if (socket === undefined) throw new Error('no socket opened');
+  return socket;
+}
+
+/**
+ * The form open on a flow sensor, its stream live, and the probe asked about twice: once when the
+ * type was chosen and once when the core said the watch stands (`U-26`). Every count below starts
+ * from that second request, so a case never races the one the watch itself prompts.
+ */
+async function watching(core: Core): Promise<DrivenSocket> {
+  const socket = await chosen(core);
   socket.open();
   socket.deliver(WATCHING);
+  await waitFor(
+    () => {
+      expect(core.healthAsked()).toBe(2);
+    },
+    { timeout: 3_000 },
+  );
+  // The answer to it is in, and it is the one the form had.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
   return socket;
 }
 
@@ -248,9 +268,9 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     // The probe itself, and not its branch: no snapshot of every sensor it scans (`U-24`).
     expect(socket.sent).toEqual([WATCH]);
 
-    // The watch standing is the world the form's own request already asked about.
+    // The watch standing was asked about once (`U-26`), and is not asked about again.
     await settled();
-    expect(core.healthAsked(), 'the answer to the watch is not news').toBe(1);
+    expect(core.healthAsked(), 'the watch standing is one request').toBe(2);
 
     core.health = RUNNING;
     socket.deliver(changed());
@@ -259,7 +279,7 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     });
     expect(describedBy()).toBeNull();
     expect(notice().className).toBe('sr-only');
-    expect(core.healthAsked()).toBe(2);
+    expect(core.healthAsked()).toBe(3);
 
     // What stands while the next answer is on its way is the last answer, not the first: the
     // sentence that was taken back does not come back for the length of a request.
@@ -271,7 +291,7 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     core.hold = true;
     socket.deliver(changed());
     await waitFor(() => {
-      expect(core.healthAsked()).toBe(3);
+      expect(core.healthAsked()).toBe(4);
     });
     expect(notice().textContent).toBe('');
     await act(async () => {
@@ -345,7 +365,7 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     core.hold = true;
     socket.deliver(changed());
     await waitFor(() => {
-      expect(core.healthAsked()).toBe(2);
+      expect(core.healthAsked()).toBe(3);
     });
     expect(notice().textContent).toContain('is not running');
     expect(describedBy()).toBe('sensor-type-listener');
@@ -372,7 +392,7 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
       expect(notice().textContent).toBe('');
     });
     await settled();
-    expect(core.healthAsked(), 'one request for forty frames').toBe(2);
+    expect(core.healthAsked(), 'one request for forty frames').toBe(3);
   });
 
   it('says nothing once the probe’s health is refused', async () => {
@@ -394,7 +414,7 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     core.hold = true;
     socket.deliver(changed());
     await waitFor(() => {
-      expect(core.healthAsked()).toBe(3);
+      expect(core.healthAsked()).toBe(4);
     });
     expect(notice().textContent).toBe('');
     await act(async () => {
@@ -428,7 +448,7 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     await waitFor(() => {
       expect(notice().textContent).toBe('');
     });
-    expect(core.healthAsked()).toBe(2);
+    expect(core.healthAsked()).toBe(3);
   });
 
   it('opens no socket for a type that reads no listener, and closes it when one is unchosen', async () => {
@@ -487,7 +507,7 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     core.health = DROPPED;
     socket.deliver(changed());
     await waitFor(() => {
-      expect(core.healthAsked()).toBe(2);
+      expect(core.healthAsked()).toBe(3);
     });
     await waitFor(() => {
       expect(notice().textContent).toBe('');
@@ -496,12 +516,12 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     core.health = CONNECTED;
     socket.deliver(changed());
     await waitFor(() => {
-      expect(core.healthAsked()).toBe(3);
+      expect(core.healthAsked()).toBe(4);
     });
     core.health = RUNNING;
     socket.deliver(changed());
     await waitFor(() => {
-      expect(core.healthAsked()).toBe(4);
+      expect(core.healthAsked()).toBe(5);
     });
     expect(notice().textContent).toBe('');
     expect(describedBy()).toBeNull();
@@ -554,7 +574,76 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     core.health = RUNNING;
     socket.deliver({ type: 'probe', probeId: 3 });
     await settled();
-    expect(core.healthAsked()).toBe(1);
+    expect(core.healthAsked()).toBe(2);
     expect(notice().textContent).toContain('is not running');
+  });
+
+  it('hears a change that fell between its own request and the watch standing (U-26)', async () => {
+    // The form read the probe when the type was chosen: collector off. The watch is not standing
+    // yet — the socket is still connecting — when the probe restarts with its collector on.
+    // No frame says so, because nobody was watching, and until this the sentence stood for as
+    // long as the form was open.
+    const core = stubCore(OFF);
+    const socket = await chosen(core);
+    await waitFor(() => {
+      expect(notice().textContent).toContain('The flow collector on probe “Berlin” is not running');
+    });
+    const name = screen.getByLabelText('Name');
+    name.focus();
+
+    core.health = RUNNING;
+    // The socket opening is not the watch standing: nothing is asked for it.
+    socket.open();
+    await settled();
+    expect(core.healthAsked(), 'asked before the core said the watch stands').toBe(1);
+    expect(notice().textContent).toContain('is not running');
+
+    socket.deliver(WATCHING);
+    await waitFor(() => {
+      expect(notice().textContent).toBe('');
+    });
+    expect(describedBy()).toBeNull();
+    expect(document.activeElement).toBe(name);
+    // Once: the watch standing is one request, however long the form then stays open.
+    await settled();
+    expect(core.healthAsked()).toBe(2);
+    expect(socket.sent).toEqual([WATCH]);
+  });
+
+  it('asks once when the watch stands, and writes nothing when the answer is the one it had (U-26)', async () => {
+    const core = stubCore(OFF);
+    const socket = await chosen(core);
+    await waitFor(() => {
+      expect(notice().textContent).toContain('is not running');
+    });
+
+    // Everything written into the live region from here on: a screen reader reads each out.
+    const written: string[] = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records) written.push(record.type);
+    });
+    observer.observe(notice(), { childList: true, characterData: true, subtree: true });
+
+    core.hold = true;
+    socket.open();
+    socket.deliver(WATCHING);
+    await waitFor(
+      () => {
+        expect(core.healthAsked()).toBe(2);
+      },
+      { timeout: 3_000 },
+    );
+    // While it asks, the sentence stands and is still tied to the field.
+    expect(notice().textContent).toContain('is not running');
+    expect(describedBy()).toBe('sensor-type-listener');
+    await act(async () => {
+      core.release();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(notice().textContent).toContain('is not running');
+    await settled();
+    observer.disconnect();
+    expect(written, 'the same sentence was written again').toEqual([]);
+    expect(core.healthAsked(), 'the watch standing was asked about more than once').toBe(2);
   });
 });

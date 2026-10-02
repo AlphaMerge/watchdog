@@ -1,9 +1,10 @@
 import { strict as assert } from 'node:assert';
 import { after, afterEach, before, beforeEach, describe, it, type TestContext } from 'node:test';
 import type { FastifyInstance } from 'fastify';
+import type { QueryResultRow } from 'pg';
 import type { WebSocket } from 'ws';
 import { ApiServer } from '../src/api/server.js';
-import { STREAM_LIMITS, STREAM_SIGNED_OUT } from '../src/api/routes/stream.js';
+import { STREAM_LIMITS, STREAM_SIGNED_OUT, STREAM_UNSURE } from '../src/api/routes/stream.js';
 import { AccountService } from '../src/auth/accounts.js';
 import { AccessService } from '../src/auth/access.js';
 import { credentialCheck, type Lapse } from '../src/auth/credentials.js';
@@ -13,7 +14,7 @@ import { LoginThrottle } from '../src/auth/throttle.js';
 import { TokenService } from '../src/auth/tokens.js';
 import { TotpService } from '../src/auth/totp.js';
 import { AuditRepository, DatabaseAuditSink } from '../src/audit/store.js';
-import type { Database } from '../src/db/pool.js';
+import type { Database, Queryable } from '../src/db/pool.js';
 import { StateBroadcaster } from '../src/state/stream.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import {
@@ -44,6 +45,10 @@ import { buildHarness, silent, testActor, type Harness } from './support/tree.js
  * timer, or the socket's own next frame does. Closed where the change was published, an account
  * that had just been signed out or disabled was told the instant some sensor changed state or
  * some probe's link moved — one it may never have been allowed to see.
+ *
+ * **Nor does how it is treated while the check cannot be made** (`U-26`): a frame sent then is
+ * not acted on and the socket is closed to reconnect, the same for a socket a change silenced,
+ * one that lapsed with nothing published since, and one still signed in.
  */
 
 const available = await databaseAvailable();
@@ -695,6 +700,220 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
       t.mock.restoreAll();
       await stream.sweep();
       assert.equal((await closedWith(watcher.closed)).code, STREAM_SIGNED_OUT);
+    });
+  });
+
+  describe('a frame sent while the check cannot be made (U-26)', () => {
+    const UNSURE = { code: STREAM_UNSURE, reason: 'could not confirm this session; reconnect' };
+
+    it('is not acted on, and closes a silenced socket, a lapsed one and a signed-in one alike', async (t: TestContext) => {
+      // Until this, the silenced socket was closed with 4401 and the other two were answered:
+      // one frame during a database outage said whether anything had changed since a sign-out.
+      const silenced = await watching(as('watcher'));
+      const unfound = await watching(as('bystander'));
+      await logOut('watcher');
+      await change();
+      // The edge happened, and it silenced the one socket whose session had ended.
+      await until(() => states(unfound.frames) === 1, 'the change on the other socket');
+      await roundTrip(silenced.socket);
+      assert.deepEqual(silenced.ended, {});
+      // Lapsed after it, and found by nothing.
+      await logOut('bystander');
+      // And one that is signed in throughout.
+      cookies.set('watcher', await logIn('watcher'));
+      const signedIn = await watching(as('watcher'));
+      const all = [silenced, unfound, signedIn];
+      const had = all.map((each) => each.frames.length);
+      const before = { ...stream.stats.signedOut };
+      const failures = stream.stats.credentialCheckFailures;
+
+      t.mock.method(sessions, 'lapsed', () => Promise.reject(new Error('the database went away')));
+      for (const each of all) each.socket.send(JSON.stringify({ subscribe: {} }));
+      for (const each of all) assert.deepEqual(await closedWith(each.closed), UNSURE);
+      assert.deepEqual(
+        all.map((each, index) => each.frames.slice(had[index])),
+        [[], [], []],
+        'a frame was answered though its socket could not be vouched for',
+      );
+      // Nobody was signed out by a question that had no answer, and each was counted.
+      assert.deepEqual(stream.stats.signedOut, before);
+      assert.equal(stream.stats.credentialCheckFailures, failures + 3);
+    });
+
+    it('sends no snapshot and no `watching` to a socket it could not vouch for, and closes it the same way', async (t: TestContext) => {
+      // The frame's own check answers; the one before the answer goes cannot be made.
+      const ask = sessions.lapsed.bind(sessions);
+      let calls = 0;
+      t.mock.method(sessions, 'lapsed', (...args: Parameters<SessionService['lapsed']>) => {
+        calls += 1;
+        return calls === 1 ? ask(...args) : Promise.reject(new Error('the database went away'));
+      });
+      for (const subscribe of [{}, { probeId }]) {
+        const what = JSON.stringify(subscribe);
+        calls = 0;
+        const socket = await app.injectWS('/api/v1/stream', { headers: as('bystander') });
+        sockets.push(socket);
+        const types: unknown[] = [];
+        socket.on('message', (raw: Buffer) => {
+          types.push((JSON.parse(raw.toString('utf8')) as Record<string, unknown>)['type']);
+        });
+        const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+          socket.on('close', (code: number, reason: Buffer) => {
+            resolve({ code, reason: reason.toString('utf8') });
+          });
+        });
+        socket.send(JSON.stringify({ subscribe }));
+
+        assert.deepEqual(await closedWith(closed), UNSURE, what);
+        assert.equal(calls, 2, `${what}: the answer was not asked about`);
+        assert.deepEqual(
+          types.filter((type) => type !== 'hello'),
+          [],
+          `${what}: something was sent to a socket nobody could vouch for`,
+        );
+      }
+    });
+
+    it('asks nothing for a frame still waiting when its socket was severed', async (t: TestContext) => {
+      const watcher = await watching(as('watcher'));
+      // Every question waits here, and is let go at the instant the socket is severed: the
+      // frames queued behind the first are then read with the socket closing and not yet gone.
+      let release = (): void => undefined;
+      const slow = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const ask = sessions.lapsed.bind(sessions);
+      let asked = 0;
+      t.mock.method(sessions, 'lapsed', async (...args: Parameters<SessionService['lapsed']>) => {
+        asked += 1;
+        await slow;
+        return ask(...args);
+      });
+      const count = stream.severed.bind(stream);
+      t.mock.method(stream, 'severed', () => {
+        count();
+        release();
+      });
+      try {
+        // As many as may wait: the first is being asked about, the rest are queued behind it.
+        for (let n = 0; n < STREAM_LIMITS.unread; n += 1) watcher.socket.send('5');
+        await roundTrip(watcher.socket);
+        assert.equal(asked, 1);
+        // One more severs the socket, which lets the first question go.
+        watcher.socket.send('5');
+        assert.equal((await closedWith(watcher.closed)).code, 1008);
+        // Whatever the queue was going to do, it has done.
+        for (let turn = 0; turn < 20; turn += 1) {
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        assert.equal(asked, 1, 'a frame behind the check asked about a socket already severed');
+      } finally {
+        release();
+      }
+    });
+  });
+
+  describe('a watch that has not been judged yet (U-26)', () => {
+    /** `db`, counting what is asked of it. */
+    const counting = (): { q: Queryable; asked: () => number } => {
+      let asked = 0;
+      return {
+        asked: () => asked,
+        q: {
+          query<T extends QueryResultRow>(text: string, values?: readonly unknown[]) {
+            asked += 1;
+            return db.query<T>(text, values);
+          },
+        },
+      };
+    };
+
+    /** Holds `canWatchProbe` until `release`, and then answers `visible` or as the core would. */
+    const judging = (t: TestContext, visible: boolean | 'ask') => {
+      let release = (): void => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let reached = false;
+      const real = stream.canWatchProbe.bind(stream);
+      t.mock.method(
+        stream,
+        'canWatchProbe',
+        async (...args: Parameters<StateBroadcaster['canWatchProbe']>) => {
+          reached = true;
+          await gate;
+          return visible === 'ask' ? real(...args) : { visible, epoch: null };
+        },
+      );
+      return {
+        release: (): void => {
+          release();
+        },
+        reached: (): boolean => reached,
+      };
+    };
+
+    it('costs an edge no read while it is being refused, and is told nothing', async (t: TestContext) => {
+      await until(() => stream.stats.subscribers === 0, 'the earlier cases’ sockets to go');
+      const held = judging(t, false);
+      const socket = await app.injectWS('/api/v1/stream', { headers: as('watcher') });
+      sockets.push(socket);
+      const frames: Record<string, unknown>[] = [];
+      socket.on('message', (raw: Buffer) => {
+        frames.push(JSON.parse(raw.toString('utf8')) as Record<string, unknown>);
+      });
+      try {
+        socket.send(JSON.stringify({ subscribe: { probeId } }));
+        await until(held.reached, 'the watch to be judged');
+        // Attached, and judged by nobody: three edges in the window read nothing for it.
+        assert.equal(stream.stats.subscribers, 1);
+        const counted = counting();
+        for (let edge = 0; edge < 3; edge += 1) {
+          assert.equal(await stream.publishProbe(counted.q, probeId), 0);
+        }
+        assert.equal(counted.asked(), 0, 'a watch being refused bought a read at an edge');
+      } finally {
+        held.release();
+      }
+      await until(() => frames.some((frame) => frame['type'] === 'problem'), 'the refusal');
+      await roundTrip(socket);
+      assert.deepEqual(
+        frames.map((frame) => frame['type']).filter((type) => type !== 'hello'),
+        ['problem'],
+      );
+      assert.equal(stream.stats.subscribers, 0);
+    });
+
+    it('hears a change that fell while it was judged, after `watching` and once', async (t: TestContext) => {
+      await until(() => stream.stats.subscribers === 0, 'the earlier cases’ sockets to go');
+      const held = judging(t, 'ask');
+      const socket = await app.injectWS('/api/v1/stream', { headers: as('watcher') });
+      sockets.push(socket);
+      const frames: Record<string, unknown>[] = [];
+      socket.on('message', (raw: Buffer) => {
+        frames.push(JSON.parse(raw.toString('utf8')) as Record<string, unknown>);
+      });
+      const counted = counting();
+      try {
+        socket.send(JSON.stringify({ subscribe: { probeId } }));
+        await until(held.reached, 'the watch to be judged');
+        await stream.publishProbe(counted.q, probeId);
+        await stream.publishProbe(counted.q, probeId);
+        assert.equal(counted.asked(), 0);
+      } finally {
+        held.release();
+      }
+      await until(() => probes(frames) === 1, 'the change held for it');
+      await roundTrip(socket);
+      assert.deepEqual(
+        frames.map((frame) => frame['type']).filter((type) => type !== 'hello'),
+        ['watching', 'probe'],
+        'the change was lost, repeated, or sent before the watch was answered',
+      );
+      // And from there an edge is read for it, and told.
+      await stream.publishProbe(counted.q, probeId);
+      await until(() => probes(frames) === 2, 'the next change');
+      assert.equal(counted.asked(), 1);
     });
   });
 

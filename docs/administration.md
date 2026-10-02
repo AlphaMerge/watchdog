@@ -166,7 +166,12 @@ Core Health counts these by reason
 (`streamEnded`, `streamExpired`, `streamRevoked`, `streamDisabled`), and `streamCheckFailures`
 counts checks that could not be made. **A check that fails closes nothing**: a database that
 blinked is not a reason to sign everybody out, so a climbing `streamCheckFailures` means sockets
-are not being checked.
+are not being checked. That holds for a page the core had already stopped sending to: **the five
+seconds are from a database that answers**, and while it does not, such a page stays open and is
+sent nothing. A check still out after two seconds is counted as one that failed and asked again
+on the next tick. A page that sends the core something while the check cannot be made is closed
+with `1013`, signed in or not, and reconnects; nothing is closed with `4401` on a question nobody
+could answer.
 
 The same socket tells a page that watches one probe — the add-sensor form does, for a sensor type
 that reads a listener — when that probe connects, drops, or reports a listener coming or going.

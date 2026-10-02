@@ -354,7 +354,8 @@ core closes it when the session behind it ends. That can be a logout in another 
 change, an administrator disabling the account, or the idle timeout. The page then goes to the
 login form and says why ("You were signed out: this session has expired; sign in again"). That
 happens within about five seconds, on a timer of the core's own; in those seconds the page is sent
-nothing, so what it shows stops moving before the login form appears.
+nothing, so what it shows stops moving before the login form appears. While the core's database is
+not answering it cannot ask, and the page waits, still sent nothing, until it can.
 
 **It does not try to reconnect.** A reconnect would be refused, and a browser cannot tell a
 refused connection from a dropped network, so it would retry for ever while the header still said

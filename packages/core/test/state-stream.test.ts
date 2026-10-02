@@ -1152,22 +1152,37 @@ describe(
       const lapses = new Map<string, Lapse>();
       const asked: string[][] = [];
       let failing = false;
+      /** Set, every answer waits for it: a slow database, or one that never answers. */
+      let gate: Promise<void> | null = null;
       const check: CredentialCheck = {
-        lapsed: (about) => {
+        lapsed: async (about) => {
           const keys = about.map(credentialKey);
           asked.push(keys);
-          if (failing) return Promise.reject(new Error('the database went away'));
+          if (gate !== null) await gate;
+          if (failing) throw new Error('the database went away');
+          // Read once the gate has opened: what is true when the database answers.
           const answer = new Map<string, Lapse>();
           for (const key of keys) {
             const lapse = lapses.get(key);
             if (lapse !== undefined) answer.set(key, lapse);
           }
-          return Promise.resolve(answer);
+          return answer;
         },
       };
       return {
         check,
         asked,
+        /** Holds every answer from here on. Returns how to let them go. */
+        hold: (): (() => void) => {
+          let release = (): void => undefined;
+          gate = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          return () => {
+            gate = null;
+            release();
+          };
+        },
         lapse: (id: string, lapse: Lapse = 'ended'): void => {
           lapses.set(`session:${id}`, lapse);
         },
@@ -1283,7 +1298,7 @@ describe(
       assert.deepEqual(log, ['silence:disabled', 'signOut:disabled']);
     });
 
-    it('asks once per edge as before, and never again about a socket it has silenced', async () => {
+    it('asks once per edge as before, not about a socket it has silenced, and once per sweep about all', async () => {
       const held = credentials();
       admitted(stream, 'lapsed', held.check);
       admitted(stream, 'allowed', held.check);
@@ -1296,8 +1311,10 @@ describe(
       await stream.sweep();
       assert.deepEqual(
         held.asked.slice(1),
-        [['session:allowed'], ['session:allowed'], ['session:allowed']],
-        'one question per edge and per sweep, and none about a socket already decided',
+        // An edge leaves out the socket already decided. The sweep asks about it with the rest,
+        // in its one query (`U-26`): see 'waits for the sweep’s question' below.
+        [['session:allowed'], ['session:allowed'], ['session:lapsed', 'session:allowed']],
+        'one question per edge and one per sweep',
       );
     });
 
@@ -1316,7 +1333,9 @@ describe(
       assert.deepEqual(lapsed.log, ['silence:ended', 'signOut:ended']);
     });
 
-    it('closes what an edge decided on a sweep whose own check fails, and nothing else', async () => {
+    it('closes nothing on a sweep whose check fails, decided at an edge or not, and both on the next', async () => {
+      // Until `U-26` the silenced socket was closed here and the other was not: two sockets of
+      // one signed-out session, told apart by whether anything had changed state in between.
       const held = credentials();
       const silenced = admitted(stream, 'silenced', held.check);
       held.lapse('silenced');
@@ -1328,12 +1347,17 @@ describe(
       const failures = stream.stats.credentialCheckFailures;
 
       await stream.sweep();
-      assert.deepEqual(silenced.log, ['silence:ended', 'signOut:ended']);
+      assert.deepEqual(silenced.log, ['silence:ended'], 'closed on a question nobody answered');
       assert.deepEqual(unfound.log, [], 'a check that could not answer closed a socket');
       assert.equal(stream.stats.credentialCheckFailures, failures + 1);
+      // Still silent: the edge that follows asks about the other and sends this one nothing.
+      await stream.publishProbe(db, probeId);
+      assert.equal(silenced.watch.changes, 0);
+      assert.equal(silenced.tree.events.length, 0);
 
       held.fail(false);
       await stream.sweep();
+      assert.deepEqual(silenced.log, ['silence:ended', 'signOut:ended']);
       assert.deepEqual(unfound.log, ['signOut:ended']);
     });
 
@@ -1362,18 +1386,24 @@ describe(
       assert.equal(await allowed.admission.confirm(), true);
       assert.deepEqual(allowed.log, []);
 
-      // And a silenced socket is closed by its own frame even when the check cannot answer —
-      // while one not yet decided is "cannot tell", which closes nothing.
+      // **A check that cannot answer is "cannot tell" for both** (`U-26`): the silenced socket
+      // is not closed by its own frame while one not yet decided is left, which is what it was.
       const second = admitted(stream, 'second', held.check);
       held.lapse('second');
       await stream.publish(db, [stateChange()]);
       const third = admitted(stream, 'third', held.check);
       held.lapse('third');
       held.fail(true);
-      assert.equal(await second.admission.confirm(), false);
-      assert.deepEqual(second.log, ['silence:ended', 'signOut:ended']);
+      await assert.rejects(second.admission.confirm(), /the database went away/);
+      assert.deepEqual(second.log, ['silence:ended'], 'closed on a question nobody answered');
       await assert.rejects(third.admission.confirm(), /the database went away/);
       assert.deepEqual(third.log, []);
+      // And when it can, both are closed by their own frames.
+      held.fail(false);
+      assert.equal(await second.admission.confirm(), false);
+      assert.equal(await third.admission.confirm(), false);
+      assert.deepEqual(second.log, ['silence:ended', 'signOut:ended']);
+      assert.deepEqual(third.log, ['signOut:ended']);
     });
 
     it('says nothing to a silenced socket that closed by itself before the sweep', async () => {
@@ -1519,6 +1549,313 @@ describe(
       detach();
       // One timer at a time, throughout.
       assert.equal(set.mock.calls.filter((call) => call.arguments[1] === EVERY).length, 5);
+    });
+
+    // ---------------------------------------------------------------------------------------
+    // What was left of telling a silenced socket from one that lapsed unfound (`U-26`).
+    // ---------------------------------------------------------------------------------------
+
+    /** Lets whatever is runnable run: promises and immediates, no timer. */
+    const turns = async (): Promise<void> => {
+      for (let turn = 0; turn < 20; turn += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    };
+
+    it('waits for the sweep’s question before closing a silenced socket, with nobody else to ask about', async () => {
+      // The only socket admitted is one an edge silenced. The sweep had nothing to ask, so it
+      // closed it a round trip sooner than it closes a lapse it has to find.
+      const held = credentials();
+      const silenced = admitted(stream, 'silenced', held.check);
+      held.lapse('silenced');
+      await stream.publish(db, [stateChange()]);
+      assert.deepEqual(silenced.log, ['silence:ended']);
+      const before = held.asked.length;
+
+      const release = held.hold();
+      const sweeping = stream.sweep();
+      await turns();
+      assert.deepEqual(held.asked.slice(before), [['session:silenced']], 'the sweep did not ask');
+      assert.deepEqual(silenced.log, ['silence:ended'], 'closed before the question was answered');
+      release();
+      await within(2_000, 'the sweep', sweeping);
+      assert.deepEqual(silenced.log, ['silence:ended', 'signOut:ended']);
+    });
+
+    it('closes a silenced socket and one the sweep finds on the same answer, in one query', async () => {
+      const held = credentials();
+      const order: string[] = [];
+      const socket = (id: string): StreamSocket => ({
+        credential: { kind: 'session', id, userId: 1 },
+        silence: () => order.push(`silence:${id}`),
+        signOut: () => order.push(`signOut:${id}`),
+      });
+      const detach = stream.subscribe(recorder().subscriber, null, EVERYONE);
+      stream.admit(socket('silenced'), held.check);
+      held.lapse('silenced');
+      await stream.publish(db, [stateChange()]);
+      stream.admit(socket('unfound'), held.check);
+      stream.admit(socket('allowed'), held.check);
+      held.lapse('unfound');
+      const before = held.asked.length;
+
+      const release = held.hold();
+      const sweeping = stream.sweep();
+      await turns();
+      assert.deepEqual(order, ['silence:silenced'], 'a socket was closed before the answer');
+      release();
+      await within(2_000, 'the sweep', sweeping);
+      assert.deepEqual(order, ['silence:silenced', 'signOut:silenced', 'signOut:unfound']);
+      assert.deepEqual(
+        held.asked.slice(before),
+        [['session:silenced', 'session:unfound', 'session:allowed']],
+        'more than one query for one sweep',
+      );
+      detach();
+    });
+
+    it('gives a check that never answers its bound, closes nothing, and sweeps again', async () => {
+      // A query that hangs held `sweep` for good: no later tick could start, a silenced socket
+      // was never closed, and no watcher was reviewed.
+      const bounded = new StateBroadcaster({
+        logger: silent,
+        accessEpoch: epochNow,
+        credentialSweepMs: 3_600_000,
+        credentialWaitMs: 60,
+      });
+      const held = credentials();
+      const silenced = admitted(bounded, 'silenced', held.check);
+      held.lapse('silenced');
+      await bounded.publish(db, [stateChange()]);
+      const unfound = admitted(bounded, 'unfound', held.check);
+      held.lapse('unfound');
+      const failures = bounded.stats.credentialCheckFailures;
+
+      const release = held.hold();
+      const started = performance.now();
+      await within(2_000, 'a sweep whose check hangs', bounded.sweep());
+      const took = performance.now() - started;
+      assert.ok(took >= 55, `gave up after ${String(took)} ms, before its bound`);
+      assert.deepEqual(silenced.log, ['silence:ended'], 'closed on a question nobody answered');
+      assert.deepEqual(unfound.log, []);
+      assert.equal(bounded.stats.credentialCheckFailures, failures + 1, 'not counted');
+
+      // The sweep is not held: the next one runs, asks, and gives up in its turn.
+      const asked = held.asked.length;
+      await within(2_000, 'a second sweep', bounded.sweep());
+      assert.equal(held.asked.length, asked + 1, 'the sweep after a hung one did not run');
+      // A client's own frame waits no longer, and is "cannot tell" for both.
+      await assert.rejects(
+        within(2_000, 'a frame’s check', silenced.admission.confirm()),
+        /did not answer in 60 ms/,
+      );
+      await assert.rejects(
+        within(2_000, 'a frame’s check', unfound.admission.confirm()),
+        /did not answer in 60 ms/,
+      );
+      assert.deepEqual([silenced.log, unfound.log], [['silence:ended'], []]);
+
+      // **The late answers are not acted on.** They arrive now, between ticks, and say both
+      // lapsed; a close here would be at no clock's instant.
+      release();
+      await turns();
+      assert.deepEqual([silenced.log, unfound.log], [['silence:ended'], []]);
+
+      // The database is back: the next sweep closes both.
+      await within(2_000, 'the sweep that can ask', bounded.sweep());
+      assert.deepEqual(silenced.log, ['silence:ended', 'signOut:ended']);
+      assert.deepEqual(unfound.log, ['signOut:ended']);
+      silenced.admission.release();
+      unfound.admission.release();
+    });
+
+    it('does not bound an edge’s check: a batch nobody has vouched for is not delivered', async () => {
+      // The wait is the sweep's and the client frame's. Applied to a published batch it would
+      // turn a check that hangs into one that failed, and a failed check delivers (`A-34`'s
+      // rule for a database that blinked): a signed-out socket would be sent the batch.
+      const bounded = new StateBroadcaster({
+        logger: silent,
+        credentialSweepMs: 3_600_000,
+        credentialWaitMs: 40,
+      });
+      const held = credentials();
+      const allowed = admitted(bounded, 'allowed', held.check);
+      const lapsed = admitted(bounded, 'lapsed', held.check);
+      held.lapse('lapsed');
+
+      const release = held.hold();
+      const publishing = bounded.publish(db, [stateChange()]);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      assert.equal(allowed.tree.events.length, 0, 'delivered before the check answered');
+      assert.equal(lapsed.tree.events.length, 0, 'delivered to a signed-out socket');
+      release();
+      await within(2_000, 'the publish', publishing);
+      assert.equal(allowed.tree.events.length, 1);
+      assert.equal(lapsed.tree.events.length, 0);
+      assert.deepEqual(lapsed.log, ['silence:ended']);
+      allowed.admission.release();
+      lapsed.admission.release();
+    });
+
+    it('closes both kinds on the first tick whose check answers, when the one before it hung', async (t) => {
+      t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
+      const timed = new StateBroadcaster({
+        logger: silent,
+        credentialSweepMs: 5_000,
+        credentialWaitMs: 2_000,
+      });
+      const held = credentials();
+      // Admitted at 0, which sets the timer's phase.
+      const silenced = admitted(timed, 'silenced', held.check);
+      const unfound = admitted(timed, 'unfound', held.check);
+      const allowed = admitted(timed, 'allowed', held.check);
+
+      // One signed out at 1.0 s and found by a batch at 1.2 s; the other at 2.0 s, by nothing.
+      t.mock.timers.tick(1_000);
+      held.lapse('silenced');
+      t.mock.timers.tick(200);
+      await timed.publish(db, [stateChange()]);
+      assert.deepEqual(silenced.log, ['silence:ended']);
+      t.mock.timers.tick(800);
+      held.lapse('unfound');
+      const failures = timed.stats.credentialCheckFailures;
+
+      // 5.0 s: the tick, and the database does not answer.
+      const release = held.hold();
+      t.mock.timers.tick(3_000);
+      await turns();
+      t.mock.timers.tick(1_999);
+      await turns();
+      assert.equal(timed.stats.credentialCheckFailures, failures, 'gave up before its bound');
+      // 7.0 s: the bound. Counted, and neither is closed — the silenced one included.
+      t.mock.timers.tick(1);
+      await turns();
+      assert.equal(timed.stats.credentialCheckFailures, failures + 1);
+      assert.deepEqual([silenced.log, unfound.log], [['silence:ended'], []]);
+
+      // The database answers again at 8 s. Nothing is closed between ticks…
+      release();
+      await turns();
+      t.mock.timers.tick(2_999);
+      await turns();
+      assert.deepEqual([silenced.log, unfound.log], [['silence:ended'], []]);
+      // …and at 10.0 s both are, on the one tick.
+      t.mock.timers.tick(1);
+      await turns();
+      assert.deepEqual(silenced.log, ['silence:ended', 'signOut:ended']);
+      assert.deepEqual(unfound.log, ['signOut:ended']);
+      assert.deepEqual(allowed.log, []);
+      allowed.admission.release();
+    });
+
+    it('closes with why the credential fails now, silenced or not', async () => {
+      // A session ends, and then its account is disabled. An edge in between recorded "ended"
+      // for the socket it silenced; the sweep would have said "disabled" to the one it found.
+      for (const by of ['sweep', 'frame'] as const) {
+        const fresh = new StateBroadcaster({ logger: silent, credentialSweepMs: 3_600_000 });
+        const held = credentials();
+        const silenced = admitted(fresh, 'silenced', held.check);
+        held.lapse('silenced', 'ended');
+        await fresh.publish(db, [stateChange()]);
+        const unfound = admitted(fresh, 'unfound', held.check);
+        held.lapse('unfound', 'ended');
+        held.lapse('silenced', 'disabled');
+        held.lapse('unfound', 'disabled');
+
+        if (by === 'sweep') await fresh.sweep();
+        else {
+          assert.equal(await silenced.admission.confirm(), false);
+          assert.equal(await unfound.admission.confirm(), false);
+        }
+        assert.deepEqual(silenced.log, ['silence:ended', 'signOut:disabled'], by);
+        assert.deepEqual(unfound.log, ['signOut:disabled'], by);
+        // Counted once each, where it was found and as what it was found to be.
+        assert.deepEqual(
+          fresh.stats.signedOut,
+          { ended: 1, expired: 0, revoked: 0, disabled: 1 },
+          by,
+        );
+      }
+    });
+
+    it('reads nothing at an edge for a watcher not yet judged, and tells it once when it stands', async () => {
+      const counted = gated();
+      counted.release();
+      const hidden = probeRecorder();
+      const considered = stream.considerProbe(hidden.watcher, probeId, EVERYONE);
+      assert.equal(stream.stats.subscribers, 1);
+
+      // Three edges while the route is still deciding: no read of the probe's place, no frame.
+      for (let edge = 0; edge < 3; edge += 1) {
+        assert.equal(await stream.publishProbe(counted.q, probeId), 0);
+      }
+      assert.equal(counted.asked(), 0, 'an unjudged watcher cost a query at an edge');
+      assert.equal(hidden.changes, 0);
+
+      // Refused: detached, having heard nothing and cost nothing.
+      assert.equal(considered.detach(), true);
+      considered.stand();
+      assert.equal(hidden.changes, 0, 'a detached watcher was told');
+
+      // Allowed: the change that fell in the judging window is said once, when it stands…
+      const allowed = probeRecorder();
+      const standing = stream.considerProbe(allowed.watcher, probeId, EVERYONE);
+      await stream.publishProbe(counted.q, probeId);
+      await stream.publishProbe(counted.q, probeId);
+      assert.equal(counted.asked(), 0);
+      standing.stand();
+      assert.equal(allowed.changes, 1, 'the changes in the window were not folded into one');
+      standing.stand();
+      assert.equal(allowed.changes, 1, 'standing twice told it twice');
+      // …and from there it is a watcher like any other.
+      assert.equal(await stream.publishProbe(counted.q, probeId), 1);
+      assert.equal(allowed.changes, 2);
+      assert.equal(counted.asked(), 1);
+
+      // One with nothing to hear stands in silence.
+      const quiet = probeRecorder();
+      stream.considerProbe(quiet.watcher, probeId, EVERYONE).stand();
+      assert.equal(quiet.changes, 0);
+    });
+
+    it('tells a watcher judged while a change is being read once, not twice', async () => {
+      const judged = probeRecorder();
+      stream.watchProbe(judged.watcher, probeId, EVERYONE);
+      const late = probeRecorder();
+      const considered = stream.considerProbe(late.watcher, probeId, EVERYONE);
+      const slow = gated();
+
+      // The edge arrives while one watcher is judged and one is not; the read is held.
+      const publishing = stream.publishProbe(slow.q, probeId);
+      await turns();
+      assert.equal(slow.asked(), 1);
+      // The route's verdict lands during the read.
+      considered.stand();
+      assert.equal(late.changes, 1);
+      slow.release();
+      assert.equal(await within(2_000, 'the publish', publishing), 1, 'told again by the read');
+      assert.equal(late.changes, 1);
+      assert.equal(judged.changes, 1);
+
+      // One still unjudged when the read ends is not sent the frame through the back door.
+      const pending = probeRecorder();
+      stream.considerProbe(pending.watcher, probeId, EVERYONE);
+      assert.equal(await stream.publishProbe(db, probeId), 2);
+      assert.equal(pending.changes, 0, 'a watcher nobody judged was sent a frame');
+
+      // Nor is one that attached while the read was out, and so was never marked: the change
+      // came before it, and what it reads when its watch stands is already after it.
+      const held = gated();
+      const reading = stream.publishProbe(held.q, probeId);
+      await turns();
+      assert.equal(held.asked(), 1);
+      const arrived = probeRecorder();
+      const arriving = stream.considerProbe(arrived.watcher, probeId, EVERYONE);
+      held.release();
+      assert.equal(await within(2_000, 'the publish', reading), 2);
+      assert.equal(arrived.changes, 0, 'a watcher nobody judged was told by a read in flight');
+      arriving.stand();
+      assert.equal(arrived.changes, 0, 'and it has nothing to hear when it stands');
     });
 
     // ---------------------------------------------------------------------------------------

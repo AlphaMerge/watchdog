@@ -300,6 +300,13 @@ export function AddSensor(): React.JSX.Element {
  *
  * Renders nothing. What changes on the page is the notice's text, in the region that was already
  * announcing it; focus is never moved.
+ *
+ * **The watch standing is news, once** (`U-26`). The form asked the probe's health when the type
+ * was chosen, and the watch stands a moment later; a probe that connected, dropped or reported
+ * in between was heard by neither. So the form asks again when the core says the watch stands:
+ * one more request each time the form opens a watch. The answer is nearly always the one it
+ * has, and then nothing is written into the notice and nothing is announced (`B-12`): the last
+ * answer stands while the next is on its way, and the same sentence is the same text node.
  */
 function ProbeWatch({
   probeId,
@@ -309,6 +316,6 @@ function ProbeWatch({
   readonly onNews: () => void;
 }): null {
   const live = useProbeStream(probeId);
-  useSettledReload(live, onNews);
+  useSettledReload(live, onNews, 'news');
   return null;
 }

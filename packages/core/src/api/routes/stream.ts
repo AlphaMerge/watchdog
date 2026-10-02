@@ -78,6 +78,18 @@ export const STREAM_LIMITS: StreamLimits = {
  */
 export const STREAM_SIGNED_OUT = 4401;
 
+/**
+ * The close code for a socket whose credential could not be asked about when its own frame, or
+ * an answer about to be sent to it, needed it asked (`U-26`). RFC 6455's "try again later".
+ *
+ * **Not `STREAM_SIGNED_OUT`, because nothing is known**: the database did not answer. A client
+ * reconnects on it as on any other close, and the upgrade is where it learns whether it is still
+ * signed in. Every socket is closed this way there, whatever its credential would have said and
+ * whether or not it had been silenced, so the close says only that the check could not be made.
+ */
+export const STREAM_UNSURE = 1013;
+const UNSURE = 'could not confirm this session; reconnect';
+
 /** What the close frame says, by why. Under the 123 bytes a close reason may hold. */
 const SIGNED_OUT: Readonly<Record<Lapse, string>> = {
   ended: 'this session has ended; sign in again',
@@ -376,7 +388,13 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
           'arrives says nothing about what changed or when. A frame the client sends in that ' +
           'time is not answered, and closes the socket at once. Do not reconnect on ' +
           `${String(STREAM_SIGNED_OUT)}: sign in again. An open stream does not count as ` +
-          'activity, so a session used for nothing else reaches its idle timeout.',
+          'activity, so a session used for nothing else reaches its idle timeout.' +
+          '\n\nThe five seconds are from a database that answers. While the core cannot ask ' +
+          'whether a credential still authenticates, no socket is closed with ' +
+          `${String(STREAM_SIGNED_OUT)}; one already being sent nothing stays that way. A frame ` +
+          'the client sends while the question cannot be asked is not acted on, and the socket ' +
+          `is closed with ${String(STREAM_UNSURE)}, signed in or not: reconnect, and subscribe ` +
+          'again.',
         // No `response`: the route upgrades rather than answering, and a schema describing a
         // 101 would be a shape no client ever parses.
         response: {},
@@ -461,6 +479,35 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         credential === null || options.credentials === undefined
           ? undefined
           : stream.admit({ credential, silence, signOut }, options.credentials);
+
+      /**
+       * Whether the socket's credential still authenticates, asked now; the socket is closed if
+       * not, or if that could not be asked (`U-26`). False means "closed: send nothing, read
+       * nothing".
+       *
+       * **A check that cannot be made is answered the same way for every socket.** It used to
+       * close a silenced socket with `STREAM_SIGNED_OUT` and answer one that had lapsed with
+       * nothing published since, so a signed-out client could send a frame while the database
+       * was away and learn which it was. The frame, or the answer, is not acted on, and the
+       * socket is closed with `STREAM_UNSURE` whether it was silenced, lapsed, or signed in:
+       * a client that reconnects is asked for its credential where a refusal can be said.
+       * Counted where the check failed, as `credentialCheckFailures`.
+       */
+      const vouched = async (admitted: Admission): Promise<boolean> => {
+        try {
+          return await admitted.confirm();
+        } catch (error: unknown) {
+          if (closed) return false;
+          closed = true;
+          unsubscribe();
+          request.log.warn(
+            { err: describeError(error), login: request.principal?.login },
+            'could not check a stream socket’s credential; the socket is closed to reconnect',
+          );
+          socket.close(STREAM_UNSURE, UNSURE);
+          return false;
+        }
+      };
 
       /**
        * Stops serving this socket, and counts it on Core Health (`A-30`). `terminate` when it is not
@@ -604,7 +651,7 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         if (gone()) return;
         // Signed out while the snapshot was read (`A-34`). No published batch vouches for a
         // snapshot, and the sweep may be seconds away; asked here, it is closed and not sent.
-        if (admission !== undefined && !(await admission.confirm())) return;
+        if (admission !== undefined && !(await vouched(admission))) return;
         if (gone()) return;
         // Numbered once it has been read: every `state` frame sent before it is counted in it, and
         // every one after it — the held ones first — carries a higher number.
@@ -627,6 +674,13 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
        * lands while the checks below are out is held by `frames` and follows `watching`.
        * Attaching decides nothing — the broadcaster sends a frame only through a view that sees
        * the probe, and nothing reaches the socket before the checks have passed.
+       *
+       * **And attached as a watcher not yet judged** (`U-26`, `considerProbe`), which costs a
+       * change nothing: the broadcaster notes that the probe changed and reads nothing on this
+       * socket's account until `stand` says it may see the probe. A subscription to a probe the
+       * account may not see used to buy a read of that probe's place at every edge while it was
+       * being refused. Judging first and attaching after would have closed that too, and opened
+       * the gap the order above exists for.
        */
       const watch = async (mine: number, probeId: number): Promise<void> => {
         const visibility = await sight();
@@ -639,7 +693,7 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
           },
         });
         const seeing: StreamSight = { visibility, key: sight.key, resolve: sight };
-        detach = stream.watchProbe(
+        const considered = stream.considerProbe(
           {
             changed: frames.changed,
             overflow: (reason) => {
@@ -651,6 +705,7 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
           probeId,
           seeing,
         );
+        detach = considered.detach;
         const gone = (): boolean => superseded(mine) || cutOff.dropped;
         const { visible, epoch } = await stream.canWatchProbe(db, probeId, visibility);
         if (gone()) return;
@@ -661,6 +716,9 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
           send({ type: 'problem', reason: 'this account may not read a probe with that id' });
           return;
         }
+        // It may see the probe: from here a change is read for it, and one that happened while
+        // that was being asked is held by `frames` now and follows `watching`.
+        considered.stand();
         // Judged through a view that grants have since changed (`A-30`). Back to the start.
         if (!(await stream.confirm(seeing, epoch))) {
           if (gone()) return;
@@ -673,7 +731,7 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         }
         if (gone()) return;
         // Signed out while that was asked (`A-34`): closed, and told nothing.
-        if (admission !== undefined && !(await admission.confirm())) return;
+        if (admission !== undefined && !(await vouched(admission))) return;
         if (gone()) return;
         send({ type: 'watching', probeId });
         frames.open();
@@ -777,8 +835,11 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
        * `STREAM_SIGNED_OUT` there, silenced or not, having been sent nothing. That instant is the
        * client's own frame's, which tells it nothing it did not choose.
        *
-       * One at a time and in order, so a subscription cannot overtake the one before it. A check
-       * that cannot answer closes nothing (`A-34`): the frame is read as before.
+       * One at a time and in order, so a subscription cannot overtake the one before it.
+       *
+       * **A check that cannot answer signs nobody out, and the frame is not read** (`U-26`,
+       * `vouched`): the socket is closed to reconnect, silenced or not. And a frame still waiting
+       * when its socket closes asks nothing: the question is about a socket that is gone.
        */
       const receive = (raw: Buffer): void => {
         if (closed) return;
@@ -795,15 +856,8 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         const frame = raw.length > MAX_CLIENT_FRAME_BYTES ? null : raw;
         reading = reading
           .then(async () => {
-            let signedIn = true;
-            try {
-              signedIn = await admission.confirm();
-            } catch (error: unknown) {
-              request.log.warn(
-                { err: describeError(error) },
-                'could not check a stream socket’s credential before reading its frame',
-              );
-            }
+            // Severed, signed out or hung up while this frame waited its turn (`U-26`).
+            const signedIn = closed ? false : await vouched(admission);
             unread -= 1;
             if (!signedIn || closed) return;
             if (frame === null) refuse('that frame is larger than any subscription');

@@ -458,7 +458,8 @@ export function useStateStream(objectId: number | null, options?: StateStreamOpt
 
 /**
  * One probe's own link and report, for a component (`U-24`): `frames` rises when the core says
- * the probe changed, and `states` is always empty. Pair it with `useSettledReload`.
+ * the probe changed, and `states` is always empty. Pair it with `useSettledReload`, and with
+ * `first: 'news'` there if the page read the probe before the watch stood (`U-26`).
  */
 export function useProbeStream(probeId: number, options?: StateStreamOptions): LiveStates {
   return useStream(null, probeId, options);
@@ -532,8 +533,20 @@ export const SETTLE_MS = 400;
  *
  * Written for the alarms list and moved here when the add-sensor form became the second view
  * whose answer the stream can only prompt for (`B-12`).
+ *
+ * **`first: 'news'` reloads on the first frame too** (`U-26`), for a subscription whose first
+ * frame carries nothing: a watch on a probe is answered `watching`, which is not a snapshot of
+ * anything. The page asked for its own answer before the watch stood, and a change in between
+ * was heard by neither — the watch was not there yet and the answer had already been read. So
+ * the watch standing is the moment to ask once more: one request for every time a form opens,
+ * and after it nothing can have been missed. A snapshot subscription leaves this at `'answer'`:
+ * its first frame *is* the state, and reloading on it would double every page load.
  */
-export function useSettledReload({ frames, status }: LiveStates, reload: () => void): void {
+export function useSettledReload(
+  { frames, status }: LiveStates,
+  reload: () => void,
+  first: 'answer' | 'news' = 'answer',
+): void {
   // Whether the stream has lost a connection yet. Until it has, its first frame is the snapshot
   // answering the subscribe it made at mount, which describes the same world the page's own
   // fetch asked about; reloading on it would double every page load. A first snapshot that comes
@@ -544,10 +557,10 @@ export function useSettledReload({ frames, status }: LiveStates, reload: () => v
   }, [status]);
 
   useEffect(() => {
-    if (frames === 0 || (frames === 1 && !lost.current)) return;
+    if (frames === 0 || (frames === 1 && first === 'answer' && !lost.current)) return;
     const handle = window.setTimeout(reload, SETTLE_MS);
     return () => {
       window.clearTimeout(handle);
     };
-  }, [frames, reload]);
+  }, [frames, reload, first]);
 }
