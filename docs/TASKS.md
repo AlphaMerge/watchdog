@@ -19296,7 +19296,9 @@ because each is a decision rather than a defect:
       2026-10-02 by `A-69`. `sweep-progress` takes any 7 to 15 characters as an address. A
       fingerprint field this build does not know is carried at any size. The summary's vendor
       breakdown reads stored rows, so one written before the bound shows uncut.
-      `SshSessionPool.closeAll` does not end an open in flight. The SSH simulator has no mode
+      `SshSessionPool.closeAll` does not end an open in flight, and a caller can join an
+      open its last waiter has just abandoned and be told its own check was cancelled (one
+      reviewer traced it, one found it out of reach in a running probe). The SSH simulator has no mode
       that accepts and never speaks, so two tickets' tests use a bare listener. **Done when**
       each is fixed with a test.
 

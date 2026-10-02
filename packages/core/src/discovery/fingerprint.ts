@@ -82,11 +82,19 @@ export function boundedText(value: unknown, max: number): string | undefined {
   const clean = value
     // eslint-disable-next-line no-control-regex -- the point of this function is control chars.
     .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+    // Half of a surrogate pair is not text PostgreSQL's jsonb will store, and one unstorable
+    // field fails the whole batch it came in. One that arrived alone is replaced; the cut
+    // below is made between characters and never through one.
+    .replace(LONE_SURROGATE, '\ufffd')
     .replace(/ {2,}/g, ' ')
     .trim()
-    .slice(0, max);
+    .slice(0, max)
+    .replace(/[\ud800-\udbff]$/, '');
   return clean === '' ? undefined : clean;
 }
+
+/** A surrogate with no partner: a high one not followed by a low, or a low one not preceded. */
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 
 /**
  * A probe's refusal as the summary shows it: one line, at most `REFUSAL_MAX_LENGTH` characters.

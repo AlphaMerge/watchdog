@@ -487,6 +487,25 @@ describe('a fingerprint’s text is bounded where it is checked (A-69)', () => {
     assert.equal(boundedText('abcdef', 3), 'abc');
     assert.equal(boundedText(' \u0000 ', 3), undefined);
     assert.equal(boundedText(['a'], 3), undefined);
+    // Never half a character: jsonb refuses a lone surrogate, and one refused field fails the
+    // batch it came in. A pair that straddles the cut goes whole; one that arrived alone is
+    // replaced. What is kept can always be stored.
+    const pair = '\u{1f600}';
+    assert.equal(boundedText(`ab${pair}`, 3), 'ab');
+    assert.equal(boundedText(`ab${pair}`, 4), `ab${pair}`);
+    assert.equal(boundedText(`a\ud83d b`, 10), 'a\ufffd b');
+    assert.equal(boundedText(`a\ude00b`, 10), 'a\ufffdb');
+    for (const text of [`ab${pair}`, `${pair}${pair}`, '\ud83d', '\ude00\ud83d', `x\ud83d`]) {
+      for (let max = 1; max <= 5; max += 1) {
+        const kept = boundedText(text, max) ?? '';
+        assert.ok(kept.length <= max, `${JSON.stringify(text)} at ${String(max)}`);
+        assert.equal(
+          /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(kept),
+          false,
+          `${JSON.stringify(text)} at ${String(max)}`,
+        );
+      }
+    }
     assert.equal(refusalText('r'.repeat(600)), 'r'.repeat(500));
   });
 });
