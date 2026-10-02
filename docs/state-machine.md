@@ -182,13 +182,33 @@ configuration that stopped leaving the sensor (`LATE_REFUSAL_GRACE_MS`, counted 
 monotonic clock from the first such configuration, and not started again by a later one) a
 refusal from that probe for that sensor is **dropped**: not a failed scan, so no Warning, no Down
 and no alarm, and not a hold, since what the configuration now says about the sensor is what
-speaks for it. It lets no hold go either. It is counted with the probe's refused results on Probe
-Health. After the ten minutes the mark is one the probe has no claim to, as above, and the result
+speaks for it. It lets no hold go either. It is counted on Probe Health's **Refusals delivered
+late** (`lateRefusals`, `A-56`), a counter with no limit and so no state of its own, and not among
+**Reports refused**, which counts what the core would not take from the probe. After the ten minutes the mark is one the probe has no claim to, as above, and the result
 is the failed scan it reads as. What this gives a probe that misbehaves is a result that
 vanishes, which it already had by not sending it: it cannot begin or prolong an Unknown with it,
 and cannot use it on a result that is `ok` or has readings, on a sensor it was never left, or
-after the ten minutes. The core keeps this in memory, so a refusal that crosses a core restart
-is judged as before `A-53`.
+after the ten minutes.
+
+**The bound: a core restart forgets it** (`A-56`). Which sensors a configuration stopped leaving
+to a probe, and when, is kept in the core's memory and nowhere else. A core restarted inside the
+ten minutes starts with nothing recorded, and a late refusal delivered to it is the mark the probe
+has no claim to: a failed scan. One is a Warning where the sensor's failed-scan count allows it,
+and as many as that count (two, as shipped) are **one Down for that sensor, with the one alarm a
+Down raises**, in the probe's words ("Not scanned: ..."), until the next scan under the new
+configuration reads what the device says. They are counted on **Reports refused**, not on
+**Refusals delivered late**. It needs all three at once: a change that stops leaving a sensor to
+its probe, refusals for it already made and not yet delivered, and a restart before they arrive.
+
+**It is not rebuilt from the database, because nothing stored says it.** What would have to be
+known is that the sensor was left to the probe under the configuration before, and when that
+stopped. `credential_set.updated_at` and `object.updated_at` say that a row changed, for any
+reason, and not what the targets or the host were before; a set that was removed has no row; a
+pause, a move and the probe's protocol version stop leaving a sensor too. Read from those, the
+grace would go to every sensor near a recent change, the ones the probe was never left included,
+which is the one thing the rule above does not give a probe. Storing the record is a table and a
+migration, for a false Down that takes a restart inside ten minutes to see, and is not done.
+`credential-pinning.test.ts` pins what a restart does.
 
 **The next result that is not a refusal lets the sensor go, and that result decides it.** The
 hold is dropped without re-deciding anything, so there is one transition, from Unknown to what

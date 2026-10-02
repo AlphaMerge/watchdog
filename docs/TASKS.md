@@ -18067,7 +18067,7 @@ because each is a decision rather than a defect:
         the three new counts. The count does not say how many of the sensors outside are the
         named-device case; the sentence says the case in words, as the ticket asked.
 
-- [ ] **A-56 — the late-refusal record does not survive a core restart, and late refusals are
+- [x] **A-56 — the late-refusal record does not survive a core restart, and late refusals are
       counted with the rest** · S · A-53 · Found 2026-10-02 by `A-53`. The record of which
       sensors had a set narrowed, and when, is in memory: a core restarted inside the ten-minute
       grace forgets it, and a probe's honest late refusal then reads as a sensor failure again.
@@ -18076,6 +18076,44 @@ because each is a decision rather than a defect:
       the record is rebuilt at start from what the database already holds or the runbook says
       the bound in words with a test of what a restart does, and a late refusal is counted
       where an operator can tell it from a standing one.
+
+      **A-56 outcome.** The second way out for the restart, and a channel of its own for the
+      count. No migration, no protocol number, nothing sent to or from a probe.
+      - **The record is not rebuilt, because nothing stored says it.** Looked for: a timestamp
+        that means "a configuration stopped leaving this sensor to its probe".
+        `credential_set.updated_at` moves on any update of the row, a rotated secret included,
+        and a removed set has no row. `object.updated_at` moves for anything written on the
+        object or its settings, channels or credentials. Neither keeps what the targets or the
+        host were before, and the history's `credential.set` entry keeps the public half after
+        the write only. A pause, a move and the probe's protocol version stop leaving a sensor
+        too, and what the probe was sent at the time is not stored anywhere. Rebuilt from those,
+        the grace would go to every sensor near a recent change, the ones the probe was never
+        left included, which `A-53` says a probe cannot have. So the bound is written down:
+        `state-machine.md` (the rule, what a restart costs, why it is not stored),
+        `troubleshooting.md` under "A sensor is Down and the device is fine" (the symptom and
+        what to do), and the channel's row in `administration.md`.
+      - **What a restart does, pinned** (`credential-pinning.test.ts`, the alarm-volume case): a
+        sensor Up, a name entry added, the configuration built, then a core with the same
+        database and nothing in memory. One late refusal is one failed scan and no page; the
+        second is Down in the probe's words, one Down row and one notification request; two
+        more raise nothing; the next scan under the new configuration reads Up. They are
+        counted as marks the probe had no claim to (`reportsRefused`), none as late.
+      - **A late refusal is counted on its own Probe Health channel**: `lateRefusals`,
+        "Refusals delivered late", a 64-bit counter with no limit and no lookup, so no state
+        and no alarm, declared after `reportsForeign`. `ProbeRefusals.late` and `lateFor` keep
+        it per probe and apart from `refused`; `IngestionService` counts `reported.late` there
+        and no longer in `refused`. Absent the source, the channel gaps. An unearned mark is
+        still counted in `reportsRefused`, which is now only that and what `P-228` refuses.
+      - **Prometheus:** `ms_probe_late_refusals_total`. There was no series for
+        `reportsRefused` to put it beside, so `ms_probe_reports_refused_total` is added with
+        it. `sensor-reference.md` regenerated.
+      - **Tests:** `probe-refusals` (8, one new), `probe-health` (three: the channel, the
+        counter text, zero against a gap), `health-types` (the declaration and its place),
+        `metrics` (both series, their type, absent when not counted), and the two scenarios in
+        `credential-pinning`. 255 passing in the seven files run, none skipped.
+      - **Mutation:** 11 of 11 killed.
+      - **Not done:** a refusal that crosses a restart is still a failed scan, as above. The
+        wiring in `main.ts` (`lateRefusals` on Probe Health's sources) has no test of its own.
 
 - [ ] **A-57 — only HTTP and mail refuse a metadata address** · M · A-09, A-54 · Found
       2026-10-02 by `A-54`. `A-09`'s link-local guard covers the HTTP and mail sensors. SSH,

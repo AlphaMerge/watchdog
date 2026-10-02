@@ -1863,7 +1863,10 @@ describe(
       assert.equal(credentials.stats().withheld, held);
       assert.equal(await scheduler.sweep(later(3_600)), 0, 'nothing to page about');
       assert.equal(await requests(), asked);
-      assert.equal(refusals.countsFor(site).refused, 2, 'dropped, and counted on Probe Health');
+      // Dropped, and counted on Probe Health where a late refusal is, apart from what the core
+      // refused from the probe (`A-56`).
+      assert.equal(refusals.lateFor(site), 2);
+      assert.equal(refusals.countsFor(site).refused, 0);
 
       // The device then does not answer the scan made under the new configuration. That is a
       // failed scan: Down, once, and the one page a Down raises.
@@ -1879,7 +1882,8 @@ describe(
       assert.equal(await downs([sensor]), 1);
       assert.equal(await scheduler.sweep(later(3_600)), 1);
       assert.equal(await requests(), asked + 1);
-      assert.equal(refusals.countsFor(site).refused, 2);
+      assert.equal(refusals.lateFor(site), 2);
+      assert.equal(refusals.countsFor(site).refused, 0);
 
       // And the bound: past the grace, a result marked this way is the probe's failed scan, as
       // any mark on a sensor it is not left to check is.
@@ -1890,7 +1894,81 @@ describe(
       assert.deepEqual(await stateOf(sensor), { state: 'down', message: REFUSED });
       assert.equal(await downs([sensor]), 2);
       assert.equal(vouching.withheld().has(sensor), false);
-      assert.equal(refusals.countsFor(site).refused, 4);
+      // Past the grace they are marks the probe has no claim to: refused, and not late.
+      assert.equal(refusals.countsFor(site).refused, 2);
+      assert.equal(refusals.lateFor(site), 2);
+    });
+
+    // After it, and sweeping as it does: what a core restarted inside the grace does (`A-56`).
+    it('a core restarted inside the grace reads a late refusal as a failed scan: one Down and one page for the sensor, cleared by its next scan', async () => {
+      const { group, sensor } = await named(site, 'restarted');
+      assert.equal(await sentTo(PINNING, sensor), true);
+      await fromProbe([{ ...measured(sensor, at(-60)), message: 'up 1 d' }]);
+
+      // The same change as above, and the configuration that stops leaving the sensor to the
+      // probe is built: the core now holds, in memory, that a refusal for it may still arrive.
+      await h.service.setCredential(testActor, group, 'snmp', {
+        version: 'v2c',
+        community: 'restarted-secret',
+        allowedTargets: ['10.20.0.0/16', '*.dc.test'],
+      });
+      assert.equal(await sentTo(PINNING, sensor), true);
+
+      // The core restarts: the same database, and nothing of what the one before held in
+      // memory. The probe redials and is sent its configuration, in which the sensor is not
+      // left to it, by a core that never knew it was.
+      const running = { credentials, config };
+      const access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent });
+      credentials = new CredentialVouching({
+        db,
+        logger: silent,
+        sensorTypes: gate,
+        rights: (principal, objectIds, q) => access.resolveManyFor(principal, objectIds, q),
+        vouching,
+        now: () => performance.now() + ahead.ms,
+      });
+      config = new ProbeConfigService({
+        db,
+        resolver: new InheritanceResolver({ db, logger: silent }),
+        vault: h.vault,
+        credentialKindsFor: (sensorType) => gate.credentialKinds(sensorType),
+        credentialCheck: credentials,
+      });
+      try {
+        assert.equal(await sentTo(PINNING, sensor), true);
+        await scheduler.sweep(later(3_600));
+        const asked = await requests();
+        const refusals = new ProbeRefusals();
+
+        // One late refusal is one failed scan: not Down yet, and no page.
+        await fromProbe([refused(sensor, at(-30))], site, refusals);
+        assert.equal(await downs([sensor]), 0);
+        assert.equal(await scheduler.sweep(later(3_600)), 0);
+
+        // The second is Down, in the probe's words, with the one page a Down raises. Counted
+        // as marks the probe had no claim to, since this core cannot know they were late.
+        await fromProbe([refused(sensor, at(-20))], site, refusals);
+        assert.deepEqual(await stateOf(sensor), { state: 'down', message: REFUSED });
+        assert.equal(await downs([sensor]), 1);
+        assert.equal(vouching.withheld().has(sensor), false, 'a failed scan, not a hold');
+        assert.equal(await scheduler.sweep(later(3_600)), 1);
+        assert.equal(await requests(), asked + 1);
+        assert.equal(refusals.countsFor(site).refused, 2);
+        assert.equal(refusals.lateFor(site), 0);
+
+        // More of them raise nothing further: one Down, one alarm, for the one sensor.
+        await fromProbe([refused(sensor, at(-15)), refused(sensor, at(-12))], site, refusals);
+        assert.equal(await downs([sensor]), 1);
+        assert.equal(await scheduler.sweep(later(3_600)), 0);
+        assert.equal(await requests(), asked + 1);
+
+        // And the scan made under the new configuration is what ends it.
+        await fromProbe([{ ...measured(sensor, at(-5)), message: 'up 1 d' }], site, refusals);
+        assert.deepEqual(await stateOf(sensor), { state: 'up', message: 'up 1 d' });
+        assert.equal(await downs([sensor]), 1);
+      } finally {
+        ({ credentials, config } = running);
+      }
     });
   },
 );

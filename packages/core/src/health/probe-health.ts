@@ -47,6 +47,12 @@ export interface ProbeHealthSources {
    */
   refusals?: (probeObjectId: number) => { refused: number; foreignRecently: number };
   /**
+   * How many of this probe's refusals to scan the core dropped as made under the configuration
+   * before its last (`A-53`, `A-56`), from `ProbeRefusals.lateFor`. Absent on a build that does
+   * not count them, and then the channel gaps.
+   */
+  lateRefusals?: (probeObjectId: number) => number;
+  /**
    * How many of this probe's sensors its clock has frozen (`P-232`). Absent on a build without
    * the sweep, and then the channel gaps.
    */
@@ -335,6 +341,9 @@ export class ProbeHealthService {
       protocol: skewCode(skew.kind),
       reportsRefused: refusals?.refused ?? null,
       reportsForeign: refusals?.foreignRecently ?? null,
+      // Not among `reportsRefused` (`A-56`): the probe refused honestly, under a configuration
+      // it no longer has, and the two have to be told apart on the sensor.
+      lateRefusals: this.#sources.lateRefusals?.(probeObjectId) ?? null,
       schedulerLag: health?.schedulerLagMs?.p95 ?? null,
       poolUsage: poolUsage(health?.poolBusy, health?.poolSize),
       // Absent below protocol 19 (`P-236`); the memory cap also wherever memory cannot be read.

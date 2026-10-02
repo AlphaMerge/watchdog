@@ -94,6 +94,15 @@ const CHANNELS: readonly ChannelDef[] = [
         'this probe reported on sensors, queries or discovery runs that were never given to it',
     },
   },
+  // **The probe's own refusals to scan, delivered after its configuration moved on** (`A-53`,
+  // `A-56`). A probe refuses a check whose device's name resolves outside its credentials'
+  // targets. One made just before a configuration stopped leaving the sensor to the probe, and
+  // delivered after, is dropped by the core for ten minutes: it is not a failed scan. **Counted
+  // here and not among `reportsRefused`**, because nothing was refused from the probe and
+  // nothing is wrong with it, and one number for both would hide a probe that marks what it
+  // should not behind every change to a set's targets. No limit and no lookup, so no state and
+  // no alarm: it rises after such a change and stops. The core's own number, like the two above.
+  { key: 'lateRefusals', name: 'Refusals delivered late', unit: 'results', counter: { bits: 64 } },
   // **Only the wheel can measure this**, because only it knows the instant each tick should have
   // run at (`P-01`). p95 rather than the mean: a scheduler is late in bursts.
   {

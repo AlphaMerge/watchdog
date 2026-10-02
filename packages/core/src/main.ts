@@ -1460,6 +1460,7 @@ async function serve(): Promise<void> {
       link: (probeObjectId) => probeEndpoint.linkFor(probeObjectId),
       timeRefusals: (gid) => ingestion.timeRefusals(gid),
       refusals: (probeObjectId) => refusals.countsFor(probeObjectId),
+      lateRefusals: (probeObjectId) => refusals.lateFor(probeObjectId),
       frozenSensors: (probeObjectId) => clockFreeze.frozenOn(probeObjectId),
       // The sweep, and only the sweep, drains the probes' folded memory lows (`P-219`, `P-245`).
       drainMemory: () => probeEndpoint.drainMemory(),

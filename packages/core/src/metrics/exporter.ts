@@ -288,6 +288,18 @@ const PROBE_METRICS: readonly Metric[] = [
     help: '0 the same as the core, 1 older, 2 incompatible.',
   },
   {
+    key: 'reportsRefused',
+    name: 'ms_probe_reports_refused_total',
+    help: 'Results, query answers and discovery messages the core refused from this probe as not its to report.',
+    counter: true,
+  },
+  {
+    key: 'lateRefusals',
+    name: 'ms_probe_late_refusals_total',
+    help: "This probe's refusals to scan that arrived after its configuration stopped leaving it the sensor, and were dropped. Not among the reports refused.",
+    counter: true,
+  },
+  {
     key: 'schedulerLag',
     name: 'ms_probe_scheduler_lag_p95_seconds',
     help: 'How late the timing wheel fired, 95th percentile over the last 1,024 ticks.',

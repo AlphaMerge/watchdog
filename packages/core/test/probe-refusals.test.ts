@@ -72,6 +72,25 @@ describe('what the core refused from each probe (`P-228`)', () => {
     assert.deepEqual(refusals.stats(), { refused: 3, foreign: 2 });
   });
 
+  it('counts a late refusal apart from what was refused, per probe (`A-56`)', () => {
+    // A probe's honest refusal that arrived after its configuration moved on is not something
+    // the core refused from it: one number for both would hide a probe that marks what it
+    // should not behind every change to a set's targets.
+    const refusals = new ProbeRefusals(clock().now);
+    refusals.late(7, 2);
+    refusals.late(7);
+    refusals.late(8, 5);
+    refusals.late(8, 0);
+    refusals.refused(7, 4);
+
+    assert.equal(refusals.lateFor(7), 3);
+    assert.equal(refusals.lateFor(8), 5);
+    assert.equal(refusals.lateFor(42), 0, 'a count, not a gap');
+    assert.deepEqual(refusals.countsFor(7), { refused: 4, foreignRecently: 0 });
+    assert.deepEqual(refusals.countsFor(8), { refused: 0, foreignRecently: 0 });
+    assert.deepEqual(refusals.stats(), { refused: 4, foreign: 0 });
+  });
+
   it('ignores nothing-to-count rather than moving either number', () => {
     const refusals = new ProbeRefusals(clock().now);
     refusals.refused(7, 0);

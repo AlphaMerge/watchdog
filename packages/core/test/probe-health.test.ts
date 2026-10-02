@@ -509,6 +509,50 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       const { reading } = build(() => connected()).read(probeId);
       assert.equal(reading['reportsRefused'], null);
       assert.equal(reading['reportsForeign'], null);
+      assert.equal(reading['lateRefusals'], null);
+    });
+
+    it('carries the refusals that arrived late on a channel of their own, as a counter (`A-56`)', () => {
+      // Beside what the core refused from the probe and not inside it: 3 late refusals and 9
+      // refused reports are two readings, and the sentence is about neither.
+      const asked: number[] = [];
+      const service = new ProbeHealthService({
+        db,
+        logger: silent,
+        vouching: everyVoucherHolds,
+        sources: {
+          link: () => connected(),
+          refusals: () => ({ refused: 9, foreignRecently: 0 }),
+          lateRefusals: (probeObjectId) => {
+            asked.push(probeObjectId);
+            return 3;
+          },
+        },
+        ingest: () => Promise.resolve(),
+      });
+      const { reading, message } = service.read(probeId);
+      assert.deepEqual(asked, [probeId]);
+      assert.equal(reading['lateRefusals'], 3);
+      assert.equal(reading['reportsRefused'], 9);
+      assert.doesNotMatch(message, /late|refus/iu);
+      // Recorded as a counter, so the channel is a rate that returns to nothing.
+      assert.deepEqual(
+        readingsFrom(reading).find((one) => one.key === 'lateRefusals'),
+        { key: 'lateRefusals', value: 3, counter: '3', counterBits: 64 },
+      );
+    });
+
+    it('reads no late refusals as zero, and for a probe that is not connected as a gap', () => {
+      const read = (link: ProbeLink): number | null | undefined =>
+        new ProbeHealthService({
+          db,
+          logger: silent,
+          vouching: everyVoucherHolds,
+          sources: { link: () => link, lateRefusals: () => 0 },
+          ingest: () => Promise.resolve(),
+        }).read(probeId).reading['lateRefusals'];
+      assert.equal(read(connected()), 0);
+      assert.equal(read({ connected: false }), null);
     });
 
     it('turns the probe Down when its worker pool has given up', () => {

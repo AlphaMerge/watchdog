@@ -394,6 +394,43 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       assert.equal(without.has(`ms_probe_syslog_overwritten_total${label}`), false);
     });
 
+    it('exports a probe’s late refusals apart from the reports refused from it (`A-56`)', async () => {
+      const label = `{probe="${String(probeId)}"}`;
+      let late = 3;
+      const core = coreHealth();
+      const probe = new ProbeHealthService({
+        vouching: everyVoucherHolds,
+        db,
+        logger: silent,
+        sources: {
+          link: () => connected,
+          refusals: () => ({ refused: 9, foreignRecently: 0 }),
+          lateRefusals: () => late,
+        },
+        ingest: () => Promise.resolve(),
+      });
+      const exports = new MetricsExporter({
+        db,
+        logger: silent,
+        coreHealth: () => core,
+        probeHealth: () => probe,
+      });
+      const first = (await exports.scrape()).body;
+      assert.equal(parse(first).get(`ms_probe_late_refusals_total${label}`), 3);
+      assert.equal(parse(first).get(`ms_probe_reports_refused_total${label}`), 9);
+      assert.match(first, /^# TYPE ms_probe_late_refusals_total counter$/mu);
+      assert.match(first, /^# TYPE ms_probe_reports_refused_total counter$/mu);
+      late = 5;
+      const second = parse((await exports.scrape()).body);
+      assert.equal(second.get(`ms_probe_late_refusals_total${label}`), 5);
+      assert.equal(second.get(`ms_probe_reports_refused_total${label}`), 9);
+
+      // A core that does not count them exports neither: absent, not zero.
+      const without = parse((await varying(() => connected).scrape()).body);
+      assert.equal(without.has(`ms_probe_late_refusals_total${label}`), false);
+      assert.equal(without.has(`ms_probe_reports_refused_total${label}`), false);
+    });
+
     it('still omits a counter the probe did not report at all', async () => {
       // The other half. A probe that is gone reports nothing, and nothing is not zero.
       const metrics = parse((await varying(() => ({ connected: false })).scrape()).body);

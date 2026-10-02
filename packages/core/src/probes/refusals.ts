@@ -20,6 +20,13 @@ import { RecentCount } from '../health/recent-count.js';
  *   count over the last five minutes rather than a counter (`RecentCount` says why), and it is
  *   what carries the warning.
  *
+ * **And a third, kept apart from both** (`A-56`): `late` is a probe's own refusal to scan a sensor,
+ * delivered after a configuration stopped leaving that sensor to it, and dropped (`A-53`). The
+ * probe did what its configuration said and nothing is wrong with it, so it is not among
+ * `refused`, where an operator looking for a probe that marks what it should not would have to
+ * tell the two apart by guessing. A counter with no limit: it rises for ten minutes after a
+ * credential set's targets or a device's address change, and then stops.
+ *
  * Keyed by probe object, the thing Probe Health reads by and the thing ownership is decided
  * against. A GID that owns no object yet has nothing it could legitimately report, so what it
  * sends is refused and counted in the totals only: there is no Probe Health sensor to show it on.
@@ -31,6 +38,7 @@ export class ProbeRefusals {
   readonly #monotonicMs: (() => number) | undefined;
   readonly #refused = new Map<number, number>();
   readonly #foreign = new Map<number, RecentCount>();
+  readonly #late = new Map<number, number>();
   #refusedTotal = 0;
   #foreignTotal = 0;
 
@@ -62,6 +70,20 @@ export class ProbeRefusals {
       this.#foreign.set(probeObjectId, recent);
     }
     recent.add(n);
+  }
+
+  /**
+   * A refusal the probe made under the configuration before its last, dropped by the core
+   * (`A-53`). Not counted as refused: nothing was refused from the probe, and nothing is wrong.
+   */
+  late(probeObjectId: number, n = 1): void {
+    if (n <= 0) return;
+    this.#late.set(probeObjectId, (this.#late.get(probeObjectId) ?? 0) + n);
+  }
+
+  /** How many of one probe's refusals arrived late, since start. Zero, not a gap, for none. */
+  lateFor(probeObjectId: number): number {
+    return this.#late.get(probeObjectId) ?? 0;
   }
 
   /** One probe's numbers, now. A probe nothing was ever refused from reads zero, not a gap. */

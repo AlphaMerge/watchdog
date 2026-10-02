@@ -835,6 +835,12 @@ export class CredentialVouching {
    * (`A-53`). A refusal for one of them inside the grace was made under the configuration before.
    * An entry counts for nothing once the grace has run out, and goes at the probe's next
    * configuration after that, when the sensor is left to the probe again, and with its probe.
+   *
+   * **In memory, and a restart forgets it** (`A-56`). Nothing the database holds says that a
+   * sensor was left to its probe under the configuration before, or when that stopped: a set's
+   * and an object's `updated_at` move for any change and keep nothing of what was there. A core
+   * restarted inside the grace reads a late refusal as the failed scan it is marked over, which
+   * `docs/state-machine.md` says in words and `credential-pinning.test.ts` pins.
    */
   readonly #stoppedLeaving = new Map<number, Map<number, number>>();
   readonly #graceMs: number;

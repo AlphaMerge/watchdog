@@ -403,9 +403,11 @@ export class IngestionService {
         }
         if (reported.late > 0) {
           // **Refused under the configuration before the one the probe has now** (`A-53`). Not
-          // failed scans and not stored, so counted where a result the core did not take is
-          // counted, as one for a sensor that moved away is: dropped, and never silently.
-          this.#refusals?.refused(origin.probeObjectId, reported.late);
+          // failed scans and not stored: dropped, and never silently. Counted on Probe Health
+          // apart from what the core refused from the probe (`A-56`): the probe followed its
+          // configuration, and a count shared with the refusals that mean a probe is marking
+          // what it should not would hide those behind every change to a set's targets.
+          this.#refusals?.late(origin.probeObjectId, reported.late);
           this.#logger.info(
             { source: origin.gid, probeObjectId: origin.probeObjectId, results: reported.late },
             'a probe refused to scan sensors its configuration has since stopped leaving to ' +

@@ -80,6 +80,27 @@ describe('the self-monitoring sensor types', () => {
     );
   });
 
+  it('carries a probe’s late refusals as a number of their own and not an alarm', () => {
+    // `A-56`. A refusal that arrived after the probe's configuration moved on is dropped and
+    // nothing is wrong: a limit or a lookup would be an alarm for a change somebody made on
+    // purpose. Declared beside the refused reports, which it is not counted among.
+    const channels = probeHealth.channels({});
+    const late = channels.find((one) => one.key === 'lateRefusals');
+    assert.deepEqual(late, {
+      key: 'lateRefusals',
+      name: 'Refusals delivered late',
+      unit: 'results',
+      counter: { bits: 64 },
+    });
+    const keys = channels.map((one) => one.key);
+    const from = keys.indexOf('reportsRefused');
+    assert.deepEqual(keys.slice(from, from + 3), [
+      'reportsRefused',
+      'reportsForeign',
+      'lateRefusals',
+    ]);
+  });
+
   it('keeps both out of every probe’s assignment list', () => {
     // The mechanism `T-21` built. For Probe Health it is not an optimisation but the whole
     // design: a probe cannot report its own absence, so the core has to be the one asking.
