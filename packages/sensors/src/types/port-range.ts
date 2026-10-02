@@ -146,6 +146,7 @@ export const portRange: SensorType = {
     // **Resolved once for the whole scan and checked against the probe's target policy**
     // (`A-57`). Every port's socket is answered with the checked addresses: a name that
     // resolved differently for each port would be a different device for each.
+    const lookupStarted = process.hrtime.bigint();
     const { lookup } = lookupFor(
       host,
       await checkedTarget({
@@ -158,19 +159,26 @@ export const portRange: SensorType = {
       }),
     );
 
+    // **The lookup shares a port's timeout, as it did when each socket made its own.** What
+    // it took is taken from the first port each worker tries, the ones that would have waited
+    // for it, so the scan never takes longer than it could before.
+    const lookupMs = Number(process.hrtime.bigint() - lookupStarted) / 1e6;
+
     const open: number[] = [];
     const queue = [...ports];
 
     const worker = async (): Promise<void> => {
+      let within = Math.max(1, timeoutMs - lookupMs);
       for (;;) {
         const port = queue.shift();
         if (port === undefined) return;
         if (context.signal.aborted) {
           throw new Error(`the check was cancelled while scanning ${host}`);
         }
-        if (await isOpen(connect, host, port, family, timeoutMs, context.signal, lookup)) {
+        if (await isOpen(connect, host, port, family, within, context.signal, lookup)) {
           open.push(port);
         }
+        within = timeoutMs;
       }
     };
 

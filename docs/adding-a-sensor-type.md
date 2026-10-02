@@ -385,7 +385,7 @@ Four rules follow from how the redactor works:
 
   `lookupFor` answers the socket's lookup with the checked addresses, so the name is never
   resolved again and TLS still names the server. A transport that takes an address and no
-  lookup uses `checkedAddress` and connects to that. One that can do neither, because a driver
+  lookup connects to one of `checked.addresses`. One that can do neither, because a driver
   resolves the name itself, calls `refuseBlockedAddress` for a device given as an address and
   is listed in `administration.md` as checked by address only. A refusal is an ordinary failed
   check; do not catch it.

@@ -46,6 +46,13 @@ export interface SshTarget {
    * whose `lookup` answers with these and nothing else, so the name is never resolved again.
    */
   readonly checked?: readonly PinnedAddress[];
+  /**
+   * Asked by the pool when, and only when, it has to open a connection: the probe's target
+   * policy over `host` (`A-57`). It refuses by throwing, and answers with the checked addresses
+   * to connect to, or nothing when the connection is made as it always was (an address, a
+   * pinned target, the `none` policy). Not asked for a connection the pool already holds.
+   */
+  readonly guard?: () => Promise<readonly PinnedAddress[] | undefined>;
 }
 
 export interface SshSessionOptions {

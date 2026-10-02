@@ -36,8 +36,8 @@ export interface TlsTarget {
   readonly lookup?: LookupFunction;
   /**
    * When the check began resolving the name, where it did that itself. `elapsedMs` is counted
-   * from here, so the handshake time still includes the lookup, as it did when the socket made
-   * it.
+   * from here, and so is the timeout: the lookup and the handshake share `timeoutMs` and the
+   * handshake time includes the lookup, both as they did when the socket made the lookup.
    */
   readonly startedAt?: bigint;
 }
@@ -132,17 +132,21 @@ export function handshake(
     };
     signal.addEventListener('abort', onAbort, { once: true });
 
-    const timer = setTimeout(() => {
-      finish(() => {
-        reject(
-          new TlsError(
-            `${target.host}:${String(target.port)} did not complete a TLS handshake within ` +
-              `${String(target.timeoutMs)} ms`,
-            target.host,
-          ),
-        );
-      });
-    }, target.timeoutMs);
+    const timer = setTimeout(
+      () => {
+        finish(() => {
+          reject(
+            new TlsError(
+              `${target.host}:${String(target.port)} did not complete a TLS handshake within ` +
+                `${String(target.timeoutMs)} ms`,
+              target.host,
+            ),
+          );
+        });
+      },
+      // What the lookup took is taken from what the handshake has.
+      Math.max(1, target.timeoutMs - Number(process.hrtime.bigint() - started) / 1e6),
+    );
     timer.unref();
 
     socket.once('secureConnect', () => {

@@ -1,5 +1,5 @@
 import type { CheckContext } from '../../contract.js';
-import { checkedAddress, guardOf } from '../checked-target.js';
+import { checkedTarget, guardOf } from '../checked-target.js';
 import { readCredentials } from './credentials.js';
 import { withSnmp } from './pool.js';
 import type { SnmpSession } from './session.js';
@@ -43,12 +43,13 @@ export async function snmpCheck<T>(
 
   const port = options.port ?? Number(context.params['port'] ?? 161);
   const timeoutMs = Number(context.params['timeoutMs'] ?? 5_000);
-  // **Resolved once, checked against the probe's target policy, and asked at that address**
+  // **Resolved once, checked against the probe's target policy, and asked at a checked address**
   // (`A-57`). UDP has no socket lookup to hook: `net-snmp` resolves whatever it is given each
-  // time it sends, so a name handed to it is a name nobody checked. The address a credential
-  // set pinned (`A-41c`) is checked as it stands and nothing is resolved for it. Over IPv4
-  // unless the device says IPv6, which is the transport a name has always been asked over.
-  const address = await checkedAddress({
+  // time it sends, so a name handed to it is a name nobody checked. One lookup a scan in place
+  // of one a datagram. The address a credential set pinned (`A-41c`) is checked as it stands
+  // and nothing is resolved for it. Over IPv4 unless the device says IPv6, which is the
+  // transport a name has always been asked over.
+  const checked = await checkedTarget({
     ...guardOf(context.target),
     family: context.target.ipVersion === 'v6' ? 6 : 4,
     timeoutMs,
@@ -62,7 +63,9 @@ export async function snmpCheck<T>(
       host,
       port,
       ipVersion: context.target.ipVersion,
-      ...(address === undefined ? {} : { pinned: address }),
+      ...(context.target.pinned === undefined ? {} : { pinned: context.target.pinned }),
+      // The pool keeps the session it has while its address is still among these.
+      ...(checked?.byGuard === true ? { checked: checked.addresses } : {}),
     },
     readCredentials(stored),
     {

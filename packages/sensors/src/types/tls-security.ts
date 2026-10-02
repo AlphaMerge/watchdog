@@ -84,7 +84,9 @@ export const tlsSecurity: SensorType = {
       typeof declared === 'string' && declared.trim() !== '' ? declared.trim() : host;
     const timeoutMs = Number(context.params['timeoutMs'] ?? 8_000);
     // Resolved once and checked against the probe's target policy; every handshake of this
-    // check then goes to an address that lookup answered with (`A-57`).
+    // check then goes to an address that lookup answered with (`A-57`). The first handshake
+    // shares its timeout with the lookup, as each did when each socket made its own.
+    let startedAt: bigint | undefined = process.hrtime.bigint();
     const checked = await checkedTarget({
       ...guardOf(context.target),
       timeoutMs,
@@ -102,7 +104,9 @@ export const tlsSecurity: SensorType = {
     for (const version of VERSIONS) {
       if (context.signal.aborted) throw new Error(`the check was cancelled while probing ${host}`);
       try {
-        const result = await handshake(target, context.signal, {
+        const first = startedAt === undefined ? {} : { startedAt };
+        startedAt = undefined;
+        const result = await handshake({ ...target, ...first }, context.signal, {
           // Pinned to exactly this version: a range would let the server pick its best and this
           // would learn nothing about the others.
           minVersion: version.id,

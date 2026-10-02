@@ -18124,8 +18124,10 @@ because each is a decision rather than a defect:
       transports it covers check the address they connect to with the same single lookup as
       `A-54`, and a simulator test shows the refusal on each.
 
-      **A-57 outcome.** Every sensor that connects to its device by name or address refuses the
-      addresses the HTTP sensors did, under one setting on the probe, with one lookup.
+      **A-57 outcome.** Every sensor that opens a connection to its device by name or address
+      refuses the addresses the HTTP sensors did, under one setting on the probe, with one
+      lookup. Ping is left as it was. Two commits: the second closes a review's findings, and
+      what follows is what is true after it.
       - **The ticket's title was wrong about mail.** Only HTTP had the guard (`A-54` said so);
         mail had none. And HTTP's policy was a constant: nothing in a probe could set it.
       - **The setting is new: `probe.targetPolicy`**, `link-local` (default), `private` or
@@ -18133,7 +18135,8 @@ because each is a decision rather than a defect:
         workers and check processes get (`MS_TARGET_POLICY`), the catalogue reads it once and
         hands it to every check as `CheckTarget.policy`, overwriting whatever the check arrived
         with. A value that is not one of the three is `link-local`. No protocol number and no
-        migration: the core is not involved.
+        migration: the core is not involved. A change needs a probe restart, which is also
+        what closes every kept SSH connection.
       - **One place resolves and checks**: `checkedTarget` (`@ms/sensors`
         `support/checked-target.ts`), lifted out of `fetchHttp`, which now calls it. It uses
         `A-54`'s parts (`resolveWithin`, `resolveBoundMs`, the catalogue's resolver) and
@@ -18146,21 +18149,33 @@ because each is a decision rather than a defect:
         | --- | --- | --- |
         | `http.request`, `http.advanced`, `http.content`, `http.transaction`, `rest.custom` | yes, as before | `fetchHttp`, now under the probe's setting |
         | `mail.smtp`, `mail.pop3`, `mail.imap`, `mail.roundtrip` | yes | `MailConnection.open`: the socket's lookup, per connection |
-        | `ssh.load`, `ssh.meminfo`, `ssh.diskfree`, `ssh.script` | yes | `sshCheck`: a socket of the session's own (`ssh2`'s `sock`) with the lookup; the pool key carries the checked addresses, sorted |
-        | `snmp.traffic`, `snmp.custom`, `snmp.custom.string`, `snmp.table`, `snmp.cpu`, `snmp.diskfree`, `snmp.memory`, `snmp.uptime` | yes | `snmpCheck`: resolved, checked, sent to the first address; IPv4 unless the device says IPv6, as before |
+        | `ssh.load`, `ssh.meminfo`, `ssh.diskfree`, `ssh.script` | yes, when a connection is opened | the pool asks `SshTarget.guard` only to open one: a socket of the session's own (`ssh2`'s `sock`) with the lookup. A held connection is reused with no lookup, and the pool key is what it was |
+        | `snmp.traffic`, `snmp.custom`, `snmp.custom.string`, `snmp.table`, `snmp.cpu`, `snmp.diskfree`, `snmp.memory`, `snmp.uptime` | yes | `snmpCheck` resolves and checks each scan; the pool, keyed as it was, keeps its session while its address is among the answers and replaces it only when it is not. IPv4 unless the device says IPv6, as before |
         | `port.tcp`, `port.range` | yes | the socket's lookup; a range resolves once for all its ports |
         | `tls.certificate`, `tls.security` | yes | the socket's lookup; one lookup for every handshake |
-        | `icmp.ping`, `icmp.jitter` | yes | `pingTarget`: `ping` is handed the first checked address, never the name |
         | `db.postgresql`, `db.mysql`, `db.mssql` | an address only | the driver resolves a name itself and takes no lookup |
         | `windows.cpu`, `windows.memory`, `windows.service`, `windows.volume` | an address only | PowerShell resolves the name, and Kerberos wants it; the `host` parameter is checked too |
+        | `icmp.ping`, `icmp.jitter` | no | see below |
         | `dns.record`, `dns.blocklist` | no | they ask a resolver, not the device; a cloud's own resolver is link-local |
         | `exe.script`, `exe.script.advanced` | no | the probe connects to nothing; the script is handed the host |
         | `snmp.trap`, `syslog.receiver`, `flow.netflow` | no | listeners: nothing is sent |
         | `ms.core.health`, `ms.probe.health`, `core.factory` | no | computed by the core |
 
-      - **ICMP is in**: it was cheap. The probe resolves, checks, and hands `ping` the
-        resolver's first address for the device's family, which is the one `ping` would have
-        picked from the same answer.
+      - **ICMP is out, and its three files are as they were before the ticket.** The first
+        commit resolved the name in the probe and handed `ping` an address. Taken out because:
+        an echo carries no credential and brings back no content, so the guard buys nothing
+        there; `ping` resolved the name in its own child process, and resolving in the probe put
+        the largest sensor population on the probe's shared libuv thread pool, where
+        `getaddrinfo` cannot be cancelled and abandoned lookups pile up uncounted during a
+        resolver outage; and it lost `ping`'s own choice of address family.
+      - **No transport makes an in-process lookup that made none before** (read from the
+        parent, `ab55657`). Mail (`net.connect`/`tls.connect` by name), `port.tcp` and
+        `port.range` (`net.connect`), and TLS (`tls.connect`) each had their socket call
+        `dns.lookup` in the probe, on the same thread pool the guard's `dns.lookup` uses now, so
+        the call moved and did not multiply. SNMP's `dgram` socket resolved the name for each
+        datagram sent, and now there is one a scan. SSH's `ssh2` socket resolved it when a
+        connection was opened, and still does only then. Only ping resolved outside the probe,
+        which is why it is out.
       - **A target a credential set pinned (`A-41c`) connects exactly as it did**: one lookup,
         `pinTarget`'s, the pinned address, and `CredentialsWithheldError` with Unknown when the
         set is withheld. What is new is that the policy reads the pinned address on SNMP, SSH
@@ -18171,47 +18186,72 @@ because each is a decision rather than a defect:
         policy, and says `probe.targetPolicy` "none" refuses nothing. HTTP's sentence changed
         to the shared one.
       - **Alarm volume: a sensor on a link-local device that was Up reads Down after the
-        upgrade.** That is the intended change. One failed check a scan for each such sensor,
-        by the ordinary path; no new state, no new notification. `probe.targetPolicy: none` on
-        that probe, and a restart, is the way back. `administration.md` says so, with the
-        cases to look for (APIPA devices, `fe80::` devices, a cloud's link-local DNS and time
-        servers).
+        upgrade**, ping sensors excepted. That is the intended change. One failed check a scan
+        for each such sensor, by the ordinary path; no new state, no new notification.
+        `probe.targetPolicy: none` on that probe, and a restart, is the way back.
+        `administration.md` says so, with the cases to look for (APIPA devices, `fe80::`
+        devices, a cloud's link-local DNS and time servers). **And a resolver outage raises no
+        alarm it did not raise before**: SSH sensors on a kept connection ask the resolver
+        nothing, and a test holds six of them Up through a resolver that fails and one that
+        hangs.
       - **Lookups per scan, for a device given as a name.**
 
         | Transport | Before | After |
         | --- | --- | --- |
-        | ping, TCP port, TLS certificate, mail (per connection) | 1, the socket's or `ping`'s | 1, the probe's |
+        | TCP port, TLS certificate, mail (per connection) | 1, the socket's | 1, the guard's |
         | `port.range`, n ports | n | 1 |
         | `tls.security` | 1 per version tried | 1 |
         | SNMP | 1 per datagram sent | 1 |
-        | SSH, connection kept from an earlier scan | 0 | 1 |
+        | SSH | 1 when a connection is opened, 0 while it is kept | the same |
+        | ping | 0 in the probe, 1 in `ping` | the same |
         | Any, device given as an address, or under `none` | as before | as before |
 
-        Not measured at volume: one `getaddrinfo` a scan for an SSH sensor that made none is
-        the only place the count goes up.
-      - **Readings unchanged**: `port.tcp`'s connect time and `tls.certificate`'s handshake
-        time still start before the lookup, as they did when the socket made it.
+      - **Timeouts and readings are as before the ticket.** The lookup and the connect share
+        the sensor's timeout on `port.tcp`, `port.range`, TLS and mail: what the lookup took is
+        taken from the connect (on a range, from the first port each worker tries; on
+        `tls.security`, from the first handshake). `port.tcp`'s connect time and
+        `tls.certificate`'s handshake time include the lookup, and did before, when the socket
+        made it: the clock starts before the lookup in both. SSH's connect timeout starts after
+        the lookup when a connection is opened, which the first commit introduced and this
+        leaves: the lookup has at most half of it more.
       - **Docs:** `administration.md` gains "The target policy: every sensor that connects, and
         the addresses it will not", beside the HTTP section; `adding-a-sensor-type.md` gains
         the rule for a transport of a type's own. No sensor schema changed, so
         `sensor-reference.md` is not regenerated.
-      - **Tests:** `target-policy-transports.test.ts`, 62, none skipped, against the SNMP, SSH,
-        SMTP and HTTP simulators, loopback listeners for TCP and TLS, and the real `ping` on
-        loopback. For each transport: a resolver that answers the metadata address is refused
-        after one lookup; a name with one good and one refused address leaves the simulator
-        untouched; a resolver that would answer differently the second time is asked once and
-        the check arrives; an IPv4-mapped spelling is refused as a host and as an answer; an
-        address and any host under `none` make no lookup; a pinned target makes the pin's one
-        lookup and keeps its `CredentialsWithheldError`. Also: a first address that refuses the
-        connection is passed (SSH, mail, TCP, TLS); a kept SNMP session or SSH connection is not
-        used once the name answers the metadata address; the SSH pool key under a rotated
-        answer; the database and Windows address-only check; the catalogue's setting and the
-        environment; and one device on a link-local address whose ten sensors each fail once,
-        unwithheld, with nothing resolved. Two tests in `pinned-transports.test.ts` that pinned
-        "an unrestricted name makes no lookup" on SNMP and mail now pin the one. One in the
-        probe's `catalogue-registry.test.ts`: the real registry refuses `port.tcp` and
-        `icmp.ping` on the metadata address with no code a runner reads.
-      - **Mutation:** 22 of 22 killed, each by an assertion.
+      - **Tests:** `target-policy-transports.test.ts`, 68, none skipped, against the SNMP, SSH,
+        SMTP and HTTP simulators and loopback listeners for TCP and TLS. For each transport
+        held to the policy: a resolver that answers the metadata address is refused after one
+        lookup; a name with one good and one refused address leaves the simulator untouched; a
+        resolver that would answer differently the second time is asked once and the check
+        arrives; an IPv4-mapped spelling is refused as a host and as an answer; an address and
+        any host under `none` make no lookup; a pinned target makes the pin's one lookup and
+        keeps its `CredentialsWithheldError`. Also: a first address that refuses the connection
+        is passed (SSH, mail, TCP, TLS); SSH sensors coming due together share one connection
+        and one lookup, stay Up with no lookup while the resolver fails or hangs, keep one
+        connection while the name's answers change every scan, and are checked again when a
+        connection has to be opened; an SNMP name whose answers rotate keeps one session, one
+        that really moved is asked at the new address with the old session closed, and an
+        answer set with a refused address is refused whole; the shared timeout on `port.tcp`,
+        `port.range`, `tls.certificate`, `tls.security` and mail, against a loopback port that
+        never answers a connection; ping is not held to the policy and makes no lookup in the
+        probe; the database and Windows address-only check; the catalogue's setting and the
+        environment; and one device on a link-local address whose eight sensors each fail
+        once, unwithheld, with nothing resolved. Two tests in `pinned-transports.test.ts` that
+        pinned "an unrestricted name makes no lookup" on SNMP and mail now pin the one. One in
+        the probe's `catalogue-registry.test.ts`: the real registry refuses `port.tcp` and
+        `tls.certificate` on the metadata address with no code a runner reads.
+      - **Test faults closed:** the `port.tcp` case waits, with a bound, for the listener's
+        accept instead of reading its counter as the client's connect resolves; the TLS suite
+        skips only when `openssl` is not installed and fails on any other setup error.
+      - **Mutation:** the first commit's 22 of 22, and 15 of 15 for what the review changed,
+        each planted alone, built clean and failed by an assertion: the SSH pool opening
+        without asking the guard, asking it and connecting by name all the same, and asking it
+        before the pool is consulted; an SNMP session kept whatever the name answers, replaced
+        at every scan, handed the name in place of a checked address, never closed when
+        replaced, closed under the check using it, and not closed when that check is done;
+        `snmpCheck` not handing the pool the checked addresses; and the whole timeout given
+        after the lookup on `port.tcp`, `port.range`, the TLS handshake, `tls.security`'s first
+        handshake, and mail.
       - **Not covered by a test:** the two lines in the probe's `main.ts` that put the setting
         in the environment, and no test in the core drives a Down from this refusal through
         notifications: it is a failed check like any other there.

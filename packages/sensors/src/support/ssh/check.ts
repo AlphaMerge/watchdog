@@ -39,23 +39,27 @@ export async function sshCheck<T>(
 
   const port = options.port ?? Number(context.params['port'] ?? 22);
   const connectTimeoutMs = Number(context.params['connectTimeoutMs'] ?? 15_000);
-  // **Resolved once and checked against the probe's target policy** (`A-57`), and the
-  // connection is made to an address that lookup answered with. A target a credential set
-  // pinned (`A-41c`) is checked at that address, resolves nothing, and connects as it did.
-  const checked = await checkedTarget({
-    ...guardOf(context.target),
-    timeoutMs: connectTimeoutMs,
-    signal: context.signal,
-    verb: 'connect to',
-    doing: `connecting to ${host}:${String(port)} over SSH`,
-  });
-
   return withSsh(
     {
       host,
       port,
       ...(context.target.pinned === undefined ? {} : { pinned: context.target.pinned }),
-      ...(checked?.byGuard === true ? { checked: checked.addresses } : {}),
+      // **Only when a connection has to be opened** (`A-57`): the name is resolved once and
+      // checked against the probe's target policy, and the connection is made to an address
+      // that lookup answered with. A connection the pool already holds is used with no lookup,
+      // as it always was: the address it is connected to was checked when it was opened, and
+      // an SSH sensor must not start failing because the probe's resolver has. A target a
+      // credential set pinned (`A-41c`) is checked at that address and resolves nothing.
+      guard: async () => {
+        const checked = await checkedTarget({
+          ...guardOf(context.target),
+          timeoutMs: connectTimeoutMs,
+          signal: context.signal,
+          verb: 'connect to',
+          doing: `connecting to ${host}:${String(port)} over SSH`,
+        });
+        return checked?.byGuard === true ? checked.addresses : undefined;
+      },
     },
     readCredentials(stored),
     {

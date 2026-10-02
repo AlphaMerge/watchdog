@@ -3,7 +3,6 @@ import {
   parsePingOutput,
   pingCommand,
   pingPlatform,
-  pingTarget,
   runPing,
   summarise,
   type PingParams,
@@ -95,8 +94,7 @@ export const icmpPing: SensorType = {
       throw new Error('the device has no host to ping');
     }
 
-    const target = await pingTarget(context.target, params.timeoutMs, context.signal);
-    const { command, args } = pingCommand(pingPlatform(process.platform), target, params);
+    const { command, args } = pingCommand(pingPlatform(process.platform), context.target, params);
     const run = await runPing(command, args, context.signal);
     const outcome = parsePingOutput(run.output, params.count);
 

@@ -607,7 +607,8 @@ next section.
 
 **`probe.targetPolicy`**, in the probe's configuration file, says which addresses that probe's
 sensors will not connect to (`A-57`). It is read at start, so changing it means restarting the
-probe, and each probe has its own.
+probe, and each probe has its own. The restart is also what makes a change take hold on SSH: a
+kept SSH connection is used as it stands, and a restart is what closes them all.
 
 | Value | Refuses |
 | --- | --- |
@@ -615,11 +616,11 @@ probe, and each probe has its own.
 | `private` | Those, and loopback, the RFC 1918 ranges, carrier-grade NAT and unique-local. Nearly every device a probe inside a network watches. |
 | `none` | Nothing. |
 
-It used to be the HTTP sensors' rule alone, with no setting: an SSH, SNMP, TCP port, TLS, mail
-or ping sensor connected to whatever its device's name resolved to. Less is at stake on those
+It used to be the HTTP sensors' rule alone, with no setting: an SSH, SNMP, TCP port, TLS or
+mail sensor connected to whatever its device's name resolved to. Less is at stake on those
 than on HTTP, where the answer is stored and shown, and it is still a probe made to speak to an
-address the policy names, by anyone who may write a device. Now every sensor that connects to
-its device by name or address is held to the one policy. Webhooks keep their own setting on the
+address the policy names, by anyone who may write a device. Now every sensor that opens a connection to
+its device by name or address is held to the one policy; ping is not, and the table says why. Webhooks keep their own setting on the
 core, `notifications.webhook.targetPolicy`, with the same three values.
 
 **A device on a link-local address that was Up reads Down after this upgrade.** Each sensor on
@@ -627,7 +628,7 @@ it that connects fails its next scan, saying the device, the address and the pol
 `refusing to connect to 169.254.10.20, which is link-local … this probe’s target policy
 (link-local) refuses it`. That is the intended change, and it pages as any Down does: once for
 each sensor, held by a dependency and collected into a digest as usual, with no new state and
-no new notification. Devices reached at an APIPA address (`169.254.x.x`), IPv6 devices added by
+no new notification. Ping sensors are not affected. Devices reached at an APIPA address (`169.254.x.x`), IPv6 devices added by
 their `fe80::` address, and the link-local service addresses a cloud provider answers on, such
 as its DNS and time servers, are the cases to look for. **If those are yours to monitor, set
 `probe.targetPolicy` to `none` on that probe and restart it**: the sensors are Up at their next
@@ -641,13 +642,13 @@ as it stands and nothing is resolved, on every one of them.
 | --- | --- | --- |
 | HTTP: `http.request`, `http.advanced`, `http.content`, `http.transaction`, `rest.custom` | Yes | As in the section above. |
 | Mail: `mail.smtp`, `mail.pop3`, `mail.imap`, `mail.roundtrip` | Yes | The socket's lookup is answered with the checked addresses; TLS still names the server. Each connection of a check is resolved and checked on its own answer, a round trip's polls included. |
-| SSH: `ssh.load`, `ssh.meminfo`, `ssh.diskfree`, `ssh.script` | Yes | The connection is made on a socket whose lookup is answered with the checked addresses. A kept connection is reused only while the name still has the same addresses. |
-| SNMP: `snmp.traffic`, `snmp.custom`, `snmp.custom.string`, `snmp.table`, `snmp.cpu`, `snmp.diskfree`, `snmp.memory`, `snmp.uptime` | Yes | UDP has no lookup to answer: the name is resolved, checked, and the agent is asked at the first checked address. Over IPv4 unless the device is set to IPv6, as before. |
+| SSH: `ssh.load`, `ssh.meminfo`, `ssh.diskfree`, `ssh.script` | Yes, when a connection is opened | The name is resolved and checked only when a connection has to be opened, and the connection is made on a socket whose lookup is answered with the checked addresses. **A kept connection is used with no lookup, as before**: its address was checked when it was opened. So a resolver that fails does not take a device's SSH sensors Down while their connection holds. |
+| SNMP: `snmp.traffic`, `snmp.custom`, `snmp.custom.string`, `snmp.table`, `snmp.cpu`, `snmp.diskfree`, `snmp.memory`, `snmp.uptime` | Yes | UDP has no lookup to answer: each scan resolves the name once, checks every address, and asks the agent at a checked address. The session it has is kept while its address is still among the answers, so a name whose answers rotate keeps one session; it is replaced only when the name no longer has that address. Over IPv4 unless the device is set to IPv6, as before. |
 | TCP: `port.tcp`, `port.range` | Yes | The socket's lookup is answered with the checked addresses. A range is resolved once for all its ports. |
 | TLS: `tls.certificate`, `tls.security` | Yes | As TCP. Every handshake of a security check goes to the same checked addresses. |
-| ICMP: `icmp.ping`, `icmp.jitter` | Yes | The name is resolved and checked, and the system `ping` is handed the first checked address, never the name. |
 | Databases: `db.postgresql`, `db.mysql`, `db.mssql` | An address only | A device given as a refused address is refused. **A name is not resolved or checked**: the driver resolves it itself and cannot be handed an address, so a check here would be of an answer the connection never uses. |
 | Windows: `windows.cpu`, `windows.memory`, `windows.service`, `windows.volume` | An address only | The same, and for the same reason: PowerShell resolves the name, and Kerberos wants the name. The sensor's own `host` parameter is checked as the device's is. |
+| ICMP: `icmp.ping`, `icmp.jitter` | No | An echo carries no credential and brings back no content, so the guard would buy nothing. `ping` resolves the name in its own process, as before. Resolving it in the probe instead would put the largest sensor population on the probe's shared lookup threads, where a lookup cannot be cancelled and abandoned ones pile up uncounted while a resolver is down, and it would lose `ping`'s own choice of address family. |
 | DNS: `dns.record`, `dns.blocklist` | No | They ask a resolver about a name and connect to no device. The resolver is the probe's own or an address in the sensor's parameters, and on a cloud machine the provider's resolver is itself link-local. |
 | Scripts: `exe.script`, `exe.script.advanced` | No | The probe connects to nothing. The script is handed the device's host and does what whoever deployed it wrote. |
 | Listeners: `snmp.trap`, `syslog.receiver`, `flow.netflow` | No | Nothing is sent: they count what a device sends the probe. |
@@ -659,18 +660,21 @@ as it stands and nothing is resolved, on every one of them.
   again, so whoever runs the name's DNS cannot answer the check with one address and the
   connection with another.
 - **A name with several addresses** is walked as it was: the socket is handed every checked
-  address and moves on from one that refuses or does not answer. SNMP and ping go to the first,
-  which is the one they used before.
+  address and moves on from one that refuses or does not answer. SNMP asks the first, which is
+  the one it used before.
+- **The lookup and the connection share the sensor's timeout**, as they did when the socket
+  made the lookup: a TCP port, TLS or mail sensor never runs longer than its timeout for the
+  lookup's sake, and its connect or handshake time includes the lookup, as before.
 - **A name that does not resolve** fails the scan in the guard, saying so. **A resolver that
   does not answer** is given half the sensor's timeout, ten seconds at most.
 - **A device whose name was checked against a credential set's targets** (`A-41c`) connects
   exactly as before, to the address that check pinned, with no second lookup, and reads Unknown
   as before when its set is withheld. The policy reads the pinned address: a set whose targets
   allow a link-local address does not make the probe connect to one.
-- **A sensor's lookups.** Before, a ping, TCP, TLS, mail or SSH connection resolved the name
-  itself, and SNMP resolved it for each datagram. Now each scan resolves it once in the probe.
-  An SSH or SNMP sensor reusing a kept session resolves once a scan where SSH resolved nothing;
-  `none` restores that too.
+- **A sensor's lookups.** No sensor asks the probe's resolver where it did not before. A TCP,
+  TLS or mail connection resolved the name in the probe when its socket connected, and now the
+  guard does, once. SNMP resolved it for each datagram, and now once a scan. SSH resolves when
+  it opens a connection, as before, and not while it keeps one. Ping is unchanged.
 
 ---
 

@@ -80,7 +80,7 @@ export const icmpJitter: SensorType = {
   },
 
   async execute(context: CheckContext): Promise<CheckExecution> {
-    const { pingCommand, pingPlatform, pingTarget, parsePingOutput, summarise, jitterOf, runPing } =
+    const { pingCommand, pingPlatform, parsePingOutput, summarise, jitterOf, runPing } =
       await import('../support/ping.js');
 
     const host = context.target.host;
@@ -94,8 +94,7 @@ export const icmpJitter: SensorType = {
       intervalSeconds: Number(context.params['intervalSeconds'] ?? 1),
     };
 
-    const target = await pingTarget(context.target, params.timeoutMs, context.signal);
-    const { command, args } = pingCommand(pingPlatform(process.platform), target, params);
+    const { command, args } = pingCommand(pingPlatform(process.platform), context.target, params);
     const run = await runPing(command, args, context.signal);
     const outcome = parsePingOutput(run.output, count);
 

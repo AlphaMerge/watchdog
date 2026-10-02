@@ -3,12 +3,14 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import {
+  connect as netConnect,
   createServer as createTcpServer,
   type LookupFunction,
   type Server,
   type Socket,
 } from 'node:net';
 import { tmpdir } from 'node:os';
+import { Worker } from 'node:worker_threads';
 import { join } from 'node:path';
 import { createServer as createTlsServer } from 'node:tls';
 import type { TargetPolicy } from '@ms/shared';
@@ -23,7 +25,6 @@ import {
 import { SensorCatalogue } from '../src/catalogue.js';
 import { snmpPool, sshPool } from '../src/index.js';
 import {
-  checkedAddress,
   checkedLookup,
   checkedTarget,
   guardOf,
@@ -39,7 +40,9 @@ import {
   type ResolvedAddress,
   type ResolveHost,
 } from '../src/support/pinned-target.js';
-import { pingCommand, pingTarget } from '../src/support/ping.js';
+import { pingCommand } from '../src/support/ping.js';
+import { readCredentials as readSnmpCredentials } from '../src/support/snmp/credentials.js';
+import { SnmpSessionPool } from '../src/support/snmp/pool.js';
 import { windowsOptions } from '../src/support/windows/schema.js';
 import type { DbDriver } from '../src/support/db/driver.js';
 import { runDbCheck } from '../src/types/db-shared.js';
@@ -194,6 +197,65 @@ function tracked<T extends Server>(server: T): T {
     socket.on('close', () => sockets.delete(socket));
   });
   return server;
+}
+
+/** Waits for something the far end does on its own time, with a bound of its own. */
+async function until(done: () => boolean, what: string, withinMs = 3_000): Promise<void> {
+  const deadline = Date.now() + withinMs;
+  while (!done()) {
+    if (Date.now() > deadline) assert.fail(`${what} did not happen within ${String(withinMs)} ms`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+/** Answers `answers` once `delayMs` has passed, and counts how often it was asked. */
+function slow(delayMs: number, answers: readonly ResolvedAddress[] = v4('127.0.0.1')): Rebinding {
+  const calls: { host: string; family: number }[] = [];
+  return {
+    calls,
+    resolve: (host, family) => {
+      calls.push({ host, family });
+      return new Promise((resolve) => setTimeout(resolve, delayMs, answers));
+    },
+  };
+}
+
+/**
+ * A loopback port that takes a connection's first packet and never answers it, or null where
+ * this machine will not make one.
+ *
+ * A listener in a thread that then stops running: nothing accepts, so once the kernel's queue
+ * for it is full a new connection gets no answer at all. That is the one thing a timeout on
+ * the *connect* can be shown against without sending a packet off this machine.
+ */
+async function blackhole(): Promise<{ port: number; close: () => Promise<void> } | null> {
+  const worker = new Worker(
+    `const { createServer } = require('node:net');
+     const { parentPort } = require('node:worker_threads');
+     const server = createServer();
+     server.listen({ port: 0, host: '127.0.0.1', backlog: 1 }, () => {
+       parentPort.postMessage(server.address().port);
+       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+     });`,
+    { eval: true },
+  );
+  const port = await new Promise<number>((resolve) => worker.once('message', resolve));
+  const filling: Socket[] = [];
+  const close = async (): Promise<void> => {
+    for (const socket of filling) socket.destroy();
+    await worker.terminate();
+  };
+  // Connections are taken by the kernel until its queue is full; the first that is still
+  // connecting after a while is the proof that the next one will hang too.
+  for (let at = 0; at < 16; at += 1) {
+    const socket = netConnect({ host: '127.0.0.1', port });
+    socket.on('error', () => undefined);
+    filling.push(socket);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    if (socket.connecting) return { port, close };
+  }
+  await close();
+  return null;
 }
 
 /** What a socket would be told, by either of the two shapes Node asks in. */
@@ -388,15 +450,6 @@ describe('checkedTarget: one lookup, every answer checked', () => {
       () => pending,
       new RegExp(`^Error: the check was cancelled while connecting to ${NAME}:22$`),
     );
-  });
-
-  it('checkedAddress is the resolver’s first, or nothing where the host is used as it is', async () => {
-    assert.deepEqual(await checkedAddress(check(rebinding(v4('127.0.0.2', '127.0.0.1')))), {
-      address: '127.0.0.2',
-      family: 4,
-    });
-    assert.equal(await checkedAddress(check(rebinding(), { host: '127.0.0.1' })), undefined);
-    assert.equal(await checkedAddress(check(rebinding(), { policy: 'none' })), undefined);
   });
 
   it('guardOf carries the pin, the policy and the resolver with the host', () => {
@@ -603,6 +656,74 @@ describe('SNMP', () => {
     assert.equal(dns.calls.length, 2);
   });
 
+  it('keeps its one session while the name’s answers only rotate', async () => {
+    const both = v4('127.0.0.1', '127.0.0.2');
+    const dns = rebinding(both, [...both].reverse());
+    const catalogue = catalogueOf(snmpUptime, dns);
+    const context = (): CheckContext => contextOf({ params: params(), credentials: credentials() });
+    const opened = snmpPool.stats().opened;
+    for (let scan = 0; scan < 3; scan += 1) {
+      assert.equal(valueOf(await catalogue.execute('snmp.uptime', context()), 'uptime'), 90);
+    }
+    // One lookup a scan, as there was one a datagram before; and one session throughout.
+    assert.equal(dns.calls.length, 3);
+    assert.equal(snmpPool.stats().opened, opened + 1);
+    assert.equal(snmpPool.stats().sessions, 1);
+  });
+
+  it('moves to the new address when the name really has moved, and closes the session it had', async () => {
+    // Nothing answers on 127.0.0.2. The session to 127.0.0.1 would: using it would be asking
+    // an address this scan's lookup did not answer with.
+    const dns = rebinding(v4('127.0.0.1'), v4('127.0.0.2'));
+    const catalogue = catalogueOf(snmpUptime, dns);
+    const context = (): CheckContext =>
+      contextOf({
+        params: { port: agent.port, timeoutMs: 300, retries: 0 },
+        credentials: credentials(),
+      });
+    const before = snmpPool.stats();
+    await catalogue.execute('snmp.uptime', context());
+    const asked = agent.requests;
+    await assert.rejects(
+      () => catalogue.execute('snmp.uptime', context()),
+      (error: unknown) => !(error instanceof TargetRefusedError),
+    );
+    assert.equal(agent.requests, asked, 'the agent on the first address was not asked again');
+    const after = snmpPool.stats();
+    assert.equal(after.opened, before.opened + 2);
+    assert.equal(after.closed, before.closed + 1);
+    assert.equal(after.sessions, 1);
+  });
+
+  it('does not close a session under the check still using it when the name moves', () => {
+    const pool = new SnmpSessionPool();
+    const credential = readSnmpCredentials({ version: 'v2c', community: 'public' });
+    const target = (address: string) => ({
+      host: NAME,
+      port: agent.port,
+      checked: [{ address, family: 4 as const }],
+    });
+    try {
+      const first = pool.acquire(target('127.0.0.1'), credential);
+      // The name has moved while the first check is still running on the session it was given.
+      const second = pool.acquire(target('127.0.0.2'), credential);
+      assert.notEqual(second.session, first.session);
+      assert.equal(first.session.closed, false, 'the session in use is left to its check');
+      assert.equal(pool.stats().sessions, 1);
+      first.release();
+      assert.equal(first.session.closed, true, 'and closed when that check is done');
+      assert.equal(second.session.closed, false);
+      // The same address again is the session the pool holds, not a third.
+      second.release();
+      const third = pool.acquire(target('127.0.0.2'), credential);
+      assert.equal(third.session, second.session);
+      third.release();
+      assert.equal(pool.stats().opened, 2);
+    } finally {
+      pool.closeAll();
+    }
+  });
+
   it('refuses an IPv4-mapped spelling, and asks an ordinary address with no lookup', async () => {
     const dns = rebinding();
     for (const host of MAPPED) {
@@ -703,6 +824,11 @@ describe('SSH', () => {
     connectTimeoutMs: 5_000,
     commandTimeoutMs: 5_000,
   });
+  /** One SSH sensor of several on the same named device. */
+  const sensor = (sensorId: number): CheckContext => ({
+    ...contextOf({ params: params(), credentials: credentials() }),
+    sensorId,
+  });
 
   before(async () => {
     server = await TestSshServer.start();
@@ -761,36 +887,81 @@ describe('SSH', () => {
     assert.equal(dns.calls.length, 1);
   });
 
-  it('keeps its connection across scans while the name’s addresses are the same, in any order', async () => {
-    const answers = [v4(DEAD, '127.0.0.1'), v4('127.0.0.1', DEAD)];
-    const dns = rebinding(answers[0], answers[1]);
-    const catalogue = catalogueOf(sshLoad, dns);
-    const context = (): CheckContext => contextOf({ params: params(), credentials: credentials() });
-    await catalogue.execute('ssh.load', context());
-    await catalogue.execute('ssh.load', context());
-    assert.equal(server.connections, 1);
-    assert.ok(server.seen.length >= 2, 'both scans ran their command');
-    assert.equal(dns.calls.length, 2);
-  });
-
-  it('runs nothing over the connection it had once the name answers the metadata address', async () => {
+  it('several sensors coming due together share one connection and its one lookup', async () => {
     const dns = rebinding();
     const catalogue = catalogueOf(sshLoad, dns);
-    const context = (): CheckContext => contextOf({ params: params(), credentials: credentials() });
-    await catalogue.execute('ssh.load', context());
-    const ran = server.seen.length;
-    await refused(catalogue.execute('ssh.load', context()));
-    assert.equal(server.seen.length, ran);
+    const executions = await Promise.all(
+      [1, 2, 3, 4].map((id) => catalogue.execute('ssh.load', sensor(id))),
+    );
+    for (const execution of executions) assert.equal(valueOf(execution, 'load1'), 0.5);
+    assert.equal(server.connections, 1);
+    assert.equal(dns.calls.length, 1);
+  });
+
+  it('a resolver outage is not an alarm for each SSH sensor on a device whose connection is held', async () => {
+    // One outage, one alarm. The connection was checked when it was opened; every sensor on
+    // the device uses it without asking the resolver anything, as before `A-57`. Were a
+    // lookup made each scan, a resolver that failed, or hung, would read every one of them
+    // Down, for a device that is answering.
+    let mode: 'answer' | 'fail' | 'hang' = 'answer';
+    const calls: string[] = [];
+    const dns: Rebinding = {
+      calls: [],
+      resolve: (host) => {
+        calls.push(mode);
+        if (mode === 'answer') return Promise.resolve(v4('127.0.0.1'));
+        if (mode === 'fail') {
+          return Promise.reject(Object.assign(new Error('SERVFAIL'), { code: 'EAI_AGAIN', host }));
+        }
+        return new Promise(() => undefined);
+      },
+    };
+    const catalogue = catalogueOf(sshLoad, dns);
+    await catalogue.execute('ssh.load', sensor(1));
+    assert.deepEqual(calls, ['answer']);
+
+    for (const outage of ['fail', 'hang'] as const) {
+      mode = outage;
+      const executions = await Promise.all(
+        [1, 2, 3, 4, 5, 6].map((id) => catalogue.execute('ssh.load', sensor(id))),
+      );
+      for (const execution of executions) {
+        assert.equal(valueOf(execution, 'load1'), 0.5, `Up while the resolver would ${outage}`);
+      }
+    }
+    assert.deepEqual(calls, ['answer'], 'no sensor asked the resolver during the outage');
     assert.equal(server.connections, 1);
   });
 
-  it('a name whose addresses change is another connection', async () => {
-    const dns = rebinding(v4('127.0.0.1'), v4('127.0.0.1', DEAD));
+  it('a name whose answers change every scan is still one connection, and no lookup after the first', async () => {
+    const answers = [v4('127.0.0.1'), v4('127.0.0.1', DEAD), v4(DEAD), v4(METADATA)];
+    const calls: { host: string; family: number }[] = [];
+    const dns: Rebinding = {
+      calls,
+      resolve: (host, family) => {
+        const answer = answers[Math.min(calls.length, answers.length - 1)] ?? [];
+        calls.push({ host, family });
+        return Promise.resolve(answer);
+      },
+    };
     const catalogue = catalogueOf(sshLoad, dns);
-    const context = (): CheckContext => contextOf({ params: params(), credentials: credentials() });
-    await catalogue.execute('ssh.load', context());
-    await catalogue.execute('ssh.load', context());
-    assert.equal(server.connections, 2);
+    for (let scan = 0; scan < 4; scan += 1) {
+      assert.equal(valueOf(await catalogue.execute('ssh.load', sensor(1)), 'load1'), 0.5);
+    }
+    assert.equal(server.connections, 1);
+    assert.equal(calls.length, 1);
+    assert.equal(sshPool.stats().connections, 1);
+  });
+
+  it('checks again when a connection has to be opened, and a name that now answers the metadata address is refused', async () => {
+    const dns = rebinding();
+    const catalogue = catalogueOf(sshLoad, dns);
+    await catalogue.execute('ssh.load', sensor(1));
+    // Gone, as an idle connection goes, or as every one does when the probe restarts.
+    sshPool.closeAll();
+    await refused(catalogue.execute('ssh.load', sensor(1)));
+    assert.equal(dns.calls.length, 2);
+    assert.equal(server.connections, 1);
   });
 
   it('an ordinary address makes no lookup, and neither does any host under `none`', async () => {
@@ -999,7 +1170,8 @@ describe('TCP port', () => {
     const execution = await execute(portTcp, dns, { params: params() });
     assert.ok((valueOf(execution, 'connectTime') ?? -1) >= 0);
     assert.equal(dns.calls.length, 1);
-    assert.equal(listener.connections(), earlier + 1);
+    // The far end counts a connection when it accepts it, which is after the near end has it.
+    await until(() => listener.connections() === earlier + 1, 'the listener’s accept');
   });
 
   it('passes a first address that refuses the connection', async () => {
@@ -1069,48 +1241,52 @@ describe('TLS', () => {
   let handshakes = 0;
 
   before(async () => {
+    // Skipped for one reason only, a machine with no openssl. Anything else that goes wrong
+    // making the certificate or the server fails the suite, where a skip would hide it.
     try {
-      dir = mkdtempSync(join(tmpdir(), 'ms-policy-'));
-      const keyFile = join(dir, 'name.key');
-      const certFile = join(dir, 'name.crt');
-      execFileSync(
-        'openssl',
-        [
-          'req',
-          '-x509',
-          '-newkey',
-          'rsa:2048',
-          '-nodes',
-          '-keyout',
-          keyFile,
-          '-out',
-          certFile,
-          '-days',
-          '30',
-          '-subj',
-          `/CN=${NAME}`,
-          '-addext',
-          `subjectAltName=DNS:${NAME}`,
-        ],
-        { stdio: 'ignore' },
-      );
-      const made = tracked(
-        createTlsServer(
-          { key: readFileSync(keyFile, 'utf8'), cert: readFileSync(certFile, 'utf8') },
-          (socket) => socket.end(),
-        ),
-      );
-      made.on('connection', () => {
-        handshakes += 1;
-      });
-      made.on('tlsClientError', () => undefined);
-      await new Promise<void>((resolve) => made.listen(0, '127.0.0.1', resolve));
-      const address = made.address();
-      port = typeof address === 'object' && address !== null ? address.port : 0;
-      server = made;
-    } catch {
-      server = undefined;
+      execFileSync('openssl', ['version'], { stdio: 'ignore' });
+    } catch (error: unknown) {
+      if ((error as { code?: unknown }).code === 'ENOENT') return;
+      throw error;
     }
+    dir = mkdtempSync(join(tmpdir(), 'ms-policy-'));
+    const keyFile = join(dir, 'name.key');
+    const certFile = join(dir, 'name.crt');
+    execFileSync(
+      'openssl',
+      [
+        'req',
+        '-x509',
+        '-newkey',
+        'rsa:2048',
+        '-nodes',
+        '-keyout',
+        keyFile,
+        '-out',
+        certFile,
+        '-days',
+        '30',
+        '-subj',
+        `/CN=${NAME}`,
+        '-addext',
+        `subjectAltName=DNS:${NAME}`,
+      ],
+      { stdio: 'ignore' },
+    );
+    const made = tracked(
+      createTlsServer(
+        { key: readFileSync(keyFile, 'utf8'), cert: readFileSync(certFile, 'utf8') },
+        (socket) => socket.end(),
+      ),
+    );
+    made.on('connection', () => {
+      handshakes += 1;
+    });
+    made.on('tlsClientError', () => undefined);
+    await new Promise<void>((resolve) => made.listen(0, '127.0.0.1', resolve));
+    const address = made.address();
+    port = typeof address === 'object' && address !== null ? address.port : 0;
+    server = made;
   });
   after(async () => {
     if (server !== undefined) await closed(server);
@@ -1186,67 +1362,145 @@ describe('TLS', () => {
   });
 });
 
-describe('ICMP ping', () => {
-  it('ping is handed the address the one lookup answered, and never the name', async () => {
-    const dns = rebinding();
-    const target = await pingTarget(
-      { host: NAME, ipVersion: 'auto', resolve: dns.resolve },
-      2_000,
-      new AbortController().signal,
-    );
-    assert.deepEqual(target, { host: '127.0.0.1', ipVersion: 'auto' });
-    assert.deepEqual(dns.calls, [{ host: NAME, family: 0 }]);
-    const { args } = pingCommand('linux', target, { count: 1, packetSize: 32, timeoutMs: 2_000 });
-    assert.equal(args.at(-1), '127.0.0.1');
-    assert.equal(args.includes(NAME), false);
-  });
+describe('ICMP ping is not held to the policy', () => {
+  // An echo carries no credential and brings back no content, so the guard would buy nothing;
+  // and `ping` resolves a name in its own process, which a lookup made here would move onto
+  // the probe's shared thread pool for the largest sensor population there is.
+  const contextFor = (host: string): CheckContext =>
+    contextOf({ params: { count: 2, timeoutMs: 4_000 }, host, ipVersion: 'v4' });
 
-  it('asks for the device’s family, and hands on a host it does not resolve as it is', async () => {
-    for (const [ipVersion, family] of [
-      ['v4', 4],
-      ['v6', 6],
-    ] as const) {
-      const dns = rebinding([{ address: family === 4 ? '127.0.0.1' : '::1', family }]);
-      const target = await pingTarget(
-        { host: NAME, ipVersion, resolve: dns.resolve },
-        2_000,
-        new AbortController().signal,
-      );
-      assert.deepEqual(dns.calls, [{ host: NAME, family }]);
-      assert.equal(target.ipVersion, ipVersion);
-    }
+  it('pings an address the policy would refuse a connection to', async () => {
+    // Loopback under `private`: refused for every transport that is held to the policy.
     const dns = rebinding();
-    const literal = { host: '127.0.0.1', ipVersion: 'v4', resolve: dns.resolve } as const;
-    assert.equal(await pingTarget(literal, 2_000, new AbortController().signal), literal);
-    const open = { host: NAME, ipVersion: 'auto', resolve: dns.resolve, policy: 'none' } as const;
-    assert.equal(await pingTarget(open, 2_000, new AbortController().signal), open);
+    await refused(
+      execute(portTcp, dns, { params: { port: 9 }, host: '127.0.0.1', policy: 'private' }),
+    );
+    for (const type of [icmpPing, icmpJitter]) {
+      const execution = await catalogueOf(type, dns, 'private').execute(
+        type.id,
+        contextFor('127.0.0.1'),
+      );
+      assert.equal(valueOf(execution, 'loss'), 0, type.id);
+    }
     assert.equal(dns.calls.length, 0);
   });
 
-  it('pings a name through the one lookup, against the real binary on loopback', async () => {
+  it('makes no lookup in the probe: ping is handed the name, and resolves it itself', async () => {
     const dns = rebinding();
-    const execution = await execute(icmpPing, dns, {
-      params: { count: 2, timeoutMs: 4_000 },
-      ipVersion: 'v4',
-    });
-    assert.match(execution.message ?? '', /2\/2 replies/);
-    assert.equal(dns.calls.length, 1);
+    // A name nothing resolves: the failure is ping's own, not a refusal and not the guard's.
+    await assert.rejects(
+      () => catalogueOf(icmpPing, dns).execute('icmp.ping', contextFor(NAME)),
+      (error: unknown) =>
+        error instanceof Error &&
+        !(error instanceof TargetRefusedError) &&
+        /no ICMP reply from device\.policy\.invalid/.test(error.message),
+    );
+    assert.equal(dns.calls.length, 0);
+    const { args } = pingCommand(
+      'linux',
+      { host: NAME, ipVersion: 'auto', resolve: dns.resolve, policy: 'link-local' },
+      { count: 1, packetSize: 32, timeoutMs: 2_000 },
+    );
+    assert.equal(args.at(-1), NAME);
+  });
+});
+
+describe('the lookup and the connection share the sensor’s timeout', () => {
+  // A resolver that takes 900 ms of a 2,000 ms timeout, then an address that never answers.
+  // The check ends at the timeout. Given the whole timeout again after the lookup, it would
+  // end 900 ms later, and a sensor could run half as long again as it was told to.
+  let hole: Awaited<ReturnType<typeof blackhole>> = null;
+  before(async () => {
+    hole = await blackhole();
+  });
+  after(async () => {
+    await hole?.close();
+  });
+  const TIMEOUT = 2_000;
+  const LOOKUP = 900;
+  const timed = async (run: () => Promise<unknown>): Promise<{ ms: number; error: Error }> => {
+    const started = process.hrtime.bigint();
+    try {
+      await run();
+    } catch (error: unknown) {
+      assert.ok(error instanceof Error);
+      return { ms: Number(process.hrtime.bigint() - started) / 1e6, error };
+    }
+    return assert.fail('the check connected to a port that answers nothing');
+  };
+  const within = (ms: number): void => {
+    assert.ok(ms >= TIMEOUT - 150 && ms < TIMEOUT + 500, `took ${String(Math.round(ms))} ms`);
+  };
+  const needsHole = (t: { skip(reason: string): void }): number | null => {
+    if (hole !== null) return hole.port;
+    t.skip('this machine answers a connection to a listener that never accepts');
+    return null;
+  };
+
+  it('port.tcp', async (t) => {
+    const port = needsHole(t);
+    if (port === null) return;
+    const { ms, error } = await timed(() =>
+      execute(portTcp, slow(LOOKUP), { params: { port, timeoutMs: TIMEOUT } }),
+    );
+    assert.match(error.message, /did not accept a connection within 2000 ms/);
+    within(ms);
   });
 
-  it('refuses a name that answers the metadata address before ping is run, with one lookup', async () => {
-    for (const type of [icmpPing, icmpJitter]) {
-      const dns = rebinding(v4('127.0.0.1', METADATA));
-      const error = await refused(execute(type, dns, { params: { count: 2, timeoutMs: 4_000 } }));
-      assert.match(
-        error.message,
-        new RegExp(`^refusing to ping ${NAME}: it resolves to 169\\.254\\.169\\.254`),
+  it('port.range, on the ports its first connections go to', async (t) => {
+    const port = needsHole(t);
+    if (port === null) return;
+    const started = process.hrtime.bigint();
+    const execution = await execute(portRange, slow(LOOKUP), {
+      params: { ports: String(port), timeoutMs: TIMEOUT },
+    });
+    assert.equal(valueOf(execution, 'open'), 0);
+    within(Number(process.hrtime.bigint() - started) / 1e6);
+  });
+
+  it('tls.certificate', async (t) => {
+    const port = needsHole(t);
+    if (port === null) return;
+    const { ms, error } = await timed(() =>
+      execute(tlsCertificate, slow(LOOKUP), { params: { port, timeoutMs: TIMEOUT } }),
+    );
+    assert.match(error.message, /did not complete a TLS handshake within 2000 ms/);
+    within(ms);
+  });
+
+  it('tls.security, on its first handshake and no other', async (t) => {
+    const port = needsHole(t);
+    if (port === null) return;
+    // Every version tried has the timeout a handshake of its own always had, and the lookup is
+    // taken from the first: a slow lookup does not make the whole check any longer.
+    const took = async (lookupMs: number): Promise<number> => {
+      const started = process.hrtime.bigint();
+      await assert.rejects(
+        () => execute(tlsSecurity, slow(lookupMs), { params: { port, timeoutMs: 1_000 } }),
+        /accepted no TLS version at all/,
       );
-      assert.equal(dns.calls.length, 1);
-      for (const host of MAPPED) {
-        await refused(execute(type, dns, { params: { count: 2, timeoutMs: 4_000 }, host }));
-      }
-      assert.equal(dns.calls.length, 1);
-    }
+      return Number(process.hrtime.bigint() - started) / 1e6;
+    };
+    const quick = await took(0);
+    const slowed = await took(450);
+    assert.ok(quick >= 850, `took ${String(Math.round(quick))} ms with no wait for the lookup`);
+    assert.ok(
+      Math.abs(slowed - quick) < 250,
+      `${String(Math.round(quick))} ms, and ${String(Math.round(slowed))} ms behind a slow lookup`,
+    );
+  });
+
+  it('mail', async (t) => {
+    const port = needsHole(t);
+    if (port === null) return;
+    const { ms, error } = await timed(() =>
+      execute(mailSmtp, slow(LOOKUP), {
+        params: { port, security: 'none', timeoutMs: TIMEOUT, requireAuth: true },
+        credentials: { mail: { username: 'ops', password: 'hunter2' } },
+      }),
+    );
+    assert.match(error.message, /did not accept a connection within 2000 ms/);
+    within(ms);
   });
 });
 
@@ -1379,8 +1633,6 @@ describe('a device on a link-local address (the alarm this change makes)', () =>
     const host = '169.254.10.20';
     const dns = rebinding();
     const sensors: [SensorType, Record<string, unknown>, CheckContext['credentials']][] = [
-      [icmpPing, { count: 1, timeoutMs: 2_000 }, {}],
-      [icmpJitter, { count: 2, timeoutMs: 2_000 }, {}],
       [portTcp, { port: 80, timeoutMs: 1_000 }, {}],
       [portRange, { ports: '80,443', timeoutMs: 1_000 }, {}],
       [tlsCertificate, { port: 443, timeoutMs: 1_000 }, {}],

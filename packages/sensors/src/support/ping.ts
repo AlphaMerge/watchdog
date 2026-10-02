@@ -1,5 +1,4 @@
 import type { CheckTarget } from '../contract.js';
-import { checkedAddress, guardOf } from './checked-target.js';
 
 /**
  * Building and reading `ping`, kept separate from running it.
@@ -159,31 +158,6 @@ export function pingCommand(
       target.host,
     ],
   };
-}
-
-/**
- * What `ping` is pointed at: the device's address, resolved once and checked against the probe's
- * target policy (`A-57`), or the target as it is when nothing is resolved here (a device given
- * as an address, which is checked as it stands, and any device under the `none` policy).
- *
- * **`ping` is handed an address and never the name.** It would resolve a name itself, and that
- * second lookup is one nobody checked. The address is the resolver's first for the device's
- * family, which is the one `ping` would have picked from the same answer.
- */
-export async function pingTarget(
-  target: CheckTarget,
-  timeoutMs: number,
-  signal: AbortSignal,
-): Promise<CheckTarget> {
-  const address = await checkedAddress({
-    ...guardOf(target),
-    family: target.ipVersion === 'v4' ? 4 : target.ipVersion === 'v6' ? 6 : 0,
-    timeoutMs,
-    signal,
-    verb: 'ping',
-    doing: `pinging ${target.host}`,
-  });
-  return address === undefined ? target : { host: address.address, ipVersion: target.ipVersion };
 }
 
 export interface PingOutcome {

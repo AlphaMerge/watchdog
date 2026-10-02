@@ -104,6 +104,7 @@ export class MailConnection {
   static async open(options: MailConnectionOptions, signal: AbortSignal): Promise<MailConnection> {
     const family = options.ipVersion === 'v6' ? 6 : options.ipVersion === 'v4' ? 4 : 0;
     const pinned = options.pinned;
+    const began = process.hrtime.bigint();
     // **Before the socket is made** (`A-57`): the probe's target policy, over the pinned address
     // or over every address the name has. A refusal is this check's failure, and nothing is
     // sent. Each connection of a check is checked on its own lookup.
@@ -130,15 +131,19 @@ export class MailConnection {
         signal.removeEventListener('abort', onAbort);
         reject(error);
       };
-      const timer = setTimeout(() => {
-        made.destroy();
-        done(
-          new MailError(
-            `${options.host}:${String(options.port)} did not accept a connection within ` +
-              `${String(options.timeoutMs)} ms`,
-          ),
-        );
-      }, options.timeoutMs);
+      const timer = setTimeout(
+        () => {
+          made.destroy();
+          done(
+            new MailError(
+              `${options.host}:${String(options.port)} did not accept a connection within ` +
+                `${String(options.timeoutMs)} ms`,
+            ),
+          );
+        },
+        // The lookup and the connect share the one timeout, as when the socket made the lookup.
+        Math.max(1, options.timeoutMs - Number(process.hrtime.bigint() - began) / 1e6),
+      );
       timer.unref();
       const onAbort = (): void => {
         made.destroy();

@@ -75,11 +75,16 @@ export interface SnmpTarget {
   readonly port?: number;
   readonly ipVersion?: 'auto' | 'v4' | 'v6';
   /**
-   * The address to send to in place of resolving `host`: the one checked against the credential
-   * set's targets (`A-41c`), or against the probe's target policy when no set pinned one
-   * (`A-57`). `host` stays the name every message uses.
+   * The address to send to in place of resolving `host` (`A-41c`): the one checked against the
+   * credential set's targets. `host` stays the name every message uses.
    */
   readonly pinned?: PinnedAddress;
+  /**
+   * The addresses `host` resolved to at this scan, each checked against the probe's target
+   * policy (`A-57`), when no credential set pinned one. Read by the pool, which sends to one of
+   * them (as `pinned`) and keeps the session it has while its address is still among them.
+   */
+  readonly checked?: readonly PinnedAddress[];
 }
 
 export interface SnmpSessionOptions {

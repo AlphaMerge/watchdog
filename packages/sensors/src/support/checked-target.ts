@@ -20,8 +20,8 @@ import {
  * is the one place that resolves a name in order to check it against the policy. It asks the
  * resolver once, checks *every* answer, and hands back the addresses that were checked. A
  * transport then connects to one of those and never resolves the name again: a socket is given
- * `checkedLookup`, and a transport with no socket of its own to hook (SNMP's UDP session, the
- * system `ping`) is given the address. Whoever runs the name's DNS cannot answer the check with
+ * `checkedLookup`, and a transport with no socket of its own to hook (SNMP's UDP session) is
+ * given the address. Whoever runs the name's DNS cannot answer the check with
  * a harmless address and the connection with `169.254.169.254`.
  *
  * **A refusal here is an ordinary failed check**, not `CredentialsWithheldError`: no credential
@@ -90,7 +90,7 @@ export interface TargetCheck {
   /** What the transport has to connect in. The one lookup is given part of it (`resolveBoundMs`). */
   readonly timeoutMs?: number;
   readonly signal: AbortSignal;
-  /** What is refused, as a verb: `connect to`, `request`, `ping`, `query`. */
+  /** What is refused, as a verb: `connect to`, `request`, `scan`, `query`. */
   readonly verb: string;
   /** What was being done when the name would not resolve: `connecting to switch:22`. */
   readonly doing: string;
@@ -233,15 +233,6 @@ function unresolved(check: TargetCheck, error: unknown): Error {
     `the device’s host name did not resolve to ${family}address, ${check.doing}` +
       (typeof code === 'string' && code !== '' ? ` (${code})` : ''),
   );
-}
-
-/**
- * The one address a transport that takes an address is sent to, or undefined when it is handed
- * the host as it is. The resolver's first: what `getaddrinfo` put first is what a program handed
- * the name would have used.
- */
-export async function checkedAddress(check: TargetCheck): Promise<PinnedAddress | undefined> {
-  return (await checkedTarget(check))?.addresses[0];
 }
 
 /** A name as it is compared: lower case, without one trailing dot. */

@@ -83,7 +83,7 @@ describe('the probe’s check registry', () => {
     // and nothing is sent: the address is refused as it stands.
     for (const [type, params] of [
       ['port.tcp', { port: 80 }],
-      ['icmp.ping', {}],
+      ['tls.certificate', { port: 443 }],
     ] as const) {
       await assert.rejects(
         () =>
@@ -99,7 +99,7 @@ describe('the probe’s check registry', () => {
           assert.equal((error as { code?: unknown }).code, undefined);
           assert.match(
             error.message,
-            /^refusing to (connect to|ping) 169\.254\.169\.254, which is link-local .* target policy \(link-local\)/,
+            /^refusing to connect to 169\.254\.169\.254, which is link-local .* target policy \(link-local\)/,
           );
           return true;
         },

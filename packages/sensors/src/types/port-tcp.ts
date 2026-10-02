@@ -188,13 +188,19 @@ export const portTcp: SensorType = {
       };
       context.signal.addEventListener('abort', onAbort, { once: true });
 
-      const connectTimer = setTimeout(() => {
-        fail(
-          `${host}:${String(port)} did not accept a connection within ${String(timeoutMs)} ms — ` +
-            'a port a firewall drops behaves exactly like this, where a closed one is refused ' +
-            'immediately',
-        );
-      }, timeoutMs);
+      // **The lookup and the connect share the one timeout**, as they did when the socket made
+      // the lookup: what the lookup took is taken from what the connect has.
+      const spentMs = Number(process.hrtime.bigint() - started) / 1e6;
+      const connectTimer = setTimeout(
+        () => {
+          fail(
+            `${host}:${String(port)} did not accept a connection within ${String(timeoutMs)} ms — ` +
+              'a port a firewall drops behaves exactly like this, where a closed one is refused ' +
+              'immediately',
+          );
+        },
+        Math.max(1, timeoutMs - spentMs),
+      );
       connectTimer.unref();
 
       let bannerTimer: NodeJS.Timeout | undefined;

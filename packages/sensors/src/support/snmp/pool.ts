@@ -72,6 +72,13 @@ interface Entry {
   leases: number;
   /** When the last lease was released. `0` while in use. */
   idleSince: number;
+  /**
+   * The address the session sends to, when the target policy chose it from a name's checked
+   * addresses (`A-57`). Absent for a session opened by name, by address, or to a pin.
+   */
+  address?: string;
+  /** Replaced while in use: closed when its last lease is released. */
+  retired?: boolean;
 }
 
 export class SnmpSessionPool {
@@ -110,8 +117,11 @@ export class SnmpSessionPool {
     const key = keyOf(target, credentials, options);
     this.#stats.acquired += 1;
 
+    // The address a new session would send to, of those the target policy checked (`A-57`).
+    const chosen = target.pinned === undefined ? target.checked?.[0] : undefined;
+
     const held = this.#entries.get(key);
-    if (held !== undefined && !held.session.closed) {
+    if (held !== undefined && !held.session.closed && stillChecked(held, target)) {
       held.leases += 1;
       held.idleSince = 0;
       this.#stats.reused += 1;
@@ -119,15 +129,27 @@ export class SnmpSessionPool {
     }
     if (held !== undefined) {
       // Closed underneath us — a socket error, or a close() somebody called directly. Drop it
-      // rather than hand out a session every request on which would fail.
+      // rather than hand out a session every request on which would fail. Or its address is
+      // no longer one the name has: the name moved, and the session is replaced.
       this.#entries.delete(key);
       this.#stats.sessions = this.#entries.size;
+      if (!held.session.closed) this.#retire(held);
     }
 
     this.#makeRoom();
 
-    const session = SnmpSession.open(target, credentials, options);
-    const entry: Entry = { key, session, leases: 1, idleSince: 0 };
+    const session = SnmpSession.open(
+      chosen === undefined ? target : { ...target, pinned: chosen },
+      credentials,
+      options,
+    );
+    const entry: Entry = {
+      key,
+      session,
+      leases: 1,
+      idleSince: 0,
+      ...(chosen === undefined ? {} : { address: chosen.address }),
+    };
     this.#entries.set(key, entry);
     this.#stats.opened += 1;
     this.#stats.sessions = this.#entries.size;
@@ -183,9 +205,24 @@ export class SnmpSessionPool {
         if (entry.leases <= 0) {
           entry.leases = 0;
           entry.idleSince = Date.now();
+          if (entry.retired === true) this.#retire(entry);
         }
       },
     };
+  }
+
+  /**
+   * Closes a session that is no longer in the pool, now or when the check using it is done:
+   * closing it under a check would fail that check for a move it has nothing to do with.
+   */
+  #retire(entry: Entry): void {
+    if (entry.leases > 0) {
+      entry.retired = true;
+      return;
+    }
+    if (entry.session.closed) return;
+    entry.session.close();
+    this.#stats.closed += 1;
   }
 
   /** Makes space for one more session by closing the oldest idle one, if there is one. */
@@ -226,6 +263,16 @@ export class SnmpSessionPool {
   }
 }
 
+/**
+ * Whether a held session may serve this scan (`A-57`): always, unless the target policy handed
+ * this scan the name's checked addresses and the session's is not among them. A rotated answer
+ * keeps the session; a name that moved replaces it.
+ */
+function stillChecked(held: Entry, target: SnmpTarget): boolean {
+  if (target.pinned !== undefined || target.checked === undefined) return true;
+  return held.address !== undefined && target.checked.some((one) => one.address === held.address);
+}
+
 function keyOf(
   target: SnmpTarget,
   credentials: SnmpCredentials,
@@ -240,6 +287,7 @@ function keyOf(
     target.ipVersion ?? 'auto',
     // A session sends to the address it was opened with (`A-41c`). A name that now resolves
     // elsewhere, still inside the targets, is another session; one no longer pinned is too.
+    // The target policy's addresses (`A-57`) are not here: see `stillChecked`.
     target.pinned?.address ?? '',
     credentialFingerprint(credentials),
     String(options.timeoutMs ?? ''),
