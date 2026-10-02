@@ -385,6 +385,41 @@ describe('the live state stream', () => {
     expect(timers.length).toBe(0);
     expect(latest().closed).toBe(true);
   });
+
+  it("counts the core's frames, and not its own subscribe clearing the states", () => {
+    // `subscribe` replaces `states` too, so a view that refetched whenever the map changed
+    // refetched for its own subscription (`U-22`). `frames` is what tells the two apart.
+    const { stream, latest } = harness();
+    stream.subscribe(1);
+    stream.subscribe(2);
+    expect(stream.frames, 'a subscribe is the page talking, not the core').toBe(0);
+
+    latest().open();
+    latest().deliver(SNAPSHOT);
+    expect(stream.frames).toBe(1);
+    latest().deliver({
+      type: 'state',
+      seq: 8,
+      sensorId: 10,
+      sensorName: 'Ping',
+      path: [1, 2, 10],
+      state: 'down',
+      cause: 'scan',
+      message: '',
+      at: 'y',
+    });
+    expect(stream.frames).toBe(2);
+    latest().deliver({ type: 'overflow', reason: 'too far behind' });
+    expect(stream.frames, 'an overflow throws the states away, so it is one').toBe(3);
+
+    latest().onmessage?.({ data: 'not json' });
+    latest().deliver({ type: 'something-new' });
+    latest().deliver({ type: 'state', sensorId: 10 });
+    expect(stream.frames, 'a frame that changed nothing is not counted').toBe(3);
+
+    stream.subscribe(3);
+    expect(stream.frames).toBe(3);
+  });
 });
 
 /**

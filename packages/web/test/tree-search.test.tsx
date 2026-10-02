@@ -7,7 +7,7 @@ import { TreeView } from '../src/routes/TreeView';
 // The tree opens a socket for live states, and none of that is what this file is about.
 vi.mock('../src/api/stream', async (importOriginal) => ({
   ...(await importOriginal<typeof Stream>()),
-  useStateStream: (): Stream.LiveStates => ({ status: 'offline', states: new Map() }),
+  useStateStream: (): Stream.LiveStates => ({ status: 'offline', states: new Map(), frames: 0 }),
 }));
 
 const ROOT = { id: 1, kind: 'root', name: 'Root' } as const;

@@ -16858,6 +16858,34 @@ because each is a decision rather than a defect:
       sets have no bounds and why that matters, and is told how many sensors a narrowing takes
       to Unknown.
 
+- [x] **U-22 — the alarms list asks for itself two or three times on every page load** · S ·
+      U-06, U-02 · Found 2026-09-29 in `M-18`'s view test: a socket that never opened still
+      caused a second fetch, about 400 ms after mount. `useSettledReload` is meant to skip the
+      stream's first snapshot, but its guard was used up by the first render, while the stream
+      still held its initial empty map. Two later changes then each reloaded `/api/v1/alarms`:
+      `subscribe()` replacing the map with a new empty one, and the real snapshot.
+      **Done when** a page load fetches the list once, the first snapshot adds nothing, and a real
+      state frame reloads it once.
+
+      **U-22 outcome.**
+      - **The stream counts what the core sent.** `StateStream.frames`, also on `LiveStates`,
+        counts snapshots, state changes and overflows, and not `subscribe`'s reset. `states`
+        changes identity for both, so a view keyed on it cannot tell them apart. The tree, the
+        detail page and the map read `states` as before.
+      - **The list reloads on frames and skips the first.** That frame is the snapshot answering
+        the list's own subscribe. **A first snapshot after a lost connection is not skipped**,
+        because the list was fetched before the outage. The old code reloaded on it by accident,
+        and that is how a page opened during a core restart leaves its error panel without a click.
+      - Tests: `alarms-reload.test.tsx` mounts the view with a stubbed fetch and a hand-driven
+        socket. It asserts one fetch on mount and none for the first snapshot, then one each for:
+        - a state frame;
+        - a first snapshot after a drop;
+        - a reconnection's snapshot and the state frame that follows it.
+
+        `state-stream.test.ts` checks what `frames` counts and what it ignores. `alarms-held`'s
+        bound goes from at most 3 fetches to exactly 2. Against the original view all three new
+        tests fail, the first with 2 fetches on mount. Four mutations, four killed.
+
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
       siblings are substituted into any text a step sends: the path, every header and the body.

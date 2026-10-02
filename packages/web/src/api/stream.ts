@@ -149,6 +149,8 @@ export class StateStream {
   #closed = false;
   /** Counted so a test — and later Probe Health's browser-side cousin — can see churn. */
   #reconnects = 0;
+  /** See `frames`. */
+  #frames = 0;
 
   constructor(options: StateStreamOptions) {
     this.#url = options.url;
@@ -174,6 +176,17 @@ export class StateStream {
 
   get reconnects(): number {
     return this.#reconnects;
+  }
+
+  /**
+   * How many frames from the core have changed `states`: snapshots, state changes and overflows.
+   *
+   * `states` cannot say this by itself, because `subscribe` replaces it too, with an empty map. A
+   * view that refetches on news (`U-06`'s list) would otherwise refetch for its own subscription
+   * (`U-22`).
+   */
+  get frames(): number {
+    return this.#frames;
   }
 
   /**
@@ -322,7 +335,7 @@ export class StateStream {
             at: entry.since ?? '',
           });
         }
-        this.#replace(next);
+        this.#heard(next);
         return;
       }
       case 'state': {
@@ -337,17 +350,23 @@ export class StateStream {
           message: frame.message ?? '',
           at: frame.at ?? '',
         });
-        this.#replace(next);
+        this.#heard(next);
         return;
       }
       case 'overflow':
         // Everything held is suspect. Subscribing again is the resync.
         this.#send();
-        this.#replace(new Map());
+        this.#heard(new Map());
         return;
       default:
         return;
     }
+  }
+
+  /** `#replace`, for a frame from the core: counted, where `subscribe`'s reset is not. */
+  #heard(states: ReadonlyMap<number, LiveState>): void {
+    this.#frames += 1;
+    this.#replace(states);
   }
 
   #replace(states: ReadonlyMap<number, LiveState>): void {
@@ -376,6 +395,8 @@ export function streamUrl(): string {
 export interface LiveStates {
   readonly status: StreamStatus;
   readonly states: ReadonlyMap<number, LiveState>;
+  /** `StateStream.frames`: how many frames from the core have changed `states` so far. */
+  readonly frames: number;
 }
 
 /**
@@ -415,11 +436,17 @@ export function useStateStream(objectId: number | null, options?: StateStreamOpt
   }, [stream, objectId]);
 
   const listen = useCallback((listener: () => void) => stream.listen(listener), [stream]);
-  const snapshot = useRef<LiveStates>({ status: 'connecting', states: new Map() });
+  const snapshot = useRef<LiveStates>({ status: 'connecting', states: new Map(), frames: 0 });
   const read = useCallback((): LiveStates => {
     const held = snapshot.current;
-    if (held.status === stream.status && held.states === stream.states) return held;
-    snapshot.current = { status: stream.status, states: stream.states };
+    if (
+      held.status === stream.status &&
+      held.states === stream.states &&
+      held.frames === stream.frames
+    ) {
+      return held;
+    }
+    snapshot.current = { status: stream.status, states: stream.states, frames: stream.frames };
     return snapshot.current;
   }, [stream]);
 

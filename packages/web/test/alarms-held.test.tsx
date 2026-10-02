@@ -111,8 +111,7 @@ describe('a held return on the alarms list', () => {
   it('asks again when the hold ends, with no state frame to prompt it', async () => {
     // The core holds the return for a second and a half, and answers as the core would: held
     // until then, and gone after. The socket stays silent, so what takes the row away is the
-    // list's own timer. (Mounting reloads once too, after the stream's first subscribe; that one
-    // is early, and still finds the row.)
+    // list's own timer.
     const since = new Date().toISOString();
     const end = Date.now() + 1_500;
     const confirmsAt = new Date(end).toISOString();
@@ -145,9 +144,9 @@ describe('a held return on the alarms list', () => {
     const last = times[times.length - 1] ?? 0;
     expect(last).toBeGreaterThanOrEqual(end);
     expect(last).toBeLessThan(end + 1_000 + 500);
-    // Asked on mount, perhaps once more as the stream subscribed, and once at the end: never in
-    // a loop.
-    expect(asked.length).toBeLessThanOrEqual(3);
+    // Asked on mount and once at the end: never in a loop, and not again for the stream's own
+    // subscribe (`U-22`).
+    expect(asked.length).toBe(2);
     expect(asked.every((url) => url === LIST)).toBe(true);
   });
 });
