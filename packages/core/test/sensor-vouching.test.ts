@@ -1208,8 +1208,13 @@ describe(
           [far],
         );
         await db.query(
-          `UPDATE sample SET time = now() - interval '2 hours'
-           WHERE channel_id IN (SELECT id FROM channel WHERE sensor_id = $1)`,
+          `WITH aged AS (
+             DELETE FROM sample
+             WHERE channel_id IN (SELECT id FROM channel WHERE sensor_id = $1)
+             RETURNING channel_id, value
+           )
+           INSERT INTO sample (channel_id, time, value)
+           SELECT channel_id, now() - interval '2 hours', value FROM aged`,
           [far],
         );
         let recorded = await history(both);

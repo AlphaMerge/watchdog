@@ -1455,8 +1455,13 @@ describe(
     /** Every reading a sensor has, two hours old: past any factory's maximum age here. */
     async function age(sensorId: number): Promise<void> {
       await db.query(
-        `UPDATE sample SET time = now() - interval '2 hours'
-         WHERE channel_id IN (SELECT id FROM channel WHERE sensor_id = $1)`,
+        `WITH aged AS (
+           DELETE FROM sample
+           WHERE channel_id IN (SELECT id FROM channel WHERE sensor_id = $1)
+           RETURNING channel_id, value
+         )
+         INSERT INTO sample (channel_id, time, value)
+         SELECT channel_id, now() - interval '2 hours', value FROM aged`,
         [sensorId],
       );
     }
