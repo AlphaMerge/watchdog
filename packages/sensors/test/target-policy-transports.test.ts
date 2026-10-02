@@ -898,6 +898,35 @@ describe('SSH', () => {
     assert.equal(dns.calls.length, 1);
   });
 
+  it('a sensor cancelled during the shared lookup ends at once, and the others get their connection (A-69)', async () => {
+    // The lookup belongs to the open, not to the check that happened to start it: it runs
+    // under the pool's signal. Under the first check's own, cancelling that check would end
+    // the lookup, and every sensor that joined would fail with it.
+    const dns = slow(1_000);
+    const catalogue = catalogueOf(sshLoad, dns);
+    const first = new AbortController();
+    const startedAt = performance.now();
+    const cancelled = catalogue.execute('ssh.load', { ...sensor(1), signal: first.signal });
+    const outcome: { error?: unknown; at: number } = { at: 0 };
+    cancelled.catch((error: unknown) => {
+      outcome.error = error;
+      outcome.at = performance.now();
+    });
+    const others = [2, 3].map((id) => catalogue.execute('ssh.load', sensor(id)));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    first.abort();
+    await assert.rejects(
+      cancelled,
+      /the check was cancelled while connecting to device\.policy\.invalid/,
+    );
+    assert.ok(outcome.at - startedAt < 800, 'told before the lookup had answered');
+    for (const execution of await Promise.all(others)) {
+      assert.equal(valueOf(execution, 'load1'), 0.5);
+    }
+    assert.equal(server.connections, 1);
+    assert.equal(dns.calls.length, 1, 'one lookup, not one begun again');
+  });
+
   it('a resolver outage is not an alarm for each SSH sensor on a device whose connection is held', async () => {
     // One outage, one alarm. The connection was checked when it was opened; every sensor on
     // the device uses it without asking the resolver anything, as before `A-57`. Were a

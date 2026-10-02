@@ -2,7 +2,10 @@ import { strict as assert } from 'node:assert';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { beforeEach, describe, it } from 'node:test';
+import { isIPv4 } from 'node:net';
+import { addressAt, parseIpRange, toText } from '../src/net/ip-range.js';
 import {
+  IPV4_ADDRESS_PATTERN,
   isProtocolCompatible,
   negotiatedVersion,
   MIN_PROTOCOL_VERSION,
@@ -694,6 +697,91 @@ describe('identification messages', () => {
         }),
       ProtocolError,
     );
+  });
+
+  describe('the addresses of a pass are dotted-quad IPv4 (A-69)', () => {
+    // The schema held an address to seven to fifteen characters, which a name and an IPv6
+    // address both fit. No protocol number: nothing a core sends stopped being valid, since it
+    // reads them from an `inet` column that a sweep of an IPv4 range filled.
+    const pass = (addresses: unknown[]) => () =>
+      parseCoreToProbe({ type: 'identify-start', job: { ...job, addresses } });
+
+    const TAKEN = ['0.0.0.0', '10.0.0.5', '169.254.169.254', '192.168.100.200', '255.255.255.255'];
+    const REFUSED: readonly (readonly [string, string])[] = [
+      ['an IPv6 address', 'fe80::1'],
+      ['an IPv6 address of fifteen characters', '2001:db8::1:2:3'],
+      ['an IPv4-mapped address', '::ffff:10.0.0.5'],
+      ['a name', 'web01.lan'],
+      ['a name of digits and dots', '10.0.0.example'],
+      ['a trailing dot', '10.0.0.5.'],
+      ['three octets', '100.200.30'],
+      ['five octets', '1.2.3.4.5'],
+      ['an octet over 255', '10.0.0.256'],
+      ['an octet of three hundred', '300.1.1.1'],
+      ['a leading zero', '010.0.0.5'],
+      ['a mask', '10.0.0.0/24'],
+      ['a space before', ' 10.0.0.5'],
+      ['a line break after', '10.0.0.5\n'],
+      ['a second address on a second line', '1.1.1.1\n2.2.2'],
+      ['a port', '10.0.0.5:22'],
+      ['hexadecimal', '0x0a.0.0.5'],
+      ['seven characters that are not one', 'a.b.c.d'],
+    ];
+
+    it('takes every dotted quad', () => {
+      assert.deepEqual(
+        parseCoreToProbe({ type: 'identify-start', job: { ...job, addresses: TAKEN } }),
+        {
+          type: 'identify-start',
+          job: { ...job, addresses: TAKEN },
+        },
+      );
+    });
+
+    for (const [what, address] of REFUSED) {
+      it(`refuses ${what}`, () => {
+        assert.throws(pass([address]), ProtocolError);
+        // Wherever it is in the list.
+        assert.throws(pass(['10.0.0.5', address, '10.0.0.9']), ProtocolError);
+      });
+    }
+
+    it('agrees with `isIPv4` and with what a range renders, so no address a sweep found is refused', () => {
+      const pattern = new RegExp(IPV4_ADDRESS_PATTERN);
+      for (const [, address] of REFUSED) {
+        assert.equal(pattern.test(address), false, address);
+        assert.equal(isIPv4(address), false, address);
+      }
+      for (const address of TAKEN) assert.equal(isIPv4(address) && pattern.test(address), true);
+      // Every value an octet can take, in every position, as `toText` writes it.
+      for (let octet = 0; octet <= 255; octet += 1) {
+        const value = (((octet << 24) >>> 0) + (octet << 16) + (octet << 8) + octet) >>> 0;
+        assert.match(toText(value), pattern);
+        assert.match(toText(octet), pattern);
+        assert.match(toText((octet << 24) >>> 0), pattern);
+      }
+      const range = parseIpRange('10.20.0.0/22, 192.168.255.250-192.168.255.255');
+      for (let at = 0; ; at += 1) {
+        const address = addressAt(range, at);
+        if (address === null) break;
+        assert.match(toText(address), pattern);
+      }
+    });
+
+    it('still takes a pass with no addresses, and what the sweep reports is as it was', () => {
+      assert.doesNotThrow(pass([]));
+      // `sweep-progress` is the other direction and is not narrowed here.
+      assert.equal(
+        parseProbeToCore({
+          type: 'sweep-progress',
+          runId: 7,
+          cursor: 1,
+          found: [{ address: '10.0.0.5', rttMs: 1 }],
+          failed: 0,
+        }).type,
+        'sweep-progress',
+      );
+    });
   });
 
   it('bounds the concurrency far below the sweep’s', () => {

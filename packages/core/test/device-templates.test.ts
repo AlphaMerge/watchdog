@@ -17,6 +17,7 @@ import {
   validateTemplate,
   type DeviceTemplate,
 } from '../src/device-templates/index.js';
+import { checkFingerprint } from '../src/discovery/fingerprint.js';
 
 /**
  * Device templates (`D-03`).
@@ -363,6 +364,37 @@ describe('the built-in set', () => {
         );
       }
     }
+  });
+
+  it('plans a host the target policy refused as a host nothing identified: a Ping and nothing that connects (A-69)', () => {
+    // A refused host answered the sweep and was asked nothing (`A-63`), so it is provisioned as
+    // any host nothing identified is: a device and its Ping, which the policy leaves alone
+    // (`A-57`). Every credential kind is available here, so nothing is left out for want of one.
+    const why =
+      'not identified: refusing to identify 169.254.169.254, which is link-local, under the ' +
+      'probe’s target policy “link-local”';
+    const refused = checkFingerprint({
+      address: '169.254.169.254',
+      ports: [],
+      kind: 'unknown',
+      confidence: 0,
+      evidence: [why],
+      refused: why,
+    });
+    assert.ok(refused.ok);
+    assert.equal(refused.fingerprint.refused, why);
+    const every = new Set(['snmp', 'ssh', 'windows', 'http', 'mail', 'database']);
+    const plan = held.plan(refused.fingerprint, every);
+    assert.deepEqual(
+      plan.templates.map((one) => one.template.id),
+      ['ms.generic'],
+    );
+    assert.deepEqual(
+      plan.sensors.map((one) => one.type),
+      ['icmp.ping'],
+    );
+    // The same plan as a host with no fingerprint at all, which is what the rule rests on.
+    assert.deepEqual(held.plan(fingerprint(), every).sensors, plan.sensors);
   });
 
   it('gives a Windows device its WMI set only where WinRM answered', () => {

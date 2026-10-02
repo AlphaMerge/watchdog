@@ -619,9 +619,16 @@ export class DiscoveryService {
       return;
     }
 
+    // **IPv4 rows only** (`A-69`), which is every row a sweep makes: its range is IPv4. The
+    // column is `inet` and a probe's `sweep-progress` is held only to a length, so a probe that
+    // reported `fe80::1` has a row, and `identify-start` takes dotted quads and nothing else:
+    // offered, it would be a frame the probe refuses. `host()` of an IPv4 `inet` is a dotted
+    // quad whatever mask the row was written with. The filter is the same on every offer, so
+    // the cursor still counts one order; a row it leaves out stays unidentified, and the
+    // summary says so.
     const rows = await this.#db.query<{ address: string }>(
       `SELECT host(address) AS address
-       FROM discovery_host WHERE run_id = $1
+       FROM discovery_host WHERE run_id = $1 AND family(address) = 4
        ORDER BY discovery_host.address
        OFFSET $2 LIMIT $3`,
       [run.id, run.identifyCursor, IDENTIFY_BATCH],

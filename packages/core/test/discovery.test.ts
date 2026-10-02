@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { parseCoreToProbe } from '@ms/shared';
 import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { DiscoveryService, type DispatchMessage } from '../src/discovery/service.js';
@@ -1053,6 +1054,128 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       const problem = summary?.errors[0]?.problem ?? '';
       assert.equal(problem.length, 500);
       assert.ok(problem.startsWith('a by'), problem.slice(0, 20));
+    });
+
+    it('stores a probe’s text bounded, whatever length it arrived at (A-69)', async () => {
+      const run = await start();
+      await discovery.progress(probeId, run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
+      await discovery.finished(probeId, run.id, 'done', 6, '');
+      await discovery.identified(probeId, run.id, 1, [
+        {
+          address: '10.0.0.1',
+          kind: 'linux',
+          confidence: 45,
+          sysDescr: `Linux\r\n${'d'.repeat(50_000)}`,
+          sysName: 'n'.repeat(50_000),
+          ports: Array.from({ length: 200 }, (_, at) => ({
+            port: at + 1,
+            transport: 'tcp',
+            banner: 'b'.repeat(50_000),
+          })),
+          evidence: Array.from({ length: 200 }, () => 'e'.repeat(50_000)),
+        },
+      ]);
+      const rows = await db.query<{ stored: Record<string, unknown>; size: number }>(
+        `SELECT fingerprint AS stored, length(fingerprint::text) AS size
+         FROM discovery_host WHERE run_id = $1`,
+        [run.id],
+      );
+      const stored = rows[0]?.stored ?? {};
+      assert.equal(stored['sysDescr'], `Linux ${'d'.repeat(994)}`);
+      assert.equal(stored['sysName'], 'n'.repeat(255));
+      const ports = stored['ports'] as { banner: string }[];
+      assert.equal(ports.length, 64);
+      assert.ok(ports.every((one) => one.banner === 'b'.repeat(200)));
+      const evidence = stored['evidence'] as string[];
+      assert.equal(evidence.length, 32);
+      assert.ok(evidence.every((one) => one === 'e'.repeat(500)));
+      // Twenty megabytes arrived. What is kept is a few dozen kilobytes.
+      assert.ok((rows[0]?.size ?? 0) < 40_000, `stored ${String(rows[0]?.size)} characters`);
+    });
+
+    it('reads a row stored before the bound as bounded, and writes nothing back (A-69)', async () => {
+      const run = await start();
+      await discovery.progress(probeId, run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
+      const old = {
+        address: '10.0.0.1',
+        kind: 'linux',
+        confidence: 45,
+        ports: [{ port: 22, transport: 'tcp', banner: `SSH-2.0\r\n${'b'.repeat(900)}` }],
+        sysName: `sw-01\n${'n'.repeat(900)}`,
+        evidence: ['e'.repeat(900)],
+      };
+      await db.query(`UPDATE discovery_host SET fingerprint = $2::jsonb WHERE run_id = $1`, [
+        run.id,
+        JSON.stringify(old),
+      ]);
+      const stored = async (): Promise<unknown> =>
+        (
+          await db.query<{ fingerprint: unknown }>(
+            `SELECT fingerprint FROM discovery_host WHERE run_id = $1`,
+            [run.id],
+          )
+        )[0]?.fingerprint;
+
+      const [host] = await discovery.hosts(run.id);
+      assert.equal(host?.fingerprint?.sysName, `sw-01 ${'n'.repeat(249)}`);
+      assert.equal(host.fingerprint.ports[0]?.banner, `SSH-2.0 ${'b'.repeat(192)}`);
+      assert.deepEqual(host.fingerprint.evidence, ['e'.repeat(500)]);
+      await discovery.summary(run.id);
+      // The row is as it was written: a read bounds what it hands on and rewrites nothing.
+      assert.deepEqual(await stored(), old);
+    });
+
+    it('offers identification only dotted quads, whatever a probe said it found (A-69)', async () => {
+      // `identify-start` takes IPv4 and nothing else. `sweep-progress` is held only to a length
+      // and the column is `inet`, so a probe that is not ours can have left an IPv6 row; here
+      // one is written as such a probe's report would be. It is never offered: a frame carrying
+      // it would be refused by the probe it was sent to.
+      sent = [];
+      const run = await start();
+      await discovery.progress(
+        probeId,
+        run.id,
+        6,
+        [
+          { address: '10.0.0.2', rttMs: 1 },
+          { address: 'fe80::1', rttMs: 1 },
+          { address: '::ffff:10.0.0.9', rttMs: 1 },
+          { address: '10.0.0.1', rttMs: 1 },
+        ],
+        0,
+      );
+      await discovery.finished(probeId, run.id, 'done', 6, '');
+      const message = sent.at(-1);
+      assert.ok(message !== undefined && message.kind === 'identify');
+      assert.deepEqual(message.job.addresses, ['10.0.0.1', '10.0.0.2']);
+      // And what is offered is a frame the probe's own parser takes.
+      assert.equal(
+        parseCoreToProbe({ type: 'identify-start', job: message.job }).type,
+        'identify-start',
+      );
+      // The control: with either of the other rows in it, the frame is one the probe refuses.
+      assert.throws(() =>
+        parseCoreToProbe({
+          type: 'identify-start',
+          job: { ...message.job, addresses: ['10.0.0.1', 'fe80::1'] },
+        }),
+      );
+
+      // The pass ends, and the rows it left out are still there, unidentified.
+      await discovery.identified(probeId, run.id, 2, [
+        fingerprint('10.0.0.1'),
+        fingerprint('10.0.0.2'),
+      ]);
+      await discovery.identifyFinished(probeId, run.id, 'done', '');
+      assert.equal((await mustGet(run.id)).status, 'done');
+      const summary = await discovery.summary(run.id);
+      assert.deepEqual(
+        [...(summary?.found.byKind ?? [])].sort((a, b) => a.kind.localeCompare(b.kind)),
+        [
+          { kind: 'linux', count: 2 },
+          { kind: 'unidentified', count: 2 },
+        ],
+      );
     });
 
     it('says where a run nobody started came from', async () => {

@@ -4,6 +4,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { classify, type Evidence } from '@ms/shared';
 import { DeviceTemplateCatalogue, type DeviceTemplate } from '../src/device-templates/index.js';
 import { DiscoveryError } from '../src/discovery/errors.js';
+import { checkFingerprint } from '../src/discovery/fingerprint.js';
 import {
   ProvisionService,
   provisionRun,
@@ -358,6 +359,69 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
       );
       assert.equal(report.devicesCreated, 1);
       assert.deepEqual(report.devices[0]?.sensors, ['Ping']);
+    });
+
+    it('provisions a host the target policy refused as it does any host nothing identified (A-69)', async () => {
+      // The rule for a host nothing identified is the case above: a device and a Ping, never
+      // nothing. A refused host is one of those: it answered the sweep and identification sent
+      // it nothing (`A-63`). The run's summary says why.
+      const address = '169.254.10.20';
+      const why = `not identified: refusing to identify ${address}, which is link-local`;
+      const check = checkFingerprint({
+        address,
+        kind: 'unknown',
+        ports: [],
+        confidence: 0,
+        evidence: [why],
+        refused: why,
+      });
+      assert.ok(check.ok);
+      const refusedHost: DiscoveredHost = { address, rttMs: 1, fingerprint: check.fingerprint };
+      credentials = new Set(['snmp']);
+      const record = await run();
+      const report = await provision([refusedHost], record);
+      assert.equal(report.devicesCreated, 1);
+      assert.deepEqual(report.devices[0]?.sensors, ['Ping'], 'the credential added nothing');
+      assert.deepEqual(report.problems, []);
+
+      // **A site's own template can still put a sensor that connects on it**, and the core does
+      // not stop it: a template with no criteria matches every host, this one included. What
+      // holds is the probe. The device is given the address itself as its host, never a name,
+      // so every type that connects reads the address the policy refused and fails that check
+      // with the policy's sentence before a socket exists, the types held to an address only
+      // (databases, Windows) among them. `target-policy-transports.test.ts` in `@ms/sensors`
+      // runs the transports against exactly this device ("a device on a link-local address"),
+      // and the address-only ones in the block before it.
+      const site = new DeviceTemplateCatalogue(() => true);
+      for (const template of TEMPLATES) site.register(template, 'test');
+      site.register(
+        {
+          id: 'site.everything',
+          name: 'Everything we own',
+          description: '',
+          match: {},
+          sensors: [
+            { type: 'snmp.traffic', name: 'Uplink', params: { port: 7 }, credential: 'snmp' },
+          ],
+        },
+        'site',
+      );
+      provisioner = new ProvisionService({
+        objects: harness.service,
+        templates: site.seal(),
+        logger: silentLogger,
+        credentialsFor: () => Promise.resolve(credentials),
+        recordDevice: () => Promise.resolve(),
+      });
+      const again = await provision([refusedHost], record);
+      assert.equal(again.matched, 1);
+      assert.deepEqual(again.devices[0]?.sensors, ['Uplink']);
+      const held = await existing();
+      assert.deepEqual(
+        held.devices.map((one) => one.host),
+        [address],
+        'the device’s host is the refused address, which is what the probe checks',
+      );
     });
 
     it('does not create a sensor nothing can authenticate', async () => {

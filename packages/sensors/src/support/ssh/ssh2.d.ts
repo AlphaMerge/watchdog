@@ -57,6 +57,8 @@ declare module 'ssh2' {
       callback: (error: Error | null | undefined, channel: ClientChannel) => void,
     ): boolean;
     end(): this;
+    /** Destroys the socket where `end` asks the server to close: nothing is waited for. */
+    destroy(): this;
     on(event: 'ready' | 'close' | 'end', listener: () => void): this;
     on(event: 'error', listener: (error: Error & { level?: string }) => void): this;
     on(event: string, listener: (...args: never[]) => void): this;

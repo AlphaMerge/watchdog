@@ -19019,7 +19019,7 @@ because each is a decision rather than a defect:
       one by a version change alone, with a test; the commit-to-build window is closed or
       written down as accepted; and give-ways are a Core Health number.
 
-- [ ] **A-69 — four loose ends from discovery and SSH under the target policy** · S · A-63,
+- [x] **A-69 — four loose ends from discovery and SSH under the target policy** · S · A-63,
       A-65 · Found 2026-10-02. The `identify-start` schema takes any 7 to 15 characters as an
       address where it means IPv4. A host the policy refused is still given a device and a
       Ping sensor by the built-in templates, and whether a site's template can add a
@@ -19028,6 +19028,84 @@ because each is a decision rather than a defect:
       `vendor`, `evidence`), which a probe cuts and a core takes at any length.
       `SshSession.open` takes no `AbortSignal`, so a check cancelled in the handshake ends on
       the connect timeout. **Done when** each is fixed with a test.
+
+      **A-69 outcome.** Three fixed, one decided and pinned. No migration, no protocol number.
+      - **`identify-start` takes dotted-quad IPv4 by pattern** (`IPV4_ADDRESS_PATTERN` in
+        `protocol/messages.ts`): four octets to 255, no leading zero, mask or space. No
+        protocol number, because nothing a core sends stopped being valid. Read: the one
+        dispatch (`#offerIdentify`) sends `host(address)` of `discovery_host` rows, which a
+        sweep of an IPv4 range fills from `toText`. **The core could be made to send something
+        else, and no longer can**: `sweep-progress` is held only to a length and the column is
+        `inet`, so a probe reporting `fe80::1` got a row, which would have been offered back
+        and is now a frame the probe refuses. The offer reads `family(address) = 4` rows only;
+        such a row stays unidentified, which the summary says, and it could never have been
+        identified, since a fingerprint's address must be IPv4. A name was never something a
+        core had to send. Tests: 18 refused spellings and five taken in `messages.test.ts`,
+        the pattern against `isIPv4` and against every octet value `toText` renders; in
+        `discovery.test.ts` a run with IPv6 rows offers only its dotted quads, in a frame
+        `parseCoreToProbe` takes, and ends.
+      - **A refused host is still provisioned, and that is the rule, not a leftover.** Every
+        host nothing identified gets a device and a Ping ("gives a host nothing identified a
+        Ping sensor rather than nothing", `D-04`), a refused host is one of those, ping is not
+        held to the policy, and the summary says why it was not identified. So it is kept, and
+        pinned: the built-in set plans `ms.generic` and `icmp.ping` alone for a refused
+        fingerprint with every credential kind available, the same plan as for no fingerprint.
+        **A site's own template can put a connecting sensor on it** (one with no criteria
+        matches every host) and the core does not stop that; a test creates one. The probe
+        does: the device's host is the refused address itself, never a name, so every type
+        held to the policy, the address-only ones included, refuses it at check time with
+        the policy's sentence before a socket exists. That is `A-57`'s "a device on a
+        link-local address" case in `target-policy-transports.test.ts`, with the database and
+        Windows cases beside it, re-run here and passing. Such a sensor reads Down every scan
+        until the policy is `none`: one failed check a scan, as `A-57` wrote down.
+      - **Every text field of a fingerprint is bounded at `checkFingerprint`**, by the one
+        function `refused` went through (`boundedText`: control characters, line breaks and
+        U+2028/2029 to a space, runs of space to one, trimmed, cut): `sysDescr` 1,000,
+        `sysName` 255, `reverseName` 255, `sysObjectId` 256, `httpServer` 200, `vendor` 100, a
+        port's `banner` 200, an evidence note 500; `ports` keeps its first 64 (what a pass may
+        ask about) and `evidence` its first 32 notes that say something. Each is our probe's
+        own cut where it has one, so a correct probe's report is unchanged, which the
+        classifier case still asserts. A field that cleans to nothing is absent, a banner that
+        is not text is dropped, and findings are counted on what is kept. **A stored row is
+        not rewritten**: reads go through the same check and hand on the bounded value; a
+        test reads an oversized row through `hosts` and `summary` and finds it as written.
+        Twenty megabytes in one fingerprint is stored as under 40,000 characters.
+        **The web** has no view of a fingerprint: its text reaches a page as a device's name
+        and comments and as the summary's problems, all React text nodes, and nothing under
+        `packages/web/src` uses `dangerouslySetInnerHTML`. No web change.
+      - **`SshSession.open` takes a signal, and the pool hands it its own.** Aborted in the
+        handshake, the socket is destroyed (`destroy`, where `end` waits for a listener that
+        never closes) and the open rejects at once as `the check was cancelled while connecting
+        to …`, phase `connect`. `sshCheck` passes the check's signal to `acquire`. **One
+        caller's abort does not fail another**: the lookup and the handshake run under a signal
+        of the pool's, aborted when the last caller waiting for that connection is cancelled;
+        each caller's own signal ends only its own wait. The guard is handed that signal, so
+        the shared lookup is no longer the first caller's to end. `A-65`'s finding stands (a
+        probe worker runs one check at a time, so nothing joins) and the pool's comment now
+        says the join is safe without leaning on it. Waiters are answered in the turn the
+        connection is recorded, which closed two things found on the way: **two joined callers
+        were counted as one lease** (the second overwrote the first's entry, so the connection
+        looked idle while one still held it), and a connection that opens as its only caller
+        is cancelled is now closed, not kept.
+      - **Tests.** `ssh-session.test.ts`, 14 cases against a listener that accepts and never
+        speaks and against the SSH simulator: the open ending and the far end seeing it; a
+        destroyed socket refusing a write where an ended one takes it; an already aborted
+        signal connecting to nothing; the pool starting afresh after an abandoned open; one of
+        two joined callers cancelled and the other running to its own timeout; the open and
+        the lookup ending with the last; a survivor's lease working with none left behind;
+        both orders of two joined leases; an SSH check ending in the handshake. One in
+        `target-policy-transports.test.ts`: a sensor cancelled in the shared lookup, and the
+        two that joined logging in on one connection and one lookup. `fingerprint-check.test.ts`
+        is table-driven over the six fields. Each wait has its own bound.
+      - **Mutation: 18/18.** Each failed a test, and after the last the rebuilt `dist` matched
+        its hashes from before the first.
+      - **Found, not fixed.** `sweep-progress` still takes any 7 to 15 characters as an
+        address, cast to `inet`: a string that is not one fails the insert. A fingerprint
+        field this build does not know is still carried at any size, bounded only by the 4 MiB
+        frame. The summary's vendor breakdown reads the stored row, so a row written before
+        this by a probe that is not ours shows its vendor uncut. `SshSessionPool.closeAll`
+        does not end an open in flight. The SSH simulator has no mode that accepts and never
+        speaks; the tests use a bare listener, as `A-65`'s do.
 
 ### Panel round two — notifications, schedules, triggers
 

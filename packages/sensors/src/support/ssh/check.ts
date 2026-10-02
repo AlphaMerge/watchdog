@@ -50,11 +50,15 @@ export async function sshCheck<T>(
       // as it always was: the address it is connected to was checked when it was opened, and
       // an SSH sensor must not start failing because the probe's resolver has. A target a
       // credential set pinned (`A-41c`) is checked at that address and resolves nothing.
-      guard: async () => {
+      //
+      // The lookup runs under the signal the pool hands it (`A-69`), which is the open's and
+      // not this check's: the open may be waited for by another check, and this one being
+      // cancelled ends its own wait and nothing of theirs.
+      guard: async (opening) => {
         const checked = await checkedTarget({
           ...guardOf(context.target),
           timeoutMs: connectTimeoutMs,
-          signal: context.signal,
+          signal: opening ?? context.signal,
           verb: 'connect to',
           doing: `connecting to ${host}:${String(port)} over SSH`,
         });
@@ -67,6 +71,10 @@ export async function sshCheck<T>(
       commandTimeoutMs: Number(context.params['commandTimeoutMs'] ?? 30_000),
     },
     (session) => body(session, context.signal),
+    undefined,
+    // Cancelled while the connection is being opened, the check ends then and not at the
+    // connect timeout (`A-69`).
+    context.signal,
   );
 }
 

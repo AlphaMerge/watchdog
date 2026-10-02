@@ -731,10 +731,25 @@ policy reads them as it reads sensors:
   description is counted by what was found, and the summary says for that address that the
   probe reported it both refused and found. The sentence is shown as one line of at most 500
   characters, with control characters and line breaks replaced by spaces.
-- **Somebody sweeping `169.254.0.0/16` on purpose** sets `probe.targetPolicy` to `none` on that
-  probe, restarts it and runs discovery again. Without that, the built-in templates still give
-  each such host a device and a Ping sensor, which works, and any other sensor added to it
-  would be refused at its first scan.
+- **Nor anything else a probe says about a host** (`A-69`). Every text field of what
+  identification reports is kept as one line, control characters and line breaks replaced by
+  spaces, and cut: `sysDescr` at 1,000 characters, `sysName` and the reverse name at 255,
+  `sysObjectID` at 256, the `Server` header and a port's banner at 200, the vendor at 100, each
+  line of evidence at 500. A host keeps its first 64 open ports and 32 lines of evidence. Our
+  probe already cuts what it collects at these lengths, so this changes nothing it reports; it
+  is the bound on a probe that is not ours, whose text would otherwise reach a device's name
+  and comments at any length. **A template's `sysDescr` pattern is matched against the kept
+  text**, so write it for one line: a pattern that needs a line break or two spaces in a row
+  matches nothing.
+- **A refused host is provisioned as any host nothing identified is**: a device and a Ping
+  sensor from the built-in templates, which works, since ping is not held to the policy. A
+  template of your own with no criteria matches it too, and may put a sensor that connects on
+  it; the core does not stop that, and the probe does. The device's address is the one the
+  policy refused, so that sensor fails every scan with the policy's sentence and connects to
+  nothing, until **somebody sweeping `169.254.0.0/16` on purpose** sets `probe.targetPolicy`
+  to `none` on that probe, restarts it and runs discovery again.
+- **A discovery pass is sent IPv4 addresses and nothing else** (`A-69`): a probe refuses a
+  pass naming anything that is not a dotted quad, and the core offers only its IPv4 hosts.
 
 ---
 

@@ -1060,6 +1060,15 @@ const CHECK_RESULT_SCHEMA = {
 
 const QUERY_FAILURES = ['offline', 'too-old', 'busy', 'timeout', 'unsupported', 'failed'] as const;
 
+/**
+ * A dotted-quad IPv4 address and nothing else (`A-69`): four octets from 0 to 255, no leading
+ * zero, no mask, no space. What `toText` in `net/ip-range.ts` renders, what PostgreSQL's `host()`
+ * renders of an IPv4 `inet`, and what Node's `isIPv4` accepts. Exported for the test that holds
+ * it to the other two.
+ */
+export const IPV4_ADDRESS_PATTERN =
+  '^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$';
+
 const probeToCoreSchema = {
   type: 'object',
   required: ['type'],
@@ -1388,10 +1397,16 @@ const coreToProbeSchema = {
           properties: {
             runId: { type: 'integer', minimum: 1 },
             // The hosts a sweep found, which is bounded by the sweep's own maximum range.
+            //
+            // **Dotted-quad IPv4, by pattern** (`A-69`). The lengths alone let through any
+            // seven to fifteen characters: a name, or `fe80::1`. No protocol number, because
+            // nothing a core sends stops being valid: the core reads these from an `inet`
+            // column through `host()`, IPv4 rows only, and a sweep is over an IPv4 range. A
+            // probe that identifies a name resolves it, and no core has a name to send.
             addresses: {
               type: 'array',
               maxItems: 65536,
-              items: { type: 'string', minLength: 7, maxLength: 15 },
+              items: { type: 'string', minLength: 7, maxLength: 15, pattern: IPV4_ADDRESS_PATTERN },
             },
             cursor: { type: 'integer', minimum: 0 },
             timeoutMs: { type: 'integer', minimum: 100, maximum: 60000 },

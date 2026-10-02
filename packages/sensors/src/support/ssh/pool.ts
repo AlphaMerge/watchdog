@@ -1,5 +1,6 @@
 import { credentialFingerprint, type SshCredentials } from './credentials.js';
 import {
+  connectCancelled,
   DEFAULT_CONNECT_TIMEOUT_MS,
   SshSession,
   type SshSessionOptions,
@@ -20,17 +21,21 @@ import {
  * same tick would both find nothing cached and both start a handshake. So an *in-flight* open is
  * shared — the second caller awaits the first's connection rather than making a second one.
  *
- * **The callers that join an open share the first caller's guard, and so its `AbortSignal`**
- * (`A-57`): were the first cancelled during the lookup, every joiner would fail with it. That
- * cannot happen in a running probe, and `A-65` settled it with a test instead of a second
- * mechanism: a pool belongs to one worker thread, a worker runs one check at a time (the check
- * pool holds a slot until its worker answers, a timed-out check included), no SSH type runs in a
- * check process, and a check only ever makes one `acquire`. So within a probe a join never
- * happens at all: the second sensor on a device finds the connection the first one left.
+ * **The callers that join an open share the first caller's guard, and its one lookup** (`A-57`).
+ * **They do not share its `AbortSignal`** (`A-69`). The open, lookup and handshake both, runs
+ * under a signal of the pool's own, which aborts when every caller waiting for that connection
+ * has been cancelled and not before. A caller that is cancelled stops waiting at once and is
+ * told so; the others go on and get the connection. When the last one goes the socket is
+ * destroyed, where a cancelled check used to hold it until the connect timeout.
+ *
+ * In a running probe a join does not happen at all, which `A-65` settled with a test: a pool
+ * belongs to one worker thread, a worker runs one check at a time (the check pool holds a slot
+ * until its worker answers, a timed-out check included), no SSH type runs in a check process,
+ * and a check only ever makes one `acquire`. So the second sensor on a device finds the
+ * connection the first one left, and the caller that is cancelled is the only one waiting.
  * `ssh-shared-open.test.ts` in the probe fails if that stops being true, by a worker running
- * two checks at once or by a join being counted, and whoever makes it fail has to run the shared
- * open under a signal that aborts only when every joined caller has. Joining is kept for a
- * caller that does overlap in one thread, which today is a test.
+ * two checks at once or by a join being counted. Nothing here depends on it any more: joining is
+ * kept for a caller that does overlap in one thread, which today is a test, and holds for one.
  *
  * Deliberately not shared code with `support/snmp/pool.ts`, and that is a decision rather than
  * an oversight: the lease counting and idle eviction are the same, but async open, in-flight
@@ -85,10 +90,25 @@ interface Entry {
   idleSince: number;
 }
 
+/** One caller waiting for a connection that is being opened. */
+interface Waiter {
+  resolve(lease: SshLease): void;
+  reject(error: unknown): void;
+  /** Stops listening to the caller's own signal: the open has ended, one way or the other. */
+  settle(): void;
+}
+
+/** A connection being opened, and everybody waiting for it (`A-69`). */
+interface Opening {
+  readonly waiters: Set<Waiter>;
+  /** Aborted when the last waiter is cancelled: nobody is left to use the connection. */
+  readonly abandon: AbortController;
+}
+
 export class SshSessionPool {
   readonly #entries = new Map<string, Entry>();
   /** Handshakes in progress, so concurrent callers share one rather than racing. */
-  readonly #opening = new Map<string, Promise<SshSession>>();
+  readonly #opening = new Map<string, Opening>();
   readonly #idleMs: number;
   readonly #maxConnections: number;
   #sweeper: NodeJS.Timeout | undefined;
@@ -116,11 +136,16 @@ export class SshSessionPool {
    * The key is the target *and* the credentials, so rotating a password opens a new connection
    * rather than reusing one authenticated as the old identity — and the credentials appear in it
    * only as a digest.
+   *
+   * `signal` is the check's (`A-69`). It ends this caller's wait for a connection being opened,
+   * and the open itself once nobody else is waiting for it. It is not read for a connection the
+   * pool already holds: that one is handed over, and `exec` is given the signal by its caller.
    */
   async acquire(
     target: SshTarget,
     credentials: SshCredentials,
     options: SshSessionOptions = {},
+    signal?: AbortSignal,
   ): Promise<SshLease> {
     const key = keyOf(target, credentials, options);
     this.#stats.acquired += 1;
@@ -139,27 +164,48 @@ export class SshSessionPool {
       this.#stats.stale += 1;
       this.#stats.connections = this.#entries.size;
     }
+    // Cancelled before it asked: nothing is opened for it, and nothing it joined is ended.
+    if (signal?.aborted === true) throw connectCancelled(target.host.trim());
 
-    const pending = this.#opening.get(key);
-    if (pending !== undefined) {
+    let opening = this.#opening.get(key);
+    if (opening !== undefined) {
       // Somebody is already shaking hands with this host. Wait for theirs rather than starting
       // a second one — two sensors on one device coming due together is the common case, not
       // the rare one.
       this.#stats.joined += 1;
-      const session = await pending;
-      return this.#attach(key, session);
+    } else {
+      this.#makeRoom();
+      opening = this.#open(key, target, credentials, options);
     }
+    return this.#wait(opening, target.host.trim(), signal);
+  }
 
-    this.#makeRoom();
+  /**
+   * Starts a connection and answers everybody waiting for it when it ends.
+   *
+   * The waiters are answered here, in one turn, and not by each awaiting a promise: between the
+   * connection being recorded and a waiter taking its lease there is then no moment in which a
+   * cancelled waiter could leave a lease nobody will give back, or another `acquire` could find
+   * neither the connection nor the open and start a second one.
+   */
+  #open(
+    key: string,
+    target: SshTarget,
+    credentials: SshCredentials,
+    options: SshSessionOptions,
+  ): Opening {
+    const opening: Opening = { waiters: new Set(), abandon: new AbortController() };
+    const signal = opening.abandon.signal;
+    this.#opening.set(key, opening);
     // The target policy is asked here and nowhere above (`A-57`): a connection that is held
     // was checked when it was opened, and is reused without a lookup. Callers that join this
     // open share its one lookup.
-    const opening = (async (): Promise<SshSession> => {
+    const session = (async (): Promise<SshSession> => {
       // **The lookup and the handshake share the one connect timeout** (`A-65`), as they did
       // when `ssh2`'s socket made the lookup: what the guard took is taken from what the
       // handshake has, so a connection is never opened in more than `connectTimeoutMs`.
       const startedAt = process.hrtime.bigint();
-      const checked = await target.guard?.();
+      const checked = await target.guard?.(signal);
       const spentMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
       const wholeMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
       return SshSession.open(
@@ -168,18 +214,61 @@ export class SshSessionPool {
         target.guard === undefined
           ? options
           : { ...options, connectTimeoutMs: Math.max(1, Math.round(wholeMs - spentMs)) },
+        signal,
       );
     })();
-    this.#opening.set(key, opening);
-    try {
-      const session = await opening;
-      this.#stats.opened += 1;
-      return this.#attach(key, session);
-    } finally {
-      // Whether it worked or not: a failed handshake left here would make every later attempt
-      // await a promise that has already rejected, so a host that came back would stay broken.
-      this.#opening.delete(key);
-    }
+    session.then(
+      (opened) => {
+        this.#opening.delete(key);
+        this.#stats.opened += 1;
+        if (opening.waiters.size === 0) {
+          // Everybody was cancelled as the handshake finished. Nobody will lease it, and kept
+          // it would be a connection opened for no check.
+          opened.close();
+          this.#stats.closed += 1;
+          return;
+        }
+        const entry = this.#record(key, opened);
+        for (const waiter of opening.waiters) {
+          waiter.settle();
+          entry.leases += 1;
+          entry.idleSince = 0;
+          waiter.resolve(this.#lease(entry));
+        }
+        opening.waiters.clear();
+      },
+      (error: unknown) => {
+        // Whether it worked or not: a failed handshake left here would make every later attempt
+        // wait on an open that has already failed, so a host that came back would stay broken.
+        this.#opening.delete(key);
+        for (const waiter of opening.waiters) {
+          waiter.settle();
+          waiter.reject(error);
+        }
+        opening.waiters.clear();
+      },
+    );
+    return opening;
+  }
+
+  /** One caller's wait for an open: ended by the open, or by the caller's own signal. */
+  #wait(opening: Opening, host: string, signal: AbortSignal | undefined): Promise<SshLease> {
+    return new Promise<SshLease>((resolve, reject) => {
+      const onAbort = (): void => {
+        opening.waiters.delete(waiter);
+        // **Only the last one out ends the open.** While anybody else is waiting, the handshake
+        // is theirs too, and this caller's cancellation is this caller's alone.
+        if (opening.waiters.size === 0) opening.abandon.abort();
+        reject(connectCancelled(host));
+      };
+      const waiter: Waiter = {
+        resolve,
+        reject,
+        settle: () => signal?.removeEventListener('abort', onAbort),
+      };
+      opening.waiters.add(waiter);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   stats(): SshPoolStats {
@@ -216,8 +305,8 @@ export class SshSessionPool {
     return evicted;
   }
 
-  /** Records a freshly opened connection and hands out the first lease on it. */
-  #attach(key: string, session: SshSession): SshLease {
+  /** The entry for a freshly opened connection, with no lease on it yet. */
+  #record(key: string, session: SshSession): Entry {
     const existing = this.#entries.get(key);
     if (existing !== undefined && !existing.session.closed && existing.session !== session) {
       // Two opens finished for the same key — possible when one was already in flight before a
@@ -225,16 +314,14 @@ export class SshSessionPool {
       // leaking a connection nothing will ever evict.
       session.close();
       this.#stats.closed += 1;
-      existing.leases += 1;
-      existing.idleSince = 0;
-      return this.#lease(existing);
+      return existing;
     }
 
-    const entry: Entry = { key, session, leases: 1, idleSince: 0 };
+    const entry: Entry = { key, session, leases: 0, idleSince: 0 };
     this.#entries.set(key, entry);
     this.#stats.connections = this.#entries.size;
     this.#startSweeping();
-    return this.#lease(entry);
+    return entry;
   }
 
   #lease(entry: Entry): SshLease {
@@ -330,8 +417,10 @@ export async function withSsh<T>(
   options: SshSessionOptions,
   body: (session: SshSession) => Promise<T>,
   pool: SshSessionPool = sshPool,
+  /** The check's signal, which ends its wait for a connection being opened (`A-69`). */
+  signal?: AbortSignal,
 ): Promise<T> {
-  const lease = await pool.acquire(target, credentials, options);
+  const lease = await pool.acquire(target, credentials, options, signal);
   try {
     return await body(lease.session);
   } finally {

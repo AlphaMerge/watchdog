@@ -51,8 +51,11 @@ export interface SshTarget {
    * policy over `host` (`A-57`). It refuses by throwing, and answers with the checked addresses
    * to connect to, or nothing when the connection is made as it always was (an address, a
    * pinned target, the `none` policy). Not asked for a connection the pool already holds.
+   *
+   * It is handed the signal the open runs under (`A-69`), which is the pool's: aborted when
+   * every check waiting for this connection has been cancelled, and not when one has.
    */
-  readonly guard?: () => Promise<readonly PinnedAddress[] | undefined>;
+  readonly guard?: (signal?: AbortSignal) => Promise<readonly PinnedAddress[] | undefined>;
 }
 
 export interface SshSessionOptions {
@@ -151,10 +154,21 @@ export class SshSession {
     return this.#verdict;
   }
 
+  /**
+   * Opens a connection: TCP, key exchange and authentication.
+   *
+   * **`signal` ends it** (`A-69`). Aborted during the handshake, the socket is destroyed and the
+   * open rejects at once, where it used to run to `connectTimeoutMs`: a cancelled check held a
+   * socket to a host that was not answering for as long as fifteen seconds. Once the session is
+   * open the signal means nothing to it: a connection is shared, and `exec` takes a signal of
+   * its own that closes one channel. The pool passes a signal of its own here and not a check's,
+   * so one check being cancelled does not end a handshake another is waiting for.
+   */
   static open(
     target: SshTarget,
     credentials: SshCredentials,
     options: SshSessionOptions = {},
+    signal?: AbortSignal,
   ): Promise<SshSession> {
     const host = target.host.trim();
     if (host === '') {
@@ -162,6 +176,7 @@ export class SshSession {
         new SshError('the device has no host to connect to', { host: '', phase: 'connect' }),
       );
     }
+    if (signal?.aborted === true) return Promise.reject(connectCancelled(host));
 
     const resolved: Required<SshSessionOptions> = {
       connectTimeoutMs: options.connectTimeoutMs ?? DEFAULTS.connectTimeoutMs,
@@ -175,9 +190,24 @@ export class SshSession {
       // Set by the host-key callback, which runs during the handshake and before 'ready'.
       let verdict: HostKeyVerdict = { kind: 'unchecked', presented: '' };
 
+      /** Ends the handshake where it stands: the socket is destroyed, not asked to leave. */
+      const abandon = (): void => {
+        if (settled) return;
+        settled = true;
+        try {
+          client.destroy();
+        } catch {
+          // Already gone, which is the state wanted.
+        }
+        // A socket of this session's own making, which `ssh2` may not have taken yet.
+        sock?.destroy();
+        reject(connectCancelled(host));
+      };
+
       const fail = (error: SshError): void => {
         if (settled) return;
         settled = true;
+        signal?.removeEventListener('abort', abandon);
         try {
           client.end();
         } catch {
@@ -189,6 +219,7 @@ export class SshSession {
       client.on('ready', () => {
         if (settled) return;
         settled = true;
+        signal?.removeEventListener('abort', abandon);
         resolve(new SshSession(client, host, resolved, verdict));
       });
 
@@ -258,6 +289,7 @@ export class SshSession {
         },
       };
 
+      signal?.addEventListener('abort', abandon, { once: true });
       try {
         client.connect(config);
       } catch (error) {
@@ -418,6 +450,14 @@ export class SshSession {
       // Closing twice, or closing a connection that already died, is not worth a failed check.
     }
   }
+}
+
+/** What a caller is told when its check was cancelled before the connection was open. */
+export function connectCancelled(host: string): SshError {
+  return new SshError(`the check was cancelled while connecting to ${host}`, {
+    host,
+    phase: 'connect',
+  });
 }
 
 function describe(error: unknown): string {

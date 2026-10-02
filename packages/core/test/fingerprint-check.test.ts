@@ -6,7 +6,17 @@ import {
   BUILT_IN_DEVICE_TEMPLATES,
   DeviceTemplateCatalogue,
 } from '../src/device-templates/index.js';
-import { checkFingerprint, REFUSAL_MAX_LENGTH, refusalText } from '../src/discovery/fingerprint.js';
+import {
+  BANNER_MAX_LENGTH,
+  boundedText,
+  checkFingerprint,
+  EVIDENCE_ITEM_MAX_LENGTH,
+  EVIDENCE_MAX_ITEMS,
+  FINGERPRINT_TEXT_LIMITS,
+  PORTS_MAX_ITEMS,
+  REFUSAL_MAX_LENGTH,
+  refusalText,
+} from '../src/discovery/fingerprint.js';
 import { baseOptions } from './support/surface.js';
 
 /**
@@ -321,5 +331,162 @@ describe('a refusal is a probe’s word, and is checked like one (A-63)', () => 
     }
     assert.equal(refusalText(null), undefined);
     assert.equal(refusalText(7), undefined);
+  });
+});
+
+/**
+ * Every free-text field is a remote probe's word, and is kept bounded and on one line (`A-69`).
+ *
+ * `A-63` bounded `refused` and left the rest: our probe cuts what it collects, and a probe that
+ * is not ours need not. They reach a device's name and its comments, the plan an operator is
+ * shown, and the log.
+ */
+describe('a fingerprint’s text is bounded where it is checked (A-69)', () => {
+  const read = (value: unknown): Record<string, unknown> => {
+    const check = checkFingerprint(value);
+    assert.ok(check.ok);
+    return check.fingerprint as unknown as Record<string, unknown>;
+  };
+  // eslint-disable-next-line no-control-regex -- that there are none is the assertion.
+  const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+
+  /** The field, its limit, and why a correct probe never passes it. */
+  const LIMITS: readonly (readonly [keyof typeof FINGERPRINT_TEXT_LIMITS, number])[] = [
+    ['reverseName', 255],
+    ['sysDescr', 1_000],
+    ['sysObjectId', 256],
+    ['sysName', 255],
+    ['httpServer', 200],
+    ['vendor', 100],
+  ];
+
+  it('has a limit for every text field a source fills, and these are the numbers', () => {
+    assert.deepEqual(Object.fromEntries(LIMITS), FINGERPRINT_TEXT_LIMITS);
+    assert.equal(BANNER_MAX_LENGTH, 200);
+    assert.equal(EVIDENCE_MAX_ITEMS, 32);
+    assert.equal(EVIDENCE_ITEM_MAX_LENGTH, 500);
+    assert.equal(PORTS_MAX_ITEMS, 64);
+  });
+
+  for (const [field, max] of LIMITS) {
+    it(`cuts ${field} at ${String(max)} characters, and no shorter`, () => {
+      assert.equal(read({ ...valid, [field]: 'x'.repeat(100_000) })[field], 'x'.repeat(max));
+      assert.equal(read({ ...valid, [field]: 'y'.repeat(max + 1) })[field], 'y'.repeat(max));
+      assert.equal(read({ ...valid, [field]: 'z'.repeat(max) })[field], 'z'.repeat(max));
+    });
+
+    it(`makes ${field} one line: control characters and line breaks become a space`, () => {
+      const forged = `first\r\nsecond\u0000\u001b[31m\u2028third\u0085\ttab  end`;
+      const kept = read({ ...valid, [field]: forged })[field];
+      assert.equal(kept, 'first second [31m third tab end');
+      assert.doesNotMatch(kept, CONTROL);
+    });
+
+    it(`reads a ${field} that says nothing as absent`, () => {
+      for (const empty of ['', '   ', '\n\t\u0000']) {
+        assert.equal(field in read({ ...valid, [field]: empty }), false, JSON.stringify(empty));
+      }
+    });
+  }
+
+  it('cuts a banner, makes it one line, and drops one that is not text or says nothing', () => {
+    const ports = read({
+      ...valid,
+      ports: [
+        { port: 22, transport: 'tcp', banner: 'b'.repeat(5_000) },
+        { port: 25, transport: 'tcp', banner: '220 mail\r\n250 forged\u0007' },
+        { port: 80, transport: 'tcp', banner: { toString: 'no' } },
+        { port: 443, transport: 'tcp', banner: ' \n ' },
+        { port: 8080, transport: 'tcp', banner: null, later: 'kept' },
+        { port: 21, transport: 'tcp', banner: 'c'.repeat(200) },
+      ],
+    })['ports'];
+    assert.deepEqual(ports, [
+      { port: 22, transport: 'tcp', banner: 'b'.repeat(200) },
+      { port: 25, transport: 'tcp', banner: '220 mail 250 forged' },
+      { port: 80, transport: 'tcp' },
+      { port: 443, transport: 'tcp' },
+      { port: 8080, transport: 'tcp', later: 'kept' },
+      { port: 21, transport: 'tcp', banner: 'c'.repeat(200) },
+    ]);
+  });
+
+  it('keeps the first 64 ports and the first 32 evidence notes', () => {
+    const many = Array.from({ length: 300 }, (_, at) => ({ port: at + 1, transport: 'tcp' }));
+    const notes = Array.from({ length: 300 }, (_, at) => `note ${String(at)}`);
+    const kept = read({ ...valid, ports: many, evidence: notes });
+    assert.deepEqual(kept['ports'], many.slice(0, 64));
+    assert.deepEqual(kept['evidence'], notes.slice(0, 32));
+    // And exactly that many are kept as they are.
+    const exact = read({ ...valid, ports: many.slice(0, 64), evidence: notes.slice(0, 32) });
+    assert.equal((exact['ports'] as unknown[]).length, 64);
+    assert.equal((exact['evidence'] as unknown[]).length, 32);
+  });
+
+  it('cuts an evidence note at 500, makes it one line, and counts only the notes that say something', () => {
+    const kept = read({
+      ...valid,
+      evidence: ['e'.repeat(9_000), 'a\nforged line\u0001', '', ' \t ', 5, null, 'f'.repeat(500)],
+    })['evidence'];
+    assert.deepEqual(kept, ['e'.repeat(500), 'a forged line', 'f'.repeat(500)]);
+    // Thirty-two that say something, however many before them say nothing.
+    const padded = [
+      ...Array.from({ length: 40 }, () => ' '),
+      ...Array.from({ length: 40 }, () => 'n'),
+    ];
+    assert.equal((read({ ...valid, evidence: padded })['evidence'] as unknown[]).length, 32);
+  });
+
+  it('still refuses a port past the sixty-fourth that is not a port', () => {
+    // Bounded, not unread: the whole list is checked before any of it is dropped.
+    const many: unknown[] = Array.from({ length: 70 }, (_, at) => ({ port: at + 1 }));
+    many[69] = { port: 'ssh' };
+    const check = checkFingerprint({ ...valid, ports: many });
+    assert.deepEqual(check, {
+      ok: false,
+      field: 'ports[69].port',
+      problem: 'must be an integer from 1 to 65535',
+    });
+  });
+
+  it('counts a host by what is kept: a field of control characters is not a finding', () => {
+    const why = 'refusing to identify 10.0.0.5';
+    const fingerprint = read({
+      address: '10.0.0.5',
+      kind: 'unknown',
+      sysName: '\u0000\u0001',
+      vendor: '\n',
+      refused: why,
+    });
+    assert.equal(fingerprint['refused'], why);
+    assert.equal('refusalIgnored' in fingerprint, false);
+    assert.equal('sysName' in fingerprint, false);
+  });
+
+  it('gives the same answer when what it kept is read again, so a stored row reads as it was stored', () => {
+    const once = read({
+      ...valid,
+      sysDescr: `Cisco IOS\r\n${'d'.repeat(5_000)}`,
+      sysName: 'n'.repeat(999),
+      vendor: 'Acme\u0000',
+      ports: [{ port: 22, transport: 'tcp', banner: 'SSH-2.0\r\nX' }],
+      evidence: ['one\ntwo', 'e'.repeat(700)],
+    });
+    assert.deepEqual(read(JSON.parse(JSON.stringify(once))), once);
+  });
+
+  it('carries a field it does not know at any length: the frame is the bound on it', () => {
+    // Written down, not fixed here: `identify-progress` leaves a fingerprint's fields open so a
+    // newer probe's are stored for a later release to read.
+    const long = 'u'.repeat(50_000);
+    assert.equal(read({ ...valid, somethingNewer: long })['somethingNewer'], long);
+  });
+
+  it('cleans and cuts with one function, the one a refusal goes through', () => {
+    assert.equal(boundedText('a\nb', 10), 'a b');
+    assert.equal(boundedText('abcdef', 3), 'abc');
+    assert.equal(boundedText(' \u0000 ', 3), undefined);
+    assert.equal(boundedText(['a'], 3), undefined);
+    assert.equal(refusalText('r'.repeat(600)), 'r'.repeat(500));
   });
 });

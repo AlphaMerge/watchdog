@@ -37,50 +37,87 @@ const TEXT_FIELDS: ReadonlySet<string> = new Set([
 export const REFUSAL_MAX_LENGTH = 500;
 
 /**
- * A probe's refusal, fit to put in a list an operator reads and a log line: one line, bounded.
+ * The longest each free-text field a source fills is kept at, in characters (`A-69`).
  *
- * **It is input from a remote probe**, and it reaches the run's summary as text. Every control
- * character becomes a space, a newline first among them, so one host's text cannot start what
- * looks like another entry in a list or another line in a log; runs of space are one; and it is
- * cut. Undefined when nothing is left: a refusal that says nothing is not one.
- *
- * **The only free-text field bounded here.** `sysDescr`, `sysName`, `reverseName`, `httpServer`,
- * `vendor`, the banners and `evidence` are cut by the probe that collects them and taken at any
- * length by this check; that is a ticket of its own, not this one's.
+ * **Every one is a remote probe's word.** Our probe cuts what it collects (`sysDescr` at 1,000,
+ * `sysName` at 255, the `Server` header and a banner at 200), and until this the core took
+ * whatever arrived: a probe that is not ours could put a megabyte in a device's name. Each limit
+ * is the probe's own cut where it has one, so nothing a correct probe sends is shortened here.
+ * The keys are also what counts as a finding: any of them, said, is one.
  */
-export function refusalText(value: unknown): string | undefined {
+export const FINGERPRINT_TEXT_LIMITS = {
+  /** A DNS name is at most 253 characters. */
+  reverseName: 255,
+  /** The probe's cut. `DisplayString` allows 255 and agents exceed it. */
+  sysDescr: 1_000,
+  /** Dotted decimal. A vendor's `sysObjectID` is a few dozen characters. */
+  sysObjectId: 256,
+  /** `DisplayString (SIZE (0..255))`, and the probe's cut. */
+  sysName: 255,
+  /** The probe's cut of a `Server` header. */
+  httpServer: 200,
+  /** A company's name, from the classifier's own table. */
+  vendor: 100,
+} as const;
+
+/** The probe's cut of the first line a service volunteered. */
+export const BANNER_MAX_LENGTH = 200;
+/** The classifier writes under ten notes a host; this is room for a later one to write more. */
+export const EVIDENCE_MAX_ITEMS = 32;
+/** A note quotes a reverse name or a `Server` header, and a refusal is one too. */
+export const EVIDENCE_ITEM_MAX_LENGTH = REFUSAL_MAX_LENGTH;
+/** As many as `identify-start` may ask about, so the most one answer can say is open. */
+export const PORTS_MAX_ITEMS = 64;
+
+/**
+ * A probe's text, fit to store, to put in a list an operator reads, and to log: one line, bounded.
+ *
+ * **It is input from a remote probe.** Every control character becomes a space, a line break
+ * first among them, so one host's text cannot start what looks like another entry in a list or
+ * another line in a log; runs of space are one; and it is cut at `max` characters. Undefined
+ * when nothing is left, or when it was not text.
+ */
+export function boundedText(value: unknown, max: number): string | undefined {
   if (typeof value !== 'string') return undefined;
   const clean = value
     // eslint-disable-next-line no-control-regex -- the point of this function is control chars.
     .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
     .replace(/ {2,}/g, ' ')
     .trim()
-    .slice(0, REFUSAL_MAX_LENGTH);
+    .slice(0, max);
   return clean === '' ? undefined : clean;
 }
 
-/** What a source fills in. Any of them, said, is a finding. */
-const FOUND_FIELDS = [
-  'reverseName',
-  'sysDescr',
-  'sysObjectId',
-  'sysName',
-  'httpServer',
-  'vendor',
-] as const;
+/**
+ * A probe's refusal as the summary shows it: one line, at most `REFUSAL_MAX_LENGTH` characters.
+ * Undefined when nothing is left: a refusal that says nothing is not one.
+ */
+export function refusalText(value: unknown): string | undefined {
+  return boundedText(value, REFUSAL_MAX_LENGTH);
+}
 
 /**
  * Whether a fingerprint carries anything identification found: a kind other than `unknown`, an
  * open port, or any of the fields a source fills (`reverseName`, `sysDescr`, `sysObjectId`,
- * `sysName`, `httpServer`, `vendor`). `confidence` and `evidence` are not findings: a refusal
- * carries its own sentence as evidence.
+ * `sysName`, `httpServer`, `vendor`), read as they are kept. `confidence` and `evidence` are not
+ * findings: a refusal carries its own sentence as evidence.
  */
-function hasFindings(record: Record<string, unknown>, kind: string, ports: unknown[]): boolean {
-  if (kind !== 'unknown' || ports.length > 0) return true;
-  return FOUND_FIELDS.some((field) => {
-    const value = record[field];
-    return typeof value === 'string' && value.trim() !== '';
-  });
+function hasFindings(
+  kept: Readonly<Record<string, string>>,
+  kind: string,
+  ports: readonly unknown[],
+): boolean {
+  return kind !== 'unknown' || ports.length > 0 || Object.keys(kept).length > 0;
+}
+
+/**
+ * One reported port as it is kept: whatever it carried, with a banner that is one bounded line
+ * or absent. A banner that is not text is dropped, since it is shown to an operator as text.
+ */
+function keptPort(port: unknown): OpenPort {
+  const { banner: said, ...rest } = port as Record<string, unknown>;
+  const banner = boundedText(said, BANNER_MAX_LENGTH);
+  return { ...rest, ...(banner === undefined ? {} : { banner }) } as unknown as OpenPort;
 }
 
 /** A fingerprint that can be matched, or the field that stops it and why (`D-12`). */
@@ -106,6 +143,14 @@ export type FingerprintCheck =
  * would lose information a later release knows how to read, and the column is `jsonb`. For the
  * same reason a confidence that is not a number reads as 0 and evidence keeps only its strings:
  * neither can break a match.
+ *
+ * **And bounded, because it is a remote probe's word** (`A-69`). Every text field this build
+ * knows is made one line and cut at its length in `FINGERPRINT_TEXT_LIMITS`, a port's banner at
+ * `BANNER_MAX_LENGTH` and an evidence note at `EVIDENCE_ITEM_MAX_LENGTH`; `ports` keeps its first
+ * `PORTS_MAX_ITEMS` and `evidence` its first `EVIDENCE_MAX_ITEMS`. A stored row is read through
+ * this too, so what a reader gets is bounded whatever was written, and reading writes nothing
+ * back. A field this build has never heard of is still carried at any size: the frame it arrived
+ * in is the only bound on it.
  */
 export function checkFingerprint(value: unknown): FingerprintCheck {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -141,6 +186,16 @@ export function checkFingerprint(value: unknown): FingerprintCheck {
   }
   const confidence = Number(record['confidence']);
   const evidence = record['evidence'];
+  // **Every free-text field is bounded here, and made one line** (`A-69`). A field that cleans
+  // to nothing is absent, as a `null` one is. The arrays are bounded too: a port past the
+  // sixty-fourth is more than a probe was asked about and is dropped, not refused, so the host
+  // keeps what was found on it.
+  const kept: Record<string, string> = {};
+  for (const [field, max] of Object.entries(FINGERPRINT_TEXT_LIMITS)) {
+    const text = boundedText(record[field], max);
+    if (text !== undefined) kept[field] = text;
+  }
+  const keptPorts = (ports as unknown[]).slice(0, PORTS_MAX_ITEMS).map(keptPort);
   // **A refusal is believed only of a host nothing was found on** (`A-63`). The probe says
   // `refused` of an address it asked nothing of, so one that arrives beside a kind, a port or a
   // system description contradicts itself, and neither half is taken on trust: the host is
@@ -149,7 +204,7 @@ export function checkFingerprint(value: unknown): FingerprintCheck {
   // is cleaned like `refused` and kept only where there are findings for it to be about.
   const claimed = refusalText(record['refused']);
   const setAside = refusalText(record['refusalIgnored']);
-  const found = hasFindings(record, kind, ports as unknown[]);
+  const found = hasFindings(kept, kind, keptPorts);
   const ignored = found ? (claimed ?? setAside) : undefined;
   const refused = found ? undefined : claimed;
   const refusal = {
@@ -159,21 +214,20 @@ export function checkFingerprint(value: unknown): FingerprintCheck {
   return {
     ok: true,
     fingerprint: {
-      ...Object.fromEntries(
-        Object.entries(record).filter(
-          ([key, one]) =>
-            key !== 'refused' &&
-            key !== 'refusalIgnored' &&
-            !(one === null && TEXT_FIELDS.has(key)),
-        ),
-      ),
+      // What this build does not know is carried as it arrived. Every text field it does know
+      // is taken out here and put back below as it is kept.
+      ...Object.fromEntries(Object.entries(record).filter(([key]) => !TEXT_FIELDS.has(key))),
+      ...kept,
       ...refusal,
       address,
       kind: kind as DeviceKind,
       confidence: Number.isFinite(confidence) ? Math.min(100, Math.max(0, confidence)) : 0,
-      ports: ports as OpenPort[],
+      ports: keptPorts,
       evidence: Array.isArray(evidence)
-        ? (evidence as unknown[]).filter((one): one is string => typeof one === 'string')
+        ? (evidence as unknown[])
+            .map((one) => boundedText(one, EVIDENCE_ITEM_MAX_LENGTH))
+            .filter((one): one is string => one !== undefined)
+            .slice(0, EVIDENCE_MAX_ITEMS)
         : [],
     },
   };
