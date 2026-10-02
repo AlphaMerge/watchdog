@@ -18000,6 +18000,15 @@ because each is a decision rather than a defect:
         the deprecated `::a.b.c.d`) are not unwrapped; whether a probe's network routes them
         is the installation's. Metadata addresses of other providers that are not link-local
         are not on the list.
+      - **Review** (four lenses, each claim put to two skeptics): no way past the guard was
+        found. Three low findings were confirmed and closed in a third commit. The walk moved
+        on after six listed codes where the socket's own walk moved on after any failed
+        connect; it now moves on whenever the socket never connected (`NeverConnected`), with
+        a test over `EACCES`, `EAFNOSUPPORT` and `ECONNRESET`, and two mutants killed (never
+        moving on; moving on after a connection). A webhook test claimed the policy refuses a
+        bracketed literal through a resolver the system's is not; it now pins only that
+        nothing is sent, and the rest is `A-58`. Three upper bounds on elapsed time had 300 ms
+        of slack and have seconds.
 
 - [ ] **A-55 — a narrowing says how many sensors are outside the bounds, not how many it puts
       there** · S · U-21, A-41b · Found 2026-10-02 by `U-21`. `withholds` counts the sensors
@@ -18027,6 +18036,16 @@ because each is a decision rather than a defect:
       policy names. **Done when** the policy is decided per transport and written down, the
       transports it covers check the address they connect to with the same single lookup as
       `A-54`, and a simulator test shows the refusal on each.
+
+- [ ] **A-58 — a webhook URL that is a bracketed IPv6 address never resolves** · S · A-54 ·
+      Found 2026-10-02 by `A-54`'s review. `GuardedHttpClient.#check` hands `URL.hostname` to the
+      resolver with its brackets on, and the system resolver does not take `[2001:db8::1]` for
+      an address: the delivery fails as "did not resolve" and is retried, so a legitimate IPv6
+      literal cannot be used, and a blocked one is refused for the wrong reason and retried
+      where the policy would have refused it outright. It fails closed. **Done when** the
+      brackets come off before the lookup and the check, a blocked literal is refused by the
+      policy and not retried, an allowed one is delivered to, and the pinned lookup is shown to
+      answer for the name the socket asks with.
 
 ### Panel round two — notifications, schedules, triggers
 

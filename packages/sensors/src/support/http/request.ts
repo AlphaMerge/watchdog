@@ -128,17 +128,17 @@ interface CheckedTarget {
 class ResolveGivenUp extends Error {}
 
 /**
- * Connect failures that say nothing was sent, after which the next checked address is tried.
- * The socket used to do this itself, across every address a name has; it is handed one now.
+ * A failure before the connection was made: nothing was sent, so the next checked address may
+ * be tried. The socket used to do this itself, across every address a name has and whatever the
+ * failure was; it is handed one address now. Judged by the socket never having connected and
+ * not by a list of codes, which would leave out the one a firewall or a kernel without IPv6
+ * gives.
  */
-const NOT_CONNECTED = new Set([
-  'ECONNREFUSED',
-  'EHOSTUNREACH',
-  'ENETUNREACH',
-  'ENETDOWN',
-  'EADDRNOTAVAIL',
-  'MS_CONNECT_SLOW',
-]);
+class NeverConnected extends Error {
+  constructor(readonly reason: unknown) {
+    super('the connection was not made');
+  }
+}
 
 /** A connection that was not made within its share of the time, with another address to try. */
 const CONNECT_SLOW = 'MS_CONNECT_SLOW';
@@ -355,9 +355,16 @@ export async function fetchHttp(
         // socket is connected, so an address that never answers the SYN was left to the
         // system's own connect timeout, minutes long. With another checked address to try it
         // gets `connectMs` and the next is tried; the last gets what is left of the request.
+        let connected = false;
         req.once('socket', (socket) => {
           // Made already, between the request and this event: there is nothing to wait for.
-          if (!socket.connecting && socket.remoteAddress !== undefined) return;
+          if (!socket.connecting && socket.remoteAddress !== undefined) {
+            connected = true;
+            return;
+          }
+          socket.once('connect', () => {
+            connected = true;
+          });
           const slow = setTimeout(() => {
             req.destroy(
               connectMs === undefined
@@ -377,7 +384,9 @@ export async function fetchHttp(
         req.setTimeout(attemptMs, () => {
           req.destroy(unanswered());
         });
-        req.on('error', reject);
+        req.on('error', (error) => {
+          reject(connected ? error : new NeverConnected(error));
+        });
         if (body !== '') req.write(body);
         req.end();
       });
@@ -397,19 +406,15 @@ export async function fetchHttp(
           at + 1 < count ? connectMs : undefined,
         );
         break;
-      } catch (error: unknown) {
+      } catch (failure: unknown) {
         // Nothing was sent, and the name has another address that was checked: the socket would
         // have tried it, when it was the one resolving. Never an address that was not checked.
-        const code = (error as NodeJS.ErrnoException | null)?.code ?? '';
-        if (
-          checked !== null &&
-          at + 1 < checked.addresses.length &&
-          NOT_CONNECTED.has(code) &&
-          !signal.aborted
-        ) {
+        const never = failure instanceof NeverConnected;
+        if (never && checked !== null && at + 1 < checked.addresses.length && !signal.aborted) {
           at += 1;
           continue;
         }
+        const error = never ? failure.reason : failure;
         throw describeFailure(error, options, path, checked?.byGuard === true);
       }
     }

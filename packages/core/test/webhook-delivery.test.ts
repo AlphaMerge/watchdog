@@ -501,20 +501,17 @@ describe('the webhook transport', () => {
     assert.equal(seen.length, 0, 'and nothing was sent');
   });
 
-  it('refuses a URL that gives such an address itself', async () => {
-    // The resolver answers an address with itself, as the system's does.
-    const literal = new WebhookTransport({
-      config: config(),
-      logger: silent,
-      resolve: (hostname) => Promise.resolve([hostname.replace(/^\[|\]$/g, '')]),
-    });
+  it('sends nothing to a URL that gives such an address itself', async () => {
+    // With the system's own resolver, which is what runs. `URL.hostname` keeps the brackets and
+    // the resolver does not take them for an address, so such a URL fails before the policy is
+    // asked — closed, and for the wrong reason (`A-58`). What is pinned here is that nothing is
+    // sent; the policy's own reading of these addresses is the test above.
+    const literal = new WebhookTransport({ config: config(), logger: silent });
     for (const host of ['[::ffff:169.254.169.254]', '[::ffff:a9fe:a9fe]', '[fd00:ec2::254]']) {
       const result = await literal.send(
         message({ settings: { url: `http://${host}:${String(port)}/hook` } }),
       );
       assert.ok(!result.ok, host);
-      assert.equal(result.retryable, false, host);
-      assert.ok(result.error.includes('refused by the target policy'), result.error);
     }
     assert.equal(seen.length, 0);
   });
