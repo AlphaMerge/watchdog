@@ -245,8 +245,20 @@ describe('read-only accounts', { skip: available ? false : 'no database' }, () =
       // has to be a deliberate act.
       const { credentialViewSchema } = await import('../src/api/schemas/objects.js');
       const properties = Object.keys(credentialViewSchema.properties);
-      assert.deepEqual(properties.sort(), ['kind', 'publicParams', 'source', 'updatedAt']);
+      assert.deepEqual(properties.sort(), [
+        'bounded',
+        'kind',
+        'publicParams',
+        'secretsSet',
+        'source',
+        'updatedAt',
+      ]);
       assert.equal(credentialViewSchema.additionalProperties, false);
+      // `U-21` added two, deliberately, and neither can hold a secret: `bounded` is a flag, and
+      // `secretsSet` is the names of the secret fields that hold a value, which are the names in
+      // the kind's own schema. `credential-view.test.ts` checks that no value ever follows one.
+      assert.equal(credentialViewSchema.properties.bounded.type, 'boolean');
+      assert.deepEqual(credentialViewSchema.properties.secretsSet.items, { type: 'string' });
     });
   });
 });
