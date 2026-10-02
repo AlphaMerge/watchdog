@@ -674,8 +674,9 @@ function Refusal({ error }: { error: ApiError }): React.JSX.Element {
  * schema.
  *
  * **Saving is two requests when the first one has something to say.** The save is previewed; if
- * it keeps the set from any sensor, or clears a secret, the form stops and says so, and the
- * fields are held as they were previewed until the operator confirms or goes back.
+ * it puts a sensor outside the set's bounds that was inside them (`A-55`: not one that was
+ * outside already), or clears a secret, the form stops and says so, and the fields are held as
+ * they were previewed until the operator confirms or goes back.
  */
 function CredentialForm({
   object,

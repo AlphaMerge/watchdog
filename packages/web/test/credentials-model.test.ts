@@ -322,10 +322,10 @@ describe('what a previewed save says', () => {
       noLongerWithheld: 1,
     });
     expect(boundsSentence(moved, 'Rack A', 'will')).toBe(
-      "This save puts 1 sensor beneath Rack A outside this set's bounds. It is not sent the set after it and reads Unknown until the bounds include it. It brings 1 sensor back inside, to be sent the set again.",
+      "This save puts 1 sensor beneath Rack A outside this set's bounds. It is not sent the set after it and reads Unknown until the bounds include it. The save also brings 1 sensor back inside, to be sent the set again.",
     );
     expect(boundsSentence(moved, 'Rack A', 'now')).toBe(
-      'This save put 1 sensor beneath Rack A outside its bounds: it is not sent the set and reads Unknown. It brought 1 sensor back inside.',
+      'This save put 1 sensor beneath Rack A outside its bounds: it is not sent the set and reads Unknown. The save also brought 1 sensor back inside.',
     );
   });
 

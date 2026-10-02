@@ -812,7 +812,7 @@ describe('the credentials tab', () => {
       const confirm = await screen.findByRole('group', { name: 'Confirm this save' });
       expect(
         within(confirm).getByText(
-          "This save puts 2 sensors beneath Rack A outside this set's bounds. They are not sent the set after it and read Unknown until the bounds include them. It brings 1 sensor back inside, to be sent the set again. 3 sensors beneath Rack A are outside already, and this save leaves them there.",
+          "This save puts 2 sensors beneath Rack A outside this set's bounds. They are not sent the set after it and read Unknown until the bounds include them. The save also brings 1 sensor back inside, to be sent the set again. 3 sensors beneath Rack A are outside already, and this save leaves them there.",
         ),
       ).toBeDefined();
     });

@@ -312,7 +312,8 @@ export function boundsSentence(
   }
   if (back > 0) {
     const sensors = plural(back, 'sensor', 'sensors');
-    const subject = added > 0 ? 'It' : 'This save';
+    // Not "It": the sentence before ends on the sensor, and a listener hears these in a line.
+    const subject = added > 0 ? 'The save also' : 'This save';
     parts.push(
       will
         ? `${subject} brings ${sensors}${added > 0 ? '' : ` beneath ${objectName}`} back ` +

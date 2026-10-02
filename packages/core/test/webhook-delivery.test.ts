@@ -647,9 +647,10 @@ describe('the webhook transport', () => {
     }
   });
 
-  it('gives a name no address that another name was checked for', async () => {
+  it('a name that answers nothing fails where it is, after another was delivered to', async () => {
     // Two names through one client: the first is allowed and pinned, the second answers
-    // nothing. The second request fails where it is, and never borrows the first one's pin.
+    // nothing and is stopped at the check. That the socket's lookup answers a name only from
+    // that name's own pin is not shown here: no request gets as far as a socket without one.
     const guarded = new WebhookTransport({
       config: config(),
       logger: silent,
