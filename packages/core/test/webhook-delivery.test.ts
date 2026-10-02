@@ -501,19 +501,170 @@ describe('the webhook transport', () => {
     assert.equal(seen.length, 0, 'and nothing was sent');
   });
 
-  it('sends nothing to a URL that gives such an address itself', async () => {
-    // With the system's own resolver, which is what runs. `URL.hostname` keeps the brackets and
-    // the resolver does not take them for an address, so such a URL fails before the policy is
-    // asked — closed, and for the wrong reason (`A-58`). What is pinned here is that nothing is
-    // sent; the policy's own reading of these addresses is the test above.
+  // ── a URL whose host is an address (`A-58`) ─────────────────────────────────────────────
+  // With the system's own resolver, which is what runs: no `resolve` is injected unless the
+  // test is about what a resolver is asked.
+
+  it('refuses by the policy a URL that gives a blocked IPv6 address itself, and does not retry', async () => {
+    // `URL.hostname` keeps the brackets and the system resolver does not take `[::1]` for an
+    // address, so these used to fail as a name that did not resolve, and were retried.
     const literal = new WebhookTransport({ config: config(), logger: silent });
     for (const host of ['[::ffff:169.254.169.254]', '[::ffff:a9fe:a9fe]', '[fd00:ec2::254]']) {
       const result = await literal.send(
         message({ settings: { url: `http://${host}:${String(port)}/hook` } }),
       );
       assert.ok(!result.ok, host);
+      assert.equal(result.retryable, false, `${host}: ${result.error}`);
+      assert.ok(result.error.includes('refused by the target policy'), result.error);
+      assert.ok(result.error.includes('metadata'), result.error);
+      assert.ok(!result.error.includes('['), `named without the brackets: ${result.error}`);
+    }
+    assert.equal(seen.length, 0, 'and nothing was sent');
+  });
+
+  it('refuses a private IPv6 address in a URL under the stricter policy', async () => {
+    const literal = new WebhookTransport({
+      config: config({ targetPolicy: 'private' }),
+      logger: silent,
+    });
+    for (const host of ['[::1]', '[fd00::1]', '[::ffff:127.0.0.1]']) {
+      const result = await literal.send(
+        message({ settings: { url: `http://${host}:${String(port)}/hook` } }),
+      );
+      assert.ok(!result.ok, host);
+      assert.equal(result.retryable, false, `${host}: ${result.error}`);
+      assert.ok(result.error.includes('private'), result.error);
     }
     assert.equal(seen.length, 0);
+  });
+
+  it('judges an address in a URL as itself, whatever a resolver would say about it', async () => {
+    // The socket connects straight to an address and asks nobody, so an answer for one would be
+    // an answer about somewhere the request does not go.
+    let asked = 0;
+    const guarded = new WebhookTransport({
+      config: config(),
+      logger: silent,
+      resolve: () => {
+        asked += 1;
+        return Promise.resolve(['127.0.0.1']);
+      },
+    });
+    for (const host of ['169.254.169.254', '[fd00:ec2::254]']) {
+      const result = await guarded.send(
+        message({ settings: { url: `http://${host}:${String(port)}/hook` } }),
+      );
+      assert.ok(!result.ok, host);
+      assert.equal(result.retryable, false, host);
+      assert.ok(result.error.includes('refused by the target policy'), result.error);
+    }
+    assert.equal(asked, 0, 'an address is not looked up');
+    assert.equal(seen.length, 0);
+
+    // And the other way about: an allowed address is reached though the resolver would have
+    // answered with one that is refused.
+    const lying = new WebhookTransport({
+      config: config(),
+      logger: silent,
+      resolve: () => Promise.resolve(['169.254.169.254']),
+    });
+    const result = await lying.send(
+      message({ settings: { url: `http://127.0.0.1:${String(port)}/hook` } }),
+    );
+    assert.ok(result.ok, result.ok ? '' : result.error);
+    assert.equal(seen.length, 1);
+    assert.equal(seen.at(0)?.headers['host'], `127.0.0.1:${String(port)}`);
+  });
+
+  it('delivers to a URL that gives an allowed IPv6 address itself', async (t) => {
+    // The default policy allows loopback. A server of its own, since the one above is on
+    // 127.0.0.1 only.
+    const arrived: { url: string; host: unknown }[] = [];
+    const six = createServer((request, response) => {
+      arrived.push({ url: request.url ?? '', host: request.headers['host'] });
+      response.writeHead(204).end();
+    });
+    const listening = await new Promise<boolean>((resolve) => {
+      six.once('error', () => {
+        resolve(false);
+      });
+      six.listen(0, '::1', () => {
+        resolve(true);
+      });
+    });
+    if (!listening) {
+      t.skip('this machine has no IPv6 loopback to listen on');
+      return;
+    }
+    const sixPort = (six.address() as AddressInfo).port;
+    try {
+      const literal = new WebhookTransport({ config: config(), logger: silent });
+      const result = await literal.send(
+        message({ settings: { url: `http://[::1]:${String(sixPort)}/hook`, timeoutMs: 5_000 } }),
+      );
+      assert.ok(result.ok, result.ok ? '' : result.error);
+      // `Host` keeps the URL's spelling of the address, brackets and all.
+      assert.deepEqual(arrived, [{ url: '/hook', host: `[::1]:${String(sixPort)}` }]);
+      assert.equal(seen.length, 0, 'and not to the IPv4 server');
+    } finally {
+      await new Promise<void>((resolve) => {
+        six.close(() => {
+          resolve();
+        });
+      });
+    }
+  });
+
+  it('pins a name under the spelling the socket asks with', async () => {
+    // The socket's lookup is answered from what was pinned for the name it asks about, so a
+    // name pinned under any other spelling than Node's has no address and nothing arrives.
+    // The resolver here answers only the spelling it expects, and each delivery arriving shows
+    // that the check, the pin and the socket agreed on it.
+    for (const [written, expected] of [
+      ['webhook.test', 'webhook.test'],
+      ['WebHook.TEST', 'webhook.test'],
+      ['webhook.test.', 'webhook.test.'],
+    ] as const) {
+      const asked: string[] = [];
+      const guarded = new WebhookTransport({
+        config: config(),
+        logger: silent,
+        resolve: (hostname) => {
+          asked.push(hostname);
+          return hostname === expected
+            ? Promise.resolve(['127.0.0.1'])
+            : Promise.reject(new Error(`asked for ${hostname}`));
+        },
+      });
+      seen = [];
+      const result = await guarded.send(
+        message({ settings: { url: `http://${written}:${String(port)}/hook` } }),
+      );
+      assert.ok(result.ok, result.ok ? '' : `${written}: ${result.error}`);
+      assert.deepEqual(asked, [expected], 'one lookup, by the guard');
+      assert.equal(seen.length, 1, written);
+      assert.equal(seen.at(0)?.headers['host'], `${expected}:${String(port)}`);
+    }
+  });
+
+  it('gives a name no address that another name was checked for', async () => {
+    // Two names through one client: the first is allowed and pinned, the second answers
+    // nothing. The second request fails where it is, and never borrows the first one's pin.
+    const guarded = new WebhookTransport({
+      config: config(),
+      logger: silent,
+      resolve: (hostname) => Promise.resolve(hostname === 'good.test' ? ['127.0.0.1'] : []),
+    });
+    const good = await guarded.send(
+      message({ settings: { url: `http://good.test:${String(port)}/hook` } }),
+    );
+    assert.ok(good.ok, good.ok ? '' : good.error);
+    const other = await guarded.send(
+      message({ settings: { url: `http://other.test:${String(port)}/hook` } }),
+    );
+    assert.ok(!other.ok);
+    assert.equal(other.retryable, true);
+    assert.equal(seen.length, 1);
   });
 
   it('refuses a name where any one of its addresses is blocked', async () => {

@@ -557,6 +557,26 @@ describe(
         assert.equal(report.delivered, true, report.error ?? '');
         assert.deepEqual(arrived, [{ path: '/steal', authorization: undefined }]);
       });
+
+      it('says the policy refused a URL that gives a metadata address in brackets', async () => {
+        // `A-58`, through the system's resolver as the shipped transport has it. The template
+        // saves, and the test send answers with the refusal instead of a name that did not
+        // resolve.
+        const shipped = new WebhookTransport({
+          config: { targetPolicy: 'link-local', maxRedirects: 0, userAgent: 'ms-core-test' },
+          logger: silent,
+        });
+        const { id: templateId } = await templates.create(testActor, {
+          name: `Literal-${String(process.hrtime.bigint())}`,
+          method: 'webhook',
+          settings: { url: at('[fd00:ec2::254]', '/hook') },
+          summarisation: 'always-immediate',
+        });
+        const report = await testerWith(shipped).send(testActor, { templateId, sensorId });
+        assert.equal(report.delivered, false);
+        assert.match(report.error ?? '', /fd00:ec2::254 refused by the target policy/);
+        assert.deepEqual(arrived, []);
+      });
     });
   },
 );

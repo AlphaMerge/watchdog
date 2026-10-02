@@ -1,6 +1,7 @@
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { request as httpRequest, type ClientRequest, type IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
+import { isIP } from 'node:net';
 import { describeError, type Logger, type WebhookConfig } from '@ms/shared';
 import { refusedAddresses, sameOrigin, schemeAllowed } from '@ms/shared';
 import { headerSafe, type DeliveryResult } from './transport.js';
@@ -164,19 +165,32 @@ export class GuardedHttpClient {
       };
     }
 
+    // **The host without its brackets** (`A-58`). `URL.hostname` spells an IPv6 address the way a
+    // URL has to, `[2001:db8::1]`, and no resolver takes that for an address: the system's
+    // answered `ENOTFOUND`, so a legitimate literal could not be used and a blocked one was
+    // retried as a name that might resolve later.
+    const host = bareHost(target);
+
     let addresses: string[];
-    try {
-      addresses = await this.#resolve(target.hostname);
-    } catch (error: unknown) {
-      // A name that does not resolve now may resolve in a minute.
-      return {
-        ok: false,
-        retryable: true,
-        error: `${target.hostname}: ${describeError(error).message}`,
-      };
-    }
-    if (addresses.length === 0) {
-      return { ok: false, retryable: true, error: `${target.hostname} resolved to nothing` };
+    if (isIP(host) !== 0) {
+      // An address is its own answer and is not looked up. The socket does not ask either: Node
+      // connects straight to an address it is given, so what is judged here is exactly what is
+      // connected to, whatever a resolver would have said about it.
+      addresses = [host];
+    } else {
+      try {
+        addresses = await this.#resolve(host);
+      } catch (error: unknown) {
+        // A name that does not resolve now may resolve in a minute.
+        return {
+          ok: false,
+          retryable: true,
+          error: `${host}: ${describeError(error).message}`,
+        };
+      }
+      if (addresses.length === 0) {
+        return { ok: false, retryable: true, error: `${host} resolved to nothing` };
+      }
     }
 
     const refused = refusedAddresses(this.#config.targetPolicy, addresses);
@@ -187,12 +201,19 @@ export class GuardedHttpClient {
         // Not retryable: the address is not going to become acceptable, and an operator has to
         // change either the URL or the policy.
         retryable: false,
-        error: `${target.hostname} refused by the target policy — ${reasons}`,
+        error: `${host} refused by the target policy — ${reasons}`,
       };
     }
     // Pin the addresses that were checked. Resolving again inside the client is the rebinding
-    // window this whole class exists to close.
-    this.#pinned.set(target.hostname, addresses);
+    // window this whole class exists to close. Keyed by the name as the socket asks for it,
+    // which is `URL.hostname` as it stands (lower case, a trailing dot kept).
+    //
+    // **An address is not pinned, because nothing asks for it.** Node takes the brackets off a
+    // URL's host itself and connects to an address without calling `lookup`. Were that ever to
+    // change, the hook below has no answer for it and the delivery fails, where a pin would
+    // have been an answer nobody had shown to be the one asked for; the tests that deliver to
+    // `127.0.0.1` and `[::1]` by address are what would say so.
+    if (isIP(host) === 0) this.#pinned.set(host, addresses);
     return null;
   }
 
@@ -206,7 +227,6 @@ export class GuardedHttpClient {
       timeoutMs: number;
     },
   ): Promise<Exchange> {
-    const pinned = this.#pinned.get(target.hostname) ?? [];
     const send = target.protocol === 'https:' ? httpsRequest : httpRequest;
     const hasBody = options.body !== '' && options.verb !== 'GET';
 
@@ -267,7 +287,12 @@ export class GuardedHttpClient {
           // (`autoSelectFamily`, on by default since Node 20) passes `all: true` and expects an
           // array, and a plain connect expects one address. Answering the wrong shape produces
           // "Invalid IP address: undefined" from somewhere that looks nothing like this.
+          //
+          // **Answered for the name the socket asks with, not for the one this hop was checked
+          // under** (`A-58`). The two are the same string or nothing is pinned for it and the
+          // connection fails: a name `#check` never judged has no address here.
           lookup: (hostname, options, callback) => {
+            const pinned = this.#pinned.get(hostname) ?? [];
             const entries = pinned.map((address) => ({
               address,
               family: address.includes(':') ? 6 : 4,
@@ -367,6 +392,15 @@ export function safeHeaders(value: unknown): Record<string, string> {
     if (typeof entry === 'string') headers[headerSafe(name)] = headerSafe(entry);
   }
   return headers;
+}
+
+/**
+ * A URL's host as a resolver, the policy and the socket know it: an IPv6 address without the
+ * brackets a URL wraps it in, and anything else as it is.
+ */
+function bareHost(target: URL): string {
+  const host = target.hostname;
+  return host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
 }
 
 /** Every address the system resolver returns for a name. */

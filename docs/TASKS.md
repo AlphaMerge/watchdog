@@ -18037,7 +18037,7 @@ because each is a decision rather than a defect:
       transports it covers check the address they connect to with the same single lookup as
       `A-54`, and a simulator test shows the refusal on each.
 
-- [ ] **A-58 — a webhook URL that is a bracketed IPv6 address never resolves** · S · A-54 ·
+- [x] **A-58 — a webhook URL that is a bracketed IPv6 address never resolves** · S · A-54 ·
       Found 2026-10-02 by `A-54`'s review. `GuardedHttpClient.#check` hands `URL.hostname` to the
       resolver with its brackets on, and the system resolver does not take `[2001:db8::1]` for
       an address: the delivery fails as "did not resolve" and is retried, so a legitimate IPv6
@@ -18046,6 +18046,35 @@ because each is a decision rather than a defect:
       brackets come off before the lookup and the check, a blocked literal is refused by the
       policy and not retried, an allowed one is delivered to, and the pinned lookup is shown to
       answer for the name the socket asks with.
+
+      **A-58 outcome.** A webhook, Slack or Teams URL whose host is an address is judged as that
+      address and connected to, and a blocked one is refused by the policy and not retried.
+      - **The brackets come off in one place** (`bareHost`, `http-client.ts`), before the lookup,
+        the policy and the error text. The request is still made from the `URL`, so `Host`
+        keeps the URL's spelling (`[::1]:port`), and SNI and the certificate check for a name
+        are what they were.
+      - **An address is its own answer and is not looked up**, IPv4 or IPv6, as in `A-54`. The
+        system resolver answers an address with itself, so nothing changes in what runs; an
+        injected resolver could answer anything, and the socket would not have gone there.
+      - **What the socket asks with, found by test.** For a name, Node calls `lookup` with
+        `URL.hostname` as it stands: lower case, a trailing dot kept. For an address it does
+        not call `lookup` at all. So the hook now answers from what was pinned for the name it
+        is asked about, where it answered from the hop's own list whatever it was asked, and
+        an address is not pinned: if Node ever did ask for one the delivery would fail, and the
+        tests that deliver to `127.0.0.1` and `[::1]` by address would say so.
+      - **Chat and test send** go through the same client and needed no change. Each has a
+        test with the system's resolver.
+      - **Tests:** `webhook-delivery.test.ts`, the wrong-reason test replaced by six: three
+        blocked literals refused by the policy, not retryable, named without brackets, with no
+        `resolve` injected; private IPv6 literals under `private`; an address never looked up,
+        refused or reached as itself whatever a resolver would answer; `[::1]` delivered to on
+        a server of its own (skips, saying so, where `::1` cannot be listened on; it ran in
+        the toolchain container); a name in three spellings resolved once and delivered; a
+        second name does not borrow the first one's pin. One in `chat-delivery.test.ts`
+        (Slack and Teams), one in `test-send.test.ts`.
+      - **Mutation:** 10 of 10 killed.
+      - **Not done:** HTTPS to an address literal has no test (no certificate fixture for an
+        address in this file); nothing in the change is specific to the scheme.
 
 ### Panel round two — notifications, schedules, triggers
 

@@ -342,6 +342,22 @@ describe('the chat transports', () => {
     assert.equal(seen.length, 0, 'nothing was connected to');
   });
 
+  it('refuses a chat webhook whose URL gives a metadata address in brackets', async () => {
+    // `A-58`, with the system's resolver: the policy refuses it outright, where it used to be
+    // retried as a name that did not resolve.
+    for (const make of [slackTransport, teamsTransport]) {
+      const transport = make({ config: config(), logger: silent });
+      const result = await transport.send(
+        message({ settings: { webhookUrl: `http://[fd00:ec2::254]:${String(port)}/services/x` } }),
+      );
+      assert.ok(!result.ok);
+      assert.equal(result.retryable, false, result.error);
+      assert.match(result.error, /refused by the target policy/);
+      assert.ok(!result.error.includes('/services/x'), 'still without the URL');
+    }
+    assert.equal(seen.length, 0, 'nothing was connected to');
+  });
+
   it('asks for the escaping its own syntax needs', () => {
     assert.equal(slack().bodyEscaping(), 'mrkdwn');
     assert.equal(teams().bodyEscaping(), 'none');
