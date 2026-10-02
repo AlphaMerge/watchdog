@@ -17124,11 +17124,24 @@ because each is a decision rather than a defect:
 
       **Visibility.** The frame goes through `Visibility.sees` on the probe's own root-first
       path, read with the access epoch in the query sensor frames use, at the moment it is
-      sent; a watcher's view is re-resolved by the same `#catchUp` — on a probe change and on
-      any state batch — and a changed view is the same `overflow`. The route refuses a watch
-      with one `problem` for a probe out of view, an id nobody used and an object that is not
-      a probe, and confirms the epoch it judged at, as a snapshot's is confirmed. A reader
-      with sensors under a probe it cannot see is sent nothing, not a frame with an id.
+      sent. The route refuses a watch with one `problem` for a probe out of view, an id nobody
+      used and an object that is not a probe, and confirms the epoch it judged at, as a
+      snapshot's is confirmed. A reader with sensors under a probe it cannot see is sent
+      nothing, not a frame with an id.
+
+      **When a watcher is told its access moved is not a function of any probe's edges**
+      (review finding, fixed in a second commit). As first written a watcher's stale view was
+      re-examined by `#catchUp` from `publishProbe`, so a reader revoked mid-watch was sent
+      `overflow` at the instant the now-hidden probe next connected or dropped: the time of
+      the edge, in a frame that carries nothing. Now a watcher is told its view changed in one
+      place, the broadcaster's sweep (`#review`), on the sweep's own five-second timer: one
+      read of the access epoch per sweep while anybody watches (`accessEpoch`, wired in
+      `main.ts`), and a resolution only for a view read at another epoch. `publishProbe`
+      examines only that probe's watchers; one whose view is stale has it asked for again and
+      the frame goes through the view the account has now, or does not go — and nothing else
+      is sent to it there, whatever the answer. A watcher is no longer examined on a state
+      batch either. The timer runs while there is a socket to check or a watcher to review,
+      and a watch still does not hold the state publish's guard open.
 
       **Backpressure.** Two folds, one count. A change that arrives while that probe's place
       is being read is folded into the frame the read is about to send (one query in flight
@@ -17150,11 +17163,17 @@ because each is a decision rather than a defect:
       **Alarm volume is untouched.** `publishProbe` writes no state and queues no
       notification; a lost probe is still Probe Health's one alarm.
 
-      **Tests.** `core/test/state-stream.test.ts` (+11: told and not told, a table of nine
-      views, grant then revoke mid-watch, a view moved noticed on a state batch, the horizon,
-      a flapping link, a failed read, a deleted probe, `canWatchProbe`),
-      `stream-backlog.test.ts` (+4, `probeFrames`), `object-visibility.test.ts` (+1, two real
-      sockets: refused three ways, told, granted, revoked, both scopes refused),
+      **Tests.** `core/test/state-stream.test.ts` (+17: told and not told, a table of nine
+      views, a flapping link, a failed read, a deleted probe, `canWatchProbe`; and for the
+      finding — revoked, then three edges with no tree subscriber: nothing, then `overflow` on
+      a sweep run by hand; the same when another probe changes and when a sensor changes
+      state; a view granted mid-watch; a view that could not be asked for; a sweep that cannot
+      read the epoch; the sweep's timer under a mocked `setInterval`, armed by a watcher alone
+      and gone with the last; a watcher attached, and one detached, while views are asked
+      for), `stream-backlog.test.ts` (+4, `probeFrames`), `object-visibility.test.ts` (+1, two
+      real sockets: refused three ways, told, granted, then revoked — three edges the
+      administrator hears and the reader's socket is sent nothing at, bounded by a frame it
+      can be waited on, and `overflow` only on the sweep — both scopes refused),
       `probe-endpoint.test.ts` (+3: claim, report shape, drop; an unclaimed probe; the shape),
       `core-health.test.ts` and `metrics.test.ts` (the channel), `web/test/state-stream.test.ts`
       (+2), `web/test/add-sensor-live.test.tsx` (12, three new). Every socket wait is
@@ -17163,11 +17182,21 @@ because each is a decision rather than a defect:
       watchers left out of the grant check, a watch allowed on a non-probe, the horizon
       ignored, no fold per socket, both scopes accepted, a hidden probe's watch allowed, a
       frame per heartbeat, no frame on a drop, a frame for another probe counted by the page,
-      the form back on the branch subscription.
+      the form back on the branch subscription. **And 11/11 on the finding's fix**: the sweep
+      not reviewing, a changed view never sent back, a review with the epoch unmoved,
+      `overflow` at the edge (the finding itself), the frame through the stale view, an
+      unchanged view never brought forward, a detached watcher told, watchers not arming the
+      timer, a view that could not be asked for falling back to the stale one, a change
+      examining every probe's watchers, a watcher sent back and left attached.
 
       **Not done.** A change between the form's own `GET` and its watch standing is not
       heard, as on `B-12`'s stream: `watching` is not news, by `B-12`'s rule. A read of the
       probe's place that fails is logged and the frame is not sent; the next change sends one.
+      And found by review, recorded and not fixed: the route attaches a watch before
+      `canWatchProbe` answers, so a client that may not see a probe can, by subscribing
+      repeatedly, have `publishProbe` run its path query for that probe during each judging
+      window. No frame reaches it and subscribe pacing bounds it; judging before attaching
+      needs the held-frame order worked out again, and is a follow-up.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

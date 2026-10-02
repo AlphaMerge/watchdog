@@ -132,6 +132,12 @@ export interface StateBroadcasterOptions {
   snapshotLimit?: number;
   /** How often every admitted socket's credential is checked when nothing is published. */
   credentialSweepMs?: number;
+  /**
+   * The access epoch, read now (`U-24`). What the sweep compares every probe watcher's view
+   * with, so a watcher whose access moved is told on the sweep's clock and on no other. Absent,
+   * a watcher's view is brought up to date only where a frame is about to be sent through it.
+   */
+  accessEpoch?: () => Promise<number | null>;
 }
 
 /**
@@ -243,7 +249,6 @@ interface Watching {
   readonly subscriber: ProbeWatcher;
   readonly probeId: ObjectId;
   readonly sight: StreamSight;
-  readonly order: number;
 }
 
 /**
@@ -294,6 +299,7 @@ export class StateBroadcaster {
   #severed = 0;
 
   readonly #sweepMs: number;
+  readonly #accessEpoch: (() => Promise<number | null>) | undefined;
   /**
    * Every open socket something authenticated (`A-34`), subscribed or not, and what to ask about
    * it. One check in a running core — the API server's — so one query however many sockets.
@@ -309,6 +315,29 @@ export class StateBroadcaster {
     this.#backlogLimit = options.backlogLimitBytes ?? DEFAULT_BACKLOG_LIMIT_BYTES;
     this.#snapshotLimit = options.snapshotLimit ?? DEFAULT_SNAPSHOT_LIMIT;
     this.#sweepMs = options.credentialSweepMs ?? DEFAULT_CREDENTIAL_SWEEP_MS;
+    this.#accessEpoch = options.accessEpoch;
+  }
+
+  /**
+   * Runs the sweep while there is something for it to look at, and not otherwise: a socket to
+   * ask about (`A-34`), or a probe watcher whose view can go stale (`U-24`). Unreferenced, so an
+   * open browser tab never holds the process up.
+   *
+   * **Its ticks are its own.** The interval starts when the first socket or watcher arrives and
+   * runs on the wall clock from there, so what it tells a watcher is timed by nothing a probe
+   * does.
+   */
+  #arm(): void {
+    const wanted =
+      this.#admitted.size > 0 || (this.#accessEpoch !== undefined && this.#watchers.size > 0);
+    if (wanted) {
+      this.#sweeper ??= setInterval(() => {
+        void this.sweep();
+      }, this.#sweepMs).unref();
+    } else if (this.#sweeper !== undefined) {
+      clearInterval(this.#sweeper);
+      this.#sweeper = undefined;
+    }
   }
 
   get stats(): StreamStats {
@@ -346,11 +375,8 @@ export class StateBroadcaster {
    */
   admit(socket: StreamSocket, check: CredentialCheck): Admission {
     this.#admitted.set(socket, check);
-    // Unreferenced, so an open browser tab never holds the process up; and only while there is a
-    // socket to sweep, so an installation nobody is watching pays nothing.
-    this.#sweeper ??= setInterval(() => {
-      void this.sweep();
-    }, this.#sweepMs).unref();
+    // Only while there is a socket to sweep, so an installation nobody is watching pays nothing.
+    this.#arm();
     return {
       confirm: async () => {
         if (!this.#admitted.has(socket)) return false;
@@ -359,10 +385,7 @@ export class StateBroadcaster {
       },
       release: () => {
         this.#admitted.delete(socket);
-        if (this.#admitted.size === 0 && this.#sweeper !== undefined) {
-          clearInterval(this.#sweeper);
-          this.#sweeper = undefined;
-        }
+        this.#arm();
       },
     };
   }
@@ -376,13 +399,78 @@ export class StateBroadcaster {
    */
   async sweep(): Promise<void> {
     // One at a time: a sweep still waiting on a slow database is not joined by another.
-    if (this.#sweeping || this.#admitted.size === 0) return;
+    if (this.#sweeping) return;
     this.#sweeping = true;
     try {
       await this.#vet();
+      await this.#review();
     } finally {
       this.#sweeping = false;
     }
+  }
+
+  /**
+   * Brings every probe watcher's view up to date, and sends back to the start those whose view
+   * changed (`U-24`). The sweep's second job, and the **only** place a watcher is told that what
+   * its account may see has moved.
+   *
+   * **Here, and not where a probe's change is published.** A tree subscriber is examined when a
+   * batch is published, because it is about to be sent that batch. A watcher examined when its
+   * probe changes would be sent `overflow` at the instant a probe it may no longer see connected
+   * or dropped — the one fact the revocation was meant to keep from it, delivered as the timing
+   * of a frame that carries nothing. On the sweep's clock the instant says only that grants
+   * moved, within the sweep's interval, which the account learns from its next request anyway.
+   *
+   * One read of the epoch per sweep while anybody watches, and no resolution unless it moved.
+   * Never rejects: what could not be asked this time is asked on the next tick.
+   */
+  async #review(): Promise<void> {
+    const read = this.#accessEpoch;
+    if (read === undefined || this.#watchers.size === 0) return;
+    let epoch: number | null;
+    try {
+      epoch = await read();
+    } catch (error: unknown) {
+      this.#logger.warn(
+        { err: describeError(error), watchers: this.#watchers.size },
+        'could not read the access epoch; probe watchers are reviewed on the next sweep',
+      );
+      return;
+    }
+    if (epoch === null) return;
+    const at = epoch;
+    const stale = [...this.#watchers].filter((watching) => {
+      const seen = watching.sight.visibility.epoch;
+      // Different, not older (`A-25`), as `#catchUp` has it.
+      return seen !== null && seen !== at;
+    });
+    await Promise.all(
+      stale.map(async (watching) => {
+        let next: Visibility | null;
+        try {
+          next = await this.#resolve(watching.sight, at);
+        } catch (error) {
+          this.#logger.warn(
+            { err: describeError(error) },
+            'could not re-resolve what a probe watcher may see; it must subscribe again',
+          );
+          next = null;
+        }
+        if (!this.#watchers.has(watching)) return;
+        if (next?.sameAs(watching.sight.visibility) === true) {
+          watching.sight.visibility = next;
+          return;
+        }
+        this.#watchers.delete(watching);
+        this.#resynced += 1;
+        watching.subscriber.overflow(
+          next === null
+            ? 'could not confirm what this account may see; subscribe again'
+            : 'what this account may see has changed; subscribe again',
+        );
+      }),
+    );
+    this.#arm();
   }
 
   /** `#examine` for every admitted socket, never rejecting. See `sweep`. */
@@ -437,10 +525,7 @@ export class StateBroadcaster {
       // delivers to nobody it signed out.
       socket.signOut(lapse);
     }
-    if (this.#admitted.size === 0 && this.#sweeper !== undefined) {
-      clearInterval(this.#sweeper);
-      this.#sweeper = undefined;
-    }
+    this.#arm();
     if (failures.length > 0) throw failures[0];
   }
 
@@ -493,10 +578,14 @@ export class StateBroadcaster {
    * visibility sees the probe **at the moment it is sent**, so attaching one is not a grant.
    */
   watchProbe(subscriber: ProbeWatcher, probeId: ObjectId, sight: StreamSight): () => void {
-    this.#attachments += 1;
-    const watching: Watching = { subscriber, probeId, sight, order: this.#attachments };
+    const watching: Watching = { subscriber, probeId, sight };
     this.#watchers.add(watching);
-    return () => this.#watchers.delete(watching);
+    this.#arm();
+    return () => {
+      const held = this.#watchers.delete(watching);
+      this.#arm();
+      return held;
+    };
   }
 
   /**
@@ -589,15 +678,43 @@ export class StateBroadcaster {
     // Deleted between the change and this read. Its watchers learn that from the object's routes.
     if (path === undefined) return 0;
 
-    const horizon = epoch === null ? this.#attachments : await this.#catchUp(epoch);
+    // **Whoever watches this probe now, and nobody who starts while the views below are asked
+    // for**: one that attaches later reads the probe's route after this change, so it loses
+    // nothing, and it was not examined here.
+    const targets = [...this.#watchers].filter((watching) => watching.probeId === probeId);
+    const at = epoch;
+    const views = await Promise.all(
+      targets.map(async (watching): Promise<Visibility | null> => {
+        const held = watching.sight.visibility;
+        if (at === null || held.epoch === null || held.epoch === at) return held;
+        // **Grants moved since this view was resolved, so it is asked for again — and whatever
+        // the answer, the watcher is told nothing about it here.** The frame goes only through
+        // the view the account has now; a watcher that has lost the probe is sent no frame, and
+        // no `overflow` either, because this is the instant the probe changed and anything sent
+        // now says so. Sending it back to the start is the sweep's, on the sweep's clock.
+        try {
+          const next = await this.#resolve(watching.sight, at);
+          // The same view at a newer epoch: kept, so the next change does not ask again. A
+          // changed one is left as it was, for the sweep to find and act on.
+          if (next.sameAs(held)) watching.sight.visibility = next;
+          return next;
+        } catch (error) {
+          this.#logger.warn(
+            { err: describeError(error) },
+            'could not re-resolve what a probe watcher may see; it is not told of this change',
+          );
+          return null;
+        }
+      }),
+    );
 
     let sent = 0;
-    for (const watching of this.#watchers) {
-      if (watching.order > horizon) continue;
-      if (watching.probeId !== probeId) continue;
+    for (const [index, watching] of targets.entries()) {
+      // Detached while the views were asked for.
+      if (!this.#watchers.has(watching)) continue;
       // **The hard rule.** The question a sensor's frame is asked, of the probe's own path: a
       // watcher that may not see the probe is sent nothing, not even a frame with its id.
-      if (!watching.sight.visibility.sees(path)) continue;
+      if (views[index]?.sees(path) !== true) continue;
       watching.subscriber.changed();
       sent += 1;
       this.#delivered += 1;
@@ -860,8 +977,9 @@ export class StateBroadcaster {
    */
   async #catchUp(epoch: number): Promise<number> {
     const horizon = this.#attachments;
-    // Both kinds of subscription (`U-24`): a probe watcher's view goes stale exactly as a tree's.
-    const stale = [...this.#attached, ...this.#watchers].filter((attached) => {
+    // Tree subscribers only. A probe watcher is reviewed by the sweep and nowhere else (`U-24`,
+    // `#review`): examined here, it would be told at the instant something changed state.
+    const stale = [...this.#attached].filter((attached) => {
       const seen = attached.sight.visibility.epoch;
       // Different, not older (`A-25`): the counter only rises in a running database, but a
       // restore or a rollback can put it back, and a socket resolved at the higher number would
@@ -883,12 +1001,12 @@ export class StateBroadcaster {
           next = null;
         }
         // Detached while this was being asked: nothing to update and nobody to tell.
-        if (!this.#holds(attached)) return;
+        if (!this.#attached.has(attached)) return;
         if (next?.sameAs(attached.sight.visibility) === true) {
           attached.sight.visibility = next;
           return;
         }
-        this.#drop(attached);
+        this.#attached.delete(attached);
         this.#resynced += 1;
         attached.subscriber.overflow(
           next === null
@@ -898,16 +1016,6 @@ export class StateBroadcaster {
       }),
     );
     return horizon;
-  }
-
-  /** Whether this subscription, of either kind, is still attached. */
-  #holds(entry: Attached | Watching): boolean {
-    return 'probeId' in entry ? this.#watchers.has(entry) : this.#attached.has(entry);
-  }
-
-  #drop(entry: Attached | Watching): void {
-    if ('probeId' in entry) this.#watchers.delete(entry);
-    else this.#attached.delete(entry);
   }
 
   /**

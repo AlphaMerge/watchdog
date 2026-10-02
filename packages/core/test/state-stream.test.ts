@@ -110,7 +110,12 @@ describe(
 
     beforeEach(async () => {
       await db.query(`DELETE FROM object WHERE kind = 'probe'`);
-      stream = new StateBroadcaster({ logger: silent });
+      // The sweep's timer an hour away, so the only sweeps are the ones a test runs by hand.
+      stream = new StateBroadcaster({
+        logger: silent,
+        accessEpoch: epochNow,
+        credentialSweepMs: 3_600_000,
+      });
 
       const probe = await h.service.create(testActor, {
         kind: 'probe',
@@ -770,58 +775,86 @@ describe(
       assert.equal(sent, cases.filter(({ told }) => told).length);
     });
 
-    it('sends a watcher back to the start when its view of the probe changes', async () => {
-      // Attached without the probe in view — the route refuses that subscription, and the
-      // broadcaster must not depend on it having done so.
+    it('tells a watcher that lost its probe nothing when the probe changes, and sends it back on the sweep', async () => {
+      // The finding this replaces a pinned case for: a watcher examined when its probe changed
+      // was sent `overflow` at that instant — the time of a link edge on a probe it may no longer
+      // see. Nothing but watches here: no tree subscriber, so no state batch examines anybody.
       const stale = await epochNow();
-      const hidden = probeRecorder();
-      stream.watchProbe(hidden.watcher, probeId, {
-        visibility: Visibility.nothing(stale),
-        key: 'reader',
-        resolve: () => Promise.reject(new Error('nothing moved, so nothing is asked')),
+      let now: number = stale;
+      let asked = 0;
+      const revoked = probeRecorder();
+      const allowed = probeRecorder();
+      stream.watchProbe(revoked.watcher, probeId, {
+        visibility: Visibility.everything(stale),
+        key: 'revoked',
+        resolve: () => Promise.resolve(Visibility.nothing(now)),
       });
-      await stream.publishProbe(db, probeId);
-      assert.equal(hidden.changes, 0, 'a reader who cannot see the probe was told it changed');
-      assert.deepEqual(hidden.overflows, []);
-
-      // Access is granted. The view changed, so it is sent back — and not sent the frame through
-      // a view nobody has confirmed.
-      const granted = await grantsMoved();
-      const first = probeRecorder();
-      stream.watchProbe(first.watcher, probeId, {
-        visibility: Visibility.nothing(stale),
-        key: 'granted',
-        resolve: () => Promise.resolve(Visibility.everything(granted)),
+      stream.watchProbe(allowed.watcher, probeId, {
+        visibility: Visibility.everything(stale),
+        key: 'allowed',
+        resolve: () => {
+          asked += 1;
+          return Promise.resolve(Visibility.everything(now));
+        },
       });
-      await stream.publishProbe(db, probeId);
-      assert.equal(first.changes, 0);
-      assert.equal(first.overflows.length, 1);
-      assert.match(String(first.overflows[0]), /may see has changed/);
+      assert.equal(await stream.publishProbe(db, probeId), 2);
+      assert.equal(revoked.changes, 1);
 
-      // Subscribing again, through the new view, it is told.
-      const again = probeRecorder();
-      let revoked: number | null = null;
-      stream.watchProbe(again.watcher, probeId, {
-        visibility: Visibility.everything(granted),
-        key: 'granted',
-        resolve: () => Promise.resolve(Visibility.nothing(revoked)),
-      });
-      await stream.publishProbe(db, probeId);
-      assert.equal(again.changes, 1);
+      // Access is taken away, and then the probe's link moves three times.
+      now = await grantsMoved();
+      assert.equal(stream.watching, false);
+      for (let edge = 0; edge < 3; edge += 1) await stream.publishProbe(db, probeId);
+      assert.equal(allowed.changes, 4, 'the edges happened: a reader of the probe heard each');
+      assert.equal(revoked.changes, 1, 'a frame went to a reader whose access was taken away');
+      assert.deepEqual(revoked.overflows, [], 'it was told something at the probe’s own edge');
+      assert.equal(stream.stats.resynced, 0);
 
-      // Access is revoked while it is attached: the next change is not sent, and it is sent back.
-      revoked = await grantsMoved();
+      // The sweep's tick, and only that, sends it back to the start.
+      await stream.sweep();
+      assert.equal(revoked.overflows.length, 1);
+      assert.match(String(revoked.overflows[0]), /may see has changed/);
+      assert.equal(stream.stats.resynced, 1);
+      assert.equal(stream.stats.subscribers, 1, 'and it is detached');
       await stream.publishProbe(db, probeId);
-      assert.equal(again.changes, 1, 'a frame went to a reader whose access was taken away');
-      assert.equal(again.overflows.length, 1);
-      assert.match(String(again.overflows[0]), /may see has changed/);
-      // Detached: nothing more, whatever happens to the probe.
-      await stream.publishProbe(db, probeId);
-      assert.equal(again.changes, 1);
-      assert.equal(again.overflows.length, 1);
+      await stream.sweep();
+      assert.equal(revoked.changes, 1);
+      assert.equal(revoked.overflows.length, 1);
+
+      // The reader whose access did not move was asked once, heard every edge, and was never
+      // disturbed — by the other account's revocation or by the sweeps.
+      assert.equal(allowed.changes, 5);
+      assert.deepEqual(allowed.overflows, []);
+      assert.equal(asked, 1, 'one grant change, asked about once');
     });
 
-    it('notices a watcher’s view has moved on a state change too, with no probe change at all', async () => {
+    it('tells a watcher that lost its probe nothing when another probe changes', async () => {
+      const other = await h.service.create(testActor, {
+        kind: 'probe',
+        parentId: h.rootId,
+        name: 'the one that flaps',
+      });
+      const stale = await epochNow();
+      const moved = await grantsMoved();
+      const revoked = probeRecorder();
+      const elsewhere = probeRecorder();
+      stream.watchProbe(revoked.watcher, probeId, {
+        visibility: Visibility.everything(stale),
+        key: 'revoked',
+        resolve: () => Promise.resolve(Visibility.nothing(moved)),
+      });
+      stream.watchProbe(elsewhere.watcher, other.id, EVERYONE);
+
+      for (let edge = 0; edge < 3; edge += 1) await stream.publishProbe(db, other.id);
+      assert.equal(elsewhere.changes, 3);
+      assert.equal(revoked.changes, 0);
+      assert.deepEqual(revoked.overflows, [], 'told at the instant a probe it cannot see changed');
+
+      await stream.sweep();
+      assert.equal(revoked.overflows.length, 1);
+      assert.deepEqual(elsewhere.overflows, []);
+    });
+
+    it('tells a watcher nothing when a sensor changes state, whatever happened to its grants', async () => {
       const stale = await epochNow();
       const moved = await grantsMoved();
       const seen = probeRecorder();
@@ -833,13 +866,136 @@ describe(
         resolve: () => Promise.resolve(Visibility.nothing(moved)),
       });
       await scan([sensorId], false, new Date());
+      assert.equal(tree.events.length, 1);
+      assert.deepEqual(seen.overflows, [], 'a watcher was told at the instant a sensor changed');
+      await stream.sweep();
       assert.equal(seen.overflows.length, 1);
-      assert.equal(seen.changes, 0);
     });
 
-    it('tells nobody who started watching while it was checking for moved grants', async () => {
-      // `A-30`'s horizon, for a watch: one attached while a change is still asking the others
-      // again was never examined, and its view may be the one the grant change took away.
+    it('sends the frame through the view the account has now, and leaves a changed view to the sweep', async () => {
+      // Attached without the probe in view — the route refuses that subscription, and the
+      // broadcaster must not depend on it having done so.
+      const stale = await epochNow();
+      const hidden = probeRecorder();
+      let granted: number | null = null;
+      stream.watchProbe(hidden.watcher, probeId, {
+        visibility: Visibility.nothing(stale),
+        key: 'reader',
+        resolve: () => Promise.resolve(Visibility.everything(granted)),
+      });
+      await stream.publishProbe(db, probeId);
+      await stream.sweep();
+      assert.equal(hidden.changes, 0, 'a reader who cannot see the probe was told it changed');
+      assert.deepEqual(hidden.overflows, [], 'nothing moved, so the sweep asks nothing');
+
+      // Access is granted. The next change goes through the view the account has now, and one
+      // sweep sends the socket back to take up that view for good.
+      granted = await grantsMoved();
+      assert.equal(await stream.publishProbe(db, probeId), 1);
+      assert.equal(hidden.changes, 1);
+      assert.deepEqual(hidden.overflows, []);
+      await stream.sweep();
+      assert.equal(hidden.overflows.length, 1);
+      assert.match(String(hidden.overflows[0]), /may see has changed/);
+    });
+
+    it('sends back a watcher whose view could not be asked for, on the sweep and not at the edge', async () => {
+      const stale = await epochNow();
+      await grantsMoved();
+      const seen = probeRecorder();
+      stream.watchProbe(seen.watcher, probeId, {
+        visibility: Visibility.everything(stale),
+        key: 'unanswered',
+        resolve: () => Promise.reject(new Error('connection terminated unexpectedly')),
+      });
+      assert.equal(await stream.publishProbe(db, probeId), 0);
+      assert.equal(seen.changes, 0, 'a frame went through a view nobody could confirm');
+      assert.deepEqual(seen.overflows, []);
+      await stream.sweep();
+      assert.equal(seen.overflows.length, 1);
+      assert.match(String(seen.overflows[0]), /could not confirm/);
+    });
+
+    it('never rejects from a sweep that cannot read the epoch, and tells nobody', async () => {
+      const blind = new StateBroadcaster({
+        logger: silent,
+        credentialSweepMs: 3_600_000,
+        accessEpoch: () => Promise.reject(new Error('connection terminated unexpectedly')),
+      });
+      const seen = probeRecorder();
+      const detach = blind.watchProbe(seen.watcher, probeId, {
+        visibility: Visibility.everything(1),
+        key: 'unread',
+        resolve: () => Promise.reject(new Error('never asked')),
+      });
+      await blind.sweep();
+      assert.deepEqual(seen.overflows, []);
+      assert.equal(blind.stats.subscribers, 1);
+      detach();
+    });
+
+    it('reviews watchers on the sweep’s own timer, and only while somebody watches', async (t) => {
+      t.mock.timers.enable({ apis: ['setInterval'] });
+      const stale = await epochNow();
+      let reads = 0;
+      const timed = new StateBroadcaster({
+        logger: silent,
+        credentialSweepMs: 5_000,
+        accessEpoch: () => {
+          reads += 1;
+          return epochNow();
+        },
+      });
+      /** Lets a sweep the mocked timer started run to its end: its awaits are real queries. */
+      const swept = async (expected: number): Promise<void> => {
+        const deadline = Date.now() + 5_000;
+        while (reads < expected) {
+          if (Date.now() > deadline) assert.fail('the timer started no sweep');
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      };
+
+      t.mock.timers.tick(5_000);
+      assert.equal(reads, 0, 'a sweep ran with nobody watching');
+
+      const moved = await grantsMoved();
+      const seen = probeRecorder();
+      const detach = timed.watchProbe(seen.watcher, probeId, {
+        visibility: Visibility.everything(stale),
+        key: 'revoked',
+        resolve: () => Promise.resolve(Visibility.nothing(moved)),
+      });
+      // Edges, and time short of a tick: nothing.
+      await timed.publishProbe(db, probeId);
+      t.mock.timers.tick(4_999);
+      await timed.publishProbe(db, probeId);
+      assert.equal(reads, 0);
+      assert.deepEqual(seen.overflows, []);
+
+      // The tick.
+      t.mock.timers.tick(1);
+      await swept(1);
+      assert.equal(seen.overflows.length, 1);
+      assert.equal(seen.changes, 0);
+
+      // It was dropped, so nobody watches and the timer is gone: no more reads.
+      t.mock.timers.tick(20_000);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(reads, 1, 'the sweep went on reading the epoch for nobody');
+
+      // And a watcher that detaches by itself stops it too.
+      const again = timed.watchProbe(probeRecorder().watcher, probeId, EVERYONE);
+      t.mock.timers.tick(5_000);
+      await swept(2);
+      again();
+      t.mock.timers.tick(20_000);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(reads, 2);
+      detach();
+    });
+
+    it('tells nobody who started watching while it was asking for the views of those who were', async () => {
       const stale = await epochNow();
       const moved = await grantsMoved();
       const checked = probeRecorder();
@@ -859,12 +1015,30 @@ describe(
 
       await stream.publishProbe(db, probeId);
       assert.equal(checked.changes, 1);
-      assert.equal(late.changes, 0, 'the one it never checked was told anyway');
+      assert.equal(late.changes, 0, 'the one it never examined was told anyway');
 
-      // The next change checks it, finds its view gone, and sends it back to the start.
+      // The next change asks for its view, finds the probe gone from it, and sends nothing.
       await stream.publishProbe(db, probeId);
+      assert.equal(checked.changes, 2);
       assert.equal(late.changes, 0);
-      assert.equal(late.overflows.length, 1);
+      assert.deepEqual(late.overflows, []);
+    });
+
+    it('does not tell a watcher that detached while the views were being asked for', async () => {
+      const stale = await epochNow();
+      const moved = await grantsMoved();
+      const seen = probeRecorder();
+      const holder: { detach: () => void } = { detach: () => undefined };
+      holder.detach = stream.watchProbe(seen.watcher, probeId, {
+        visibility: Visibility.everything(stale),
+        key: 'leaving',
+        resolve: () => {
+          holder.detach();
+          return Promise.resolve(Visibility.everything(moved));
+        },
+      });
+      assert.equal(await stream.publishProbe(db, probeId), 0);
+      assert.equal(seen.changes, 0);
     });
 
     it('folds a flapping link into the frame already being read for, and counts it', async () => {

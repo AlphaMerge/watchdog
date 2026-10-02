@@ -348,7 +348,10 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
           'probe, and a watch on a probe the caller cannot read — or on an id that is not a ' +
           'probe — is answered with `problem`. Changes that arrive faster than the socket takes ' +
           'them are folded into one frame, so a `probe` frame means "at least once since the ' +
-          'last", and the frames are not numbered. `objectId` and `probeId` together are refused.' +
+          'last", and the frames are not numbered. `objectId` and `probeId` together are refused. ' +
+          'A watch whose caller loses the probe is sent nothing when the probe next changes; it ' +
+          'is sent `overflow` within seconds of the grant changing, on a timer of the core’s ' +
+          'own, so that when it arrives says nothing about the probe.' +
           '\n\n`seq` numbers the `state` frames this socket has been sent, from 1 and across ' +
           'every subscription it makes; `hello` carries 0 and a `snapshot` the number of the last ' +
           '`state` frame before it. It is the socket’s own count, so a gap means a frame was ' +

@@ -139,7 +139,18 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
     const accounts = new AccountService({ audit: new DatabaseAuditSink(), db, logger: silent });
     access = new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent });
     groups = new GroupService({ audit: new DatabaseAuditSink(), db, logger: silent });
-    stream = new StateBroadcaster({ logger: silent });
+    // The sweep an hour away: the one test that needs a sweep runs it by hand (`U-24`), and a
+    // tick landing inside its bounded wait would be the frame it asserts is absent.
+    stream = new StateBroadcaster({
+      logger: silent,
+      credentialSweepMs: 3_600_000,
+      accessEpoch: async () => {
+        const rows = await db.query<{ value: string }>(
+          'SELECT value::text AS value FROM access_epoch',
+        );
+        return Number(rows[0]?.value);
+      },
+    });
 
     const discovery = new DiscoveryService({
       db,
@@ -2416,20 +2427,44 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
           'a watch on one probe was told about another',
         );
 
-        // And taken away while the socket is open: the change after it is not sent. The socket is
-        // sent back to the start, and watching again is refused as it was at first.
+        // And taken away while the socket is open. Nothing but watches are attached — no tree
+        // subscriber — and the probe's link then moves three times. The administrator hears
+        // each edge; the reader who lost the probe is sent **nothing** at any of them: not the
+        // frame, and not an `overflow` either, whose arrival would say when a probe it can no
+        // longer see connected or dropped.
         await access.grant(probeId, teamId, 'none', actorNamed('visibility'));
+        assert.equal(stream.watching, false);
         const revoked = branchFrames.length;
-        await stream.publishProbe(db, probeId);
-        const overflow = await waitFor(branch, branchFrames, 'overflow', revoked);
+        for (let edge = 0; edge < 3; edge += 1) {
+          const at = adminFrames.length;
+          await stream.publishProbe(db, probeId);
+          await waitFor(admin, adminFrames, 'probe', at);
+        }
+        // A frame the socket can be waited on, sent after the edges, bounds the wait: anything
+        // the edges sent it would have arrived first.
+        branch.send('not a subscription');
+        await waitFor(branch, branchFrames, 'problem', revoked);
+        assert.deepEqual(
+          branchFrames.slice(revoked).map((frame) => (JSON.parse(frame) as { type: string }).type),
+          ['problem'],
+          'a reader whose access to the probe was taken away was told something at its edges',
+        );
+
+        // The sweep's tick, run by hand, is what sends it back to the start.
+        const tick = branchFrames.length;
+        await stream.sweep();
+        const overflow = await waitFor(branch, branchFrames, 'overflow', tick);
         assert.match(String(overflow['reason']), /may see has changed/);
+        // Watching again is refused as it was at first, and later edges and ticks say nothing.
         const again = branchFrames.length;
         watch(branch, probeId);
         assert.deepEqual(await waitFor(branch, branchFrames, 'problem', again), refused);
-        await stream.publishProbe(db, probeId);
         const after = branchFrames.length;
-        branch.send(JSON.stringify({ subscribe: {} }));
-        await waitFor(branch, branchFrames, 'snapshot', after);
+        await stream.publishProbe(db, probeId);
+        await stream.sweep();
+        branch.send('not a subscription');
+        await waitFor(branch, branchFrames, 'problem', after);
+        assert.equal(branchFrames.length, after + 1, 'something followed the refusal');
         assert.deepEqual(
           about(branchFrames, revoked),
           [],

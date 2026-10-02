@@ -434,7 +434,18 @@ async function serve(): Promise<void> {
   // — the one function every state change in the system goes through — so ingestion, a pause,
   // an acknowledgement, a simulated error and a dependency cascade all reach it without each
   // path having to remember.
-  const stream = new StateBroadcaster({ logger });
+  const stream = new StateBroadcaster({
+    logger,
+    // What the sweep compares a probe watcher's view with (`U-24`): a watcher whose access moved
+    // is told on the sweep's clock, never at the moment its probe changes.
+    accessEpoch: async () => {
+      const rows = await db.query<{ value: string }>(
+        'SELECT value::text AS value FROM access_epoch',
+      );
+      const value = rows[0]?.value;
+      return value === undefined ? null : Number(value);
+    },
+  });
   const publishStates: CommittedStates = (committed) => {
     // Floating on purpose, and safe because `publish` never rejects — see the guarantee on it
     // (`P-91`). This runs from `afterCommit`, whose hook loop try/catches only the synchronous
