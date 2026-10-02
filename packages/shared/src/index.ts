@@ -89,9 +89,14 @@ export {
   healthForPeer,
   resultForPeer,
   missingCapabilities,
+  pinningCapabilityFor,
   versionFor,
 } from './protocol/capabilities.js';
-export type { ProbeCapabilities, ProtocolSkew } from './protocol/capabilities.js';
+export type {
+  PinningCapability,
+  ProbeCapabilities,
+  ProtocolSkew,
+} from './protocol/capabilities.js';
 export {
   isProtocolCompatible,
   negotiatedVersion,

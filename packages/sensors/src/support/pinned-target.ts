@@ -134,6 +134,11 @@ export const PIN_REFUSALS = {
     `Not scanned: the connection for ${host} asked to resolve ${asked}, which is not the name ` +
     'that was checked against the allowed targets of the credentials it would use, so nothing ' +
     'was sent. A proxy or a redirect between the probe and the device does this.',
+  redirected: (host: string, other: string): string =>
+    `Not scanned: ${host} handed the connection on to ${other}, which is not the address ` +
+    'checked against the allowed targets of the database credentials it would use, so they ' +
+    'are not sent there. Giving the device the name or address of the server that answers, ' +
+    'inside those targets, sends them again.',
   otherPeer: (host: string, pinned: string, actual: string): string =>
     `Not scanned: the connection for ${host} went to ${actual}, not to ${pinned}, the address ` +
     'checked against the allowed targets of the credentials it would use, so its answer is ' +

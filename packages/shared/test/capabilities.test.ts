@@ -12,6 +12,7 @@ import {
   resultForPeer,
   MIN_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
+  pinningCapabilityFor,
   versionFor,
   type ProbeHealthReport,
 } from '../src/index.js';
@@ -53,6 +54,7 @@ describe('what a protocol version can do', () => {
       credentialAddressPinning: false,
       flowOverwritten: false,
       listenerOverwritten: false,
+      databaseAddressPinning: false,
     });
   });
 
@@ -400,7 +402,7 @@ describe('the health a peer can be sent', () => {
   });
 
   it('sends everything to a core that knows it', () => {
-    assert.equal(PROTOCOL_VERSION, 26);
+    assert.equal(PROTOCOL_VERSION, 27);
     assert.deepEqual(healthForPeer(health, 26), health);
     assert.deepEqual(healthForPeer(health, PROTOCOL_VERSION), health);
   });
@@ -507,6 +509,28 @@ describe('the health a peer can be sent', () => {
       ),
     );
     assert.ok(missingCapabilities(20).includes('report the log lines it could not write'));
+  });
+
+  it('a database set is pinned from 27, and every other kind from 24 (A-62)', () => {
+    // No field on the wire: below 27 the core withholds the set from a database sensor.
+    assert.equal(versionFor('databaseAddressPinning'), 27);
+    assert.equal(capabilitiesFor(26).databaseAddressPinning, false);
+    assert.equal(capabilitiesFor(27).databaseAddressPinning, true);
+    assert.equal(pinningCapabilityFor('database'), 'databaseAddressPinning');
+    for (const kind of ['snmp', 'ssh', 'http', 'mail', 'windows', '']) {
+      assert.equal(pinningCapabilityFor(kind), 'credentialAddressPinning', kind);
+    }
+    assert.ok(
+      missingCapabilities(26).includes(
+        'check a named database server against the addresses its credentials allow, and ' +
+          'connect to the address it checked',
+      ),
+    );
+    assert.deepEqual(missingCapabilities(27), []);
+    // Stripping what a peer does not know is by capability: 27 has no health field, so a core
+    // at 26 is sent what a core at 27 is.
+    const health = { memoryMb: 1, trapOverwritten: 9, syslogOverwritten: 2 };
+    assert.deepEqual(healthForPeer(health, 26), healthForPeer(health, 27));
   });
 });
 

@@ -3,6 +3,7 @@ import { isRestricted, restrictionOf, type CredentialRestriction } from '@ms/sen
 import {
   capabilitiesFor,
   describeError,
+  pinningCapabilityFor,
   PROTOCOL_VERSION,
   targetVerdict,
   versionFor,
@@ -519,7 +520,7 @@ export const WITHHELD_CREDENTIALS = {
     'Not scanned: this device is named by host name, and the allowed targets of the credentials ' +
     'it would use name only addresses and ranges. A name is checked against those by resolving ' +
     'it and connecting to the address that was checked, and this kind of sensor connects ' +
-    'through a driver that resolves the name itself. Giving the device its address, or adding ' +
+    'through a transport that resolves the name itself. Giving the device its address, or adding ' +
     'its name or *.domain to the targets, sends them again.',
   probeCannotPin:
     'Not scanned: this device is named by host name, and the allowed targets of the credentials ' +
@@ -527,6 +528,12 @@ export const WITHHELD_CREDENTIALS = {
     'once and connect to the address it checked. Upgrading the probe to protocol ' +
     `${String(versionFor('credentialAddressPinning'))} sends them again, and so does giving the ` +
     'device its address, or adding its name or *.domain to the targets.',
+  probeCannotPinDatabase:
+    'Not scanned: this device is named by host name, and the allowed targets of the credentials ' +
+    'it would use name only addresses and ranges. Its probe is too old to connect a database ' +
+    'sensor to the address it checked: its driver resolves the name itself. Upgrading the ' +
+    `probe to protocol ${String(versionFor('databaseAddressPinning'))} sends them again, and so ` +
+    'does giving the device its address, or adding its name or *.domain to the targets.',
   probeTooOld:
     'Not scanned: the SSH credentials it would use list host keys, and its probe is too old to ' +
     'check a server against more than one. Upgrading the probe to protocol 22 sends them again.',
@@ -553,13 +560,19 @@ export function boundRefusal(
    * (`A-41c`). False withholds a name facing address targets, as before `A-41c`.
    */
   pinsAddress = false,
+  /**
+   * The kind of the set, which says what a probe must speak to pin it (`A-62`): a database
+   * set needs a newer probe than the others.
+   */
+  kind = '',
 ): string | null {
-  const reason = boundRefusalReason(restriction, host, peerVersion, pinsAddress);
+  const reason = boundRefusalReason(restriction, host, peerVersion, pinsAddress, kind);
   return reason === null ? null : WITHHELD_CREDENTIALS[reason];
 }
 
 /** Which of `WITHHELD_CREDENTIALS`' sentences a set's bounds refuse a sensor with. */
-export type BoundRefusalReason = 'outside' | 'undecided' | 'probeCannotPin' | 'probeTooOld';
+export type BoundRefusalReason =
+  'outside' | 'undecided' | 'probeCannotPin' | 'probeCannotPinDatabase' | 'probeTooOld';
 
 /**
  * `boundRefusal`, as which refusal it is and not its sentence (`A-59`): a write that counts the
@@ -571,6 +584,7 @@ export function boundRefusalReason(
   host: string,
   peerVersion: number,
   pinsAddress = false,
+  kind = '',
 ): BoundRefusalReason | null {
   if (restriction.targets.length > 0) {
     const verdict = targetVerdict(host, restriction.targets);
@@ -582,7 +596,12 @@ export function boundRefusalReason(
       // address to connect to, and the probe is new enough to do the check at all. A probe below
       // that version would be sent the set and connect by name.
       if (!pinsAddress) return 'undecided';
-      if (!capabilitiesFor(peerVersion).credentialAddressPinning) return 'probeCannotPin';
+      // **The version is the kind's** (`A-62`): a probe that pins SNMP, SSH, HTTP and mail may
+      // still have database drivers that resolve the name themselves.
+      const needs = pinningCapabilityFor(kind);
+      if (!capabilitiesFor(peerVersion)[needs]) {
+        return needs === 'databaseAddressPinning' ? 'probeCannotPinDatabase' : 'probeCannotPin';
+      }
     }
   }
   if (restriction.hostKeys !== null && !capabilitiesFor(peerVersion).credentialHostKeys) {
@@ -652,7 +671,13 @@ export async function boundsBeneath(
     if (route.ownerId === ownerId) reached.add(route.sensorId);
     if (!isRestricted(route.restriction)) continue;
     const pins = types.pinsAddress(route.sensorType, route.kind);
-    const reason = boundRefusalReason(route.restriction, route.host, PROTOCOL_VERSION, pins);
+    const reason = boundRefusalReason(
+      route.restriction,
+      route.host,
+      PROTOCOL_VERSION,
+      pins,
+      route.kind,
+    );
     if (reason === null) continue;
     // Asked as the newest probe, so the two refusals that are about a probe's age do not come
     // up; anything that is not the name left undecided is the device outside the targets.
@@ -1049,6 +1074,7 @@ export class CredentialVouching {
             sensor.host,
             peerVersion,
             this.#types.pinsAddress(sensor.sensorType, kind),
+            kind,
           );
           if (refusal !== null) refused.set(sensor.sensorId, refusal);
           else if (targetVerdict(sensor.host, restriction.targets) === 'undecided') {

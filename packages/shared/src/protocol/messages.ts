@@ -41,6 +41,13 @@ import { AppError } from '../errors/app-error.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
+ * Version 27 adds `databaseAddressPinning` (`A-62`): a probe's PostgreSQL, MySQL and SQL Server
+ * sensors connect to the address the probe checked, on a socket the driver is handed, where an
+ * older probe's drivers resolve the device's name themselves. Nothing on the wire changes. It
+ * is 24's `credentialAddressPinning` for the `database` kind: the core sends a database set
+ * whose targets leave a named device to its probe only to a probe at 27, and holds the sensor
+ * Unknown on an older one, which would connect by name.
+ *
  * Version 26 adds `trapOverwritten` and `syslogOverwritten` (`B-14`): what the trap and the
  * syslog listener each received and overwrote in its buffer before a sensor had read it, running
  * totals since the listener started, as 25's is for flows. Two new fields in a closed schema
@@ -125,7 +132,7 @@ import { AppError } from '../errors/app-error.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 26;
+export const PROTOCOL_VERSION = 27;
 
 /**
  * The oldest peer version this build still understands.

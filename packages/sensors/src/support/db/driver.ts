@@ -1,3 +1,7 @@
+import type { LookupFunction } from 'node:net';
+import { isCredentialsWithheld, type PinnedAddress } from '../pinned-target.js';
+import { TargetRefusedError } from '../checked-target.js';
+
 /**
  * What a database sensor needs from an engine, and nothing else (`T-18`).
  *
@@ -30,6 +34,29 @@ export interface DbConnectOptions {
    * heavy query behind each time is a monitoring system that becomes the outage.
    */
   readonly statementTimeoutMs: number;
+  /**
+   * The lookup the connection's socket is given (`A-62`): it answers the device's name with the
+   * addresses that were checked against the probe's target policy, or with the one address a
+   * credential set pinned (`A-41c`), and the name is not resolved again. `host` stays the name,
+   * which is what TLS names and checks.
+   *
+   * Absent, the driver connects as it always has: the device is an address, or nothing is
+   * checked.
+   */
+  readonly lookup?: LookupFunction;
+  /** The address a credential set pinned, when one did: the far end must be it. */
+  readonly pinned?: PinnedAddress;
+  /**
+   * What the connect has left of `connectTimeoutMs` once the lookup has been taken out: the two
+   * share the one timeout. Absent, all of it. `connectTimeoutMs` stays what a message quotes.
+   */
+  readonly connectWithinMs?: number;
+  /**
+   * The lookup for a server the device redirected the connection to (SQL Server does), checked
+   * as the device was and on a lookup of its own; undefined when it needs none. Rejects when
+   * the redirect may not be followed.
+   */
+  readonly redirect?: (host: string) => Promise<LookupFunction | undefined>;
 }
 
 /** One row, values as the driver produced them. */
@@ -72,9 +99,27 @@ export function codeOf(error: unknown): string {
   return typeof code === 'string' ? code : typeof code === 'number' ? String(code) : '';
 }
 
+/** The error and what it was made from: `tedious` wraps a socket's error in one of its own. */
+function chainOf(error: unknown): unknown[] {
+  const chain: unknown[] = [];
+  for (let at: unknown = error; at instanceof Error && chain.length < 5; at = at.cause) {
+    chain.push(at);
+  }
+  return chain.length === 0 ? [error] : chain;
+}
+
+/** The codes a driver puts around a socket's own, which say nothing of what went wrong. */
+const WRAPPERS = new Set(['', 'ESOCKET']);
+
 export function describeDbError(error: unknown, options: DbConnectOptions, engine: string): Error {
   const where = `${options.host}:${String(options.port)}`;
-  const code = codeOf(error);
+  const chain = chainOf(error);
+  // **A refusal is not a database's failure, and keeps its class** (`A-62`): the runner reads a
+  // set that was withheld as Unknown, and the policy's refusal says the address and the policy.
+  for (const one of chain) {
+    if (isCredentialsWithheld(one) || one instanceof TargetRefusedError) return one;
+  }
+  const code = chain.map(codeOf).find((one) => !WRAPPERS.has(one)) ?? '';
   const message = error instanceof Error ? error.message : String(error);
 
   if (code === 'ECONNREFUSED') return new DbError(`nothing is listening at ${where}`);

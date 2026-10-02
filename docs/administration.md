@@ -427,13 +427,14 @@ nobody, not even an administrator, can bring it outside.
   | SSH | Checked and pinned. The server is still identified by its host key. |
   | HTTP | Checked and pinned. The request still names the device: `Host`, TLS SNI and the certificate check are on the name. |
   | Mail (SMTP, IMAP, POP3) | Checked and pinned, with the certificate checked against the name, after `STARTTLS` too. |
-  | PostgreSQL, MySQL, SQL Server | **Withheld.** The drivers resolve the name themselves and take no address to connect to. |
-  | Windows (PowerShell) | **Withheld.** Kerberos needs the name, and PowerShell resolves it. |
+  | PostgreSQL, MySQL, SQL Server | Checked and pinned, **by a probe at protocol 27** (`A-62`): the driver is handed a connection to the address that was checked, and TLS still names the device. A server that hands the login on to another (SQL Server's redirect) is not followed with a pinned set: the sensor reads Unknown, naming where it was sent. |
+  | Windows (PowerShell) | **Withheld.** Kerberos needs the name, and PowerShell resolves it: there is no connection to hand it. |
 
-  For the withheld kinds, give the device its address, or add its name or `*.domain` to the
+  For Windows sensors, give the device its address, or add its name or `*.domain` to the
   targets; the sensor's message says which. **A probe older than protocol 24 is not sent such a
-  set at all**: it would connect by name. Its sensors read Unknown, saying so, until the probe
-  is upgraded. "Check now" is held to the same rule, against the probe that is connected at
+  set at all, and one older than 27 is not sent a database set**: it would connect by name. Its
+  sensors read Unknown, saying so and which version sends them again, until the probe is
+  upgraded. "Check now" is held to the same rule, against the probe that is connected at
   that moment and not the version a probe last announced. With no probe connected it answers
   503 `PROBE_QUERY_OFFLINE`, "the probe that owns this sensor is not connected", as it does for
   any sensor: nothing is sent, and it is not the probe's age. A sensor outside its targets, or
@@ -467,7 +468,7 @@ nobody, not even an administrator, can bring it outside.
   what outside means. A set stored for the first time on a group is compared with the
   ancestor's set its sensors used until then, so a sensor that set's targets already kept out
   is not counted as newly outside. Restricting a set to ranges when the
-  devices under it are named by host name takes every database and Windows sensor among them to
+  devices under it are named by host name takes every Windows sensor among them to
   Unknown, and the count is how you find that out before the pages do. **It does not count a
   named device its probe will check**: whether that name resolves inside is found out at the
   scan, and by the probe's resolver, not the core's. Unknown pages as it always has: once per
@@ -652,6 +653,15 @@ as its DNS and time servers, are the cases to look for. **If those are yours to 
 scan. There is no per-device exception, by design: whoever writes the device is who the rule is
 there for.
 
+**The database sensors joined this later** (`A-62`), so the same holds for them at the upgrade
+that brings it: a PostgreSQL, MySQL or SQL Server sensor on a device given as a *name* that
+resolves to a link-local address was Up, because the driver resolved the name and nothing
+checked the answer, and now reads Down with the sentence above. One failed check a scan for
+each, no new state and no new notification, and `probe.targetPolicy: none` is the way back.
+A PostgreSQL sensor whose device's "host" is the path of a Unix socket directory on the probe's
+own machine fails under any policy but `none` too, saying the name did not resolve: a path is
+not a name.
+
 What each transport does, for a device given as a name. A device given as an address is checked
 as it stands and nothing is resolved, on every one of them.
 
@@ -663,8 +673,8 @@ as it stands and nothing is resolved, on every one of them.
 | SNMP: `snmp.traffic`, `snmp.custom`, `snmp.custom.string`, `snmp.table`, `snmp.cpu`, `snmp.diskfree`, `snmp.memory`, `snmp.uptime` | Yes | UDP has no lookup to answer: each scan resolves the name once, checks every address, and asks the agent at a checked address. The session it has is kept while its address is still among the answers, so a name whose answers rotate keeps one session; it is replaced only when the name no longer has that address. Over IPv4 unless the device is set to IPv6, as before. |
 | TCP: `port.tcp`, `port.range` | Yes | The socket's lookup is answered with the checked addresses. A range is resolved once for all its ports. |
 | TLS: `tls.certificate`, `tls.security` | Yes | As TCP. Every handshake of a security check goes to the same checked addresses. |
-| Databases: `db.postgresql`, `db.mysql`, `db.mssql` | An address only | A device given as a refused address is refused. **A name is not resolved or checked**: the driver resolves it itself and cannot be handed an address, so a check here would be of an answer the connection never uses. |
-| Windows: `windows.cpu`, `windows.memory`, `windows.service`, `windows.volume` | An address only | The same, and for the same reason: PowerShell resolves the name, and Kerberos wants the name. The sensor's own `host` parameter is checked as the device's is. |
+| Databases: `db.postgresql`, `db.mysql`, `db.mssql` | Yes (`A-62`) | None of the three drivers takes a lookup, and each takes the connection: `pg` and `mysql2` a `stream`, `tedious` a `connector`. The name is resolved once and checked, and the driver is handed a socket whose lookup is answered with the checked addresses. The driver still holds the name, so TLS sends it and checks the certificate against it, never against the address. PostgreSQL's second connection under `prefer`, when the server has no TLS, goes to the same checked addresses with no second lookup. **A server SQL Server redirects the login to** is another host: it is resolved and checked on a lookup of its own before it is followed. Whichever address family the name has, as before. |
+| Windows: `windows.cpu`, `windows.memory`, `windows.service`, `windows.volume` | **An address only: a name is outside the policy** | A device given as a refused address is refused, and the sensor's own `host` parameter is checked as the device's is. **A name is not resolved or checked.** The probe starts PowerShell and hands it the name; PowerShell's `New-CimSession -ComputerName` resolves it inside that process, WinRM takes no address in its place without breaking Kerberos, which authenticates the *name*, and there is no socket or lookup the probe can hand a child process. A check made here would be of an answer the connection never uses. If a Windows device must not be able to point a probe at a link-local address, give the device its address. |
 | ICMP: `icmp.ping`, `icmp.jitter` | No | An echo carries no credential and brings back no content, so the guard would buy nothing. `ping` resolves the name in its own process, as before. Resolving it in the probe instead would put the largest sensor population on the probe's shared lookup threads, where a lookup cannot be cancelled and abandoned ones pile up uncounted while a resolver is down, and it would lose `ping`'s own choice of address family. |
 | DNS: `dns.record`, `dns.blocklist` | No | They ask a resolver about a name and connect to no device. The resolver is the probe's own or an address in the sensor's parameters, and on a cloud machine the provider's resolver is itself link-local. |
 | Scripts: `exe.script`, `exe.script.advanced` | No | The probe connects to nothing. The script is handed the device's host and does what whoever deployed it wrote. |
@@ -681,7 +691,9 @@ as it stands and nothing is resolved, on every one of them.
   the one it used before.
 - **The lookup and the connection share the sensor's timeout**, as they did when the socket
   made the lookup: a TCP port, TLS or mail sensor never runs longer than its timeout for the
-  lookup's sake, and its connect or handshake time includes the lookup, as before. An SSH
+  lookup's sake, and its connect or handshake time includes the lookup, as before. A database
+  sensor's `connectTimeoutMs` is shared the same way, and its **Connect time** channel
+  includes the lookup, as it did when the driver made it. An SSH
   sensor's `connectTimeoutMs` is the same (`A-65`): when a connection has to be opened, what
   the lookup took is taken from what the handshake has.
 - **A name that does not resolve** fails the scan in the guard, saying so. **A resolver that
@@ -692,7 +704,8 @@ as it stands and nothing is resolved, on every one of them.
   allow a link-local address does not make the probe connect to one.
 - **A sensor's lookups.** No sensor asks the probe's resolver where it did not before. A TCP,
   TLS or mail connection resolved the name in the probe when its socket connected, and now the
-  guard does, once. SNMP resolved it for each datagram, and now once a scan. SSH resolves when
+  guard does, once. A database driver resolved it in the probe when it connected (twice for
+  PostgreSQL under `prefer` against a server with no TLS), and now the guard does, once. SNMP resolved it for each datagram, and now once a scan. SSH resolves when
   it opens a connection, as before, and not while it keeps one. Ping is unchanged.
 
 **Discovery is held to the same setting** (`A-63`). A discovery run has two halves, and the
@@ -1709,8 +1722,8 @@ Covered in [`docs/installation.md`](installation.md#upgrading). The two things w
   one `hostKeyFingerprint` included, and is sent exactly where it was sent the day before.
   **With one exception, which somebody did choose** (`A-41c`): a set whose targets name only
   addresses now reaches SNMP, SSH, HTTP and mail sensors on devices named by host name, once
-  their probe speaks protocol 24 and for as long as every address the name resolves to is inside
-  those targets. Before, those sensors read Unknown. The targets were written to say where the
+  their probe speaks protocol 24, and database sensors once it speaks 27 (`A-62`), and for as
+  long as every address the name resolves to is inside those targets. Before, those sensors read Unknown. The targets were written to say where the
   set may go, and it goes nowhere outside them.
 
 ---

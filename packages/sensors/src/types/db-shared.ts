@@ -6,7 +6,8 @@ import type {
   SensorType,
 } from '../contract.js';
 import { MAX_PATTERN } from '../support/pattern.js';
-import { refuseBlockedAddress } from '../support/checked-target.js';
+import { checkedTarget, guardOf, lookupFor } from '../support/checked-target.js';
+import { CredentialsWithheldError, PIN_REFUSALS, pinnedLookup } from '../support/pinned-target.js';
 import type { DbConnectOptions, DbDriver, DbResult, DbRow } from '../support/db/driver.js';
 
 /**
@@ -247,10 +248,6 @@ function cellAt(result: DbResult, row: number, column: string, position: number)
 export async function runDbCheck(driver: DbDriver, context: CheckContext): Promise<CheckExecution> {
   const host = context.target.host;
   if (host === '') throw new Error('the device has no host to connect to');
-  // **An address is held to the probe's target policy; a name is not resolved here** (`A-57`).
-  // The driver resolves a name itself and takes no lookup, so a check of the name would be on
-  // an answer the connection never uses.
-  refuseBlockedAddress(host, context.target.policy, 'connect to');
   const query = typeof context.params['query'] === 'string' ? context.params['query'].trim() : '';
   if (query === '') throw new Error('this sensor has no query to run');
 
@@ -264,24 +261,76 @@ export async function runDbCheck(driver: DbDriver, context: CheckContext): Promi
   }
 
   const declaredPort = Number(context.params['port'] ?? 0);
+  const port = declaredPort > 0 ? declaredPort : driver.defaultPort;
   const encryptRaw = context.params['encrypt'];
-  const options: DbConnectOptions = {
-    host,
-    port: declaredPort > 0 ? declaredPort : driver.defaultPort,
-    database: typeof context.params['database'] === 'string' ? context.params['database'] : '',
-    username,
-    password: typeof credential['password'] === 'string' ? credential['password'] : '',
-    encrypt: encryptRaw === 'require' || encryptRaw === 'disable' ? encryptRaw : 'prefer',
-    verifyTls: context.params['verifyTls'] === true,
-    connectTimeoutMs: Number(context.params['connectTimeoutMs'] ?? 10_000),
-    statementTimeoutMs: Number(context.params['statementTimeoutMs'] ?? 30_000),
-  };
+  const connectTimeoutMs = Number(context.params['connectTimeoutMs'] ?? 10_000);
 
   // Checked once, here, rather than in each driver: three copies would be three chances to
   // narrow the signal and leave the mid-query check unreachable, which is what happened.
   if (context.signal.aborted) throw new Error('the check was cancelled before it connected');
 
+  // The clock starts before the name is resolved, as it did when the driver resolved it: the
+  // connect time has always included the lookup.
   const startedAt = process.hrtime.bigint();
+  const spentMs = (): number => Number(process.hrtime.bigint() - startedAt) / 1e6;
+  // **Resolved once and checked against the probe's target policy** (`A-62`), every answer of
+  // it. The driver is then handed a socket whose lookup answers with the checked addresses, and
+  // the name is not resolved again. Whichever family the name has, as the drivers always
+  // connected. A device given as an address is checked as it stands and resolves nothing.
+  const pinned = context.target.pinned;
+  const checked = await checkedTarget({
+    ...guardOf(context.target),
+    timeoutMs: connectTimeoutMs,
+    signal: context.signal,
+    verb: 'connect to',
+    doing: `connecting to ${host}:${String(port)}`,
+  });
+  // The one address a credential set was checked against (`A-41c`), or the policy's addresses.
+  const lookup =
+    pinned === undefined ? lookupFor(host, checked).lookup : pinnedLookup(host, pinned);
+
+  const options: DbConnectOptions = {
+    host,
+    port,
+    database: typeof context.params['database'] === 'string' ? context.params['database'] : '',
+    username,
+    password: typeof credential['password'] === 'string' ? credential['password'] : '',
+    encrypt: encryptRaw === 'require' || encryptRaw === 'disable' ? encryptRaw : 'prefer',
+    verifyTls: context.params['verifyTls'] === true,
+    connectTimeoutMs,
+    statementTimeoutMs: Number(context.params['statementTimeoutMs'] ?? 30_000),
+    ...(lookup === undefined
+      ? {}
+      : {
+          lookup,
+          // **The lookup and the connect share the one timeout**, as they did when the driver
+          // made the lookup: what it took is taken from what the connect has.
+          connectWithinMs: Math.max(1, connectTimeoutMs - spentMs()),
+          // A server the device hands the connection on to is another host, checked as one. A
+          // set held to one address is not sent to a second.
+          redirect: async (other: string) => {
+            if (pinned !== undefined) {
+              throw new CredentialsWithheldError(PIN_REFUSALS.redirected(host, other), {
+                sensorId: context.sensorId,
+                target: host,
+                phase: 'connect',
+                kind: 'database',
+              });
+            }
+            const onward = await checkedTarget({
+              ...guardOf(context.target),
+              host: other,
+              timeoutMs: Math.max(1, connectTimeoutMs - spentMs()),
+              signal: context.signal,
+              verb: 'follow a redirect to',
+              doing: `following a redirect from ${host} to ${other}`,
+            });
+            return lookupFor(other, onward).lookup;
+          },
+        }),
+    ...(pinned === undefined ? {} : { pinned }),
+  };
+
   const connection = await driver.connect(options, context.signal);
   const connectedAt = process.hrtime.bigint();
 
@@ -349,6 +398,10 @@ export function databaseSensor(
     credentialKinds: ['database'],
     // Where the set goes besides the host (`A-41`): a port, and whether it is encrypted and
     // checked.
+    // **Every connection goes to the address a set was checked against** (`A-62`): the driver
+    // is handed a socket whose lookup answers with it, and never resolves the name. A probe
+    // below `databaseAddressPinning` does not, and the core does not send it such a set.
+    pinnedKinds: ['database'],
     secretDestinations: { 'kind:database': ['encrypt', 'port', 'verifyTls'] },
     paramsSchema: {
       type: 'object',

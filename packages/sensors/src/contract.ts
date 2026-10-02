@@ -376,8 +376,10 @@ export interface SensorType {
    * every address, and pins one. A type that leaves a kind out is not sent such a set, and one
    * that listed a kind and still connected by name would hand the set to whoever answers the
    * second lookup. List a kind only where the transport takes an address to connect to or a
-   * `lookup` for its socket: SNMP, SSH, HTTP and mail do. The database drivers and PowerShell
-   * resolve the name themselves, and stay off this list.
+   * `lookup` for its socket: SNMP, SSH, HTTP and mail do, and the database drivers are handed
+   * a socket that has one (`A-62`, from protocol 27: the core asks `pinningCapabilityFor` which
+   * version of a probe pins a kind). PowerShell resolves the name itself, and stays off this
+   * list.
    *
    * Each must be one of `credentialKinds`; the catalogue refuses a type that lists another.
    */

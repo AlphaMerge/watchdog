@@ -138,9 +138,10 @@ function refusal(
 /**
  * Refuses a device given as an address the policy blocks. Nothing is resolved: a name passes.
  *
- * On its own, this is all a transport that cannot be held to an address is given: a database
- * driver or PowerShell resolves a name itself, so a lookup made here would be one the
- * connection never uses, and a check that whoever runs the name's DNS answers as they like.
+ * On its own, this is all a transport that cannot be held to an address is given: PowerShell
+ * resolves a name itself, so a lookup made here would be one the connection never uses, and a
+ * check that whoever runs the name's DNS answers as they like. The database drivers were here
+ * too until `A-62` handed them a socket.
  */
 export function refuseBlockedAddress(
   host: string,

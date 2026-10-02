@@ -1538,7 +1538,7 @@ describe('HTTP is held to the same setting', () => {
   });
 });
 
-describe('transports that cannot be held to an address: an address is checked, a name is not resolved', () => {
+describe('the database sensors through a driver that connects to nothing, and the transport that cannot be held to an address', () => {
   const driver = (connects: string[]): DbDriver => ({
     id: 'postgresql',
     name: 'PostgreSQL',
@@ -1575,16 +1575,29 @@ describe('transports that cannot be held to an address: an address is checked, a
     assert.equal(dns.calls.length, 0);
   });
 
-  it('a database sensor on a name, an ordinary address, or under `none` connects as it did', async () => {
+  it('a database sensor on an ordinary address, or under `none`, connects as it did', async () => {
     const connects: string[] = [];
     const dns = rebinding(v4(METADATA));
-    await runDbCheck(driver(connects), database(NAME, dns));
     await runDbCheck(driver(connects), database('127.0.0.1', dns));
     // The fake driver connects to nothing: this is what the check hands it.
     await runDbCheck(driver(connects), database('169.254.7.7', dns, 'none'));
-    assert.deepEqual(connects, [NAME, '127.0.0.1', '169.254.7.7']);
-    // The driver resolves the name itself, so a lookup here would be one it never uses.
+    await runDbCheck(driver(connects), database(NAME, dns, 'none'));
+    assert.deepEqual(connects, ['127.0.0.1', '169.254.7.7', NAME]);
     assert.equal(dns.calls.length, 0);
+  });
+
+  it('a database sensor on a name is resolved once and checked, where it was not (A-62)', async () => {
+    // The real drivers, against servers on loopback, are in `db-checked-target.test.ts`.
+    const connects: string[] = [];
+    const inside = rebinding();
+    await runDbCheck(driver(connects), database(NAME, inside));
+    assert.deepEqual(connects, [NAME], 'the driver still holds the name, which TLS names');
+    assert.equal(inside.calls.length, 1);
+    const dns = rebinding(v4('127.0.0.1', METADATA));
+    const error = await refused(runDbCheck(driver(connects), database(NAME, dns)));
+    assert.match(error.message, /it resolves to 169\.254\.169\.254, which is link-local/);
+    assert.deepEqual(connects, [NAME]);
+    assert.equal(dns.calls.length, 1);
   });
 
   const windows = (host: string, params: Record<string, unknown> = {}, policy?: TargetPolicy) =>

@@ -147,6 +147,14 @@ export interface ProbeCapabilities {
    * stripped a capability at a time, and no core knows one of the two and not the other.
    */
   listenerOverwritten: boolean;
+  /**
+   * Connects its database sensors to the address it checked (`A-62`): `pg`, `mysql2` and
+   * `tedious` are handed a socket whose lookup answers with it, where below this each driver
+   * resolved the device's name itself. No field on the wire. It is `credentialAddressPinning`
+   * for one more credential kind: below this the core does not send a database set whose
+   * targets leave a named device to its probe, because that probe would connect by name.
+   */
+  databaseAddressPinning: boolean;
 }
 
 /**
@@ -175,6 +183,7 @@ const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
   ['credentialAddressPinning', 24],
   ['flowOverwritten', 25],
   ['listenerOverwritten', 26],
+  ['databaseAddressPinning', 27],
 ];
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -200,6 +209,9 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   flowOverwritten: 'report the flows its collector overwrote before a sensor read them',
   listenerOverwritten:
     'report the traps and syslog messages its listeners overwrote before a sensor read them',
+  databaseAddressPinning:
+    'check a named database server against the addresses its credentials allow, and connect ' +
+    'to the address it checked',
 };
 
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
@@ -223,7 +235,24 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     credentialAddressPinning: has(24),
     flowOverwritten: has(25),
     listenerOverwritten: has(26),
+    databaseAddressPinning: has(27),
   };
+}
+
+/** The capabilities that say a probe connects one credential kind to an address it checked. */
+export type PinningCapability = 'credentialAddressPinning' | 'databaseAddressPinning';
+
+/**
+ * Which capability a probe needs to connect a credential kind to the address it checked
+ * (`A-41c`, `A-62`).
+ *
+ * By kind, because a kind is a transport: SNMP, SSH, HTTP and mail were held to a checked
+ * address at 24, and the database drivers at 27. A probe between the two has database sensor
+ * types that resolve the name themselves, and would refuse such a set at every scan; the core
+ * asks here and does not send it one.
+ */
+export function pinningCapabilityFor(kind: string): PinningCapability {
+  return kind === 'database' ? 'databaseAddressPinning' : 'credentialAddressPinning';
 }
 
 /**

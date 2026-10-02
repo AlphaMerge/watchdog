@@ -385,10 +385,13 @@ Four rules follow from how the redactor works:
 
   `lookupFor` answers the socket's lookup with the checked addresses, so the name is never
   resolved again and TLS still names the server. A transport that takes an address and no
-  lookup connects to one of `checked.addresses`. One that can do neither, because a driver
-  resolves the name itself, calls `refuseBlockedAddress` for a device given as an address and
-  is listed in `administration.md` as checked by address only. A refusal is an ordinary failed
-  check; do not catch it.
+  lookup connects to one of `checked.addresses`. **A driver that resolves the name itself
+  usually still takes the connection** (`A-62`): read its source for an option that accepts a
+  socket and hand it one made with that lookup, as `support/db/socket.ts` does for `pg`
+  (`stream`), `mysql2` (`stream`) and `tedious` (`connector`), leaving the driver the name so
+  that TLS names it. Only a transport that can do none of these, as PowerShell cannot, calls
+  `refuseBlockedAddress` for a device given as an address and is listed in `administration.md`
+  as checked by address only. A refusal is an ordinary failed check; do not catch it.
 
 The form (`U-08`) follows from the same annotation: a `writeOnly` parameter renders as
 "set, write-only" with Replace and Clear, never as a filled input, and is omitted from the save

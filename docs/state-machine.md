@@ -158,7 +158,8 @@ group at once, and pages as Unknown does: once per sensor, into the digest, and 
 sensor a Down dependency already holds, since a paused sensor is not configured.
 
 **And a sensor whose probe refuses to scan it** (`A-41c`). A device named by host name, facing a
-set whose targets name only addresses, is sent to a probe at protocol 24, which resolves the name
+set whose targets name only addresses, is sent to a probe at protocol 24 (27 for a database
+sensor, `A-62`), which resolves the name
 at each scan and checks every address. When one is outside the targets, or the name resolves to
 nothing, the probe sends the device nothing and marks its result `withheld`. **That result never
 reaches the state machine.** It is not a failed scan: counted as one it would be a Down, and an

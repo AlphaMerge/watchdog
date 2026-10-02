@@ -8,6 +8,7 @@ import {
   type DbDriver,
   type DbResult,
 } from './driver.js';
+import { connectBudgetMs, connectingSocket } from './socket.js';
 
 /**
  * MySQL and MariaDB, through `mysql2` (`T-18`).
@@ -32,14 +33,18 @@ export const mysqlDriver: DbDriver = {
 
   async connect(options: DbConnectOptions, _signal: AbortSignal): Promise<DbConnection> {
     let connection: Connection;
+    // **Handed its socket when the device's name was checked** (`A-62`): `mysql2` takes no
+    // `lookup`, and takes a `stream`. The host stays the name, which is what it names in TLS.
+    const stream = connectingSocket(options);
     try {
       connection = await createConnection({
         host: options.host,
         port: options.port,
+        ...(stream === undefined ? {} : { stream }),
         ...(options.database === '' ? {} : { database: options.database }),
         user: options.username,
         password: options.password,
-        connectTimeout: options.connectTimeoutMs,
+        connectTimeout: connectBudgetMs(options),
         ...(options.encrypt === 'disable'
           ? {}
           : { ssl: { rejectUnauthorized: options.verifyTls } }),

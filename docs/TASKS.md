@@ -18703,13 +18703,94 @@ because each is a decision rather than a defect:
         minutes, and a failed write is logged. `main.ts` is not started by any test: its order is
         pinned by reading the source. The window above.
 
-- [ ] **A-62 — database and Windows sensors connect to whatever a name resolves to** · M ·
+- [x] **A-62 — database and Windows sensors connect to whatever a name resolves to** · M ·
       A-57, A-41c · Found 2026-10-02 by `A-57`. `pg`, `mysql2` and `tedious` resolve a name
       themselves and take no lookup, and PowerShell resolves for Kerberos, so the target policy
       reads an address given as one and nothing else. **Done when** `pg` and `mysql2` are
       handed a stream connected to a checked address, `tedious` and the Windows transport are
       either given one or named in the administration guide as outside the policy with the
       reason, and a simulator test shows the refusal for each that is covered.
+
+      **A-62 outcome.** The three database sensors resolve a device's name once, check every
+      answer against the probe's target policy, and hand their driver a connection to a checked
+      address. They can be pinned for a credential set too, from protocol 27. The Windows
+      sensors are as they were, and the guide says why.
+      - **Every driver takes the connection, `tedious` included** (the ticket and `A-41c`'s
+        table said it took neither option). Read from the installed sources:
+        - `pg` 8.23, `lib/connection.js`: `config.stream`, called when it is a function, then
+          `stream.connect(port, host)`; `upgradeToSSL(host)` wraps that stream with `servername`
+          the host. `lib/client.js` destroys the stream at `connectionTimeoutMillis` whoever
+          made it, and a client is never connected twice. Handed a socket whose `connect` goes
+          to the device through the checked lookup.
+        - `mysql2` 3.24, `lib/base/connection.js`: `config.stream`, used as found with no
+          connect of the driver's own; `startTLS` wraps it with `servername` from
+          `config.host`; `connectTimeout` runs whoever made it; no reconnect. Handed a socket
+          already connecting.
+        - `tedious` 20, `lib/connection.js` `connectOnPort`: `options.connector`, called in
+          place of its own connect and awaited with nothing raced against it, so the connector
+          ends itself at the timeout. The TLS it runs inside TDS names `config.server`
+          (`lib/message-io.js`).
+        - PowerShell: the probe spawns it and `New-CimSession -ComputerName` resolves the name
+          in that process (`support/windows/envelope.ts`). No socket, no lookup hook, and
+          Kerberos authenticates the name. Left, and named in the guide as outside the policy
+          for a name.
+      - **One place still resolves and checks**: `runDbCheck` calls `checkedTarget`, and
+        `support/db/socket.ts` is the one file that makes a driver's socket. The driver keeps
+        the name as its host, so TLS sends it and checks the certificate against it.
+        `DbConnectOptions` gains `lookup`, `pinned`, `connectWithinMs` and `redirect`; absent
+        (an address, or `none`), each driver connects exactly as before.
+      - **A SQL Server redirect is another host.** `tedious` asks the connector again with the
+        server the login was routed to. That host is resolved and checked on a lookup of its
+        own before it is followed; with a pinned set it is refused as
+        `CredentialsWithheldError`. `tedious` passes the destination as arguments its typings
+        do not declare: a call without them is taken for the device.
+      - **The lookup and the connect share `connectTimeoutMs`**, and **Connect time** includes
+        the lookup, as when the driver made it. Any address family, as the drivers connected.
+      - **`describeDbError` keeps a refusal's class** through a driver that wraps it, and reads
+        a socket's code inside `tedious`'s `ESOCKET`, so SQL Server now says "nothing is
+        listening" where it said "Failed to connect".
+      - **Protocol 27, `databaseAddressPinning`** (`A-41c`'s other half). The three types
+        declare `pinnedKinds: ['database']`. `pinningCapabilityFor(kind)` in `@ms/shared` says
+        which capability a kind needs, and `boundRefusalReason` takes the kind: a database set
+        that leaves a named device to its probe goes only to a probe at 27, and an older one
+        is withheld with a new sentence, `probeCannotPinDatabase`, naming 27. "Check now"
+        inherits the gate, against the live session's version. Nothing on the wire changed. A
+        core below 27 sees no pinning database type and withholds as before. The `undecided`
+        sentence now says "a transport that resolves the name itself".
+      - **Alarm volume.** A database sensor on a device given as a *name* that resolves to a
+        link-local address was Up and now reads Down: one failed check a scan, the ordinary
+        path, no new state or notification, and `probe.targetPolicy: none` is the way back.
+        Intended. In the other direction, database sensors that read Unknown as `unpinnable`
+        are scanned once their probe speaks 27.
+      - **Docs:** `administration.md` (both per-transport tables, the upgrade notes, the
+        lookups and timeouts), `adding-a-sensor-type.md`, `state-machine.md`, `web-ui.md`. No
+        schema changed: both generated references pass `--check` unchanged.
+      - **Tests:** `db-checked-target.test.ts`, 55, none skipped: the real `pg`, `mysql2` and
+        `tedious` against loopback servers that speak PostgreSQL and MySQL far enough to
+        answer one query, and TDS far enough to see the TLS hello. For each driver: a name
+        with one good and one metadata address is refused on one lookup with no connection; a
+        resolver that would answer differently the second time is asked once and the check
+        arrives; an address makes no lookup; `none` checks nothing; a name facing
+        address-bounded targets is pinned on one lookup, withheld when it resolves outside,
+        and refused as a failed check when the pin is link-local; the shared timeout against
+        a port that never answers. TLS: PostgreSQL sends the name and refuses a trusted
+        certificate for another name, pinned or not; MySQL and SQL Server send the name.
+        Also the redirect, the two handed sockets and the connector on their own, and the
+        alarm-volume case. `db-drivers.test.ts` ran its five PostgreSQL cases against the real
+        server by name, through the guard. Core: `credential-pinning.test.ts` gains the gate's
+        table and a configuration, check-now and probe-refusal case at 26 and 27. Shared:
+        the capability and `pinningCapabilityFor`.
+      - **Mutation:** 22 of 22 killed by a test, each planted alone and built clean.
+      - **Not covered by a test:** a redirect followed by a real `tedious` login (the TDS fake
+        accepts no login; the connector and the `redirect` callback are tested apart), and
+        TLS verification of the name on SQL Server beyond the hello's server name. MySQL and
+        SQL Server were not running, so `db-drivers.test.ts` skipped their ten cases.
+      - **Found, not fixed:** `db.mysql` with **Verify the certificate** on checks the chain
+        and not the name: `mysql2` compares the name only under `ssl.verifyIdentity`, which
+        the driver never sets. It was so before this ticket. A PostgreSQL device whose host is
+        a Unix socket directory now fails as a name that does not resolve, under any policy
+        but `none`. `boundsBeneath` hands the kind to the gate and asks as the newest probe,
+        so it changes nothing there.
 
 - [x] **A-63 — discovery is not held to the target policy** · S · A-57 · Found 2026-10-02 by
       `A-57`. `discovery/ping-probe.ts` and `identify.ts` reach whatever a range or a name

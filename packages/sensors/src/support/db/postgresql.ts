@@ -8,6 +8,7 @@ import {
   type DbDriver,
   type DbResult,
 } from './driver.js';
+import { connectBudgetMs, unconnectedSocket } from './socket.js';
 
 /**
  * PostgreSQL, through `pg` — the one driver this installation already has (`T-18`).
@@ -26,21 +27,12 @@ export const postgresqlDriver: DbDriver = {
   defaultPort: 5432,
 
   async connect(options: DbConnectOptions, signal: AbortSignal): Promise<DbConnection> {
-    const client = new pg.Client({
-      host: options.host,
-      port: options.port,
-      database: options.database,
-      user: options.username,
-      password: options.password,
-      connectionTimeoutMillis: options.connectTimeoutMs,
-      // `prefer` is what `psql` does and what almost every deployment is actually running: try
-      // TLS, accept plain text if the server has none. `require` refuses the downgrade.
-      ssl: options.encrypt === 'disable' ? false : { rejectUnauthorized: options.verifyTls },
-      // The application name lands in `pg_stat_activity`, which is where a DBA looks when asking
-      // who is running this query every sixty seconds.
-      application_name: 'monitoring-system',
-      statement_timeout: options.statementTimeoutMs,
-    });
+    // `prefer` is what `psql` does and what almost every deployment is actually running: try
+    // TLS, accept plain text if the server has none. `require` refuses the downgrade.
+    const client = clientFor(
+      options,
+      options.encrypt === 'disable' ? false : { rejectUnauthorized: options.verifyTls },
+    );
 
     try {
       await client.connect();
@@ -57,21 +49,38 @@ export const postgresqlDriver: DbDriver = {
   },
 };
 
-async function connectPlain(
+/**
+ * **Handed its socket when the device's name was checked** (`A-62`): `pg` takes no `lookup`, and
+ * takes a `stream`. The host stays the name, so `pg` names it in TLS and checks the certificate
+ * against it.
+ */
+function clientFor(
   options: DbConnectOptions,
-  _signal: AbortSignal,
-): Promise<DbConnection> {
-  const client = new pg.Client({
+  ssl: false | { rejectUnauthorized: boolean },
+): pg.Client {
+  const stream = unconnectedSocket(options);
+  return new pg.Client({
     host: options.host,
     port: options.port,
     database: options.database,
     user: options.username,
     password: options.password,
-    connectionTimeoutMillis: options.connectTimeoutMs,
-    ssl: false,
+    connectionTimeoutMillis: connectBudgetMs(options),
+    ssl,
+    ...(stream === undefined ? {} : { stream }),
+    // The application name lands in `pg_stat_activity`, which is where a DBA looks when asking
+    // who is running this query every sixty seconds.
     application_name: 'monitoring-system',
     statement_timeout: options.statementTimeoutMs,
   });
+}
+
+async function connectPlain(
+  options: DbConnectOptions,
+  _signal: AbortSignal,
+): Promise<DbConnection> {
+  // A second connection of the same check: the same checked addresses, and no second lookup.
+  const client = clientFor(options, false);
   try {
     await client.connect();
   } catch (error) {

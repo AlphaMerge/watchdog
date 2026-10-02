@@ -10,6 +10,14 @@ import type { DbConnection, DbDriver, DbResult } from '../src/support/db/driver.
 import type { CheckContext, CheckExecution } from '../src/contract.js';
 
 /**
+ * The device is a name, and a name is resolved once and checked before the driver is asked
+ * (`A-62`). Nothing resolves `.invalid`, so the check is handed a resolver, as a probe's
+ * catalogue hands one in.
+ */
+const LOOPBACK = (): Promise<{ address: string; family: number }[]> =>
+  Promise.resolve([{ address: '127.0.0.1', family: 4 }]);
+
+/**
  * Everything a database sensor does with an answer, without a database.
  *
  * The drivers have their own file and their own live servers. What is here is the half that
@@ -46,7 +54,7 @@ function run(
 ): Promise<CheckExecution> {
   return runDbCheck(driverReturning(result), {
     sensorId: 1,
-    target: { host: 'db.example.invalid', ipVersion: 'auto' },
+    target: { host: 'db.example.invalid', ipVersion: 'auto', resolve: LOOPBACK },
     params: { query: 'select 1', ...params },
     credentials: CREDENTIAL,
     signal: new AbortController().signal,
@@ -236,7 +244,7 @@ describe('a database check', () => {
     await assert.rejects(() =>
       runDbCheck(driver, {
         sensorId: 1,
-        target: { host: 'db.example.invalid', ipVersion: 'auto' },
+        target: { host: 'db.example.invalid', ipVersion: 'auto', resolve: LOOPBACK },
         params: { query: 'select 1' },
         credentials: CREDENTIAL,
         signal: new AbortController().signal,
@@ -249,7 +257,7 @@ describe('a database check', () => {
     const seen: { sql?: string } = {};
     await runDbCheck(driverReturning({ rows: [{ a: 1 }], columns: ['a'] }, seen), {
       sensorId: 1,
-      target: { host: 'db.example.invalid', ipVersion: 'auto' },
+      target: { host: 'db.example.invalid', ipVersion: 'auto', resolve: LOOPBACK },
       params: { query: '  select pg_is_in_recovery()  ' },
       credentials: CREDENTIAL,
       signal: new AbortController().signal,

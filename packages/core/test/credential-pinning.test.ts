@@ -97,6 +97,9 @@ const dbQuery: SensorType = {
   execute: () => Promise.resolve({ channels: [] }),
 };
 
+/** A database type as a build at 27 has them: its driver is handed a socket, so it pins (`A-62`). */
+const dbPinned: SensorType = { ...dbQuery, id: 'test.db.pinned', pinnedKinds: ['database'] };
+
 /** An SSH type as the core sees one: the kind a set bounded by its host keys is. */
 const sshLoad: SensorType = {
   id: 'test.ssh.load',
@@ -181,8 +184,88 @@ describe('protocol 24 is what a probe must speak to be sent such a set (A-41c)',
     assert.equal(boundRefusal(both, 'sw.dc.test', 21, true), WITHHELD_CREDENTIALS.probeCannotPin);
   });
 
+  describe('a database set needs a probe at 27: its drivers pin from there (A-62)', () => {
+    const DATABASE = versionFor('databaseAddressPinning');
+    const rows: [string, string, number, boolean, string, string | null][] = [
+      ['a name, a probe at 27', 'db.dc.test', 27, true, 'database', null],
+      [
+        'a name, a probe at 26: it pins the other kinds and not this one',
+        'db.dc.test',
+        26,
+        true,
+        'database',
+        WITHHELD_CREDENTIALS.probeCannotPinDatabase,
+      ],
+      [
+        'a name, a probe at 24',
+        'db.dc.test',
+        24,
+        true,
+        'database',
+        WITHHELD_CREDENTIALS.probeCannotPinDatabase,
+      ],
+      [
+        'a name, a probe below 24: the sentence is still the database one, which names 27',
+        'db.dc.test',
+        23,
+        true,
+        'database',
+        WITHHELD_CREDENTIALS.probeCannotPinDatabase,
+      ],
+      [
+        'a name, nobody on the line',
+        'db.dc.test',
+        0,
+        true,
+        'database',
+        WITHHELD_CREDENTIALS.probeCannotPinDatabase,
+      ],
+      ['another kind at 26 is sent as before', 'sw.dc.test', 26, true, 'ssh', null],
+      ['another kind at 24 is sent as before', 'sw.dc.test', 24, true, 'snmp', null],
+      [
+        'another kind at 23 keeps its own sentence',
+        'sw.dc.test',
+        23,
+        true,
+        'ssh',
+        WITHHELD_CREDENTIALS.probeCannotPin,
+      ],
+      [
+        'a database type that does not pin is the type’s refusal, whatever the probe',
+        'db.dc.test',
+        27,
+        false,
+        'database',
+        WITHHELD_CREDENTIALS.undecided,
+      ],
+      ['an address inside needs no probe version', '10.20.0.9', 21, true, 'database', null],
+      [
+        'an address outside is outside',
+        '192.0.2.9',
+        27,
+        true,
+        'database',
+        WITHHELD_CREDENTIALS.outside,
+      ],
+    ];
+    for (const [name, host, version, pins, kind, expected] of rows) {
+      it(name, () => {
+        assert.equal(boundRefusal(ranges, host, version, pins, kind), expected);
+      });
+    }
+
+    it('is the version the capability arrived in, and the sentence names it', () => {
+      assert.equal(DATABASE, 27);
+      assert.equal(capabilitiesFor(PROTOCOL_VERSION).databaseAddressPinning, true);
+      assert.match(
+        WITHHELD_CREDENTIALS.probeCannotPinDatabase,
+        /^Not scanned: .*Upgrading the probe to protocol 27 sends them again/,
+      );
+    });
+  });
+
   it('says why in each sentence, and what sends the set again', () => {
-    assert.match(WITHHELD_CREDENTIALS.undecided, /a driver that resolves the name itself/);
+    assert.match(WITHHELD_CREDENTIALS.undecided, /a transport that resolves the name itself/);
     assert.match(WITHHELD_CREDENTIALS.probeCannotPin, /Upgrading the probe to protocol 24 sends/);
     for (const reason of [WITHHELD_CREDENTIALS.undecided, WITHHELD_CREDENTIALS.probeCannotPin]) {
       assert.match(reason, /^Not scanned: .* sends them again/);
@@ -1621,7 +1704,7 @@ describe(
     let config: ProbeConfigService;
     const seen: OutgoingMessage[] = [];
 
-    const gate = catalogueSensorTypeGate(testCatalogue([snmpPinned, dbQuery, sshLoad]));
+    const gate = catalogueSensorTypeGate(testCatalogue([snmpPinned, dbQuery, dbPinned, sshLoad]));
     let site = 0;
     let batch = 0;
     /** How far the clock `credentials` reads is ahead of the real one: a test moves it on. */
@@ -1749,7 +1832,7 @@ describe(
         states: true,
         alarms: engine,
         withheldSensors: () => vouching.withheld(),
-        types: [snmpPinned, dbQuery, sshLoad],
+        types: [snmpPinned, dbQuery, dbPinned, sshLoad],
       });
       const sync = new TriggerSync({ engine, logger: silent });
       h.audit.also = sync;
@@ -2073,6 +2156,80 @@ describe(
         (error: unknown) =>
           error instanceof ObjectError && error.message === WITHHELD_CREDENTIALS.undecided,
       );
+    });
+
+    it('a database set reaches a named device through a probe at 27, and no older one (A-62)', async () => {
+      const DATABASE = versionFor('databaseAddressPinning');
+      const group = await create({ kind: 'group', parentId: site, name: 'databases' });
+      const device = await create({
+        kind: 'device',
+        parentId: group,
+        name: 'named database',
+        host: 'db.gate.test',
+      });
+      const query = await create({
+        kind: 'sensor',
+        parentId: device,
+        name: 'pinned query',
+        sensorType: 'test.db.pinned',
+        params: { port: 5432 },
+      });
+      // The write counts nothing: whether the name resolves inside is the probe's to find out.
+      const written = await h.service.setCredential(testActor, group, 'database', {
+        username: 'monitor',
+        password: 'pinned-password',
+        allowedTargets: ['10.20.0.0/16'],
+      });
+      assert.equal(written.withholds, 0);
+      assert.equal(written.byReason.unpinnable.withholds, 0);
+
+      // A probe at 27 is sent it, with the targets it has to check the name against.
+      const sent = (await config.assignmentsFor(site, DATABASE)).sensors.find(
+        (one) => one.sensorId === query,
+      );
+      assert.ok(sent !== undefined, 'the database sensor is sent to a probe at 27');
+      assert.deepEqual(sent.target, { host: 'db.gate.test', ipVersion: 'auto' });
+      assert.deepEqual(sent.credentials?.['database']?.['allowedTargets'], ['10.20.0.0/16']);
+      assert.equal(sent.credentials['database']['password'], 'pinned-password');
+      assert.equal(vouching.withheld().has(query), false);
+
+      // A probe that pins the other kinds, and whose database drivers still resolve the name
+      // themselves, is not: it would connect by name.
+      for (const older of [DATABASE - 1, PINNING, PINNING - 1, 3]) {
+        assert.equal(await sentTo(older, query), false, `protocol ${String(older)}`);
+        assert.deepEqual(await stateOf(query), {
+          state: 'unknown',
+          message: WITHHELD_CREDENTIALS.probeCannotPinDatabase,
+        });
+      }
+      assert.equal(await sentTo(DATABASE, query), true);
+      assert.equal(vouching.withheld().has(query), false);
+
+      // "Check now" is held to the same rule, against the probe on the line.
+      await assert.rejects(
+        config.assignmentFor(query, () => DATABASE - 1),
+        (error: unknown) =>
+          error instanceof ObjectError &&
+          error.message === WITHHELD_CREDENTIALS.probeCannotPinDatabase,
+      );
+      assert.deepEqual(await config.assignmentFor(query), {
+        probeObjectId: site,
+        peerVersion: 0,
+        assignment: null,
+      });
+      const found = await config.assignmentFor(query, () => DATABASE);
+      assert.equal(found?.peerVersion, DATABASE);
+      assert.equal(found.assignment?.credentials?.['database']?.['password'], 'pinned-password');
+
+      // A refusal the probe then makes is believed, as for the kinds it pinned before: the
+      // sensor is one the last configuration left to it.
+      await config.assignmentsFor(site, DATABASE);
+      const sentence =
+        'Not scanned: db.gate.test resolves to 192.0.2.7, which is outside the allowed targets ' +
+        'of the database credentials it would use, so they are not sent.';
+      await fromProbe([refused(query, new Date().toISOString(), sentence)]);
+      assert.deepEqual(await stateOf(query), { state: 'unknown', message: sentence });
+      assert.equal(await downs([query]), 0, 'a refused check is not a failed scan');
     });
 
     it('check now is decided against the probe on the line, not the one that last said hello', async () => {

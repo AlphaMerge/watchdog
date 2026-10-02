@@ -7,6 +7,7 @@ import {
   type DbDriver,
   type DbResult,
 } from './driver.js';
+import { connectBudgetMs, tdsConnector } from './socket.js';
 
 /**
  * Microsoft SQL Server, through `tedious` (`T-18`).
@@ -28,14 +29,19 @@ export const mssqlDriver: DbDriver = {
   defaultPort: 1433,
 
   async connect(options: DbConnectOptions, signal: AbortSignal): Promise<DbConnection> {
+    // **Handed its socket when the device's name was checked** (`A-62`): `tedious` takes no
+    // `lookup`, and takes a `connector`. The server stays the name, which is what it names in
+    // the TLS it runs inside TDS.
+    const connector = tdsConnector(options);
     const connection = new Connection({
       server: options.host,
       options: {
         port: options.port,
+        ...(connector === undefined ? {} : { connector }),
         ...(options.database === '' ? {} : { database: options.database }),
         encrypt: options.encrypt !== 'disable',
         trustServerCertificate: !options.verifyTls,
-        connectTimeout: options.connectTimeoutMs,
+        connectTimeout: connectBudgetMs(options),
         requestTimeout: options.statementTimeoutMs,
         rowCollectionOnRequestCompletion: true,
         // A monitoring account should never be able to change anything, but a query that opened

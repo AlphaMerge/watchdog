@@ -188,8 +188,8 @@ function needsTrust(t: { skip(reason: string): void }): boolean {
 // ---------------------------------------------------------------------------------------------
 
 describe('which types pin', () => {
-  it('every SNMP, SSH, HTTP and mail type pins the kind it uses, and nothing else does', () => {
-    const pinnable = new Set(['snmp', 'ssh', 'http', 'mail']);
+  it('every SNMP, SSH, HTTP, mail and database type pins the kind it uses, and nothing else does', () => {
+    const pinnable = new Set(['snmp', 'ssh', 'http', 'mail', 'database']);
     const catalogue = new SensorCatalogue();
     for (const type of BUILT_IN_SENSOR_TYPES) catalogue.register(type);
     let credentialed = 0;
@@ -204,10 +204,11 @@ describe('which types pin', () => {
       }
     }
     assert.ok(credentialed >= 20, 'the built-in set uses credentials');
-    // The withheld transports, by name: a driver or PowerShell resolves the name itself.
+    // The database drivers are handed a socket to the pinned address (`A-62`).
     for (const id of ['db.postgresql', 'db.mysql', 'db.mssql']) {
-      assert.equal(catalogue.pinsAddress(id, 'database'), false, id);
+      assert.equal(catalogue.pinsAddress(id, 'database'), true, id);
     }
+    // The withheld transport, by name: PowerShell resolves the name itself.
     for (const id of ['windows.cpu', 'windows.memory', 'windows.service', 'windows.volume']) {
       assert.equal(catalogue.pinsAddress(id, 'windows'), false, id);
     }
@@ -222,14 +223,16 @@ describe('which types pin', () => {
     );
   });
 
-  it('a database sensor handed a set it cannot pin is refused, and resolves nothing', async () => {
-    const database = BUILT_IN_SENSOR_TYPES.find((type) => type.id === 'db.postgresql');
-    assert.ok(database !== undefined);
+  it('a Windows sensor handed a set it cannot pin is refused, and resolves nothing', async () => {
+    // The database sensors were the example here until `A-62` handed their drivers a socket;
+    // `db-checked-target.test.ts` has them pinned.
+    const windows = BUILT_IN_SENSOR_TYPES.find((type) => type.id === 'windows.cpu');
+    assert.ok(windows !== undefined);
     const dns = rebinding();
     const error = await withheld(
-      execute(database, dns, {
-        params: { query: 'select 1' },
-        credentials: { database: { username: 'ms', password: 'pw', allowedTargets: INSIDE } },
+      execute(windows, dns, {
+        params: {},
+        credentials: { windows: { username: 'ms', password: 'pw', allowedTargets: INSIDE } },
       }),
     );
     assert.match(error.message, /this kind of sensor cannot be held to an address/);

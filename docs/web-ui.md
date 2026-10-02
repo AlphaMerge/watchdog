@@ -276,10 +276,11 @@ A set with **allowed targets**, or an SSH set with **host keys**, is not vouched
 refused. A device outside them does not get it, whoever saved it. Its sensors read **Unknown** on
 their **Overview** with the reason: outside the targets, or a probe too old to check more than
 one host key. A device named by host name, where the targets name only addresses, is checked by
-its probe at each scan (`A-41c`): SNMP, SSH, HTTP and mail sensors are scanned at the address
-that was checked, and read **Unknown** only while the name resolves outside the targets, or to
-nothing, or while the probe is older than protocol 24. Database and Windows sensors on such a
-device read **Unknown** until it is given its address or its name is added to the targets.
+its probe at each scan (`A-41c`): SNMP, SSH, HTTP, mail and database sensors are scanned at the
+address that was checked, and read **Unknown** only while the name resolves outside the targets,
+or to nothing, or while the probe is older than protocol 24 (27 for a database sensor, `A-62`).
+Windows sensors on such a device read **Unknown** until it is given its address or its name is
+added to the targets.
 
 ### Credentials
 
