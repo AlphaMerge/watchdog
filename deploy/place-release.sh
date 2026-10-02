@@ -16,6 +16,7 @@
 #   2. Ask the *new* build whether it can read the configuration on disk, with the new launcher,
 #      while the old services are still running on the old tree. A refusal removes the copy and
 #      leaves the installation exactly as it was, so "the old version is still running" is true.
+#      A pass with warnings goes ahead, and the warnings are shown (`H-26`).
 #   3. Stop the services, move the release in — renames, not copies, so the window is short and
 #      cannot fail half-way for want of space — and keep the one it replaces at
 #      ${PREFIX}/previous, which is what a rollback starts from.
@@ -41,7 +42,7 @@ while [ "$#" -gt 0 ]; do
     --confdir)    CONFDIR="$2"; shift ;;
     --components) IFS=',' read -r -a components <<< "$2"; shift ;;
     --no-start)   start_services=0 ;;
-    -h|--help)    sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)    sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -101,7 +102,19 @@ if [ "${start_services}" -eq 1 ]; then
   for svc in "${components[@]}"; do
     [ -f "${CONFDIR}/${svc}.json" ] || continue
     [ -x "${incoming}/bin/ms-${svc}" ] || continue
-    if ! out="$("${incoming}/bin/ms-${svc}" config check --config "${CONFDIR}/${svc}.json" 2>&1)"; then
+    if out="$("${incoming}/bin/ms-${svc}" config check --config "${CONFDIR}/${svc}.json" 2>&1)"; then
+      # **A check that passes can still have something to say** (`H-26`): a setting the new build
+      # starts with and that does nothing under it, which the check marks `warning: ` and exits 0
+      # on (`B-08`). Kept to itself here, it reached a person who ran the check by hand and
+      # nobody who upgraded. Only the marked lines: the rest of a pass is "configuration is
+      # valid" and where it was read from, which is not news to somebody upgrading. `|| true`
+      # because a pass with no warning is the ordinary case and `grep` exits 1 on it.
+      warnings="$(printf '%s\n' "${out}" | grep '^warning: ' || true)"
+      if [ -n "${warnings}" ]; then
+        echo "==> ${CONFDIR}/${svc}.json is valid for ${version}, and the upgrade goes ahead. It says:" >&2
+        printf '%s\n' "${warnings}" | sed 's/^/    /' >&2
+      fi
+    else
       echo "==> ${CONFDIR}/${svc}.json is not valid for ${version}:" >&2
       printf '%s\n' "${out}" | sed 's/^/    /' >&2
       config_bad=1

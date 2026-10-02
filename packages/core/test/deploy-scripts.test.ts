@@ -513,6 +513,11 @@ describe('placing a release', { skip: linux ? false : 'Linux only' }, () => {
    * An unpacked release whose launcher's `config check` refuses any file that says `refused-port`.
    * Letters a hex key cannot spell: setup writes one into every configuration it installs, and a
    * marker of `bad` refused about 1.5% of runs for the key alone.
+   *
+   * A file that says `no-effect-setting` is warned about the way `runConfigCheck` warns
+   * (`B-08`): two lines marked `warning: ` on stderr, before anything else and whether or not
+   * the check then passes. A pass says what a real one says, on stdout, and one of its lines has
+   * the marker in the middle of it — which is not a warning.
    */
   function release(box: Sandbox, version: string): string {
     const from = join(box.dir, `release-${version}`);
@@ -526,7 +531,13 @@ describe('placing a release', { skip: linux ? false : 'Linux only' }, () => {
       writeFileSync(
         join(from, 'bin', `ms-${svc}`),
         `#!/usr/bin/env bash\necho "ms-${svc} ${version} $*" >> "$STUB_LOG"\n` +
-          `grep -q refused-port "$4" && { echo "api.port: must be integer"; exit 1; }\nexit 0\n`,
+          `if grep -q no-effect-setting "$4"; then\n` +
+          `  echo "warning: flowListener.enabled: is true, and this build carries no flow sensor type" >&2\n` +
+          `  echo "warning: a second thing ms-${svc} starts with" >&2\nfi\n` +
+          `grep -q refused-port "$4" && { echo "api.port: must be integer"; exit 1; }\n` +
+          `echo "configuration is valid for ms-${svc} ${version}"\n` +
+          `echo "  file            $4"\n` +
+          `echo "  ignored MS_*    MS_NOT_A_warning: line"\nexit 0\n`,
         { mode: 0o755 },
       );
       writeFileSync(join(from, 'etc', `${svc}.json`), '{}');
@@ -607,6 +618,78 @@ describe('placing a release', { skip: linux ? false : 'Linux only' }, () => {
     // A second upgrade: the rollback copy is always the release just replaced.
     assert.equal(place(box, release(box, '3.0.0'), prefix, conf).status, 0);
     assert.equal(readFileSync(join(prefix, 'previous', 'VERSION'), 'utf8'), '2.0.0\n');
+  });
+
+  it('shows the warnings of a check that passed, and goes ahead (`H-26`)', () => {
+    const box = sandbox();
+    const { prefix, conf } = installed(box);
+    // The probe's file and not the core's, so the heading has a file to get wrong.
+    writeFileSync(join(conf, 'probe.json'), '{"flowListener":{"enabled":"no-effect-setting"}}');
+    const result = place(box, release(box, '2.0.0'), prefix, conf);
+
+    assert.equal(result.status, 0, result.stderr);
+    // Every warning, each as the check wrote it, under a heading that names the file and says
+    // what is happening to the upgrade — on stderr, where the check put them.
+    const said = result.stderr.split('\n');
+    const heading = said.findIndex((line) => line.includes('probe.json is valid for 2.0.0'));
+    assert.ok(heading >= 0, result.stderr);
+    assert.match(
+      said[heading] ?? '',
+      /^==> .*etc-ms\/probe\.json is valid for 2\.0\.0, and the upgrade goes ahead/,
+    );
+    assert.equal(
+      said[heading + 1],
+      '    warning: flowListener.enabled: is true, and this build carries no flow sensor type',
+    );
+    assert.equal(said[heading + 2], '    warning: a second thing ms-probe starts with');
+    // And only the warnings: the rest of a pass is not news, marker in the middle or not.
+    assert.doesNotMatch(result.stderr + result.stdout, /configuration is valid for/);
+    assert.doesNotMatch(result.stderr + result.stdout, /MS_NOT_A_warning/);
+    // Nothing is said about the file that had none.
+    assert.doesNotMatch(result.stderr, /core\.json/);
+    assert.doesNotMatch(result.stderr, /not valid|Nothing was changed/);
+
+    // The upgrade itself is the one a silent pass gets.
+    const log = box.logged();
+    assert.match(log, /systemctl stop ms-probe\.service\n {2}in place when stopped: 1\.0\.0/);
+    assert.equal(readFileSync(join(prefix, 'VERSION'), 'utf8'), '2.0.0\n');
+    assert.equal(readFileSync(join(prefix, 'previous', 'VERSION'), 'utf8'), '1.0.0\n');
+    assert.ok(!existsSync(join(prefix, '.incoming')));
+  });
+
+  it('says nothing about a check that passed with nothing to say', () => {
+    const box = sandbox();
+    const { prefix, conf } = installed(box);
+    const result = place(box, release(box, '2.0.0'), prefix, conf);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, '');
+    assert.doesNotMatch(result.stdout, /is valid for|warning/);
+  });
+
+  it('refuses a check that failed exactly as before, warnings and all', () => {
+    const box = sandbox();
+    const { prefix, conf } = installed(box);
+    writeFileSync(
+      join(conf, 'core.json'),
+      '{"api":{"port":"refused-port"},"x":"no-effect-setting"}',
+    );
+    const result = place(box, release(box, '2.0.0'), prefix, conf);
+
+    assert.equal(result.status, 1);
+    // The whole of what the check said, in the order it said it, under the refusal's heading.
+    const said = result.stderr.split('\n');
+    const heading = said.findIndex((line) => line.includes('core.json is not valid for 2.0.0'));
+    assert.ok(heading >= 0, result.stderr);
+    assert.deepEqual(said.slice(heading + 1, heading + 4), [
+      '    warning: flowListener.enabled: is true, and this build carries no flow sensor type',
+      '    warning: a second thing ms-core starts with',
+      '    api.port: must be integer',
+    ]);
+    assert.doesNotMatch(result.stderr, /is valid for|goes ahead/);
+    assert.match(result.stderr, /Nothing was changed: 1\.0\.0 is still what is installed/);
+    assert.ok(!box.logged().includes('systemctl stop'), 'something was stopped');
+    assert.equal(readFileSync(join(prefix, 'VERSION'), 'utf8'), '1.0.0\n');
+    assert.ok(!existsSync(join(prefix, '.incoming')), 'the copy was left behind');
   });
 
   it('touches nothing when the copy fails part-way', () => {

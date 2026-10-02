@@ -20200,6 +20200,39 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       **Done when** the script prints a passing check's warnings, still exits 0, and the smoke
       install shows one on an upgrade.
 
+      **Written 2026-10-02 and left open: the smoke assertion has not been run.** The first two
+      thirds of the Done-when are met and tested; the third is written into
+      `scripts/smoke-install.sh` and nobody has seen it pass. Tick this when a smoke install has.
+
+      **The script.** A check that exits 0 has its lines that begin `warning: ` — the marker
+      `runConfigCheck` writes (`CONFIG_WARNING_PREFIX`) — printed to stderr, indented, under
+      `==> <file> is valid for <version>, and the upgrade goes ahead. It says:`, and the script
+      carries on to the stop and the swap. Only those lines: the rest of a pass is "configuration
+      is valid" and the file's name. A pass with no warning prints nothing, as before. The
+      failing branch is the old one, untouched: the whole of the check's output, then "Nothing
+      was changed", exit 1.
+
+      **Tests.** `core/test/deploy-scripts.test.ts`, the harness that already ran
+      `place-release.sh` against a stub launcher: three new cases (a pass with two warnings is
+      shown under the probe's file and swaps; a silent pass writes nothing to stderr; a refusal
+      with warnings shows the check's whole output in order and changes nothing). The file is
+      47 of 47. **Mutations 10/10**: the warnings not printed, the marker matched anywhere in a
+      line, the whole output shown, `|| true` dropped (a silent pass then dies under `set -e`),
+      the heading naming the wrong file, a warning failing the upgrade, the refusal showing only
+      the warnings, the indent dropped, the warnings on stdout, the heading dropped.
+
+      **The smoke assertion, written and not run.** Under the v1 profile only, the existing
+      re-run in `smoke-install.sh` now happens with `flowListener.enabled` true in
+      `/etc/ms/probe.json`, and the run fails unless `rerun.log` holds the heading and
+      `    warning: flowListener.enabled`; the file is put back afterwards. The v1 probe that
+      re-run starts has read the file with the setting in it, which it starts on and warns
+      about, and reads the restored file at its next start.
+
+      **Found, not fixed.** `deploy/setup.sh` asks the same question for the `.deb` and the
+      `.rpm`, which never come through `place-release.sh`, and keeps a passing check's output in
+      the same way: a package upgrade still shows no warning. Fixing it there as well would
+      show a tarball upgrade the same warning twice, so it wants deciding rather than copying.
+
 ## Release 1.1 — Windows
 
 **Decided 2026-09-28 (`H-10`): 1.0 is Linux-only, and Windows is 1.1.** Nothing here is

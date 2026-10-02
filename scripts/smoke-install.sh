@@ -470,6 +470,20 @@ docker exec "${container}" systemctl daemon-reload
 
 echo "==> asserting a re-run keeps the configuration and takes a backup"
 before="$(docker exec "${container}" md5sum /etc/ms/core.json | cut -d' ' -f1)"
+# `H-26`: a setting the new build accepts and that does nothing under it, so that this upgrade's
+# check passes with a warning to show. Only a v1 probe has one — `flowListener.enabled`, with no
+# flow sensor type to feed (`B-08`); the full build would open the port and say nothing. Written
+# in place, so the file keeps its owner and mode, and put back once the upgrade has been read.
+if [ "${expected_profile}" = "v1" ]; then
+  docker exec "${container}" cp -p /etc/ms/probe.json /tmp/probe.json.h26
+  docker exec "${container}" node -e '
+    const fs = require("node:fs");
+    const file = "/etc/ms/probe.json";
+    const config = JSON.parse(fs.readFileSync(file, "utf8"));
+    config.flowListener = { ...(config.flowListener ?? {}), enabled: true };
+    fs.writeFileSync(file, JSON.stringify(config, null, 2) + "\n");
+  '
+fi
 # With a start, the way an upgrade is run: it stops both services, swaps the release in and
 # starts them again (`H-21`) — `--no-start` would now leave them stopped.
 docker exec "${container}" bash -c 'cd /tmp/unpacked/ms-* && ./install.sh' >/tmp/rerun.log 2>&1 || {
@@ -477,6 +491,21 @@ docker exec "${container}" bash -c 'cd /tmp/unpacked/ms-* && ./install.sh' >/tmp
   sed 's/^/      /' /tmp/rerun.log >&2
   failed=1
 }
+if [ "${expected_profile}" = "v1" ]; then
+  # The warning itself, under the installer's heading for it, in what the operator was shown —
+  # and the upgrade went ahead all the same, which the assertions below are about. The probe
+  # that was just started read the file with the setting in it, which a v1 probe starts on; the
+  # file goes back now and the probe reads it at its next start.
+  if grep -q 'probe.json is valid for .*the upgrade goes ahead' /tmp/rerun.log && \
+     grep -q '^    warning: flowListener.enabled' /tmp/rerun.log; then
+    echo "    a passing check's warning: shown (flowListener.enabled on a v1 probe)"
+  else
+    echo "    FAILED — the upgrade did not show the passing check's warning:" >&2
+    sed 's/^/      /' /tmp/rerun.log >&2
+    failed=1
+  fi
+  docker exec "${container}" cp -p /tmp/probe.json.h26 /etc/ms/probe.json
+fi
 after="$(docker exec "${container}" md5sum /etc/ms/core.json | cut -d' ' -f1)"
 if [ "${before}" = "${after}" ]; then
   echo "    configuration: kept"
