@@ -17097,6 +17097,15 @@ because each is a decision rather than a defect:
       move focus. **Done when** the tab is walked through in a browser with a keyboard and a
       screen reader, light and dark, and both edges are fixed with tests.
 
+- [ ] **U-24 — the state stream does not say a probe's link or report changed** · M · B-12 ·
+      Found 2026-10-02 by `B-12`. The stream carries sensor state changes only. A probe with no
+      sensor the reader can see — exactly a probe getting its first sensor — sends no frame, so
+      the add-sensor form's collector notice is still read once there; and a probe that
+      reconnects can be asked before its first report, with nothing to prompt the form when the
+      report arrives. **Done when** the stream has a frame for a probe connecting, dropping and
+      reporting, sent only to a reader who may see that probe, the form follows it, and the
+      subscription is the probe and not every sensor beneath it.
+
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
       siblings are substituted into any text a step sends: the path, every header and the body.
@@ -18115,6 +18124,22 @@ because each is a decision rather than a defect:
       - **Mutation:** 10 of 10 killed.
       - **Not done:** HTTPS to an address literal has no test (no certificate fixture for an
         address in this file); nothing in the change is specific to the scheme.
+
+- [ ] **A-59 — the audit entry for a credential write does not say what the write changed** · S ·
+      A-55 · Found 2026-10-02 by `A-55`. The answer carries how many sensors a save puts outside
+      the bounds and how many it brings back; `credential.set` in the audit log keeps only the
+      total. The count is also one number for two reasons — an address outside the bounds, and
+      a named device whose sensor type cannot be held to a checked address. **Done when** the
+      audit entry carries the added and returned counts (whole, as it carries the total), and
+      the answer and the tab give the two reasons separately, each trimmed by the caller's
+      visibility.
+
+- [ ] **A-60 — no test delivers a webhook over HTTPS to an address** · S · A-58 · Found
+      2026-10-02 by `A-58`. A URL whose host is an address is delivered to over HTTP in a test;
+      over HTTPS it needs a certificate that names the address, and the file has none.
+      **Done when** a fixture certificate with an IP subject alternative name exists and a test
+      delivers to `https://127.0.0.1` and, where the machine has it, `https://[::1]`, with the
+      certificate checked against the address.
 
 ### Panel round two — notifications, schedules, triggers
 
@@ -20302,6 +20327,13 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       the same way: a package upgrade still shows no warning. Fixing it there as well would
       show a tarball upgrade the same warning twice, so it wants deciding rather than copying.
 
+- [ ] **H-27 — a package upgrade does not show a passing config check's warnings** · S · H-26 ·
+      Found 2026-10-02 by `H-26`. `deploy/setup.sh` runs the same check for the `.deb` and the
+      `.rpm`, which never go through `place-release.sh`, and keeps a passing check's output.
+      Printing it there as well would show a tarball upgrade the warning twice. **Done when**
+      one place prints it for every way of upgrading, once, and the smoke install shows it for
+      a package and for a tarball.
+
 ## Release 1.1 — Windows
 
 **Decided 2026-09-28 (`H-10`): 1.0 is Linux-only, and Windows is 1.1.** Nothing here is
@@ -21242,6 +21274,20 @@ analysis". `F-` is Phase 0.
       that a probe's link or report changed, which is a frame type and a stream protocol
       number, and none was assigned here. The subscription is the whole probe's branch, so its
       snapshot is every sensor on the probe for the sake of one sentence.
+
+- [ ] **B-13 — NetFlow v5 keeps one sequence for an address with two engines** · S · B-10 ·
+      Found 2026-10-02 by `B-10`, by reading; not reproduced. A v5 header carries an engine type
+      and id, which the decoder reads, and a chassis exporting from two engines counts flows per
+      engine: read as one sequence, `flowMissed` counts losses that did not happen. **Done
+      when** a test shows the false count from two engines at one address, or shows there is
+      none and the ticket is closed saying so; if it is real, the engine joins the key.
+
+- [ ] **B-14 — trap and syslog buffers that overwrite unread messages are not on Probe Health**
+      · S · B-11 · Found 2026-10-02 by `B-11`. They share `NotificationRing`, which now counts
+      a record overwritten before any sensor read it; only the flow collector's count reaches
+      the heartbeat. **Done when** each listener's count is a Probe Health channel behind a
+      capability, as `flowOverwritten` is, with no limit on it, and a probe-level test
+      overflows each buffer and reads the number.
 
 ## Phase 12 — Maps and dashboards (`V2-02`)
 
