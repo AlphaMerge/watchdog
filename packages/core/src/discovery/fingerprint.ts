@@ -24,10 +24,64 @@ const TEXT_FIELDS: ReadonlySet<string> = new Set([
   'sysName',
   'httpServer',
   'vendor',
-  // Why the probe's target policy stopped identification (`A-63`). Read as a string by the
-  // summary, which shows it to an operator.
+  // Why the probe's target policy stopped identification (`A-63`), and the same claim set
+  // aside. Read as strings by the summary, which shows them to an operator.
   'refused',
+  'refusalIgnored',
 ]);
+
+/**
+ * The longest refusal kept. The probe's sentence is about 300 characters; this is room for a
+ * long name in it and nothing like room for a document.
+ */
+export const REFUSAL_MAX_LENGTH = 500;
+
+/**
+ * A probe's refusal, fit to put in a list an operator reads and a log line: one line, bounded.
+ *
+ * **It is input from a remote probe**, and it reaches the run's summary as text. Every control
+ * character becomes a space, a newline first among them, so one host's text cannot start what
+ * looks like another entry in a list or another line in a log; runs of space are one; and it is
+ * cut. Undefined when nothing is left: a refusal that says nothing is not one.
+ *
+ * **The only free-text field bounded here.** `sysDescr`, `sysName`, `reverseName`, `httpServer`,
+ * `vendor`, the banners and `evidence` are cut by the probe that collects them and taken at any
+ * length by this check; that is a ticket of its own, not this one's.
+ */
+export function refusalText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const clean = value
+    // eslint-disable-next-line no-control-regex -- the point of this function is control chars.
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+    .replace(/ {2,}/g, ' ')
+    .trim()
+    .slice(0, REFUSAL_MAX_LENGTH);
+  return clean === '' ? undefined : clean;
+}
+
+/** What a source fills in. Any of them, said, is a finding. */
+const FOUND_FIELDS = [
+  'reverseName',
+  'sysDescr',
+  'sysObjectId',
+  'sysName',
+  'httpServer',
+  'vendor',
+] as const;
+
+/**
+ * Whether a fingerprint carries anything identification found: a kind other than `unknown`, an
+ * open port, or any of the fields a source fills (`reverseName`, `sysDescr`, `sysObjectId`,
+ * `sysName`, `httpServer`, `vendor`). `confidence` and `evidence` are not findings: a refusal
+ * carries its own sentence as evidence.
+ */
+function hasFindings(record: Record<string, unknown>, kind: string, ports: unknown[]): boolean {
+  if (kind !== 'unknown' || ports.length > 0) return true;
+  return FOUND_FIELDS.some((field) => {
+    const value = record[field];
+    return typeof value === 'string' && value.trim() !== '';
+  });
+}
 
 /** A fingerprint that can be matched, or the field that stops it and why (`D-12`). */
 export type FingerprintCheck =
@@ -87,12 +141,33 @@ export function checkFingerprint(value: unknown): FingerprintCheck {
   }
   const confidence = Number(record['confidence']);
   const evidence = record['evidence'];
+  // **A refusal is believed only of a host nothing was found on** (`A-63`). The probe says
+  // `refused` of an address it asked nothing of, so one that arrives beside a kind, a port or a
+  // system description contradicts itself, and neither half is taken on trust: the host is
+  // counted by its findings, which are what a template matches, and the claim is moved to
+  // `refusalIgnored`, which the summary shows for that address. `refusalIgnored` from a probe
+  // is cleaned like `refused` and kept only where there are findings for it to be about.
+  const claimed = refusalText(record['refused']);
+  const setAside = refusalText(record['refusalIgnored']);
+  const found = hasFindings(record, kind, ports as unknown[]);
+  const ignored = found ? (claimed ?? setAside) : undefined;
+  const refused = found ? undefined : claimed;
+  const refusal = {
+    ...(refused === undefined ? {} : { refused }),
+    ...(ignored === undefined ? {} : { refusalIgnored: ignored }),
+  };
   return {
     ok: true,
     fingerprint: {
       ...Object.fromEntries(
-        Object.entries(record).filter(([key, one]) => !(one === null && TEXT_FIELDS.has(key))),
+        Object.entries(record).filter(
+          ([key, one]) =>
+            key !== 'refused' &&
+            key !== 'refusalIgnored' &&
+            !(one === null && TEXT_FIELDS.has(key)),
+        ),
       ),
+      ...refusal,
       address,
       kind: kind as DeviceKind,
       confidence: Number.isFinite(confidence) ? Math.min(100, Math.max(0, confidence)) : 0,

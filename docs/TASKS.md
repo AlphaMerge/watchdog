@@ -18725,6 +18725,33 @@ because each is a decision rather than a defect:
         the rebuilt `dist` compared with its hash from before the mutant. One survived the
         first run (a name that does not resolve going on to the sources: the test used the
         real sources, which found nothing either way), and that test now counts what is asked.
+      - **After review: the core does not take `refused` on trust** (third commit). It is a
+        remote probe's word, and two things followed from believing it as sent.
+        - **A refusal is believed only of a host nothing was found on.** The predicate, in
+          `checkFingerprint`: no finding means `kind` is `unknown`, `ports` is empty, and none
+          of `reverseName`, `sysDescr`, `sysObjectId`, `sysName`, `httpServer`, `vendor` is a
+          non-empty string (`confidence` and `evidence` are not findings; a refusal carries
+          its sentence as evidence). A fingerprint with a finding **and** `refused` is counted
+          by its findings: `refused` is taken off, the claim is kept as `refusalIgnored`, and
+          the summary's `errors` say for that address that the probe reported it both refused
+          and found, and what it said. Neither half is silently believed. Because this is
+          decided where the fingerprint is checked, what is stored is already decided, and
+          the SQL that counts reads it unchanged. A table of mixed fingerprints holds the
+          invariant: `byKind` sums to the hosts, and identified plus unidentified is all of
+          them.
+        - **The text is bounded and made one line at the same boundary** (`refusalText`):
+          every control character, line breaks and U+2028/2029 included, becomes a space, runs
+          of space are one, and it is cut at 500 characters; nothing left means no refusal.
+          The summary cleans it again on the way out, for a row written by anything else, and
+          cuts a refusal merged with a provisioning problem at 2,000, as that problem is.
+          `errors` is in address order. **No other free-text field of a fingerprint is bounded
+          by the core** (`sysDescr`, `sysName`, `reverseName`, `httpServer`, `vendor`, banners,
+          `evidence`): the probe cuts them and the core takes them at any length. Not changed
+          here.
+        - **The page renders it as text**: `DiscoveryView.tsx` puts `one.address` and
+          `one.problem` in a `<li>` as React text nodes, and nothing under `packages/web/src`
+          uses `dangerouslySetInnerHTML`. No web change.
+        - Mutation for this commit: 17/17.
       - **Found, not fixed.** The identify job's schema takes any string of 7 to 15 characters
         as an address, so a core could send a name; the probe is now safe against one, and the
         schema still says "dotted-quads" only in a comment. A refused host is still

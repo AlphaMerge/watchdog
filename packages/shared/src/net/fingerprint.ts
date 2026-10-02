@@ -60,6 +60,12 @@ export interface Fingerprint {
    * the same sentence from `evidence`.
    */
   refused?: string;
+  /**
+   * Written by the core, never by a probe: what a probe gave as `refused` on a fingerprint that
+   * also carried findings (`A-63`). The two cannot both be true, so the host is counted by what
+   * was found, `refused` is taken off, and the claim is kept here for the run's summary to show.
+   */
+  refusalIgnored?: string;
 }
 
 /**

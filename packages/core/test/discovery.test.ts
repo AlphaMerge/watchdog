@@ -924,6 +924,137 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       assert.equal(summary.scanned.identified, 0);
     });
 
+    it('counts every host once whatever a probe says of it: the breakdown sums to the hosts (A-63)', async () => {
+      // `refused` is a remote probe's word. Believed of a host with nothing found on it, and
+      // set aside, with a line in the errors, where the same fingerprint carries findings.
+      const why = 'not identified: refusing to identify it';
+      const said = (over: Record<string, unknown>) => ({ kind: 'unknown', confidence: 0, ...over });
+      const TABLE: readonly (readonly [string, Record<string, unknown> | null, string, boolean])[] =
+        [
+          // address, fingerprint (null: never identified), kind it counts as, whether identified
+          ['10.0.0.1', said({ kind: 'linux' }), 'linux', true],
+          ['10.0.0.2', said({ refused: why, evidence: [why] }), 'unidentified', false],
+          ['10.0.0.3', said({ kind: 'windows', refused: why }), 'windows', true],
+          ['10.0.0.4', said({ refused: why, sysDescr: 'Linux 6.1' }), 'unknown', true],
+          [
+            '10.0.0.5',
+            said({ refused: why, ports: [{ port: 22, transport: 'tcp' }] }),
+            'unknown',
+            true,
+          ],
+          ['10.0.0.6', null, 'unidentified', false],
+        ];
+      const run = await start();
+      await discovery.progress(
+        probeId,
+        run.id,
+        6,
+        TABLE.map(([address]) => ({ address, rttMs: 1 })),
+        0,
+      );
+      await discovery.finished(probeId, run.id, 'done', 6, '');
+      await discovery.identified(
+        probeId,
+        run.id,
+        5,
+        TABLE.filter(([, given]) => given !== null).map(([address, given]) =>
+          fingerprint(address, given ?? {}),
+        ),
+      );
+
+      const summary = await discovery.summary(run.id);
+      assert.ok(summary !== null);
+      const expected = new Map<string, number>();
+      for (const [, , kind] of TABLE) expected.set(kind, (expected.get(kind) ?? 0) + 1);
+      assert.deepEqual(
+        new Map<string, number>(summary.found.byKind.map((one) => [one.kind, one.count])),
+        expected,
+      );
+      // The invariant: every host is in the breakdown exactly once, and the identified and the
+      // unidentified are all of them.
+      const counted = summary.found.byKind.reduce((sum, one) => sum + one.count, 0);
+      const unidentified =
+        summary.found.byKind.find((one) => one.kind === 'unidentified')?.count ?? 0;
+      assert.equal(counted, TABLE.length);
+      assert.equal(summary.scanned.alive, TABLE.length);
+      assert.equal(summary.scanned.identified, TABLE.filter(([, , , is]) => is).length);
+      assert.equal(summary.scanned.identified + unidentified, TABLE.length);
+
+      // The one refusal that is believed says what the probe said; each contradiction says so.
+      const contradiction =
+        'the probe reported this host as refused and also reported findings for it, so it is ' +
+        `counted by what was found; the probe said: ${why}`;
+      assert.deepEqual(summary.errors, [
+        { address: '10.0.0.2', problem: why },
+        { address: '10.0.0.3', problem: contradiction },
+        { address: '10.0.0.4', problem: contradiction },
+        { address: '10.0.0.5', problem: contradiction },
+      ]);
+
+      const hosts = await discovery.hosts(run.id);
+      const of = (address: string) => hosts.find((one) => one.address === address)?.fingerprint;
+      assert.equal(of('10.0.0.3')?.refused, undefined);
+      assert.equal(of('10.0.0.3')?.refusalIgnored, why);
+      assert.equal(of('10.0.0.2')?.refused, why);
+    });
+
+    it('shows a probe’s refusal as one bounded line, and cuts what is merged with it', async () => {
+      const run = await start();
+      await discovery.progress(
+        probeId,
+        run.id,
+        6,
+        [
+          { address: '10.0.0.1', rttMs: 1 },
+          { address: '10.0.0.2', rttMs: 1 },
+        ],
+        0,
+      );
+      await discovery.finished(probeId, run.id, 'done', 6, '');
+      await discovery.identified(probeId, run.id, 2, [
+        fingerprint('10.0.0.1', {
+          kind: 'unknown',
+          refused: `refused\n10.0.0.9 — forged line\u0001${'x'.repeat(5_000)}`,
+        }),
+        fingerprint('10.0.0.2', { kind: 'unknown', refused: 'refused' }),
+      ]);
+      await discovery.recordProvisioning(run.id, {
+        devicesCreated: 0,
+        matched: 0,
+        sensorsCreated: 0,
+        problems: [{ address: '10.0.0.2', problem: 'p'.repeat(2_000) }],
+      });
+
+      const summary = await discovery.summary(run.id);
+      const [first, second] = summary?.errors ?? [];
+      assert.ok(first !== undefined && second !== undefined);
+      assert.equal(first.problem.length, 500);
+      assert.ok(first.problem.startsWith('refused 10.0.0.9 — forged line x'), first.problem);
+      // eslint-disable-next-line no-control-regex -- that there are none is the assertion.
+      assert.doesNotMatch(first.problem, /[\u0000-\u001f\u007f-\u009f]/);
+      // The refusal first, and the two together no longer than a provisioning problem may be.
+      assert.equal(second.problem.length, 2_000);
+      assert.ok(second.problem.startsWith('refused; ppp'));
+    });
+
+    it('cleans a refusal that was stored by something other than the check', async () => {
+      const run = await start();
+      await discovery.progress(probeId, run.id, 6, [{ address: '10.0.0.1', rttMs: 1 }], 0);
+      await db.query(`UPDATE discovery_host SET fingerprint = $2::jsonb WHERE run_id = $1`, [
+        run.id,
+        JSON.stringify({
+          address: '10.0.0.1',
+          kind: 'unknown',
+          ports: [],
+          refused: `a\nb${'y'.repeat(5_000)}`,
+        }),
+      ]);
+      const summary = await discovery.summary(run.id);
+      const problem = summary?.errors[0]?.problem ?? '';
+      assert.equal(problem.length, 500);
+      assert.ok(problem.startsWith('a by'), problem.slice(0, 20));
+    });
+
     it('says where a run nobody started came from', async () => {
       // `D-07`. The schedule id is on the run row, because the question is asked from the run's
       // end and a schedule holds only its most recent one.

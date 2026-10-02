@@ -713,6 +713,11 @@ policy reads them as it reads sensors:
   with the unidentified hosts, not with the identified ones and not as an `unknown` kind, and
   the same sentence is on the host in `GET /discovery/:id/hosts`, as `fingerprint.refused`.
   The probe logs each refusal at `info`.
+- **The core does not take a probe's refusal on trust.** It is believed only of a host the
+  probe reported nothing else about. One that arrives beside a kind, an open port or a system
+  description is counted by what was found, and the summary says for that address that the
+  probe reported it both refused and found. The sentence is shown as one line of at most 500
+  characters, with control characters and line breaks replaced by spaces.
 - **Somebody sweeping `169.254.0.0/16` on purpose** sets `probe.targetPolicy` to `none` on that
   probe, restarts it and runs discovery again. Without that, the built-in templates still give
   each such host a device and a Ping sensor, which works, and any other sensor added to it

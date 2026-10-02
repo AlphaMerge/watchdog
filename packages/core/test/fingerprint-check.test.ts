@@ -6,7 +6,7 @@ import {
   BUILT_IN_DEVICE_TEMPLATES,
   DeviceTemplateCatalogue,
 } from '../src/device-templates/index.js';
-import { checkFingerprint } from '../src/discovery/fingerprint.js';
+import { checkFingerprint, REFUSAL_MAX_LENGTH, refusalText } from '../src/discovery/fingerprint.js';
 import { baseOptions } from './support/surface.js';
 
 /**
@@ -216,5 +216,110 @@ describe('the plan route (D-12)', () => {
       assert.ok(body.templates.length > 0);
       assert.ok(body.sensors.length > 0);
     }
+  });
+});
+
+describe('a refusal is a probe’s word, and is checked like one (A-63)', () => {
+  const bare = { address: '10.0.0.5', kind: 'unknown', ports: [], confidence: 0, evidence: [] };
+  const why = 'not identified: refusing to identify 10.0.0.5, which is a private address';
+  const read = (value: unknown) => {
+    const check = checkFingerprint(value);
+    assert.ok(check.ok);
+    return check.fingerprint;
+  };
+
+  it('believes a refusal of a host nothing was found on', () => {
+    const fingerprint = read({ ...bare, refused: why, evidence: [why] });
+    assert.equal(fingerprint.refused, why);
+    assert.equal(fingerprint.refusalIgnored, undefined);
+  });
+
+  // Each of these is something a source found, and a host with any is not one nothing was
+  // asked of.
+  const FINDINGS: readonly (readonly [string, Record<string, unknown>])[] = [
+    ['a kind', { kind: 'linux' }],
+    ['an open port', { ports: [{ port: 22, transport: 'tcp' }] }],
+    ['a reverse name', { reverseName: 'gw.example.com' }],
+    ['a sysDescr', { sysDescr: 'Linux 6.1' }],
+    ['a sysObjectId', { sysObjectId: '1.3.6.1.4.1.9.1.1' }],
+    ['a sysName', { sysName: 'sw-01' }],
+    ['an HTTP server', { httpServer: 'nginx' }],
+    ['a vendor', { vendor: 'Cisco' }],
+  ];
+  for (const [what, finding] of FINDINGS) {
+    it(`sets a refusal aside when the fingerprint also carries ${what}`, () => {
+      const fingerprint = read({ ...bare, ...finding, refused: why });
+      assert.equal(fingerprint.refused, undefined, 'the host is counted by what was found');
+      assert.equal(fingerprint.refusalIgnored, why, 'and the claim is kept to be shown');
+      // And the findings are as they arrived.
+      for (const [key, value] of Object.entries(finding)) {
+        assert.deepEqual((fingerprint as unknown as Record<string, unknown>)[key], value);
+      }
+    });
+  }
+
+  it('does not read confidence, evidence or an empty field as a finding', () => {
+    const fingerprint = read({
+      ...bare,
+      confidence: 90,
+      evidence: ['SSH is open'],
+      sysDescr: '  ',
+      vendor: '',
+      refused: why,
+    });
+    assert.equal(fingerprint.refused, why);
+    assert.equal(fingerprint.refusalIgnored, undefined);
+  });
+
+  it('gives the same answer when what it stored is read again', () => {
+    for (const value of [
+      { ...bare, refused: why },
+      { ...bare, kind: 'linux', refused: why },
+      { ...bare, kind: 'linux' },
+    ]) {
+      const once = read(value);
+      assert.deepEqual(read(JSON.parse(JSON.stringify(once))), once);
+    }
+  });
+
+  it('keeps a claim set aside only where there are findings for it to be about', () => {
+    assert.equal(read({ ...bare, refusalIgnored: why }).refusalIgnored, undefined);
+    assert.equal(read({ ...bare, refusalIgnored: why }).refused, undefined);
+    assert.equal(read({ ...bare, kind: 'nas', refusalIgnored: `${why}\n` }).refusalIgnored, why);
+    // What the probe says now outranks what it is said to have said.
+    assert.equal(
+      read({ ...bare, kind: 'nas', refused: 'now', refusalIgnored: 'then' }).refusalIgnored,
+      'now',
+    );
+  });
+
+  it('makes a refusal one line: control characters and line breaks become a space', () => {
+    const forged = 'refused\r\n10.0.0.9 — all sensors deleted\u0000\u001b[31m\u2028next\u0085\ttab';
+    const fingerprint = read({ ...bare, refused: forged });
+    assert.equal(fingerprint.refused, 'refused 10.0.0.9 — all sensors deleted [31m next tab');
+    // eslint-disable-next-line no-control-regex -- that there are none is the assertion.
+    assert.doesNotMatch(fingerprint.refused ?? '', /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/);
+    // The same on a claim set aside.
+    assert.equal(read({ ...bare, kind: 'nas', refused: 'a\nb' }).refusalIgnored, 'a b');
+  });
+
+  it('cuts a refusal at its bound', () => {
+    assert.equal(REFUSAL_MAX_LENGTH, 500);
+    const fingerprint = read({ ...bare, refused: 'x'.repeat(100_000) });
+    assert.equal(fingerprint.refused, 'x'.repeat(500));
+    assert.equal(
+      read({ ...bare, kind: 'nas', refused: 'y'.repeat(501) }).refusalIgnored,
+      'y'.repeat(500),
+    );
+    assert.equal(refusalText('z'.repeat(500)), 'z'.repeat(500), 'and no shorter');
+  });
+
+  it('reads a refusal that says nothing as no refusal', () => {
+    for (const empty of ['', '   ', '\n\t\u0000']) {
+      const fingerprint = read({ ...bare, refused: empty });
+      assert.equal('refused' in fingerprint, false, JSON.stringify(empty));
+    }
+    assert.equal(refusalText(null), undefined);
+    assert.equal(refusalText(7), undefined);
   });
 });

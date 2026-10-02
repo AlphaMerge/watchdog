@@ -12,7 +12,7 @@ import type { Database } from '../db/pool.js';
 import type { Actor, AuditSink } from '../objects/audit.js';
 import type { ProbeRefusals } from '../probes/refusals.js';
 import { DiscoveryError } from './errors.js';
-import { readFingerprint } from './fingerprint.js';
+import { readFingerprint, refusalText } from './fingerprint.js';
 import { isUnderProbe, requireGroupProbe } from './scope.js';
 import { describeRun, type DiscoverySummary } from './summary.js';
 
@@ -1052,20 +1052,42 @@ export class DiscoveryService {
    * sentence names the setting that allows it.
    */
   async #errors(runId: number): Promise<{ address: string; problem: string }[]> {
-    const refused = await this.#db.query<{ address: string; problem: string }>(
-      `SELECT host(address) AS address, fingerprint->>'refused' AS problem
+    const said = await this.#db.query<{
+      address: string;
+      refused: string | null;
+      ignored: string | null;
+    }>(
+      `SELECT host(address) AS address,
+              fingerprint->>'refused' AS refused,
+              fingerprint->>'refusalIgnored' AS ignored
        FROM discovery_host
-       WHERE run_id = $1 AND fingerprint->>'refused' IS NOT NULL
+       WHERE run_id = $1
+         AND (fingerprint->>'refused' IS NOT NULL OR fingerprint->>'refusalIgnored' IS NOT NULL)
        ORDER BY discovery_host.address`,
       [runId],
     );
     const errors = await this.problems(runId);
-    for (const one of refused) {
+    for (const one of said) {
+      // Cleaned again on the way out: a row written before the check bounded it, or by anything
+      // that is not the check, is still a probe's text.
+      const refused = refusalText(one.refused);
+      const ignored = refusalText(one.ignored);
+      const problem =
+        refused ??
+        (ignored === undefined
+          ? undefined
+          : 'the probe reported this host as refused and also reported findings for it, so it ' +
+            `is counted by what was found; the probe said: ${ignored}`);
+      if (problem === undefined) continue;
       const held = errors.find((error) => error.address === one.address);
-      if (held === undefined) errors.push({ address: one.address, problem: one.problem });
-      else held.problem = `${one.problem}; ${held.problem}`;
+      if (held === undefined) errors.push({ address: one.address, problem });
+      // The same cut a provisioning problem is stored under, for the two together.
+      else held.problem = `${problem}; ${held.problem}`.slice(0, 2_000);
     }
-    return errors;
+    // In address order, as each of the two lists was: an operator reads down it for a host.
+    const rank = (address: string): number =>
+      address.split('.').reduce((sum, octet) => sum * 256 + Number(octet), 0);
+    return errors.sort((a, b) => rank(a.address) - rank(b.address));
   }
 
   /** What a provisioning pass could not create, and why. */
