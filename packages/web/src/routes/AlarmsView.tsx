@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { ApiError, send, useApi } from '../api/client';
-import { useStateStream, type LiveStates } from '../api/stream';
+import { SETTLE_MS, useSettledReload, useStateStream } from '../api/stream';
 import type { Alarm, AlarmKind, AlarmPage, HeldReturn } from '../api/types';
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { RecoveringBadge, StatusBadge } from '../components/StatusBadge';
@@ -24,8 +24,8 @@ const SEVERITIES: readonly { state: AlarmKind; label: string }[] = [
   { state: 'recovering', label: 'Recovering' },
 ];
 
-/** How long to wait after a state change before refetching, so a burst is one request. */
-export const SETTLE_MS = 400;
+/** How long the list waits after a state change before refetching: the stream's own settle. */
+export { SETTLE_MS };
 
 const PRESETS = [
   { minutes: 15, label: '15 minutes' },
@@ -131,35 +131,6 @@ export function AlarmsView(): React.JSX.Element {
 
 function isSeverity(value: string): value is AlarmKind {
   return SEVERITIES.some((severity) => severity.state === value);
-}
-
-/**
- * Refetches once a burst of state changes has stopped arriving.
- *
- * A switch failing takes forty sensors down inside a second. Refetching per event would be forty
- * requests for one answer, and the first thirty-nine would be superseded before they landed.
- *
- * **Keyed on the frames the core sent, not on `states`** (`U-22`). `subscribe` replaces the map
- * as well, with an empty one, so a list that refetched whenever the map changed refetched for its
- * own subscription too. Every page load asked two or three times.
- */
-function useSettledReload({ frames, status }: LiveStates, reload: () => void): void {
-  // Whether the stream has lost a connection yet. Until it has, its first frame is the snapshot
-  // answering the subscribe it made at mount, which describes the same world the page's own
-  // fetch asked about; reloading on it would double every page load. A first snapshot that comes
-  // after an outage is news, and is how a page opened while the core restarted recovers.
-  const lost = useRef(false);
-  useEffect(() => {
-    if (status === 'offline') lost.current = true;
-  }, [status]);
-
-  useEffect(() => {
-    if (frames === 0 || (frames === 1 && !lost.current)) return;
-    const handle = window.setTimeout(reload, SETTLE_MS);
-    return () => {
-      window.clearTimeout(handle);
-    };
-  }, [frames, reload]);
 }
 
 function LiveDot({ status }: { status: 'connecting' | 'live' | 'offline' }): React.JSX.Element {

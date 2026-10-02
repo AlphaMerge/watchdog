@@ -452,3 +452,38 @@ export function useStateStream(objectId: number | null, options?: StateStreamOpt
 
   return useSyncExternalStore(listen, read, read);
 }
+
+/** How long to wait after a state change before refetching, so a burst is one request. */
+export const SETTLE_MS = 400;
+
+/**
+ * Refetches once a burst of state changes has stopped arriving.
+ *
+ * A switch failing takes forty sensors down inside a second. Refetching per event would be forty
+ * requests for one answer, and the first thirty-nine would be superseded before they landed.
+ *
+ * **Keyed on the frames the core sent, not on `states`** (`U-22`). `subscribe` replaces the map
+ * as well, with an empty one, so a list that refetched whenever the map changed refetched for its
+ * own subscription too. Every page load asked two or three times.
+ *
+ * Written for the alarms list and moved here when the add-sensor form became the second view
+ * whose answer the stream can only prompt for (`B-12`).
+ */
+export function useSettledReload({ frames, status }: LiveStates, reload: () => void): void {
+  // Whether the stream has lost a connection yet. Until it has, its first frame is the snapshot
+  // answering the subscribe it made at mount, which describes the same world the page's own
+  // fetch asked about; reloading on it would double every page load. A first snapshot that comes
+  // after an outage is news, and is how a page opened while the core restarted recovers.
+  const lost = useRef(false);
+  useEffect(() => {
+    if (status === 'offline') lost.current = true;
+  }, [status]);
+
+  useEffect(() => {
+    if (frames === 0 || (frames === 1 && !lost.current)) return;
+    const handle = window.setTimeout(reload, SETTLE_MS);
+    return () => {
+      window.clearTimeout(handle);
+    };
+  }, [frames, reload]);
+}

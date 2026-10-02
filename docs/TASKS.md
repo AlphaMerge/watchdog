@@ -21042,12 +21042,57 @@ analysis". `F-` is Phase 0.
       heartbeat, behind a capability so an older core ignores it, with the probe-level overflow
       test reading it.
 
-- [ ] **B-12 — the add-sensor form reads the collector notice once** · S · B-08 · Found
+- [x] **B-12 — the add-sensor form reads the collector notice once** · S · B-08 · Found
       2026-10-02 by `B-08`. The notice that a probe's flow collector is off is taken from the
       probe's state when the form opens; a probe that reconnects with the collector on, or
       drops, while the form is open leaves a stale sentence. **Done when** the notice follows
       the probe's state on the push channel the page already holds, with a component test for
       both directions.
+
+      **Done 2026-10-02, with a correction to the ticket and a limit that is the stream's.**
+
+      **The page held no push channel.** The state stream is one socket per view
+      (`useStateStream`), and the add-sensor form was not one of the views that had one. It has
+      one now, opened the way the tree, the alarms list and the object page open theirs, and only
+      while there is a probe to watch: a small `ProbeWatch` component subscribes to the probe's
+      branch, so the form for a type that reads no listener, or for a reader who cannot see the
+      probe, opens no socket, and choosing another type closes it. No new route, no poll, no
+      frame type.
+
+      **The stream is the prompt; `GET /probes/{id}/health` is still the answer.** The stream
+      carries sensor states and nothing about a probe's listeners, so a frame under the probe
+      means "ask again", after the same settle the alarms list uses — `useSettledReload` and
+      `SETTLE_MS` moved from `AlarmsView` to `api/stream.ts` for the second caller, unchanged.
+      A probe going away with every sensor it holds is one request. The first snapshot is not
+      news; a snapshot after the stream was lost is.
+
+      **The last answer stands while the next is asked for.** `useApi` goes back to `loading` on
+      a reload, and the notice is a `role="status"` region: emptying it and writing the same
+      sentence back would have it read out again for every sensor that changed state. A refusal
+      is not held over. Focus is never moved, and the region, its tie to the field and the
+      sentence are `B-08`'s.
+
+      **Tests.** `web/test/add-sensor-live.test.tsx` (9): the collector comes on and the notice
+      goes; the probe drops and it goes; the probe comes back with the collector off and it
+      appears, in the status region, with focus still in the name field; a re-ask with the same
+      answer writes nothing into the region; forty frames are one request; a refusal takes the
+      notice back and the next re-ask does not restore it; a stream that was lost asks again on
+      its next snapshot; no socket for a type with no listener, and it closes when one is
+      unchosen; no socket for a reader who cannot see the probe. `add-sensor-listener.test.tsx`
+      (11) and `alarms-reload.test.tsx` (3) pass unchanged but for a stubbed socket in the
+      first. **Mutations 11/11**, one of them a survivor first: the held answer frozen at the
+      first one, which brought a taken-back sentence back for the length of a request, and now
+      fails the first case.
+
+      **Not done, and not doable on this stream.** A frame is a sensor changing state. A probe
+      with no sensor the reader can see — which is exactly a probe getting its first sensor —
+      sends none, so its notice is still the one read when the type was chosen. And a probe
+      that reconnects with its collector still off is asked about when its sensors change
+      state, which can be before its first report: the notice goes, correctly, and nothing
+      prompts the form when the report then arrives without it. Both need the stream to say
+      that a probe's link or report changed, which is a frame type and a stream protocol
+      number, and none was assigned here. The subscription is the whole probe's branch, so its
+      snapshot is every sensor on the probe for the sake of one sentence.
 
 ## Phase 12 — Maps and dashboards (`V2-02`)
 

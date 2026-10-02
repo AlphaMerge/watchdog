@@ -1,0 +1,486 @@
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SETTLE_MS, type CloseLike, type SocketLike } from '../src/api/stream';
+import type { ObjectRef, ProbeHealthView, SensorTypeSummary } from '../src/api/types';
+import { AddSensor } from '../src/routes/AddSensor';
+
+/**
+ * The add-sensor form's listener notice following the probe while the form is open (`B-12`).
+ *
+ * `B-08` read the notice once, when the type was chosen. A form stays open for as long as
+ * somebody takes to fill it in, and in that time a probe restarted with its collector on left
+ * "is not running" standing, and a probe that dropped left a sentence about a setting nobody
+ * could vouch for any longer. The state stream is the prompt — a frame under the probe means
+ * "ask again" — and `GET /probes/{id}/health` is still the answer.
+ */
+
+const health = (channels: Record<string, number | null>): ProbeHealthView => ({
+  at: '2026-10-02T10:00:00.000Z',
+  probeId: 2,
+  message: 'connected',
+  channels,
+});
+
+/** A probe that has reported, with its flow collector running. */
+const RUNNING = health({ connected: 1, scheduled: 12, flowReceived: 0 });
+/** The same probe with the collector off: reported, and no flow counter in the report. */
+const OFF = health({ connected: 1, scheduled: 12, flowReceived: null });
+/** The probe gone: every channel but `connected` is a gap. */
+const DROPPED = health({ connected: 0, scheduled: null, flowReceived: null });
+
+const TYPES: SensorTypeSummary[] = [
+  {
+    id: 'flow.netflow',
+    category: 'Flow',
+    costHint: 'light',
+    hasPreview: false,
+    listener: 'flow',
+    paramsSchema: { type: 'object', properties: {} },
+  },
+  {
+    id: 'icmp.ping',
+    category: 'Availability',
+    costHint: 'light',
+    hasPreview: false,
+    paramsSchema: { type: 'object', properties: {} },
+  },
+];
+
+const DEVICE = {
+  id: 4,
+  parentId: 3,
+  kind: 'device',
+  name: 'edge-1',
+  tags: [],
+  priority: 3,
+  version: 1,
+  hasChildren: false,
+  comments: '',
+  inheritsTriggers: true,
+  childCount: 0,
+  createdAt: '2026-10-01T00:00:00.000Z',
+  updatedAt: '2026-10-01T00:00:00.000Z',
+};
+
+const ANCESTORS: ObjectRef[] = [
+  { id: 1, kind: 'root', name: 'Root' },
+  { id: 2, kind: 'probe', name: 'Berlin' },
+  { id: 3, kind: 'group', name: 'Routers' },
+];
+
+/** The probe's branch as the form's own fetch saw it. */
+const SNAPSHOT = {
+  type: 'snapshot',
+  seq: 0,
+  objectId: 2,
+  truncated: false,
+  entries: [
+    {
+      sensorId: 9,
+      sensorName: 'Probe Health',
+      path: [1, 2, 9],
+      state: 'up',
+      cause: 'scan',
+      message: 'connected, 12 sensors scheduled',
+      since: '2026-10-02T09:00:00.000Z',
+    },
+  ],
+};
+
+/** Something under the probe changed: its own health sensor, as when the probe drops. */
+const changed = (seq: number): unknown => ({
+  type: 'state',
+  seq,
+  sensorId: 9,
+  sensorName: 'Probe Health',
+  path: [1, 2, 9],
+  state: seq % 2 === 1 ? 'down' : 'up',
+  cause: 'scan',
+  message: '',
+  at: '2026-10-02T10:00:05.000Z',
+});
+
+interface Core {
+  /** What `GET /probes/2/health` answers now; a number is a refusal with that status. */
+  health: ProbeHealthView | number;
+  /** Set to hold the next health answer back until `release` is called. */
+  hold: boolean;
+  release: () => void;
+  readonly asked: string[];
+  readonly healthAsked: () => number;
+  readonly ancestors: ObjectRef[];
+}
+
+function stubCore(first: ProbeHealthView, ancestors: ObjectRef[] = ANCESTORS): Core {
+  const asked: string[] = [];
+  const answer = (body: unknown, status = 200): Response =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    });
+  const refuse = (status: number): Response =>
+    answer({ error: { code: 'FORBIDDEN', message: 'no' } }, status);
+
+  const core: Core = {
+    health: first,
+    hold: false,
+    release: () => undefined,
+    asked,
+    healthAsked: () => asked.filter((path) => path === '/probes/2/health').length,
+    ancestors,
+  };
+
+  vi.stubGlobal('fetch', (url: string) => {
+    const path = url.replace(/^.*\/api\/v1/, '');
+    asked.push(path);
+    if (path === '/sensor-types') return Promise.resolve(answer({ items: TYPES }));
+    if (path === '/objects/4') return Promise.resolve(answer(DEVICE));
+    if (path === '/objects/4/ancestors') return Promise.resolve(answer({ items: core.ancestors }));
+    if (path === '/probes/2/health') {
+      const given = core.health;
+      const response = (): Response => (typeof given === 'number' ? refuse(given) : answer(given));
+      if (!core.hold) return Promise.resolve(response());
+      core.hold = false;
+      return new Promise<Response>((resolve) => {
+        core.release = () => {
+          resolve(response());
+        };
+      });
+    }
+    return Promise.resolve(refuse(404));
+  });
+  return core;
+}
+
+/** Every socket the form opened, oldest first. */
+let sockets: DrivenSocket[] = [];
+
+/** A socket the test drives by hand, standing in for the browser's `WebSocket`. */
+class DrivenSocket implements SocketLike {
+  readonly sent: string[] = [];
+  closed = false;
+  onopen: (() => void) | null = null;
+  onclose: ((event: CloseLike) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+
+  constructor() {
+    sockets.push(this);
+  }
+  send(data: string): void {
+    this.sent.push(data);
+  }
+  close(): void {
+    this.closed = true;
+  }
+  open(): void {
+    act(() => {
+      this.onopen?.();
+    });
+  }
+  deliver(frame: unknown): void {
+    act(() => {
+      this.onmessage?.({ data: JSON.stringify(frame) });
+    });
+  }
+  /** Closed from the far end, as a restarting core closes it. */
+  drop(): void {
+    act(() => {
+      this.onclose?.({ code: 1006, reason: '' });
+    });
+  }
+}
+
+/** Long enough for a re-ask the form has scheduled to have gone out. */
+async function settled(): Promise<void> {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, SETTLE_MS + 300));
+  });
+}
+
+async function open(): Promise<void> {
+  render(
+    <MemoryRouter initialEntries={['/objects/4/add-sensor']}>
+      <Routes>
+        <Route path="/objects/:id/add-sensor" element={<AddSensor />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+  await waitFor(() => {
+    expect(screen.getByLabelText('Sensor type')).toBeDefined();
+  });
+}
+
+const pick = (typeId: string): void => {
+  fireEvent.change(screen.getByLabelText('Sensor type'), { target: { value: typeId } });
+};
+
+const notice = (): HTMLElement => {
+  const region = document.getElementById('sensor-type-listener');
+  if (region === null) throw new Error('the form has no notice region under the type');
+  return region;
+};
+
+const describedBy = (): string | null =>
+  screen.getByLabelText('Sensor type').getAttribute('aria-describedby');
+
+/** The form open on a flow sensor, the probe's first answer in, and its stream live. */
+async function watching(core: Core): Promise<DrivenSocket> {
+  await open();
+  pick('flow.netflow');
+  await waitFor(() => {
+    expect(core.healthAsked()).toBe(1);
+  });
+  await waitFor(() => {
+    expect(sockets.length).toBe(1);
+  });
+  const socket = sockets[0];
+  if (socket === undefined) throw new Error('no socket opened');
+  socket.open();
+  socket.deliver(SNAPSHOT);
+  return socket;
+}
+
+describe('the add-sensor form’s listener notice while the form is open', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    sockets = [];
+    vi.stubGlobal('WebSocket', DrivenSocket);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('takes the notice back when the probe comes back with its collector on', async () => {
+    const core = stubCore(OFF);
+    const socket = await watching(core);
+    await waitFor(() => {
+      expect(notice().textContent).toContain('The flow collector on probe “Berlin” is not running');
+    });
+    // Scoped to the probe: its own health sensor and everything it scans, and nothing else.
+    expect(socket.sent).toEqual([JSON.stringify({ subscribe: { objectId: 2 } })]);
+
+    // The first snapshot is the world the form's own request already asked about.
+    await settled();
+    expect(core.healthAsked(), 'the first snapshot is not news').toBe(1);
+
+    core.health = RUNNING;
+    socket.deliver(changed(1));
+    await waitFor(() => {
+      expect(notice().textContent).toBe('');
+    });
+    expect(describedBy()).toBeNull();
+    expect(notice().className).toBe('sr-only');
+    expect(core.healthAsked()).toBe(2);
+
+    // What stands while the next answer is on its way is the last answer, not the first: the
+    // sentence that was taken back does not come back for the length of a request.
+    const written: string[] = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records) written.push(record.type);
+    });
+    observer.observe(notice(), { childList: true, characterData: true, subtree: true });
+    core.hold = true;
+    socket.deliver(changed(2));
+    await waitFor(() => {
+      expect(core.healthAsked()).toBe(3);
+    });
+    expect(notice().textContent).toBe('');
+    await act(async () => {
+      core.release();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    observer.disconnect();
+    expect(written, 'the sentence that was taken back was written again').toEqual([]);
+  });
+
+  it('takes the notice back when the probe drops: nothing can be said of a probe that is gone', async () => {
+    const core = stubCore(OFF);
+    const socket = await watching(core);
+    await waitFor(() => {
+      expect(notice().textContent).toContain('is not running');
+    });
+
+    core.health = DROPPED;
+    socket.deliver(changed(1));
+    await waitFor(() => {
+      expect(notice().textContent).toBe('');
+    });
+    expect(describedBy()).toBeNull();
+  });
+
+  it('puts the notice up when the probe comes back with its collector off, and leaves focus alone', async () => {
+    const core = stubCore(RUNNING);
+    const socket = await watching(core);
+    await settled();
+    expect(notice().textContent).toBe('');
+
+    // Somebody is typing the name when the probe restarts.
+    const name = screen.getByLabelText('Name');
+    name.focus();
+    expect(document.activeElement).toBe(name);
+
+    core.health = OFF;
+    socket.deliver(changed(1));
+    await waitFor(() => {
+      expect(notice().textContent).toContain('The flow collector on probe “Berlin” is not running');
+    });
+    // WCAG 4.1.3: said in the region that was already in the document, which announces it;
+    // 1.3.1: tied to the field; 1.4.1: a sentence, not a colour; and focus stays where it was.
+    expect(notice().getAttribute('role')).toBe('status');
+    expect(describedBy()).toBe('sensor-type-listener');
+    expect(notice().textContent).toContain('flowListener.enabled');
+    expect(document.activeElement).toBe(name);
+    // Still a caution: what was typed is kept and the sensor can be created.
+    fireEvent.change(name, { target: { value: 'Uplink flows' } });
+    expect(screen.getByRole('button', { name: 'Create sensor' }).hasAttribute('disabled')).toBe(
+      false,
+    );
+  });
+
+  it('leaves the sentence standing while it asks again, so it is announced once', async () => {
+    const core = stubCore(OFF);
+    const socket = await watching(core);
+    await waitFor(() => {
+      expect(notice().textContent).toContain('is not running');
+    });
+
+    // Everything written into the live region from here on: a screen reader reads each out.
+    const written: string[] = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records) written.push(record.type);
+    });
+    observer.observe(notice(), { childList: true, characterData: true, subtree: true });
+
+    // A sensor under the probe changed state and the collector is as it was. The answer is held
+    // back, so "while it asks" is a moment the test stands in.
+    core.hold = true;
+    socket.deliver(changed(1));
+    await waitFor(() => {
+      expect(core.healthAsked()).toBe(2);
+    });
+    expect(notice().textContent).toContain('is not running');
+    expect(describedBy()).toBe('sensor-type-listener');
+
+    await act(async () => {
+      core.release();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(notice().textContent).toContain('is not running');
+    observer.disconnect();
+    expect(written, 'the same sentence was written again').toEqual([]);
+  });
+
+  it('asks once for a burst: a probe going away takes every sensor with it', async () => {
+    const core = stubCore(OFF);
+    const socket = await watching(core);
+    await waitFor(() => {
+      expect(notice().textContent).toContain('is not running');
+    });
+
+    core.health = DROPPED;
+    for (let seq = 1; seq <= 40; seq += 1) socket.deliver(changed(seq));
+    await waitFor(() => {
+      expect(notice().textContent).toBe('');
+    });
+    await settled();
+    expect(core.healthAsked(), 'one request for forty frames').toBe(2);
+  });
+
+  it('says nothing once the probe’s health is refused', async () => {
+    // The reader's right to the probe was taken away while the form was open.
+    const core = stubCore(OFF);
+    const socket = await watching(core);
+    await waitFor(() => {
+      expect(notice().textContent).toContain('is not running');
+    });
+
+    core.health = 403;
+    socket.deliver(changed(1));
+    await waitFor(() => {
+      expect(notice().textContent).toBe('');
+    });
+    expect(describedBy()).toBeNull();
+
+    // And the sentence is not brought back by the next ask being on its way.
+    core.hold = true;
+    socket.deliver(changed(2));
+    await waitFor(() => {
+      expect(core.healthAsked()).toBe(3);
+    });
+    expect(notice().textContent).toBe('');
+    await act(async () => {
+      core.release();
+      await Promise.resolve();
+    });
+  });
+
+  it('asks again when the stream comes back after the core was away', async () => {
+    const core = stubCore(OFF);
+    const socket = await watching(core);
+    await waitFor(() => {
+      expect(notice().textContent).toContain('is not running');
+    });
+
+    core.health = RUNNING;
+    socket.drop();
+    // What it last knew stands while there is nobody to ask.
+    expect(notice().textContent).toContain('is not running');
+    await waitFor(
+      () => {
+        expect(sockets.length).toBe(2);
+      },
+      { timeout: 3_000 },
+    );
+    const second = sockets[1];
+    if (second === undefined) throw new Error('no second socket');
+    second.open();
+    expect(second.sent).toEqual([JSON.stringify({ subscribe: { objectId: 2 } })]);
+    second.deliver(SNAPSHOT);
+    await waitFor(() => {
+      expect(notice().textContent).toBe('');
+    });
+    expect(core.healthAsked()).toBe(2);
+  });
+
+  it('opens no socket for a type that reads no listener, and closes it when one is unchosen', async () => {
+    const core = stubCore(OFF);
+    await open();
+    pick('icmp.ping');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(sockets.length).toBe(0);
+
+    pick('flow.netflow');
+    await waitFor(() => {
+      expect(sockets.length).toBe(1);
+    });
+    const socket = sockets[0];
+    if (socket === undefined) throw new Error('no socket opened');
+    socket.open();
+    socket.deliver(SNAPSHOT);
+    expect(socket.closed).toBe(false);
+
+    pick('icmp.ping');
+    await waitFor(() => {
+      expect(socket.closed).toBe(true);
+    });
+    // A frame that was already on its way asks nothing: nobody is watching.
+    socket.deliver(changed(1));
+    await settled();
+    expect(core.healthAsked()).toBe(1);
+    expect(sockets.length).toBe(1);
+  });
+
+  it('opens no socket for a reader who cannot see the probe', async () => {
+    const core = stubCore(OFF, [{ id: 3, kind: 'group', name: 'Routers' }]);
+    await open();
+    pick('flow.netflow');
+    await waitFor(() => {
+      expect(core.asked).toContain('/objects/4/ancestors');
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(sockets.length).toBe(0);
+    expect(core.healthAsked()).toBe(0);
+  });
+});

@@ -202,9 +202,23 @@ const notice = (): HTMLElement => {
   return region;
 };
 
+/**
+ * A socket that never opens. The form watches the probe it asked about (`B-12`,
+ * `add-sensor-live.test.tsx`); these cases are about what it says when the type is chosen.
+ */
+class QuietSocket {
+  onopen = null;
+  onclose = null;
+  onerror = null;
+  onmessage = null;
+  send(): void {}
+  close(): void {}
+}
+
 describe('the add-sensor form on a probe whose flow collector is off', () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
+    vi.stubGlobal('WebSocket', QuietSocket);
   });
   afterEach(() => {
     vi.unstubAllGlobals();
