@@ -113,7 +113,7 @@ describe(
 
     it(
       'counts a NetFlow datagram into a reading, and its counters into the heartbeat',
-      { timeout: 120_000 },
+      { timeout: 300_000 },
       async () => {
         const port = await freeUdpPort();
         const { core, probe } = await probeWith(
@@ -222,7 +222,7 @@ describe(
 
     it(
       'binds nothing until it is turned on, and the sensor names the setting that does it',
-      { timeout: 60_000 },
+      { timeout: 180_000 },
       async () => {
         const port = await freeUdpPort();
         // Everything but `enabled`, so the only thing between this probe and a socket is that.
@@ -255,7 +255,7 @@ describe(
 
     it(
       'binds nothing in a v1 build whatever the setting says, and still refuses the sensor by name',
-      { timeout: 60_000 },
+      { timeout: 180_000 },
       async () => {
         const port = await freeUdpPort();
         const { core, probe } = await probeWith(

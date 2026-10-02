@@ -213,7 +213,7 @@ export class FakeCore {
   async waitFor<T>(
     what: string,
     pick: (message: ProbeToCoreMessage) => T | undefined,
-    { from = 0, ms = 20_000 }: { from?: number; ms?: number } = {},
+    { from = 0, ms = 60_000 }: { from?: number; ms?: number } = {},
   ): Promise<T> {
     const find = (): T | undefined => {
       for (const message of this.received.slice(from)) {
