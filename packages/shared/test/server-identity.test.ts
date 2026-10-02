@@ -17,7 +17,18 @@ import { serverIdentity } from '../src/net/server-identity.js';
  */
 
 let dir = '';
-let made: Record<'addresses' | 'others' | 'spelt' | 'name', PeerCertificate> | undefined;
+let made:
+  Record<'addresses' | 'others' | 'spelt' | 'name' | 'linkLocal', PeerCertificate> | undefined;
+
+/** Whether there is an `openssl` to make certificates with. Asked on its own: see `before`. */
+const opensslAvailable = (() => {
+  try {
+    execFileSync('openssl', ['version'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 /** A certificate as Node hands one to `checkServerIdentity`: the parsed fields and the DER. */
 function certificate(file: string, commonName: string, names: string): PeerCertificate {
@@ -48,17 +59,18 @@ function certificate(file: string, commonName: string, names: string): PeerCerti
 }
 
 before(() => {
-  try {
-    dir = mkdtempSync(join(tmpdir(), 'ms-identity-'));
-    made = {
-      addresses: certificate('addresses', 'ms-identity-test', 'IP:127.0.0.1,IP:::1'),
-      others: certificate('others', 'ms-identity-test', 'IP:127.0.0.2,IP:::2'),
-      spelt: certificate('spelt', '::1', 'DNS:::1'),
-      name: certificate('name', 'device.test', 'DNS:device.test,DNS:*.wild.test'),
-    };
-  } catch {
-    made = undefined;
-  }
+  // **Only a missing `openssl` skips.** Anything else that goes wrong here throws, and every
+  // case fails with it: these cases are the proof that verification was not weakened, and a
+  // certificate that could not be made must not turn them into skips that read as green.
+  if (!opensslAvailable) return;
+  dir = mkdtempSync(join(tmpdir(), 'ms-identity-'));
+  made = {
+    addresses: certificate('addresses', 'ms-identity-test', 'IP:127.0.0.1,IP:::1'),
+    others: certificate('others', 'ms-identity-test', 'IP:127.0.0.2,IP:::2'),
+    spelt: certificate('spelt', '::1', 'DNS:::1'),
+    name: certificate('name', 'device.test', 'DNS:device.test,DNS:*.wild.test'),
+    linkLocal: certificate('link-local', 'ms-identity-test', 'IP:fe80::1'),
+  };
 });
 
 after(() => {
@@ -66,20 +78,32 @@ after(() => {
 });
 
 function certificates(t: { skip(reason: string): void }): NonNullable<typeof made> | null {
-  if (made === undefined) t.skip('openssl is not on this machine');
-  return made ?? null;
+  if (!opensslAvailable) {
+    t.skip('openssl is not on this machine');
+    return null;
+  }
+  assert.ok(made !== undefined, 'the certificates were not made, and openssl is here');
+  return made;
 }
 
 describe('who a certificate is for', () => {
   it('Node’s own check refuses ::1 under a certificate that lists ::1, which is why this exists', (t) => {
     // The measurement, taken directly (`A-60` reported it; `A-67` took it again before leaning
-    // on it). If this fails, Node has learned to check an IPv6 address: `serverIdentity` can
-    // then hand everything to Node, and this file says so before anybody wonders.
+    // on it). The one test here meant to fail on the day Node learns to check an IPv6 address,
+    // and the only one that does: every other case asks `serverIdentity`, whose own branch
+    // goes on answering as it did.
     const pairs = certificates(t);
     if (pairs === null) return;
     assert.equal(new X509Certificate(pairs.addresses.raw).checkIP('::1'), '::1');
     const refused = checkServerIdentity('::1', pairs.addresses);
-    assert.ok(refused instanceof Error, `Node ${process.version} accepted ::1 by itself`);
+    assert.ok(
+      refused instanceof Error,
+      `Node ${process.version} now accepts an IPv6 host under a certificate that lists it, by ` +
+        'itself. Nothing is broken: the IPv6 branch of serverIdentity ' +
+        '(packages/shared/src/net/server-identity.ts) is no longer needed and can go, leaving ' +
+        'it to return checkServerIdentity(host, certificate) for every host. Delete this test ' +
+        '(packages/shared/test/server-identity.test.ts) with it.',
+    );
     // Read as a name: the complaint is about a host and a common name, not about an address.
     assert.match(refused.message, /Host: ::1\. is not cert's CN/);
     // And the same certificate is accepted for the IPv4 address it lists.
@@ -107,6 +131,32 @@ describe('who a certificate is for', () => {
       assert.match(refused.message, /IP: ::1 is not in the cert's list/);
     }
     assert.ok(serverIdentity('::2', pairs.addresses) instanceof Error);
+  });
+
+  it('takes the zone off a link-local address before asking the certificate', (t) => {
+    // `fe80::1%eth0` is the only way to reach `fe80::1`, and the certificate lists the address.
+    const pairs = certificates(t);
+    if (pairs === null) return;
+    assert.equal(serverIdentity('fe80::1%eth0', pairs.linkLocal), undefined);
+    assert.equal(serverIdentity('fe80::1', pairs.linkLocal), undefined);
+    assert.equal(serverIdentity('::1%lo', pairs.addresses), undefined);
+    // The zone buys nothing: another address's certificate is refused with it as without.
+    for (const certificate of [pairs.others, pairs.addresses, pairs.name, pairs.spelt]) {
+      const refused = serverIdentity('fe80::1%eth0', certificate);
+      assert.ok(refused instanceof Error);
+      assert.equal((refused as NodeJS.ErrnoException).code, 'ERR_TLS_CERT_ALTNAME_INVALID');
+    }
+    assert.ok(serverIdentity('fe80::2%eth0', pairs.linkLocal) instanceof Error);
+  });
+
+  it('refuses a host that is only a zone, or a zone with no address, and does not throw', (t) => {
+    const pairs = certificates(t);
+    if (pairs === null) return;
+    for (const host of ['%eth0', '%', '%fe80::1', 'eth0%fe80::1']) {
+      for (const certificate of Object.values(pairs)) {
+        assert.ok(serverIdentity(host, certificate) instanceof Error, host);
+      }
+    }
   });
 
   it('refuses a certificate with nothing to ask, whatever its fields say', () => {

@@ -19002,6 +19002,18 @@ because each is a decision rather than a defect:
       - **Mutation:** 11 of 11 killed — the option dropped at each of the seven call sites
         (two in the mail connection), the host dropped from the `STARTTLS` upgrade, and three
         in the shared check.
+      - **After review, three closed.** (1) A zone-scoped address, `fe80::1%eth0` — the only way
+        to reach a link-local one — is an IPv6 host to `net.isIP`, and OpenSSL calls the whole
+        spelling invalid, so a certificate that lists `fe80::1` was refused. The zone is taken
+        off before the certificate is asked; another address's certificate is refused with a
+        zone as without, and a host that is only a zone is no address and is refused by Node as
+        a name. (2) The three new test files skipped every case when certificate generation
+        failed for any reason; they now skip only when `openssl version` cannot run, and
+        anything else fails them (tried: with generation broken, all 30 cases are cancelled
+        and none skipped). (3) The test that pins Node's defect now says what to do when it
+        fails — delete the IPv6 branch of `serverIdentity` and that test — and is the only
+        test that calls Node's check with an IPv6 host, so the only one that fails that day.
+        Two tests more in `server-identity.test.ts` (7); mutation 2 of 2 on the zone.
       - **Not done.** The heartbeat (`health/heartbeat.ts`) uses `fetch`, which fails for
         `https://[::1]` the same way (measured) and has no `checkServerIdentity` to pass. The
         database sensors and the core's own database pool hand TLS to `pg`, `mysql2` and

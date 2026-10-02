@@ -49,6 +49,16 @@ interface Pairs {
 
 const NAME = 'device.a67.test';
 
+/** Whether there is an `openssl` to make certificates with. Asked on its own: see `before`. */
+const opensslAvailable = (() => {
+  try {
+    execFileSync('openssl', ['version'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
 let dir = '';
 let pairs: Pairs | undefined;
 const setTrusted = (tls as { setDefaultCACertificates?: (certs: string[]) => void })
@@ -108,19 +118,19 @@ const httpServers: HttpSimulator[] = [];
 const tlsServers: tls.Server[] = [];
 
 before(() => {
-  try {
-    dir = mkdtempSync(join(tmpdir(), 'ms-a67-'));
-    pairs = {
-      forAddresses: certificate('addresses', 'ms-a67-test', 'IP:127.0.0.1,IP:::1'),
-      forOtherAddresses: certificate('others', 'ms-a67-test', 'IP:127.0.0.2,IP:::2'),
-      speltLikeAnAddress: certificate('spelt', '::1', 'DNS:::1'),
-      forLocalhost: certificate('localhost', 'localhost', 'DNS:localhost'),
-      forName: certificate('name', NAME, `DNS:${NAME}`),
-    };
-  } catch {
-    pairs = undefined;
-  }
-  if (pairs !== undefined && setTrusted !== undefined && getTrusted !== undefined) {
+  // **Only a missing `openssl` skips.** Anything else that goes wrong here throws, and every
+  // case fails with it: these cases are the proof that verification was not weakened, and a
+  // certificate that could not be made must not turn them into skips that read as green.
+  if (!opensslAvailable) return;
+  dir = mkdtempSync(join(tmpdir(), 'ms-a67-'));
+  pairs = {
+    forAddresses: certificate('addresses', 'ms-a67-test', 'IP:127.0.0.1,IP:::1'),
+    forOtherAddresses: certificate('others', 'ms-a67-test', 'IP:127.0.0.2,IP:::2'),
+    speltLikeAnAddress: certificate('spelt', '::1', 'DNS:::1'),
+    forLocalhost: certificate('localhost', 'localhost', 'DNS:localhost'),
+    forName: certificate('name', NAME, `DNS:${NAME}`),
+  };
+  if (setTrusted !== undefined && getTrusted !== undefined) {
     trustedBefore = getTrusted('default');
     setTrusted([...trustedBefore, ...Object.values(pairs).map((pair: Pair) => pair.cert)]);
   }
@@ -142,10 +152,11 @@ after(async () => {
 
 /** The certificates, or a skip that says why there are none. */
 function ready(t: { skip(reason: string): void }, needsV6: boolean): Pairs | null {
-  if (pairs === undefined) {
+  if (!opensslAvailable) {
     t.skip('openssl is not on this machine');
     return null;
   }
+  assert.ok(pairs !== undefined, 'the certificates were not made, and openssl is here');
   if (trustedBefore === undefined) {
     t.skip('this Node has no tls.setDefaultCACertificates to trust a test certificate with');
     return null;

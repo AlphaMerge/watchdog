@@ -21,6 +21,12 @@ import { checkServerIdentity, type PeerCertificate } from 'node:tls';
  * an address the certificate lists as an address passes — never a DNS name or a common name
  * spelt like one. A certificate with nothing to ask is refused.
  *
+ * **A zone is not part of the address.** A link-local address can only be reached with one
+ * (`fe80::1%eth0`): it says which interface to leave by, means nothing off this machine, and no
+ * certificate lists it. OpenSSL takes the whole spelling for an invalid address, so the zone is
+ * taken off before the certificate is asked — otherwise a certificate that lists `fe80::1` was
+ * refused for the only way there is of reaching it.
+ *
  * Whether the certificate is *trusted* is not decided here, and is as it was: this is passed as
  * a connection's `checkServerIdentity` and changes nothing about `rejectUnauthorized`, the
  * certificate authorities or what is sent as the server name. `host` is what Node hands that
@@ -28,9 +34,11 @@ import { checkServerIdentity, type PeerCertificate } from 'node:tls';
  */
 export function serverIdentity(host: string, certificate: PeerCertificate): Error | undefined {
   if (isIP(host) !== 6) return checkServerIdentity(host, certificate);
+  const zone = host.indexOf('%');
+  const address = zone < 0 ? host : host.slice(0, zone);
   let listed = false;
   try {
-    listed = new X509Certificate(certificate.raw).checkIP(host) !== undefined;
+    listed = new X509Certificate(certificate.raw).checkIP(address) !== undefined;
   } catch {
     listed = false;
   }
