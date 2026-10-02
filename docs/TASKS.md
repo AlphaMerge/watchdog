@@ -19570,7 +19570,7 @@ because each is a decision rather than a defect:
       Also: a sensor with two credential kinds, one version-dependent, has no case there, and
       no test boots `main.ts`.
 
-- [ ] **A-73 — five loose ends from discovery text and the SSH pool** · S · A-69 · Found
+- [x] **A-73 — five loose ends from discovery text and the SSH pool** · S · A-69 · Found
       2026-10-02 by `A-69`. `sweep-progress` takes any 7 to 15 characters as an address. A
       fingerprint field this build does not know is carried at any size. The summary's vendor
       breakdown reads stored rows, so one written before the bound shows uncut.
@@ -19579,6 +19579,51 @@ because each is a decision rather than a defect:
       reviewer traced it, one found it out of reach in a running probe). The SSH simulator has no mode
       that accepts and never speaks, so two tickets' tests use a bare listener. **Done when**
       each is fixed with a test.
+
+      **A-73 outcome.** Five fixed. No migration, no protocol number.
+      - **`sweep-progress` takes dotted-quad IPv4 by pattern** (`IPV4_ADDRESS_PATTERN`, as
+        `identify-start`). No protocol number: nothing a probe of ours sends stopped being
+        valid. Read: the one sender is `SweepRunner`, through `main.ts`'s `onProgress`, and the
+        only address it reports is `toText` of a position in a range `parseIpRange` took, which
+        is 32-bit; a range that is not IPv4 fails the run and reports nothing. No other sender
+        was found. Tests: the eighteen refused spellings and the five taken, on this message
+        (`messages.test.ts`); in `probe/test/sweep.test.ts` five ranges across octet
+        boundaries and both ends of the space, every reported address `isIPv4` and every frame
+        taken by `parseProbeToCore`. The core still offers identification IPv4 rows only: a row
+        an earlier build stored is still there.
+      - **A field this build does not know is kept only when it is small.** At
+        `checkFingerprint`: a boolean, a finite number, or text made one line and cut at 500
+        characters, under a name of at most 64 characters that is itself one clean line; the
+        first 16 such fields, and the rest dropped. An object, an array and `null` are dropped.
+        About 9,000 characters at most. **The same on each port**, which had the same hole one
+        level down: the first 8, and `transport` cut at 16. A stored row reads through the
+        same check, and reading writes nothing back. **This changes what a newer probe can
+        hand an older core**: a structured field is no longer stored for a later release to
+        read, only a scalar one.
+      - **The summary's vendor breakdown is bounded on the way out** (`vendorBreakdown`): each
+        vendor as the check keeps one (one line, 100 characters), rows that become the same
+        line counted together, most first. The query reads at most the first 1,000 characters
+        of a stored vendor.
+      - **`SshSessionPool`: an abandoned open is forgotten in the turn it is abandoned**, so a
+        caller arriving before the handshake has finished ending starts its own and is told
+        what happened to its own. The abandoned open's ending removes only itself, never an
+        open started since under the same key. **`closeAll` ends opens in flight**: lookup and
+        handshake aborted, the socket destroyed, each waiter told the connection was
+        cancelled, nothing recorded afterwards.
+      - **`MuteSshServer` in `@ms/simulators`** accepts and never speaks, reads and discards,
+        and hands a test the next connection with a promise of its closing. A class beside
+        `TestSshServer` and not a mode of it, because `ssh2.Server` writes its identification
+        line on connect and cannot be silent. `A-65`'s and `A-69`'s cases in
+        `ssh-session.test.ts` moved onto it, which was mechanical (three names). **Left on a
+        listener of its own**: the one `A-69` case that needs a half-open, paused socket.
+      - **Tests.** `fingerprint-check.test.ts` (table-driven: eight values dropped, eight
+        kept, the count, the name, a megabyte stored as under 10,000 characters, the port
+        rule, a round trip, three on the breakdown), `discovery.test.ts` (a nested and a long
+        unknown field as stored; a 300,000-character vendor in a row written before the
+        bound, through `summary`), `ssh-session.test.ts` +3, `simulators/test/ssh-server.test.ts`
+        (3, new), `messages.test.ts` +20, `sweep.test.ts` +1. Each wait has its own bound.
+      - **Mutation: 15/15.** After the last, the rebuilt `dist` matched its hashes from before
+        the first.
 
 ### Panel round two — notifications, schedules, triggers
 

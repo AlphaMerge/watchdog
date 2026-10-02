@@ -1145,7 +1145,18 @@ const probeToCoreSchema = {
           items: {
             type: 'object',
             properties: {
-              address: { type: 'string', minLength: 7, maxLength: 15 },
+              // **Dotted-quad IPv4, by pattern** (`A-73`), as `identify-start` has it (`A-69`).
+              // The lengths alone took any seven to fifteen characters, cast to `inet` by the
+              // core: `fe80::1` got a row, and a string that is no address failed the insert
+              // for the whole batch. No protocol number, because nothing a probe sends stops
+              // being valid: the one sender is `SweepRunner`, which reports `toText` of a
+              // position in an IPv4 range and nothing else.
+              address: {
+                type: 'string',
+                minLength: 7,
+                maxLength: 15,
+                pattern: IPV4_ADDRESS_PATTERN,
+              },
               rttMs: { type: 'number', minimum: 0 },
             },
             required: ['address', 'rttMs'],

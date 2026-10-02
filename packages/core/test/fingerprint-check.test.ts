@@ -16,6 +16,11 @@ import {
   PORTS_MAX_ITEMS,
   REFUSAL_MAX_LENGTH,
   refusalText,
+  UNKNOWN_FIELD_MAX_LENGTH,
+  UNKNOWN_FIELD_NAME_MAX_LENGTH,
+  UNKNOWN_FIELDS_MAX,
+  UNKNOWN_PORT_FIELDS_MAX,
+  vendorBreakdown,
 } from '../src/discovery/fingerprint.js';
 import { baseOptions } from './support/surface.js';
 
@@ -129,13 +134,14 @@ describe('checking a fingerprint (D-12)', () => {
     });
   });
 
-  it('keeps a field it does not know, even a null one', () => {
+  it('keeps a field it does not know when it is a word, a number or a flag', () => {
     // A newer probe's field, carried into the jsonb column for a later release to read.
-    const check = checkFingerprint({ ...valid, somethingNewer: { model: 'X99' }, later: null });
+    const check = checkFingerprint({ ...valid, model: 'X99', rackUnits: 2, virtual: false });
     assert.ok(check.ok);
     const kept = check.fingerprint as unknown as Record<string, unknown>;
-    assert.deepEqual(kept['somethingNewer'], { model: 'X99' });
-    assert.equal(kept['later'], null);
+    assert.equal(kept['model'], 'X99');
+    assert.equal(kept['rackUnits'], 2);
+    assert.equal(kept['virtual'], false);
   });
 
   it('clamps a confidence and keeps only the evidence that is text', () => {
@@ -475,11 +481,163 @@ describe('a fingerprint’s text is bounded where it is checked (A-69)', () => {
     assert.deepEqual(read(JSON.parse(JSON.stringify(once))), once);
   });
 
-  it('carries a field it does not know at any length: the frame is the bound on it', () => {
-    // Written down, not fixed here: `identify-progress` leaves a fingerprint's fields open so a
-    // newer probe's are stored for a later release to read.
-    const long = 'u'.repeat(50_000);
-    assert.equal(read({ ...valid, somethingNewer: long })['somethingNewer'], long);
+  describe('a field this build does not know (A-73)', () => {
+    // `identify-progress` leaves a fingerprint's fields open so a newer probe's are stored for
+    // a later release to read. Until this they were carried at any size and any depth.
+    const KNOWN = ['address', 'kind', 'confidence', 'ports', 'evidence'];
+    const unknown = (kept: Record<string, unknown>): string[] =>
+      Object.keys(kept).filter((key) => !KNOWN.includes(key));
+
+    const DROPPED: readonly (readonly [string, unknown])[] = [
+      ['an object', { model: 'X99' }],
+      ['an empty object', {}],
+      ['an array', ['a', 'b']],
+      ['an array of megabytes', ['x'.repeat(1_000_000)]],
+      ['null', null],
+      ['infinity, which JSON cannot say', Number.POSITIVE_INFINITY],
+      ['not a number', Number.NaN],
+      ['text that cleans to nothing', ' \u0000\n '],
+    ];
+    for (const [what, value] of DROPPED) {
+      it(`drops ${what}`, () => {
+        const kept = read({ ...valid, somethingNewer: value, model: 'X99' });
+        assert.deepEqual(unknown(kept), ['model'], 'and keeps the field beside it');
+      });
+    }
+
+    const KEPT: readonly (readonly [string, unknown, unknown])[] = [
+      ['a word', 'X99', 'X99'],
+      ['zero', 0, 0],
+      ['a negative fraction', -1.5, -1.5],
+      ['true', true, true],
+      ['false', false, false],
+      ['text of several lines, as one', 'a\r\nb\u2028c', 'a b c'],
+      ['text at the limit', 'u'.repeat(UNKNOWN_FIELD_MAX_LENGTH), 'u'.repeat(500)],
+      ['text past it, cut', 'u'.repeat(50_000), 'u'.repeat(500)],
+    ];
+    for (const [what, value, expected] of KEPT) {
+      it(`keeps ${what}`, () => {
+        assert.deepEqual(read({ ...valid, somethingNewer: value })['somethingNewer'], expected);
+      });
+    }
+
+    it('keeps the first sixteen and drops the rest, counting only what it keeps', () => {
+      assert.equal(UNKNOWN_FIELDS_MAX, 16);
+      const many: Record<string, unknown> = {};
+      for (let n = 0; n < 40; n += 1) {
+        // Every third is something that is dropped anyway, and does not use up a place.
+        many[`f${String(n).padStart(2, '0')}`] = n % 3 === 0 ? { nested: n } : n;
+      }
+      const kept = unknown(read({ ...valid, ...many }));
+      assert.equal(kept.length, 16);
+      assert.deepEqual(kept.slice(0, 4), ['f01', 'f02', 'f04', 'f05']);
+      // And the fields it knows are not counted against them.
+      const full = read({ ...valid, ...many, vendor: 'Acme', sysName: 'sw-01' });
+      assert.equal(full['vendor'], 'Acme');
+      assert.equal(full['sysName'], 'sw-01');
+      assert.equal(unknown(full).length, 18);
+    });
+
+    it('drops a field whose name is not one short line', () => {
+      assert.equal(UNKNOWN_FIELD_NAME_MAX_LENGTH, 64);
+      const kept = read({
+        ...valid,
+        ['n'.repeat(64)]: 1,
+        ['n'.repeat(65)]: 2,
+        ['m'.repeat(1_000_000)]: 3,
+        'two\nlines': 4,
+        ' padded': 5,
+        '': 6,
+      });
+      assert.deepEqual(unknown(kept), ['n'.repeat(64)]);
+    });
+
+    it('bounds what a megabyte of unknown fields is stored as', () => {
+      const flood: Record<string, unknown> = {};
+      for (let n = 0; n < 2_000; n += 1) flood[`field${String(n)}`] = 'x'.repeat(10_000);
+      flood['deep'] = { a: { b: { c: 'x'.repeat(1_000_000) } } };
+      const stored = JSON.stringify(read({ ...valid, ...flood }));
+      assert.ok(stored.length < 10_000, `${String(stored.length)} characters were kept`);
+    });
+
+    it('holds a port to the same rule: eight fields, and a transport that is a word', () => {
+      assert.equal(UNKNOWN_PORT_FIELDS_MAX, 8);
+      const extra: Record<string, unknown> = {};
+      for (let n = 0; n < 20; n += 1) extra[`p${String(n).padStart(2, '0')}`] = `v${String(n)}`;
+      const kept = read({
+        ...valid,
+        ports: [
+          { port: 22, transport: 'tcp', banner: 'SSH-2.0', tls: true, ...extra },
+          { port: 161, transport: 'u'.repeat(5_000), detail: { community: 'x'.repeat(100_000) } },
+          { port: 443, transport: 7, long: 'y'.repeat(50_000) },
+        ],
+      })['ports'] as Record<string, unknown>[];
+      const [ssh, snmp, https] = kept;
+      assert.ok(ssh !== undefined && snmp !== undefined && https !== undefined);
+      assert.equal(ssh['port'], 22);
+      assert.equal(ssh['transport'], 'tcp');
+      assert.equal(ssh['banner'], 'SSH-2.0');
+      assert.equal(ssh['tls'], true);
+      assert.equal(
+        Object.keys(ssh).filter((key) => !['port', 'transport', 'banner'].includes(key)).length,
+        8,
+      );
+      assert.deepEqual(snmp, { port: 161, transport: 'u'.repeat(16) });
+      assert.deepEqual(https, { port: 443, long: 'y'.repeat(500) });
+    });
+
+    it('reads what it kept as it kept it, so a stored row reads as it was stored', () => {
+      const flood: Record<string, unknown> = { model: 'X\nY', units: 2, nested: { a: 1 } };
+      for (let n = 0; n < 40; n += 1) flood[`f${String(n)}`] = `value ${String(n)}`;
+      const once = read({ ...valid, ...flood, ports: [{ port: 22, transport: 'tcp', x: 'y' }] });
+      assert.deepEqual(read(JSON.parse(JSON.stringify(once))), once);
+    });
+  });
+
+  describe('the summary’s vendor breakdown (A-73)', () => {
+    it('shows each vendor as the check keeps one, whatever the row says', () => {
+      assert.deepEqual(
+        vendorBreakdown([
+          { vendor: 'Acme', count: 3 },
+          { vendor: `Big\r\nCorp ${'v'.repeat(5_000)}`, count: 2 },
+        ]),
+        [
+          { vendor: 'Acme', count: 3 },
+          {
+            vendor: `Big Corp ${'v'.repeat(FINGERPRINT_TEXT_LIMITS.vendor - 9)}`,
+            count: 2,
+          },
+        ],
+      );
+    });
+
+    it('counts together rows that are the same vendor once cleaned, and puts the most first', () => {
+      assert.deepEqual(
+        vendorBreakdown([
+          { vendor: 'Zyx', count: 4 },
+          { vendor: 'Acme', count: 3 },
+          { vendor: 'Acme\u0000', count: 2 },
+          { vendor: ' Acme ', count: 1 },
+          { vendor: 'Bolt', count: 4 },
+        ]),
+        [
+          { vendor: 'Acme', count: 6 },
+          // One count: in the order the rows came, which is the database's.
+          { vendor: 'Zyx', count: 4 },
+          { vendor: 'Bolt', count: 4 },
+        ],
+      );
+    });
+
+    it('leaves out a vendor that cleans to nothing, as an absent one is', () => {
+      assert.deepEqual(
+        vendorBreakdown([
+          { vendor: ' \u0000\n', count: 9 },
+          { vendor: '', count: 1 },
+        ]),
+        [],
+      );
+    });
   });
 
   it('cleans and cuts with one function, the one a refusal goes through', () => {

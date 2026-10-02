@@ -37,6 +37,12 @@ import {
  * two checks at once or by a join being counted. Nothing here depends on it any more: joining is
  * kept for a caller that does overlap in one thread, which today is a test, and holds for one.
  *
+ * **An open its last caller abandoned is gone at once** (`A-73`). Aborting it ends the handshake
+ * a few turns later, and until then the open was still there to be joined: a caller arriving in
+ * those turns waited on it and was told its own check had been cancelled, which it had not. The
+ * abandoned open is forgotten in the turn it is abandoned, and what it does when it ends touches
+ * only itself — never an open that has since been started for the same connection.
+ *
  * Deliberately not shared code with `support/snmp/pool.ts`, and that is a decision rather than
  * an oversight: the lease counting and idle eviction are the same, but async open, in-flight
  * sharing and liveness checking are not, and an abstraction over two cases guesses wrong about
@@ -100,8 +106,15 @@ interface Waiter {
 
 /** A connection being opened, and everybody waiting for it (`A-69`). */
 interface Opening {
+  readonly key: string;
+  /** For the sentence a waiter is told when the pool is closed under it. */
+  readonly host: string;
   readonly waiters: Set<Waiter>;
-  /** Aborted when the last waiter is cancelled: nobody is left to use the connection. */
+  /**
+   * Aborted when the last waiter is cancelled, or the pool is closed: nobody is left to use the
+   * connection. **An open that has been abandoned is not one to join** (`A-73`): it is taken out
+   * of `#opening` in the same turn, so the next caller starts its own.
+   */
   readonly abandon: AbortController;
 }
 
@@ -167,6 +180,7 @@ export class SshSessionPool {
     // Cancelled before it asked: nothing is opened for it, and nothing it joined is ended.
     if (signal?.aborted === true) throw connectCancelled(target.host.trim());
 
+    // An open somebody abandoned is not here to be found: see `#abandon`.
     let opening = this.#opening.get(key);
     if (opening !== undefined) {
       // Somebody is already shaking hands with this host. Wait for theirs rather than starting
@@ -194,7 +208,12 @@ export class SshSessionPool {
     credentials: SshCredentials,
     options: SshSessionOptions,
   ): Opening {
-    const opening: Opening = { waiters: new Set(), abandon: new AbortController() };
+    const opening: Opening = {
+      key,
+      host: target.host.trim(),
+      waiters: new Set(),
+      abandon: new AbortController(),
+    };
     const signal = opening.abandon.signal;
     this.#opening.set(key, opening);
     // The target policy is asked here and nowhere above (`A-57`): a connection that is held
@@ -219,7 +238,7 @@ export class SshSessionPool {
     })();
     session.then(
       (opened) => {
-        this.#opening.delete(key);
+        this.#forget(opening);
         this.#stats.opened += 1;
         if (opening.waiters.size === 0) {
           // Everybody was cancelled as the handshake finished. Nobody will lease it, and kept
@@ -240,7 +259,7 @@ export class SshSessionPool {
       (error: unknown) => {
         // Whether it worked or not: a failed handshake left here would make every later attempt
         // wait on an open that has already failed, so a host that came back would stay broken.
-        this.#opening.delete(key);
+        this.#forget(opening);
         for (const waiter of opening.waiters) {
           waiter.settle();
           waiter.reject(error);
@@ -251,6 +270,24 @@ export class SshSessionPool {
     return opening;
   }
 
+  /**
+   * Takes this open out of the opens to be joined, if it is still the one there (`A-73`). Its
+   * own ending calls this too, and by then another may have been started under the same key:
+   * that one is not this open's to remove.
+   */
+  #forget(opening: Opening): void {
+    if (this.#opening.get(opening.key) === opening) this.#opening.delete(opening.key);
+  }
+
+  /**
+   * Ends an open nobody is waiting for, and forgets it in the same turn (`A-73`), so no caller
+   * can join a handshake that is already being torn down.
+   */
+  #abandon(opening: Opening): void {
+    this.#forget(opening);
+    opening.abandon.abort();
+  }
+
   /** One caller's wait for an open: ended by the open, or by the caller's own signal. */
   #wait(opening: Opening, host: string, signal: AbortSignal | undefined): Promise<SshLease> {
     return new Promise<SshLease>((resolve, reject) => {
@@ -258,7 +295,7 @@ export class SshSessionPool {
         opening.waiters.delete(waiter);
         // **Only the last one out ends the open.** While anybody else is waiting, the handshake
         // is theirs too, and this caller's cancellation is this caller's alone.
-        if (opening.waiters.size === 0) opening.abandon.abort();
+        if (opening.waiters.size === 0) this.#abandon(opening);
         reject(connectCancelled(host));
       };
       const waiter: Waiter = {
@@ -277,7 +314,14 @@ export class SshSessionPool {
     return { ...this.#stats, connections: this.#entries.size, inUse };
   }
 
-  /** Closes everything, in use or not. For worker shutdown and for tests. */
+  /**
+   * Closes everything, in use or not. For worker shutdown and for tests.
+   *
+   * **And ends every connection still being opened** (`A-73`): its lookup and its handshake are
+   * aborted, so the socket is destroyed now and not at the connect timeout, and whoever was
+   * waiting for it is told the connection was cancelled. Until this an open in flight outlived
+   * the pool that started it, and recorded its connection in a pool nobody would close again.
+   */
   closeAll(): void {
     for (const entry of this.#entries.values()) {
       entry.session.close();
@@ -285,6 +329,15 @@ export class SshSessionPool {
     }
     this.#entries.clear();
     this.#stats.connections = 0;
+    for (const opening of [...this.#opening.values()]) {
+      const waiters = [...opening.waiters];
+      opening.waiters.clear();
+      this.#abandon(opening);
+      for (const waiter of waiters) {
+        waiter.settle();
+        waiter.reject(connectCancelled(opening.host));
+      }
+    }
     this.#stopSweeping();
   }
 

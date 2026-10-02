@@ -768,9 +768,42 @@ describe('identification messages', () => {
       }
     });
 
-    it('still takes a pass with no addresses, and what the sweep reports is as it was', () => {
+    describe('and so are the addresses a sweep reports (A-73)', () => {
+      // The other direction, held to the same pattern: `sweep-progress` took any seven to
+      // fifteen characters, which the core cast to `inet`.
+      const progress = (addresses: readonly string[]) => () =>
+        parseProbeToCore({
+          type: 'sweep-progress',
+          runId: 7,
+          cursor: addresses.length,
+          found: addresses.map((address) => ({ address, rttMs: 0.4 })),
+          failed: 0,
+        });
+
+      it('takes every dotted quad', () => {
+        const message = progress(TAKEN)();
+        assert.ok(message.type === 'sweep-progress');
+        assert.deepEqual(
+          message.found.map((host) => host.address),
+          TAKEN,
+        );
+      });
+
+      for (const [what, address] of REFUSED) {
+        it(`refuses ${what}`, () => {
+          assert.throws(progress([address]), ProtocolError);
+          // Wherever it is in the batch: one bad address is a frame the core does not take.
+          assert.throws(progress(['10.0.0.5', address, '10.0.0.9']), ProtocolError);
+        });
+      }
+
+      it('still takes a batch that found nothing', () => {
+        assert.doesNotThrow(progress([]));
+      });
+    });
+
+    it('still takes a pass with no addresses, and a sweep’s report of a dotted quad', () => {
       assert.doesNotThrow(pass([]));
-      // `sweep-progress` is the other direction and is not narrowed here.
       assert.equal(
         parseProbeToCore({
           type: 'sweep-progress',

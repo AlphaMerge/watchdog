@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
+import { isIPv4 } from 'node:net';
 import { describe, it } from 'node:test';
-import type { SweepEnding, SweepHost, SweepJob } from '@ms/shared';
+import { parseProbeToCore, type SweepEnding, type SweepHost, type SweepJob } from '@ms/shared';
 import { SweepRunner, type SweepDeps } from '../src/discovery/sweep.js';
 import { pino } from 'pino';
 
@@ -166,6 +167,48 @@ describe('sweeping a range', () => {
     await h.done;
     assert.equal(ended(h).ending, 'failed');
     assert.match(ended(h).message, /eighteen million million million/);
+  });
+
+  it('reports dotted quads and nothing else, in frames the core takes (A-73)', async () => {
+    // `sweep-progress` holds an address to the dotted-quad pattern, and this runner is the one
+    // thing in a probe that fills one. Every address it can report is `toText` of a position in
+    // an IPv4 range: across octet boundaries, at both ends of the space, and from a mask.
+    const ranges = [
+      '0.0.0.0-0.0.0.3',
+      '9.255.255.254-10.0.0.1',
+      '100.99.255.250-100.100.0.5',
+      '192.168.100.0/28',
+      '255.255.255.252-255.255.255.255',
+    ];
+    let frames = 0;
+    for (const range of ranges) {
+      // Everything answers, so everything offered is reported.
+      const h = harness({ probe: () => Promise.resolve(1) });
+      h.runner.start({ ...JOB, range, concurrency: 3 });
+      await h.done;
+      assert.equal(ended(h).ending, 'done', range);
+      const found = h.progress.flatMap((one) => one.found);
+      assert.equal(found.length, ended(h).cursor, `${range}: every address reported`);
+      for (const one of found) assert.ok(isIPv4(one.address), `${range}: ${one.address}`);
+      for (const one of h.progress) {
+        // What `main.ts` sends, through the parser the core reads it with.
+        const frame = JSON.parse(
+          JSON.stringify({ type: 'sweep-progress', runId: 1, ...one }),
+        ) as unknown;
+        assert.equal(parseProbeToCore(frame).type, 'sweep-progress', range);
+        frames += 1;
+      }
+    }
+    assert.ok(frames >= ranges.length, 'the control: frames were parsed');
+    // And a range that is not IPv4 reports no address at all: it fails, as the case above has it.
+    const six = harness({ probe: () => Promise.resolve(1) });
+    six.runner.start({ ...JOB, range: 'fe80::1-fe80::8' });
+    await six.done;
+    assert.equal(ended(six).ending, 'failed');
+    assert.deepEqual(
+      six.progress.flatMap((one) => one.found),
+      [],
+    );
   });
 });
 

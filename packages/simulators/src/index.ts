@@ -48,6 +48,7 @@ export {
 } from './snmp-agent.js';
 
 export {
+  MuteSshServer,
   TestSshServer,
   keyPair,
   type CommandResult,

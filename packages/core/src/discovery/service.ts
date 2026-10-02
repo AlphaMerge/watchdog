@@ -12,7 +12,12 @@ import type { Database } from '../db/pool.js';
 import type { Actor, AuditSink } from '../objects/audit.js';
 import type { ProbeRefusals } from '../probes/refusals.js';
 import { DiscoveryError } from './errors.js';
-import { readFingerprint, refusalText } from './fingerprint.js';
+import {
+  readFingerprint,
+  refusalText,
+  VENDOR_READ_MAX_LENGTH,
+  vendorBreakdown,
+} from './fingerprint.js';
 import { isUnderProbe, requireGroupProbe } from './scope.js';
 import { describeRun, type DiscoverySummary } from './summary.js';
 
@@ -620,9 +625,9 @@ export class DiscoveryService {
     }
 
     // **IPv4 rows only** (`A-69`), which is every row a sweep makes: its range is IPv4. The
-    // column is `inet` and a probe's `sweep-progress` is held only to a length, so a probe that
-    // reported `fe80::1` has a row, and `identify-start` takes dotted quads and nothing else:
-    // offered, it would be a frame the probe refuses. `host()` of an IPv4 `inet` is a dotted
+    // column is `inet`, and until `A-73` a probe's `sweep-progress` was held only to a length,
+    // so a probe that reported `fe80::1` to an earlier build has a row, and `identify-start`
+    // takes dotted quads and nothing else: offered, it would be a frame the probe refuses. `host()` of an IPv4 `inet` is a dotted
     // quad whatever mask the row was written with. The filter is the same on every offer, so
     // the cursor still counts one order; a row it leaves out stays unidentified, and the
     // summary says so.
@@ -1035,12 +1040,20 @@ export class DiscoveryService {
     );
     // Vendors only where one was found: "23 hosts, vendor unknown" is the default state of a
     // vendor column and says nothing, where the kind breakdown's null is a real answer.
-    const vendors = await this.#db.query<{ vendor: string; count: number }>(
-      `SELECT fingerprint->>'vendor' AS vendor, count(*)::int AS count
-       FROM discovery_host
-       WHERE run_id = $1 AND fingerprint->>'vendor' IS NOT NULL
-       GROUP BY 1 ORDER BY count DESC, vendor`,
-      [runId],
+    //
+    // **Bounded on the way out, as `refused` is** (`A-73`). The breakdown reads the stored row
+    // and not through `checkFingerprint`, so a row written before `A-69` bounded a vendor — by
+    // a probe that is not ours — showed it uncut: a megabyte in a list an operator reads. No
+    // more than a few lines of it leaves the database, and `vendorBreakdown` makes it the line
+    // the check would have stored and counts together what that makes the same.
+    const vendors = vendorBreakdown(
+      await this.#db.query<{ vendor: string; count: number }>(
+        `SELECT left(fingerprint->>'vendor', $2::int) AS vendor, count(*)::int AS count
+         FROM discovery_host
+         WHERE run_id = $1 AND fingerprint->>'vendor' IS NOT NULL
+         GROUP BY 1 ORDER BY count DESC, vendor`,
+        [runId, VENDOR_READ_MAX_LENGTH],
+      ),
     );
 
     // `count(*)::int` rather than the default bigint, which node-postgres hands over as a

@@ -1,3 +1,4 @@
+import { createServer, type Server as TcpServer, type Socket } from 'node:net';
 import ssh2 from 'ssh2';
 import type { Server, ServerChannel, ServerConnection } from 'ssh2';
 
@@ -201,6 +202,101 @@ export class TestSshServer {
     // the server was still up (`P-70`).
     for (const connection of this.#connections) connection.end();
     this.#connections.clear();
+    await new Promise<void>((resolve) => {
+      this.#server.close(() => {
+        resolve();
+      });
+    });
+  }
+}
+
+/**
+ * An SSH server that accepts a connection and never speaks (`A-73`).
+ *
+ * **A mode of the simulator and not of `ssh2.Server`, because `ssh2.Server` cannot be silent**:
+ * it writes its identification line the moment a socket arrives, and a client that has read
+ * that line is already past the wait this is for. What a handshake that never starts looks
+ * like from the client is a TCP connection that was accepted and says nothing — a firewall that
+ * completes the handshake for a host that is gone, a service wedged before its banner — and
+ * the client's connect timeout, or its caller's cancellation, is the only thing that ends it.
+ *
+ * `A-65` and `A-69` each stood up a bare listener for this in their own test file. It is here so
+ * the next test that needs one does not write a third.
+ *
+ * What the client sends is read and thrown away, so its own closing is heard: a socket nobody
+ * reads holds what it was sent and never reports the end that follows it.
+ */
+export class MuteSshServer {
+  readonly #server: TcpServer;
+  readonly #sockets = new Set<Socket>();
+  #port = 0;
+  /** Connections accepted since `start`. What proves a client did, or did not, connect. */
+  connections = 0;
+
+  private constructor(server: TcpServer) {
+    this.#server = server;
+  }
+
+  static async start(): Promise<MuteSshServer> {
+    const server = createServer();
+    const instance = new MuteSshServer(server);
+    server.on('connection', (socket) => {
+      instance.connections += 1;
+      instance.#sockets.add(socket);
+      socket.on('error', () => undefined);
+      socket.on('close', () => {
+        instance.#sockets.delete(socket);
+      });
+      socket.resume();
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      // Port 0 so tests never collide; 127.0.0.1 so nothing leaves the machine.
+      server.listen(0, '127.0.0.1', () => {
+        resolve();
+      });
+    });
+    const at = server.address();
+    instance.#port = typeof at === 'object' && at !== null ? at.port : 0;
+    return instance;
+  }
+
+  get port(): number {
+    return this.#port;
+  }
+
+  get host(): string {
+    return '127.0.0.1';
+  }
+
+  /** Connections open now. */
+  get open(): number {
+    return this.#sockets.size;
+  }
+
+  /**
+   * The connection accepted next, and a promise of its closing — from either end. Ask before
+   * the client connects: a connection already accepted is not the next one.
+   */
+  next(): Promise<{ socket: Socket; closed: Promise<void> }> {
+    return new Promise((resolve) => {
+      this.#server.once('connection', (socket: Socket) => {
+        const closed = new Promise<void>((done) => {
+          if (socket.destroyed) done();
+          else
+            socket.once('close', () => {
+              done();
+            });
+        });
+        resolve({ socket, closed });
+      });
+    });
+  }
+
+  /** Destroys every connection and stops listening. Resolves once the port is free. */
+  async stop(): Promise<void> {
+    for (const socket of this.#sockets) socket.destroy();
+    this.#sockets.clear();
     await new Promise<void>((resolve) => {
       this.#server.close(() => {
         resolve();

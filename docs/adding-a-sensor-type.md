@@ -464,6 +464,7 @@ network — there is no interception layer that a redirect or a framing bug coul
 | `HttpSimulator` | Routes with scripted status, headers, body — and **latency**: `delayMs` (no answer yet), `bodyDelayMs` (head now, body later), `dripMs` (a slow trickle), `hang`, `reset`. A route may be a *sequence*, which is how "fails twice then succeeds" is written. Records every request. |
 | `TestSnmpAgent` | A v1/v2c agent that misbehaves on request: never answers, loses the first datagram, walks *backwards*, returns a subtree with no end. |
 | `TestSshServer` | A real SSH server that refuses a password, presents an unexpected host key, or hangs on a command. |
+| `MuteSshServer` | An SSH port that accepts a connection and never speaks, so the handshake waits out its connect timeout. `next()` hands over the connection accepted next and a promise of its closing. |
 | `smtpServer` / `pop3Server` / `imapServer` | One shared mailbox, so a round trip is a real round trip. Each can refuse at the step that matters. |
 | `sendUdp` / `sendTcp` | A syslog sender: RFC 3164 and 5424, both of RFC 6587's TCP framings, and `splitAt` to break a frame across two packets. |
 | `installFakePowerShell` | A PowerShell that is not PowerShell, for the Windows transport. |

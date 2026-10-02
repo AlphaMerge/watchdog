@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { createHash } from 'node:crypto';
-import { createServer, type Server, type Socket } from 'node:net';
+import { createServer, type Socket } from 'node:net';
 import { SshError, SshSession } from '../src/support/ssh/session.js';
 import { SshSessionPool, withSsh } from '../src/support/ssh/pool.js';
 import { sshCheck } from '../src/support/ssh/check.js';
@@ -12,7 +12,7 @@ import {
   type SshCredentials,
 } from '../src/support/ssh/credentials.js';
 import { fingerprintOf, matchesFingerprint, verifyHostKey } from '../src/support/ssh/host-key.js';
-import { keyPair, TestSshServer } from '@ms/simulators';
+import { keyPair, MuteSshServer, TestSshServer } from '@ms/simulators';
 
 let server: TestSshServer;
 /** Learned from the first connection, so the strict-policy tests have something real to match. */
@@ -390,32 +390,16 @@ describe('reusing connections', () => {
   });
 
   describe('opening behind the target policy’s lookup (A-65)', () => {
-    // A listener that accepts and never speaks: the handshake waits out its whole timeout.
-    let mute: Server;
-    let mutePort = 0;
-    const accepted: Socket[] = [];
+    // A server that accepts and never speaks: the handshake waits out its whole timeout. The
+    // simulator's own (`A-73`), where this file used to stand up a bare listener.
+    let mute: MuteSshServer;
 
     before(async () => {
-      mute = createServer((socket) => {
-        accepted.push(socket);
-        socket.on('error', () => undefined);
-      });
-      await new Promise<void>((resolve) => {
-        mute.listen(0, '127.0.0.1', () => {
-          resolve();
-        });
-      });
-      const at = mute.address();
-      mutePort = typeof at === 'object' && at !== null ? at.port : 0;
+      mute = await MuteSshServer.start();
     });
 
     after(async () => {
-      for (const socket of accepted) socket.destroy();
-      await new Promise<void>((resolve) => {
-        mute.close(() => {
-          resolve();
-        });
-      });
+      await mute.stop();
     });
 
     /** How long an open that cannot succeed took, behind a guard that takes `guardMs`. */
@@ -427,7 +411,7 @@ describe('reusing connections', () => {
           pool.acquire(
             {
               host: '127.0.0.1',
-              port: mutePort,
+              port: mute.port,
               ...(guardMs === null
                 ? {}
                 : {
@@ -493,7 +477,7 @@ describe('reusing connections', () => {
      */
     describe('cancelled while the connection is being opened (A-69)', () => {
       const LONG_MS = 10_000;
-      const mutely = () => ({ host: '127.0.0.1', port: mutePort });
+      const mutely = () => ({ host: '127.0.0.1', port: mute.port });
       const anyKey = () => credentials({ hostKeyPolicy: 'accept-any' });
       const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -515,21 +499,7 @@ describe('reusing connections', () => {
       }
 
       /** The connection the listener accepts next, and a promise of its closing. */
-      function nextAccepted(): Promise<{ socket: Socket; closed: Promise<void> }> {
-        return new Promise((resolve) => {
-          mute.once('connection', (socket: Socket) => {
-            // Read and thrown away, so the far end closing is heard here. A socket nobody
-            // reads holds what it was sent and never reports the end that follows it.
-            socket.resume();
-            const closed = new Promise<void>((done) => {
-              socket.once('close', () => {
-                done();
-              });
-            });
-            resolve({ socket, closed });
-          });
-        });
-      }
+      const nextAccepted = (): Promise<{ socket: Socket; closed: Promise<void> }> => mute.next();
 
       /** How a promise ended and when, without waiting for it here. */
       function watched(promise: Promise<unknown>): { error?: unknown; ended: boolean; at: number } {
@@ -625,7 +595,7 @@ describe('reusing connections', () => {
       });
 
       it('SshSession.open connects to nothing for a signal that is already aborted', async () => {
-        const before = accepted.length;
+        const before = mute.connections;
         await assert.rejects(
           within(
             SshSession.open(mutely(), anyKey(), { connectTimeoutMs: LONG_MS }, AbortSignal.abort()),
@@ -635,7 +605,7 @@ describe('reusing connections', () => {
           cancelled,
         );
         await sleep(150);
-        assert.equal(accepted.length, before, 'no connection was made');
+        assert.equal(mute.connections, before, 'no connection was made');
       });
 
       it('a signal that never aborts changes nothing: the handshake has its timeout', async () => {
@@ -692,7 +662,7 @@ describe('reusing connections', () => {
 
       it('opens nothing for a caller cancelled before it asked', async () => {
         const pool = new SshSessionPool();
-        const before = accepted.length;
+        const before = mute.connections;
         let asked = 0;
         try {
           await assert.rejects(
@@ -716,7 +686,7 @@ describe('reusing connections', () => {
           );
           await sleep(150);
           assert.equal(asked, 0, 'the target policy was not asked');
-          assert.equal(accepted.length, before, 'and no connection was made');
+          assert.equal(mute.connections, before, 'and no connection was made');
         } finally {
           pool.closeAll();
         }
@@ -799,7 +769,7 @@ describe('reusing connections', () => {
       it('a lookup that is still going ends with the last caller too', async () => {
         const pool = new SshSessionPool();
         const controller = new AbortController();
-        const before = accepted.length;
+        const before = mute.connections;
         let abandoned = false;
         try {
           const lease = pool.acquire(
@@ -825,7 +795,7 @@ describe('reusing connections', () => {
           await assert.rejects(within(lease, 2_000, 'the acquire ending'), cancelled);
           assert.equal(abandoned, true);
           await sleep(100);
-          assert.equal(accepted.length, before, 'no connection was made');
+          assert.equal(mute.connections, before, 'no connection was made');
         } finally {
           pool.closeAll();
         }
@@ -933,7 +903,7 @@ describe('reusing connections', () => {
           {
             sensorId: 69,
             target: { host: '127.0.0.1', ipVersion: 'auto' },
-            params: { port: mutePort, connectTimeoutMs: LONG_MS },
+            params: { port: mute.port, connectTimeoutMs: LONG_MS },
             credentials: { ssh: { username: 'u', password: 'p', hostKeyPolicy: 'accept-any' } },
             signal: controller.signal,
           },
@@ -945,6 +915,116 @@ describe('reusing connections', () => {
         await assert.rejects(within(check, 2_000, 'the check ending'), cancelled);
         await within(closed, 2_000, 'the socket closing at the listener');
         assert.ok(performance.now() - startedAt < 5_000);
+      });
+
+      it('a caller arriving as an open is abandoned starts its own, and is not told it was cancelled (A-73)', async () => {
+        // The last waiter's abort ends the handshake a few turns later. Until then the open was
+        // still there to be joined, and whoever joined it was told its own check was cancelled.
+        const pool = new SshSessionPool();
+        const first = new AbortController();
+        const options = { connectTimeoutMs: 1_200 };
+        const before = mute.connections;
+        try {
+          const arriving = nextAccepted();
+          const one = watched(pool.acquire(mutely(), anyKey(), options, first.signal));
+          const { closed } = await within(arriving, 5_000, 'the listener accepting');
+
+          const again = nextAccepted();
+          first.abort();
+          // The same turn: the abandoned handshake has not ended yet.
+          const startedAt = performance.now();
+          const second = pool.acquire(mutely(), anyKey(), options);
+          const two = watched(second);
+          assert.equal(pool.stats().joined, 0, 'it joined an open nobody was waiting for');
+          await within(again, 5_000, 'a connection of its own');
+          await within(closed, 2_000, 'the abandoned connection closing');
+          assert.ok(one.ended && cancelled(one.error));
+
+          // **The abandoned open's ending touches only itself.** It has ended by now, and the
+          // open that replaced it is still the one a third caller finds and joins.
+          await sleep(150);
+          assert.equal(two.ended, false, 'ended with the open it did not join');
+          const three = watched(pool.acquire(mutely(), anyKey(), options));
+          assert.equal(pool.stats().joined, 1, 'the open that replaced it was forgotten');
+
+          // Its own handshake, to its own timeout, saying what happened to it.
+          await assert.rejects(
+            within(second, 5_000, 'the second caller’s open'),
+            /could not connect to 127\.0\.0\.1/,
+          );
+          assert.ok(two.at - startedAt >= 1_100, 'not early');
+          await sleep(20);
+          assert.match(String(three.error), /could not connect to 127\.0\.0\.1/);
+          assert.equal(mute.connections - before, 2, 'one connection for each open, and no third');
+        } finally {
+          pool.closeAll();
+        }
+      });
+
+      it('closeAll ends an open in flight: its caller is told, the socket goes, nothing is kept (A-73)', async () => {
+        const pool = new SshSessionPool();
+        const before = mute.connections;
+        const arriving = nextAccepted();
+        const options = { connectTimeoutMs: LONG_MS };
+        const startedAt = performance.now();
+        const lease = pool.acquire(mutely(), anyKey(), options);
+        const joined = pool.acquire(mutely(), anyKey(), options, new AbortController().signal);
+        const seen = [watched(lease), watched(joined)];
+        const { closed } = await within(arriving, 5_000, 'the listener accepting');
+
+        pool.closeAll();
+        await assert.rejects(within(lease, 2_000, 'the acquire ending'), cancelled);
+        await assert.rejects(within(joined, 2_000, 'the joined acquire ending'), cancelled);
+        await within(closed, 2_000, 'the socket closing at the listener');
+        assert.ok(
+          seen.every((one) => one.at - startedAt < 5_000),
+          'long before the timeout',
+        );
+        await sleep(50);
+        const stats = pool.stats();
+        assert.deepEqual(
+          { connections: stats.connections, opened: stats.opened, inUse: stats.inUse },
+          { connections: 0, opened: 0, inUse: 0 },
+        );
+
+        // The pool is not left holding the open: the next caller makes a connection of its own.
+        const again = nextAccepted();
+        const next = pool.acquire(mutely(), anyKey(), { connectTimeoutMs: 300 });
+        watched(next);
+        await within(again, 5_000, 'a new connection');
+        await assert.rejects(within(next, 3_000, 'the new open'), /could not connect/);
+        assert.equal(pool.stats().joined, 1, 'only the one that joined before the close');
+        assert.equal(mute.connections - before, 2);
+        pool.closeAll();
+      });
+
+      it('closeAll during the lookup leaves no connection behind in a pool nobody will close (A-73)', async () => {
+        // Against the real server: the lookup ignores its signal and answers after the pool
+        // was closed. The handshake that followed used to succeed and be recorded.
+        const pool = new SshSessionPool({ idleMs: 60_000 });
+        const connectionsBefore = server.connections;
+        const lease = pool.acquire(
+          {
+            ...target(),
+            guard: async () => {
+              await sleep(250);
+              return undefined;
+            },
+          },
+          credentials(),
+          { connectTimeoutMs: 5_000 },
+        );
+        watched(lease);
+        await sleep(50);
+        pool.closeAll();
+        await assert.rejects(within(lease, 2_000, 'the acquire ending'), cancelled);
+        await sleep(500);
+        assert.equal(server.connections - connectionsBefore, 0, 'a handshake was made after all');
+        const stats = pool.stats();
+        assert.deepEqual(
+          { connections: stats.connections, opened: stats.opened },
+          { connections: 0, opened: 0 },
+        );
       });
     });
   });

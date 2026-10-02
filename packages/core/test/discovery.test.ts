@@ -525,14 +525,28 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
 
     it('keeps a field it does not know about, because a newer probe may send one', async () => {
       // The column is jsonb and the shape grows. Dropping an unrecognised field would lose
-      // information a later release knows how to read.
+      // information a later release knows how to read. **A word, a number or a line of it**
+      // (`A-73`): a nested value, or a long one, is not stored at whatever size it arrived.
       const run = await sweptAndFound(['10.0.0.1']);
       await discovery.identified(probeId, run.id, 1, [
-        fingerprint('10.0.0.1', { somethingNewer: { model: 'X99' } }),
+        fingerprint('10.0.0.1', {
+          somethingNewer: 'X99',
+          rackUnits: 2,
+          nested: { model: 'x'.repeat(200_000) },
+          long: 'y'.repeat(200_000),
+        }),
       ]);
-      const stored = (await discovery.hosts(run.id))[0]?.fingerprint as
-        Record<string, unknown> | null | undefined;
-      assert.deepEqual(stored?.['somethingNewer'], { model: 'X99' });
+      const rows = await db.query<{ fingerprint: Record<string, unknown>; size: number }>(
+        `SELECT fingerprint, length(fingerprint::text)::int AS size
+         FROM discovery_host WHERE run_id = $1`,
+        [run.id],
+      );
+      const stored = rows[0]?.fingerprint;
+      assert.equal(stored?.['somethingNewer'], 'X99');
+      assert.equal(stored['rackUnits'], 2);
+      assert.equal(stored['nested'], undefined);
+      assert.equal(stored['long'], 'y'.repeat(500));
+      assert.ok((rows[0]?.size ?? 0) < 2_000, `stored ${String(rows[0]?.size)} characters`);
     });
 
     it('makes a replayed fingerprint free, as the sweep does for a replayed host', async () => {
@@ -1103,6 +1117,10 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
         ports: [{ port: 22, transport: 'tcp', banner: `SSH-2.0\r\n${'b'.repeat(900)}` }],
         sysName: `sw-01\n${'n'.repeat(900)}`,
         evidence: ['e'.repeat(900)],
+        // Written before a vendor was bounded (`A-69`), and before a field this build does not
+        // know was (`A-73`).
+        vendor: `Acme\r\nNetworks ${'v'.repeat(300_000)}`,
+        legacy: { deep: 'x'.repeat(5_000) },
       };
       await db.query(`UPDATE discovery_host SET fingerprint = $2::jsonb WHERE run_id = $1`, [
         run.id,
@@ -1120,15 +1138,23 @@ describe('discovery runs', { skip: available ? false : 'no database' }, () => {
       assert.equal(host?.fingerprint?.sysName, `sw-01 ${'n'.repeat(249)}`);
       assert.equal(host.fingerprint.ports[0]?.banner, `SSH-2.0 ${'b'.repeat(192)}`);
       assert.deepEqual(host.fingerprint.evidence, ['e'.repeat(500)]);
-      await discovery.summary(run.id);
+      assert.equal(host.fingerprint.vendor, `Acme Networks ${'v'.repeat(86)}`);
+      assert.equal((host.fingerprint as unknown as Record<string, unknown>)['legacy'], undefined);
+      // **The summary reads the stored row and not through the check** (`A-73`), and showed the
+      // vendor as it was written: three hundred thousand characters in a breakdown. It is the
+      // line the host's own read gives.
+      const summary = await discovery.summary(run.id);
+      assert.deepEqual(summary?.found.byVendor, [
+        { vendor: `Acme Networks ${'v'.repeat(86)}`, count: 1 },
+      ]);
       // The row is as it was written: a read bounds what it hands on and rewrites nothing.
       assert.deepEqual(await stored(), old);
     });
 
     it('offers identification only dotted quads, whatever a probe said it found (A-69)', async () => {
-      // `identify-start` takes IPv4 and nothing else. `sweep-progress` is held only to a length
-      // and the column is `inet`, so a probe that is not ours can have left an IPv6 row; here
-      // one is written as such a probe's report would be. It is never offered: a frame carrying
+      // `identify-start` takes IPv4 and nothing else. Until `A-73` `sweep-progress` was held
+      // only to a length and the column is `inet`, so a probe that is not ours can have left an
+      // earlier build an IPv6 row; here one is written as that report was. It is never offered: a frame carrying
       // it would be refused by the probe it was sent to.
       sent = [];
       const run = await start();
