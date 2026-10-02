@@ -247,6 +247,9 @@ export class ProbeHealthReporter {
             trapReceived: trap.received,
             trapRejected: trap.rejected,
             trapMalformed: trap.malformed,
+            // `B-14`: received, and overwritten in the buffer before a sensor read it. Sent only
+            // to a core at protocol 26, as the syslog one below is.
+            trapOverwritten: trap.overwrittenUnread,
           }),
       ...(syslog === undefined
         ? {}
@@ -254,6 +257,7 @@ export class ProbeHealthReporter {
             syslogReceived: syslog.received,
             syslogRejected: syslog.rejected,
             syslogMalformed: syslog.malformed,
+            syslogOverwritten: syslog.overwrittenUnread,
           }),
       ...(flows === undefined
         ? {}

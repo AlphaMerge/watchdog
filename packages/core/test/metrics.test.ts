@@ -378,6 +378,22 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       assert.equal(without.has(`ms_probe_flows_overwritten_total${label}`), false);
     });
 
+    it('exports what the trap and syslog buffers overwrote unread, each as its own series', async () => {
+      // `B-14`. Beside `ms_probe_flows_overwritten_total`; a probe that sent neither has neither.
+      const label = `{probe="${String(probeId)}"}`;
+      const lossy = (): ProbeLink => ({
+        ...connected,
+        health: { ...connected.health, trapOverwritten: 1_300, syslogOverwritten: 75 },
+      });
+      const metrics = parse((await varying(lossy).scrape()).body);
+      assert.equal(metrics.get(`ms_probe_traps_overwritten_total${label}`), 1_300);
+      assert.equal(metrics.get(`ms_probe_syslog_overwritten_total${label}`), 75);
+
+      const without = parse((await varying(() => connected).scrape()).body);
+      assert.equal(without.has(`ms_probe_traps_overwritten_total${label}`), false);
+      assert.equal(without.has(`ms_probe_syslog_overwritten_total${label}`), false);
+    });
+
     it('still omits a counter the probe did not report at all', async () => {
       // The other half. A probe that is gone reports nothing, and nothing is not zero.
       const metrics = parse((await varying(() => ({ connected: false })).scrape()).body);

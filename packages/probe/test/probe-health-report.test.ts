@@ -317,7 +317,10 @@ describe('the probe’s own health report', () => {
         malformed: 3,
         buffered: 20_000,
         cursors: 2,
+        // Different, and the larger is the one that is not sent: everything the buffer gave up,
+        // against what it gave up unread (`B-14`).
         overwritten: 8_000_000,
+        overwrittenUnread: 1_300,
       }),
       syslogListener: () => ({
         running: true,
@@ -326,10 +329,17 @@ describe('the probe’s own health report', () => {
         malformed: 17,
         buffered: 20_000,
         cursors: 1,
-        overwritten: 0,
+        overwritten: 20_000,
+        overwrittenUnread: 75,
       }),
     }).report();
 
+    assert.equal(
+      report.trapOverwritten,
+      1_300,
+      'what was lost unread, not all that was overwritten',
+    );
+    assert.equal(report.syslogOverwritten, 75, 'and each listener’s own');
     assert.equal(report.trapReceived, 900);
     assert.equal(report.trapRejected, 412, 'the number that turns "reads zero" into a diagnosis');
     assert.equal(report.trapMalformed, 3);

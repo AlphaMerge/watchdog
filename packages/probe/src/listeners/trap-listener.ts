@@ -54,8 +54,17 @@ export interface TrapListenerStats {
   readonly malformed: number;
   readonly buffered: number;
   readonly cursors: number;
-  /** Notifications overwritten in the ring. Not per sensor — see `drain`. */
+  /**
+   * Every notification the ring gave up for a newer one, read or not. Not per sensor — see
+   * `drain` — and ordinary on a buffer that has filled once.
+   */
   readonly overwritten: number;
+  /**
+   * Notifications the ring overwrote before a sensor that was following it had read them
+   * (`B-14`): received and counted, and lost to `bufferSize`. Once a notification however many
+   * sensors were behind, and nothing while no trap sensor is assigned. Since the listener started.
+   */
+  readonly overwrittenUnread: number;
 }
 
 export class TrapListener {
@@ -150,6 +159,7 @@ export class TrapListener {
       buffered: this.#ring.buffered,
       cursors: this.#ring.cursors,
       overwritten: this.#ring.overwritten,
+      overwrittenUnread: this.#ring.unread,
     };
   }
 

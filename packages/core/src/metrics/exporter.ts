@@ -379,6 +379,12 @@ const PROBE_METRICS: readonly Metric[] = [
     counter: true,
   },
   {
+    key: 'trapOverwritten',
+    name: 'ms_probe_traps_overwritten_total',
+    help: 'SNMP traps this probe received and its buffer overwrote before a sensor read them.',
+    counter: true,
+  },
+  {
     key: 'syslogReceived',
     name: 'ms_probe_syslog_received_total',
     help: 'Syslog messages this probe’s listener accepted.',
@@ -388,6 +394,12 @@ const PROBE_METRICS: readonly Metric[] = [
     key: 'syslogRejected',
     name: 'ms_probe_syslog_rejected_total',
     help: 'Syslog messages turned away because their sender is not in the accept list.',
+    counter: true,
+  },
+  {
+    key: 'syslogOverwritten',
+    name: 'ms_probe_syslog_overwritten_total',
+    help: 'Syslog messages this probe received and its buffer overwrote before a sensor read them.',
     counter: true,
   },
   {

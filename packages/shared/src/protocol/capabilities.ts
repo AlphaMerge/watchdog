@@ -140,6 +140,13 @@ export interface ProbeCapabilities {
    * still gets the five counters it knows; the channel gaps.
    */
   flowOverwritten: boolean;
+  /**
+   * Reports what its trap listener and its syslog listener each overwrote in the buffer before
+   * a sensor read it (`B-14`). Two fields, `trapOverwritten` and `syslogOverwritten`, under one
+   * capability because they arrive in one version and leave together: the health report is
+   * stripped a capability at a time, and no core knows one of the two and not the other.
+   */
+  listenerOverwritten: boolean;
 }
 
 /**
@@ -167,6 +174,7 @@ const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
   ['flowCounters', 23],
   ['credentialAddressPinning', 24],
   ['flowOverwritten', 25],
+  ['listenerOverwritten', 26],
 ];
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -190,6 +198,8 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
     'check a named device against the addresses its credentials allow, and connect to the ' +
     'address it checked',
   flowOverwritten: 'report the flows its collector overwrote before a sensor read them',
+  listenerOverwritten:
+    'report the traps and syslog messages its listeners overwrote before a sensor read them',
 };
 
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
@@ -212,6 +222,7 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     flowCounters: has(23),
     credentialAddressPinning: has(24),
     flowOverwritten: has(25),
+    listenerOverwritten: has(26),
   };
 }
 
@@ -228,6 +239,10 @@ export function healthForPeer(health: ProbeHealthReport, peerVersion: number): P
   let sent = health;
   // Newest first; each capability's fields are stripped on their own, so a peer one version
   // behind loses only that version's.
+  if (!capabilities.listenerOverwritten) {
+    const { trapOverwritten: _traps, syslogOverwritten: _syslog, ...older } = sent;
+    sent = older;
+  }
   if (!capabilities.flowOverwritten) {
     const { flowOverwritten: _overwritten, ...older } = sent;
     sent = older;

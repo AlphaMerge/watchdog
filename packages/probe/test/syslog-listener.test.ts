@@ -99,6 +99,50 @@ describe('syslog listener', () => {
     await listener.stop();
   });
 
+  it('counts what was overwritten unread apart from everything that was overwritten (`B-14`)', async () => {
+    // The number Probe Health carries. `overwritten` rises with every message on a buffer that
+    // has filled once, nearly always for one every sensor had read; this is what a sensor lost.
+    const { listener, send } = listenerOf({ bufferSize: 4 });
+    await listener.start();
+    listener.drain(1);
+    for (let at = 0; at < 4; at += 1) send(line(`read ${String(at)}`));
+    assert.equal(listener.drain(1).items.length, 4);
+    for (let at = 0; at < 4; at += 1) send(line(`kept up ${String(at)}`));
+    assert.equal(listener.stats().overwritten, 4, 'four did leave the buffer');
+    assert.equal(listener.stats().overwrittenUnread, 0, 'and all four had been read');
+
+    // Read again, and then ten with no scan among them: the first four push out the four just
+    // read, and the other six push out six of themselves.
+    assert.equal(listener.drain(1).items.length, 4);
+    for (let at = 0; at < 10; at += 1) send(line(`flood ${String(at)}`));
+    assert.equal(listener.stats().overwritten, 14);
+    assert.equal(listener.stats().overwrittenUnread, 6);
+    assert.equal(listener.drain(1).dropped, 6, 'the same six, from the sensor’s side');
+    await listener.stop();
+  });
+
+  it('counts a message once however many sensors were behind, and none with no sensor (`B-14`)', async () => {
+    const { listener, send } = listenerOf({ bufferSize: 4 });
+    await listener.start();
+    for (let at = 0; at < 10; at += 1) send(line(`unwatched ${String(at)}`));
+    assert.equal(listener.stats().overwritten, 6);
+    assert.equal(listener.stats().overwrittenUnread, 0, 'nobody was waiting for them');
+
+    listener.drain(1);
+    listener.drain(2);
+    for (let at = 0; at < 7; at += 1) send(line(`watched ${String(at)}`));
+    assert.equal(listener.stats().overwrittenUnread, 3, 'three lost, not three for each sensor');
+    await listener.stop();
+
+    // A sender that is turned away never reaches the buffer, so it overwrites nothing.
+    const strict = listenerOf({ bufferSize: 4, senders: ['10.0.0.1'] });
+    await strict.listener.start();
+    strict.listener.drain(1);
+    for (let at = 0; at < 10; at += 1) strict.send(line('refused'), '10.9.9.9');
+    assert.equal(strict.listener.stats().overwrittenUnread, 0);
+    await strict.listener.stop();
+  });
+
   it('turns a message into a notification the sensor can filter on', async () => {
     const { listener, send } = listenerOf();
     await listener.start();

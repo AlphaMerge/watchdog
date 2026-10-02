@@ -41,6 +41,12 @@ import { AppError } from '../errors/app-error.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
+ * Version 26 adds `trapOverwritten` and `syslogOverwritten` (`B-14`): what the trap and the
+ * syslog listener each received and overwrote in its buffer before a sensor had read it, running
+ * totals since the listener started, as 25's is for flows. Two new fields in a closed schema
+ * under one capability, `listenerOverwritten`: a core below 26 is sent neither, and a probe below
+ * 26 sends neither and both channels gap.
+ *
  * Version 25 adds `flowOverwritten` (`B-11`): flow records the probe's collector received and
  * its buffer overwrote before a sensor had read them, a running total since the collector
  * started, as `flowMissed` is. A new field in a closed schema, so gated and stripped like 23's:
@@ -119,7 +125,7 @@ import { AppError } from '../errors/app-error.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 25;
+export const PROTOCOL_VERSION = 26;
 
 /**
  * The oldest peer version this build still understands.
@@ -513,6 +519,17 @@ export interface ProbeHealthReport {
   syslogReceived?: number;
   syslogRejected?: number;
   syslogMalformed?: number;
+  /**
+   * Notifications and messages a listener received and its buffer overwrote before a sensor that
+   * was following the buffer had read them (`B-14`). Sent only to a core at protocol 26.
+   *
+   * **Each listener's own backpressure**, as `flowOverwritten` is the flow collector's: what
+   * arrived, was counted in `received`, and was lost to `bufferSize`. A running total since the
+   * listener started, counted once a record however many sensors were behind it, and zero while
+   * no sensor of that kind is assigned. Each absent with the listener it belongs to.
+   */
+  trapOverwritten?: number;
+  syslogOverwritten?: number;
   /**
    * The flow collector's counters (`B-02`), absent unless this probe runs it — and sent only to a
    * core at protocol 23 (`B-07`), where `healthForPeer` leaves them in.
@@ -946,6 +963,8 @@ const PROBE_HEALTH_SCHEMA = {
     syslogReceived: { type: 'integer', minimum: 0 },
     syslogRejected: { type: 'integer', minimum: 0 },
     syslogMalformed: { type: 'integer', minimum: 0 },
+    trapOverwritten: { type: 'integer', minimum: 0 },
+    syslogOverwritten: { type: 'integer', minimum: 0 },
     flowReceived: { type: 'integer', minimum: 0 },
     flowRejected: { type: 'integer', minimum: 0 },
     flowMalformed: { type: 'integer', minimum: 0 },

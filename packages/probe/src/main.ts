@@ -515,6 +515,8 @@ async function main(): Promise<void> {
     // Only when this probe runs that listener. What the channels are for is `rejected`: a device
     // sending the wrong community has every message dropped before the ring, so the sensor reads
     // a quiet network rather than a receiver turning everything away (`P-64`).
+    // What each listener's buffer overwrote before a sensor read it goes only to a core at
+    // protocol 26 (`B-14`); the rest of what they count has been sent since `P-64`.
     ...(trapListener === undefined ? {} : { trapListener: () => trapListener.stats() }),
     ...(syslogListener === undefined ? {} : { syslogListener: () => syslogListener.stats() }),
     // `flowMissed` is the one with no equivalent above: what the exporter says it sent and this

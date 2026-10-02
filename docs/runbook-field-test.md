@@ -123,6 +123,15 @@ takes a threshold trigger with an explicit value, because nothing else will make
 this list yourself: check `docs/sensor-reference.md` for whether it has a limit before assuming a
 state trigger will ever see it.
 
+`trapOverwritten` and `syslogOverwritten` on Probe Health are two of those: neither has a limit,
+and both need the probe and the core at protocol 26. Each counts what that listener received and
+its buffer overwrote before a trap or syslog sensor read it, so a number above zero is
+`trapListener.bufferSize` or `syslogListener.bufferSize` too small for what real devices send,
+not the network. A trigger on either is optional — a syslog sensor that was behind fails that
+scan and says how many it lost, and so does a trap sensor unless that was switched off on it —
+but a week of real devices is the first time either buffer meets a real flood, so read both at
+each of the three readings below.
+
 ### If the build carries flow monitoring (Phase 11)
 
 The v1 candidate does not, so skip this section when testing it.

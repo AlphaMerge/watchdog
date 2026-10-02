@@ -52,6 +52,7 @@ describe('what a protocol version can do', () => {
       flowCounters: false,
       credentialAddressPinning: false,
       flowOverwritten: false,
+      listenerOverwritten: false,
     });
   });
 
@@ -225,9 +226,13 @@ describe('the health a peer can be sent', () => {
     flowMissed: 61,
     flowUndecodable: 7,
     flowOverwritten: 250,
+    trapOverwritten: 1_300,
+    syslogOverwritten: 75,
   };
-  /** `health` as a core at 23 or 24 is sent it: everything but 25's one field (`B-11`). */
-  const { flowOverwritten: _overwritten, ...withoutOverwritten } = health;
+  /** `health` as a core at 25 is sent it: everything but 26's two fields (`B-14`). */
+  const { trapOverwritten: _traps, syslogOverwritten: _syslog, ...withoutListeners } = health;
+  /** `health` as a core at 23 or 24 is sent it: that, less 25's one field (`B-11`). */
+  const { flowOverwritten: _overwritten, ...withoutOverwritten } = withoutListeners;
   /** `health` as a core at 21 or 22 is sent it: that, less 23's flow counters (`B-07`). */
   const {
     flowReceived: _received,
@@ -341,8 +346,62 @@ describe('the health a peer can be sent', () => {
     assert.equal(read(1.5), undefined);
   });
 
+  it('leaves what the trap and syslog buffers overwrote out for a core at 25, and keeps 25’s field', () => {
+    // `B-14`, stripped on its own: a core at 25 knows `flowOverwritten` and neither of these.
+    for (const version of [16, 22, 24, 25]) {
+      const sent = healthForPeer(health, version);
+      for (const field of ['trapOverwritten', 'syslogOverwritten']) {
+        assert.equal(field in sent, false, `${field} sent to a core at ${String(version)}`);
+      }
+    }
+    assert.deepEqual(healthForPeer(health, 25), withoutListeners);
+    assert.equal(healthForPeer(health, 25).flowOverwritten, 250);
+    assert.equal(healthForPeer(health, 26).trapOverwritten, 1_300);
+    assert.equal(healthForPeer(health, 26).syslogOverwritten, 75);
+  });
+
+  it('strips each of the two from a report that carries nothing else gated', () => {
+    // Not a side effect of another field going, and neither one rides on the other: a probe
+    // running one listener sends one of them.
+    assert.deepEqual(healthForPeer({ memoryMb: 1, trapOverwritten: 9 }, 25), { memoryMb: 1 });
+    assert.deepEqual(healthForPeer({ memoryMb: 1, syslogOverwritten: 9 }, 25), { memoryMb: 1 });
+    assert.deepEqual(healthForPeer({ memoryMb: 1, trapOverwritten: 9 }, 26), {
+      memoryMb: 1,
+      trapOverwritten: 9,
+    });
+    assert.deepEqual(healthForPeer({ memoryMb: 1, syslogOverwritten: 9 }, 26), {
+      memoryMb: 1,
+      syslogOverwritten: 9,
+    });
+  });
+
+  it('knows both listener fields in this build’s health schema, as counts', () => {
+    // The other end of the gate: a core at 26 is sent them, so its schema must take them.
+    for (const field of ['trapOverwritten', 'syslogOverwritten'] as const) {
+      const read = (sent: unknown): unknown => {
+        const parsed = parseProbeToCore({
+          type: 'heartbeat',
+          seq: 1,
+          sentAt: 'now',
+          health: { memoryMb: 12, [field]: sent },
+        });
+        if (parsed.type !== 'heartbeat') return 'not a heartbeat';
+        // The heartbeat is kept whatever the count is, with the rest of its health (`P-224`).
+        assert.equal(parsed.health?.memoryMb, 12, `${field} cost the heartbeat its health`);
+        return parsed.health[field];
+      };
+      assert.equal(read(1_300), 1_300, field);
+      assert.equal(read(0), 0, field);
+      // A value no count can be is a gap on the channel.
+      assert.equal(read(-1), undefined, field);
+      assert.equal(read(1.5), undefined, field);
+      assert.equal(read('7'), undefined, field);
+    }
+  });
+
   it('sends everything to a core that knows it', () => {
-    assert.deepEqual(healthForPeer(health, 25), health);
+    assert.equal(PROTOCOL_VERSION, 26);
+    assert.deepEqual(healthForPeer(health, 26), health);
     assert.deepEqual(healthForPeer(health, PROTOCOL_VERSION), health);
   });
 
@@ -371,6 +430,9 @@ describe('the health a peer can be sent', () => {
       flowUndecodable: 23,
       // `B-11`: a new field, at the version that adds it.
       flowOverwritten: 25,
+      // `B-14`: two new fields, at the version that adds them.
+      trapOverwritten: 26,
+      syslogOverwritten: 26,
     };
     // The rest predate `P-178`, and a core older than that refuses a newer probe at the handshake,
     // in words, so it is never sent a heartbeat at all. Pinned by count, so that a new field is
@@ -427,6 +489,15 @@ describe('the health a peer can be sent', () => {
     assert.ok(
       missingCapabilities(24).includes(
         'report the flows its collector overwrote before a sensor read them',
+      ),
+    );
+    // `B-14`: two health fields under one capability, stripped below 26.
+    assert.equal(versionFor('listenerOverwritten'), 26);
+    assert.equal(capabilitiesFor(25).listenerOverwritten, false);
+    assert.equal(capabilitiesFor(26).listenerOverwritten, true);
+    assert.ok(
+      missingCapabilities(25).includes(
+        'report the traps and syslog messages its listeners overwrote before a sensor read them',
       ),
     );
     assert.ok(

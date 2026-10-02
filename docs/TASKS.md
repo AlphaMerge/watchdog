@@ -21318,12 +21318,67 @@ analysis". `F-` is Phase 0.
       Deciding between the two needs a capture from a multi-engine chassis, which the field
       test has not had.
 
-- [ ] **B-14 — trap and syslog buffers that overwrite unread messages are not on Probe Health**
+- [x] **B-14 — trap and syslog buffers that overwrite unread messages are not on Probe Health**
       · S · B-11 · Found 2026-10-02 by `B-11`. They share `NotificationRing`, which now counts
       a record overwritten before any sensor read it; only the flow collector's count reaches
       the heartbeat. **Done when** each listener's count is a Probe Health channel behind a
       capability, as `flowOverwritten` is, with no limit on it, and a probe-level test
       overflows each buffer and reads the number.
+
+      **Done 2026-10-02.** Both listeners' stats gain `overwrittenUnread`, the ring's `unread`
+      that `B-11` added, and the reporter sends each as `trapOverwritten` and
+      `syslogOverwritten`: running totals since the listener started, recorded by the core as
+      rates. Each is absent with its listener, so a probe running one sends one.
+
+      **One capability, `listenerOverwritten`, protocol 26.** The health report is stripped a
+      capability at a time and a capability may own several fields, as `flowCounters` owns
+      five; the two arrive in one version and no core knows one without the other, so two
+      capabilities would be two names for one gate. `healthForPeer` strips the pair below 26 on
+      its own, so a core at 25 keeps `flowOverwritten` and everything older.
+      `PROTOCOL_VERSION` is 26. A count that is negative, fractional or not a number gaps that
+      one field and the heartbeat and the rest of its health are kept (`P-224`); the test
+      checks the heartbeat's other field survives, not only that the bad one is gone.
+
+      **Two channels and nothing else, so alarm volume is unchanged.** No limit, no lookup, no
+      state: a syslog sensor that was behind already fails that scan with the count, and so
+      does a trap sensor unless `warnOnDropped` is off on it, so a limit here would be a second
+      alarm for the same buffer. No scenario test for that reason. `health-types.test.ts` pins
+      both declarations whole. `ms_probe_traps_overwritten_total` and
+      `ms_probe_syslog_overwritten_total` sit beside the flow one. The stop lines carry
+      `overwrittenUnread` beside `overwritten`. `docs/sensor-reference.md` is regenerated;
+      `docs/administration.md` has the row and the version paragraph, the runbook a paragraph.
+
+      **At the probe, `probe-listeners.test.ts`** starts `ms-probe` with all three listeners
+      and buffers of 100. *Syslog over TCP, in one turn*: six messages read, then 150 in one
+      write — the scan fails naming 50, the heartbeat reads `syslogOverwritten` 50 where 56
+      left the buffer, and 50 again after one more message overwrote a read one. *Traps cannot
+      be one turn* — a trap is a datagram — so the trap sensor runs with `warnOnDropped` off
+      and reports `dropped` scan by scan: after six read and a burst of 400, the heartbeat's
+      `trapOverwritten` equals the sum of what the scans said they lost, wherever they fell,
+      and is between 100 and 300. Each count is checked not to move the other's or
+      `flowOverwritten`. A reconnect to a core at 25 gets the older listener counters and
+      `flowOverwritten` and neither new field. A second case runs syslog alone and reads no
+      trap field. Every wait has its own 60 s bound under the case's 300 s. The trap is
+      rendered as BER in the test, since `net-snmp` stays inside `@ms/sensors`.
+
+      **Elsewhere.** Two cases each in `trap-listener.test.ts` and `syslog-listener.test.ts`
+      (unread apart from overwritten; once a message, none with no sensor, none for a rejected
+      sender); the reporter sends 1,300 of 8,000,000 and 75 of 20,000; `capabilities.test.ts`
+      for the strip at 25, each field alone, the schema, the table and `SINCE`; the core's
+      reading, its zero and its gap; the two Prometheus series and their absence.
+      **Mutations 25/25**: each listener and the reporter sending every overwrite (the
+      reporter's twice more against the probe case alone), the trap listener sending nothing
+      and the reporter crossing the two (probe case alone), the core crossing the fields and
+      reading a gap as zero, the capability and its table entry at 25, the strip removed (again
+      against the probe case alone), inverted, and leaving either field in, the trap field out
+      of the schema, a negative count kept, the version left at 25 (again against the probe
+      case alone), a channel given a lookup and one made a gauge, and each metric reading the
+      wrong channel.
+
+      **Not done.** `docs/administration.md`'s Probe Health table has no rows for the six
+      older trap and syslog channels (`trapReceived` and the rest); the new row stands alone.
+      `trapMalformed`, `syslogMalformed` and `flowMalformed` have no Prometheus series. The web
+      UI shows the two channels as it shows any other.
 
 ## Phase 12 — Maps and dashboards (`V2-02`)
 

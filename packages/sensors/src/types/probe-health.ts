@@ -228,6 +228,24 @@ const CHANNELS: readonly ChannelDef[] = [
   { key: 'syslogReceived', name: 'Syslog received', unit: 'messages', counter: { bits: 64 } },
   { key: 'syslogRejected', name: 'Syslog rejected', unit: 'messages', counter: { bits: 64 } },
   { key: 'syslogMalformed', name: 'Syslog malformed', unit: 'messages', counter: { bits: 64 } },
+  // **Each listener's buffer (`B-14`), and no limit on either.** What arrived, was counted above
+  // as received, and was overwritten before a sensor following the buffer had read it. The trap
+  // or syslog sensor that was behind already fails that scan with the number, so a limit here
+  // would be a second alarm for the one event; this is where an operator watching the probe sees
+  // that `bufferSize` is too small, and which probe. `flowOverwritten` below is the same for the
+  // flow collector.
+  {
+    key: 'trapOverwritten',
+    name: 'Traps overwritten unread',
+    unit: 'traps',
+    counter: { bits: 64 },
+  },
+  {
+    key: 'syslogOverwritten',
+    name: 'Syslog overwritten unread',
+    unit: 'messages',
+    counter: { bits: 64 },
+  },
   // **The flow collector (`B-02`), and one of these is unlike everything else on this sensor.**
   // `flowMissed` counts what did *not* arrive — read out of the exporter's own running sequence,
   // which is the only evidence there is, because UDP drops silently. Without it a collector losing

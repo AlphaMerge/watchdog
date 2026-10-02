@@ -52,7 +52,14 @@ export interface SyslogListenerStats {
   readonly malformed: number;
   readonly buffered: number;
   readonly cursors: number;
+  /** Every message the buffer gave up for a newer one, read or not. Ordinary on a full buffer. */
   readonly overwritten: number;
+  /**
+   * Messages the buffer overwrote before a sensor that was following it had read them (`B-14`):
+   * received and counted, and lost to `bufferSize`. Once a message however many sensors were
+   * behind, and nothing while no syslog sensor is assigned. Since the listener started.
+   */
+  readonly overwrittenUnread: number;
 }
 
 export class SyslogListener {
@@ -141,6 +148,7 @@ export class SyslogListener {
       buffered: this.#ring.buffered,
       cursors: this.#ring.cursors,
       overwritten: this.#ring.overwritten,
+      overwrittenUnread: this.#ring.unread,
     };
   }
 

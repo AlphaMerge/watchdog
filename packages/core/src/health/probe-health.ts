@@ -369,6 +369,10 @@ export class ProbeHealthService {
       syslogReceived: health?.syslogReceived ?? null,
       syslogRejected: health?.syslogRejected ?? null,
       syslogMalformed: health?.syslogMalformed ?? null,
+      // `B-14`. A gap for no listener and for either end below protocol 26, never a zero that
+      // reads as a buffer that lost nothing.
+      trapOverwritten: health?.trapOverwritten ?? null,
+      syslogOverwritten: health?.syslogOverwritten ?? null,
       flowReceived: health?.flowReceived ?? null,
       flowRejected: health?.flowRejected ?? null,
       flowMalformed: health?.flowMalformed ?? null,

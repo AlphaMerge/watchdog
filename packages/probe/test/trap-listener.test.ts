@@ -159,6 +159,43 @@ describe('the bound on memory, and what it costs', () => {
     deliver(trap());
     assert.equal(trapListener.drain(1).dropped, 0);
   });
+
+  it('counts what was overwritten unread apart from everything that was overwritten (`B-14`)', async () => {
+    // The number Probe Health carries. `overwritten` rises with every trap on a buffer that has
+    // filled once, nearly always for one every sensor had read; this is what a sensor lost.
+    const trapListener = await listener(4);
+    trapListener.drain(1);
+    for (let at = 0; at < 4; at += 1) deliver(trap());
+    assert.equal(trapListener.drain(1).items.length, 4);
+    for (let at = 0; at < 4; at += 1) deliver(trap());
+    assert.equal(trapListener.stats().overwritten, 4, 'four did leave the buffer');
+    assert.equal(trapListener.stats().overwrittenUnread, 0, 'and all four had been read');
+
+    // Read again, and then ten with no scan among them: the first four push out the four just
+    // read, and the other six push out six of themselves.
+    assert.equal(trapListener.drain(1).items.length, 4);
+    for (let at = 0; at < 10; at += 1) deliver(trap());
+    assert.equal(trapListener.stats().overwritten, 14);
+    assert.equal(trapListener.stats().overwrittenUnread, 6);
+    assert.equal(trapListener.drain(1).dropped, 6, 'the same six, from the sensor’s side');
+  });
+
+  it('counts a notification once however many sensors were behind, and none with no sensor (`B-14`)', async () => {
+    const unread = await listener(4);
+    for (let at = 0; at < 10; at += 1) deliver(trap());
+    assert.equal(unread.stats().overwritten, 6);
+    assert.equal(unread.stats().overwrittenUnread, 0, 'nobody was waiting for them');
+
+    unread.drain(1);
+    unread.drain(2);
+    for (let at = 0; at < 7; at += 1) deliver(trap());
+    assert.equal(unread.stats().overwrittenUnread, 3, 'three lost, not three for each sensor');
+    // A rejected community never reaches the buffer, so it overwrites nothing.
+    const strict = await listener(4, ['public']);
+    strict.drain(1);
+    for (let at = 0; at < 10; at += 1) deliver(trap({ community: 'other' }));
+    assert.equal(strict.stats().overwrittenUnread, 0);
+  });
 });
 
 describe('what the listener accepts', () => {

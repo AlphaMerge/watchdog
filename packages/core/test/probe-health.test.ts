@@ -231,6 +231,27 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(reading['syslogMalformed'], 17);
     });
 
+    it('carries what each listener’s buffer overwrote unread, and gaps it when the probe sends none', () => {
+      // `B-14`. Each from its own field, and a gap, never a zero, for a probe without that
+      // listener, an older probe, or a core below 26 on the other end.
+      const lossy = build(() =>
+        connected({ health: { ...FULL, trapOverwritten: 1_300, syslogOverwritten: 75 } }),
+      ).read(probeId).reading;
+      assert.equal(lossy['trapOverwritten'], 1_300);
+      assert.equal(lossy['syslogOverwritten'], 75);
+
+      const zero = build(() =>
+        connected({ health: { ...FULL, trapOverwritten: 0, syslogOverwritten: 0 } }),
+      ).read(probeId).reading;
+      assert.equal(zero['trapOverwritten'], 0, 'a buffer that lost nothing is a reading');
+      assert.equal(zero['syslogOverwritten'], 0);
+
+      const { reading } = build(() => connected()).read(probeId);
+      assert.equal(reading['trapOverwritten'], null);
+      assert.equal(reading['syslogOverwritten'], null);
+      assert.equal(reading['trapReceived'], 900, 'what the listener did send is unaffected');
+    });
+
     it('carries what the flow collector counted, and gaps all six for a probe without one', () => {
       // `B-07`. Until a probe constructed the collector these five channels gapped on every
       // probe there was, and nothing here said what they read when one did send them.

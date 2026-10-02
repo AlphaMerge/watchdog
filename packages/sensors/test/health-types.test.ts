@@ -56,6 +56,30 @@ describe('the self-monitoring sensor types', () => {
     });
   });
 
+  it('carries what the trap and syslog buffers overwrote unread as numbers and not alarms', () => {
+    // `B-14`. The trap or syslog sensor that was behind already fails its scan with the count,
+    // so a limit or a lookup here would turn Probe Health as well: two alarms for one buffer.
+    const channels = probeHealth.channels({});
+    assert.deepEqual(
+      channels.find((one) => one.key === 'trapOverwritten'),
+      {
+        key: 'trapOverwritten',
+        name: 'Traps overwritten unread',
+        unit: 'traps',
+        counter: { bits: 64 },
+      },
+    );
+    assert.deepEqual(
+      channels.find((one) => one.key === 'syslogOverwritten'),
+      {
+        key: 'syslogOverwritten',
+        name: 'Syslog overwritten unread',
+        unit: 'messages',
+        counter: { bits: 64 },
+      },
+    );
+  });
+
   it('keeps both out of every probe’s assignment list', () => {
     // The mechanism `T-21` built. For Probe Health it is not an optimisation but the whole
     // design: a probe cannot report its own absence, so the core has to be the one asking.
