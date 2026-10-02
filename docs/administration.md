@@ -677,6 +677,7 @@ alarm.
 | `memoryAvailable` | What the probe's *machine* has left, which `memory` — the probe's own share — cannot tell you. The probe `P-206` lost was the largest process on its VM, and was killed because a lint run and PostgreSQL had taken the rest. Warns below 20%, errors below 10%. Read every 2 s on the probe's own timer, because the fall from 8.5% to a kill took six, and each record is the lowest since the record before — see [what a record's memory channels cover](#what-a-records-memory-channels-cover). A gap for a probe older than protocol 17, on any platform but Linux and Windows, and where the machine claims more available than it has in total — a container whose `/proc/meminfo` is virtualised (`lxcfs`, OpenVZ) can (`P-224`). The machine's figure, not the probe's own ceiling — that is the next row. **A gap on the local probe** (`M-21`): its machine is the core's, and Core Health's `memoryAvailable` above carries the same reading with the same limits, so one squeeze on a single-host install is one alarm, on Core Health. The local probe's message still names the figure when it is below 20%. Only a probe flagged local at approval is treated this way; one on the core's host that is not flagged still reports both |
 | `memoryLimitUsage` | The probe's working set against the ceiling its own unit sets — `MemoryMax=6G` in `ms-probe.service`, whatever the machine has left. Warns above 80%. **Act on the warning**: at 100% the kernel kills the probe, and what follows is a link that drops, not a reading — see [a service at its memory ceiling](#a-service-at-its-memory-ceiling). Measured against the working set, not `memory.current`, because page cache fills a cgroup to its ceiling harmlessly. A gap where there is no limit, on cgroup v1 (RHEL 8 by default) and on Windows. `memoryLimit` beside it is the ceiling in MB |
 | `flowReceived`, `flowRejected`, `flowMalformed`, `flowMissed`, `flowUndecodable` | The probe's flow collector, when it runs one — see [the flow collector](#the-flow-collector). No limits, so none of them moves the sensor's state; put a threshold trigger on `flowMissed`, which counts flows the exporter says it sent and the probe never received and is the only evidence of UDP loss there is. **A gap on a probe with `flowListener.enabled` off, on a v1 build, on a probe older than protocol 23, and on any probe whose core is older than protocol 23** — a gap is "no collector", a zero is "a collector hearing nothing" |
+| `flowOverwritten` | Flow records the collector received and its buffer overwrote before a flow sensor had read them: `flowListener.bufferSize` is too small for this probe's traffic and its sensors' intervals. A running total since the collector started, recorded as a rate, and counted once a record however many sensors were behind it. **No limit, so it never moves this sensor's state**: the flow sensor that was behind already fails that scan with the count, and this is the same event seen from the probe. Zero while no flow sensor is assigned, since nothing was waiting for what was overwritten. A gap wherever the five above gap, and on a probe or a core older than protocol 25 |
 | `clockJumps` | The host's clock moved. Scheduling is monotonic, but data is wall-clock |
 | `clockOffset` | How far the probe's clock is behind the core's, in seconds; negative is ahead. Measured by the core from the send time on every heartbeat and batch, the smallest of five minutes, so a delayed message cannot make a probe look behind. **Warns beyond a minute either way.** A gap until the session has sent one. See [a probe whose clock is wrong](#a-probe-whose-clock-is-wrong) |
 | `sensorsFrozen` | **Any value above zero is an error**, so a frozen probe reads Down as a lost one does (`M-22`). Sensors whose last result is later than the probe's clock reads now, so they can accept nothing it sends until it catches up. They read Unknown meanwhile, like a lost probe's. The alarm when NTP pulls a fast clock back, which leaves `clockOffset` near zero |
@@ -729,10 +730,14 @@ setting. The same is said for a syslog or SNMP trap sensor on a probe whose list
 sensor can still be created. Nothing is said about a probe that is not connected, or one too old
 to report — its channels gap for a different reason — or to an account that cannot read the probe.
 
-Two different things can be lost, and they are counted in two places. `flowMissed` on Probe
-Health is what an exporter sent and the probe never received. What the probe received and its
-buffer overwrote before a sensor read it is not in `flowMissed`: it fails that sensor's scan with
-the number, and is in the collector's stop line in the log as `overwritten`.
+Two different things can be lost, and they are counted apart. `flowMissed` on Probe Health is
+what an exporter sent and the probe never received. What the probe received and its buffer
+overwrote before a sensor read it is not in `flowMissed`: it fails that sensor's scan with the
+number, and it is `flowOverwritten` on Probe Health, a running total since the collector started.
+A record that two sensors had both yet to read is one record there, and fails both scans. The
+collector's stop line in the log carries the same total as `overwrittenUnread`, beside
+`overwritten`, which is every record the buffer gave up for a newer one, read or not, and rises
+with every flow on any buffer that has filled once.
 
 `flowMissed` is read from each exporter's own running sequence, and a device keeps more than one.
 A sequence is followed per exporter address, per dialect, and within a dialect per NetFlow v9
@@ -745,7 +750,8 @@ The five `flow*` channels on Probe Health are what the collector counted, and th
 ends at protocol 23**: a probe sends them only to a core that says it speaks 23, because an older
 core refuses a heartbeat carrying a field it does not know. Upgrade the core first and nothing is
 lost; upgrade a probe first and its flow sensors work while the five channels gap until the core
-follows.
+follows. `flowOverwritten` is one version newer and needs both ends at protocol 25 in the same
+way: between a probe and a core where either is at 23 or 24, the five are recorded and it gaps.
 
 ### What a record's memory channels cover
 

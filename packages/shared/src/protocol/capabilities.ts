@@ -134,6 +134,12 @@ export interface ProbeCapabilities {
    * which an older core's schema would reject, and an older core never sends it such a set.
    */
   credentialAddressPinning: boolean;
+  /**
+   * Reports the flow records its collector's buffer overwrote before a sensor read them
+   * (`B-11`). One field, `flowOverwritten`, stripped below this on its own, so a core at 23 or 24
+   * still gets the five counters it knows; the channel gaps.
+   */
+  flowOverwritten: boolean;
 }
 
 /**
@@ -160,6 +166,7 @@ const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
   ['credentialHostKeys', 22],
   ['flowCounters', 23],
   ['credentialAddressPinning', 24],
+  ['flowOverwritten', 25],
 ];
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -182,6 +189,7 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   credentialAddressPinning:
     'check a named device against the addresses its credentials allow, and connect to the ' +
     'address it checked',
+  flowOverwritten: 'report the flows its collector overwrote before a sensor read them',
 };
 
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
@@ -203,6 +211,7 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     credentialHostKeys: has(22),
     flowCounters: has(23),
     credentialAddressPinning: has(24),
+    flowOverwritten: has(25),
   };
 }
 
@@ -219,6 +228,10 @@ export function healthForPeer(health: ProbeHealthReport, peerVersion: number): P
   let sent = health;
   // Newest first; each capability's fields are stripped on their own, so a peer one version
   // behind loses only that version's.
+  if (!capabilities.flowOverwritten) {
+    const { flowOverwritten: _overwritten, ...older } = sent;
+    sent = older;
+  }
   if (!capabilities.flowCounters) {
     const {
       flowReceived: _received,

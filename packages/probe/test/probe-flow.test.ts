@@ -57,6 +57,8 @@ const FLOW_FIELDS = [
   'flowMissed',
   'flowUndecodable',
 ] as const;
+/** `B-11`'s one field, a version after the five: what the buffer overwrote before a scan read it. */
+const OVERWRITTEN = 'flowOverwritten';
 
 const flowSensor: SensorAssignment = {
   sensorId: SENSOR_ID,
@@ -233,6 +235,7 @@ describe(
         );
         assert.equal(health.flowMissed, 5);
         assert.equal(health.flowUndecodable, 0);
+        assert.equal(health.flowOverwritten, 0, 'a buffer of twenty thousand lost three flows');
 
         // The same probe against a core one version below the counters. That core's health schema
         // may not have the five fields, and it refuses the whole heartbeat for one it does not
@@ -253,6 +256,7 @@ describe(
             `${field} was sent to a core at protocol ${String(below)}`,
           );
         }
+        assert.equal(OVERWRITTEN in older, false, 'and neither is the one field newer than them');
 
         assert.deepEqual(core.refused, [], 'the probe sent something a core refuses');
         assert.equal(await probe.stop(), 0, 'the probe did not stop cleanly');
@@ -384,6 +388,7 @@ describe(
         assert.equal(heard.flowMalformed, 0, 'a dialect was refused');
         assert.equal(heard.flowUndecodable, 0, 'a template was not learnt');
         assert.equal(heard.flowMissed, 0, 'one dialect’s sequence was read against another’s');
+        assert.equal(heard.flowOverwritten, 0, 'six flows in a buffer of a hundred');
 
         // **The overflow, in one datagram, so no scan can land in the middle of it.** IPFIX has no
         // thirty-record limit: a hundred and fifty records arrive as one message and go into a
@@ -435,6 +440,9 @@ describe(
         );
         assert.equal(overrun.flowMissed, 10);
         assert.equal(overrun.flowMalformed, 0);
+        // **And it is on Probe Health as its own number** (`B-11`): the fifty the scan above
+        // named, and not the fifty-six that left the buffer — six of those had been read.
+        assert.equal(overrun.flowOverwritten, SENT - BUFFER);
 
         // One failed scan, not a sensor behind for ever: the cursor caught up when it failed.
         mark = core.received.length;
@@ -442,12 +450,45 @@ describe(
         const again = await core.waitFor('a reading after the overflow', ok, { from: mark });
         assert.match(again.message, /^1 flow, /);
 
+        // That flow overwrote one more, which the scan after the overflow had read: the count is
+        // of records lost, and a full buffer giving up a read one does not move it.
+        const settled = await core.waitFor(
+          'a heartbeat carrying the flow after the overflow',
+          (message) => {
+            const sent = healthOf(message);
+            return sent?.flowReceived === 6 + SENT + 1 ? sent : undefined;
+          },
+          { from: mark },
+        );
+        assert.equal(settled.flowOverwritten, SENT - BUFFER);
+
+        // A core one version below the field is sent the five counters it knows and not this
+        // one: its health schema is closed, and it would refuse the heartbeat for it.
+        const below = versionFor('flowOverwritten') - 1;
+        core.protocolVersion = below;
+        const reconnect = core.received.length;
+        core.dropLink();
+        const older = await core.waitFor('a heartbeat to the older core', healthOf, {
+          from: reconnect,
+        });
+        assert.equal(older.flowReceived, 6 + SENT + 1, 'the five still go to a core at 24');
+        assert.equal(
+          OVERWRITTEN in older,
+          false,
+          `${OVERWRITTEN} was sent to a core at protocol ${String(below)}`,
+        );
+
         assert.deepEqual(core.refused, [], 'the probe sent something a core refuses');
         assert.equal(await probe.stop(), 0, 'the probe did not stop cleanly');
         const stopped = probe.logs().find((line) => line['msg'] === 'flow listener stopped');
         assert.ok(stopped !== undefined);
         assert.equal(stopped['buffered'], BUFFER, 'the buffer was not the size it was given');
         assert.equal(stopped['overwritten'], 6 + SENT + 1 - BUFFER);
+        assert.equal(
+          stopped['overwrittenUnread'],
+          SENT - BUFFER,
+          'and the stop line tells them apart',
+        );
       },
     );
 
@@ -517,9 +558,11 @@ describe(
           'a probe with the collector off bound its port',
         );
 
-        // And its five channels gap: a zero would say a collector is running and hearing nothing.
+        // And its six channels gap: a zero would say a collector is running and hearing nothing.
         const health = await core.waitFor('a heartbeat', healthOf);
-        for (const field of FLOW_FIELDS) assert.equal(field in health, false, field);
+        for (const field of [...FLOW_FIELDS, OVERWRITTEN]) {
+          assert.equal(field in health, false, field);
+        }
 
         assert.deepEqual(core.refused, [], 'the probe sent something a core refuses');
         assert.equal(await probe.stop(), 0);
@@ -558,7 +601,9 @@ describe(
         );
 
         const health = await core.waitFor('a heartbeat', healthOf);
-        for (const field of FLOW_FIELDS) assert.equal(field in health, false, field);
+        for (const field of [...FLOW_FIELDS, OVERWRITTEN]) {
+          assert.equal(field in health, false, field);
+        }
 
         assert.deepEqual(core.refused, [], 'the probe sent something a core refuses');
         assert.equal(await probe.stop(), 0);

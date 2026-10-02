@@ -231,7 +231,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(reading['syslogMalformed'], 17);
     });
 
-    it('carries what the flow collector counted, and gaps all five for a probe without one', () => {
+    it('carries what the flow collector counted, and gaps all six for a probe without one', () => {
       // `B-07`. Until a probe constructed the collector these five channels gapped on every
       // probe there was, and nothing here said what they read when one did send them.
       const flowing = build(() =>
@@ -243,6 +243,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
             flowMalformed: 2,
             flowMissed: 61,
             flowUndecodable: 7,
+            flowOverwritten: 250,
           },
         }),
       ).read(probeId).reading;
@@ -251,6 +252,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(flowing['flowMalformed'], 2);
       assert.equal(flowing['flowMissed'], 61);
       assert.equal(flowing['flowUndecodable'], 7);
+      assert.equal(flowing['flowOverwritten'], 250);
 
       // No collector, an older probe, or a core below 23 on the other end: a gap, never a zero
       // that reads as a collector hearing nothing.
@@ -261,6 +263,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
         'flowMalformed',
         'flowMissed',
         'flowUndecodable',
+        'flowOverwritten',
       ]) {
         assert.equal(reading[key], null, key);
       }

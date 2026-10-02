@@ -146,6 +146,13 @@ never will.
 template arrives, so a steady non-zero count is an exporter whose templates are not reaching us —
 which looks like silence and is not.
 
+A sixth, `flowOverwritten`, needs both ends at protocol 25. It counts records that did arrive and
+that the collector's buffer overwrote before a flow sensor read them, so it is the probe's own
+`flowListener.bufferSize` being too small and not the network. It has no limit either. A trigger
+on it is optional: every flow sensor that was behind fails that scan and says how many it lost,
+which is already an alarm. Read it on the probe to see how often, and by how much, before
+choosing a larger buffer.
+
 **`sessionOverflows` matters more here than anywhere else**, and it is why it was worth adding
 before the field test rather than after. A hundred real devices with SNMP and SSH credentials is
 the first workload this project has ever run that opens sessions in earnest, and the pools open

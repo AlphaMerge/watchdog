@@ -138,6 +138,93 @@ describe('the flow listener', () => {
     assert.equal(batch.dropped, 6, 'and says so about the other six');
   });
 
+  describe('what the buffer overwrote before a sensor read it (`B-11`)', () => {
+    it('counts each such record once, and it is what the sensor behind is told', async () => {
+      const flow = await listener(4);
+      flow.drain(1);
+      deliver(datagram('192.0.2.1', 0, 10));
+
+      assert.equal(flow.stats().overwrittenUnread, 6);
+      assert.equal(flow.drain(1).dropped, 6, 'the same six, from the other side');
+    });
+
+    it('counts nothing for records every sensor had read, which a full buffer gives up all day', async () => {
+      // **Why this is not `overwritten`.** A buffer that has filled once overwrites on every
+      // push for ever, and nearly all of it is records already read. A channel of that would
+      // climb at the rate flows arrive on a probe losing nothing.
+      const flow = await listener(4);
+      flow.drain(1);
+      deliver(datagram('192.0.2.1', 0, 4));
+      assert.equal(flow.drain(1).items.length, 4);
+      deliver(datagram('192.0.2.1', 4, 4));
+
+      assert.equal(flow.stats().overwritten, 4, 'four did leave the buffer');
+      assert.equal(flow.stats().overwrittenUnread, 0, 'and all four had been read');
+      assert.equal(flow.drain(1).dropped, 0);
+    });
+
+    it('counts a record once however many sensors were behind it, and by the slowest', async () => {
+      const flow = await listener(4);
+      flow.drain(1);
+      flow.drain(2);
+      flow.drain(3);
+      deliver(datagram('192.0.2.1', 0, 3));
+      assert.equal(flow.drain(1).items.length, 3, 'sensor 1 keeps up; 2 and 3 do not scan');
+      deliver(datagram('192.0.2.1', 3, 4));
+
+      // Seven records through a buffer of four: the first three are gone, and two sensors had
+      // not read them. Three records were lost, not six.
+      assert.equal(flow.stats().overwrittenUnread, 3);
+      assert.equal(flow.drain(1).dropped, 0);
+      assert.equal(flow.drain(2).dropped, 3);
+      assert.equal(flow.drain(3).dropped, 3);
+    });
+
+    it('counts nothing while no sensor reads the buffer', async () => {
+      // A collector with no flow sensor assigned yet loses nothing anybody was waiting for.
+      const flow = await listener(4);
+      deliver(datagram('192.0.2.1', 0, 10));
+      assert.equal(flow.stats().overwritten, 6);
+      assert.equal(flow.stats().overwrittenUnread, 0);
+    });
+
+    it('counts from a sensor’s first scan, and from exactly the record it is waiting at', async () => {
+      const flow = await listener(4);
+      deliver(datagram('192.0.2.1', 0, 10)); // sequences 0..9, before any sensor
+      flow.drain(1); // waiting at 10
+      deliver(datagram('192.0.2.1', 10, 4)); // 10..13 overwrite 6..9, which it never asked for
+      assert.equal(flow.stats().overwrittenUnread, 0);
+
+      deliver(datagram('192.0.2.1', 14, 1)); // 14 overwrites 10: the first it was waiting for
+      assert.equal(flow.stats().overwrittenUnread, 1);
+      assert.equal(flow.drain(1).dropped, 1);
+    });
+
+    it('stops counting for a sensor that was removed', async () => {
+      const flow = await listener(4);
+      flow.drain(1);
+      flow.drain(2);
+      deliver(datagram('192.0.2.1', 0, 4));
+      flow.drain(1);
+      // Sensor 2 is deleted without ever reading; only sensor 1, which is up to date, remains.
+      flow.retain([1]);
+      deliver(datagram('192.0.2.1', 4, 4));
+      assert.equal(flow.stats().overwrittenUnread, 0);
+    });
+
+    it('keeps counting after the sensor behind catches up and falls behind again', async () => {
+      // A running total since the collector started, as every counter here is.
+      const flow = await listener(4);
+      flow.drain(1);
+      deliver(datagram('192.0.2.1', 0, 6));
+      assert.equal(flow.drain(1).dropped, 2);
+      deliver(datagram('192.0.2.1', 6, 4));
+      assert.equal(flow.stats().overwrittenUnread, 2, 'four read records left; nothing new lost');
+      deliver(datagram('192.0.2.1', 10, 3));
+      assert.equal(flow.stats().overwrittenUnread, 5);
+    });
+  });
+
   it('turns away an exporter that is not on the list, and counts it', async () => {
     const flow = await listener(8, ['192.0.2.1']);
     deliver(datagram('192.0.2.1', 0, 1));

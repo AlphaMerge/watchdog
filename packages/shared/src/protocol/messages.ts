@@ -41,6 +41,11 @@ import { AppError } from '../errors/app-error.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
+ * Version 25 adds `flowOverwritten` (`B-11`): flow records the probe's collector received and
+ * its buffer overwrote before a sensor had read them, a running total since the collector
+ * started, as `flowMissed` is. A new field in a closed schema, so gated and stripped like 23's:
+ * a core below 25 is not sent it, and a probe below 25 does not send it and the channel gaps.
+ *
  * Version 24 adds `credentialAddressPinning` (`A-41c`): a probe resolves a device's host name
  * once, checks every address it answers with against a credential set's address and range
  * targets, and connects to one of the addresses it checked. An older probe resolves the name when
@@ -114,7 +119,7 @@ import { AppError } from '../errors/app-error.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 24;
+export const PROTOCOL_VERSION = 25;
 
 /**
  * The oldest peer version this build still understands.
@@ -527,6 +532,16 @@ export interface ProbeHealthReport {
   /** Flow records this collector had no template for (`B-03`). */
   flowUndecodable?: number;
   /**
+   * Flow records this probe received and its buffer overwrote before a sensor that was following
+   * the buffer had read them (`B-11`). Sent only to a core at protocol 25.
+   *
+   * **The collector's own backpressure, which `flowMissed` is not.** That one is what the network
+   * lost on the way here; this is what arrived, was counted in `flowReceived`, and was lost to
+   * `flowListener.bufferSize`. A running total since the collector started, counted once a
+   * record however many sensors were behind it.
+   */
+  flowOverwritten?: number;
+  /**
    * Whether this probe is getting back the checks it dispatches (`P-76`): 1 yes, 0 no.
    *
    * **The half `P-74` cannot see.** The core can tell whether a probe is delivering *anything*,
@@ -936,6 +951,7 @@ const PROBE_HEALTH_SCHEMA = {
     flowMalformed: { type: 'integer', minimum: 0 },
     flowMissed: { type: 'integer', minimum: 0 },
     flowUndecodable: { type: 'integer', minimum: 0 },
+    flowOverwritten: { type: 'integer', minimum: 0 },
     checksCompleting: { type: 'integer', minimum: 0, maximum: 1 },
     checksBehind: { type: 'integer', minimum: 0 },
     checksOutstanding: { type: 'integer', minimum: 0 },

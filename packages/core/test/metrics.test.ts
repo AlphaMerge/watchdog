@@ -363,6 +363,21 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       assert.equal(metrics.get(`ms_probe_worker_crashes_total${label}`), 0);
     });
 
+    it('exports what a flow collector’s buffer overwrote unread, apart from what it missed', async () => {
+      // `B-11`. Two different losses and two series; a probe with no collector has neither.
+      const label = `{probe="${String(probeId)}"}`;
+      const flowing = (): ProbeLink => ({
+        ...connected,
+        health: { ...connected.health, flowMissed: 61, flowOverwritten: 250 },
+      });
+      const metrics = parse((await varying(flowing).scrape()).body);
+      assert.equal(metrics.get(`ms_probe_flows_overwritten_total${label}`), 250);
+      assert.equal(metrics.get(`ms_probe_flows_missed_total${label}`), 61);
+
+      const without = parse((await varying(() => connected).scrape()).body);
+      assert.equal(without.has(`ms_probe_flows_overwritten_total${label}`), false);
+    });
+
     it('still omits a counter the probe did not report at all', async () => {
       // The other half. A probe that is gone reports nothing, and nothing is not zero.
       const metrics = parse((await varying(() => ({ connected: false })).scrape()).body);

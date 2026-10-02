@@ -21134,13 +21134,62 @@ analysis". `F-` is Phase 0.
       type and id, which the decoder reads, and a chassis exporting from two engines counts
       flows per engine; v5 has no specification that says so, and the ticket did not ask.
 
-- [ ] **B-11 — a flow ring that overwrites is not on Probe Health** · S · B-07, B-09 · Found
+- [x] **B-11 — a flow ring that overwrites is not on Probe Health** · S · B-07, B-09 · Found
       2026-10-02 by `B-09`. Records the probe received and its buffer overwrote fail the
       sensor's scan and appear in the stop line, and nowhere an operator watching the probe
       would look. A buffer is a queue, and the rule is that every one of them is on a health
       sensor. **Done when** Probe Health carries an overwritten-flows channel fed from the
       heartbeat, behind a capability so an older core ignores it, with the probe-level overflow
       test reading it.
+
+      **Done 2026-10-02, and the number is not the stop line's `overwritten`.** That one counts
+      every record the ring gives up for a newer one. A ring that has filled once does that on
+      every push, nearly always to a record every sensor has read, so as a channel it would be
+      `flowReceived` less the buffer's size on a probe losing nothing. `NotificationRing` now
+      also counts `unread`: a record overwritten while at least one cursor had yet to reach it,
+      once a record however many sensors were behind, which is the `dropped` the slowest
+      sensor's next drain reports. The ring follows its slowest cursor when one moves, arrives
+      or is removed, so a push costs one comparison. With no flow sensor assigned it counts
+      nothing. The stop line carries both, as `overwritten` and `overwrittenUnread`.
+
+      **`flowOverwritten`, protocol 25.** A running total since the collector started, as
+      `flowMissed` is, recorded by the core as a rate. The capability is `flowOverwritten`;
+      `healthForPeer` strips the one field below 25 on its own, so a core at 23 or 24 keeps the
+      five counters. `PROTOCOL_VERSION` is 25. It goes through the same places as the five: the
+      listener's stats, the reporter, the wire type and its schema, the core's mapping (`??
+      null`), the Probe Health channel, and `ms_probe_flows_overwritten_total`.
+
+      **A channel and nothing else, so alarm volume is unchanged.** No limit, no lookup, no
+      state: the flow sensor that was behind already fails that scan with the count, and a
+      limit here would be a second alarm for the same buffer. `health-types.test.ts` pins the
+      channel's whole declaration.
+
+      **Tests.** Seven at the listener for what counts as unread (once a record, nothing for
+      read records, the slowest of three sensors, nobody reading, the exact record a new sensor
+      waits at, a removed sensor, and a running total across two overflows); the reporter sends
+      250 of 3,912 overwritten; `capabilities.test.ts` for the strip at 24, the field alone,
+      the schema, the table and `SINCE`; the core's reading and its gap; the Prometheus series
+      beside `flowMissed`'s. At the probe, `probe-flow.test.ts`'s overflow case reads
+      `flowOverwritten` 50 where 56 records left the buffer, reads 50 again after one more flow
+      overwrote a read record, and reconnects to a core at 24, which gets `flowReceived` and
+      not the new field: one more wait, with its own 60 s bound. The first case reads 0 and its
+      core at 22 gets neither. **Mutations 21/21**: the boundary record not counted,
+      every overwrite counted, a new, an advanced and a removed cursor each not followed, the
+      fastest cursor followed, the listener and the reporter each sending every overwrite (the
+      reporter's once against the probe case alone), the capability and its table entry at 24,
+      the strip removed (again once against the probe case alone) and inverted, the field out
+      of the schema, a negative count kept, the version left at 24, the core reading a gap as
+      zero and mapping `flowMissed`, the channel given a limit, and the metric reading the wrong
+      channel.
+
+      **The first mutation run was void and was run again.** One new test failed on the
+      unmutated tree — it expected a negative count to refuse the heartbeat, where `P-224` keeps
+      the heartbeat and gaps the field — so every mutant looked killed. The test now says what
+      the schema does, and the count above is from a run that began from a green tree.
+
+      **Not done.** The trap and syslog listeners share the ring and neither reports `unread`:
+      their overwrites are still per sensor and in the stop line only. The web UI shows the
+      channel as it shows any other and says nothing more about it.
 
 - [x] **B-12 — the add-sensor form reads the collector notice once** · S · B-08 · Found
       2026-10-02 by `B-08`. The notice that a probe's flow collector is off is taken from the

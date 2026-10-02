@@ -51,6 +51,7 @@ describe('what a protocol version can do', () => {
       credentialHostKeys: false,
       flowCounters: false,
       credentialAddressPinning: false,
+      flowOverwritten: false,
     });
   });
 
@@ -223,8 +224,11 @@ describe('the health a peer can be sent', () => {
     flowMalformed: 2,
     flowMissed: 61,
     flowUndecodable: 7,
+    flowOverwritten: 250,
   };
-  /** `health` as a core at 21 or 22 is sent it: everything but 23's flow counters (`B-07`). */
+  /** `health` as a core at 23 or 24 is sent it: everything but 25's one field (`B-11`). */
+  const { flowOverwritten: _overwritten, ...withoutOverwritten } = health;
+  /** `health` as a core at 21 or 22 is sent it: that, less 23's flow counters (`B-07`). */
   const {
     flowReceived: _received,
     flowRejected: _rejected,
@@ -232,7 +236,7 @@ describe('the health a peer can be sent', () => {
     flowMissed: _missed,
     flowUndecodable: _undecodable,
     ...withoutFlow
-  } = health;
+  } = withoutOverwritten;
 
   it('leaves the machine’s memory and the limit out for a core older than protocol 17', () => {
     const sent = healthForPeer(health, 16);
@@ -295,8 +299,50 @@ describe('the health a peer can be sent', () => {
     assert.equal(sent.flowUndecodable, 7);
   });
 
+  it('leaves what the flow buffer overwrote out for a core at 24, and keeps 23’s five', () => {
+    // `B-11`, stripped on its own: a core at 23 or 24 knows the five counters and not this.
+    for (const version of [16, 22, 23, 24]) {
+      assert.equal(
+        'flowOverwritten' in healthForPeer(health, version),
+        false,
+        `flowOverwritten sent to a core at ${String(version)}`,
+      );
+    }
+    assert.deepEqual(healthForPeer(health, 23), withoutOverwritten);
+    assert.deepEqual(healthForPeer(health, 24), withoutOverwritten);
+    assert.equal(healthForPeer(health, 25).flowOverwritten, 250);
+  });
+
+  it('strips what the flow buffer overwrote from a report that carries nothing else gated', () => {
+    // Not a side effect of the five going: a report with only this one field loses it too.
+    assert.deepEqual(healthForPeer({ memoryMb: 1, flowOverwritten: 9 }, 24), { memoryMb: 1 });
+    assert.deepEqual(healthForPeer({ memoryMb: 1, flowOverwritten: 9 }, 25), {
+      memoryMb: 1,
+      flowOverwritten: 9,
+    });
+  });
+
+  it('is a field this build’s health schema knows, as a count', () => {
+    // The other end of the gate: a core at 25 is sent the field, so its schema must take it.
+    const heartbeat = (flowOverwritten: unknown): unknown => ({
+      type: 'heartbeat',
+      seq: 1,
+      sentAt: 'now',
+      health: { flowOverwritten },
+    });
+    const read = (sent: unknown): unknown => {
+      const parsed = parseProbeToCore(heartbeat(sent));
+      return parsed.type === 'heartbeat' ? parsed.health?.flowOverwritten : 'not a heartbeat';
+    };
+    assert.equal(read(250), 250);
+    assert.equal(read(0), 0);
+    // A value no count can be is a gap on the channel and the heartbeat is kept (`P-224`).
+    assert.equal(read(-1), undefined);
+    assert.equal(read(1.5), undefined);
+  });
+
   it('sends everything to a core that knows it', () => {
-    assert.deepEqual(healthForPeer(health, 23), health);
+    assert.deepEqual(healthForPeer(health, 25), health);
     assert.deepEqual(healthForPeer(health, PROTOCOL_VERSION), health);
   });
 
@@ -323,6 +369,8 @@ describe('the health a peer can be sent', () => {
       flowMalformed: 23,
       flowMissed: 23,
       flowUndecodable: 23,
+      // `B-11`: a new field, at the version that adds it.
+      flowOverwritten: 25,
     };
     // The rest predate `P-178`, and a core older than that refuses a newer probe at the handshake,
     // in words, so it is never sent a heartbeat at all. Pinned by count, so that a new field is
@@ -372,6 +420,15 @@ describe('the health a peer can be sent', () => {
     assert.equal(versionFor('credentialAddressPinning'), 24);
     assert.equal(capabilitiesFor(23).credentialAddressPinning, false);
     assert.equal(capabilitiesFor(24).credentialAddressPinning, true);
+    // `B-11`: one health field, stripped below 25.
+    assert.equal(versionFor('flowOverwritten'), 25);
+    assert.equal(capabilitiesFor(24).flowOverwritten, false);
+    assert.equal(capabilitiesFor(25).flowOverwritten, true);
+    assert.ok(
+      missingCapabilities(24).includes(
+        'report the flows its collector overwrote before a sensor read them',
+      ),
+    );
     assert.ok(
       missingCapabilities(23).includes(
         'check a named device against the addresses its credentials allow, and connect to the ' +

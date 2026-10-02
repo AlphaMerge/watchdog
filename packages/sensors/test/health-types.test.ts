@@ -43,6 +43,19 @@ describe('the self-monitoring sensor types', () => {
     assert.equal(channels.find((one) => one.key === 'protocol')?.lookup, 'ms.probe.protocol');
   });
 
+  it('carries what a flow collector’s buffer overwrote unread as a number and not an alarm', () => {
+    // `B-11`. The flow sensor that was behind already fails its scan with the count, so a limit
+    // or a lookup here would turn Probe Health as well: two alarms for one buffer too small.
+    const overwritten = probeHealth.channels({}).find((one) => one.key === 'flowOverwritten');
+    assert.deepEqual(overwritten, {
+      key: 'flowOverwritten',
+      name: 'Flows overwritten unread',
+      unit: 'flows',
+      // A running total on the wire, as `flowMissed` is, recorded as a rate.
+      counter: { bits: 64 },
+    });
+  });
+
   it('keeps both out of every probe’s assignment list', () => {
     // The mechanism `T-21` built. For Probe Health it is not an optimisation but the whole
     // design: a probe cannot report its own absence, so the core has to be the one asking.

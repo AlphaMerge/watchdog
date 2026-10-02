@@ -86,7 +86,16 @@ export interface FlowListenerStats {
   readonly undecodable: number;
   readonly buffered: number;
   readonly cursors: number;
+  /** Every record the buffer gave up for a newer one, read or not. Ordinary on a full buffer. */
   readonly overwritten: number;
+  /**
+   * Records the buffer overwrote before a sensor that was following it had read them (`B-11`).
+   *
+   * The collector's backpressure: these were received and counted, and lost to `bufferSize`. Each
+   * also fails the scan of the sensor that was behind, with the number. Since the collector
+   * started, like every counter here.
+   */
+  readonly overwrittenUnread: number;
 }
 
 export class FlowListener {
@@ -184,6 +193,7 @@ export class FlowListener {
       buffered: this.#ring.buffered,
       cursors: this.#ring.cursors,
       overwritten: this.#ring.overwritten,
+      overwrittenUnread: this.#ring.unread,
     };
   }
 

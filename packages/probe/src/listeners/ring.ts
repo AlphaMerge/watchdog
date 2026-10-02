@@ -23,6 +23,9 @@ export class NotificationRing {
   readonly #cursors = new Map<number, { next: number; since: Date }>();
   #nextSequence = 0;
   #overwritten = 0;
+  #unread = 0;
+  /** The lowest sequence any cursor has yet to read. Infinity while no sensor reads this ring. */
+  #slowest = Number.POSITIVE_INFINITY;
 
   constructor(size: number, now: () => Date = () => new Date()) {
     this.#slots = new Array<ReceivedNotification | undefined>(Math.max(1, size));
@@ -32,7 +35,12 @@ export class NotificationRing {
   push(notification: ReceivedNotification): void {
     const size = this.#slots.length;
     const slot = this.#nextSequence % size;
-    if (this.#slots[slot] !== undefined) this.#overwritten += 1;
+    if (this.#slots[slot] !== undefined) {
+      this.#overwritten += 1;
+      // The record leaving is the one `size` behind this. Some sensor had yet to read it when
+      // its cursor is at or before it, and that sensor's next drain will say so as `dropped`.
+      if (this.#slowest <= this.#nextSequence - size) this.#unread += 1;
+    }
     this.#slots[slot] = notification;
     this.#nextSequence += 1;
   }
@@ -52,6 +60,7 @@ export class NotificationRing {
     const cursor = this.#cursors.get(sensorId);
     if (cursor === undefined) {
       this.#cursors.set(sensorId, { next: this.#nextSequence, since: now });
+      this.#follow();
       return {
         listener,
         items: [],
@@ -75,6 +84,7 @@ export class NotificationRing {
     const since = cursor.since;
     cursor.next = this.#nextSequence;
     cursor.since = now;
+    this.#follow();
     return { listener, items, dropped, since: since.toISOString(), until: now.toISOString() };
   }
 
@@ -84,6 +94,14 @@ export class NotificationRing {
     for (const sensorId of [...this.#cursors.keys()]) {
       if (!keep.has(sensorId)) this.#cursors.delete(sensorId);
     }
+    this.#follow();
+  }
+
+  /** Finds the slowest cursor again, whenever one moved, arrived or left: never on a push. */
+  #follow(): void {
+    let slowest = Number.POSITIVE_INFINITY;
+    for (const cursor of this.#cursors.values()) slowest = Math.min(slowest, cursor.next);
+    this.#slowest = slowest;
   }
 
   get buffered(): number {
@@ -94,7 +112,25 @@ export class NotificationRing {
     return this.#cursors.size;
   }
 
+  /**
+   * Every record that left the ring to make room, read or not.
+   *
+   * On a ring that has filled once this rises with every push, because a full ring holding only
+   * records every sensor has read still gives up its oldest for the next. It says how much has
+   * passed through, and nothing about loss; `unread` is the count of what was lost.
+   */
   get overwritten(): number {
     return this.#overwritten;
+  }
+
+  /**
+   * Records overwritten while at least one sensor had yet to read them.
+   *
+   * Counted once a record, however many sensors were behind it, and equal to the `dropped` the
+   * slowest sensor's next drain reports. A ring nobody reads loses nothing and counts nothing:
+   * a record no sensor was waiting for is not a record a sensor missed.
+   */
+  get unread(): number {
+    return this.#unread;
   }
 }

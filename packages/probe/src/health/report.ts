@@ -267,6 +267,9 @@ export class ProbeHealthReporter {
             // `B-03`: records whose template has not arrived. Ordinary for seconds after a
             // restart; permanent when an exporter's template interval exceeds its data one.
             flowUndecodable: flows.undecodable,
+            // `B-11`: received, and overwritten in the buffer before a sensor read it. Sent only
+            // to a core at protocol 25.
+            flowOverwritten: flows.overwrittenUnread,
           }),
       ...(spool === undefined
         ? {}

@@ -415,6 +415,12 @@ const PROBE_METRICS: readonly Metric[] = [
     counter: true,
   },
   {
+    key: 'flowOverwritten',
+    name: 'ms_probe_flows_overwritten_total',
+    help: 'Flow records this probe received and its buffer overwrote before a sensor read them.',
+    counter: true,
+  },
+  {
     key: 'scheduled',
     name: 'ms_probe_sensors_scheduled',
     help: 'Sensors this probe currently has on its wheel.',

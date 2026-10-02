@@ -518,7 +518,8 @@ async function main(): Promise<void> {
     ...(trapListener === undefined ? {} : { trapListener: () => trapListener.stats() }),
     ...(syslogListener === undefined ? {} : { syslogListener: () => syslogListener.stats() }),
     // `flowMissed` is the one with no equivalent above: what the exporter says it sent and this
-    // probe never received (`B-02`). Sent only to a core at protocol 23 (`B-07`).
+    // probe never received (`B-02`). Sent only to a core at protocol 23 (`B-07`), and what its
+    // buffer overwrote unread only to one at 25 (`B-11`).
     ...(flowListener === undefined ? {} : { flowListener: () => flowListener.stats() }),
     spool: () => spool.stats(),
     // How much is waiting is the spool's; whether any of it is *moving* is only the drain's, and

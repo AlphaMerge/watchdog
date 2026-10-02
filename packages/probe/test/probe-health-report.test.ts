@@ -354,7 +354,10 @@ describe('the probe’s own health report', () => {
         undecodable: 7,
         buffered: 900,
         cursors: 1,
-        overwritten: 0,
+        // Different, and the larger is the one that is not sent: everything the buffer gave up,
+        // against what it gave up unread (`B-11`).
+        overwritten: 3_912,
+        overwrittenUnread: 250,
       }),
     }).report();
 
@@ -363,6 +366,7 @@ describe('the probe’s own health report', () => {
     assert.equal(report.flowMalformed, 2);
     assert.equal(report.flowMissed, 61, 'what did not arrive, which nothing else counts');
     assert.equal(report.flowUndecodable, 7);
+    assert.equal(report.flowOverwritten, 250, 'what was lost unread, not all that was overwritten');
   });
 
   it('says nothing about a flow collector this probe does not run', () => {
@@ -373,6 +377,7 @@ describe('the probe’s own health report', () => {
       'flowMalformed',
       'flowMissed',
       'flowUndecodable',
+      'flowOverwritten',
     ]) {
       assert.equal(field in report, false, `${field} reported by a probe with no collector`);
     }

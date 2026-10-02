@@ -247,6 +247,17 @@ const CHANNELS: readonly ChannelDef[] = [
     unit: 'records',
     counter: { bits: 64 },
   },
+  // **The collector's buffer (`B-11`), and no limit on it either.** Records that arrived, were
+  // counted above as received, and were overwritten before a sensor following the buffer had read
+  // them. The flow sensor that was behind already fails that scan with the number, so a limit
+  // here would be a second alarm for the one event; this is where an operator watching the probe
+  // sees that `bufferSize` is too small, and which probe.
+  {
+    key: 'flowOverwritten',
+    name: 'Flows overwritten unread',
+    unit: 'flows',
+    counter: { bits: 64 },
+  },
   { key: 'scheduled', name: 'Sensors scheduled', unit: 'sensors' },
   // **The second runner (`P-61`).** EXE and Script checks run in a child process rather than a
   // worker, with their own much smaller ceiling — so the pool channels above say nothing at all

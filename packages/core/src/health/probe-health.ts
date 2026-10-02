@@ -374,6 +374,9 @@ export class ProbeHealthService {
       flowMalformed: health?.flowMalformed ?? null,
       flowMissed: health?.flowMissed ?? null,
       flowUndecodable: health?.flowUndecodable ?? null,
+      // `B-11`. A gap for no collector and for either end below protocol 25, never a zero that
+      // reads as a buffer that lost nothing.
+      flowOverwritten: health?.flowOverwritten ?? null,
       // Null, not 0, when the probe sends nothing: a build with no child-process runner has
       // nothing to say here, and a confident zero cannot be told from one that is idle.
       childSlots: health?.childSlots ?? null,
