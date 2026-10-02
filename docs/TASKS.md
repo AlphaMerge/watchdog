@@ -18233,6 +18233,14 @@ because each is a decision rather than a defect:
       delivers to `https://127.0.0.1` and, where the machine has it, `https://[::1]`, with the
       certificate checked against the address.
 
+- [ ] **A-61 — a late refusal that crosses a core restart is a failed scan** · M · A-56 · Found
+      2026-10-02 by `A-56`, which wrote the bound down and pinned it because nothing stored says
+      which sensors a configuration stopped leaving to a probe, or when. Inside the ten-minute
+      grace, a core restart turns a probe's honest late refusals into failed scans: two of them
+      are one Down and one notification for a change somebody made on purpose. **Done when**
+      the record is stored (a migration, forward and back), read at start, pruned past the
+      grace, and the restart scenario in `credential-pinning.test.ts` shows no Down.
+
 ### Panel round two — notifications, schedules, triggers
 
 Eight lenses over `packages/core/src/{notifications,schedules,triggers}`, merged to 34 distinct
@@ -21471,6 +21479,21 @@ analysis". `F-` is Phase 0.
       older trap and syslog channels (`trapReceived` and the rest); the new row stands alone.
       `trapMalformed`, `syslogMalformed` and `flowMalformed` have no Prometheus series. The web
       UI shows the two channels as it shows any other.
+
+- [ ] **B-15 — that NetFlow v5 counts flows per engine has not been seen on a device** · S ·
+      B-13 · Found 2026-10-02 by `B-13`. The sequence is followed per engine type and id on the
+      ticket's premise; nothing in the repository says a chassis counts that way, and v5 has no
+      specification. A device that keeps one count per address and stamps whichever engine
+      switched the flow would now read false losses in the other direction. **Done when** a
+      capture from a chassis exporting from two engines is read and the rule is confirmed or
+      turned back, with the capture's header fields in a findings file.
+
+- [ ] **B-16 — the older listener counters are missing from the table and from a scrape** · S ·
+      B-14 · Found 2026-10-02 by `B-14`. `docs/administration.md`'s Probe Health table has no
+      rows for `trapReceived`, `trapRejected`, `trapMalformed` or the syslog three, and
+      `trapMalformed`, `syslogMalformed` and `flowMalformed` have no Prometheus series.
+      **Done when** the table has every listener channel, each malformed count is exported
+      beside its received count, and the metrics test reads them.
 
 ## Phase 12 — Maps and dashboards (`V2-02`)
 
