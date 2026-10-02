@@ -17953,10 +17953,25 @@ because each is a decision rather than a defect:
         bound, now shared).
       - **No agent on any request.** `agent: false` for every one, where only a pinned request
         had it. `connection: close` was already sent.
-      - **Changed for a name with several addresses.** The socket used to try each address
-        itself. It is now tried at the resolver's first, and at the next checked address only
-        when the connection is refused or has no route (`NOT_CONNECTED`). A first address that
-        drops packets silently takes the whole timeout, where Node moved on after 250 ms.
+      - **A name with several addresses** used to be walked by the socket. Now the request
+        goes to the resolver's first, and to the next checked address when the connection is
+        refused, has no route (`NOT_CONNECTED`), or is not made within `connectAttemptMs`: 250
+        ms, Node's own `autoSelectFamilyAttemptTimeout`, which is what these requests had
+        before, so a dual-stack name whose first address drops packets reads Up as it did. The
+        addresses before the last share at most half the request's timeout, and time one
+        spends is taken from the next, so all of them together stay inside the timeout. Only
+        the connect is bounded; an address that accepted and is slow is not abandoned.
+      - **The connect of the last address is bounded too**, by what is left of the timeout.
+        `req.setTimeout` only counts once a socket is connected, so an address that never
+        answered the SYN was left to the system's connect timeout or the runner. It now fails
+        at the sensor's timeout saying the device did not answer.
+      - **The policy reads the address, not its spelling** (`@ms/shared` `target-policy.ts`,
+        for sensors and webhooks both). `unmapped` turns an IPv4-mapped IPv6 address into the
+        IPv4 one in either spelling (`::ffff:169.254.169.254`, `::ffff:a9fe:a9fe`), and
+        `refuses`, `isLinkLocal` and `isPrivate` all go through it; `isPrivate` knew the dotted
+        spelling only and `isLinkLocal` neither. `isMetadataAddress` adds `fd00:ec2::254`, the
+        one address the comment named that link-local does not contain, refused under
+        `link-local` and compared as numbers. `fe80::/10` is read from the groups.
       - **Docs:** `administration.md` gains "HTTP sensors and the cloud metadata address"; the
         guard was not described there before. No schema or route changed.
       - **Tests:** 18 new in `pinned-transports.test.ts` and one rewritten: a resolver that
@@ -17965,20 +17980,26 @@ because each is a decision rather than a defect:
         another name; a transaction whose second step's answer is refused; TLS with SNI, `Host`
         and a certificate for another name; the next address after a refused connection and
         never past the checked ones; a resolver that fails, answers nothing, hangs, or is
-        cancelled; an address and the `none` policy; the shared agent. 269 passing, none
-        skipped, in the nine sensors suites touched.
-      - **Mutation:** 23 mutants, 23 killed. Two were killed by a test that then never ended
+        cancelled; an address and the `none` policy; the shared agent. Then 8 more there: a
+        first address whose connection is never made (a socket the test makes and leaves
+        connecting) is passed in about 250 ms; three such share one timeout and no other
+        address is tried; one alone has the whole timeout; a slow answer is not abandoned,
+        over TLS either; the share with little time; and the mapped and `fd00:ec2::254`
+        addresses as a host and as an answer. `target-policy.test.ts` in `@ms/shared`, 11, and
+        2 in `webhook-delivery.test.ts` for the same addresses as an answer and in a URL.
+      - **Mutation:** 36 mutants, 36 killed: 23 on the first commit and 13 on the second (6 on
+        the policy, 7 on the connect bound). Three were killed by a test that then never ended
         and failed its file at the run's timeout (the retry that does not advance, the
-        resolution timer that does not reject), the other 21 by an assertion.
+        resolution timer that does not reject, the last address with no connect bound), the
+        other 33 by an assertion.
       - **Not covered by a test:** the peer check on a guard-pinned socket and the sentence
         `describeFailure` gives it (`byGuard`): a socket handed the address cannot arrive
         anywhere else.
-      - **Found, not fixed:** `isLinkLocal` (`@ms/shared`) does not read an IPv4-mapped IPv6
-        address, so `::ffff:169.254.169.254`, as a device's host or as an AAAA answer, passes
-        the guard and the webhook guard both, while `isPrivate` does unwrap it. And the
-        `link-local` policy does not cover `fd00:ec2::254`, which the comment on `isLinkLocal`
-        names as a metadata address. Mail, SSH, SNMP and the port sensors have no metadata
-        guard at all.
+      - **Found, not fixed:** mail, SSH, SNMP and the port sensors have no metadata guard at
+        all. Other ways to write an IPv4 address inside an IPv6 one (NAT64 `64:ff9b::/96`,
+        the deprecated `::a.b.c.d`) are not unwrapped; whether a probe's network routes them
+        is the installation's. Metadata addresses of other providers that are not link-local
+        are not on the list.
 
 - [ ] **A-55 — a narrowing says how many sensors are outside the bounds, not how many it puts
       there** · S · U-21, A-41b · Found 2026-10-02 by `U-21`. `withholds` counts the sensors

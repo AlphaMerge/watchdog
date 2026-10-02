@@ -3,6 +3,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { globalAgent } from 'node:http';
+import { connect as netConnect, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as tls from 'node:tls';
@@ -22,7 +23,11 @@ import {
   type ResolvedAddress,
   type ResolveHost,
 } from '../src/support/pinned-target.js';
-import { fetchHttp, type HttpRequestOptions } from '../src/support/http/request.js';
+import {
+  connectAttemptMs,
+  fetchHttp,
+  type HttpRequestOptions,
+} from '../src/support/http/request.js';
 import { httpAdvanced } from '../src/types/http-advanced.js';
 import { httpTransaction } from '../src/types/http-transaction.js';
 import { mailImap } from '../src/types/mail-imap.js';
@@ -939,6 +944,173 @@ describe('HTTP, held to the address the target policy checked', () => {
     await assert.rejects(
       () => request(simulator.port, dns, { targetPolicy: 'private' }),
       /refusing to request device\.pinned\.invalid: it resolves to 127\.0\.0\.1, which is a private/,
+    );
+    assert.equal(dns.calls.length, 1);
+    assert.equal(simulator.requests.length, 0);
+  });
+
+  /**
+   * Makes the socket: one to `DEAD` whose connection is never made, as when an address drops
+   * the SYN and says nothing, and a real one to any other address. Where each attempt was
+   * going is read from the lookup the request handed its socket, and recorded.
+   */
+  const dropping =
+    (attempts: string[]): NonNullable<HttpRequestOptions['createConnection']> =>
+    (options) => {
+      let address = '';
+      options.lookup?.(options.host ?? '', {}, (_error, found) => {
+        address = typeof found === 'string' ? found : (found[0]?.address ?? '');
+      });
+      attempts.push(address);
+      if (address !== DEAD) return netConnect({ host: address, port: Number(options.port) });
+      const pending = new Socket();
+      (pending as { connecting: boolean }).connecting = true;
+      // A socket that is connecting holds the process open. This one has no handle to do it.
+      const held = setInterval(() => undefined, 1_000);
+      pending.once('close', () => {
+        clearInterval(held);
+      });
+      return pending;
+    };
+
+  it('moves past an address that never accepts the connection, well inside the timeout', async () => {
+    const simulator = await start(ok);
+    const dns = rebinding(v4(DEAD, '127.0.0.1'), v4(METADATA));
+    const attempts: string[] = [];
+    const started = Date.now();
+    const response = await request(simulator.port, dns, {
+      timeoutMs: 6_000,
+      createConnection: dropping(attempts),
+    });
+    const took = Date.now() - started;
+    assert.equal(response.status, 200);
+    assert.deepEqual(attempts, [DEAD, '127.0.0.1']);
+    assert.ok(took >= 200 && took < 2_000, `took ${String(took)} ms`);
+    assert.equal(simulator.requests.length, 1);
+    assert.equal(dns.calls.length, 1);
+  });
+
+  it('gives several silent addresses one timeout between them, and tries no other', async () => {
+    const simulator = await start(ok);
+    // What a second lookup would say is where the simulator is. Nobody asks.
+    const dns = rebinding(v4(DEAD, DEAD, DEAD), v4('127.0.0.1'));
+    const attempts: string[] = [];
+    const started = Date.now();
+    await assert.rejects(
+      () =>
+        request(simulator.port, dns, { timeoutMs: 1_200, createConnection: dropping(attempts) }),
+      /did not answer within 1200 ms/,
+    );
+    const took = Date.now() - started;
+    assert.deepEqual(attempts, [DEAD, DEAD, DEAD]);
+    assert.ok(took < 1_500, `took ${String(took)} ms`);
+    assert.equal(simulator.requests.length, 0);
+    assert.equal(dns.calls.length, 1);
+  });
+
+  it('a name with one address has the whole timeout to connect', async () => {
+    const simulator = await start(ok);
+    const dns = rebinding(v4(DEAD), v4('127.0.0.1'));
+    const attempts: string[] = [];
+    const started = Date.now();
+    await assert.rejects(
+      () => request(simulator.port, dns, { timeoutMs: 400, createConnection: dropping(attempts) }),
+      /did not answer within 400 ms/,
+    );
+    assert.ok(Date.now() - started >= 380);
+    assert.deepEqual(attempts, [DEAD]);
+  });
+
+  it('does not abandon an address that connected and is slow to answer', async () => {
+    // The bound is on making the connection. A device that takes a second to answer is
+    // measured, and is not asked twice.
+    const simulator = await start({
+      routes: { '/status': { status: 200, body: 'ok', delayMs: 600 } },
+    });
+    const dns = rebinding(v4('127.0.0.1', DEAD), v4(METADATA));
+    const response = await request(simulator.port, dns);
+    assert.equal(response.status, 200);
+    assert.ok(response.totalMs >= 550);
+    assert.equal(simulator.requests.length, 1);
+  });
+
+  it('over TLS, a slow answer is not abandoned either', async (t) => {
+    if (!needsTrust(t) || forName === undefined) return;
+    const simulator = await start({
+      tls: forName,
+      routes: { '/status': { status: 200, body: 'ok', delayMs: 600 } },
+    });
+    const dns = rebinding(v4('127.0.0.1', DEAD), v4(METADATA));
+    const response = await request(simulator.port, dns, { scheme: 'https' });
+    assert.equal(response.status, 200);
+    assert.equal(simulator.requests.length, 1);
+  });
+
+  it('with little time, the addresses before the last share half of it', async () => {
+    assert.equal(connectAttemptMs(10_000, 1), undefined);
+    assert.equal(connectAttemptMs(10_000, 2), 250);
+    assert.equal(connectAttemptMs(10_000, 9), 250);
+    assert.equal(connectAttemptMs(400, 2), 200);
+    assert.equal(connectAttemptMs(400, 3), 100);
+    assert.equal(connectAttemptMs(1, 5), 1);
+    // And so a request with 400 ms still reaches the third address with half of it left.
+    const simulator = await start(ok);
+    const dns = rebinding(v4(DEAD, DEAD, '127.0.0.1'), v4(METADATA));
+    const attempts: string[] = [];
+    const response = await request(simulator.port, dns, {
+      timeoutMs: 400,
+      createConnection: dropping(attempts),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(attempts, [DEAD, DEAD, '127.0.0.1']);
+  });
+
+  it('refuses the metadata address inside an IPv4-mapped IPv6 one, as a host and as an answer', async () => {
+    const simulator = await start(ok);
+    const never = rebinding(v4('127.0.0.1'), v4('127.0.0.1'));
+    for (const host of ['::ffff:169.254.169.254', '::ffff:a9fe:a9fe', '0:0:0:0:0:ffff:a9fe:a9fe']) {
+      await assert.rejects(
+        () => request(simulator.port, never, { host }),
+        /refusing to request .*, which is link-local/,
+        host,
+      );
+    }
+    assert.equal(never.calls.length, 0);
+    for (const address of ['::ffff:169.254.169.254', '::ffff:a9fe:a9fe']) {
+      const answers = [
+        { address: '127.0.0.1', family: 4 },
+        { address, family: 6 },
+      ];
+      const dns = rebinding(answers, answers);
+      await assert.rejects(
+        () => request(simulator.port, dns),
+        /refusing to request device\.pinned\.invalid: it resolves to ::ffff:.*link-local/,
+        address,
+      );
+      assert.equal(dns.calls.length, 1);
+    }
+    assert.equal(simulator.requests.length, 0);
+  });
+
+  it('refuses the metadata address that is not link-local, as a host and as an answer', async () => {
+    const simulator = await start(ok);
+    const never = rebinding(v4('127.0.0.1'), v4('127.0.0.1'));
+    for (const host of ['fd00:ec2::254', 'fd00:0ec2:0:0:0:0:0:254']) {
+      await assert.rejects(
+        () => request(simulator.port, never, { host }),
+        /refusing to request .*, which is a cloud instance-metadata address/,
+        host,
+      );
+    }
+    assert.equal(never.calls.length, 0);
+    const answers = [
+      { address: '127.0.0.1', family: 4 },
+      { address: 'fd00:ec2::254', family: 6 },
+    ];
+    const dns = rebinding(answers, answers);
+    await assert.rejects(
+      () => request(simulator.port, dns),
+      /it resolves to fd00:ec2::254, which is a cloud instance-metadata address/,
     );
     assert.equal(dns.calls.length, 1);
     assert.equal(simulator.requests.length, 0);

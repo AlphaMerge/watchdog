@@ -476,6 +476,49 @@ describe('the webhook transport', () => {
     assert.equal(seen.length, 0, 'and nothing was sent');
   });
 
+  it('refuses a name that resolves to a metadata address in any spelling', async () => {
+    // `A-54`: inside an IPv4-mapped IPv6 address it is the same destination, and one metadata
+    // address is not link-local at all. Alone, and beside an address that is allowed.
+    for (const address of [
+      '::ffff:169.254.169.254',
+      '::ffff:a9fe:a9fe',
+      'fd00:ec2::254',
+      'fd00:0ec2:0:0:0:0:0:254',
+    ]) {
+      for (const answers of [[address], ['127.0.0.1', address]]) {
+        const guarded = new WebhookTransport({
+          config: config(),
+          logger: silent,
+          resolve: () => Promise.resolve(answers),
+        });
+        const result = await guarded.send(message({ settings: { url: url() } }));
+        assert.ok(!result.ok, address);
+        assert.equal(result.retryable, false, address);
+        assert.ok(result.error.includes('refused by the target policy'), result.error);
+        assert.ok(result.error.includes('metadata'), result.error);
+      }
+    }
+    assert.equal(seen.length, 0, 'and nothing was sent');
+  });
+
+  it('refuses a URL that gives such an address itself', async () => {
+    // The resolver answers an address with itself, as the system's does.
+    const literal = new WebhookTransport({
+      config: config(),
+      logger: silent,
+      resolve: (hostname) => Promise.resolve([hostname.replace(/^\[|\]$/g, '')]),
+    });
+    for (const host of ['[::ffff:169.254.169.254]', '[::ffff:a9fe:a9fe]', '[fd00:ec2::254]']) {
+      const result = await literal.send(
+        message({ settings: { url: `http://${host}:${String(port)}/hook` } }),
+      );
+      assert.ok(!result.ok, host);
+      assert.equal(result.retryable, false, host);
+      assert.ok(result.error.includes('refused by the target policy'), result.error);
+    }
+    assert.equal(seen.length, 0);
+  });
+
   it('refuses a name where any one of its addresses is blocked', async () => {
     const guarded = new WebhookTransport({
       config: config(),

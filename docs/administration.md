@@ -551,7 +551,11 @@ An HTTP sensor requests whatever device it is put on, and what it reads is store
 no HTTP sensor (`http.request`, `http.advanced`, `http.content`, `http.transaction`, `rest.custom`)
 requests a **link-local** address, `169.254.0.0/16` or `fe80::/10`: that is where a cloud
 provider's instance-metadata service answers, with credentials, to anything that asks (`A-09`).
-Private addresses are not refused. Monitoring them is the job.
+Nor `fd00:ec2::254`, the one such service that answers outside that range. An address is read
+for what it is and not how it is written: `::ffff:169.254.169.254` and `::ffff:a9fe:a9fe` are
+169.254.169.254 inside an IPv6 address, and are refused as it is (`A-54`). Webhooks are held to
+the same rule by the same code. Other private addresses are not refused. Monitoring them is the
+job.
 
 - **A device given as an address** is checked as it stands. Nothing is resolved.
 - **A device given as a name is resolved once per request, and the request goes to an address
@@ -561,8 +565,14 @@ Private addresses are not refused. Monitoring them is the job.
   the name's DNS cannot answer the check with one address and the connection with another. The
   request still names the device: `Host`, TLS SNI and the certificate check are on the name.
 - **A name with several addresses** is tried at the first the resolver gave, and at the next
-  only when a connection is refused or has no route. A first address that accepts nothing and
-  refuses nothing uses the sensor's timeout, and the sensor is Down.
+  when that connection is refused, has no route, or is not made within 250 ms. So a name whose
+  first address drops packets without a word is still read at its second, a quarter of a second
+  late, and is not Down for it. With a short timeout the wait is shorter: the addresses before
+  the last share at most half the sensor's timeout, and all of them together never take more
+  than the timeout. Only the making of the connection is bounded this way. A device that
+  accepts and then takes its time is waited for, and is never asked twice.
+- **An address that never accepts the connection** fails at the sensor's timeout, saying the
+  device did not answer in that time.
 - **A redirect** is followed only on the same device, scheme and port, to the same checked
   address, without another lookup. One that points anywhere else is not followed, and the
   sensor reports where it pointed. Each step of an `http.transaction` is a request of its own:

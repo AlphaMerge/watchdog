@@ -1,6 +1,6 @@
-import { request as httpRequest } from 'node:http';
+import { Agent as HttpAgent, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import type { IncomingHttpHeaders } from 'node:http';
+import type { ClientRequestArgs, IncomingHttpHeaders } from 'node:http';
 import { isIP } from 'node:net';
 import { refuses, type TargetPolicy } from '@ms/shared';
 import type { CheckTarget } from '../../contract.js';
@@ -88,6 +88,11 @@ export interface HttpRequestOptions {
    * `pinned` is set, when `host` is an address, or under the `none` policy.
    */
   readonly resolve?: ResolveHost;
+  /**
+   * How the socket is made, for a test that needs a connection that never completes. Plain
+   * HTTP only. Absent in production, where Node makes it and `lookup` decides where it goes.
+   */
+  readonly createConnection?: ClientRequestArgs['createConnection'];
 }
 
 export interface HttpResponse {
@@ -132,7 +137,34 @@ const NOT_CONNECTED = new Set([
   'ENETUNREACH',
   'ENETDOWN',
   'EADDRNOTAVAIL',
+  'MS_CONNECT_SLOW',
 ]);
+
+/** A connection that was not made within its share of the time, with another address to try. */
+const CONNECT_SLOW = 'MS_CONNECT_SLOW';
+
+/**
+ * What a connection may take before the next checked address is tried: Node's own
+ * `autoSelectFamilyAttemptTimeout`, which is what these requests had while the socket resolved
+ * the name itself and walked its addresses.
+ */
+const CONNECT_ATTEMPT_MS = 250;
+
+/**
+ * How long each address but the last is given to accept a connection, or undefined for a name
+ * with one address, which has the whole timeout.
+ *
+ * **An address that drops packets must not cost the sensor its reading** (`A-54`). A dual-stack
+ * name whose first address is unreachable without saying so was Up while the socket walked the
+ * addresses, and would be Down, a false alarm, if the one pinned address were all there was.
+ * 250 ms, as Node gave it, and less when the request has little time: the addresses before the
+ * last share at most half of it between them, so the last always has half or more.
+ */
+export function connectAttemptMs(timeoutMs: number, addresses: number): number | undefined {
+  if (addresses < 2) return undefined;
+  const share = Math.floor(timeoutMs / 2 / (addresses - 1));
+  return Math.max(1, Math.min(CONNECT_ATTEMPT_MS, share));
+}
 
 /**
  * Refuses a host whose addresses the policy blocks, and says where the request may connect.
@@ -250,6 +282,9 @@ export async function fetchHttp(
     const send = options.scheme === 'https' ? httpsRequest : httpRequest;
     const exchange = (
       pinned: PinnedAddress | undefined,
+      // How long this attempt has in all, and how long to connect when another address follows.
+      attemptMs: number,
+      connectMs: number | undefined,
     ): Promise<{ status: number; headers: IncomingHttpHeaders }> =>
       new Promise<{ status: number; headers: IncomingHttpHeaders }>((resolve, reject) => {
         const req = send(
@@ -265,7 +300,12 @@ export async function fetchHttp(
             ...(pinned === undefined ? {} : { lookup: pinnedLookup(options.host, pinned) }),
             // No agent, for any request: a pooled connection is one made for another check, to
             // wherever that check's lookup answered, and this request would ride it unchecked.
-            agent: false as const,
+            // (A test that makes the socket itself gets an agent of its own for this one
+            // request, which is the only place Node asks for one.)
+            agent:
+              options.createConnection === undefined
+                ? (false as const)
+                : Object.assign(new HttpAgent(), { createConnection: options.createConnection }),
             ...(options.scheme === 'https'
               ? { rejectUnauthorized: options.verifyTls, servername: options.host }
               : {}),
@@ -306,13 +346,36 @@ export async function fetchHttp(
           },
         );
 
-        req.setTimeout(options.timeoutMs, () => {
-          req.destroy(
-            new Error(
-              `${options.scheme}://${options.host}:${String(options.port)}${path} did not answer ` +
-                `within ${String(options.timeoutMs)} ms`,
-            ),
+        const unanswered = (): Error =>
+          new Error(
+            `${options.scheme}://${options.host}:${String(options.port)}${path} did not answer ` +
+              `within ${String(options.timeoutMs)} ms`,
           );
+        // **The connection has a bound of its own.** `setTimeout` below starts counting once the
+        // socket is connected, so an address that never answers the SYN was left to the
+        // system's own connect timeout, minutes long. With another checked address to try it
+        // gets `connectMs` and the next is tried; the last gets what is left of the request.
+        req.once('socket', (socket) => {
+          // Made already, between the request and this event: there is nothing to wait for.
+          if (!socket.connecting && socket.remoteAddress !== undefined) return;
+          const slow = setTimeout(() => {
+            req.destroy(
+              connectMs === undefined
+                ? unanswered()
+                : Object.assign(new Error('the connection was not made in time'), {
+                    code: CONNECT_SLOW,
+                  }),
+            );
+          }, connectMs ?? attemptMs);
+          slow.unref();
+          const made = (): void => {
+            clearTimeout(slow);
+          };
+          socket.once('connect', made);
+          socket.once('close', made);
+        });
+        req.setTimeout(attemptMs, () => {
+          req.destroy(unanswered());
         });
         req.on('error', reject);
         if (body !== '') req.write(body);
@@ -320,9 +383,19 @@ export async function fetchHttp(
       });
 
     let outcome: { status: number; headers: IncomingHttpHeaders };
+    // The addresses of one hop share the request's timeout: time an address spent not
+    // connecting is taken from the next, so trying several never outlasts trying one.
+    const hopStarted = process.hrtime.bigint();
+    const count = checked?.addresses.length ?? 1;
+    const connectMs = connectAttemptMs(options.timeoutMs, count);
     for (;;) {
+      const spentMs = Number(process.hrtime.bigint() - hopStarted) / 1e6;
       try {
-        outcome = await exchange(checked?.addresses[at]);
+        outcome = await exchange(
+          checked?.addresses[at],
+          Math.max(1, Math.round(options.timeoutMs - spentMs)),
+          at + 1 < count ? connectMs : undefined,
+        );
         break;
       } catch (error: unknown) {
         // Nothing was sent, and the name has another address that was checked: the socket would

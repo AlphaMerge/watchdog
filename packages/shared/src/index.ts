@@ -142,11 +142,13 @@ export type { ProgramRun, ProgramRunOptions } from './process/run.js';
 
 export {
   isLinkLocal,
+  isMetadataAddress,
   isPrivate,
   refuses,
   refusedAddresses,
   sameOrigin,
   schemeAllowed,
+  unmapped,
 } from './net/target-policy.js';
 export type { TargetPolicy, TargetRefusal } from './net/target-policy.js';
 export {
