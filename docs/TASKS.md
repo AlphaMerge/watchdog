@@ -17198,6 +17198,21 @@ because each is a decision rather than a defect:
       window. No frame reaches it and subscribe pacing bounds it; judging before attaching
       needs the held-frame order worked out again, and is a follow-up.
 
+- [ ] **U-25 — a socket whose credential lapsed is closed at the next thing that happens** · M ·
+      U-24, A-34 · Found 2026-10-02 by `U-24`'s second review. `publish` checks every admitted
+      socket's credential before a state batch goes out, and `publishProbe` does the same at a
+      watched probe's edge, and closes a lapsed one there. So an account signed out or disabled
+      is told so at the instant some sensor changed state or some watched probe connected or
+      dropped, including ones it could never see: one sample, inside one sweep interval. The
+      check is what keeps anything committed after a sign-out from being delivered (`A-34`);
+      the close is what carries the timing. **Done when** a lapsed socket is sent nothing at an
+      edge and closed on the sweep's own clock, on both paths, with a test that shows the edge
+      happened and the close did not come with it. Also from that review: the test that the
+      sweep's timer stops with the last watcher cannot fail and needs to watch the timer; the
+      route attaches a watch before it is judged, so repeated subscribes to a hidden probe cost
+      a path read each; and a change between the add-sensor form's own request and its watch
+      standing is not heard.
+
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
       siblings are substituted into any text a step sends: the path, every header and the body.
@@ -18548,6 +18563,15 @@ because each is a decision rather than a defect:
       pool for every transport that resolves there, counted nowhere. **Done when** `test:perf`
       has a case at the 5,000-sensor class with named devices and a slow resolver, the numbers
       are in `docs/findings/`, and lookups in flight or given up are a Probe Health number.
+
+- [ ] **A-67 — an IPv6 address under TLS has only been tried on webhook delivery** · S · A-60 ·
+      Found 2026-10-02 by `A-60`. Node's `checkServerIdentity` (v24.19 in the toolchain) reads
+      an IPv6 host as a name and refuses a certificate that lists the address; the delivery
+      client now asks the certificate itself. The HTTP, `tls.certificate` and mail sensors, mail
+      delivery, and the probe's connection to a core given by IPv6 address rely on the same
+      check and have not been tried. **Done when** each has a test against a certificate
+      listing `::1`, the ones that fail share one identity check with the delivery client, and
+      a core addressed as `https://[::1]` accepts a probe.
 
 ### Panel round two — notifications, schedules, triggers
 
@@ -20794,6 +20818,15 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       which skips the check, so showing a warning there means an upgrade that starts services
       on boxes that have no database, and only the upgrade's last four lines are kept. That
       is not a small change, and it is the part of the Done-when nothing here meets.
+
+- [ ] **H-28 — the upgrade warnings have not been through a smoke install** · S · H-26, H-27 ·
+      Found 2026-10-02. `smoke-install.sh` carries an assertion for the tarball path that has
+      never run. `smoke-packages.sh` upgrades under `MS_SETUP_NO_START=1`, which skips the
+      check, and keeps four lines of output, so no package upgrade can show a warning there.
+      **Done when** `smoke-install.sh` has run with the assertion passing, `smoke-packages.sh`
+      upgrades a `.deb` and an `.rpm` with the check running and shows the warning once in
+      each, and `H-26` and `H-27` are ticked on those runs. `deploy/windows/ms-setup.ps1` gets
+      the same question in Release 1.1.
 
 ## Release 1.1 — Windows
 
