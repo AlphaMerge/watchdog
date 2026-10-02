@@ -17089,6 +17089,14 @@ because each is a decision rather than a defect:
         bound goes from at most 3 fetches to exactly 2. Against the original view all three new
         tests fail, the first with 2 fetches on mount. Four mutations, four killed.
 
+- [ ] **U-23 — the Credentials tab has not been seen in a browser, and two rough edges** · S ·
+      U-21 · Found 2026-10-02 by `U-21`. The tab was built and tested in jsdom; port 5173 was
+      taken by another project when the check was tried. An entry in a list of strings, such as
+      `allowedTargets`, cannot be emptied by deleting its last character, because `removeAt` in
+      `forms/schema.ts` does not descend into arrays (Remove works). A refused preview does not
+      move focus. **Done when** the tab is walked through in a browser with a keyboard and a
+      screen reader, light and dark, and both edges are fixed with tests.
+
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
       siblings are substituted into any text a step sends: the path, every header and the body.
@@ -17823,6 +17831,37 @@ because each is a decision rather than a defect:
       - **Mutation 9/9:** a move's parents kept; its `toProbeId` kept; a reorder's parent
         kept; a clone's source kept; a master kept; a reverted master kept; only the after side
         rewritten; every id nulled, visible or not; and nothing asked about, so nothing seen.
+
+- [ ] **A-52 — "check now" with no probe connected says the probe is too old** · S · A-41c ·
+      Found 2026-10-02 by `A-41c`'s review fixes. With nobody on the line the live version is 0,
+      so a sensor whose set leaves its host undecided is refused with the `probeCannotPin`
+      sentence. The refusal is right and the sentence is wrong: the probe is not connected.
+      **Done when** check now on such a sensor says the probe is not connected, and a test tells
+      the two cases apart.
+
+- [ ] **A-53 — a probe's honest refusal that arrives after the configuration changed reads as a
+      failed scan** · S · A-41c · Found 2026-10-02 by `A-41c`'s review fixes. `reported()` honours
+      `withheld` only for a sensor the probe's last configuration left to it. A refusal made just
+      before a configuration stopped leaving it, and delivered after, is kept as a plain error:
+      one Down where Unknown was true. **Done when** a refusal is judged against the
+      configuration it was made under (a configuration generation on the result, or a short
+      grace), with a scenario test that the race raises no Down.
+
+- [ ] **A-54 — `A-09`'s link-local guard resolves, checks, and lets the socket resolve again** ·
+      M · A-09, A-41c · Found 2026-10-02 by `A-41c`. For a request that is not pinned, the
+      metadata-address guard looks the name up and checks it, and the connection then looks it up
+      again: the rebinding gap `A-41c` closed for bounded sets is still open on this guard, and
+      is older than that ticket. **Done when** the guard's check and the connection use one
+      lookup (`pinnedLookup` already does this for a pinned target), on HTTP and mail, and a test
+      with a resolver that answers differently the second time shows one lookup and a refusal.
+
+- [ ] **A-55 — a narrowing says how many sensors are outside the bounds, not how many it puts
+      there** · S · U-21, A-41b · Found 2026-10-02 by `U-21`. `withholds` counts the sensors
+      outside a set's targets after the write, among those the caller sees, so the tab says "N
+      sensors are outside this set's bounds" and cannot say what this save changes. "Outside" is
+      also loose for a named device whose transport cannot pin. **Done when** the answer carries
+      the count before and after, the tab says how many the save adds, and the sentence covers
+      the unpinnable case in words.
 
 ### Panel round two — notifications, schedules, triggers
 
@@ -19960,6 +19999,16 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
 
 ---
 
+- [ ] **H-25 — the two ways of watching the core from outside have not been run** · S · H-18 ·
+      Found 2026-10-02 by `H-18`. The `OnFailure=` drop-in was written from systemd's rules and
+      never installed; the outside check's script was never run against a core; no core has been
+      started with `heartbeat.url`. The smoke install compares `OnFailure` to exactly
+      `ms-recover@<svc>.service`, so an operator's addition would fail it. **Done when**
+      `smoke-install.sh` installs the documented drop-in and sees both units listed and the
+      notify unit run on `failed`; a started core sends a heartbeat after its first pass and
+      shows `heartbeatFailures`; and the outside check has a variant that alerts once per
+      outage, not every minute.
+
 ## Release 1.1 — Windows
 
 **Decided 2026-09-28 (`H-10`): 1.0 is Linux-only, and Windows is 1.1.** Nothing here is
@@ -20654,6 +20703,19 @@ analysis". `F-` is Phase 0.
       interval does not promise. v9, IPFIX and sFlow reach the probe through the same socket and
       only v5 is sent to a running one. The web UI does not say a probe's collector is off before
       a flow sensor is added to it.
+
+- [ ] **B-08 — nothing says a probe's flow collector is off until a flow sensor fails** · S ·
+      B-07 · Found 2026-10-02 by `B-07`. The web UI offers a flow sensor on any probe, and the
+      operator learns from the first scan's error that `flowListener.enabled` is false. A v1
+      probe with the key set logs a warning and binds nothing, and `config check` says nothing.
+      **Done when** the add-sensor form says so for a probe whose collector is off, and
+      `config check` reports the key under a v1 profile.
+
+- [ ] **B-09 — only NetFlow v5 has been sent to a running probe** · S · B-07 · Found 2026-10-02
+      by `B-07`. v9, IPFIX and sFlow are covered at the decoder and the listener, and
+      `bufferSize` and `ipVersion` reach the listener with no probe-level test. **Done when**
+      `probe-flow.test` sends each dialect to a started probe and sees a reading, and an
+      overflow case shows `flowMissed` counting.
 
 ## Phase 12 — Maps and dashboards (`V2-02`)
 
