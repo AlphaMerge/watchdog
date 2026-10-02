@@ -1044,3 +1044,161 @@ describe('the heartbeat over HTTPS, to a name and to an address (A-71)', () => {
     assert.deepEqual(elsewhere.seen, [], 'the request, with its token, went where it was sent');
   });
 });
+
+/**
+ * Every way a request can end is an end (`A-71`, found in its review).
+ *
+ * `fetch` answered for all of them. Node's own client tells of an answer with `response`, of a
+ * failure with `error` — and of an answer it will not use (a `101`, with nobody listening for an
+ * upgrade) with neither: it destroys the socket and says only `close`. A request waiting on the
+ * first two never ended, the one-at-a-time rule then held every later heartbeat back behind it,
+ * and nothing was counted or logged: a dead man's switch that had stopped without a word.
+ *
+ * The receivers here are bare TCP listeners that write the bytes themselves, because no HTTP
+ * server will send most of these.
+ */
+describe('the heartbeat request always ends (A-71)', () => {
+  /** A listener that reads one request and answers it as `answer` says. */
+  async function raw(
+    answer: (socket: Socket) => void,
+  ): Promise<{ url: string; requests: () => number }> {
+    let requests = 0;
+    const held: Socket[] = [];
+    const server = createTcpServer((socket) => {
+      held.push(socket);
+      socket.on('error', () => undefined);
+      let read = '';
+      socket.on('data', (chunk: Buffer) => {
+        read += chunk.toString('latin1');
+        if (!read.includes('\r\n\r\n')) return;
+        read = '';
+        requests += 1;
+        answer(socket);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    open.push({
+      origin: '',
+      url: '',
+      seen: [],
+      close: () =>
+        new Promise<void>((resolve) => {
+          for (const socket of held) socket.destroy();
+          server.close(() => {
+            resolve();
+          });
+        }),
+    });
+    const port = (server.address() as AddressInfo).port;
+    return { url: `http://127.0.0.1:${String(port)}/${TOKEN}`, requests: () => requests };
+  }
+
+  /**
+   * Two passes an interval apart against one receiver: what each counted, and the warnings.
+   * Every wait has its own bound, well inside the test's (rule 22): a request that never ends
+   * fails here by name.
+   */
+  async function twoPasses(
+    receiver: { url: string; requests: () => number },
+    timeoutMs: number,
+  ): Promise<{
+    first: { sent: number; failures: number };
+    second: { sent: number; failures: number };
+    warned: Record<string, unknown>[];
+    text: string;
+  }> {
+    const { logger, lines } = capturing();
+    let now = 0;
+    const heartbeat = new Heartbeat({
+      url: receiver.url,
+      intervalSeconds: 300,
+      passSeconds: 300,
+      version: '9.9.9',
+      logger,
+      timeoutMs,
+      monotonicMs: () => now,
+    });
+    const ended = async (pass: string, count: number): Promise<void> => {
+      await until(timeoutMs + 3_000, `the ${pass} heartbeat to end, one way or the other`, () => {
+        const { sent, failures } = heartbeat.stats();
+        return sent + failures >= count;
+      });
+    };
+    try {
+      heartbeat.passed();
+      await ended('first', 1);
+      const first = heartbeat.stats();
+      // The next pass that is due sends the next one: nothing is left in flight to hold it back.
+      now = 300_000;
+      heartbeat.passed();
+      await until(3_000, 'the second heartbeat to be sent at all', () => receiver.requests() >= 2);
+      await ended('second', 2);
+      await heartbeat.settled();
+      return {
+        first,
+        second: heartbeat.stats(),
+        warned: lines.filter((one) => one['level'] === 40),
+        text: JSON.stringify(lines),
+      };
+    } finally {
+      heartbeat.stop();
+    }
+  }
+
+  it('counts a 101 nobody asked for as one failure, and the next pass sends again', async () => {
+    const receiver = await raw((socket) => {
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n',
+      );
+    });
+    // A long timeout, so that what ends the request is the answer and not the clock.
+    const result = await twoPasses(receiver, 20_000);
+    assert.deepEqual(result.first, { sent: 0, failures: 1 });
+    assert.deepEqual(result.second, { sent: 0, failures: 2 });
+    assert.equal(receiver.requests(), 2);
+    assert.equal(result.warned.length, 2);
+    const [line] = result.warned;
+    assert.ok(line !== undefined);
+    assert.equal(line['phase'], 'request');
+    assert.equal(line['receiver'], new URL(receiver.url).origin);
+    assert.match(
+      (line['err'] as { message: string }).message,
+      /closed .* with no answer this could use/,
+    );
+    assert.ok(!result.text.includes('s3cret-token'), 'the token reached the log');
+  });
+
+  it('counts a receiver that closes with no answer, either way of closing, and the next pass sends again', async () => {
+    for (const [label, close] of [
+      ['reset', (socket: Socket) => socket.destroy()],
+      ['ended', (socket: Socket) => socket.end()],
+      ['half an answer', (socket: Socket) => socket.end('HTTP/1.1 2')],
+    ] as const) {
+      const receiver = await raw(close);
+      const result = await twoPasses(receiver, 20_000);
+      assert.deepEqual(result.first, { sent: 0, failures: 1 }, label);
+      assert.deepEqual(result.second, { sent: 0, failures: 2 }, label);
+      assert.equal(receiver.requests(), 2, label);
+      assert.equal(result.warned[0]?.['phase'], 'request', label);
+    }
+  });
+
+  it('waits through an informational answer for the real one, and for its timeout and no longer when none follows', async () => {
+    const hinted = await raw((socket) => {
+      socket.write('HTTP/1.1 103 Early Hints\r\nLink: </x>; rel=preload\r\n\r\n');
+      socket.write('HTTP/1.1 204 No Content\r\n\r\n');
+    });
+    const arrived = await twoPasses(hinted, 20_000);
+    assert.deepEqual(arrived.second, { sent: 2, failures: 0 }, arrived.text);
+
+    const stalled = await raw((socket) => {
+      socket.write('HTTP/1.1 102 Processing\r\n\r\n');
+    });
+    const given = await twoPasses(stalled, 200);
+    assert.deepEqual(given.second, { sent: 0, failures: 2 });
+    assert.deepEqual(
+      given.warned.map((line) => line['phase']),
+      ['timeout', 'timeout'],
+    );
+  });
+});

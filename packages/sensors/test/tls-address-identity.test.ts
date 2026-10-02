@@ -3,7 +3,7 @@ import { after, before, describe, it } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { X509Certificate } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { createServer as createTcpServer } from 'node:net';
+import { createServer as createTcpServer, isIP } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as tls from 'node:tls';
@@ -126,6 +126,12 @@ const v6 = await new Promise<boolean>((resolve) => {
   });
 });
 
+/**
+ * Handshakes the TLS servers below completed for a client that named nobody, or named an
+ * address. What the last case needs to have seen before "Node did not warn" means anything.
+ */
+let addressHandshakes = 0;
+
 const mailbox = new Mailbox();
 const mailServers: RunningServer[] = [];
 const httpServers: HttpSimulator[] = [];
@@ -235,6 +241,8 @@ async function handshakes(
       },
     },
     (socket) => {
+      const asked = (socket as { servername?: string | false }).servername;
+      if (typeof asked !== 'string' || isIP(asked) !== 0) addressHandshakes += 1;
       socket.end();
     },
   );
@@ -667,9 +675,18 @@ describe('mail sensors on a device given by address, verifying the certificate',
 });
 
 describe('a server name that is an address', () => {
-  it('was sent by nothing in this file: Node did not warn (DEP0123)', async () => {
+  it('was sent by nothing in this file: Node did not warn (DEP0123)', async (t) => {
     // Node warns once a process, at the first connection given an address as its server name.
     // Every sensor type above has by now connected to one, so one that still sent it is here.
+    // **Only where they ran.** With no `openssl`, or no way to trust a certificate, every case
+    // above skips, nothing connects, and no warning would be no evidence: this skips with
+    // them. And where they did run, the servers must have seen a device given by address
+    // arrive, or there was nothing to warn about.
+    if (ready(t, false) === null) return;
+    assert.ok(
+      addressHandshakes > 0,
+      'no handshake for a device given by address reached a server in this file',
+    );
     // Warnings are delivered on a later tick than the connection that caused them.
     await new Promise((resolve) => setImmediate(resolve));
     const codes = warnings.map((warning) => (warning as { code?: string }).code ?? warning.name);

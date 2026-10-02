@@ -252,6 +252,21 @@ export class Heartbeat implements PassWitness {
       // Left on for the life of the request: an error after the answer has nowhere else to go,
       // and rejecting a promise that has settled does nothing.
       request.on('error', reject);
+      // **Every end is an end.** Node tells of an answer with `response` and of a failure with
+      // `error`, and of an answer it will not use with neither: a `101 Switching Protocols`
+      // nobody asked for has it destroy the socket and say only `close`. Waiting on the first
+      // two, this never settled; the one-at-a-time rule then held every later heartbeat back
+      // behind it, uncounted and unlogged — a dead man's switch stopped without a word, which
+      // `fetch` never did (found in `A-71`'s review). `close` is the one event every request
+      // ends with, and it comes after the other two, so by then this has usually been said.
+      request.on('close', () => {
+        reject(
+          new Error(
+            'the receiver closed the connection with no answer this could use (an upgrade ' +
+              'to another protocol is one such)',
+          ),
+        );
+      });
       request.end();
     });
   }

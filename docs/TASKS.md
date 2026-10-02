@@ -19414,6 +19414,18 @@ because each is a decision rather than a defect:
         has the new function.
       - **Mutation: 19/19.** Each failed a test, and after each restore the rebuilt `dist`
         matched its hashes from before the first.
+      - **Review: a request that never ended, fixed.** Node's client says of a `101 Switching
+        Protocols` nobody asked for neither `response` nor `error`: it destroys the socket and
+        says `close`. The request waited on the first two, so it never settled, the timeout had
+        nothing left to abort, and the one-at-a-time rule held every later heartbeat back
+        behind it, uncounted and unlogged. Reproduced in a test on the toolchain's Node 24
+        ("timed out after 23000 ms waiting for the first heartbeat to end") against a bare
+        listener. The request now ends on `close` as well: one failure, phase `request`, and
+        the next pass sends again. Beside it: a receiver that resets, ends, or sends half a
+        status line is one failure each and the next pass sends; a `103` is waited through to
+        the real answer, and a `102` with nothing after it is one timeout. The DEP0123 case
+        now skips where the others skip and first asserts that a server saw a handshake for a
+        device given by address. Mutation: 4/4.
       - **Found, not fixed.** The channel is still named *Host name matches* though it now
         answers for an address. The mismatch note in `tls.certificate`'s message lists the
         certificate's names and not its addresses. The heartbeat does not honour
