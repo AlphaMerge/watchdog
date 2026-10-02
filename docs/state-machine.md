@@ -200,11 +200,27 @@ always was, and past the ten minutes, counted from when the configuration stoppe
 sensor and not from the restart, the mark is one the probe has no claim to
 (`credential-pinning.test.ts`, the alarm-volume scenario).
 
-- **Written by the core alone, from its own decision.** A row is written when a configuration the
-  core builds stops leaving a sensor to its probe, and the write is awaited before that
-  configuration is handed over. Nothing a probe sends writes to the table, so what a probe that
-  misbehaves can and cannot do is exactly the paragraph above, on either side of a restart. A
-  configuration that changes nothing recorded writes nothing.
+- **Written by the core, when a configuration it builds changes the record.** A row is written
+  when a configuration stops leaving a sensor to its probe, and the write is waited for, within
+  a bound, before that configuration is handed over. A configuration that changes nothing
+  recorded writes nothing. **No result a probe sends writes to the table.** One thing a probe
+  says does reach a configuration: the protocol version it connects with, which decides whether
+  a named device is left to it at all. A probe that reconnects under a version that changes
+  that causes one write, once per reconnect, of no more rows than it has sensors, and the stop
+  it records begins the ten minutes for those sensors as any stop does. That it can do so again
+  by alternating versions is `A-53`'s behaviour in memory and is not changed here; what storing
+  adds is the write, and that the ten minutes survive a restart. Otherwise what a probe that
+  misbehaves can and cannot do is the paragraph above, on either side of a restart.
+- **The write gives way, and holds nobody back.** It runs in its own transaction with a lock
+  timeout of 300 ms and a statement timeout of 2 s, and the configuration waits for it 3 s at
+  most, whatever the connection is doing. It takes its own rows and then a key-share lock on
+  the sensors' rows; a delete of a device or group takes those first and cascades into the
+  table. 300 ms is under PostgreSQL's `deadlock_timeout` (a second as shipped), so the write is
+  always the one to give up and the operator's delete is never the one aborted. Giving up is
+  logged at `warn`, the configuration goes out, and the write is made again at the next
+  configuration or within the minute. Each probe's writes are in a line of their own: one
+  probe's configuration never waits on another's write. An entry whose sensor or probe was
+  deleted meanwhile is dropped rather than written again.
 - **Removed as the entry in memory is**: when the sensor is left to the probe again, at the
   probe's first configuration after the ten minutes, and on a one-minute timer for a probe that
   is never sent another. A deleted sensor or probe takes its rows with it.
@@ -228,8 +244,8 @@ the change, and a late refusal for it is the mark the probe has no claim to: a f
 as many as the sensor's failed-scan count (two, as shipped) are **one Down for that sensor, with
 the one alarm a Down raises**, in the probe's words ("Not scanned: ..."), until the next scan
 under the new configuration, counted on **Reports refused**. The same follows a write that
-failed, which is logged at `error` and made again at the probe's next configuration or within the
-minute, and a clock set forward across the restart. Closing it would mean storing what each probe
+failed or gave way, when the core is restarted before it is made again at the probe's next
+configuration or within the minute, and a clock set forward across the restart. Closing it would mean storing what each probe
 was last left, which is not done.
 
 **The next result that is not a refusal lets the sensor go, and that result decides it.** The

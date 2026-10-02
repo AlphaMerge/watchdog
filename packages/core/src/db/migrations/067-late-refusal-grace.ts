@@ -10,10 +10,13 @@ import type { Migration } from './types.js';
  * notification, for a change somebody made on purpose (`A-56`). One row per (probe, sensor) is
  * the record, with the time the first such configuration was built.
  *
- * **Written only by the core, from what it decided itself**, when it builds a configuration:
- * nothing a probe sends writes here. Read once at start, before the probe endpoint accepts a
- * result. A row goes when the sensor is left to the probe again, when its ten minutes have run
- * out, and with its sensor or its probe, which is what the two cascades are for.
+ * **Written only by the core, when it builds a configuration that changes the record.** No
+ * result a probe sends writes here. One thing a probe says does reach a configuration: the
+ * protocol version it connects with, which decides whether a named device is left to it at all.
+ * A probe that reconnects under a version that changes that causes one write, once per
+ * reconnect, of no more rows than it has sensors. Read once at start, before the probe endpoint
+ * accepts a result. A row goes when the sensor is left to the probe again, when its ten minutes
+ * have run out, and with its sensor or its probe, which is what the two cascades are for.
  *
  * **`stopped_at` is this core's wall clock, not the database's**: it is compared at the next
  * start with the same clock, and the comparison is bounded there, so a time in the future or one

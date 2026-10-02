@@ -12,7 +12,7 @@ import {
 import { atLeast, type AccessPrincipal, type AccessRight } from '../auth/access.js';
 import type { AccountRole } from '../auth/accounts.js';
 import { AuthError } from '../auth/errors.js';
-import type { Queryable } from '../db/pool.js';
+import { DatabaseError, type Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 import type { Actor, AuditSink, Mutation } from './audit.js';
 import {
@@ -721,6 +721,11 @@ export interface CredentialVouchingOptions {
    * against at the next start (`A-61`). `Date.now` when absent. Injected by a test.
    */
   wallNow?: () => number;
+  /**
+   * How long a configuration waits for its record to be stored before it goes out without
+   * (`A-61`). `LATE_REFUSAL_SAVE_WAIT_MS` when absent. Injected by a test.
+   */
+  saveWaitMs?: number;
 }
 
 /**
@@ -736,6 +741,30 @@ export interface CredentialVouchingOptions {
  * have not sent.
  */
 export const LATE_REFUSAL_GRACE_MS = 10 * 60_000;
+
+/**
+ * How long the write of the stored record waits for a lock before it gives up (`A-61`). Well
+ * under PostgreSQL's `deadlock_timeout` (a second as shipped), so that against a delete that
+ * cascades into the table it is this write that gives way, and never the delete that is aborted.
+ */
+export const LATE_REFUSAL_SAVE_LOCK_MS = 300;
+/** How long that statement may run on the server at all. */
+export const LATE_REFUSAL_SAVE_STATEMENT_MS = 2_000;
+/**
+ * How long a configuration waits for the write, whatever the write is doing: the two above bound
+ * a statement the server is running, and this bounds a connection that never answers.
+ */
+export const LATE_REFUSAL_SAVE_WAIT_MS = 3_000;
+
+/** `lock_not_available`, `query_canceled` and `deadlock_detected`: a write that gave way. */
+const GAVE_WAY = new Set(['55P03', '57014', '40P01']);
+
+/** Whether a write failed for a lock or for time, through the pool's wrapper or without it. */
+function gaveWay(error: unknown): boolean {
+  if (error instanceof DatabaseError) return GAVE_WAY.has(error.sqlstate ?? '');
+  if (typeof error !== 'object' || error === null || !('code' in error)) return false;
+  return typeof error.code === 'string' && GAVE_WAY.has(error.code);
+}
 
 /** What a stored time says at a start (`A-61`): how much of the grace has run, or that it is spent. */
 export type StoredStop =
@@ -930,8 +959,10 @@ export class CredentialVouching {
   readonly #stoppedLeaving = new Map<number, Map<number, number>>();
   /** Probes whose entries here are not what the table holds: a write failed. Written again. */
   readonly #unsaved = new Set<number>();
-  /** The writes to the table, one after another, so that the last one to land is the latest. */
-  #saving: Promise<void> = Promise.resolve();
+  /** Each probe's write that is running, and the one waiting behind it (`#saved`). */
+  readonly #saveRunning = new Map<number, Promise<void>>();
+  readonly #saveWaiting = new Map<number, Promise<void>>();
+  readonly #saveWaitMs: number;
   readonly #graceMs: number;
   readonly #now: () => number;
   readonly #wallNow: () => number;
@@ -941,6 +972,7 @@ export class CredentialVouching {
     this.#graceMs = options.lateRefusalGraceMs ?? LATE_REFUSAL_GRACE_MS;
     this.#now = options.now ?? ((): number => performance.now());
     this.#wallNow = options.wallNow ?? ((): number => Date.now());
+    this.#saveWaitMs = options.saveWaitMs ?? LATE_REFUSAL_SAVE_WAIT_MS;
     this.#db = options.db;
     this.#logger = options.logger.child({ component: 'credential-vouching' });
     this.#types = options.sensorTypes;
@@ -1088,7 +1120,8 @@ export class CredentialVouching {
     if (left.size === 0) this.#leftToProbe.delete(probeId);
     else this.#leftToProbe.set(probeId, left);
     // Stored before this configuration is handed to anybody (`A-61`), and only when it changed
-    // what is recorded, which most configurations do not: a steady build writes nothing.
+    // what is recorded, which most configurations do not: a steady build writes nothing. Waited
+    // for within a bound, and never behind another probe's write.
     if (moved || this.#unsaved.has(probeId)) await this.#saved(probeId);
     const before = this.#withheldByProbe.get(probeId) ?? 0;
     if (refused.size === 0) this.#withheldByProbe.delete(probeId);
@@ -1142,53 +1175,129 @@ export class CredentialVouching {
    * **One statement**, so the table never holds half of a change. Each time is written as the
    * wall clock's reading now less what the entry has already run on the monotonic one, which is
    * the moment the configuration stopped leaving the sensor as this clock would have read it.
-   * A sensor or a probe deleted meanwhile is skipped by the join; its rows went with it.
+   *
+   * **It gives way to everything else, and soon.** The statement runs in a transaction of its
+   * own with a lock timeout of `LATE_REFUSAL_SAVE_LOCK_MS` and a statement timeout of
+   * `LATE_REFUSAL_SAVE_STATEMENT_MS`. It takes its own rows and then a key-share lock on the
+   * sensors' and the probe's rows in `object`; a delete of a device or a group takes those rows
+   * first and cascades into these, which is the two in the other order. PostgreSQL would settle
+   * that by aborting one of them after `deadlock_timeout`, a second as shipped, and the one it
+   * picks could be the operator's delete. The lock timeout is well under that, so **this write
+   * is always the one to give up**: it is the one that can be made again. Giving up for a lock
+   * or for time is expected under contention and is logged at `warn`; anything else at `error`.
+   *
+   * **An entry whose sensor or probe is gone is dropped, not written again.** The join skips it,
+   * the statement says which rows it wrote, and what it did not write has nothing left to be
+   * about: without this a sensor deleted while its write was waiting would be a write retried
+   * every minute for nothing.
    *
    * **The window between the decision and this write.** A configuration change is decided in the
    * write's own transaction, and nothing here is part of that: the record is of what a probe's
    * *configuration* stops leaving it, and that is known only when the configuration is next built
    * for that probe, from what the one before left it, which is held in memory. For a connected
-   * probe that is the notifier's 250 ms after the commit, and this write is awaited before the
-   * configuration is handed over. A core that stops inside that window, or while the probe is
-   * away, starts with no entry for the change, and a late refusal for it is the failed scan it
-   * was before `A-61`. What is stored is every entry a configuration has been built for.
+   * probe that is the notifier's 250 ms after the commit, and this write is waited for, within
+   * its bound, before the configuration is handed over. A core that stops inside that window, or
+   * while the probe is away, starts with no entry for the change, and a late refusal for it is
+   * the failed scan it was before `A-61`. What is stored is every entry a configuration has
+   * been built for and whose write landed.
    */
   async #save(probeId: number): Promise<void> {
-    const stopped = this.#stoppedLeaving.get(probeId);
-    const sensorIds = [...(stopped?.keys() ?? [])];
+    const entries = [...(this.#stoppedLeaving.get(probeId) ?? [])];
+    const sensorIds = entries.map(([sensorId]) => sensorId);
     const wall = this.#wallNow();
     const now = this.#now();
-    const stoppedAtMs = [...(stopped?.values() ?? [])].map((at) => wall - (now - at));
+    const stoppedAtMs = entries.map(([, at]) => wall - (now - at));
     try {
-      await this.#db.query(
-        `WITH gone AS (
-           DELETE FROM late_refusal_grace
-           WHERE probe_id = $1 AND sensor_id <> ALL($2::bigint[])
-         )
-         INSERT INTO late_refusal_grace (probe_id, sensor_id, stopped_at)
-         SELECT p.id, s.id, to_timestamp(r.stopped_ms / 1000.0)
-         FROM unnest($2::bigint[], $3::float8[]) AS r (sensor_id, stopped_ms)
-         JOIN object s ON s.id = r.sensor_id
-         JOIN object p ON p.id = $1
-         ON CONFLICT (probe_id, sensor_id) DO UPDATE SET stopped_at = EXCLUDED.stopped_at`,
-        [probeId, sensorIds, stoppedAtMs],
-      );
+      const written = await this.#db.tx(async (q) => {
+        await q.query(
+          `SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)`,
+          [`${String(LATE_REFUSAL_SAVE_LOCK_MS)}ms`, `${String(LATE_REFUSAL_SAVE_STATEMENT_MS)}ms`],
+        );
+        return q.query<{ sensor_id: string }>(
+          `WITH gone AS (
+             DELETE FROM late_refusal_grace
+             WHERE probe_id = $1 AND sensor_id <> ALL($2::bigint[])
+           )
+           INSERT INTO late_refusal_grace (probe_id, sensor_id, stopped_at)
+           SELECT p.id, s.id, to_timestamp(r.stopped_ms / 1000.0)
+           FROM unnest($2::bigint[], $3::float8[]) AS r (sensor_id, stopped_ms)
+           JOIN object s ON s.id = r.sensor_id
+           JOIN object p ON p.id = $1
+           ON CONFLICT (probe_id, sensor_id) DO UPDATE SET stopped_at = EXCLUDED.stopped_at
+           RETURNING sensor_id::text AS sensor_id`,
+          [probeId, sensorIds, stoppedAtMs],
+        );
+      });
       this.#unsaved.delete(probeId);
+      // What was not written has no sensor, or no probe, to be about any more.
+      const stored = new Set(written.map((row) => Number(row.sensor_id)));
+      const stopped = this.#stoppedLeaving.get(probeId);
+      for (const [sensorId, at] of entries) {
+        if (!stored.has(sensorId) && stopped?.get(sensorId) === at) stopped.delete(sensorId);
+      }
+      if (stopped?.size === 0) this.#stoppedLeaving.delete(probeId);
     } catch (error: unknown) {
       this.#unsaved.add(probeId);
-      this.#logger.error(
-        { probeId, entries: sensorIds.length, err: describeError(error) },
-        'could not store which sensors a configuration stopped leaving to a probe; a core ' +
-          'restarted before the next write reads a late refusal for them as a failed scan',
-      );
+      const fields = { probeId, entries: sensorIds.length, err: describeError(error) };
+      if (gaveWay(error)) {
+        this.#logger.warn(
+          fields,
+          'gave up storing which sensors a configuration stopped leaving to a probe, for a ' +
+            'lock or for time; it is written again at the next configuration or within a minute',
+        );
+      } else {
+        this.#logger.error(
+          fields,
+          'could not store which sensors a configuration stopped leaving to a probe; a core ' +
+            'restarted before the next write reads a late refusal for them as a failed scan',
+        );
+      }
     }
   }
 
-  /** `#save`, after every write asked for before it. */
+  /**
+   * `#save`, waited for no longer than `#saveWaitMs`.
+   *
+   * **One probe's write never waits on another's**: each probe has its own line, of the write
+   * that is running and at most one behind it. One behind is enough, since a write stores what
+   * is recorded when it runs and not when it was asked for, so a second request while one is
+   * already waiting its turn is that same write.
+   *
+   * **And a probe's configuration does not wait on its own without end.** The server's two
+   * timeouts bound a statement the server is running. They do not bound a connection that never
+   * answers or a pool with none to give, so the caller is let go after `#saveWaitMs` whatever
+   * the write is doing, with the probe marked for the next configuration or prune to write again.
+   */
   #saved(probeId: number): Promise<void> {
-    const run = this.#saving.then(() => this.#save(probeId));
-    this.#saving = run;
-    return run;
+    let waiting = this.#saveWaiting.get(probeId);
+    if (waiting === undefined) {
+      const before = this.#saveRunning.get(probeId) ?? Promise.resolve();
+      waiting = before.then(async () => {
+        this.#saveWaiting.delete(probeId);
+        const run = this.#save(probeId);
+        this.#saveRunning.set(probeId, run);
+        await run;
+        if (this.#saveRunning.get(probeId) === run) this.#saveRunning.delete(probeId);
+      });
+      this.#saveWaiting.set(probeId, waiting);
+    }
+    const write = waiting;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.#unsaved.add(probeId);
+        this.#logger.warn(
+          { probeId, waitedMs: this.#saveWaitMs },
+          'stopped waiting for the record of late refusals to be stored; the configuration ' +
+            'goes out without it, and it is written again at the next one or within a minute',
+        );
+        resolve();
+      }, this.#saveWaitMs);
+      timer.unref();
+      void write.then(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
   }
 
   /**
@@ -1239,7 +1348,7 @@ export class CredentialVouching {
         rewrite.add(probeId);
       }
     }
-    for (const probeId of rewrite) await this.#saved(probeId);
+    await Promise.all([...rewrite].map((probeId) => this.#saved(probeId)));
     if (rows.length > 0) {
       this.#logger[tally.ahead > 0 ? 'warn' : 'info'](
         { ...tally },
@@ -1270,7 +1379,8 @@ export class CredentialVouching {
       }
       if (stopped.size === 0) this.#stoppedLeaving.delete(probeId);
     }
-    for (const probeId of moved) await this.#saved(probeId);
+    // Together: each probe has its own line, and none of them waits past its bound.
+    await Promise.all([...moved].map((probeId) => this.#saved(probeId)));
   }
 
   /** Whether a configuration stopped leaving this sensor to the probe within the grace. */

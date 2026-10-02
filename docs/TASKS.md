@@ -18617,8 +18617,9 @@ because each is a decision rather than a defect:
         is decided in its own write; what makes a refusal late is that the probe's configuration
         stopped leaving it the sensor, and the core knows that when it next builds that
         configuration (`withhold`), from what the one before left the probe, which is in memory.
-        The row is written there, in one statement, awaited before the configuration is handed
-        over, and only when the build changed what is recorded: a steady build writes nothing.
+        The row is written there, in one statement, waited for (within a bound, see the review
+        below) before the configuration is handed over, and only when the build changed what is
+        recorded: a steady build writes nothing.
         **The window that remains** is from the change's commit to that build: the notifier's
         250 ms for a connected probe, and until it redials for one that is away. A core that
         stops inside it starts with no row, and the refusal is the failed scan it was before.
@@ -18643,9 +18644,32 @@ because each is a decision rather than a defect:
         configuration stops leaving it that sensor. It cannot begin or prolong an Unknown,
         discard an `ok` or a reading, use it on a sensor it was never left or past the ten
         minutes, or reopen the window. Storing changes one thing: those ten minutes no longer
-        end at a restart. Nothing a probe sends writes to the table (a test sends marked batches
-        and counts no write), and a restart does not start the ten minutes again. The one case
-        that gives a fresh ten minutes is an operator's clock set back across a restart, once.
+        end at a restart, and a restart does not start them again. **No result a probe sends
+        writes to the table.** One thing a probe says does: the protocol version it connects
+        with decides whether a named device is left to it (`boundRefusal`), so a reconnect under
+        a version that changes that causes one statement, once per reconnect, of no more rows
+        than the probe has sensors (a test counts both). The first outcome said "nothing a probe
+        sends writes", which was wrong. A probe alternating its version re-opens the ten minutes
+        each time; that is `A-53`'s in-memory behaviour and is not changed here. Besides that,
+        an operator's clock set back across a restart gives a fresh ten minutes, once.
+      - **Review, second commit: the write gives way and holds nobody back.** Three findings.
+        (1) Every probe's write went through one chain with no bound, so one stalled write held
+        back every probe's configuration. Each probe now has its own line (the write running and
+        at most one behind it), the write runs in its own transaction with `lock_timeout` 300 ms
+        and `statement_timeout` 2 s, and a configuration or a prune waits 3 s at most for it,
+        whatever the connection does. On a timeout the configuration is returned, the probe is
+        marked unsaved and the existing retry writes it; that is logged at `warn`, anything else
+        at `error`. (2) The write locks its rows and then the sensors' rows in `object`; a delete
+        of a device or group takes them in the other order. 300 ms is under `deadlock_timeout`
+        (1 s as shipped), so the write always gives up first and the operator's delete is never
+        the one aborted: that is the design, and a test on the real table holds the lock from a
+        second connection, once as an update would and once as a delete, and shows the build
+        returning inside the bound, the other transaction committing, and the next build or
+        prune storing what is left. The statement returns the rows it wrote, and an entry whose
+        sensor or probe is gone is dropped from memory, so it is not a write retried every
+        minute. (3) The claim above, corrected here, in the migration's comment and in
+        `state-machine.md`. 13 more unit cases and the one on the real table; mutation 10 of
+        10 killed.
       - **Alarm volume** (`credential-pinning.test.ts`, the restart scenario, rewritten): a
         sensor Up, a name entry added, the row stored, then a second `CredentialVouching` on the
         same database that reads it. Four late refusals: still Up, no row in its state history,

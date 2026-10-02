@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import type { SensorType } from '@ms/sensors';
+import { pino } from 'pino';
 import {
   capabilitiesFor,
   PROTOCOL_VERSION,
@@ -12,7 +13,7 @@ import {
 } from '@ms/shared';
 import { CompositeAuditSink, DatabaseAuditSink } from '../src/audit/store.js';
 import { AccessService } from '../src/auth/access.js';
-import type { Database } from '../src/db/pool.js';
+import { DatabaseError, type Database } from '../src/db/pool.js';
 import { Ingestor } from '../src/ingestion/ingestor.js';
 import { IngestionService } from '../src/ingestion/service.js';
 import { MessageContextLoader } from '../src/notifications/context.js';
@@ -25,6 +26,9 @@ import { TemplateService } from '../src/notifications/templates.js';
 import {
   CredentialVouching,
   LATE_REFUSAL_GRACE_MS,
+  LATE_REFUSAL_SAVE_LOCK_MS,
+  LATE_REFUSAL_SAVE_STATEMENT_MS,
+  LATE_REFUSAL_SAVE_WAIT_MS,
   WITHHELD_CREDENTIALS,
   boundRefusal,
   storedStop,
@@ -771,51 +775,117 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
     stopped_ms: String(WALL + offsetMs),
   });
 
+  /** One line the core logged at `warn` or above. */
+  interface Logged {
+    level: number;
+    msg: string;
+    probeId?: number;
+  }
+  const WARN = 40;
+  const ERROR = 50;
+
   /**
    * A core over a table that holds `stored`, with both of its clocks in the test's hands. Nothing
    * has been sent to any probe: `leave` sends probe 7 the sensors it is left.
    */
-  function core(stored: readonly StoredRow[] = []): {
+  function core(
+    stored: readonly StoredRow[] = [],
+    saveWaitMs?: number,
+  ): {
     credentials: CredentialVouching;
     clock: { ms: number; wall: number };
-    control: { failWrite: boolean; failRead: boolean; writeDelaysMs: number[] };
+    control: {
+      failWrite: boolean;
+      /** What the next writes fail with, in place of a lost connection. */
+      failWith: Error | undefined;
+      failRead: boolean;
+      writeDelaysMs: number[];
+      /** Sensors that no longer exist: the statement writes no row for one, and says so. */
+      gone: Set<number>;
+      /** A probe whose write does not come back until `release` is called. */
+      stalled: number | null;
+      release: () => void;
+    };
     /** When each write to the table began and ended, in the order it happened. */
     order: string[];
     written: Written[];
+    /** The timeouts each write's transaction set, before its statement. */
+    bounds: unknown[][];
+    logged: Logged[];
     leave: (sensorIds: readonly number[]) => Promise<unknown>;
     /** How many of these refusals from probe 7 for sensor 1 are taken as late. */
     late: (sensorId?: number, probeId?: number) => Promise<number>;
   } {
     const clock = { ms: 5_000_000, wall: WALL };
-    const control = { failWrite: false, failRead: false, writeDelaysMs: [] as number[] };
+    let let_go: () => void = () => undefined;
+    const released = new Promise<void>((done) => {
+      let_go = done;
+    });
+    const control = {
+      failWrite: false,
+      failWith: undefined as Error | undefined,
+      failRead: false,
+      writeDelaysMs: [] as number[],
+      gone: new Set<number>(),
+      stalled: null as number | null,
+      release: let_go,
+    };
     const written: Written[] = [];
     const order: string[] = [];
+    const bounds: unknown[][] = [];
+    const logged: Logged[] = [];
+    /** Whether the statement being run is inside a transaction, which the write has to be. */
+    let inside = false;
+    const query = async <R>(sql: string, values: readonly unknown[] = []): Promise<R[]> => {
+      if (sql.includes('set_config')) {
+        assert.equal(inside, true, 'the timeouts are set for a transaction, not for a session');
+        bounds.push([...values]);
+        return [];
+      }
+      if (sql.includes('INSERT INTO late_refusal_grace')) {
+        assert.equal(inside, true, 'the write runs in the transaction its timeouts were set in');
+        const [probeId, sensorIds, stoppedAtMs] = values as [number, number[], number[]];
+        order.push(`begin ${sensorIds.join(',')}`);
+        // What exists is what existed when the statement ran, whatever happens while it is out.
+        const missing = new Set(control.gone);
+        if (control.stalled === probeId) await released;
+        const delay = control.writeDelaysMs.shift() ?? 0;
+        if (delay > 0) await new Promise((done) => setTimeout(done, delay));
+        order.push(`end ${sensorIds.join(',')}`);
+        if (control.failWith !== undefined) throw control.failWith;
+        if (control.failWrite) throw new Error('connection terminated');
+        written.push({ probeId, sensorIds: [...sensorIds], stoppedAtMs: [...stoppedAtMs] });
+        return sensorIds
+          .filter((sensorId) => !missing.has(sensorId))
+          .map((sensorId) => ({ sensor_id: String(sensorId) })) as R[];
+      }
+      if (sql.includes('FROM late_refusal_grace')) {
+        if (control.failRead) throw new Error('relation "late_refusal_grace" does not exist');
+        return [...stored] as R[];
+      }
+      return [];
+    };
     const credentials = new CredentialVouching({
       db: {
-        query: async <R>(sql: string, values: readonly unknown[] = []): Promise<R[]> => {
-          if (sql.includes('INSERT INTO late_refusal_grace')) {
-            const [probeId, sensorIds, stoppedAtMs] = values as [number, number[], number[]];
-            order.push(`begin ${sensorIds.join(',')}`);
-            const delay = control.writeDelaysMs.shift() ?? 0;
-            if (delay > 0) await new Promise((done) => setTimeout(done, delay));
-            order.push(`end ${sensorIds.join(',')}`);
-            if (control.failWrite) throw new Error('connection terminated');
-            written.push({ probeId, sensorIds: [...sensorIds], stoppedAtMs: [...stoppedAtMs] });
-            return [];
+        query,
+        tx: async (fn) => {
+          inside = true;
+          try {
+            return await fn({ query });
+          } finally {
+            inside = false;
           }
-          if (sql.includes('FROM late_refusal_grace')) {
-            if (control.failRead) throw new Error('relation "late_refusal_grace" does not exist');
-            return [...stored] as R[];
-          }
-          return [];
         },
-        tx: () => Promise.reject(new Error('no transaction in this test')),
       },
-      logger: silent,
+      logger: pino(
+        { level: 'warn' },
+        { write: (line: string) => logged.push(JSON.parse(line) as Logged) },
+      ),
       sensorTypes: catalogueSensorTypeGate(testCatalogue([snmpPinned])),
       rights: () => Promise.resolve(new Map()),
       now: () => clock.ms,
       wallNow: () => clock.wall,
+      ...(saveWaitMs === undefined ? {} : { saveWaitMs }),
     });
     return {
       credentials,
@@ -823,6 +893,8 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
       control,
       written,
       order,
+      bounds,
+      logged,
       leave: (sensorIds) => credentials.withhold(7, sensorIds.map(leftToProbe), PINNING),
       late: async (sensorId = 1, probeId = 7) =>
         (await credentials.reported(probeId, [refused(sensorId, T(0))])).late,
@@ -1060,19 +1132,207 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
       assert.deepEqual(written.at(-1)?.sensorIds, [1, 2]);
     });
 
-    it('writes nothing a probe sends: a batch of marked results touches no row', async () => {
+    it('writes for no result a probe sends, and once for a reconnect under another protocol version', async () => {
       const { credentials, written, leave } = core();
       await leave([1, 2, 3]);
       await leave([2, 3]);
-      const before = written.length;
+      assert.equal(written.length, 1);
+      // Results, marked or not, from the probe and from another: no statement.
       await credentials.reported(7, [
         refused(1, T(0)),
         refused(2, T(0)),
         refused(9, T(0)),
         measured(3, T(0), 'error'),
+        measured(2, T(1)),
       ]);
       await credentials.reported(8, [refused(1, T(0))]);
+      assert.equal(written.length, 1, 'a result writes nothing');
+
+      // What a probe says that does reach a configuration is the version it connects with. Below
+      // the one that checks a name, it is left none of these sensors: one statement for the
+      // reconnect, of no more rows than it has sensors, and none for a build that follows it.
+      const reconnect = (version: number): Promise<unknown> =>
+        credentials.withhold(7, [2, 3].map(leftToProbe), version);
+      await reconnect(PINNING - 1);
+      assert.equal(written.length, 2, 'one statement for the reconnect');
+      assert.deepEqual(written[1]?.sensorIds, [1, 2, 3]);
+      await reconnect(PINNING - 1);
+      await reconnect(PINNING - 1);
+      assert.equal(written.length, 2, 'and none for the same version again');
+      // Back at the version that checks: left again, and again one statement.
+      await reconnect(PINNING);
+      assert.equal(written.length, 3);
+      assert.deepEqual(written[2]?.sensorIds, [1]);
+    });
+  });
+
+  describe('a write gives way, and holds nobody back', () => {
+    const settle = (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms));
+
+    it('sets a lock timeout under PostgreSQL’s deadlock timeout, and a statement timeout, in its own transaction', async () => {
+      const { bounds, written, leave } = core();
+      await leave([1, 2, 3]);
+      await leave([2, 3]);
+      assert.equal(written.length, 1);
+      assert.deepEqual(bounds, [['300ms', '2000ms']]);
+      assert.equal(LATE_REFUSAL_SAVE_LOCK_MS, 300);
+      assert.equal(LATE_REFUSAL_SAVE_STATEMENT_MS, 2_000);
+      assert.equal(LATE_REFUSAL_SAVE_WAIT_MS, 3_000);
+      // 300 ms is under `deadlock_timeout`, a second as PostgreSQL ships: this is what gives up.
+    });
+
+    it('does not hold another probe’s configuration behind a write that is stalled', async () => {
+      const { credentials, control, written, logged } = core([], 60);
+      const send = (probeId: number, sensorIds: readonly number[]): Promise<unknown> =>
+        credentials.withhold(probeId, sensorIds.map(leftToProbe), PINNING);
+      await send(7, [1, 2, 3]);
+      await send(8, [1, 2, 3]);
+      control.stalled = 7;
+      let seventh = false;
+      const stalled = send(7, [2, 3]).then(() => {
+        seventh = true;
+      });
+      await settle(5);
+      // Probe 8's record moves while probe 7's write is out, and is stored at once.
+      await send(8, [2, 3]);
+      assert.equal(seventh, false, 'probe 7 is still waiting for its own');
+      assert.deepEqual(written, [{ probeId: 8, sensorIds: [1], stoppedAtMs: [WALL] }]);
+
+      // And probe 7's configuration goes out without its write, after the bound and no later.
+      const started = performance.now();
+      await stalled;
+      assert.ok(performance.now() - started < 1_000, 'let go at the bound');
+      assert.equal(written.length, 1, 'the write has still not come back');
+      assert.deepEqual(
+        logged.map((line) => [line.level, line.probeId]),
+        [[WARN, 7]],
+      );
+
+      // Probe 7 is owed a write from then on, so the next prune asks for one, behind the one
+      // that is out, and is let go at the bound as the configuration was.
+      await credentials.prune();
+      assert.equal(written.length, 1);
+
+      // When the first does come back, the one asked for runs after it, and nothing is owed.
+      control.stalled = null;
+      control.release();
+      await settle(5);
+      assert.deepEqual(written.at(-1), { probeId: 7, sensorIds: [1], stoppedAtMs: [WALL] });
+      assert.equal(written.filter((one) => one.probeId === 7).length, 2);
+      const before = written.length;
+      await credentials.prune();
       assert.equal(written.length, before);
+    });
+
+    it('lets a prune go at the bound too, and keeps one write waiting behind a stalled one, not one per request', async () => {
+      const { credentials, control, written, order, leave } = core([], 40);
+      await leave([1, 2, 3]);
+      control.stalled = 7;
+      await leave([2, 3]);
+      await credentials.prune();
+      await credentials.prune();
+      await leave([3]);
+      await credentials.prune();
+      assert.deepEqual(order, ['begin 1'], 'one is out, and nothing has started behind it');
+      control.stalled = null;
+      control.release();
+      await settle(10);
+      // The one that was out, and one after it with everything asked for since.
+      assert.deepEqual(order, ['begin 1', 'end 1', 'begin 1,2', 'end 1,2']);
+      assert.equal(written.length, 2);
+    });
+
+    /** An error as the driver raises one, before the pool has wrapped it. */
+    const driverError = (code: string, message: string): Error =>
+      Object.assign(new Error(message), { code });
+    const gaveWay: [string, Error, number][] = [
+      ['a lock it could not have', driverError('55P03', 'canceling statement'), WARN],
+      ['the statement timeout', driverError('57014', 'canceling statement'), WARN],
+      ['a deadlock it lost', driverError('40P01', 'deadlock detected'), WARN],
+      [
+        'a lock, as the pool wraps it',
+        new DatabaseError('query failed', { cause: { code: '55P03', message: 'lock timeout' } }),
+        WARN,
+      ],
+      ['a key that is not there', driverError('23503', 'violates foreign key'), ERROR],
+      [
+        'anything else the pool wraps',
+        new DatabaseError('query failed', { cause: { code: '42P01', message: 'no relation' } }),
+        ERROR,
+      ],
+      ['a lost connection', new Error('connection terminated'), ERROR],
+    ];
+    for (const [name, failure, level] of gaveWay) {
+      it(`logs ${name} at ${level === WARN ? 'warn' : 'error'}, returns the configuration, and writes again`, async () => {
+        const { control, written, logged, leave, late } = core();
+        await leave([1, 2, 3]);
+        control.failWith = failure;
+        await leave([2, 3]);
+        assert.deepEqual(
+          logged.map((line) => [line.level, line.probeId]),
+          [[level, 7]],
+        );
+        assert.equal(await late(), 1, 'judged by what is held, written or not');
+        control.failWith = undefined;
+        await leave([2, 3]);
+        assert.deepEqual(written, [{ probeId: 7, sensorIds: [1], stoppedAtMs: [WALL] }]);
+        assert.equal(logged.length, 1);
+      });
+    }
+
+    it('drops an entry whose sensor is gone, and does not write it again every minute', async () => {
+      const { credentials, control, written, leave, late } = core();
+      await leave([1, 2, 3]);
+      // The first write fails, and sensor 1 is deleted before the next.
+      control.failWrite = true;
+      await leave([2]);
+      control.failWrite = false;
+      control.gone.add(1);
+      await credentials.prune();
+      assert.deepEqual(
+        written.map((one) => one.sensorIds),
+        [[1, 3]],
+      );
+      assert.equal(await late(1), 0, 'nothing is held for a sensor that is not there');
+      assert.equal(await late(3), 1, 'and what is there is kept');
+      await credentials.prune();
+      await credentials.prune();
+      assert.equal(written.length, 1, 'stored, so nothing is owed');
+      // The next write is of what is left, and no longer names it.
+      await leave([]);
+      assert.deepEqual(written.at(-1)?.sensorIds, [3, 2]);
+    });
+
+    it('drops every entry of a probe that is gone', async () => {
+      const { credentials, control, written, leave, late } = core();
+      await leave([1, 2, 3]);
+      control.gone = new Set([1, 2, 3]);
+      await leave([]);
+      assert.equal(written.length, 1);
+      assert.equal(await late(1), 0);
+      assert.equal(await late(2), 0);
+      await credentials.prune();
+      assert.equal(written.length, 1);
+    });
+
+    it('keeps an entry that was recorded again while the write that missed it was out', async () => {
+      const { control, clock, written, leave, late } = core();
+      await leave([1, 2, 3]);
+      // Sensor 1's write is out, reporting it gone, while it is left again and then is not.
+      control.writeDelaysMs.push(30);
+      control.gone.add(1);
+      const first = leave([2, 3]);
+      await settle(5);
+      control.gone.clear();
+      clock.ms += 1_000;
+      clock.wall += 1_000;
+      await Promise.all([first, leave([1, 2, 3]), leave([2, 3])]);
+      assert.equal(
+        await late(1),
+        1,
+        'the entry is the later one, and the write was about the earlier',
+      );
+      assert.deepEqual(written.at(-1), { probeId: 7, sensorIds: [1], stoppedAtMs: [WALL + 1_000] });
     });
   });
 
@@ -2244,6 +2504,60 @@ describe(
       );
       assert.equal(await sentTo(24, uptime), true);
       assert.equal(vouching.withheld().has(uptime), false);
+    });
+
+    it('gives way to a transaction that holds a row it needs: the configuration goes out, the other commits, and the record is stored after (A-61)', async () => {
+      const kept = await named(site, 'contended');
+      const doomed = await named(site, 'doomed');
+      assert.equal(await sentTo(PINNING, kept.sensor), true);
+      assert.equal(await sentTo(PINNING, doomed.sensor), true);
+      const rows = (sensorId: number): Promise<number> =>
+        count('SELECT count(*)::text AS n FROM late_refusal_grace WHERE sensor_id = $1', [
+          sensorId,
+        ]);
+      const point = (device: number, host: string): Promise<unknown> =>
+        h.service.update(testActor, device, { kind: 'device', host }, { kind: 'none' });
+      /** How long a configuration for the probe took to come back. */
+      const build = async (sensorId: number): Promise<number> => {
+        const started = performance.now();
+        assert.equal(await sentTo(PINNING, sensorId), true, 'the configuration is still returned');
+        return performance.now() - started;
+      };
+
+      // Another connection holds the sensor's row, as an update of it would. The write needs a
+      // key-share lock on that row, waits its 300 ms for it, and gives up.
+      await point(kept.device, '10.20.0.61');
+      await db.tx(async (other) => {
+        await other.query('SELECT 1 FROM object WHERE id = $1 FOR UPDATE', [kept.sensor]);
+        const waited = await build(kept.sensor);
+        assert.ok(waited >= LATE_REFUSAL_SAVE_LOCK_MS - 50, `it waited ${String(waited)} ms`);
+        assert.ok(waited < 1_500, `inside its bound, and it took ${String(waited)} ms`);
+        assert.equal(await rows(kept.sensor), 0, 'not stored while the row is held');
+      });
+      // The next build stores it.
+      await build(kept.sensor);
+      assert.equal(await rows(kept.sensor), 1);
+
+      // The same against a delete, which is the one that could deadlock: it takes the sensor's
+      // row first and cascades into the table. The write gives up, and the delete commits.
+      await point(doomed.device, '10.20.0.62');
+      await db.tx(async (other) => {
+        await other.query('DELETE FROM object WHERE id = $1', [doomed.sensor]);
+        const waited = await build(kept.sensor);
+        assert.ok(waited >= LATE_REFUSAL_SAVE_LOCK_MS - 50, `it waited ${String(waited)} ms`);
+        assert.ok(waited < 1_500, `inside its bound, and it took ${String(waited)} ms`);
+      });
+      assert.equal(
+        await count('SELECT count(*)::text AS n FROM object WHERE id = $1', [doomed.sensor]),
+        0,
+        'the delete was not the one aborted',
+      );
+      // And the write is made again, for what is left: no row for a sensor that is gone.
+      await credentials.prune();
+      assert.equal(await rows(doomed.sensor), 0);
+      assert.equal(await rows(kept.sensor), 1);
+      const quick = await build(kept.sensor);
+      assert.ok(quick < LATE_REFUSAL_SAVE_LOCK_MS, `nothing left to wait for: ${String(quick)} ms`);
     });
 
     it('stores which sensors a configuration stopped leaving to the probe, and reads them back by the clock it is started at (A-61)', async () => {

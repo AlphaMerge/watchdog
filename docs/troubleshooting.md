@@ -120,8 +120,11 @@ failed in**, and the underlying error, because "ETIMEDOUT" alone is not a diagno
   - **The core's clock was set forward across the restart**, by more than was left of the ten
     minutes. The stored time then reads as long past. (Set back, it gives the ten minutes from
     the restart and no more, and the log says so at `warn`.)
-  - **The write failed.** The core logs "could not store which sensors a configuration stopped
-    leaving to a probe" at `error` and writes again within a minute.
+  - **The write failed, and the core was restarted before it was made again.** The core logs
+    "could not store which sensors a configuration stopped leaving to a probe" at `error` and
+    writes again within a minute. A write that only gave way to something else holding a row it
+    needs (a device being deleted or edited at that moment) is logged at `warn` as "gave up
+    storing …", is expected now and then, and is made again the same way.
 
   Nothing is wrong with the device or the probe, and the next scan under the new configuration
   clears it. It shows on the probe's Probe Health as **Reports refused** rising where
