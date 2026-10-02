@@ -82,6 +82,7 @@ export {
   describeSkew,
   explainSkew,
   healthForPeer,
+  resultForPeer,
   missingCapabilities,
   versionFor,
 } from './protocol/capabilities.js';

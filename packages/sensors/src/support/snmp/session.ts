@@ -1,4 +1,5 @@
 import snmp from 'net-snmp';
+import type { PinnedAddress } from '../pinned-target.js';
 import { credentialFingerprint, describeCredentials, type SnmpCredentials } from './credentials.js';
 import { compareOids, formatOid, isPrefixOf, normaliseOid, parseOid } from './oid.js';
 
@@ -73,6 +74,11 @@ export interface SnmpTarget {
   readonly host: string;
   readonly port?: number;
   readonly ipVersion?: 'auto' | 'v4' | 'v6';
+  /**
+   * The address to send to in place of resolving `host` (`A-41c`): the one checked against the
+   * credential set's targets. `host` stays the name every message uses.
+   */
+  readonly pinned?: PinnedAddress;
 }
 
 export interface SnmpSessionOptions {
@@ -252,8 +258,20 @@ export class SnmpSession {
       // 'auto' is not a transport. A hostname that resolves to both is asked over IPv4, which is
       // what the system resolver would have preferred anyway; a device that is v6-only is
       // configured as such, on the device, where every sensor under it inherits the answer.
-      transport: target.ipVersion === 'v6' ? 'udp6' : 'udp4',
+      // A pinned address says its own family: it was chosen from what the name resolved to.
+      transport:
+        target.pinned === undefined
+          ? target.ipVersion === 'v6'
+            ? 'udp6'
+            : 'udp4'
+          : target.pinned.family === 6
+            ? 'udp6'
+            : 'udp4',
     };
+    // **The checked address, never the name, when there is one** (`A-41c`). `net-snmp` resolves
+    // whatever it is given each time it sends, and a name resolved again is a name whoever runs
+    // its DNS can point elsewhere after the check.
+    const peer = target.pinned?.address ?? target.host;
 
     try {
       if (credentials.version === 'v3') {
@@ -279,14 +297,14 @@ export class SnmpSession {
         const withContext: snmp.SessionOptions =
           credentials.context === undefined ? base : { ...base, context: credentials.context };
         return new SnmpSession(
-          snmp.createV3Session(target.host, user, withContext),
+          snmp.createV3Session(peer, user, withContext),
           target.host,
           resolved,
         );
       }
 
       return new SnmpSession(
-        snmp.createSession(target.host, credentials.community, base),
+        snmp.createSession(peer, credentials.community, base),
         target.host,
         resolved,
       );

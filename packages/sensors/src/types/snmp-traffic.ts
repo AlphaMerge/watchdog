@@ -47,6 +47,7 @@ export const snmpTraffic: SensorType = {
   // it (`A-05`). It is deliberately not a parameter of this type: forty interfaces on a router
   // is forty sensors, and forty copies of a credential is forty places to rotate it.
   credentialKinds: ['snmp'],
+  pinnedKinds: ['snmp'],
 
   paramsSchema: snmpParamsSchema(
     {

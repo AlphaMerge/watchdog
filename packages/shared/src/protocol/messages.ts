@@ -41,6 +41,15 @@ import { AppError } from '../errors/app-error.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
+ * Version 24 adds `credentialAddressPinning` (`A-41c`): a probe resolves a device's host name
+ * once, checks every address it answers with against a credential set's address and range
+ * targets, and connects to one of the addresses it checked. An older probe resolves the name when
+ * it connects, which whoever runs the name's DNS can answer differently from the check, so the
+ * core sends such a set only to a probe at 24 and holds the sensor Unknown on an older one. A
+ * check result gains `withheld`: the probe refused to use the set, and the sensor reads Unknown
+ * with the message rather than Down. Only a probe sent such a set writes the field, and only a
+ * core at 24 sends one, so an older core never meets it; `resultsForPeer` strips it regardless.
+ *
  * Version 23 adds `flowCounters` (`B-07`): the first version whose heartbeat may carry
  * `flowReceived`, `flowRejected`, `flowMalformed`, `flowMissed` and `flowUndecodable`. The fields
  * themselves are older — `B-02` added them to the health schema at 16 with no capability — and
@@ -105,7 +114,7 @@ import { AppError } from '../errors/app-error.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 23;
+export const PROTOCOL_VERSION = 24;
 
 /**
  * The oldest peer version this build still understands.
@@ -232,6 +241,14 @@ export interface CheckResult {
   durationMs: number;
   /** Empty on a failed check: a Down sensor records no channel values (CLAUDE.md). */
   channels: ChannelReading[];
+  /**
+   * The probe refused to run this check because of where its credentials may go (`A-41c`): the
+   * device's name resolved to an address outside their allowed targets, or to nothing. Only ever
+   * `true`, and only beside `outcome: 'error'`. **Not a failure of the device**: nothing was
+   * sent to it, so the core holds the sensor Unknown with `message` instead of counting a failed
+   * scan. Protocol 24; absent on every other result.
+   */
+  withheld?: true;
 }
 
 /**
@@ -963,6 +980,8 @@ const CHECK_RESULT_SCHEMA = {
     outcome: { type: 'string', enum: ['ok', 'error'] },
     message: { type: 'string', maxLength: 2000 },
     durationMs: { type: 'number', minimum: 0 },
+    // Only `true` (`A-41c`): a check the probe refused over where its credentials may go.
+    withheld: { const: true },
     channels: {
       type: 'array',
       maxItems: 500,

@@ -1155,6 +1155,7 @@ export class CheckPool {
         ok: boolean;
         aborted?: boolean;
         unknownType?: boolean;
+        withheld?: boolean;
         message: string;
         channels?: { key: string; value: number; name?: string; unit?: string }[];
         sessions?: SessionCounters;
@@ -1183,6 +1184,8 @@ export class CheckPool {
           message: result.message,
           durationMs: result.durationMs,
           channels: [],
+          // Refused over where its credentials may go (`A-41c`), which is not a failed scan.
+          ...(result.withheld === true ? { withheld: true as const } : {}),
         });
       }
     }
@@ -1403,6 +1406,7 @@ export class CheckPool {
       message: string;
       durationMs: number;
       channels: { key: string; value: number; name?: string; unit?: string }[];
+      withheld?: true;
     },
   ): void {
     job.settled = true;
@@ -1417,6 +1421,7 @@ export class CheckPool {
       durationMs: Number(parts.durationMs.toFixed(3)),
       // A failed check records no channel values: the gap is the data (CLAUDE.md).
       channels: parts.outcome === 'ok' ? parts.channels : [],
+      ...(parts.outcome === 'error' && parts.withheld === true ? { withheld: true as const } : {}),
     };
     this.#onResult(result, { phase, waitMs: job.waitMs, workerId: slot?.id ?? 0 });
     if (this.#onDrained !== undefined && this.#inFlight() === 0) this.#onDrained();

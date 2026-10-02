@@ -2,6 +2,7 @@
 // exports through it at runtime even though TypeScript resolves them. Same as `net-snmp`.
 import ssh2 from 'ssh2';
 import type { Client } from 'ssh2';
+import type { PinnedAddress } from '../pinned-target.js';
 import { describeCredentials, type SshCredentials } from './credentials.js';
 import { describeVerdict, verifyHostKey, type HostKeyVerdict } from './host-key.js';
 
@@ -31,6 +32,12 @@ export type SshPhase = 'connect' | 'authenticate' | 'host-key' | 'exec';
 export interface SshTarget {
   readonly host: string;
   readonly port?: number;
+  /**
+   * The address to connect to in place of resolving `host` (`A-41c`): the one checked against
+   * the credential set's targets. The server is still identified by its host key, and `host`
+   * stays the name every message uses.
+   */
+  readonly pinned?: PinnedAddress;
 }
 
 export interface SshSessionOptions {
@@ -188,7 +195,9 @@ export class SshSession {
       });
 
       const config = {
-        host,
+        // **The checked address, never the name, when there is one** (`A-41c`): `ssh2` resolves a
+        // name when it connects, and that second answer is the one nobody checked.
+        host: target.pinned?.address ?? host,
         port: target.port ?? 22,
         username: credentials.username,
         readyTimeout: resolved.connectTimeoutMs,

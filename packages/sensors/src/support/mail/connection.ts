@@ -1,5 +1,11 @@
 import { connect as netConnect, type Socket } from 'node:net';
 import { connect as tlsConnect, type TLSSocket } from 'node:tls';
+import {
+  isCredentialsWithheld,
+  pinnedLookup,
+  pinnedPeerRefusal,
+  type PinnedAddress,
+} from '../pinned-target.js';
 
 /**
  * One line-oriented mail connection, shared by SMTP, POP3 and IMAP (`T-17`).
@@ -24,6 +30,12 @@ export interface MailConnectionOptions {
   readonly verifyTls: boolean;
   readonly timeoutMs: number;
   readonly ipVersion: 'auto' | 'v4' | 'v6';
+  /**
+   * The address the socket connects to, in place of resolving `host` (`A-41c`): the one checked
+   * against the credential set's targets. Answered to the socket's `lookup`, so `host` is still
+   * what TLS sends as SNI and checks the certificate against, immediately or after `STARTTLS`.
+   */
+  readonly pinned?: PinnedAddress;
 }
 
 /** How much a server may say before this gives up. Generous for a mailbox listing, and bounded. */
@@ -80,6 +92,9 @@ export class MailConnection {
 
   static async open(options: MailConnectionOptions, signal: AbortSignal): Promise<MailConnection> {
     const family = options.ipVersion === 'v6' ? 6 : options.ipVersion === 'v4' ? 4 : 0;
+    const pinned = options.pinned;
+    // The checked address, whatever the socket asks its lookup for (`A-41c`).
+    const pin = pinned === undefined ? {} : { lookup: pinnedLookup(options.host, pinned) };
     const socket = await new Promise<Socket | TLSSocket>((resolve, reject) => {
       const done = (error: Error): void => {
         clearTimeout(timer);
@@ -112,14 +127,25 @@ export class MailConnection {
               ...(isAddress(options.host) ? {} : { servername: options.host }),
               rejectUnauthorized: options.verifyTls,
               ...(family === 0 ? {} : { family }),
+              ...pin,
             })
           : netConnect({
               host: options.host,
               port: options.port,
               ...(family === 0 ? {} : { family }),
+              ...pin,
             });
 
       made.once(options.security === 'tls' ? 'secureConnect' : 'connect', () => {
+        // Before anything is said on it, and so before a password is (`A-41c`): the far end
+        // has to be the address that was checked.
+        const refusal =
+          pinned === undefined ? null : pinnedPeerRefusal(options.host, pinned, made.remoteAddress);
+        if (refusal !== null) {
+          made.destroy();
+          done(refusal);
+          return;
+        }
         clearTimeout(timer);
         signal.removeEventListener('abort', onAbort);
         resolve(made);
@@ -268,6 +294,9 @@ function isAddress(host: string): boolean {
 
 /** Turns a socket or TLS failure into something that names the cause. */
 function describe(error: unknown, options: MailConnectionOptions): Error {
+  // A refusal over where the credentials may go keeps its class (`A-41c`): that is what makes
+  // the sensor read Unknown rather than Down.
+  if (isCredentialsWithheld(error)) return error;
   const where = `${options.host}:${String(options.port)}`;
   const code = (error as NodeJS.ErrnoException).code ?? '';
   const message = error instanceof Error ? error.message : String(error);

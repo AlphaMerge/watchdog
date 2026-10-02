@@ -1,4 +1,5 @@
-import type { JsonSchema } from '../../contract.js';
+import type { CheckTarget, JsonSchema } from '../../contract.js';
+import type { PinnedAddress } from '../pinned-target.js';
 
 /**
  * The mail credential, and the transport parameters every mail sensor takes (`T-17`).
@@ -74,8 +75,11 @@ export const MAIL_TRANSPORT_SCHEMA: Readonly<Record<string, JsonSchema>> = {
 /** The transport options those parameters describe. */
 export function readTransport(
   params: Readonly<Record<string, unknown>>,
-  host: string,
-  ipVersion: 'auto' | 'v4' | 'v6',
+  /**
+   * The check's whole target, not its host and family apart (`A-41c`): the pinned address goes
+   * wherever the host goes, so no mail type can pass one and forget the other.
+   */
+  target: CheckTarget,
   defaults: { readonly plain: number; readonly tls: number },
 ): {
   host: string;
@@ -84,17 +88,19 @@ export function readTransport(
   verifyTls: boolean;
   timeoutMs: number;
   ipVersion: 'auto' | 'v4' | 'v6';
+  pinned?: PinnedAddress;
 } {
   const raw = params['security'];
   const security = raw === 'none' || raw === 'tls' ? raw : 'starttls';
   const declared = Number(params['port'] ?? 0);
   return {
-    host,
+    host: target.host,
     port: declared > 0 ? declared : security === 'tls' ? defaults.tls : defaults.plain,
     security,
     verifyTls: params['verifyTls'] !== false,
     timeoutMs: Number(params['timeoutMs'] ?? 20_000),
-    ipVersion,
+    ipVersion: target.ipVersion,
+    ...(target.pinned === undefined ? {} : { pinned: target.pinned }),
   };
 }
 

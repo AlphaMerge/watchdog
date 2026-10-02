@@ -23,6 +23,7 @@ export const snmpCustomString: SensorType = {
   costHint: 'medium',
   secretDestinations: SNMP_SECRET_DESTINATIONS,
   credentialKinds: ['snmp'],
+  pinnedKinds: ['snmp'],
 
   paramsSchema: snmpParamsSchema(
     {

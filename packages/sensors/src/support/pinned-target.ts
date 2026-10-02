@@ -1,0 +1,341 @@
+import { lookup as dnsLookup } from 'node:dns/promises';
+import { BlockList, isIP, type LookupFunction } from 'node:net';
+import { targetVerdict } from '@ms/shared';
+import { restrictionOf } from '../credentials/index.js';
+
+/**
+ * A device named by host name, checked against a credential set's address targets (`A-41c`).
+ *
+ * A set whose `allowedTargets` name only addresses and ranges says nothing about a host *name*:
+ * `A-41b` had the core withhold it, because the obvious thing a probe could do is wrong. Resolve
+ * the name, check the address, connect to the name — and the connection resolves the name again.
+ * The device's writer picks the name and can run its DNS, so they answer the check with an
+ * address inside the targets and the connection with a machine of their own.
+ *
+ * **So the name is resolved once, here, and the check connects to an address this checked.**
+ * `pinTarget` is the one place that resolves and checks. It asks the resolver once, checks
+ * *every* address it answers with for the device's address family against the targets, and hands
+ * back one of them. Each transport that can be held to an address takes it from the check's
+ * target (`CheckTarget.pinned`) and never resolves the name itself: SNMP and SSH connect to the
+ * address, HTTP and mail answer their socket's `lookup` with it (`pinnedLookup`) so that SNI, the
+ * `Host` header and the certificate check stay on the name.
+ *
+ * Every address, not the one chosen, for the reason `A-09`'s guard reads them all: a name with
+ * one record inside and one outside is a name whose owner chooses, per connection, which is used.
+ *
+ * **In `@ms/sensors` and called by the catalogue**, which every check on a probe passes through,
+ * whichever runner it is in. A type cannot forget it, and a type that does not say it honours
+ * the pin (`SensorType.pinnedKinds`) is refused here rather than run by name.
+ */
+
+/** The address a check connects to, in place of resolving its device's name. */
+export interface PinnedAddress {
+  readonly address: string;
+  readonly family: 4 | 6;
+}
+
+/** One answer from a resolver. */
+export interface ResolvedAddress {
+  readonly address: string;
+  readonly family: number;
+}
+
+/**
+ * Every address a name has for a family: 4, 6, or 0 for both. Rejects when the name does not
+ * resolve. The system resolver in production; a test hands in its own.
+ */
+export type ResolveHost = (host: string, family: 0 | 4 | 6) => Promise<readonly ResolvedAddress[]>;
+
+/**
+ * `getaddrinfo`, the resolver a socket handed the name would have used, so that the hosts file
+ * and the search list mean here what they mean everywhere else on the probe's machine.
+ */
+export const systemResolve: ResolveHost = (host, family) => dnsLookup(host, { all: true, family });
+
+/** Where a refusal happened. */
+export type WithheldPhase = 'check' | 'resolve' | 'connect';
+
+/** How a runner recognises a refusal without importing this package. Structural, like `UNKNOWN_SENSOR_TYPE`. */
+export const CREDENTIALS_WITHHELD = 'CREDENTIALS_WITHHELD';
+
+/**
+ * A check refused because of where its credentials may go. **Not a failure of the device**:
+ * nothing was sent to it. The probe marks the result `withheld`, and the core holds the sensor
+ * Unknown with the message.
+ */
+export class CredentialsWithheldError extends Error {
+  readonly code = CREDENTIALS_WITHHELD;
+  readonly sensorId: number | undefined;
+  /** The device's host, as the device names it. */
+  readonly target: string;
+  readonly phase: WithheldPhase;
+  /** The credential kind whose targets refused it. */
+  readonly kind: string | undefined;
+
+  constructor(
+    message: string,
+    context: { sensorId?: number; target: string; phase: WithheldPhase; kind?: string },
+  ) {
+    super(message);
+    this.name = 'CredentialsWithheldError';
+    this.sensorId = context.sensorId;
+    this.target = context.target;
+    this.phase = context.phase;
+    this.kind = context.kind;
+  }
+
+  /** The same refusal, naming the sensor: a transport that raises one does not know it. */
+  forSensor(sensorId: number): CredentialsWithheldError {
+    if (this.sensorId !== undefined) return this;
+    return new CredentialsWithheldError(this.message, {
+      sensorId,
+      target: this.target,
+      phase: this.phase,
+      ...(this.kind === undefined ? {} : { kind: this.kind }),
+    });
+  }
+}
+
+export function isCredentialsWithheld(error: unknown): error is CredentialsWithheldError {
+  return error instanceof CredentialsWithheldError;
+}
+
+const FIX =
+  'Every address the name has must be inside them: correct the name’s records, add the ' +
+  'address to the targets where the credentials are stored, or give the device its address.';
+
+/** What a refused check says. Each names the host and the kind, and never the secret. */
+export const PIN_REFUSALS = {
+  outside: (host: string, kind: string): string =>
+    `Not scanned: ${host} is outside the allowed targets of the ${kind} credentials it would ` +
+    'use, so they are not sent to it. Adding the device to the targets where the credentials ' +
+    'are stored, or pointing it back inside them, sends them again.',
+  unpinnable: (host: string, kind: string): string =>
+    `Not scanned: ${host} is a host name, the allowed targets of the ${kind} credentials it ` +
+    'would use name only addresses and ranges, and this kind of sensor cannot be held to an ' +
+    'address checked against them. Giving the device its address, or adding its name or ' +
+    '*.domain to the targets, sends them again.',
+  resolvedOutside: (host: string, kind: string, address: string): string =>
+    `Not scanned: ${host} resolves to ${address}, which is outside the allowed targets of the ` +
+    `${kind} credentials it would use, so they are not sent. ${FIX}`,
+  resolvedNothing: (host: string, kind: string, family: string, why: string): string =>
+    `Not scanned: ${host} did not resolve to any ${family}address${why}, so it could not be ` +
+    `checked against the allowed targets of the ${kind} credentials it would use, and they ` +
+    'are not sent. It is scanned again when the name resolves inside them.',
+  cancelled: (host: string): string =>
+    `Not scanned: the check was cancelled while ${host} was being resolved to check it against ` +
+    'the allowed targets of the credentials it would use.',
+  otherName: (host: string, asked: string): string =>
+    `Not scanned: the connection for ${host} asked to resolve ${asked}, which is not the name ` +
+    'that was checked against the allowed targets of the credentials it would use, so nothing ' +
+    'was sent. A proxy or a redirect between the probe and the device does this.',
+  otherPeer: (host: string, pinned: string, actual: string): string =>
+    `Not scanned: the connection for ${host} went to ${actual}, not to ${pinned}, the address ` +
+    'checked against the allowed targets of the credentials it would use, so its answer is ' +
+    'not used.',
+} as const;
+
+export interface PinRequest {
+  readonly sensorId: number;
+  readonly target: { readonly host: string; readonly ipVersion: 'auto' | 'v4' | 'v6' };
+  /** The sets the check was handed, by kind, public fields included. */
+  readonly credentials: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  /** The kinds this sensor type connects to a pinned address for (`SensorType.pinnedKinds`). */
+  readonly pinnedKinds: readonly string[];
+  readonly signal?: AbortSignal;
+}
+
+/**
+ * The address this check must connect to, or null when it may connect as it always has.
+ *
+ * Null, **with no lookup made**, unless a set the check holds has targets that the host is
+ * undecided against: a name that no name entry covers, facing address or range entries. A set
+ * with no targets, a device given as an address, and a name a name entry covers are all decided
+ * without resolving anything, and behave exactly as before.
+ *
+ * Throws `CredentialsWithheldError` when the set must not be used: the host is outside the
+ * targets, the type cannot pin, the name resolves to nothing, or any address it resolves to for
+ * the device's family is outside the targets of any set that needs the check.
+ */
+export async function pinTarget(
+  request: PinRequest,
+  resolve: ResolveHost = systemResolve,
+): Promise<PinnedAddress | null> {
+  const { sensorId, signal } = request;
+  const host = request.target.host;
+  const refuse = (message: string, phase: WithheldPhase, kind?: string): never => {
+    throw new CredentialsWithheldError(message, {
+      sensorId,
+      target: host,
+      phase,
+      ...(kind === undefined ? {} : { kind }),
+    });
+  };
+
+  // Sorted, so that which kind a refusal names does not depend on the order of a map.
+  const undecided: { kind: string; targets: readonly string[] }[] = [];
+  for (const kind of Object.keys(request.credentials).sort()) {
+    const targets = restrictionOf(kind, request.credentials[kind] ?? {}).targets;
+    if (targets.length === 0) continue;
+    const verdict = targetVerdict(host, targets);
+    // The core does not send a set to a host outside its targets. Checked again because this is
+    // the last place that can: a probe that trusted the core here would be the only check.
+    if (verdict === 'outside') refuse(PIN_REFUSALS.outside(host, kind), 'check', kind);
+    if (verdict === 'undecided') undecided.push({ kind, targets });
+  }
+  if (undecided.length === 0) return null;
+
+  for (const { kind } of undecided) {
+    if (!request.pinnedKinds.includes(kind)) {
+      refuse(PIN_REFUSALS.unpinnable(host, kind), 'check', kind);
+    }
+  }
+  const first = undecided[0]?.kind ?? '';
+
+  const family = request.target.ipVersion === 'v4' ? 4 : request.target.ipVersion === 'v6' ? 6 : 0;
+  const familyName = family === 4 ? 'IPv4 ' : family === 6 ? 'IPv6 ' : '';
+  let answers: readonly ResolvedAddress[];
+  try {
+    answers = await resolving(resolve(host, family), host, sensorId, signal);
+  } catch (error: unknown) {
+    if (isCredentialsWithheld(error)) throw error;
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    return refuse(
+      PIN_REFUSALS.resolvedNothing(
+        host,
+        first,
+        familyName,
+        typeof code === 'string' && code !== '' ? ` (${code})` : '',
+      ),
+      'resolve',
+      first,
+    );
+  }
+
+  // Of the device's family only. A resolver asked for one family answers with that family; one
+  // that answers with more is not believed about the rest, and they are never connected to.
+  const candidates = answers.filter((answer) => {
+    const version = isIP(answer.address);
+    return version !== 0 && (family === 0 || version === family);
+  });
+  if (candidates.length === 0) {
+    refuse(PIN_REFUSALS.resolvedNothing(host, first, familyName, ''), 'resolve', first);
+  }
+
+  for (const candidate of candidates) {
+    for (const { kind, targets } of undecided) {
+      if (targetVerdict(candidate.address, targets) !== 'inside') {
+        refuse(PIN_REFUSALS.resolvedOutside(host, kind, candidate.address), 'check', kind);
+      }
+    }
+  }
+
+  // Every candidate is inside, so any of them may be used. IPv4 first when the device does not
+  // say, which is what SNMP has always done with `auto`; then the resolver's own order.
+  const chosen =
+    (family === 0 ? candidates.find((candidate) => isIP(candidate.address) === 4) : undefined) ??
+    candidates[0];
+  if (chosen === undefined) {
+    return refuse(PIN_REFUSALS.resolvedNothing(host, first, familyName, ''), 'resolve', first);
+  }
+  return { address: chosen.address, family: isIP(chosen.address) === 6 ? 6 : 4 };
+}
+
+/** The resolution, or a refusal as soon as the check is cancelled: `getaddrinfo` cannot be. */
+function resolving(
+  pending: Promise<readonly ResolvedAddress[]>,
+  host: string,
+  sensorId: number,
+  signal: AbortSignal | undefined,
+): Promise<readonly ResolvedAddress[]> {
+  if (signal === undefined) return pending;
+  const cancelled = (): CredentialsWithheldError =>
+    new CredentialsWithheldError(PIN_REFUSALS.cancelled(host), {
+      sensorId,
+      target: host,
+      phase: 'resolve',
+    });
+  if (signal.aborted) {
+    // Nobody is waiting for it any more, and a rejection nobody handles ends the worker.
+    pending.catch(() => undefined);
+    return Promise.reject(cancelled());
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      reject(cancelled());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    pending.then(
+      (answers) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(answers);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
+
+/** A name as it is compared: lower case, without one trailing dot. */
+function nameOf(host: string): string {
+  const lower = host.trim().toLowerCase();
+  return lower.endsWith('.') ? lower.slice(0, -1) : lower;
+}
+
+/**
+ * The `lookup` a socket is given in place of the system resolver (`A-41c`): it answers the
+ * device's name with the address that was checked, and nothing else with anything.
+ *
+ * The socket still believes it is connecting to the name, so TLS sends the name as SNI and
+ * checks the certificate against it, and HTTP sends it as `Host`. Only the address comes from
+ * here. A lookup for any other name is refused before a byte is sent: it means something between
+ * the check and the socket chose another destination, a proxy for one.
+ */
+export function pinnedLookup(host: string, pinned: PinnedAddress): LookupFunction {
+  return (hostname, options, callback) => {
+    if (nameOf(hostname) !== nameOf(host)) {
+      callback(
+        new CredentialsWithheldError(PIN_REFUSALS.otherName(host, hostname), {
+          target: host,
+          phase: 'connect',
+        }),
+        '',
+      );
+      return;
+    }
+    if (options.all === true) {
+      callback(null, [{ address: pinned.address, family: pinned.family }]);
+      return;
+    }
+    callback(null, pinned.address, pinned.family);
+  };
+}
+
+/**
+ * The refusal for a connection whose far end is not the address that was checked, or null when
+ * it is. Asked of a connected socket's `remoteAddress`, where a transport has one to ask.
+ *
+ * A connection with no remote address is refused: it is closed already, or is not a network
+ * socket, and neither is a connection to the address that was checked.
+ */
+export function pinnedPeerRefusal(
+  host: string,
+  pinned: PinnedAddress,
+  remoteAddress: string | undefined,
+): CredentialsWithheldError | null {
+  const actual = remoteAddress ?? '';
+  const version = isIP(actual);
+  if (version !== 0) {
+    // A `BlockList`, as the targets are matched: an IPv4 peer reported in its IPv6-mapped
+    // spelling is the same peer.
+    const list = new BlockList();
+    list.addAddress(pinned.address, pinned.family === 6 ? 'ipv6' : 'ipv4');
+    if (list.check(actual, version === 6 ? 'ipv6' : 'ipv4')) return null;
+  }
+  return new CredentialsWithheldError(
+    PIN_REFUSALS.otherPeer(host, pinned.address, actual === '' ? 'no address' : actual),
+    { target: host, phase: 'connect' },
+  );
+}

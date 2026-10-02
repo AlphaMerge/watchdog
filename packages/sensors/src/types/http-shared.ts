@@ -200,7 +200,7 @@ export async function runHttp(
   const host = context.target.host;
   if (host === '') throw new Error('the device has no host to request');
 
-  const common = readCommon(context.params, host);
+  const common = readCommon(context.params, context.target);
   const agent = context.params['userAgent'];
   const userAgent = typeof agent === 'string' && agent.trim() !== '' ? agent.trim() : '';
   const expectRaw = context.params['expectStatus'];

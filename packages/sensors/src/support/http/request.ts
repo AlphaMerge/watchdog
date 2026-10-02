@@ -3,6 +3,13 @@ import { request as httpsRequest } from 'node:https';
 import type { IncomingHttpHeaders } from 'node:http';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { refuses, type TargetPolicy } from '@ms/shared';
+import type { CheckTarget } from '../../contract.js';
+import {
+  isCredentialsWithheld,
+  pinnedLookup,
+  pinnedPeerRefusal,
+  type PinnedAddress,
+} from '../pinned-target.js';
 
 /**
  * One HTTP request, shared by every HTTP sensor type (`P-09`, `T-13`, `T-14`).
@@ -61,6 +68,16 @@ export interface HttpRequestOptions {
    * and rendered — so the credentials end up on a dashboard rather than merely in flight.
    */
   readonly targetPolicy?: TargetPolicy;
+  /**
+   * The address every connection of this request goes to, in place of resolving `host`
+   * (`A-41c`): the one checked against the credential set's targets.
+   *
+   * Handed to the socket as its `lookup`, so `host` is still what is sent as SNI and as `Host`
+   * and what the certificate is checked against. Redirects are followed only on this host, so
+   * each hop goes to the same address. Nothing here resolves `host` when this is set, the
+   * `targetPolicy` guard included: it checks this address instead.
+   */
+  readonly pinned?: PinnedAddress;
 }
 
 export interface HttpResponse {
@@ -88,17 +105,28 @@ const round = (value: number): number => Math.round(value * 100) / 100;
  * address it answers with is checked, because a name with an A record inside the network and one
  * pointing at metadata is refused on the second.
  */
-async function refuseBlockedTarget(host: string, policy: TargetPolicy): Promise<void> {
+async function refuseBlockedTarget(
+  host: string,
+  policy: TargetPolicy,
+  pinned: PinnedAddress | undefined,
+): Promise<void> {
   if (policy === 'none') return;
 
   let addresses: string[];
-  try {
-    const resolved = await dnsLookup(host, { all: true });
-    addresses = resolved.map((entry) => entry.address);
-  } catch {
-    // Not this guard's business: a name that will not resolve is the request's own failure, and
-    // reporting it here would replace a diagnosis the caller already produces with a worse one.
-    return;
+  // A pinned request goes to one address and resolves nothing (`A-41c`), so that address is the
+  // whole of what there is to check, and a second lookup here would be the one nobody checked.
+  if (pinned !== undefined) {
+    addresses = [pinned.address];
+  } else {
+    try {
+      const resolved = await dnsLookup(host, { all: true });
+      addresses = resolved.map((entry) => entry.address);
+    } catch {
+      // Not this guard's business: a name that will not resolve is the request's own failure,
+      // and reporting it here would replace a diagnosis the caller already produces with a
+      // worse one.
+      return;
+    }
   }
 
   for (const address of addresses) {
@@ -133,7 +161,8 @@ export async function fetchHttp(
   // **Checked before the first byte leaves, and the addresses are the thing checked, not the
   // name.** A guard that inspected the hostname would be defeated by any name that resolves to a
   // blocked address, which is a DNS record away.
-  await refuseBlockedTarget(options.host, options.targetPolicy ?? 'link-local');
+  const pinned = options.pinned;
+  await refuseBlockedTarget(options.host, options.targetPolicy ?? 'link-local', pinned);
 
   let redirects = 0;
   let size = 0;
@@ -153,6 +182,13 @@ export async function fetchHttp(
             path,
             method,
             signal,
+            // **The checked address, answered to the socket's own lookup** (`A-41c`). `host`
+            // above stays the name, so it is what `Host` carries, what SNI sends and what the
+            // certificate is checked against; only where the bytes go comes from the pin. No
+            // agent: one would be free to connect somewhere else on this request's behalf.
+            ...(pinned === undefined
+              ? {}
+              : { lookup: pinnedLookup(options.host, pinned), agent: false as const }),
             ...(options.scheme === 'https'
               ? { rejectUnauthorized: options.verifyTls, servername: options.host }
               : {}),
@@ -169,6 +205,16 @@ export async function fetchHttp(
             },
           },
           (res) => {
+            // The far end has to be the address that was checked (`A-41c`). It cannot be
+            // anything else through the lookup above; an answer from anywhere else is not used.
+            if (pinned !== undefined) {
+              const refusal = pinnedPeerRefusal(options.host, pinned, res.socket.remoteAddress);
+              if (refusal !== null) {
+                req.destroy(refusal);
+                reject(refusal);
+                return;
+              }
+            }
             timing.firstByteAt ??= process.hrtime.bigint();
             res.on('data', (chunk: Buffer) => {
               size += chunk.length;
@@ -334,6 +380,9 @@ export function resolveRedirect(
 
 /** Turns a socket or TLS failure into something that names the cause. */
 function describeFailure(error: unknown, options: HttpRequestOptions, path: string): Error {
+  // A refusal over where the credentials may go is not a failure of the request (`A-41c`): it
+  // keeps its class, which is what makes the sensor read Unknown rather than Down.
+  if (isCredentialsWithheld(error)) return error;
   const where = `${options.scheme}://${options.host}:${String(options.port)}${path}`;
   const code = (error as NodeJS.ErrnoException).code ?? '';
   const message = error instanceof Error ? error.message : String(error);
@@ -362,8 +411,9 @@ function describeFailure(error: unknown, options: HttpRequestOptions, path: stri
 /** The parameters every HTTP sensor shares, so the three forms cannot drift apart. */
 export function readCommon(
   params: Readonly<Record<string, unknown>>,
-  host: string,
+  target: CheckTarget,
 ): Omit<HttpRequestOptions, 'headers' | 'body' | 'method' | 'maxBodyBytes'> {
+  const host = target.host;
   const text = (key: string, fallback = ''): string => {
     const value = params[key];
     return typeof value === 'string' ? value : fallback;
@@ -382,5 +432,8 @@ export function readCommon(
     verifyTls: params['verifyTls'] !== false,
     followRedirects: params['followRedirects'] !== false,
     maxRedirects: 5,
+    // The whole target, not its host, so that no HTTP type can read one and forget the other
+    // (`A-41c`): the pinned address goes wherever the host goes.
+    ...(target.pinned === undefined ? {} : { pinned: target.pinned }),
   };
 }

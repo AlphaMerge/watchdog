@@ -19,6 +19,7 @@ export const sshDiskFree: SensorType = {
   category: 'SSH',
   costHint: 'medium',
   credentialKinds: ['ssh'],
+  pinnedKinds: ['ssh'],
   // Where the set goes besides the host (`A-41`): the port.
   secretDestinations: { 'kind:ssh': ['port'] },
 

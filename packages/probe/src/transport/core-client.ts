@@ -3,6 +3,7 @@ import {
   capabilitiesFor,
   describeError,
   healthForPeer,
+  resultForPeer,
   isProtocolCompatible,
   loadTlsMaterial,
   MessageConnection,
@@ -686,7 +687,13 @@ export class CoreClient {
     failure?: QueryFailure;
     message?: string;
   }): void {
-    this.#connection?.send({ type: 'query-result', ...message });
+    // `withheld` only to a core that knows the field (`A-41c`); its schema refuses one it does not.
+    const { result, ...rest } = message;
+    this.#connection?.send({
+      type: 'query-result',
+      ...rest,
+      ...(result === undefined ? {} : { result: resultForPeer(result, this.#coreProtocolVersion) }),
+    });
   }
 
   async sendResults(results: readonly CheckResult[], backlog = 0): Promise<ResultsOutcome> {
@@ -706,7 +713,9 @@ export class CoreClient {
         connection.send({
           type: 'results',
           batchId,
-          results: [...results],
+          // `withheld` only to a core that knows the field (`A-41c`): the spool can hold a
+          // result written for one core and replay it to another.
+          results: results.map((result) => resultForPeer(result, this.#coreProtocolVersion)),
           backlog,
           // **This probe's own clock, so the core can judge a replay in one frame** (`P-169`).
           // Gated: an older core's results schema refuses an unknown field outright.

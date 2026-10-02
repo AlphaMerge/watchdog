@@ -124,6 +124,7 @@ export const restCustom: SensorType = {
   category: 'Web',
   costHint: 'medium',
   credentialKinds: ['http'],
+  pinnedKinds: ['http'],
   // Where the set goes besides the host (`A-41`): a port, and whether it is encrypted and checked.
   secretDestinations: { 'kind:http': ['port', 'scheme', 'verifyTls'] },
 

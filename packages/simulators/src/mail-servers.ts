@@ -68,6 +68,12 @@ export interface MailServerOptions {
    * default is written for.
    */
   readonly requireAuth?: boolean;
+  /**
+   * Where the name each client asks for in its STARTTLS handshake (SNI) is recorded, in order
+   * (`A-41c`): an empty string for a client that sent none. What proves a client that connected
+   * to an address still asked for the device by name.
+   */
+  readonly servernames?: string[];
 }
 
 export interface RunningServer {
@@ -153,6 +159,10 @@ function wrap(socket: Socket, options: MailServerOptions): Duplexish {
       const secure = new TLSSocket(current, {
         isServer: true,
         secureContext: createSecureContext({ key: pair.key, cert: pair.cert }),
+      });
+      secure.once('secure', () => {
+        const asked = (secure as { servername?: unknown }).servername;
+        options.servernames?.push(typeof asked === 'string' ? asked : '');
       });
       current = secure;
       bind(secure);

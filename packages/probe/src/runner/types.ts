@@ -109,6 +109,14 @@ export interface CheckRegistry {
 export const UNKNOWN_SENSOR_TYPE = 'UNKNOWN_SENSOR_TYPE';
 
 /**
+ * The code of a check refused over where its credentials may go (`A-41c`): `@ms/sensors`'
+ * `CredentialsWithheldError`. Sniffed structurally, for the reason `UNKNOWN_SENSOR_TYPE` is. The
+ * runner marks the result `withheld`, and the core holds the sensor Unknown instead of counting a
+ * failed scan: nothing was sent to the device, so nothing about it failed.
+ */
+export const CREDENTIALS_WITHHELD = 'CREDENTIALS_WITHHELD';
+
+/**
  * How a check process announces its answer on stdout (`P-03`).
  *
  * **Here rather than in `check-child.ts`, and that is not tidiness.** `check-child.ts` is an

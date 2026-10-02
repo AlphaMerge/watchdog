@@ -29,6 +29,7 @@ export const mailRoundTrip: SensorType = {
   // A send, then polling a mailbox until it arrives. The most expensive check in the catalogue.
   costHint: 'heavy',
   credentialKinds: ['mail'],
+  pinnedKinds: ['mail'],
   // Where the set goes besides the host (`A-41`): both servers' ports, protocols and encryption.
   secretDestinations: {
     'kind:mail': ['readPort', 'readSecurity', 'readWith', 'smtpPort', 'smtpSecurity', 'verifyTls'],
@@ -158,8 +159,7 @@ export const mailRoundTrip: SensorType = {
         verifyTls,
         timeoutMs,
       },
-      host,
-      context.target.ipVersion,
+      context.target,
       { plain: 587, tls: 465 },
     );
     const read = readTransport(
@@ -169,8 +169,7 @@ export const mailRoundTrip: SensorType = {
         verifyTls,
         timeoutMs,
       },
-      host,
-      context.target.ipVersion,
+      context.target,
       readWith === 'pop3' ? { plain: 110, tls: 995 } : { plain: 143, tls: 993 },
     );
 

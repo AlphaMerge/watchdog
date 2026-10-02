@@ -1,4 +1,9 @@
-import { MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, type ProbeHealthReport } from './messages.js';
+import {
+  MIN_PROTOCOL_VERSION,
+  PROTOCOL_VERSION,
+  type CheckResult,
+  type ProbeHealthReport,
+} from './messages.js';
 
 /**
  * What a peer at a given protocol version can actually be asked to do (`R-06`).
@@ -120,6 +125,15 @@ export interface ProbeCapabilities {
    * the log output's fields; the five channels gap.
    */
   flowCounters: boolean;
+  /**
+   * Resolves a device's host name once, checks every address it answers with against a
+   * credential set's address and range targets, and connects to an address it checked
+   * (`A-41c`). Below this the core does not send such a set at all: a probe that resolved the
+   * name for the check and again for the connection could be answered differently each time by
+   * whoever runs the name's DNS. It also marks the check it refuses as `withheld` on its result,
+   * which an older core's schema would reject, and an older core never sends it such a set.
+   */
+  credentialAddressPinning: boolean;
 }
 
 /**
@@ -145,6 +159,7 @@ const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
   ['logOutput', 21],
   ['credentialHostKeys', 22],
   ['flowCounters', 23],
+  ['credentialAddressPinning', 24],
 ];
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -164,6 +179,9 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   logOutput: 'report the log lines it could not write',
   credentialHostKeys: 'check an SSH server against more than one host key',
   flowCounters: 'report what its flow collector received and what it missed',
+  credentialAddressPinning:
+    'check a named device against the addresses its credentials allow, and connect to the ' +
+    'address it checked',
 };
 
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
@@ -184,6 +202,7 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     logOutput: has(21),
     credentialHostKeys: has(22),
     flowCounters: has(23),
+    credentialAddressPinning: has(24),
   };
 }
 
@@ -228,6 +247,22 @@ export function healthForPeer(health: ProbeHealthReport, peerVersion: number): P
     sent = older;
   }
   return sent;
+}
+
+/**
+ * A check result with every field this peer's version does not know taken out (`A-41c`).
+ *
+ * `withheld` is the first field a result has gained since the schema was closed. A core below 24
+ * never sends a probe the kind of set that produces one, so this strips nothing in practice; it
+ * is here for the spool, which can hold a result written while one core was on the line and
+ * replay it to another. Stripped, such a result reads as the failed check an older core takes it
+ * for, with the reason still in its message.
+ */
+export function resultForPeer(result: CheckResult, peerVersion: number): CheckResult {
+  if (result.withheld === undefined) return result;
+  if (capabilitiesFor(peerVersion).credentialAddressPinning) return result;
+  const { withheld: _withheld, ...older } = result;
+  return older;
 }
 
 /** The version a peer must speak for one capability — the number the gates used to inline. */

@@ -347,6 +347,25 @@ Four rules follow from how the redactor works:
   Changing what a shipped type names changes every fingerprint of that type without anything
   having moved. The core notices at start-up and fingerprints what it had recorded again, keeping
   whoever vouched, so an upgrade does not withhold them.
+- **Connect to `ctx.target.pinned` when there is one, and say that you do** (`A-41c`). A
+  credential set can be bounded to addresses and ranges, and a device can be named by host name.
+  The catalogue then resolves the name once, before `execute`, checks every address against the
+  set's targets, and hands the check the one to use as `ctx.target.pinned`. A type that connected
+  to `ctx.target.host` regardless would resolve the name a second time, and whoever runs its DNS
+  could answer that lookup with another machine. So:
+
+  - Pass the whole `ctx.target` to the shared transport, never its `host` alone: `snmpCheck`,
+    `sshCheck`, `readCommon` (HTTP) and `readTransport` (mail) take it and pin for you.
+  - A transport of your own connects to `pinned.address`, or gives its socket
+    `lookup: pinnedLookup(host, pinned)` so that TLS still names the server by `host`.
+  - List the kind in `pinnedKinds` only once every connection the type makes with that kind
+    does this. A kind left out is simply not sent to a named device with address-only targets,
+    which is the safe answer for a driver that resolves the name itself.
+
+  ```ts
+  credentialKinds: ['ssh'],
+  pinnedKinds: ['ssh'],
+  ```
 
 The form (`U-08`) follows from the same annotation: a `writeOnly` parameter renders as
 "set, write-only" with Replace and Clear, never as a filled input, and is omitted from the save
@@ -396,6 +415,7 @@ All of these fail at startup, loudly, rather than at runtime:
 | no `writeOnly` inside a combinator             | it could not be reliably redacted                               |
 | every `writeOnly` has a `secretDestinations` entry, naming visible properties | a secret stays with where it is sent (`A-40`) |
 | every kind in `credentialKinds` has a `kind:<id>` entry, and no other kind does | an inherited set goes only where somebody vouched (`A-41`) |
+| every kind in `pinnedKinds` is one of `credentialKinds` | a promise about a set the type is never sent is a typo (`A-41c`) |
 | at most one `isPrimary` channel                | the one-primary-per-sensor index                                |
 | no repeated channel key                        | `(sensor_id, key)` is unique                                    |
 | the schema validates its own declared defaults | a `default` a `pattern` rejects is a field nobody can fill in   |

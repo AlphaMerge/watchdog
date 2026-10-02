@@ -1235,6 +1235,9 @@ async function serve(): Promise<void> {
     resolver: channels,
     ownership,
     refusals,
+    // A check a probe refused over where its credentials may go holds its sensor Unknown, and
+    // never reaches the machine as a failed scan (`A-41c`).
+    credentialRefusals: credentialVouching,
     // What turns an outcome into Up, Warning or Down (M-02). Its writes ride in the readings'
     // own transaction, so the two can never disagree about what happened.
     states,

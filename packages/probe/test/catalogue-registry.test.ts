@@ -3,7 +3,9 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
+import { CREDENTIALS_WITHHELD as SENSORS_CREDENTIALS_WITHHELD } from '@ms/sensors';
 import registry from '../src/runner/catalogue-registry.js';
+import { CREDENTIALS_WITHHELD } from '../src/runner/types.js';
 
 /**
  * The registry every worker and every child process runs a check through (`S-19`).
@@ -43,6 +45,32 @@ describe('the probe’s check registry', () => {
       (error: unknown) => {
         assert.ok(error instanceof Error);
         assert.match(error.message, /exited with code 2: request failed with ••••••$/);
+        return true;
+      },
+    );
+  });
+
+  it('refuses a check outside its credentials’ targets, in the code the runners read (A-41c)', async () => {
+    // The real registry, so the real catalogue: what is pinned is that a probe's checks pass
+    // through `pinTarget`, and that its refusal carries the code `check-worker` looks for. An
+    // address outside the targets needs nothing resolved and nothing sent.
+    assert.equal(CREDENTIALS_WITHHELD, SENSORS_CREDENTIALS_WITHHELD);
+    await assert.rejects(
+      () =>
+        registry.execute('snmp.uptime', {
+          sensorId: 9,
+          target: { host: '192.0.2.9', ipVersion: 'auto' },
+          params: { port: 161 },
+          credentials: {
+            snmp: { version: 'v2c', community: 'public', allowedTargets: ['10.0.0.0/8'] },
+          },
+          signal: new AbortController().signal,
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.equal((error as { code?: unknown }).code, CREDENTIALS_WITHHELD);
+        assert.equal((error as { sensorId?: unknown }).sensorId, 9);
+        assert.match(error.message, /^Not scanned: 192\.0\.2\.9 is outside the allowed targets/);
         return true;
       },
     );

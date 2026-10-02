@@ -391,11 +391,31 @@ nobody, not even an administrator, can bring it outside.
   to the devices it is for, and no wider.
 - **A device is matched with entries of its own sort.** A device given as an address is inside
   an address or a range that covers it. A device given as a name is inside a name or a
-  `*.domain` that covers it. **A device named by host name, facing targets that name only
-  addresses and ranges, is refused**, since the core does not resolve names. A probe that did
-  would have to connect to the very address it checked, or whoever picks the name could answer
-  the check with one address and the connection with another (`A-41c`). Give the device its
-  address, or add its name to the targets.
+  `*.domain` that covers it.
+- **A device named by host name, facing targets that name only addresses and ranges, is checked
+  by its probe** (`A-41c`). The core does not resolve names. The probe resolves the name once,
+  at each scan, and checks *every* address it has for the device's address family against the
+  targets. All inside, it connects to one of those addresses, never to the name, so whoever
+  runs the name's DNS cannot answer the check with one address and the connection with another.
+  Any one outside, or none at all, and the scan sends the device nothing: the sensor reads
+  Unknown, with a sentence naming the address and what to correct. It is scanned again at its
+  next interval, and is Up at the scan where the name resolves inside.
+
+  | Sensors | A named device, address-only targets |
+  | --- | --- |
+  | SNMP | Checked and pinned: the probe asks the address it checked. |
+  | SSH | Checked and pinned. The server is still identified by its host key. |
+  | HTTP | Checked and pinned. The request still names the device: `Host`, TLS SNI and the certificate check are on the name. |
+  | Mail (SMTP, IMAP, POP3) | Checked and pinned, with the certificate checked against the name, after `STARTTLS` too. |
+  | PostgreSQL, MySQL, SQL Server | **Withheld.** The drivers resolve the name themselves and take no address to connect to. |
+  | Windows (PowerShell) | **Withheld.** Kerberos needs the name, and PowerShell resolves it. |
+
+  For the withheld kinds, give the device its address, or add its name or `*.domain` to the
+  targets; the sensor's message says which. **A probe older than protocol 24 is not sent such a
+  set at all**: it would connect by name. Its sensors read Unknown, saying so, until the probe
+  is upgraded. With `IP version` on `auto` both families are checked, and the probe prefers an
+  IPv4 address when the name has one. A name with one record inside the targets and one
+  outside is refused whichever the probe would have used.
 - **Outside the targets, a sensor reads Unknown** with a sentence saying why and what sends the
   set again, and "check now" answers 409 `OBJECT_CREDENTIALS_WITHHELD`. The write that moved it
   there is not refused: targets decide delivery, at every configuration a probe is sent, whoever
@@ -404,10 +424,14 @@ nobody, not even an administrator, can bring it outside.
   the `credential.set` audit entry, count the sensors beneath that are outside them after the
   write. The response counts the ones its caller can see, so an account with a `none` carved
   beneath the object is not told how many sensors are inside it; the audit log's entry counts
-  them all. A removal's `sensors` is counted the same way. Restricting a set to ranges when the devices under it are named by host name takes every
-  one of them to Unknown, and the count is how you find that out before the pages do. Unknown
-  pages as it always has: once per sensor, collected into the template's digest, and nothing for a
-  sensor a Down dependency already holds.
+  them all. A removal's `sensors` is counted the same way. Restricting a set to ranges when the
+  devices under it are named by host name takes every database and Windows sensor among them to
+  Unknown, and the count is how you find that out before the pages do. **It does not count a
+  named device its probe will check**: whether that name resolves inside is found out at the
+  scan, and by the probe's resolver, not the core's. Unknown pages as it always has: once per
+  sensor, collected into the template's digest, and nothing for a sensor a Down dependency
+  already holds. A DNS change that moves a group's names outside the targets pages the same way,
+  and raises no Down.
 - **Widening the targets needs the secret again.** A write that adds an entry, or empties the
   list, clears the set's secrets unless the same write sends them. The response's
   `secretsCleared` and the audit entry name what went. Removing entries, or adding targets to a
@@ -1455,6 +1479,11 @@ Covered in [`docs/installation.md`](installation.md#upgrading). The two things w
   set is bounded by `allowedTargets` or SSH `hostKeys` only when somebody writes them (`A-41b`).
   So every set in use before stays under `A-41`'s voucher rule, a strict SSH set with only its
   one `hostKeyFingerprint` included, and is sent exactly where it was sent the day before.
+  **With one exception, which somebody did choose** (`A-41c`): a set whose targets name only
+  addresses now reaches SNMP, SSH, HTTP and mail sensors on devices named by host name, once
+  their probe speaks protocol 24 and for as long as every address the name resolves to is inside
+  those targets. Before, those sensors read Unknown. The targets were written to say where the
+  set may go, and it goes nowhere outside them.
 
 ---
 

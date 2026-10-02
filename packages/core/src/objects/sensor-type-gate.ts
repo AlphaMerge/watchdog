@@ -123,6 +123,13 @@ export interface SensorTypeGate {
     params: Record<string, unknown>,
     declared?: readonly string[],
   ): readonly (readonly [string, unknown])[];
+
+  /**
+   * Whether a sensor of this type connects to an address its probe checked, with a set of this
+   * kind (`A-41c`): what lets a set whose targets name only addresses reach a device named by
+   * host name. False for a type that resolves the name itself, and for one not registered.
+   */
+  pinsAddress(sensorType: string, kind: string): boolean;
 }
 
 export type { ChannelRecord };
@@ -293,6 +300,10 @@ export function catalogueSensorTypeGate(catalogue: SensorCatalogue): SensorTypeG
       // An unregistered type is sent nothing, so it has nowhere to send it.
       if (!catalogue.has(sensorType)) return [];
       return catalogue.credentialDestination(sensorType, kind, params, declared);
+    },
+
+    pinsAddress(sensorType: string, kind: string): boolean {
+      return catalogue.pinsAddress(sensorType, kind);
     },
 
     redact(sensorType: string, params: Record<string, unknown>): RedactedParams {

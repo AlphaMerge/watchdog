@@ -238,6 +238,9 @@ function keyOf(
     target.host,
     String(target.port ?? 161),
     target.ipVersion ?? 'auto',
+    // A session sends to the address it was opened with (`A-41c`). A name that now resolves
+    // elsewhere, still inside the targets, is another session; one no longer pinned is too.
+    target.pinned?.address ?? '',
     credentialFingerprint(credentials),
     String(options.timeoutMs ?? ''),
     String(options.retries ?? ''),

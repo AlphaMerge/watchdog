@@ -1,5 +1,6 @@
 import {
   RESULT_MARKER,
+  CREDENTIALS_WITHHELD,
   UNKNOWN_SENSOR_TYPE,
   type CheckRegistry,
   type CheckTarget,
@@ -67,6 +68,7 @@ async function main(): Promise<void> {
       durationMs: elapsed(startedAt),
       aborted: controller.signal.aborted,
       unknownType: (error as { code?: unknown } | null)?.code === UNKNOWN_SENSOR_TYPE,
+      withheld: (error as { code?: unknown } | null)?.code === CREDENTIALS_WITHHELD,
       message: error instanceof Error ? error.message : String(error),
     });
   }

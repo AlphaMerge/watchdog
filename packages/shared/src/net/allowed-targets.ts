@@ -18,9 +18,11 @@ import { BlockList, isIP } from 'node:net';
  * name host is inside a name or a pattern that covers it. An address host is inside an address
  * or a range that covers it. An address never matches a name: that would take a reverse lookup,
  * and a PTR record is written by whoever holds the address. A name host facing only addresses
- * and ranges is `undecided`: the core does not resolve names, and resolving on the probe is only
- * sound if the check then connects to the address it checked (`A-41c`). Until then, undecided is
- * refused, like outside.
+ * and ranges is `undecided`: the core does not resolve names. **The probe decides it** (`A-41c`),
+ * by resolving the name once, asking this same function about every address it has, and
+ * connecting to one of them, never to the name. Where that cannot be done, because the probe is
+ * older than the check or the transport resolves the name itself, undecided is refused, like
+ * outside.
  */
 
 /** One parsed entry. */

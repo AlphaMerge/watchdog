@@ -8,6 +8,8 @@ import {
   isProtocolCompatible,
   missingCapabilities,
   negotiatedVersion,
+  parseProbeToCore,
+  resultForPeer,
   MIN_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
   versionFor,
@@ -48,6 +50,7 @@ describe('what a protocol version can do', () => {
       logOutput: false,
       credentialHostKeys: false,
       flowCounters: false,
+      credentialAddressPinning: false,
     });
   });
 
@@ -365,6 +368,52 @@ describe('the health a peer can be sent', () => {
         'report what its flow collector received and what it missed',
       ),
     );
+    // `A-41c`: no field towards the probe either. Below 24 the core withholds the set.
+    assert.equal(versionFor('credentialAddressPinning'), 24);
+    assert.equal(capabilitiesFor(23).credentialAddressPinning, false);
+    assert.equal(capabilitiesFor(24).credentialAddressPinning, true);
+    assert.ok(
+      missingCapabilities(23).includes(
+        'check a named device against the addresses its credentials allow, and connect to the ' +
+          'address it checked',
+      ),
+    );
     assert.ok(missingCapabilities(20).includes('report the log lines it could not write'));
+  });
+});
+
+describe('the check result a peer can be sent (`A-41c`)', () => {
+  const plain = {
+    sensorId: 7,
+    at: '2026-10-02T00:00:00.000Z',
+    outcome: 'error' as const,
+    message: 'Not scanned: outside the allowed targets',
+    durationMs: 3,
+    channels: [],
+  };
+
+  it('keeps `withheld` for a core at 24 and takes it out below', () => {
+    const refused = { ...plain, withheld: true as const };
+    assert.deepEqual(resultForPeer(refused, 24), refused);
+    assert.deepEqual(resultForPeer(refused, 25), refused);
+    assert.deepEqual(resultForPeer(refused, 23), plain);
+    assert.equal('withheld' in resultForPeer(refused, 22), false);
+  });
+
+  it('hands back the very result when there is nothing to take out', () => {
+    assert.equal(resultForPeer(plain, 3), plain);
+    assert.equal(resultForPeer(plain, 24), plain);
+  });
+
+  it('is a field both schemas know, and only as true', () => {
+    const batch = (result: unknown): unknown => ({
+      type: 'results',
+      batchId: 'b',
+      results: [result],
+    });
+    assert.doesNotThrow(() => parseProbeToCore(batch({ ...plain, withheld: true })));
+    assert.doesNotThrow(() => parseProbeToCore(batch(plain)));
+    assert.throws(() => parseProbeToCore(batch({ ...plain, withheld: false })));
+    assert.throws(() => parseProbeToCore(batch({ ...plain, withheld: 'yes' })));
   });
 });

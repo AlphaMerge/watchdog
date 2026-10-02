@@ -153,6 +153,21 @@ describe('process runner', () => {
     assert.equal(seen[0]?.meta.phase, 'unknown-type');
   });
 
+  it('marks a check refused over its credentials’ targets, and no other failure', async () => {
+    // `A-41c`: the same mark the worker pool sets, from a process of its own.
+    const { runner, seen } = runnerOf();
+    runner.submit(request(21, 'test.withheld'));
+    runner.submit(request(22, 'test.throw'));
+    await until(() => seen.length === 2, 'both failures');
+    const refused = seen.find((one) => one.result.sensorId === 21)?.result;
+    const failed = seen.find((one) => one.result.sensorId === 22)?.result;
+    assert.ok(refused !== undefined && failed !== undefined);
+    assert.equal(refused.outcome, 'error');
+    assert.equal(refused.withheld, true);
+    assert.equal(refused.message, 'Not scanned: outside the allowed targets');
+    assert.equal('withheld' in failed, false);
+  });
+
   it('finds its result past whatever a library printed', async () => {
     const { runner, seen } = runnerOf();
     runner.submit(request(9, 'test.print'));

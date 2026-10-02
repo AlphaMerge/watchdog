@@ -7,6 +7,7 @@ import type {
 } from '../contract.js';
 import { authorizationFor, scrub, secretsOf } from '../support/http/auth.js';
 import { extract, MAX_PATTERN, PatternError } from '../support/pattern.js';
+import { isCredentialsWithheld } from '../support/pinned-target.js';
 import { scrubberOf } from '../support/secrets.js';
 import { HTTP_COMMON_SCHEMA } from './http-shared.js';
 
@@ -332,6 +333,7 @@ export const httpTransaction: SensorType = {
   // Up to ten requests, and it holds a session across them.
   costHint: 'heavy',
   credentialKinds: ['http'],
+  pinnedKinds: ['http'],
   // Where the set goes besides the host (`A-41`): a port, and whether it is encrypted and checked.
   secretDestinations: { 'kind:http': ['port', 'scheme', 'verifyTls'] },
 
@@ -418,7 +420,7 @@ export const httpTransaction: SensorType = {
     // S-19's scrub, as the catalogue hands it over: every response passes through it (`A-42`).
     const scrubbed = scrubberOf(context);
 
-    const common = readCommon(context.params, host);
+    const common = readCommon(context.params, context.target);
     const agent = context.params['userAgent'];
     const userAgent = typeof agent === 'string' && agent.trim() !== '' ? agent.trim() : '';
     const maxBodyBytes = Number(context.params['maxBodyBytes'] ?? DEFAULT_MAX_BODY);
@@ -465,6 +467,9 @@ export const httpTransaction: SensorType = {
         },
         context.signal,
       ).catch((error: unknown) => {
+        // A refusal over where the credentials may go keeps its class (`A-41c`): rewrapped, it
+        // would read as a failed step, and the sensor Down for a device nothing was sent to.
+        if (isCredentialsWithheld(error)) throw error;
         throw new Error(
           scrub(
             `${where} failed: ${error instanceof Error ? error.message : String(error)}`,

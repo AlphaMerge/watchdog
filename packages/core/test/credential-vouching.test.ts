@@ -16,6 +16,7 @@ import {
   routesAtOrUnder,
   storedAccountWrites,
   verdictFor,
+  type CredentialBoundTypes,
   type CredentialRoute,
   type CredentialTypes,
   type RouteVerdict,
@@ -368,11 +369,12 @@ describe(
         ...gate.credentialDestination(type, kind, {}).map(([field]) => field),
         'timeout',
       ];
-      const widened: CredentialTypes = {
+      const widened: CredentialBoundTypes = {
         credentialedTypes: () => gate.credentialedTypes(),
         credentialKinds: (type) => gate.credentialKinds(type),
         credentialDestination: (type, kind, params, fields) =>
           gate.credentialDestination(type, kind, params, fields ?? declared(type, kind)),
+        pinsAddress: (type, kind) => gate.pinsAddress(type, kind),
       };
       return new CredentialVouching({
         db,

@@ -264,6 +264,9 @@ function keyOf(target: SshTarget, credentials: SshCredentials, options: SshSessi
   return [
     target.host,
     String(target.port ?? 22),
+    // A connection is to the address it was opened with (`A-41c`). A name that now resolves
+    // elsewhere, still inside the targets, is another connection; one no longer pinned is too.
+    target.pinned?.address ?? '',
     credentialFingerprint(credentials),
     // A connection was checked against the keys accepted when it opened. Accepting fewer has to
     // open a new one, or a key taken off the list would go on being trusted until it idled out.

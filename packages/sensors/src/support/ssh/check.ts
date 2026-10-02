@@ -37,7 +37,11 @@ export async function sshCheck<T>(
   }
 
   return withSsh(
-    { host, port: options.port ?? Number(context.params['port'] ?? 22) },
+    {
+      host,
+      port: options.port ?? Number(context.params['port'] ?? 22),
+      ...(context.target.pinned === undefined ? {} : { pinned: context.target.pinned }),
+    },
     readCredentials(stored),
     {
       connectTimeoutMs: Number(context.params['connectTimeoutMs'] ?? 15_000),

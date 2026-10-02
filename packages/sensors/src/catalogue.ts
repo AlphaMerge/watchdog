@@ -13,6 +13,12 @@ import type {
   SensorTypeDeclaration,
 } from './contract.js';
 import { scrubSecrets, secretsOfCheck } from './support/secrets.js';
+import {
+  isCredentialsWithheld,
+  pinTarget,
+  systemResolve,
+  type ResolveHost,
+} from './support/pinned-target.js';
 
 /**
  * `snmp.traffic`, `http.advanced`, `exe.script-advanced`.
@@ -85,9 +91,12 @@ export class SensorCatalogue {
   /** Each type's `secretDestinations`, checked against its `writeOnly` paths (`A-40`). */
   readonly #destinations = new Map<string, Readonly<Record<string, readonly string[]>>>();
   readonly #ajv: Ajv;
+  /** How `execute` resolves a name it has to check against a set's address targets (`A-41c`). */
+  readonly #resolve: ResolveHost;
   #sealed = false;
 
-  constructor() {
+  constructor(options: { readonly resolve?: ResolveHost } = {}) {
+    this.#resolve = options.resolve ?? systemResolve;
     // useDefaults fills in what a type declares a default for, so what gets stored is complete
     // and `channels(params)` never has to second-guess an absent optional.
     this.#ajv = new Ajv({
@@ -133,6 +142,7 @@ export class SensorCatalogue {
 
     const writeOnly = collectWriteOnly(type.paramsSchema, type.id);
     assertSecretsSayWhereTheyGo(type, writeOnly);
+    assertPinsWhatItUses(type);
     assertOnePrimaryChannel(type);
     assertSaysWhatItReads(type);
     assertHoldIsADuration(type);
@@ -209,14 +219,38 @@ export class SensorCatalogue {
     const secrets = secretsOfCheck(this.writeOnlyPaths(id), context.params, context.credentials);
     let execution: CheckExecution;
     try {
+      // **Before the type runs, for every type** (`A-41c`): a device named by host name, facing
+      // a set whose targets name only addresses, is resolved once and every address checked.
+      // The type connects to the address this hands it and never resolves the name again. No
+      // lookup is made for a check that holds no such set. Whatever `pinned` arrived with the
+      // context is dropped: only this decides it.
+      const pinned = await pinTarget(
+        {
+          sensorId: context.sensorId,
+          target: context.target,
+          credentials: context.credentials,
+          pinnedKinds: type.pinnedKinds ?? [],
+          signal: context.signal,
+        },
+        this.#resolve,
+      );
       // The same scrub, handed to the type for what it clips (`S-21`): a secret cut in two
       // before this point is two strings this scrub no longer finds.
       execution = await type.execute({
         ...context,
+        target: {
+          host: context.target.host,
+          ipVersion: context.target.ipVersion,
+          ...(pinned === null ? {} : { pinned }),
+        },
         scrub: (text: string) => scrubSecrets(text, secrets),
       });
     } catch (error: unknown) {
-      throw scrubbedError(error, secrets);
+      // A refusal a transport raised does not know the sensor; the runner reads the class.
+      throw scrubbedError(
+        isCredentialsWithheld(error) ? error.forSensor(context.sensorId) : error,
+        secrets,
+      );
     }
     return execution.message === undefined || secrets.length === 0
       ? execution
@@ -279,6 +313,14 @@ export class SensorCatalogue {
     return [...fields]
       .sort()
       .map((field) => [field, readAtPath(params, field.split('.')) ?? null] as const);
+  }
+
+  /**
+   * Whether a sensor of this type connects to a pinned address with a set of `kind` (`A-41c`):
+   * what lets the core send a named device a set whose targets name only addresses.
+   */
+  pinsAddress(id: string, kind: string): boolean {
+    return this.#types.get(id)?.pinnedKinds?.includes(kind) === true;
   }
 
   /**
@@ -454,6 +496,18 @@ function assertHoldIsADuration(type: SensorType): void {
     'BAD_SENSOR_TYPE',
     `sensor type "${type.id}" declares a recovery hold of ${String(hold)} s; it must be a whole ` +
       `number of seconds from 0 to ${String(MAX_RECOVERY_HOLD_SECONDS)}`,
+  );
+}
+
+/** A type pins only the kinds it is sent (`A-41c`): a promise about a set it never holds is a typo. */
+function assertPinsWhatItUses(type: SensorType): void {
+  const used = type.credentialKinds ?? [];
+  const stray = (type.pinnedKinds ?? []).filter((kind) => !used.includes(kind));
+  if (stray.length === 0) return;
+  throw new SensorTypeError(
+    'BAD_SENSOR_TYPE',
+    `sensor type "${type.id}" says it pins the "${stray.join('", "')}" credential kind, which ` +
+      'is not one of its `credentialKinds`',
   );
 }
 

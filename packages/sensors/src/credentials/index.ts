@@ -58,9 +58,11 @@ const ALLOWED_TARGETS: JsonSchema = {
     'The devices this set may be sent to: host names, *.domain patterns, addresses and CIDR ' +
     'ranges. A device inside them receives it whoever created the device, and one outside does ' +
     'not, whoever created it. Leave it empty and the set goes wherever somebody with write on ' +
-    'this object vouches for. A device named by host name is inside only a name or a *.domain: ' +
-    'addresses and ranges match devices given as addresses. Adding an entry, or emptying the ' +
-    'list, needs the password again.',
+    'this object vouches for. A device named by host name is inside a name or a *.domain that ' +
+    'covers it. Against addresses and ranges, its probe resolves the name at each scan, checks ' +
+    'every address, and connects to one it checked; database and Windows sensors cannot be ' +
+    'held to an address and are not sent the set. Adding an entry, or emptying the list, needs ' +
+    'the password again.',
 };
 
 /** What every kind's secrets are bound to, and SSH's, which a server key bounds as well. */

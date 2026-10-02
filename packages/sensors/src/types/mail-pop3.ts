@@ -18,6 +18,7 @@ export const mailPop3: SensorType = {
   category: 'Mail',
   costHint: 'light',
   credentialKinds: ['mail'],
+  pinnedKinds: ['mail'],
   // Where the set goes besides the host (`A-41`): a port, and whether it is encrypted and checked.
   secretDestinations: { 'kind:mail': ['port', 'security', 'verifyTls'] },
 
@@ -55,7 +56,7 @@ export const mailPop3: SensorType = {
 
     const host = context.target.host;
     if (host === '') throw new Error('the device has no host to connect to');
-    const transport = readTransport(context.params, host, context.target.ipVersion, {
+    const transport = readTransport(context.params, context.target, {
       plain: 110,
       tls: 995,
     });

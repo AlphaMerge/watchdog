@@ -57,6 +57,7 @@ export const sshScript: SensorType = {
   // operator's to decide. Not `heavy` — it is not a process on this machine.
   costHint: 'medium',
   credentialKinds: ['ssh'],
+  pinnedKinds: ['ssh'],
   // Where the set goes besides the host (`A-41`): the port.
   secretDestinations: { 'kind:ssh': ['port'] },
 

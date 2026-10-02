@@ -59,6 +59,23 @@ export {
 // The session pools, exported so the probe can report what they are doing (`P-36`). The pools
 // themselves stay where the transports are; what crosses this boundary is their counters, and
 // only because nothing else in the system could see a bound being passed.
+export {
+  CREDENTIALS_WITHHELD,
+  CredentialsWithheldError,
+  isCredentialsWithheld,
+  PIN_REFUSALS,
+  pinnedLookup,
+  pinnedPeerRefusal,
+  pinTarget,
+  systemResolve,
+} from './support/pinned-target.js';
+export type {
+  PinnedAddress,
+  PinRequest,
+  ResolvedAddress,
+  ResolveHost,
+  WithheldPhase,
+} from './support/pinned-target.js';
 export { snmpPool } from './support/snmp/pool.js';
 export type { SnmpPoolStats } from './support/snmp/pool.js';
 export { sshPool } from './support/ssh/pool.js';

@@ -157,6 +157,19 @@ name, and reads `unknown`/`access` with the reason. Narrowing a set's targets ca
 group at once, and pages as Unknown does: once per sensor, into the digest, and not at all for a
 sensor a Down dependency already holds, since a paused sensor is not configured.
 
+**And a sensor whose probe refuses to scan it** (`A-41c`). A device named by host name, facing a
+set whose targets name only addresses, is sent to a probe at protocol 24, which resolves the name
+at each scan and checks every address. When one is outside the targets, or the name resolves to
+nothing, the probe sends the device nothing and marks its result `withheld`. **That result never
+reaches the state machine.** It is not a failed scan: counted as one it would be a Down, and an
+alarm, about a device nobody asked anything of. The core takes it out of the batch and holds the
+sensor in the same set, under a second per-probe name, with the probe's own sentence. The sensor
+is let go by its next result that is not a refusal, before the machine sees that result, so it is
+Up at the scan that found the name inside again, with no Down between. Results are ordered by the
+probe's clock, since a spool replays: an older refusal holds nothing, and an older reading lets
+nothing go. A sensor the core stops sending the probe (paused, moved, deleted, or withheld by the
+core itself) is dropped from what the probe refused at the next configuration.
+
 ### 2.1 Query state — did the check run?
 
 From the result's `outcome`, with the two-step rule (`M-03`).

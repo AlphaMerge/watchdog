@@ -1,4 +1,5 @@
 import type { ChannelReading } from '@ms/shared';
+import type { PinnedAddress } from './support/pinned-target.js';
 
 /**
  * A JSON Schema document. Deliberately not a structural type: `paramsSchema` is handed to Ajv,
@@ -109,6 +110,19 @@ export interface CheckTarget {
   /** The device's `host`: a hostname or a literal address. Never resolved by the core. */
   readonly host: string;
   readonly ipVersion: 'auto' | 'v4' | 'v6';
+  /**
+   * The address this check must connect to, when `host` is a name that was checked against a
+   * credential set's address targets (`A-41c`). Set by the catalogue and by nothing else, from
+   * `pinTarget`, which resolved the name once and checked every address it has.
+   *
+   * **A transport handed this never resolves `host` itself.** It connects to the address, or
+   * answers its socket's `lookup` with it (`pinnedLookup`), and keeps `host` for what names the
+   * server: SNI, the `Host` header, the certificate check, the sensor's messages. Resolving the
+   * name again is the hole this closes, since whoever runs its DNS can answer the second lookup
+   * with another machine. Absent for every check that needs no pin, which then behaves as it
+   * always has.
+   */
+  readonly pinned?: PinnedAddress;
 }
 
 /** What a check is handed when it runs. */
@@ -331,6 +345,23 @@ export interface SensorType {
    * whatever turns encryption or its verification off — since each is a listener of its own.
    */
   readonly secretDestinations?: Readonly<Record<string, readonly string[]>>;
+  /**
+   * The credential kinds this type sends only to `CheckTarget.pinned` when there is one
+   * (`A-41c`): every connection it makes with a set of that kind goes to the pinned address, and
+   * none of them resolves the device's name.
+   *
+   * **A promise about the transport, and what lets a restricted set reach a named device.** A
+   * set whose `allowedTargets` name only addresses is sent to a device named by host name only
+   * when the sensor's type lists the kind here; the probe then resolves the name once, checks
+   * every address, and pins one. A type that leaves a kind out is not sent such a set, and one
+   * that listed a kind and still connected by name would hand the set to whoever answers the
+   * second lookup. List a kind only where the transport takes an address to connect to or a
+   * `lookup` for its socket: SNMP, SSH, HTTP and mail do. The database drivers and PowerShell
+   * resolve the name themselves, and stay off this list.
+   *
+   * Each must be one of `credentialKinds`; the catalogue refuses a type that lists another.
+   */
+  readonly pinnedKinds?: readonly string[];
   /**
    * The probe-side listener this type is fed by, instead of polling (`T-06`).
    *

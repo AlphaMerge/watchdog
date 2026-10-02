@@ -1,6 +1,13 @@
 import { createHash } from 'node:crypto';
 import { isRestricted, restrictionOf, type CredentialRestriction } from '@ms/sensors';
-import { capabilitiesFor, PROTOCOL_VERSION, targetVerdict, type Logger } from '@ms/shared';
+import {
+  capabilitiesFor,
+  PROTOCOL_VERSION,
+  targetVerdict,
+  versionFor,
+  type CheckResult,
+  type Logger,
+} from '@ms/shared';
 import { atLeast, type AccessPrincipal, type AccessRight } from '../auth/access.js';
 import type { AccountRole } from '../auth/accounts.js';
 import { AuthError } from '../auth/errors.js';
@@ -40,6 +47,12 @@ export type CredentialTypes = Pick<
   SensorTypeGate,
   'credentialKinds' | 'credentialedTypes' | 'credentialDestination'
 >;
+
+/**
+ * And whether a type connects to an address its probe checked (`A-41c`), for the two callers
+ * that decide whether a restricted set is sent: the configuration, and the count a write answers.
+ */
+export type CredentialBoundTypes = CredentialTypes & Pick<SensorTypeGate, 'pinsAddress'>;
 
 /**
  * The fingerprint of where a sensor sends a set: its probe, its device's host and address
@@ -126,6 +139,7 @@ export function declarationsOf(recipe: string): Map<string, readonly string[]> |
 export interface CredentialRoute {
   readonly sensorId: ObjectId;
   readonly sensorName: string;
+  readonly sensorType: string;
   readonly kind: string;
   readonly ownerId: ObjectId;
   readonly ownerKind: string;
@@ -315,6 +329,7 @@ export async function routesAtOrUnder(
     routes.push({
       sensorId: Number(row.sensor_id),
       sensorName: row.sensor_name,
+      sensorType: row.sensor_type,
       kind: row.kind,
       ownerId: Number(row.owner_id),
       ownerKind: row.owner_kind,
@@ -496,9 +511,16 @@ export const WITHHELD_CREDENTIALS = {
     'stored, or pointing it back inside them, sends them again.',
   undecided:
     'Not scanned: this device is named by host name, and the allowed targets of the credentials ' +
-    'it would use name only addresses and ranges, which a name is not checked against without ' +
-    'resolving it. Giving the device its address, or adding its name or *.domain to the ' +
-    'targets, sends them again.',
+    'it would use name only addresses and ranges. A name is checked against those by resolving ' +
+    'it and connecting to the address that was checked, and this kind of sensor connects ' +
+    'through a driver that resolves the name itself. Giving the device its address, or adding ' +
+    'its name or *.domain to the targets, sends them again.',
+  probeCannotPin:
+    'Not scanned: this device is named by host name, and the allowed targets of the credentials ' +
+    'it would use name only addresses and ranges. Its probe is too old to resolve the name ' +
+    'once and connect to the address it checked. Upgrading the probe to protocol ' +
+    `${String(versionFor('credentialAddressPinning'))} sends them again, and so does giving the ` +
+    'device its address, or adding its name or *.domain to the targets.',
   probeTooOld:
     'Not scanned: the SSH credentials it would use list host keys, and its probe is too old to ' +
     'check a server against more than one. Upgrading the probe to protocol 22 sends them again.',
@@ -509,8 +531,10 @@ export const WITHHELD_CREDENTIALS = {
  *
  * **Its bounds decide it, and nothing else does**: not who vouched, and not who wrote the sensor.
  * Inside the targets, every sensor gets it; outside them, none does. A device named by host name
- * against targets that name only addresses is refused too — the core does not resolve names, and
- * a probe that did would have to connect to the address it checked (`A-41c`). And a set bounded
+ * against targets that name only addresses is not the core's to decide: it does not resolve
+ * names. It is sent to a probe that resolves the name once and connects to the address it
+ * checked, for a sensor whose transport can be held to one (`A-41c`), and refused otherwise: for
+ * an older probe, and for a transport that resolves the name itself. And a set bounded
  * by its SSH keys goes only to a probe that checks the whole list: an older one reads the one
  * fingerprint and would log in to a server the list does not name.
  */
@@ -518,11 +542,26 @@ export function boundRefusal(
   restriction: CredentialRestriction,
   host: string,
   peerVersion: number,
+  /**
+   * Whether the sensor's type connects to an address its probe checked, with this kind
+   * (`A-41c`). False withholds a name facing address targets, as before `A-41c`.
+   */
+  pinsAddress = false,
 ): string | null {
   if (restriction.targets.length > 0) {
     const verdict = targetVerdict(host, restriction.targets);
     if (verdict === 'outside') return WITHHELD_CREDENTIALS.outside;
-    if (verdict === 'undecided') return WITHHELD_CREDENTIALS.undecided;
+    if (verdict === 'undecided') {
+      // **The probe decides it, and only a probe that can** (`A-41c`). It resolves the name once,
+      // checks every address against the targets, and connects to one it checked. Two things
+      // have to hold, and either failing withholds the set as before: the transport takes an
+      // address to connect to, and the probe is new enough to do the check at all. A probe below
+      // that version would be sent the set and connect by name.
+      if (!pinsAddress) return WITHHELD_CREDENTIALS.undecided;
+      if (!capabilitiesFor(peerVersion).credentialAddressPinning) {
+        return WITHHELD_CREDENTIALS.probeCannotPin;
+      }
+    }
   }
   if (restriction.hostKeys !== null && !capabilitiesFor(peerVersion).credentialHostKeys) {
     return WITHHELD_CREDENTIALS.probeTooOld;
@@ -532,7 +571,11 @@ export function boundRefusal(
 
 /**
  * The sensors a set's bounds keep it from, after a write (`A-41b`): the ones that resolve to it
- * and are outside its targets or undecided against them. None for an unrestricted set.
+ * and are outside its targets, or undecided against them with a transport that cannot be held to
+ * a checked address. None for an unrestricted set.
+ *
+ * **A named device a probe will check is not among them** (`A-41c`): whether its name resolves
+ * inside the targets is the probe's to find out, at each scan, and the write cannot know.
  *
  * Read in the write's transaction, for the response and the audit entry, so that narrowing a
  * set's targets says how many sensors it is about to take to Unknown before anybody finds out
@@ -544,7 +587,7 @@ export function boundRefusal(
  */
 export async function withheldByBounds(
   q: Queryable,
-  types: CredentialTypes,
+  types: CredentialBoundTypes,
   ownerId: ObjectId,
   kind: string,
 ): Promise<ObjectId[]> {
@@ -552,7 +595,8 @@ export async function withheldByBounds(
   const sensors = new Set<ObjectId>();
   for (const route of routes) {
     if (route.ownerId !== ownerId || !isRestricted(route.restriction)) continue;
-    if (boundRefusal(route.restriction, route.host, PROTOCOL_VERSION) !== null) {
+    const pins = types.pinsAddress(route.sensorType, route.kind);
+    if (boundRefusal(route.restriction, route.host, PROTOCOL_VERSION, pins) !== null) {
       sensors.add(route.sensorId);
     }
   }
@@ -596,7 +640,7 @@ export interface SensorBeingSent {
 export interface CredentialVouchingOptions {
   db: Queryable & { tx<T>(fn: (q: Queryable) => Promise<T>): Promise<T> };
   logger: Logger;
-  sensorTypes: CredentialTypes;
+  sensorTypes: CredentialBoundTypes;
   /** What each account may do to each owner: `AccessService.resolveManyFor`. */
   rights: (
     principal: AccessPrincipal,
@@ -634,8 +678,17 @@ const ADOPTING: Actor = { kind: 'system', component: 'credential-vouching' };
 export interface CredentialVouchingStats {
   /** Sensors whose credentials were checked before being sent. */
   checked: number;
-  /** Sensors withheld at the last check of each probe. */
+  /**
+   * Sensors withheld at the last check of each probe, and those a probe is refusing to scan
+   * because their name resolves outside their credentials' targets (`A-41c`).
+   */
   withheld: number;
+}
+
+/** One sensor a probe refused to scan (`A-41c`), and when it last said so, by its own clock. */
+interface ProbeRefusal {
+  readonly at: number;
+  readonly message: string;
 }
 
 interface Account {
@@ -658,7 +711,7 @@ interface Account {
 export class CredentialVouching {
   readonly #db: CredentialVouchingOptions['db'];
   readonly #logger: Logger;
-  readonly #types: CredentialTypes;
+  readonly #types: CredentialBoundTypes;
   readonly #rights: CredentialVouchingOptions['rights'];
   readonly #vouching: Pick<VoucherCheck, 'settle'> | undefined;
   readonly #audit: AuditSink | undefined;
@@ -667,6 +720,8 @@ export class CredentialVouching {
   /** Keyed by account and role: a role is a ceiling, and changing it does not move the epoch. */
   readonly #writable = new Map<string, Map<number, boolean>>();
   readonly #withheldByProbe = new Map<number, number>();
+  /** What each probe is refusing to scan, by sensor (`A-41c`). */
+  readonly #refusedByProbe = new Map<number, Map<number, ProbeRefusal>>();
   #checked = 0;
 
   constructor(options: CredentialVouchingOptions) {
@@ -681,6 +736,7 @@ export class CredentialVouching {
   stats(): CredentialVouchingStats {
     let withheld = 0;
     for (const count of this.#withheldByProbe.values()) withheld += count;
+    for (const refused of this.#refusedByProbe.values()) withheld += refused.size;
     return { checked: this.#checked, withheld };
   }
 
@@ -730,7 +786,12 @@ export class CredentialVouching {
       for (const [kind, ownerId] of sensor.owners) {
         const restriction = sensor.restrictions?.get(kind);
         if (restriction !== undefined && isRestricted(restriction)) {
-          const refusal = boundRefusal(restriction, sensor.host, peerVersion);
+          const refusal = boundRefusal(
+            restriction,
+            sensor.host,
+            peerVersion,
+            this.#types.pinsAddress(sensor.sensorType, kind),
+          );
           if (refusal !== null) refused.set(sensor.sensorId, refusal);
           continue;
         }
@@ -800,7 +861,97 @@ export class CredentialVouching {
       );
     }
     await this.#vouching?.settle(`credentials:${String(probeId)}`, refused);
+    // What the probe was refusing to scan stands only for a sensor it is still being sent
+    // (`A-41c`): one paused, moved away, deleted or withheld here is no longer the probe's to
+    // refuse, and its own reason is the one that speaks for it now.
+    await this.#keepReported(
+      probeId,
+      new Set(sensors.map((sensor) => sensor.sensorId).filter((id) => !refused.has(id))),
+    );
     return refused;
+  }
+
+  /**
+   * Takes the checks a probe refused out of its batch, and holds their sensors Unknown with what
+   * the probe said (`A-41c`). Returns the results that are left, for the state machine.
+   *
+   * **A refused check is not a failed scan.** The probe resolved the device's name, found an
+   * address outside the credentials' targets, or none, and sent the device nothing. Counted as a
+   * failure it would turn the sensor Down, an alarm about a device nobody asked anything of. So
+   * it never reaches the machine: the sensor is held through the set `A-41` withholds with, under
+   * this probe's own name, and reads Unknown with the probe's sentence.
+   *
+   * **The next result that is not a refusal lets it go**, before the machine sees that result, so
+   * a name that resolves inside again is Up at the scan that found out. Ordered by the probe's
+   * clock, since a spool replays: a refusal older than the last thing known about the sensor
+   * holds nothing, and an older reading lets nothing go.
+   */
+  async reported(
+    probeId: number,
+    results: readonly CheckResult[],
+    /** When the machine last took a result for a sensor, if it has. */
+    lastResultAt: (sensorId: number) => Date | null | undefined = () => undefined,
+  ): Promise<readonly CheckResult[]> {
+    const held = this.#refusedByProbe.get(probeId);
+    // Nothing held and nothing refused, which is every batch of every probe but a few.
+    if (held === undefined && !results.some((result) => result.withheld === true)) return results;
+
+    const refused = new Map(held);
+    const kept: CheckResult[] = [];
+    let changed = false;
+    const inOrder = [...results].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+    for (const result of inOrder) {
+      const at = Date.parse(result.at);
+      const holding = refused.get(result.sensorId);
+      if (result.withheld !== true) {
+        kept.push(result);
+        if (holding !== undefined && at > holding.at) {
+          refused.delete(result.sensorId);
+          changed = true;
+        }
+        continue;
+      }
+      // A time nobody can read orders against nothing. Left for the machine's own gate, which
+      // drops and counts it; it holds nothing.
+      if (Number.isNaN(at)) {
+        kept.push(result);
+        continue;
+      }
+      const known = holding?.at ?? lastResultAt(result.sensorId)?.getTime();
+      if (known !== undefined && at <= known) continue;
+      refused.set(result.sensorId, { at, message: result.message });
+      // The same words at a later time move nothing anybody reads.
+      if (holding?.message !== result.message) changed = true;
+    }
+    if (refused.size === 0) this.#refusedByProbe.delete(probeId);
+    else this.#refusedByProbe.set(probeId, refused);
+    if (changed) await this.#settleReported(probeId, refused);
+    return kept;
+  }
+
+  /** Drops what a probe refused for every sensor not in `sensorIds`, and settles if any went. */
+  async #keepReported(probeId: number, sensorIds: ReadonlySet<number>): Promise<void> {
+    const held = this.#refusedByProbe.get(probeId);
+    if (held === undefined) return;
+    const refused = new Map([...held].filter(([sensorId]) => sensorIds.has(sensorId)));
+    if (refused.size === held.size) return;
+    if (refused.size === 0) this.#refusedByProbe.delete(probeId);
+    else this.#refusedByProbe.set(probeId, refused);
+    await this.#settleReported(probeId, refused);
+  }
+
+  async #settleReported(
+    probeId: number,
+    refused: ReadonlyMap<number, ProbeRefusal>,
+  ): Promise<void> {
+    this.#logger.info(
+      { probeId, refused: refused.size },
+      'sensors a probe refuses to scan because of where their credentials may go',
+    );
+    await this.#vouching?.settle(
+      `credentials-probe:${String(probeId)}`,
+      new Map([...refused].map(([sensorId, refusal]) => [sensorId, refusal.message])),
+    );
   }
 
   async #accounts(userIds: readonly number[]): Promise<Map<number, Account>> {

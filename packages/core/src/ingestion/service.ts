@@ -54,6 +54,18 @@ export interface IngestionServiceOptions {
   /** Where a refused result is counted per probe, for Probe Health (`P-228`). */
   refusals?: ProbeRefusals;
   /**
+   * Where a check a probe refused over its credentials' targets is taken out of the batch, and
+   * its sensor held Unknown (`A-41c`): `CredentialVouching.reported`. Absent, such a result is
+   * the failed scan it otherwise reads as.
+   */
+  credentialRefusals?: {
+    reported(
+      probeObjectId: number,
+      results: readonly CheckResult[],
+      lastResultAt: (sensorId: number) => Date | null | undefined,
+    ): Promise<readonly CheckResult[]>;
+  };
+  /**
    * The state machine (`M-02`). Absent stores readings and decides nothing, which is what a
    * throughput benchmark wants and no running system does.
    */
@@ -205,6 +217,7 @@ export class IngestionService {
   readonly #pacer: ReplayPacer | undefined;
   readonly #ownership: SensorOwnership;
   readonly #refusals: ProbeRefusals | undefined;
+  readonly #credentialRefusals: IngestionServiceOptions['credentialRefusals'];
   readonly #states: SensorStateService | undefined;
   readonly #maxFutureSkewMs: number;
   readonly #maxResultAgeMs: number;
@@ -247,6 +260,7 @@ export class IngestionService {
     this.#pacer = options.pacer;
     this.#ownership = options.ownership ?? new SensorOwnership();
     this.#refusals = options.refusals;
+    this.#credentialRefusals = options.credentialRefusals;
     this.#states = options.states;
     this.#maxFutureSkewMs = options.maxFutureSkewMs ?? DEFAULT_MAX_FUTURE_SKEW_MS;
     this.#maxResultAgeMs = options.maxResultAgeMs ?? DEFAULT_MAX_RESULT_AGE_MS;
@@ -355,7 +369,38 @@ export class IngestionService {
       this.#resultsReceived += message.results.length;
       return { type: 'results-ack', batchId: message.batchId, storedSamples: 0, retryAfterMs: 0 };
     }
-    return this.#accept(origin.gid, message, admitted.results);
+    // **Before the machine sees the batch** (`A-41c`). A check the probe refused over where its
+    // credentials may go is not a failed scan, and is taken out here: its sensor is held Unknown
+    // with the probe's sentence. A sensor that was held and has a real result in this batch is
+    // let go first, so the result decides its state.
+    let results: readonly CheckResult[] = admitted.results;
+    if (this.#credentialRefusals !== undefined && origin.probeObjectId !== null) {
+      try {
+        results = await this.#credentialRefusals.reported(
+          origin.probeObjectId,
+          admitted.results,
+          (sensorId) => this.#states?.peek(sensorId)?.facts.lastResultAt,
+        );
+      } catch (error: unknown) {
+        this.#resultsReceived += message.results.length;
+        this.#logger.error(
+          { err: error, source: origin.gid },
+          'could not hold the sensors a probe refused to scan',
+        );
+        return {
+          type: 'results-nack',
+          batchId: message.batchId,
+          reason: 'storage-error',
+          retryAfterMs: 1_000,
+        };
+      }
+    }
+    if (results.length === 0 && admitted.results.length > 0) {
+      // Every result was a refusal, and each has been taken. Nothing to store.
+      this.#resultsReceived += message.results.length;
+      return { type: 'results-ack', batchId: message.batchId, storedSamples: 0, retryAfterMs: 0 };
+    }
+    return this.#accept(origin.gid, message, results);
   }
 
   /** Counts what `admit` refused, here and per probe. Returns how many results that was. */

@@ -16814,7 +16814,7 @@ because each is a decision rather than a defect:
         - `m16` (`unboundedSets` counting the bounded sets) survived a test storing two of
           each. It is now three against two.
 
-- [ ] **A-41c — A named device checked against a set's address targets, on the probe** · M ·
+- [x] **A-41c — A named device checked against a set's address targets, on the probe** · M ·
       A-41b · Split from `A-41b` (WatchDog, 2026-09-29). A device named by host name, whose
       set's `allowedTargets` name only addresses and ranges, is withheld today. The core does not
       resolve names. The probe cannot simply resolve, check and connect, because the device's
@@ -16840,6 +16840,67 @@ because each is a decision rather than a defect:
       the set on the transports above that can pin, the check connects to one of those addresses
       and no other, and a name that resolves outside, or differently between the check and the
       connection, is refused with a sentence saying so.
+
+      **A-41c outcome.** A device named by host name, facing a set whose targets name only
+      addresses and ranges, is checked by its probe and connected to at the address that was
+      checked, on SNMP, SSH, HTTP and mail. The database drivers and PowerShell stay withheld.
+      - **One place resolves and checks**: `pinTarget` (`@ms/sensors`
+        `support/pinned-target.ts`), called by `SensorCatalogue.execute` before any type runs, so
+        every check on a probe passes through it, in a worker or a child process.
+        - It makes no lookup unless a set the check holds has targets the host is `undecided`
+          against. An unrestricted set, a device given as an address, and a name a name entry
+          covers behave as before.
+        - Otherwise it resolves once (`getaddrinfo`, the device's family; both for `auto`), checks
+          every address against every set that needs it, and pins one: IPv4 first under `auto`.
+        - It refuses, as `CredentialsWithheldError` with the sensor id, target and phase, a host
+          outside the targets, a kind the type does not pin, a name that resolves to nothing, and
+          a name with any address outside.
+      - **Transports take the pin from the check's target** (`CheckTarget.pinned`) and never
+        resolve the name. SNMP and SSH connect to the address, and their pool keys carry it. HTTP
+        and mail give their socket `pinnedLookup`, so SNI, `Host` and the certificate check stay
+        on the name; a lookup for any other name is refused before a byte is sent, and a far end
+        that is not the pinned address is refused (`pinnedPeerRefusal`). `A-09`'s metadata guard
+        reads the pinned address instead of resolving again. `readCommon` and `readTransport` now
+        take the whole target, so no HTTP or mail type can pass the host and forget the pin.
+      - **A type says which kinds it pins**: `SensorType.pinnedKinds`, declared on the 19 SNMP,
+        SSH, HTTP and mail types, refused at registration when it names a kind the type is not
+        sent. The core reads it through `SensorTypeGate.pinsAddress`.
+      - **Protocol 24, `credentialAddressPinning`.** `boundRefusal` sends an undecided set only
+        when the type pins the kind and the probe speaks 24. Below that the sensor is withheld
+        with `probeCannotPin`; a type that cannot pin keeps `undecided`, whose sentence now says
+        a driver resolves the name itself. Nothing new is sent towards the probe: it decides from
+        the host and the set's own `allowedTargets`, with the same `targetVerdict` the core uses.
+        The credential write's `withholds` no longer counts a named device a probe will check.
+      - **A refused check reads Unknown, not Down.** The runners mark its result `withheld` (the
+        one wire change, stripped for a core below 24 by `resultForPeer`). `CredentialVouching
+        .reported`, called by `IngestionService.acceptProbeResults`, takes it out of the batch
+        before the state machine sees it and holds the sensor through `A-41`'s set, under
+        `credentials-probe:<probe>`, with the probe's sentence. The next result that is not a
+        refusal lets it go first, ordered by the probe's clock. A sensor no longer sent to the
+        probe is dropped from what the probe refused at the next configuration.
+      - **Alarm volume** (`credential-pinning.test.ts`): 6 named devices whose names move outside
+        raised 6 Unknown pages, 1 digest, and no Down; the same refusals again raised nothing; the
+        names back inside were Up at that scan with no Down in their history.
+      - **Docs:** `administration.md` (what the probe does, the per-transport table, the upgrade
+        note), `state-machine.md`, `adding-a-sensor-type.md`. The generated references are
+        unchanged.
+      - **Tests:** shared 62, simulators 24, sensors 64 new (`pinned-target`, `pinned-transports`,
+        none skipped) and 640 in the touched suites, probe 126, core 354 and `sensor-vouching` 19,
+        all passing on the restored tree. The transport tests name the device `*.invalid`, which
+        nothing resolves, and inject a resolver that answers 127.0.0.1 once and an outside
+        address ever after: each check reaches its simulator and asks the resolver once. The TLS
+        tests trust two generated certificates through `tls.setDefaultCACertificates`.
+      - **Mutation:** 34 mutants, 34 killed by a test, none after a fix. Two were first caught by
+        the compiler and were run again in a form that compiles.
+      - **Not covered by a test:** the calls to `pinnedPeerRefusal` in `fetchHttp` and
+        `MailConnection.open` (a real socket given the pinned address cannot arrive anywhere
+        else; the function itself is tested), and `resultForPeer` at its two call sites in the
+        probe's `CoreClient`, which no probe test drives.
+      - **Found, not fixed:** nothing on Core Health counts withheld sensors, the core's or a
+        probe's (`CredentialVouching.stats()` has no reader). `A-09`'s guard still resolves,
+        checks and then lets the socket resolve again for a request that is not pinned.
+        `sensor-vouching.test.ts` failed 2 of 19 once, at 01:40 UTC, on a hypertable chunk
+        constraint in its own `INSERT ... now()`, and passed 19 of 19 forty minutes later.
 
 - [x] **U-21 — A credential view: each object's sets, where they may go, and which have no
       bounds** · M · A-05, A-41b · Found 2026-09-29 by `A-41b`. The web UI has no credential view

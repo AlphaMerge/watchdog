@@ -47,6 +47,13 @@ const registry: CheckRegistry = {
       case 'test.throw':
         throw new Error('the check failed on purpose');
 
+      case 'test.withheld':
+        // What `@ms/sensors` raises when a check may not use its credentials where its device
+        // points (`A-41c`). The same code, so the runners classify it the same way.
+        throw Object.assign(new Error('Not scanned: outside the allowed targets'), {
+          code: 'CREDENTIALS_WITHHELD',
+        });
+
       case 'test.limits':
         // What the thread running this check was started with (`P-207`). `resourceLimits` is empty
         // in the main thread, which is how a test tells a worker that was capped from one that was

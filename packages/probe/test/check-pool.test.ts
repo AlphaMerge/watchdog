@@ -114,6 +114,24 @@ describe('check pool', () => {
     assert.deepEqual(entry.result.channels, []);
   });
 
+  it('marks a check refused over its credentials’ targets, and no other failure', async () => {
+    // The core holds such a sensor Unknown rather than counting a failed scan (`A-41c`), and the
+    // mark is the only thing that tells it which this was.
+    const { pool, seen } = await poolOf();
+    pool.submit(request(3, 'test.withheld'));
+    pool.submit(request(4, 'test.throw'));
+
+    await until(() => seen.length === 2, 'both failures');
+    const refused = seen.find((one) => one.result.sensorId === 3)?.result;
+    const failed = seen.find((one) => one.result.sensorId === 4)?.result;
+    assert.ok(refused !== undefined && failed !== undefined);
+    assert.equal(refused.outcome, 'error');
+    assert.equal(refused.withheld, true);
+    assert.equal(refused.message, 'Not scanned: outside the allowed targets');
+    assert.deepEqual(refused.channels, []);
+    assert.equal('withheld' in failed, false, 'an ordinary failure carries no mark at all');
+  });
+
   it('reports an unknown sensor type rather than hanging on it', async () => {
     const { pool, seen } = await poolOf();
     pool.submit(request(3, 'nope.missing'));

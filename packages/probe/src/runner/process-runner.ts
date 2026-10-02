@@ -111,6 +111,7 @@ interface ChildAnswer {
   message?: string;
   aborted?: boolean;
   unknownType?: boolean;
+  withheld?: boolean;
 }
 
 const DEFAULT_MAX_CONCURRENT = 4;
@@ -325,6 +326,8 @@ export class ProcessRunner {
         outcome: 'error',
         message: answer.message ?? 'the check failed and said nothing',
         durationMs: answer.durationMs,
+        // Refused over where its credentials may go (`A-41c`), which is not a failed scan.
+        ...(answer.withheld === true ? { withheld: true as const } : {}),
       });
       return;
     }
@@ -399,7 +402,7 @@ export class ProcessRunner {
           durationMs: number;
           channels: { key: string; value: number; name?: string; unit?: string }[];
         }
-      | { outcome: 'error'; message: string; durationMs: number },
+      | { outcome: 'error'; message: string; durationMs: number; withheld?: true },
   ): void {
     if (job.settled) return;
     job.settled = true;
@@ -410,6 +413,7 @@ export class ProcessRunner {
       message: parts.message,
       durationMs: Number(parts.durationMs.toFixed(3)),
       channels: parts.outcome === 'ok' ? parts.channels : [],
+      ...(parts.outcome === 'error' && parts.withheld === true ? { withheld: true as const } : {}),
     };
     // `workerId` is -1 rather than absent: Probe Health reads one shape for both runners, and a
     // check that ran in a process of its own genuinely has no worker.

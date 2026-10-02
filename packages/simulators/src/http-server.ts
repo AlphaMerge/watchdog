@@ -68,6 +68,12 @@ export interface RecordedRequest {
   url: string;
   headers: IncomingHttpHeaders;
   body: string;
+  /**
+   * The name the client asked for in the TLS handshake (SNI), when the simulator speaks HTTPS
+   * and the client sent one (`A-41c`). What proves a client that connected to an address still
+   * asked for the device by name.
+   */
+  servername?: string;
 }
 
 export interface HttpSimulatorOptions {
@@ -173,6 +179,9 @@ export class HttpSimulator {
       url,
       headers: request.headers,
       body,
+      ...(typeof (request.socket as { servername?: unknown }).servername === 'string'
+        ? { servername: (request.socket as { servername?: string }).servername }
+        : {}),
     });
 
     const script = this.#scriptFor(url);

@@ -45,6 +45,7 @@ export async function snmpCheck<T>(
       host,
       port: options.port ?? Number(context.params['port'] ?? 161),
       ipVersion: context.target.ipVersion,
+      ...(context.target.pinned === undefined ? {} : { pinned: context.target.pinned }),
     },
     readCredentials(stored),
     {
