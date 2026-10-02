@@ -48,12 +48,28 @@ export interface ConfigCheckOptions<T> {
    * What only the running build can know about a configuration the schema accepts (`B-08`).
    *
    * The schema is the same in every build and a build is not: a v1 probe carries no flow sensor
-   * type, so `flowListener.enabled: true` validates and does nothing. Each line returned is a
-   * problem, reported with the others and failing the check — the file would load, and it does
-   * not say what its author meant.
+   * type, so `flowListener.enabled: true` validates and does nothing. Asked only of a file that
+   * loaded.
+   *
+   * **Two severities, because the exit code is an upgrade gate.** `place-release.sh` refuses to
+   * replace anything when this exits non-zero. A `problem` is something the service would not
+   * start with, or would start and do wrong: it fails the check. A `warning` is a setting the
+   * service starts with and that has no effect: it is said, on stderr and marked as a warning,
+   * and the check passes — a setting that does nothing must not hold a probe back from an
+   * upgrade that the service itself would run.
    */
-  readonly problems?: (config: T) => readonly string[];
+  readonly findings?: (config: T) => ConfigFindings;
 }
+
+export interface ConfigFindings {
+  /** Each fails the check. */
+  readonly problems?: readonly string[];
+  /** Each is reported and does not. */
+  readonly warnings?: readonly string[];
+}
+
+/** What every warning line starts with, so an installer or a person can pick them out. */
+export const CONFIG_WARNING_PREFIX = 'warning: ';
 
 export function runConfigCheck<T>(options: ConfigCheckOptions<T>): number {
   try {
@@ -69,7 +85,12 @@ export function runConfigCheck<T>(options: ConfigCheckOptions<T>): number {
       );
       return 1;
     }
-    const problems = options.problems?.(loaded.config) ?? [];
+    const findings = options.findings?.(loaded.config) ?? {};
+    const problems = findings.problems ?? [];
+    // Warnings first and whatever else is true: a failing check still owes them.
+    for (const warning of findings.warnings ?? []) {
+      options.writeError(`${CONFIG_WARNING_PREFIX}${warning}`);
+    }
     if (problems.length > 0) {
       // Every one, like the loader's own: nobody should run this twice to find two.
       for (const problem of problems) options.writeError(problem);

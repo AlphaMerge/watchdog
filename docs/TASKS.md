@@ -20776,15 +20776,17 @@ analysis". `F-` is Phase 0.
 
       **Done 2026-10-02.**
 
-      **`config check`.** `runConfigCheck` takes a `problems` hook — what only the running build
-      can know about a file its schema accepts — and fails on every line it returns. The probe
-      gives it `buildProblems` (`probe/src/config-problems.ts`), which asks this build's own
-      dispatch tables whether any type is fed by the flow collector, the question `main.ts` now
-      asks through the same function before it constructs one. A v1 probe with
-      `flowListener.enabled` true exits 1 naming the setting, the profile and the port. The
-      runtime warning stays. **A consequence to know**: installers gate on this exit code, so an
-      upgrade of a v1 probe with the setting on now stops before anything is replaced, the old
-      version still running, where the service itself would have started and warned.
+      **`config check`.** `runConfigCheck` takes a `findings` hook — what only the running
+      build can know about a file its schema accepts — returning `problems`, which fail the
+      check, and `warnings`, which are written to stderr behind `warning: ` and do not. The
+      probe gives it `buildFindings` (`probe/src/config-problems.ts`), which asks this build's
+      own dispatch tables whether any type is fed by the flow collector, the question `main.ts`
+      now asks through the same function before it constructs one. A v1 probe with
+      `flowListener.enabled` true gets a warning naming the setting, the profile and the port,
+      and exits 0. **A warning and not a failure, by decision**: the service starts with that
+      setting, and `place-release.sh` refuses an upgrade when the check exits non-zero, so a
+      setting with no effect must not hold a v1 probe on its old version. It was first written
+      as a failure and changed the same day. The runtime warning stays.
 
       **The form.** No protocol field: number 26 is unused. A probe reports a listener's counters
       only while it runs and Probe Health gaps them otherwise, so `GET /probes/{id}/health` —
@@ -20800,18 +20802,24 @@ analysis". `F-` is Phase 0.
       region that is always in the document and is the select's `aria-describedby`. Creating the
       sensor is not blocked.
 
-      **Tests.** `config-check.test.ts` (3), `probe/test/config-problems.test.ts` (5, two of
-      them running `main.js config check` under each profile), `core/test/sensor-types.test.ts`
-      (1, through the closed response schema), `web/test/add-sensor-listener.test.tsx` (11).
-      **Mutations 15/15**: the check exiting 0 with problems, only the first written, the finding
-      inverted, `enabled` ignored, the verb asking tables that carry flow, `listener` out of the
-      route schema, a listener named for every type, an unreported probe called off, a running
-      listener called off, every listener judged by the flow counter, the notice untied from the
-      field, a probe asked about for every type, the live region removed, a sensor directly under
-      a probe, and the trap setting misnamed.
+      **Tests.** `config-check.test.ts` (5: problems fail, warnings pass and are marked, both
+      together, the loaded configuration, a file that did not load),
+      `probe/test/config-problems.test.ts` (5, two of them running `main.js config check` under
+      each profile — exit 0, the warning on stderr, the pass line on stdout),
+      `core/test/sensor-types.test.ts` (1, through the closed response schema),
+      `web/test/add-sensor-listener.test.tsx` (11). **Mutations 20/20**: a warning failing the
+      check, the warning unmarked, the warning on stdout, a problem exiting 0, only the first
+      problem written, only the first warning written, the flow finding returned as a problem,
+      the finding inverted, `enabled` ignored, the verb asking tables that carry flow,
+      `listener` out of the route schema, a listener named for every type, an unreported probe
+      called off, a running listener called off, every listener judged by the flow counter, the
+      notice untied from the field, a probe asked about for every type, the live region removed,
+      a sensor directly under a probe, and the trap setting misnamed.
 
       **Not done.** The notice is read once, when the type is chosen; it does not follow a probe
-      that reconnects while the form is open. The edit form says nothing, since a sensor that
+      that reconnects while the form is open. `place-release.sh` keeps a
+      passing check's output to itself, so an installer does not show the warning; a person
+      running the check sees it. The edit form says nothing, since a sensor that
       exists already says it on every scan.
 
 - [x] **B-09 — only NetFlow v5 has been sent to a running probe** · S · B-07 · Found 2026-10-02

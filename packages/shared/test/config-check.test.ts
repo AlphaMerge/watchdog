@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { runConfigCheck } from '../src/config/check.js';
+import { CONFIG_WARNING_PREFIX, runConfigCheck, type ConfigFindings } from '../src/config/check.js';
 import { coreConfigSchema, probeConfigSchema } from '../src/config/schema.js';
 
 /**
@@ -185,10 +185,12 @@ describe('checking a configuration', () => {
 
   describe('what only the build can know (`B-08`)', () => {
     // The schema accepts `flowListener.enabled` in every build, and a v1 probe does nothing with
-    // it. The service asks its own build and hands the check what it found.
+    // it. The service asks its own build and hands the check what it found, as problems that
+    // fail it or as warnings that do not: the installer gates an upgrade on the exit code.
+    type Flow = { flowListener: { enabled: boolean } };
     const probeCheck = (
       argv: readonly string[],
-      problems: (config: { flowListener: { enabled: boolean } }) => readonly string[],
+      findings: (config: Flow) => ConfigFindings,
     ): { code: number; out: string[]; err: string[] } => {
       const out: string[] = [];
       const err: string[] = [];
@@ -198,7 +200,7 @@ describe('checking a configuration', () => {
         version: '9.9.9',
         argv,
         env: {},
-        problems,
+        findings,
         write: (line) => out.push(line),
         writeError: (line) => err.push(line),
       });
@@ -208,11 +210,34 @@ describe('checking a configuration', () => {
     it('fails on every problem the build reports, and says nothing that reads as a pass', () => {
       const path = tempFile(JSON.stringify({ flowListener: { enabled: true } }));
       const { code, out, err } = probeCheck(['--config', path], (config) =>
-        config.flowListener.enabled ? ['first: no', 'second: no'] : [],
+        config.flowListener.enabled ? { problems: ['first: no', 'second: no'] } : {},
       );
       assert.equal(code, 1);
       assert.deepEqual(err, ['first: no', 'second: no']);
       assert.deepEqual(out, [], 'a failed check printed "configuration is valid"');
+    });
+
+    it('passes on warnings, each on stderr and marked as one', () => {
+      // What `place-release.sh` branches on is the exit code, so this is the upgrade going ahead.
+      const path = tempFile(JSON.stringify({ flowListener: { enabled: true } }));
+      const { code, out, err } = probeCheck(['--config', path], (config) =>
+        config.flowListener.enabled ? { warnings: ['first: odd', 'second: odd'] } : {},
+      );
+      assert.equal(code, 0);
+      assert.deepEqual(err, ['warning: first: odd', 'warning: second: odd']);
+      assert.equal(CONFIG_WARNING_PREFIX, 'warning: ');
+      assert.ok(out[0]?.includes('configuration is valid'), 'a warning stopped the pass line');
+    });
+
+    it('fails on a problem whatever the warnings, and still gives the warnings', () => {
+      const path = tempFile(JSON.stringify({}));
+      const { code, out, err } = probeCheck(['--config', path], () => ({
+        problems: ['broken: yes'],
+        warnings: ['odd: yes'],
+      }));
+      assert.equal(code, 1);
+      assert.deepEqual(err, ['warning: odd: yes', 'broken: yes']);
+      assert.deepEqual(out, []);
     });
 
     it('is handed the configuration as loaded, defaults and all, and passes when it is fine', () => {
@@ -220,7 +245,7 @@ describe('checking a configuration', () => {
       const seen: boolean[] = [];
       const { code, out, err } = probeCheck(['--config', path], (config) => {
         seen.push(config.flowListener.enabled);
-        return [];
+        return { problems: [], warnings: [] };
       });
       assert.equal(code, 0);
       assert.deepEqual(seen, [false], 'the default the file did not spell out');
@@ -233,12 +258,12 @@ describe('checking a configuration', () => {
       let asked = 0;
       const { code, err } = probeCheck(['--config', path], () => {
         asked += 1;
-        return ['never'];
+        return { problems: ['never'], warnings: ['nor this'] };
       });
       assert.equal(code, 1);
       assert.equal(asked, 0);
       assert.match(err.join('\n'), /flowListener\.enabled/);
-      assert.ok(!err.includes('never'));
+      assert.ok(!err.some((line) => line.includes('never') || line.includes('nor this')));
     });
   });
 });

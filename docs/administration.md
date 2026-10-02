@@ -638,10 +638,11 @@ alarm.
 
 Flow monitoring is v2: a v1 build carries no `flow.netflow` sensor type, and its probe opens no
 flow port whatever its configuration says — it logs *flowListener.enabled is set and this build
-carries no flow sensor type* at start and carries on. `ms-probe config check` does not carry on:
-it fails on that setting in a v1 build, naming it, because the file says something the probe will
-not do (`B-08`). An installer runs that check before it replaces anything, so an upgrade of a v1
-probe with the setting on stops there, with the old version still running — set it to `false`.
+carries no flow sensor type* at start and carries on. `ms-probe config check` says the same on
+stderr, in a line beginning `warning:` that names the setting, and still passes (`B-08`): the
+installer refuses an upgrade when that check fails, and a setting with no effect is not a reason
+to hold a probe on its old version. An installer does not print the output of a
+check that passed, so run the check by hand to see it. Set the key to `false` to be rid of it.
 
 In a build that has it, the collector is **off until you turn it on**, like the SNMP trap and
 syslog listeners: a probe that opened a port nobody asked for is a surprise on a firewall audit.

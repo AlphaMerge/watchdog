@@ -38,7 +38,7 @@ import { ProbeHealthReporter } from './health/report.js';
 import { CoreClient } from './transport/core-client.js';
 import { BUILD, VERSION } from './version.js';
 import { dispatchTables } from './catalogue.js';
-import { buildProblems, carriesFlow } from './config-problems.js';
+import { buildFindings, carriesFlow } from './config-problems.js';
 
 /**
  * `ms-probe config check` — the only verb this service has, and it earns its place (`H-03`).
@@ -85,7 +85,7 @@ async function main(): Promise<void> {
       version: VERSION,
       argv: process.argv.slice(2),
       // What this build cannot do with a setting its schema accepts (`B-08`).
-      problems: (config) => buildProblems(config, dispatchTables().listenerFor, BUILD.profile),
+      findings: (config) => buildFindings(config, dispatchTables().listenerFor, BUILD.profile),
       write: (line) => process.stdout.write(`${line}\n`),
       writeError: (line) => process.stderr.write(`${line}\n`),
     });
@@ -316,8 +316,9 @@ async function main(): Promise<void> {
   // no sensor of its could ever read, and says so rather than ignoring the setting in silence.
   const flowCarried = carriesFlow(listenerFor);
   if (config.flowListener.enabled && !flowCarried) {
-    // Still a warning here and not a refusal: `config check` fails on it (`B-08`), and a probe
-    // that would not start over a setting with no effect would stop scanning to make the point.
+    // A warning here and a warning from `config check` (`B-08`), and a refusal from neither: a
+    // probe that would not start, or could not be upgraded, over a setting with no effect would
+    // stop scanning to make the point.
     logger.warn(
       { profile: BUILD.profile, port: config.flowListener.port },
       'flowListener.enabled is set and this build carries no flow sensor type, so the flow ' +

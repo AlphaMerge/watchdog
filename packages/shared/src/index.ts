@@ -2,7 +2,12 @@ export { AppError, ConfigError, describeError } from './errors/app-error.js';
 export type { ErrorContext } from './errors/app-error.js';
 
 export { loadConfig } from './config/load.js';
-export { runConfigCheck, type ConfigCheckOptions } from './config/check.js';
+export {
+  CONFIG_WARNING_PREFIX,
+  runConfigCheck,
+  type ConfigCheckOptions,
+  type ConfigFindings,
+} from './config/check.js';
 export type { ConfigSources, LoadConfigOptions, LoadedConfig } from './config/load.js';
 export {
   allowedHostProblem,

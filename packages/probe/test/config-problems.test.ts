@@ -7,15 +7,17 @@ import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import type { ProbeConfig } from '@ms/shared';
 import { dispatchTables, probeCatalogue } from '../src/catalogue.js';
-import { buildProblems, carriesFlow } from '../src/config-problems.js';
+import { buildFindings, carriesFlow } from '../src/config-problems.js';
 
 /**
  * `ms-probe config check` and a setting this build does nothing with (`B-08`).
  *
  * A v1 probe with `flowListener.enabled` set starts, warns once in its log and binds nothing
  * (`B-07`), and the operator learns it from a flow sensor's first failed scan. The check is what a
- * person runs, so the check says it. The last cases run `dist/src/main.js` itself: a finding that
- * was computed and never handed to the verb is the shape `B-07` was.
+ * person runs, so the check says it — as a warning, because `place-release.sh` refuses an upgrade
+ * when the check exits non-zero and this setting stops nothing. The last cases run
+ * `dist/src/main.js` itself: a finding that was computed and never handed to the verb is the shape
+ * `B-07` was.
  */
 
 /** At runtime this file is `dist/test/config-problems.test.js`. */
@@ -43,19 +45,26 @@ describe('what a probe build cannot do with a valid configuration (`B-08`)', () 
     assert.ok(v1.size > 0, 'the v1 profile maps no listener, so the case above proves nothing');
   });
 
-  it('reports the flow collector switched on in a build that has none', () => {
-    const problems = buildProblems(flow(true), v1, 'v1');
-    assert.equal(problems.length, 1);
+  it('warns of the flow collector switched on in a build that has none, and fails nothing', () => {
+    const { warnings = [], problems = [] } = buildFindings(flow(true), v1, 'v1');
+    assert.equal(warnings.length, 1);
     // The setting first, the way the loader names one, so the two read as one list.
-    assert.match(problems[0] ?? '', /^flowListener\.enabled: is true/);
-    assert.match(problems[0] ?? '', /the v1 profile\) carries no flow sensor type/);
-    assert.match(problems[0] ?? '', /open no flow port \(2055\)/);
+    assert.match(warnings[0] ?? '', /^flowListener\.enabled: is true/);
+    assert.match(warnings[0] ?? '', /the v1 profile\) carries no flow sensor type/);
+    assert.match(warnings[0] ?? '', /opens no flow port \(2055\)/);
+    // The probe starts with this setting, so it is not a reason to refuse an upgrade.
+    assert.deepEqual(problems, []);
   });
 
   it('says nothing where the setting does what it says, or is off', () => {
-    assert.deepEqual(buildProblems(flow(true), full, 'full'), []);
-    assert.deepEqual(buildProblems(flow(false), v1, 'v1'), []);
-    assert.deepEqual(buildProblems(flow(false), full, 'full'), []);
+    for (const findings of [
+      buildFindings(flow(true), full, 'full'),
+      buildFindings(flow(false), v1, 'v1'),
+      buildFindings(flow(false), full, 'full'),
+    ]) {
+      assert.deepEqual(findings.warnings ?? [], []);
+      assert.deepEqual(findings.problems ?? [], []);
+    }
   });
 
   describe('through the verb', () => {
@@ -90,31 +99,36 @@ describe('what a probe build cannot do with a valid configuration (`B-08`)', () 
     };
 
     it(
-      'fails a v1 probe’s check on `flowListener.enabled`, naming it',
+      'warns a v1 probe of `flowListener.enabled` on stderr and exits 0, so an upgrade is not held',
       { timeout: 150_000 },
       () => {
+        // `place-release.sh` runs exactly this and refuses to replace anything on a non-zero
+        // exit. The service starts with the setting, so the gate must not trip on it.
         const run = check({ flowListener: { enabled: true, port: 9995 } }, 'v1');
-        assert.equal(run.status, 1, run.stderr);
+        assert.equal(run.status, 0, run.stderr);
         assert.match(
           run.stderr,
-          /flowListener\.enabled: is true, and this build \(the v1 profile\)/,
+          /^warning: flowListener\.enabled: is true, and this build \(the v1 profile\)/m,
         );
         assert.match(run.stderr, /\(9995\)/);
-        assert.doesNotMatch(run.stdout, /configuration is valid/);
+        assert.match(run.stdout, /configuration is valid for ms-probe/);
+        assert.doesNotMatch(run.stdout, /warning/, 'the warning went to stdout');
       },
     );
 
     it(
-      'passes that file in a build that carries flow, and a v1 one with it off',
+      'says nothing of it in a build that carries flow, or in a v1 one with it off',
       { timeout: 150_000 },
       () => {
         const on = check({ flowListener: { enabled: true, port: 9995 } }, 'full');
         assert.equal(on.status, 0, on.stderr);
         assert.match(on.stdout, /configuration is valid for ms-probe/);
+        assert.doesNotMatch(on.stderr, /warning/);
 
         const off = check({ flowListener: { enabled: false } }, 'v1');
         assert.equal(off.status, 0, off.stderr);
         assert.match(off.stdout, /configuration is valid for ms-probe/);
+        assert.doesNotMatch(off.stderr, /warning/);
       },
     );
   });
