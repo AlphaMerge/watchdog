@@ -337,19 +337,22 @@ describe('SNMP', () => {
     assert.equal(dns.calls.length, 2);
   });
 
-  it('an unrestricted set makes no lookup of its own, by address or by name', async () => {
+  it('an unrestricted set makes no lookup by address; by name the one is the target policy’s', async () => {
     const dns = rebinding();
     await execute(snmpUptime, dns, {
       params: params(),
       credentials: credentials(),
       host: '127.0.0.1',
     });
+    assert.equal(dns.calls.length, 0);
+    // `A-57`: no set pins the name, so the probe's target policy resolves it, once, and the
+    // agent is asked at that address. `target-policy-transports.test.ts` is where that is held.
     await execute(snmpUptime, dns, {
       params: params(),
       credentials: credentials(),
       host: 'localhost',
     });
-    assert.equal(dns.calls.length, 0);
+    assert.deepEqual(dns.calls, [{ host: 'localhost', family: 4 }]);
   });
 
   it('a device given as an address inside the targets makes none either', async () => {
@@ -1259,12 +1262,15 @@ describe('mail', () => {
     );
   });
 
-  it('an unrestricted set, and an address inside the targets, make no lookup', async () => {
+  it('an address makes no lookup, restricted or not; an unrestricted name makes the target policy’s one', async () => {
     const port = await start(smtpServer);
     const dns = rebinding();
     const params = { port, security: 'none', timeoutMs: 5_000, requireAuth: true };
-    await execute(mailSmtp, dns, { params, credentials: credentials(), host: 'localhost' });
+    await execute(mailSmtp, dns, { params, credentials: credentials(), host: '127.0.0.1' });
     await execute(mailSmtp, dns, { params, credentials: credentials(INSIDE), host: '127.0.0.1' });
     assert.equal(dns.calls.length, 0);
+    // `A-57`: mail had no guard at all before, and a name went to the socket as it was.
+    await execute(mailSmtp, dns, { params, credentials: credentials(), host: 'localhost' });
+    assert.deepEqual(dns.calls, [{ host: 'localhost', family: 0 }]);
   });
 });

@@ -76,6 +76,37 @@ describe('the probe’s check registry', () => {
     );
   });
 
+  it('refuses a device on a metadata address as an ordinary failed check (A-57)', async () => {
+    // The real registry again: a probe's checks are held to its target policy, on a transport
+    // that had no guard before, and the refusal carries no code a runner reads. It is a failed
+    // check, so the sensor reads Down by the ordinary path, not Unknown. Nothing is resolved
+    // and nothing is sent: the address is refused as it stands.
+    for (const [type, params] of [
+      ['port.tcp', { port: 80 }],
+      ['icmp.ping', {}],
+    ] as const) {
+      await assert.rejects(
+        () =>
+          registry.execute(type, {
+            sensorId: 9,
+            target: { host: '169.254.169.254', ipVersion: 'auto' },
+            params,
+            credentials: {},
+            signal: new AbortController().signal,
+          }),
+        (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.equal((error as { code?: unknown }).code, undefined);
+          assert.match(
+            error.message,
+            /^refusing to (connect to|ping) 169\.254\.169\.254, which is link-local .* target policy \(link-local\)/,
+          );
+          return true;
+        },
+      );
+    }
+  });
+
   it('refuses a device host beginning with "-" before ping is spawned (S-20)', async () => {
     // What this replaces is ping's own "Destination address required", which says nothing about
     // the device's host being the problem.

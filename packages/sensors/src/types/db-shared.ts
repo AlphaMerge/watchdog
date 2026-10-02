@@ -6,6 +6,7 @@ import type {
   SensorType,
 } from '../contract.js';
 import { MAX_PATTERN } from '../support/pattern.js';
+import { refuseBlockedAddress } from '../support/checked-target.js';
 import type { DbConnectOptions, DbDriver, DbResult, DbRow } from '../support/db/driver.js';
 
 /**
@@ -246,6 +247,10 @@ function cellAt(result: DbResult, row: number, column: string, position: number)
 export async function runDbCheck(driver: DbDriver, context: CheckContext): Promise<CheckExecution> {
   const host = context.target.host;
   if (host === '') throw new Error('the device has no host to connect to');
+  // **An address is held to the probe's target policy; a name is not resolved here** (`A-57`).
+  // The driver resolves a name itself and takes no lookup, so a check of the name would be on
+  // an answer the connection never uses.
+  refuseBlockedAddress(host, context.target.policy, 'connect to');
   const query = typeof context.params['query'] === 'string' ? context.params['query'].trim() : '';
   if (query === '') throw new Error('this sensor has no query to run');
 

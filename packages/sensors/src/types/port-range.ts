@@ -1,5 +1,6 @@
-import type { connect as netConnect } from 'node:net';
+import type { connect as netConnect, LookupFunction } from 'node:net';
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
+import { checkedTarget, guardOf, lookupFor } from '../support/checked-target.js';
 
 /**
  * How many of a set of ports are open (`T-22`).
@@ -142,6 +143,21 @@ export const portRange: SensorType = {
     const family =
       context.target.ipVersion === 'v6' ? 6 : context.target.ipVersion === 'v4' ? 4 : 0;
 
+    // **Resolved once for the whole scan and checked against the probe's target policy**
+    // (`A-57`). Every port's socket is answered with the checked addresses: a name that
+    // resolved differently for each port would be a different device for each.
+    const { lookup } = lookupFor(
+      host,
+      await checkedTarget({
+        ...guardOf(context.target),
+        family,
+        timeoutMs,
+        signal: context.signal,
+        verb: 'scan',
+        doing: `scanning ${host}`,
+      }),
+    );
+
     const open: number[] = [];
     const queue = [...ports];
 
@@ -152,7 +168,9 @@ export const portRange: SensorType = {
         if (context.signal.aborted) {
           throw new Error(`the check was cancelled while scanning ${host}`);
         }
-        if (await isOpen(connect, host, port, family, timeoutMs, context.signal)) open.push(port);
+        if (await isOpen(connect, host, port, family, timeoutMs, context.signal, lookup)) {
+          open.push(port);
+        }
       }
     };
 
@@ -184,9 +202,15 @@ function isOpen(
   family: number,
   timeoutMs: number,
   signal: AbortSignal,
+  lookup: LookupFunction | undefined,
 ): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
-    const socket = connect({ host, port, ...(family === 0 ? {} : { family }) });
+    const socket = connect({
+      host,
+      port,
+      ...(family === 0 ? {} : { family }),
+      ...(lookup === undefined ? {} : { lookup }),
+    });
     let settled = false;
 
     const finish = (opened: boolean): void => {

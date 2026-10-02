@@ -10,6 +10,7 @@ import {
   startFailure,
   waitForLocalAddress,
 } from '@ms/shared';
+import { TARGET_POLICY_ENV } from '@ms/sensors';
 import { SCRIPT_DIR_ENV } from '@ms/sensors/script';
 import { POWERSHELL_ENV } from '@ms/sensors/windows';
 import { CheckPool } from './runner/pool.js';
@@ -189,6 +190,17 @@ async function main(): Promise<void> {
         : config.probe.powerShellPath;
   }
 
+  // Which addresses a sensor may connect to (`A-57`). In this process's environment, before any
+  // worker starts, for the reason PowerShell's path is: a check runs in a worker, a worker
+  // inherits the probe's environment, and its catalogue reads the policy from there.
+  process.env[TARGET_POLICY_ENV] = config.probe.targetPolicy;
+  if (config.probe.targetPolicy !== 'link-local') {
+    logger.info(
+      { targetPolicy: config.probe.targetPolicy },
+      'probe.targetPolicy is not the default',
+    );
+  }
+
   const pool = new CheckPool({
     logger,
     size: config.probe.workerPoolSize,
@@ -226,9 +238,14 @@ async function main(): Promise<void> {
     // path in this config file is relative to (`spoolDir`, the TLS files). The check runs in a
     // child process whose working directory is its own, so a relative path handed straight
     // through would be resolved against somewhere nobody configured.
-    ...(config.probe.scriptDir === ''
-      ? {}
-      : { childEnv: { [SCRIPT_DIR_ENV]: resolve(config.probe.scriptDir) } }),
+    // And the target policy (`A-57`), always: a child's environment is built, never inherited,
+    // and a check that connects from one must be held to what the workers are.
+    childEnv: {
+      [TARGET_POLICY_ENV]: config.probe.targetPolicy,
+      ...(config.probe.scriptDir === ''
+        ? {}
+        : { [SCRIPT_DIR_ENV]: resolve(config.probe.scriptDir) }),
+    },
   };
 
   // Checks that run in a process of their own (`P-03`). Same submit/callback contract as the

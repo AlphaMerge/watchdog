@@ -1,4 +1,5 @@
 import type { CheckContext } from '../../contract.js';
+import { refuseBlockedAddress } from '../checked-target.js';
 import { scrubberOf } from '../secrets.js';
 import { AUTHENTICATIONS, type Authentication, type PowerShellOptions } from './powershell.js';
 
@@ -53,6 +54,10 @@ export const WINDOWS_SCHEMA = {
 export function windowsOptions(context: CheckContext): PowerShellOptions {
   const declared = typeof context.params['host'] === 'string' ? context.params['host'].trim() : '';
   const named = declared === '' ? context.target.host : declared;
+  // **An address is held to the probe's target policy; a name is not resolved here** (`A-57`).
+  // PowerShell resolves a name itself, and Kerberos wants the name, so a check of the name
+  // would be on an answer the connection never uses.
+  if (!isLocal(named)) refuseBlockedAddress(named, context.target.policy, 'connect to');
 
   const raw = context.credentials['windows'] ?? {};
   const username = typeof raw['username'] === 'string' ? raw['username'].trim() : '';

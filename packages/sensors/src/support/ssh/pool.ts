@@ -267,6 +267,12 @@ function keyOf(target: SshTarget, credentials: SshCredentials, options: SshSessi
     // A connection is to the address it was opened with (`A-41c`). A name that now resolves
     // elsewhere, still inside the targets, is another connection; one no longer pinned is too.
     target.pinned?.address ?? '',
+    // Likewise for the addresses the target policy checked (`A-57`): a name whose addresses
+    // have changed is another connection. Sorted, so a resolver that rotates them is not.
+    (target.checked ?? [])
+      .map((one) => one.address)
+      .sort()
+      .join(','),
     credentialFingerprint(credentials),
     // A connection was checked against the keys accepted when it opened. Accepting fewer has to
     // open a new one, or a key taken off the list would go on being trusted until it idled out.

@@ -1,4 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
+import { checkedTarget, guardOf, lookupFor } from '../support/checked-target.js';
 
 /**
  * A TCP connect, timed (`P-10`).
@@ -102,13 +103,35 @@ export const portTcp: SensorType = {
     const family =
       context.target.ipVersion === 'v6' ? 6 : context.target.ipVersion === 'v4' ? 4 : 0;
 
+    // The clock starts before the name is resolved, as it did when the socket resolved it: the
+    // connect time has always included the lookup.
+    const started = process.hrtime.bigint();
+    // **Resolved once and checked against the probe's target policy** (`A-57`); the socket's
+    // lookup then answers with the checked addresses and the name is not resolved again.
+    const checked = await checkedTarget({
+      ...guardOf(context.target),
+      family,
+      timeoutMs,
+      signal: context.signal,
+      verb: 'connect to',
+      doing: `connecting to ${host}:${String(port)}`,
+      unresolved: () =>
+        new Error(
+          `could not connect to ${host}:${String(port)} — the device’s host name did not resolve`,
+        ),
+    });
+
     return new Promise<CheckExecution>((resolve, reject) => {
-      const started = process.hrtime.bigint();
       let connectedAt: bigint | null = null;
       let banner = '';
       let settled = false;
 
-      const socket = connect({ host, port, ...(family === 0 ? {} : { family }) });
+      const socket = connect({
+        host,
+        port,
+        ...(family === 0 ? {} : { family }),
+        ...lookupFor(host, checked),
+      });
       socket.setNoDelay(true);
 
       const finish = (outcome: () => void): void => {

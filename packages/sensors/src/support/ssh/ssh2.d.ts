@@ -15,7 +15,7 @@
  */
 declare module 'ssh2' {
   import type { EventEmitter } from 'node:events';
-  import type { Readable } from 'node:stream';
+  import type { Duplex, Readable } from 'node:stream';
 
   export interface ConnectConfig {
     host: string;
@@ -24,6 +24,11 @@ declare module 'ssh2' {
     password?: string;
     privateKey?: string | Buffer;
     passphrase?: string;
+    /**
+     * A stream to speak over in place of a connection of `ssh2`'s own making. A `net.Socket`
+     * that is still connecting is waited for.
+     */
+    sock?: Duplex;
     /** The whole handshake, in milliseconds — not one command. */
     readyTimeout?: number;
     /**

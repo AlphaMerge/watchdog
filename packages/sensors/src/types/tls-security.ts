@@ -1,4 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
+import { checkedTarget, guardOf, lookupFor } from '../support/checked-target.js';
 
 /**
  * Which TLS versions a device still accepts, scored (`T-12`).
@@ -82,7 +83,16 @@ export const tlsSecurity: SensorType = {
     const servername =
       typeof declared === 'string' && declared.trim() !== '' ? declared.trim() : host;
     const timeoutMs = Number(context.params['timeoutMs'] ?? 8_000);
-    const target = { host, port, servername, timeoutMs };
+    // Resolved once and checked against the probe's target policy; every handshake of this
+    // check then goes to an address that lookup answered with (`A-57`).
+    const checked = await checkedTarget({
+      ...guardOf(context.target),
+      timeoutMs,
+      signal: context.signal,
+      verb: 'connect to',
+      doing: `connecting to ${host}:${String(port)}`,
+    });
+    const target = { host, port, servername, timeoutMs, ...lookupFor(host, checked) };
 
     const accepted = new Map<string, boolean>();
     let cipher: string | null = null;

@@ -1,10 +1,13 @@
 import { connect as netConnect, type Socket } from 'node:net';
 import { connect as tlsConnect, type TLSSocket } from 'node:tls';
+import type { TargetPolicy } from '@ms/shared';
+import { checkedTarget, lookupFor } from '../checked-target.js';
 import {
   isCredentialsWithheld,
   pinnedLookup,
   pinnedPeerRefusal,
   type PinnedAddress,
+  type ResolveHost,
 } from '../pinned-target.js';
 
 /**
@@ -36,6 +39,14 @@ export interface MailConnectionOptions {
    * what TLS sends as SNI and checks the certificate against, immediately or after `STARTTLS`.
    */
   readonly pinned?: PinnedAddress;
+  /**
+   * What the probe lets a sensor connect to (`CheckTarget.policy`, `A-57`). Every connection is
+   * checked against it: `host` is resolved once, every address it has is checked, and the
+   * socket's `lookup` answers with those. A pinned address is checked as it stands.
+   */
+  readonly targetPolicy?: TargetPolicy;
+  /** How that one lookup is made (`CheckTarget.resolve`). Absent, the system's resolver. */
+  readonly resolve?: ResolveHost;
 }
 
 /** How much a server may say before this gives up. Generous for a mailbox listing, and bounded. */
@@ -93,8 +104,26 @@ export class MailConnection {
   static async open(options: MailConnectionOptions, signal: AbortSignal): Promise<MailConnection> {
     const family = options.ipVersion === 'v6' ? 6 : options.ipVersion === 'v4' ? 4 : 0;
     const pinned = options.pinned;
-    // The checked address, whatever the socket asks its lookup for (`A-41c`).
-    const pin = pinned === undefined ? {} : { lookup: pinnedLookup(options.host, pinned) };
+    // **Before the socket is made** (`A-57`): the probe's target policy, over the pinned address
+    // or over every address the name has. A refusal is this check's failure, and nothing is
+    // sent. Each connection of a check is checked on its own lookup.
+    const checked = await checkedTarget({
+      host: options.host,
+      family,
+      ...(pinned === undefined ? {} : { pinned }),
+      ...(options.targetPolicy === undefined ? {} : { policy: options.targetPolicy }),
+      ...(options.resolve === undefined ? {} : { resolve: options.resolve }),
+      timeoutMs: options.timeoutMs,
+      signal,
+      verb: 'connect to',
+      doing: `connecting to ${options.host}:${String(options.port)}`,
+    });
+    // The checked address, whatever the socket asks its lookup for (`A-41c`); or, where no
+    // credential set pinned one, the addresses the policy checked.
+    const pin =
+      pinned === undefined
+        ? lookupFor(options.host, checked)
+        : { lookup: pinnedLookup(options.host, pinned) };
     const socket = await new Promise<Socket | TLSSocket>((resolve, reject) => {
       const done = (error: Error): void => {
         clearTimeout(timer);

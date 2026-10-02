@@ -1,4 +1,4 @@
-import type { ChannelReading } from '@ms/shared';
+import type { ChannelReading, TargetPolicy } from '@ms/shared';
 import type { PinnedAddress, ResolveHost } from './support/pinned-target.js';
 
 /**
@@ -130,6 +130,13 @@ export interface CheckTarget {
    * uses, so a test that injects one sees every lookup a check makes. Absent, the system's.
    */
   readonly resolve?: ResolveHost;
+  /**
+   * What this probe's sensors may connect to (`A-09`, `A-57`): the probe's `targetPolicy`, set
+   * by the catalogue for every check. A transport that connects to `host` hands this, `pinned`
+   * and `resolve` to `checkedTarget` (`support/checked-target.ts`) and connects to an address
+   * that answered. Absent, where a test calls a type directly, the default: `link-local`.
+   */
+  readonly policy?: TargetPolicy;
 }
 
 /** What a check is handed when it runs. */

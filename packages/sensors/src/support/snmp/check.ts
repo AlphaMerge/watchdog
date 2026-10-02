@@ -1,4 +1,5 @@
 import type { CheckContext } from '../../contract.js';
+import { checkedAddress, guardOf } from '../checked-target.js';
 import { readCredentials } from './credentials.js';
 import { withSnmp } from './pool.js';
 import type { SnmpSession } from './session.js';
@@ -40,16 +41,32 @@ export async function snmpCheck<T>(
     );
   }
 
+  const port = options.port ?? Number(context.params['port'] ?? 161);
+  const timeoutMs = Number(context.params['timeoutMs'] ?? 5_000);
+  // **Resolved once, checked against the probe's target policy, and asked at that address**
+  // (`A-57`). UDP has no socket lookup to hook: `net-snmp` resolves whatever it is given each
+  // time it sends, so a name handed to it is a name nobody checked. The address a credential
+  // set pinned (`A-41c`) is checked as it stands and nothing is resolved for it. Over IPv4
+  // unless the device says IPv6, which is the transport a name has always been asked over.
+  const address = await checkedAddress({
+    ...guardOf(context.target),
+    family: context.target.ipVersion === 'v6' ? 6 : 4,
+    timeoutMs,
+    signal: context.signal,
+    verb: 'query',
+    doing: `querying ${host}:${String(port)} over SNMP`,
+  });
+
   return withSnmp(
     {
       host,
-      port: options.port ?? Number(context.params['port'] ?? 161),
+      port,
       ipVersion: context.target.ipVersion,
-      ...(context.target.pinned === undefined ? {} : { pinned: context.target.pinned }),
+      ...(address === undefined ? {} : { pinned: address }),
     },
     readCredentials(stored),
     {
-      timeoutMs: Number(context.params['timeoutMs'] ?? 5_000),
+      timeoutMs,
       retries: Number(context.params['retries'] ?? 1),
     },
     (session) => body(session, context.signal),

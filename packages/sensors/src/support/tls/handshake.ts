@@ -5,6 +5,7 @@ import {
   type PeerCertificate,
   type TLSSocket,
 } from 'node:tls';
+import type { LookupFunction } from 'node:net';
 
 /**
  * One TLS handshake, and what it revealed (`T-11`, `T-12`).
@@ -27,6 +28,18 @@ export interface TlsTarget {
   /** SNI. Almost always the host; separate because a device addressed by IP still needs one. */
   readonly servername: string;
   readonly timeoutMs: number;
+  /**
+   * The socket's `lookup`, when the device's name was resolved and checked against the probe's
+   * target policy (`A-57`): it answers with the checked addresses, so the name is not resolved
+   * a second time. `host` stays the name.
+   */
+  readonly lookup?: LookupFunction;
+  /**
+   * When the check began resolving the name, where it did that itself. `elapsedMs` is counted
+   * from here, so the handshake time still includes the lookup, as it did when the socket made
+   * it.
+   */
+  readonly startedAt?: bigint;
 }
 
 export interface TlsHandshake {
@@ -67,13 +80,14 @@ export function handshake(
   } = {},
 ): Promise<TlsHandshake> {
   return new Promise<TlsHandshake>((resolve, reject) => {
-    const started = process.hrtime.bigint();
+    const started = target.startedAt ?? process.hrtime.bigint();
     let settled = false;
 
     const config: ConnectionOptions = {
       host: target.host,
       port: target.port,
       servername: target.servername,
+      ...(target.lookup === undefined ? {} : { lookup: target.lookup }),
       // See the note above: verification is done *after* the fact so that a bad certificate is a
       // reading rather than a failed connection.
       rejectUnauthorized: false,

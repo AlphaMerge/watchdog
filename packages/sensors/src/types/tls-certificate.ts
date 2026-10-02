@@ -1,4 +1,5 @@
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
+import { checkedTarget, guardOf, lookupFor } from '../support/checked-target.js';
 
 /**
  * The certificate a device presents, and how long it has left (`T-11`).
@@ -71,8 +72,21 @@ export const tlsCertificate: SensorType = {
     const servername =
       typeof declared === 'string' && declared.trim() !== '' ? declared.trim() : host;
     const timeoutMs = Number(context.params['timeoutMs'] ?? 10_000);
+    // Resolved once and checked against the probe's target policy; every handshake of this
+    // check then goes to an address that lookup answered with (`A-57`).
+    const startedAt = process.hrtime.bigint();
+    const checked = await checkedTarget({
+      ...guardOf(context.target),
+      timeoutMs,
+      signal: context.signal,
+      verb: 'connect to',
+      doing: `connecting to ${host}:${String(port)}`,
+    });
 
-    const result = await handshake({ host, port, servername, timeoutMs }, context.signal);
+    const result = await handshake(
+      { host, port, servername, timeoutMs, startedAt, ...lookupFor(host, checked) },
+      context.signal,
+    );
     const leaf = result.certificate;
     if (Object.keys(leaf).length === 0) {
       throw new Error(

@@ -12,7 +12,9 @@ import type {
   SensorType,
   SensorTypeDeclaration,
 } from './contract.js';
+import type { TargetPolicy } from '@ms/shared';
 import { scrubSecrets, secretsOfCheck } from './support/secrets.js';
+import { targetPolicyFrom } from './support/checked-target.js';
 import {
   isCredentialsWithheld,
   pinTarget,
@@ -101,10 +103,17 @@ export class SensorCatalogue {
   readonly #ajv: Ajv;
   /** How `execute` resolves a name it has to check against a set's address targets (`A-41c`). */
   readonly #resolve: ResolveHost;
+  /** What a check may connect to (`A-57`): the probe's `targetPolicy`, handed to every check. */
+  readonly #policy: TargetPolicy;
   #sealed = false;
 
-  constructor(options: { readonly resolve?: ResolveHost } = {}) {
+  constructor(
+    options: { readonly resolve?: ResolveHost; readonly targetPolicy?: TargetPolicy } = {},
+  ) {
     this.#resolve = options.resolve ?? systemResolve;
+    // From the environment the probe set, where nobody hands one in: a worker builds its
+    // catalogue with no options, and inherits the probe's environment.
+    this.#policy = options.targetPolicy ?? targetPolicyFrom();
     // useDefaults fills in what a type declares a default for, so what gets stored is complete
     // and `channels(params)` never has to second-guess an absent optional.
     this.#ajv = new Ajv({
@@ -255,6 +264,9 @@ export class SensorCatalogue {
           // What a transport that checks addresses itself resolves with (`A-54`): the same
           // resolver, so one injected here is the only one a check ever asks.
           resolve: this.#resolve,
+          // What the probe lets a sensor connect to (`A-57`). Whatever `policy` arrived with
+          // the context is dropped, as `pinned` is: a check does not choose its own.
+          policy: this.#policy,
         },
         scrub: (text: string) => scrubSecrets(text, secrets),
       });

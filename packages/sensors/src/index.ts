@@ -76,6 +76,12 @@ export type {
   ResolveHost,
   WithheldPhase,
 } from './support/pinned-target.js';
+export {
+  DEFAULT_TARGET_POLICY,
+  TARGET_POLICY_ENV,
+  TargetRefusedError,
+  targetPolicyFrom,
+} from './support/checked-target.js';
 export { snmpPool } from './support/snmp/pool.js';
 export type { SnmpPoolStats } from './support/snmp/pool.js';
 export { sshPool } from './support/ssh/pool.js';

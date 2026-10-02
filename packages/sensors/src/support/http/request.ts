@@ -1,16 +1,13 @@
 import { Agent as HttpAgent, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { ClientRequestArgs, IncomingHttpHeaders } from 'node:http';
-import { isIP } from 'node:net';
-import { refuses, type TargetPolicy } from '@ms/shared';
+import type { TargetPolicy } from '@ms/shared';
 import type { CheckTarget } from '../../contract.js';
+import { checkedTarget, type CheckedTarget } from '../checked-target.js';
 import {
   isCredentialsWithheld,
   pinnedLookup,
   pinnedPeerRefusal,
-  resolveBoundMs,
-  resolveWithin,
-  systemResolve,
   type PinnedAddress,
   type ResolveHost,
 } from '../pinned-target.js';
@@ -59,7 +56,8 @@ export interface HttpRequestOptions {
    */
   readonly cookies?: Map<string, string>;
   /**
-   * What this sensor is allowed to reach (`A-09`).
+   * What this sensor is allowed to reach (`A-09`): the probe's `targetPolicy`, which the
+   * catalogue hands every check (`CheckTarget.policy`, `A-57`).
    *
    * **Defaults to `link-local`, and the default is the point.** A monitoring system fetches URLs
    * inside the network it watches — that is the job — so a guard that blocked private addresses
@@ -114,20 +112,6 @@ export interface HttpResponse {
 const round = (value: number): number => Math.round(value * 100) / 100;
 
 /**
- * Where a request may connect: the addresses that were checked, in the order to try them. Null
- * when the socket is handed `host` as it is, because nothing would resolve it (an address) or
- * nothing is checked (`none`).
- */
-interface CheckedTarget {
-  readonly addresses: readonly PinnedAddress[];
-  /** Resolved here by the guard, rather than pinned above for a credential set (`A-41c`). */
-  readonly byGuard: boolean;
-}
-
-/** A resolution the guard gave up on. Its message is already the whole diagnosis. */
-class ResolveGivenUp extends Error {}
-
-/**
  * A failure before the connection was made: nothing was sent, so the next checked address may
  * be tried. The socket used to do this itself, across every address a name has and whatever the
  * failure was; it is handed one address now. Judged by the socket never having connected and
@@ -175,72 +159,31 @@ export function connectAttemptMs(timeoutMs: number, addresses: number): number |
  * `169.254.169.254`. Now the answers that were checked are the only places the request can go,
  * through `pinnedLookup`, as for a target pinned for a credential set.
  *
- * A literal address needs no resolution and is checked directly; a name is resolved and *every*
- * address it answers with is checked, because a name with an A record inside the network and one
- * pointing at metadata is refused on the second.
+ * The resolving and the checking are `checkedTarget`'s, which every transport shares (`A-57`);
+ * what is this request's own is the words for a name that would not resolve.
  */
-async function checkedTarget(
+function checkedForRequest(
   options: HttpRequestOptions,
   signal: AbortSignal,
 ): Promise<CheckedTarget | null> {
-  const host = options.host;
-  const policy = options.targetPolicy ?? 'link-local';
-  const check = (address: string): void => {
-    const reason = policy === 'none' ? null : refuses(policy, address);
-    if (reason !== null) {
-      throw new Error(
-        `refusing to request ${host}: it resolves to ${address}, which is ${reason} — ` +
-          'this range is where cloud instance-metadata services live',
-      );
-    }
-  };
-
-  // A pinned request goes to one address and resolves nothing (`A-41c`), so that address is the
-  // whole of what there is to check, and a second lookup here would be the one nobody checked.
-  if (options.pinned !== undefined) {
-    check(options.pinned.address);
-    return { addresses: [options.pinned], byGuard: false };
-  }
-  if (policy === 'none') return null;
-  if (isIP(host) !== 0) {
-    check(host);
-    return null;
-  }
-
-  const where = `${options.scheme}://${host}:${String(options.port)}${options.path}`;
-  // Bounded, and ended with the check: `getaddrinfo` cannot be cancelled, and a resolver that
-  // does not answer would otherwise hold the check until its runner gave up on it.
-  const boundMs = resolveBoundMs(options.timeoutMs);
-  let answers: Awaited<ReturnType<ResolveHost>>;
-  try {
-    answers = await resolveWithin((options.resolve ?? systemResolve)(host, 0), signal, boundMs, {
-      cancelled: () => new ResolveGivenUp(`the check was cancelled while requesting ${where}`),
-      timedOut: () =>
-        new ResolveGivenUp(
-          `the device’s host name did not resolve within ${String(boundMs)} ms, requesting ` +
-            `${where} — the probe’s resolver is not answering`,
-        ),
-    });
-  } catch (error: unknown) {
+  const where = `${options.scheme}://${options.host}:${String(options.port)}${options.path}`;
+  return checkedTarget({
+    host: options.host,
+    ...(options.pinned === undefined ? {} : { pinned: options.pinned }),
+    ...(options.targetPolicy === undefined ? {} : { policy: options.targetPolicy }),
+    ...(options.resolve === undefined ? {} : { resolve: options.resolve }),
+    timeoutMs: options.timeoutMs,
+    signal,
+    verb: 'request',
+    doing: `requesting ${where}`,
     // **Not handed to the socket to try again.** A name that would not resolve used to be left
-    // to the request, which is a second lookup nobody checks. It fails here, in the words the
-    // request has always used for it.
-    throw error instanceof ResolveGivenUp ? error : describeFailure(error, options, options.path);
-  }
-
-  // Every answer is checked before any is used. One that is not an address is never connected
-  // to, so there is nothing of it to check.
-  const addresses: PinnedAddress[] = [];
-  for (const answer of answers) {
-    const version = isIP(answer.address);
-    if (version === 0) continue;
-    check(answer.address);
-    addresses.push({ address: answer.address, family: version === 6 ? 6 : 4 });
-  }
-  if (addresses.length === 0) {
-    throw new Error(`the device’s host name did not resolve, requesting ${where}`);
-  }
-  return { addresses, byGuard: true };
+    // to the request, which is a second lookup nobody checks. It fails in the guard, in the
+    // words the request has always used for it.
+    unresolved: (error) =>
+      error === undefined
+        ? new Error(`the device’s host name did not resolve, requesting ${where}`)
+        : describeFailure(error, options, options.path),
+  });
 }
 
 export async function fetchHttp(
@@ -267,7 +210,7 @@ export async function fetchHttp(
   // **And resolved once, here, for the whole request** (`A-54`): every hop of a redirect goes to
   // an address this checked. A redirect is only ever followed on this host, so there is no
   // other name to resolve; one that names another host is reported and not followed.
-  const checked = await checkedTarget(options, signal);
+  const checked = await checkedForRequest(options, signal);
   // Which checked address is in use. It moves on only when a connection could not be made.
   let at = 0;
 
@@ -625,5 +568,6 @@ export function readCommon(
     // (`A-41c`): the pinned address goes wherever the host goes.
     ...(target.pinned === undefined ? {} : { pinned: target.pinned }),
     ...(target.resolve === undefined ? {} : { resolve: target.resolve }),
+    ...(target.policy === undefined ? {} : { targetPolicy: target.policy }),
   };
 }

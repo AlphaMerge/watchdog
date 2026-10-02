@@ -2,6 +2,8 @@
 // exports through it at runtime even though TypeScript resolves them. Same as `net-snmp`.
 import ssh2 from 'ssh2';
 import type { Client } from 'ssh2';
+import { connect as netConnect, type Socket } from 'node:net';
+import { checkedLookup } from '../checked-target.js';
 import type { PinnedAddress } from '../pinned-target.js';
 import { describeCredentials, type SshCredentials } from './credentials.js';
 import { describeVerdict, verifyHostKey, type HostKeyVerdict } from './host-key.js';
@@ -38,6 +40,12 @@ export interface SshTarget {
    * stays the name every message uses.
    */
   readonly pinned?: PinnedAddress;
+  /**
+   * The addresses `host` resolved to, each checked against the probe's target policy (`A-57`),
+   * when no credential set pinned one. The connection is made to one of them, through a socket
+   * whose `lookup` answers with these and nothing else, so the name is never resolved again.
+   */
+  readonly checked?: readonly PinnedAddress[];
 }
 
 export interface SshSessionOptions {
@@ -194,12 +202,22 @@ export class SshSession {
         );
       });
 
+      // **A socket of this session's own making, for the addresses the target policy checked**
+      // (`A-57`). `ssh2` takes no `lookup`, and connecting by name would resolve it a second
+      // time. The socket is still told the name, so Node walks the checked addresses as it
+      // would have walked the name's, and a first address that is dead is passed.
+      const sock =
+        target.pinned === undefined && target.checked !== undefined
+          ? checkedSocket(host, target.port ?? 22, target.checked)
+          : undefined;
+
       const config = {
         // **The checked address, never the name, when there is one** (`A-41c`): `ssh2` resolves a
         // name when it connects, and that second answer is the one nobody checked.
         host: target.pinned?.address ?? host,
         port: target.port ?? 22,
         username: credentials.username,
+        ...(sock === undefined ? {} : { sock }),
         readyTimeout: resolved.connectTimeoutMs,
         // Every key exchange and cipher ssh2 offers by default. Narrowing them is a policy
         // decision an operator should make about their estate, not one a monitoring tool should
@@ -233,6 +251,8 @@ export class SshSession {
       try {
         client.connect(config);
       } catch (error) {
+        // `ssh2` never took the socket, so nothing else will close it.
+        sock?.destroy();
         fail(
           new SshError(`could not connect to ${host}: ${describe(error)}`, {
             host,
@@ -392,4 +412,15 @@ export class SshSession {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * A socket connecting to `host` at one of the addresses the target policy checked (`A-57`).
+ * Made on the tick `ssh2` is handed it, so every event of it is `ssh2`'s to hear.
+ */
+function checkedSocket(host: string, port: number, addresses: readonly PinnedAddress[]): Socket {
+  const socket = netConnect({ host, port, lookup: checkedLookup(host, addresses) });
+  // What `ssh2` does to a socket it makes itself, and not to one it is handed.
+  socket.setMaxListeners(0);
+  return socket;
 }

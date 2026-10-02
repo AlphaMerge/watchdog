@@ -366,6 +366,29 @@ Four rules follow from how the redactor works:
   credentialKinds: ['ssh'],
   pinnedKinds: ['ssh'],
   ```
+- **Connect only to an address the target policy checked** (`A-57`). A probe refuses to connect
+  to link-local and cloud instance-metadata addresses (`probe.targetPolicy`), and the check and
+  the connection have to use one lookup, or whoever runs the device's DNS answers them
+  differently. The shared transports do this for you. A type with a connection of its own calls
+  `checkedTarget` (`support/checked-target.ts`) before it connects:
+
+  ```ts
+  const checked = await checkedTarget({
+    ...guardOf(context.target), // the host, with the pin, the policy and the resolver
+    timeoutMs,
+    signal: context.signal,
+    verb: 'connect to',
+    doing: `connecting to ${host}:${String(port)}`,
+  });
+  const socket = connect({ host, port, ...lookupFor(host, checked) });
+  ```
+
+  `lookupFor` answers the socket's lookup with the checked addresses, so the name is never
+  resolved again and TLS still names the server. A transport that takes an address and no
+  lookup uses `checkedAddress` and connects to that. One that can do neither, because a driver
+  resolves the name itself, calls `refuseBlockedAddress` for a device given as an address and
+  is listed in `administration.md` as checked by address only. A refusal is an ordinary failed
+  check; do not catch it.
 
 The form (`U-08`) follows from the same annotation: a `writeOnly` parameter renders as
 "set, write-only" with Replace and Clear, never as a filled input, and is omitted from the save

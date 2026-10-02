@@ -687,6 +687,22 @@ export interface ProbeConfig {
      * written for the older one, so it runs on either.
      */
     powerShellPath: string;
+    /**
+     * Which addresses this probe's sensors will not connect to (`A-09`, `A-57`).
+     *
+     * `link-local`, the default, refuses `169.254.0.0/16`, `fe80::/10` and the cloud
+     * instance-metadata addresses outside them: a probe on a cloud machine can otherwise be
+     * pointed, by anyone who may write a device, at the service that hands out that machine's
+     * credentials. Every sensor that connects to its device is held to it, whatever it speaks.
+     * `private` also refuses loopback and the private ranges, which is nearly every device a
+     * probe inside a network watches. `none` refuses nothing: for a network where a device on
+     * a link-local address is yours to monitor.
+     *
+     * Here, on the probe, and not a setting of the sensor or of the core: the address means
+     * what it means from the machine the probe runs on, and whoever writes a sensor is who the
+     * rule is there for.
+     */
+    targetPolicy: 'link-local' | 'private' | 'none';
   };
   /**
    * The SNMP trap listener (`T-06`).
@@ -1446,6 +1462,7 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
         'processGid',
         'scriptDir',
         'powerShellPath',
+        'targetPolicy',
       ],
       properties: {
         gid: { type: 'string', default: '' },
@@ -1491,6 +1508,12 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
         // Empty means "work it out from the platform", which is right on Windows and honest
         // everywhere else.
         powerShellPath: { type: 'string', default: '' },
+        // The same three names, and the same default, as `notifications.webhook.targetPolicy`.
+        targetPolicy: {
+          type: 'string',
+          enum: ['link-local', 'private', 'none'],
+          default: 'link-local',
+        },
       },
     },
     trapListener: {

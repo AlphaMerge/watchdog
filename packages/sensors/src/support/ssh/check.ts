@@ -1,4 +1,5 @@
 import type { CheckContext } from '../../contract.js';
+import { checkedTarget, guardOf } from '../checked-target.js';
 import { readCredentials } from './credentials.js';
 import { withSsh } from './pool.js';
 import { describeVerdict } from './host-key.js';
@@ -36,15 +37,29 @@ export async function sshCheck<T>(
     );
   }
 
+  const port = options.port ?? Number(context.params['port'] ?? 22);
+  const connectTimeoutMs = Number(context.params['connectTimeoutMs'] ?? 15_000);
+  // **Resolved once and checked against the probe's target policy** (`A-57`), and the
+  // connection is made to an address that lookup answered with. A target a credential set
+  // pinned (`A-41c`) is checked at that address, resolves nothing, and connects as it did.
+  const checked = await checkedTarget({
+    ...guardOf(context.target),
+    timeoutMs: connectTimeoutMs,
+    signal: context.signal,
+    verb: 'connect to',
+    doing: `connecting to ${host}:${String(port)} over SSH`,
+  });
+
   return withSsh(
     {
       host,
-      port: options.port ?? Number(context.params['port'] ?? 22),
+      port,
       ...(context.target.pinned === undefined ? {} : { pinned: context.target.pinned }),
+      ...(checked?.byGuard === true ? { checked: checked.addresses } : {}),
     },
     readCredentials(stored),
     {
-      connectTimeoutMs: Number(context.params['connectTimeoutMs'] ?? 15_000),
+      connectTimeoutMs,
       commandTimeoutMs: Number(context.params['commandTimeoutMs'] ?? 30_000),
     },
     (session) => body(session, context.signal),

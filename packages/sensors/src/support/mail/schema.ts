@@ -1,5 +1,6 @@
 import type { CheckTarget, JsonSchema } from '../../contract.js';
-import type { PinnedAddress } from '../pinned-target.js';
+import type { TargetPolicy } from '@ms/shared';
+import type { PinnedAddress, ResolveHost } from '../pinned-target.js';
 
 /**
  * The mail credential, and the transport parameters every mail sensor takes (`T-17`).
@@ -89,6 +90,8 @@ export function readTransport(
   timeoutMs: number;
   ipVersion: 'auto' | 'v4' | 'v6';
   pinned?: PinnedAddress;
+  targetPolicy?: TargetPolicy;
+  resolve?: ResolveHost;
 } {
   const raw = params['security'];
   const security = raw === 'none' || raw === 'tls' ? raw : 'starttls';
@@ -101,6 +104,9 @@ export function readTransport(
     timeoutMs: Number(params['timeoutMs'] ?? 20_000),
     ipVersion: target.ipVersion,
     ...(target.pinned === undefined ? {} : { pinned: target.pinned }),
+    // And the probe's target policy with the resolver it is checked through (`A-57`).
+    ...(target.policy === undefined ? {} : { targetPolicy: target.policy }),
+    ...(target.resolve === undefined ? {} : { resolve: target.resolve }),
   };
 }
 
