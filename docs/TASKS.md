@@ -19925,7 +19925,7 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       covered and what it did not. A hosted runner can install an MSI and cannot run a week, so
       this needs a Windows Server host.
 
-- [ ] **H-18 — Nothing notices a core that has stopped** · M · P-215 · Found 2026-09-28 in
+- [x] **H-18 — Nothing notices a core that has stopped** · M · P-215 · Found 2026-09-28 in
       `P-215`'s review. `P-215` made a core that cannot stay up end in `failed` rather than loop,
       and `ms-core.service` and `administration.md` now say so in as many words: the core is the
       thing that raises alarms, so a stopped core is silent, and "this project ships neither" the
@@ -19958,6 +19958,53 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       its receiver is visible while the core is up to show it. A test against a local receiver
       proves a wedged housekeeping pass stops the requests. `ms-core.service` and
       `administration.md` stop saying the project ships nothing.
+
+      **Done.** Ways (1) and (2), as decided.
+      - **The runbook.** `administration.md`, "Watching the core from outside": the check from
+        another machine as a script and a crontab line, with what each status means; the
+        heartbeat; and the `OnFailure=` drop-in, headed as the weaker half. The script is a file
+        rather than one cron line because `%` is special in a crontab and the token belongs in a
+        `0600` header file, not in `ps`.
+      - **What the check's sentence rests on, now tested** (`object-visibility.test.ts`). A
+        read-scoped token of a read-only account holding `read` on the root is answered 200; no
+        credential, a mistyped token and a revoked one are 401; the same token is refused a write.
+        **The database half was true by a route nobody had pointed at**: `/core-health` itself
+        answers without a database (`P-126`), and what makes the check cover PostgreSQL is the
+        token lookup, which answers 500 when it cannot be made. So the runbook says to keep
+        `api.requireAuthentication` on, since with it off the check sees the process and the port
+        only.
+      - **The heartbeat** is `heartbeat.url` and `heartbeat.intervalSeconds` (300; 10 to 86,400),
+        off while the URL is empty. `packages/core/src/health/heartbeat.ts` has no timer: the
+        housekeeping loop tells it as each pass ends and does not wait for it. One `GET`, the URL
+        as written, `User-Agent: ms-core/<version>`, ten seconds, an `AbortSignal`, no retry, no
+        redirect followed.
+      - **Decided here, where the ticket left it open.**
+        - *A pass that threw sends nothing, and is counted.* A pass fails as a whole when it cannot
+          reach the database, and a core with no database is silent in the way this exists to
+          catch. A failed step inside a pass does not withhold it.
+        - *The interval may not be shorter than `housekeeping.intervalSeconds`*, and a URL may not
+          be set with housekeeping off: the pass is what sends it. `config check` refuses both.
+        - *Half a pass of slack.* With both at their default of 300, an exact comparison would
+          skip every pass that ended a millisecond early and send half what the receiver was told.
+        - *A URL with a user name or password is refused*, since sending it means an
+          `Authorization` header nobody asked for; and neither a refusal nor a log line repeats the
+          URL, whose path is usually the receiver's token. Logs name the receiver's origin.
+        - *One request at a time*, and a stop ends the one in flight without counting it.
+      - **Core Health** has `heartbeatFailures`: refused, timed out, not connected or withheld,
+        since the last reading; warns above zero; a gap where no URL is set.
+      - **Tests.** `heartbeat.test.ts` (18, every receiver an in-process server on loopback): what
+        leaves, the timeout, the loop wedged for twelve periods sending nothing and resuming, a
+        hanging receiver beside which five passes finish, a failed pass withheld. Seven in
+        `config.test.ts`, three in `core-health.test.ts`, two in `object-visibility.test.ts`.
+      - **Mutants: 25 of 25**, after one survivor. A stopped heartbeat that still counted a failed
+        pass survived, because the test's `passed()` had taken the interval's one turn before its
+        `failed()`; the test now asks an interval later.
+      - **Not done, and not verified.** The `OnFailure=` drop-in was written from systemd's rule
+        that a dependency in a drop-in adds to the list; it has not been run on a host, and the
+        runbook gives the `systemctl show` line that checks it. The outside-check script has not
+        been run against a live core. The heartbeat's wiring in `main.ts` is covered through
+        `heartbeatFor` and not by a core started with a URL. Nothing here notices a core whose
+        API answers and whose housekeeping is disabled by configuration.
 
 - [ ] **T-25 — The Windows queries, run against Windows** · M · T-09, T-10 · `T-10` says it in
       so many words: **no `Get-CimInstance` has run against a Windows machine.** The transport, the

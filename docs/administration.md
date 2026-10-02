@@ -566,6 +566,7 @@ alarm.
 | `notifyOldest` | Notifications queued and undelivered. 15 minutes warns; an hour means nobody is being told anything |
 | `hostsRefused` | Requests refused since the last reading because their `Host` is not one of the core's names. No limit, since scanners send these all day. A step up after a DNS or proxy change is somebody reaching the core by a name nobody listed. See [the names the core answers to](#the-names-the-core-answers-to) |
 | `rateLimited` | **Any value above zero is a warning.** Requests refused since the last reading by the per-client rate limit. Nobody using the web UI meets it, so a refusal is a runaway loop, an enumeration, or a provisioning script that should use `POST /objects/tree` or needs `api.rateLimitPerMinute` raised. The log names the client. See [the rate limit, and provisioning scripts](#the-rate-limit-and-provisioning-scripts) |
+| `heartbeatFailures` | **Any value above zero is a warning.** Heartbeats to the receiver named in `heartbeat.url` that were due since the last reading and did not arrive: refused, timed out, not connected, or withheld because the housekeeping pass that sends them failed. The receiver is what reports a stopped core, and it is about to report this one. The log says which. A gap where no URL is set, which is the default. See [the core's outbound heartbeat](#the-cores-outbound-heartbeat) |
 | `alarmOverdue` | The alarm sweep is not running. Everything downstream of it is silently stale. Measured on the clock the scheduler's timer runs on, so a step of the core's wall clock is not lateness (`P-247`) |
 | `clockBehind` | How far **the core's own clock** is behind every remote probe's, with two or more connected. Warns beyond a minute, errors at 15 minutes, where every remote probe's results are refused. While it is over a minute, each Probe Health's clock warnings stand down and its sentence names the offset instead: one alarm, on the machine at fault. A gap with fewer than two remote probes. See [the core's own clock](#the-cores-own-clock) |
 | `resultsUnreadableTime` | **Any value above zero is a warning.** Results dropped because their time is not a date, which our probe never sends: a broken or hostile build. What it drops is usually a failed check (`P-247`) |
@@ -877,8 +878,9 @@ after the crossing. At 80% there is still room for one such surge; past about 86
   start rather than waiting ten minutes. It clears the count and changes nothing else.
 - **The core behaves the same way, and says nothing while it does.** A core killed at its ceiling
   on every start ends in `failed` too, and is started again on the same schedule. Between retries,
-  since the core is what raises alarms, nothing in this system reports it. Only the host's own
-  monitoring, or a check from another machine, will notice; this project ships neither.
+  since the core is what raises alarms, nothing in this system reports it. Something outside it
+  has to: [watching the core from outside](#watching-the-core-from-outside) has a check to run
+  from another machine and a heartbeat the core sends to a receiver you name.
 
 To raise a ceiling, set it with `systemctl`, which applies it at once, keeps it across reboots and
 leaves the shipped unit file alone for the next upgrade to replace:
@@ -1145,6 +1147,164 @@ every sensor it covers.
 **Why not `RestartSteps=`.** systemd 254 can back off by itself, but Debian 12 and RHEL 9 ship
 252, and it backs off only while the start limit is not hit, which would mean giving up the limit
 and the alarm bound it buys.
+
+### Watching the core from outside
+
+**A core that has stopped is silent.** The core is what raises alarms, so nothing in this system
+reports its own absence: Core Health is a sensor the core records about itself, and it goes quiet
+with the core, not Down. Remote probes notice within one of their own heartbeats and spool; they
+have nobody to tell. So one thing outside the core has to be watching it (`H-18`). There are three
+ways, and the first two are worth having together, because each sees what the other cannot.
+
+| | Notices | Does not notice | Lives |
+| --- | --- | --- | --- |
+| **A check from another machine** | The process, the host, the port, the network path and the database, whatever stopped them | A core that answers its API while its housekeeping is wedged | On a machine of yours |
+| **The core's outbound heartbeat** | The process, the host, a wedged housekeeping pass, a database the pass cannot reach, and the core's way out to the network | An API nobody can reach from where they sit | At a receiver you name |
+| **`OnFailure=` on the unit** | The unit reaching `failed` | Everything else, and it dies with the host | On the core's own host |
+
+#### A check from another machine
+
+`GET /api/v1/core-health` with a read-only API token, **and anything but a 200 inside ten seconds
+is down**. That one request covers the process, the host, the port and the database: the route
+needs the right to read the root, the token carrying it is looked up in PostgreSQL, and a token
+that cannot be looked up is not answered 200.
+
+1. **Make an account for it**, with the read-only role, in a user group granted `read` on the root
+   group and nothing else. Sign in as it once and issue a token with scope `read`
+   (`POST /api/v1/auth/tokens`, see [API tokens](#api-tokens)). The token is shown once. It can
+   change nothing, and revoking it ends it.
+2. **On another machine**, put the token where only the check can read it, as a header line:
+
+   ```
+   sudo install -d -m 700 /etc/ms-core-check
+   printf 'Authorization: Bearer %s\n' 'mst_…' | sudo tee /etc/ms-core-check/header >/dev/null
+   sudo chmod 600 /etc/ms-core-check/header
+   ```
+
+3. **Install the check** as `/usr/local/bin/ms-core-check`, mode 755, with your own address and
+   your own way of telling somebody on the last line:
+
+   ```sh
+   #!/bin/sh
+   # Exits 0 only if the core answered 200 inside ten seconds.
+   URL=https://monitoring.example.com/api/v1/core-health
+   code=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
+     --header @/etc/ms-core-check/header "$URL")
+   [ "$code" = 200 ] && exit 0
+   echo "MonitoringSystem core at $URL is down (HTTP $code; 000 is no answer at all)" |
+     mail -s 'MonitoringSystem core is down' ops@example.com
+   exit 1
+   ```
+
+4. **Run it every minute** from that machine's crontab:
+
+   ```
+   * * * * * /usr/local/bin/ms-core-check
+   ```
+
+What each answer means:
+
+| Answer | Means |
+| --- | --- |
+| `200` | The core is serving and its database answered the token lookup |
+| `000`, or nothing inside ten seconds | The process, the host, the port or the path to it |
+| `401` | The token was revoked, has expired or was mistyped, or its account was disabled |
+| `403` | The account lost `read` on the root |
+| `421` | The check uses a name that is not in `api.allowedHosts` — see [the names the core answers to](#the-names-the-core-answers-to) |
+| `503` | The core is [still starting](#a-core-that-is-still-starting). It passes in moments on an ordinary restart |
+| `500` | The database could not be asked about the token |
+
+Three things to know before relying on it:
+
+- **It tells you every minute for as long as the core is down.** That is the right default for a
+  script this short. Send it to something that groups repeats, or have the script keep a state
+  file, if a mail a minute is too many.
+- **A restart is a `503` or a refused connection for a few seconds.** If upgrades are routine and
+  the mail is not wanted, alert on the second failure in a row.
+- **With `api.requireAuthentication` off the route answers anybody, and without a database**: its
+  numbers degrade to gaps and the answer is still 200 (`P-126`). The check then covers the process
+  and the port and no longer the database. Keep authentication on.
+
+The check uses one request a minute of the token's account's [rate limit](#the-rate-limit-and-provisioning-scripts).
+
+#### The core's outbound heartbeat
+
+A dead man's switch. The core requests a URL you name for as long as it is working, and whatever
+serves that URL — yours, or a hosted one — is told to expect a request every so often and alarms
+when they stop. **Off until you set a URL**, and nothing in the core depends on the receiver being
+there.
+
+```json
+{
+  "heartbeat": {
+    "url": "https://hc.example.org/ping/1f0c7d2e",
+    "intervalSeconds": 300
+  }
+}
+```
+
+- **What is sent**: a `GET` for that URL exactly as written, with `User-Agent: ms-core/<version>`.
+  No body, no credential, and nothing else about the installation. A receiver's token goes in the
+  path or the query, where you put it; a URL carrying a user name or a password is refused at
+  load, since sending those would mean a header nobody asked for. A redirect is not followed.
+- **When**: at the end of a housekeeping pass, once every `intervalSeconds` (300 by default, from
+  10 to 86,400). **It has no timer of its own**, and that is the point: a core whose housekeeping
+  has wedged goes on answering its API, and a timer would go on reporting it as well. So
+  `intervalSeconds` may not be shorter than `housekeeping.intervalSeconds`, and a URL may not be
+  set with `housekeeping.enabled` off; `ms-core config check` refuses both.
+- **A pass that failed sends nothing.** A pass fails as a whole when it cannot reach the database,
+  and a core with no database can neither record a state nor queue a notification. The receiver
+  should hear that as silence. A step failing inside a pass is logged and does not withhold it.
+- **What to tell the receiver**: a period of `intervalSeconds`, and a grace of at least one more.
+  A pass that has a lot to catch up on after a long stop runs longer than usual, and the request
+  leaves when it ends. The first one leaves at the end of the first pass after a start.
+- **One request, ten seconds, no retry.** A receiver that does not answer costs the pass nothing:
+  the pass does not wait for it. The next one due is the retry.
+- **When it does not arrive, Core Health says so.** `heartbeatFailures` counts every heartbeat
+  that was due and was refused (any answer but a 2xx), timed out, could not connect, or was
+  withheld, and **any is a warning**. So a heartbeat that has quietly stopped reaching its
+  receiver — a firewall change, an expired token at the receiver — is an alarm here while the core
+  is up to raise it, before the receiver's own alarm says the core has stopped. Each one is a
+  `warn` line from `heartbeat` in the core log, naming the receiver's host, the phase and the
+  status or error. The log never carries the URL's path or query.
+
+The same two settings work under WinSW on Windows.
+
+#### `OnFailure=` on the unit: the weaker half
+
+systemd can run a unit of yours when `ms-core` enters `failed` — the start limit, or a
+configuration it refused. It costs a drop-in and two small files, and it is worth having only
+beside one of the two above: **it runs on the core's own host, so it dies with the host**, with its
+network and with its mail. It also says nothing about a core that is running and wedged.
+
+```
+# /etc/systemd/system/ms-core-failed.service
+[Unit]
+Description=Tell somebody ms-core has failed
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'systemctl status ms-core --no-pager | mail -s "ms-core has failed on %H" ops@example.com'
+```
+
+```
+sudo systemctl edit ms-core
+# and in the drop-in it opens:
+[Unit]
+OnFailure=ms-core-failed.service
+```
+
+**The drop-in adds to the unit's own `OnFailure=`, it does not replace it**: the shipped unit names
+`ms-recover@`, which is what [starts a crashing core again](#when-a-service-keeps-crashing), and a
+dependency listed in a drop-in is added to the list. Check that both are there:
+
+```
+systemctl show ms-core -p OnFailure --value
+# ms-recover@ms-core.service ms-core-failed.service
+```
+
+Expect one message for each time the unit fails, which for a core that keeps crashing is one a
+retry: 10 minutes, then 20, 40, 80, 160, and every 4 hours.
 
 ### What a stop does
 

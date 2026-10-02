@@ -8,6 +8,7 @@ import { loadConfig } from '../src/config/load.js';
 import {
   coreConfigSchema,
   DEFAULT_RATE_LIMIT_PER_MINUTE,
+  heartbeatUrlProblem,
   probeConfigSchema,
 } from '../src/config/schema.js';
 import { ConfigError } from '../src/errors/app-error.js';
@@ -329,6 +330,100 @@ describe('how many requests a client may make in a minute (A-39)', () => {
     for (const rateLimitPerMinute of [60, 1_000_000]) {
       assert.equal(load({ rateLimitPerMinute }).config.api.rateLimitPerMinute, rateLimitPerMinute);
     }
+  });
+});
+
+describe('the heartbeat a receiver outside the core is sent (H-18)', () => {
+  const load = (file: Record<string, unknown>, env: NodeJS.ProcessEnv = {}) =>
+    loadConfig({
+      schema: coreConfigSchema,
+      env,
+      argv: ['--config', tempFile('core.json', JSON.stringify(file))],
+    });
+  const refusal = (file: Record<string, unknown>): string => {
+    const error = captureError(() => load(file));
+    assert.ok(error instanceof ConfigError, JSON.stringify(file));
+    return error.message;
+  };
+  const URL_SET = 'https://hc.example.org/ping/1f0c';
+
+  it('is off unless a URL is set, and five minutes apart when one is', () => {
+    const { config } = loadConfig({ schema: coreConfigSchema, env: {}, argv: [] });
+    assert.deepEqual(config.heartbeat, { url: '', intervalSeconds: 300 });
+  });
+
+  it('takes both from the file or the environment', () => {
+    const { config } = load(
+      { heartbeat: { url: URL_SET } },
+      { MS_HEARTBEAT__INTERVAL_SECONDS: '600' },
+    );
+    assert.deepEqual(config.heartbeat, { url: URL_SET, intervalSeconds: 600 });
+  });
+
+  it('refuses an interval outside its bounds, and takes both bounds exactly', () => {
+    for (const intervalSeconds of [9, 86_401, 0, 60.5]) {
+      assert.match(
+        refusal({ heartbeat: { intervalSeconds } }),
+        /heartbeat\.intervalSeconds/,
+        String(intervalSeconds),
+      );
+    }
+    for (const intervalSeconds of [10, 86_400]) {
+      assert.equal(
+        load({ heartbeat: { intervalSeconds } }).config.heartbeat.intervalSeconds,
+        intervalSeconds,
+      );
+    }
+  });
+
+  it('refuses a URL that cannot be requested, in words and without repeating it', () => {
+    // The URL usually carries the receiver's token, and a refusal ends up in a journal.
+    for (const [url, says] of [
+      ['hc.example.org/ping/s3cret-token', /heartbeat\.url: not a URL/],
+      ['/ping/s3cret-token', /heartbeat\.url: not a URL/],
+      ['ftp://hc.example.org/s3cret-token', /heartbeat\.url: "ftp:" cannot be requested/],
+      ['file:///etc/s3cret-token', /heartbeat\.url: "file:" cannot be requested/],
+      ['https://ops:s3cret-token@hc.example.org/ping', /heartbeat\.url: carries a user name/],
+      ['https://s3cret-token@hc.example.org/ping', /heartbeat\.url: carries a user name/],
+    ] as const) {
+      const message = refusal({ heartbeat: { url } });
+      assert.match(message, says, url);
+      assert.ok(!message.includes('s3cret-token'), `the refusal repeated the URL: ${message}`);
+    }
+    assert.equal(heartbeatUrlProblem('http://10.0.0.9:8080/beat?k=1'), undefined);
+    assert.equal(heartbeatUrlProblem(URL_SET), undefined);
+  });
+
+  it('refuses a URL with housekeeping off, since the pass is what sends it', () => {
+    assert.match(
+      refusal({ heartbeat: { url: URL_SET }, housekeeping: { enabled: false } }),
+      /heartbeat\.url: set while housekeeping\.enabled is false/,
+    );
+  });
+
+  it('refuses an interval shorter than the pass that sends it, naming both', () => {
+    const message = refusal({
+      heartbeat: { url: URL_SET, intervalSeconds: 60 },
+      housekeeping: { intervalSeconds: 300 },
+    });
+    assert.match(message, /heartbeat\.intervalSeconds: 60 seconds is shorter than/);
+    assert.match(message, /housekeeping\.intervalSeconds \(300\)/);
+
+    // Equal is fine: every pass sends one.
+    const { config } = load({
+      heartbeat: { url: URL_SET, intervalSeconds: 60 },
+      housekeeping: { intervalSeconds: 60 },
+    });
+    assert.equal(config.heartbeat.intervalSeconds, 60);
+  });
+
+  it('holds none of it against an installation that set no URL', () => {
+    // Off is off: a short interval or a disabled housekeeper is no problem with nothing to send.
+    const { config } = load({
+      heartbeat: { intervalSeconds: 10 },
+      housekeeping: { enabled: false, intervalSeconds: 300 },
+    });
+    assert.equal(config.heartbeat.url, '');
   });
 });
 

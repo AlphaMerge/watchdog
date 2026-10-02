@@ -1740,6 +1740,113 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       }
     });
 
+    it('answers the runbook’s check from outside 200 for a read-only token, and nothing else (H-18)', async () => {
+      // `administration.md` gives an operator a cron line: `GET /core-health` with a read-only
+      // API token, anything but a 200 is down. Every half of that sentence is asserted here, on
+      // the least an account can be: read-only, holding `read` on the root and nothing more.
+      await access.grant(harness.rootId, rootReadersId, 'read', actorNamed('visibility'));
+      const issued = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/tokens',
+        headers: as('rooted'),
+        payload: { name: 'outside check', scope: 'read' },
+      });
+      assert.equal(issued.statusCode, 201, issued.body);
+      const { secret, token } = issued.json<{ secret: string; token: { id: number } }>();
+      const check = (headers: Record<string, string>) =>
+        app.inject({ method: 'GET', url: '/api/v1/core-health', headers });
+
+      const up = await check({ authorization: `Bearer ${secret}` });
+      assert.equal(up.statusCode, 200, up.body);
+      assert.ok('ingestQueue' in up.json<{ channels: Record<string, unknown> }>().channels);
+
+      // Not a 200 for anybody who is not that token: so a 200 is the core, and not a login page
+      // or a proxy's welcome.
+      assert.equal((await check({})).statusCode, 401);
+      assert.equal((await check({ authorization: `Bearer ${secret}x` })).statusCode, 401);
+      assert.equal((await check({ authorization: 'Bearer mst_never-issued' })).statusCode, 401);
+
+      // And the token is read-only in fact: the same secret changes nothing.
+      const write = await app.inject({
+        method: 'POST',
+        url: '/api/v1/objects',
+        headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' },
+        payload: { kind: 'group', parentId: probeId, name: 'made by the check' },
+      });
+      assert.equal(write.statusCode, 403, write.body);
+
+      // Revoked, it stops answering, so a token that leaked from a crontab can be ended.
+      const revoked = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/auth/tokens/${String(token.id)}`,
+        headers: as('rooted'),
+      });
+      assert.equal(revoked.statusCode, 204, revoked.body);
+      assert.equal((await check({ authorization: `Bearer ${secret}` })).statusCode, 401);
+    });
+
+    it('does not answer that check 200 while the database a token is checked against is gone (H-18)', async () => {
+      // The route itself answers without a database (`P-126`): its numbers degrade to gaps. What
+      // makes the check from outside cover the database is the token, which is looked up there —
+      // so this is a second server whose tokens are read from a database that refuses.
+      const gone = {
+        query: () =>
+          Promise.reject(
+            Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:5432'), {
+              code: 'ECONNREFUSED',
+            }),
+          ),
+      } as unknown as Database;
+      const coreHealth = fixedCoreHealth(db);
+      const audit = new DatabaseAuditSink();
+      const outside = new ApiServer({
+        config: {
+          host: '127.0.0.1',
+          port: 0,
+          webRoot: '',
+          allowedOrigins: [],
+          requireAuthentication: true,
+        },
+        logger: silent,
+        version: '9.9.9',
+        service: harness.service,
+        history: new HistoryService({ db, logger: silent }),
+        db,
+        audit: new AuditRepository(),
+        catalogue: testCatalogue(),
+        coreHealth: () => coreHealth,
+        auth: {
+          accounts: new AccountService({ audit, db, logger: silent }),
+          sessions: new SessionService({ db, logger: silent }),
+          throttle: new LoginThrottle({ db, logger: silent, sleep: () => Promise.resolve() }),
+          groups,
+          access,
+          tokens: new TokenService({ audit, db: gone, logger: silent }),
+          totp: new TotpService({ audit, db, logger: silent }),
+          required: true,
+        },
+      });
+      await outside.build('9.9.9', harness.service);
+      try {
+        const down = await outside.app.inject({
+          method: 'GET',
+          url: '/api/v1/core-health',
+          headers: { authorization: 'Bearer mst_any-token-at-all' },
+        });
+        assert.equal(down.statusCode, 500, down.body);
+        // The control: the same server answers the same route to a session, which this database
+        // can still check. So the refusal above is the token's lookup and nothing else.
+        const control = await outside.app.inject({
+          method: 'GET',
+          url: '/api/v1/core-health',
+          headers: as('admin'),
+        });
+        assert.equal(control.statusCode, 200, control.body);
+      } finally {
+        await outside.app.close();
+      }
+    });
+
     it('scrapes without the probes a root reader was carved out of (A-31)', async () => {
       // `#withoutHiddenProbes` ran in no test: it needs an account that clears the root bar and
       // still has a probe hidden from it.

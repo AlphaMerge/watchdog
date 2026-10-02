@@ -18,6 +18,10 @@
     "idleTimeoutMinutes": 720,
     "absoluteTimeoutHours": 168
   },
+  "heartbeat": {
+    "url": "",
+    "intervalSeconds": 300
+  },
   "database": {
     "host": "127.0.0.1",
     "port": 5432,

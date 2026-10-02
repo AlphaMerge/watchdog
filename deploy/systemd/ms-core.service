@@ -18,8 +18,10 @@ Wants=network-online.target
 # against — exits 78, which is not restarted. A database that stays down puts at most two starts
 # in any ten minutes. The table is in docs/administration.md, "What a start failure does".
 # **A core in `failed` is silent**: it is the thing that raises alarms, so only something outside
-# this system notices it — the host's own monitoring, or a check from another machine. This
-# project ships none. **So a core the limit stopped is started again** (H-23): ms-recover@ tries
+# this system notices it. Three ways to be told are in docs/administration.md, "Watching the core
+# from outside" (H-18): a check from another machine, the core's own heartbeat to a receiver you
+# name (`heartbeat.url` in core.json, off until set), and a second OnFailure= in a drop-in, which
+# adds to the one below. **And a core the limit stopped is started again** (H-23): ms-recover@ tries
 # after 10 minutes, doubling to 4 hours, for as long as it keeps crashing. It never retries a core
 # that exited 78, which fails differently. To keep it down, `systemctl disable ms-core`.
 # After fixing the cause, `systemctl reset-failed ms-core` and start it.

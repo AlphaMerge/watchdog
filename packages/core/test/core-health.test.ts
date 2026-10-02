@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
-import { CORE_HEALTH_CHANNELS, CORE_HEALTH_COUNTERS } from '@ms/sensors';
+import { CORE_HEALTH_CHANNELS, CORE_HEALTH_COUNTERS, coreHealth } from '@ms/sensors';
 import type { AvailableMemoryLow, CheckResult } from '@ms/shared';
 import {
   CoreHealthService,
@@ -683,6 +683,45 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
         process: fakeProcess({ cpuUs: [], elapsedNs: [], uptime: 1_000 }),
       });
       assert.equal((await service.read())['rateLimited'], null, 'a server with no limit');
+    });
+  });
+
+  describe('the heartbeats that did not reach their receiver (H-18)', () => {
+    it('counts them per reading, from the first, and clears', async () => {
+      // The receiver alarms when the requests stop; this is the core saying, while it is up to
+      // say it, that they have.
+      const beats = { sent: 40, failures: 2 };
+      const service = new CoreHealthService({
+        vouching: everyVoucherHolds,
+        db,
+        logger: silent,
+        sources: { ...sources(), heartbeat: () => ({ ...beats }) },
+        ingest: () => Promise.resolve(),
+        process: fakeProcess({ cpuUs: [], elapsedNs: [], uptime: 1_000 }),
+      });
+      assert.equal((await service.read())['heartbeatFailures'], 2);
+      beats.failures = 5;
+      beats.sent = 41;
+      assert.equal((await service.read())['heartbeatFailures'], 3);
+      assert.equal((await service.read())['heartbeatFailures'], 0, 'a count, not a total');
+    });
+
+    it('gaps where no heartbeat is configured, which is the default', async () => {
+      // Not zero: a heartbeat nobody set up has not arrived every time.
+      assert.equal((await build().read())['heartbeatFailures'], null);
+    });
+
+    it('warns on the first one, in words that say what will happen next', () => {
+      const channel = coreHealth.channels({}).find((one) => one.key === 'heartbeatFailures');
+      assert.ok(channel !== undefined, 'Core Health declares the channel');
+      const limits = channel.limits;
+      assert.ok(limits !== undefined, 'with a limit of its own');
+      assert.equal(limits.upperWarning, 0);
+      assert.equal(limits.upperError, undefined, 'a warning: the core itself is working');
+      assert.match(limits.warningMessage ?? '', /will report this core as stopped/);
+      assert.equal(channel.unit, 'requests');
+      assert.ok(CORE_HEALTH_CHANNELS.includes('heartbeatFailures'));
+      assert.ok(!CORE_HEALTH_COUNTERS.has('heartbeatFailures'), 'a count a reading, not a rate');
     });
   });
 

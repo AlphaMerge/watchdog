@@ -119,6 +119,12 @@ export interface CoreHealthSources {
    */
   rateLimit?: () => { refused: number } | undefined;
   /**
+   * `Heartbeat.stats()` — heartbeats that were due and did not reach their receiver, since the
+   * core started (`H-18`). Absent where no `heartbeat.url` is set, and the channel gaps: a
+   * heartbeat nobody configured has not failed zero times.
+   */
+  heartbeat?: () => { failures: number };
+  /**
    * The last housekeeping pass's view of the disk (`S-17`).
    *
    * Read from the *report* rather than measured here, and that is deliberate: the number Core
@@ -234,6 +240,7 @@ export class CoreHealthMeters {
   localProbeLog: { readonly meter: DeltaMeter; readonly session: number } | undefined;
   readonly hosts = new DeltaMeter();
   readonly rateLimit = new DeltaMeter();
+  readonly heartbeat = new DeltaMeter();
 }
 
 const MB = 1024 * 1024;
@@ -333,6 +340,7 @@ export class CoreHealthService {
     const log = this.#sources.log?.();
     const hosts = this.#sources.hosts?.();
     const rateLimit = this.#sources.rateLimit?.();
+    const heartbeat = this.#sources.heartbeat?.();
 
     const memory = this.#process.memoryUsage();
     const queues = await this.#queues(now, degradeOnDatabaseError);
@@ -413,6 +421,9 @@ export class CoreHealthService {
       // The same shape: refused since the last reading, and the whole count on the first.
       rateLimited:
         rateLimit === undefined ? null : meters.rateLimit.take(rateLimit.refused, uptime, true),
+      // And again: failed since the last reading, and the whole count on the first (`H-18`).
+      heartbeatFailures:
+        heartbeat === undefined ? null : meters.heartbeat.take(heartbeat.failures, uptime, true),
     };
     return { reading, parkedError: queues.parked.lastError };
   }

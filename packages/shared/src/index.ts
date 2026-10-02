@@ -8,6 +8,7 @@ export {
   allowedHostProblem,
   coreConfigSchema,
   DEFAULT_RATE_LIMIT_PER_MINUTE,
+  heartbeatUrlProblem,
   probeConfigSchema,
   trustedProxyProblem,
 } from './config/schema.js';

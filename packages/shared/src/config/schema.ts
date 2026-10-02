@@ -458,6 +458,33 @@ export interface CoreConfig {
     absoluteTimeoutHours: number;
   };
   /**
+   * A request the core makes for as long as it is working, so that something outside it can
+   * notice when it stops (`H-18`). A dead man's switch.
+   *
+   * **The core is what raises alarms, so a core that has stopped is silent.** Whatever serves
+   * `url` — the operator's own, or a hosted one — is told to expect a request every
+   * `intervalSeconds` and alarms when they stop coming. Nothing here depends on it being there.
+   *
+   * **Sent by the housekeeping pass, and only by one that finished**: a stopped process, a wedged
+   * loop and a database that cannot be reached all end the requests, which a timer of its own
+   * would not. Core Health's `heartbeatFailures` counts each one that was due and did not arrive.
+   */
+  heartbeat: {
+    /**
+     * Where to send it: an `http` or `https` URL, requested with `GET` exactly as written. Empty,
+     * the default, sends nothing. A receiver's token goes in the path or the query, where the
+     * operator put it; nothing else about this installation is sent but its version, in
+     * `User-Agent`.
+     */
+    url: string;
+    /**
+     * Seconds between requests, 300 by default. Never shorter than
+     * `housekeeping.intervalSeconds`, since the pass is what sends it — `config check` refuses
+     * that. Tell the receiver this figure, with a grace of at least one more.
+     */
+    intervalSeconds: number;
+  };
+  /**
    * Where a geographical map's tiles come from (`G-08`, `ADR-004`).
    *
    * **Empty by default, and the product ships no tiles and no provider.** Bundling a world is
@@ -873,6 +900,7 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
     'service',
     'api',
     'sessions',
+    'heartbeat',
     'notifications',
     'database',
     'ingestion',
@@ -931,6 +959,18 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
         // Ninety days at the most. A browser that must stay signed in longer than a quarter is
         // a script, and a script uses an API token.
         absoluteTimeoutHours: { type: 'integer', minimum: 1, maximum: 2_160, default: 168 },
+      },
+    },
+    heartbeat: {
+      type: 'object',
+      default: {} as CoreConfig['heartbeat'],
+      additionalProperties: false,
+      required: ['url', 'intervalSeconds'],
+      properties: {
+        // Not by pattern: `heartbeatUrlProblem` below says what is wrong with it in words.
+        url: { type: 'string', default: '' },
+        // Ten seconds at the least, which is the housekeeping pass's own floor; a day at the most.
+        intervalSeconds: { type: 'integer', minimum: 10, maximum: 86_400, default: 300 },
       },
     },
     maps: {
@@ -1304,6 +1344,36 @@ export function allowedHostProblem(entry: string): string | undefined {
   );
 }
 
+/**
+ * What is wrong with `heartbeat.url`, or `undefined` when it can be requested (`H-18`).
+ *
+ * An absolute `http` or `https` URL. **One carrying a user name or a password is refused**: the
+ * request would have to turn them into an `Authorization` header, which is a credential this core
+ * was never asked to send, and a receiver's token belongs in the path or the query. The problem
+ * never repeats the URL, which usually carries that token and would end up in a log.
+ */
+export function heartbeatUrlProblem(url: string): string | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return (
+      'heartbeat.url: not a URL — give the whole address, as in ' +
+      '"https://hc.example.org/ping/1f0c"'
+    );
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return `heartbeat.url: "${parsed.protocol}" cannot be requested — use http or https`;
+  }
+  if (parsed.username !== '' || parsed.password !== '') {
+    return (
+      'heartbeat.url: carries a user name or a password, which this core does not send — put ' +
+      "the receiver's token in the path or the query"
+    );
+  }
+  return undefined;
+}
+
 RULES.set(coreConfigSchema, (config: CoreConfig): readonly string[] => {
   const problems: string[] = [];
   for (const entry of config.api.trustedProxies) {
@@ -1322,6 +1392,26 @@ RULES.set(coreConfigSchema, (config: CoreConfig): readonly string[] => {
         'timeout would never be what ended a session; raise the absolute timeout or lower the ' +
         'idle one',
     );
+  }
+  if (config.heartbeat.url !== '') {
+    const problem = heartbeatUrlProblem(config.heartbeat.url);
+    if (problem !== undefined) problems.push(problem);
+    // The pass is what sends it (`H-18`), so with no pass there is nothing to send, and an
+    // interval shorter than the pass's is one the receiver would be told and never see kept.
+    if (!config.housekeeping.enabled) {
+      problems.push(
+        'heartbeat.url: set while housekeeping.enabled is false, and the housekeeping pass is ' +
+          'what sends the heartbeat — enable housekeeping or clear the URL',
+      );
+    }
+    if (config.heartbeat.intervalSeconds < config.housekeeping.intervalSeconds) {
+      problems.push(
+        `heartbeat.intervalSeconds: ${String(config.heartbeat.intervalSeconds)} seconds is ` +
+          'shorter than housekeeping.intervalSeconds ' +
+          `(${String(config.housekeeping.intervalSeconds)}), and the housekeeping pass is what ` +
+          'sends the heartbeat; raise it, or lower the housekeeping interval',
+      );
+    }
   }
   return problems;
 });

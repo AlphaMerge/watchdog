@@ -499,6 +499,21 @@ const CHANNELS: readonly ChannelDef[] = [
         'api.rateLimitPerMinute or have it build with POST /objects/tree',
     },
   },
+  // **Heartbeats that were due and did not arrive** (`H-18`), since the last reading: refused by
+  // the receiver, timed out, not connected, or withheld because the housekeeping pass that sends
+  // them failed. **Any is the warning**: the receiver is what reports a stopped core, and it is
+  // about to report this one. A gap where no `heartbeat.url` is set, which is the default.
+  {
+    key: 'heartbeatFailures',
+    name: 'Heartbeats that did not arrive',
+    unit: 'requests',
+    limits: {
+      upperWarning: 0,
+      warningMessage:
+        'the heartbeat is not reaching its receiver, which will report this core as stopped; ' +
+        'the core log says why',
+    },
+  },
 ];
 
 export const coreHealth: SensorType = {

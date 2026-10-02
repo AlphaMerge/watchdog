@@ -73,6 +73,7 @@ import { TemplateActivation } from './notifications/activation.js';
 import { ProbeDeliveryWatch } from './probes/delivery-watch.js';
 import { remoteClockOffsets } from './health/core-clock.js';
 import { CoreHealthService } from './health/core-health.js';
+import { heartbeatFor } from './health/heartbeat.js';
 import { ProbeHealthService, ProbeHealthTargets } from './health/probe-health.js';
 import { MetricsExporter } from './metrics/exporter.js';
 import { PeriodicSweep } from './support/periodic-sweep.js';
@@ -1172,6 +1173,9 @@ async function serve(): Promise<void> {
     path: config.housekeeping.disk.path,
     dataDir: config.service.dataDir,
   });
+  // The dead man's switch (`H-18`): off unless an operator named a receiver. It has no timer; the
+  // housekeeping loop tells it as each pass ends, so a wedged pass sends nothing.
+  const heartbeat = heartbeatFor(config, VERSION, logger);
   const housekeeper = new Housekeeper({
     db,
     logger,
@@ -1180,12 +1184,17 @@ async function serve(): Promise<void> {
     disk,
     // No reports to prune in a build that has none (`H-12`).
     reports: v2.reporting !== undefined,
+    ...(heartbeat === undefined ? {} : { witness: heartbeat }),
   });
   housekeeper.start();
   lifecycle.onShutdown({
     name: 'housekeeping',
     timeoutMs: 15_000,
-    run: () => housekeeper.stop(),
+    run: async () => {
+      // First, so the pass a stop cuts short is not reported as one that finished.
+      heartbeat?.stop();
+      await housekeeper.stop();
+    },
   });
 
   // Ingestion writes readings; the housekeeper is what it tells about ranges that land behind a
@@ -1367,6 +1376,7 @@ async function serve(): Promise<void> {
       ingestionDiscards: () => ingestion.stats(),
       hosts: () => api.hostStats(),
       rateLimit: () => api.rateLimitStats(),
+      ...(heartbeat === undefined ? {} : { heartbeat: () => heartbeat.stats() }),
       // Gaps in the v1 profile, which has no reporting to count (`H-12`).
       ...(v2.reporting === undefined ? {} : { reports: v2.reporting.stats }),
     },

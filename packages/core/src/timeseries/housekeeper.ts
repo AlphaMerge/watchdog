@@ -1,6 +1,7 @@
 import { describeError, type HousekeepingConfig, type Logger } from '@ms/shared';
 import { AuditRepository } from '../audit/store.js';
 import type { Database, Queryable } from '../db/pool.js';
+import type { PassWitness } from '../health/heartbeat.js';
 import type { DiskReading, DiskWatcher } from './disk.js';
 import type { EngineCapabilities } from './engine.js';
 import {
@@ -183,6 +184,12 @@ export interface HousekeeperOptions {
    * Defaults to true, which is every build before that one.
    */
   reports?: boolean;
+  /**
+   * Told as each pass of the loop ends, and never waited for (`H-18`). The heartbeat rides this
+   * rather than a timer of its own, so a pass that never returns sends nothing. Only the loop
+   * tells it: a `runOnce` called directly does not.
+   */
+  witness?: PassWitness;
   /** Injectable so an eviction test does not have to wait out a real clock. */
   now?: () => Date;
   /**
@@ -219,6 +226,7 @@ export class Housekeeper {
   readonly #config: HousekeepingConfig;
   readonly #disk: DiskWatcher | undefined;
   readonly #pruneReportsEnabled: boolean;
+  readonly #witness: PassWitness | undefined;
   readonly #now: () => Date;
   readonly #monotonicMs: () => number;
   #lastDisk: DiskReading | null = null;
@@ -248,6 +256,7 @@ export class Housekeeper {
     this.#audit = options.auditRepository ?? new AuditRepository();
     this.#disk = options.disk;
     this.#pruneReportsEnabled = options.reports ?? true;
+    this.#witness = options.witness;
     this.#now = options.now ?? (() => new Date());
     this.#monotonicMs = options.monotonicMs ?? (() => Number(process.hrtime.bigint() / 1_000_000n));
   }
@@ -364,8 +373,13 @@ export class Housekeeper {
     this.#inFlight = this.runOnce();
     try {
       await this.#inFlight;
+      // After the pass and not before it, so a pass that never returns is a heartbeat that never
+      // leaves (`H-18`). Not awaited: the request has its own timeout.
+      this.#witness?.passed();
     } catch (error: unknown) {
-      this.#logger.error({ err: describeError(error) }, 'housekeeping pass failed');
+      const described = describeError(error);
+      this.#logger.error({ err: described }, 'housekeeping pass failed');
+      this.#witness?.failed(described.message);
     } finally {
       this.#inFlight = undefined;
     }
