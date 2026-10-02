@@ -673,10 +673,19 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         { kind: 'indefinite' },
         'maintenance on the rack',
       );
+      // Credential sets with no bounds, inside the branch and outside it (`U-21`): the list of
+      // them names the object each is stored on, so the hidden probe and the hidden group are
+      // there for it to leak and the branch's own is there for it to show.
+      for (const owner of [probeId, otherGroupId, branchId]) {
+        await harness.service.setCredential(testActor, owner, 'snmp', { community: 'swept' });
+      }
     });
 
     after(async () => {
       await harness.service.resume(testActor, carvedDeviceId);
+      for (const owner of [probeId, otherGroupId, branchId]) {
+        await harness.service.clearCredential(testActor, owner, 'snmp');
+      }
     });
 
     /** Every id this account can see, for whatever `:id` means on a route. */
@@ -799,6 +808,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         'GET /api/v1/public/maps/:token',
         'GET /api/v1/libraries',
         'GET /api/v1/discovery/schedules',
+        'GET /api/v1/credentials/unbounded',
         'GET /api/v1/probes',
         'GET /metrics',
         // Each is its own option to `ApiServer`, so leaving one out loses its routes without a
@@ -3587,6 +3597,8 @@ const NAMED_BY: readonly (readonly [name: string, route: string])[] = [
   ['a-found-vendor', '/api/v1/discovery/:id/summary'],
   ['Customer A library', '/api/v1/libraries'],
   ['Customer A wall', '/api/v1/maps'],
+  // The branch's own set without bounds, in a list that also holds the hidden probe's (`U-21`).
+  ['Customer A', '/api/v1/credentials/unbounded'],
 ];
 
 /**

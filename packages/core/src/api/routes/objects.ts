@@ -200,6 +200,19 @@ const idParams = {
   properties: { id: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER } },
 } as const;
 
+/**
+ * A credential write asked for as a preview (`U-21`): run whole, and rolled back.
+ *
+ * On the route that writes rather than beside it, so the bar is the write's own and there is one
+ * handler to keep right. An enumeration and not a boolean, as `effective` is on the read: a
+ * mistyped value is refused, where coercion would have made `?dryRun=yes` a real write.
+ */
+const dryRunQuery = {
+  type: 'object',
+  additionalProperties: false,
+  properties: { dryRun: { type: 'string', enum: ['true', 'false'] } },
+} as const;
+
 const credentialKindParams = {
   type: 'object',
   required: ['id', 'kind'],
@@ -1764,6 +1777,54 @@ export async function objectRoutes(
     },
   );
 
+  // ── 15b. the sets with no bounds ─────────────────────────────────────────────────────────
+  app.get(
+    '/credentials/unbounded',
+    {
+      // Everything the caller can see, filtered by it (`A-12`): the list has no object in its
+      // path to hold a bar against, and a set on a hidden object is simply not in it.
+      config: READS,
+      schema: {
+        tags: ['credentials'],
+        description:
+          'The credential sets with no `allowedTargets` and no SSH `hostKeys`, each with the ' +
+          'object it is stored on (`U-21`). `write` on that object is trust with the set ' +
+          '(`A-41`), so this is the list to work through. **Only sets on objects the caller can ' +
+          "see**: Core Health's `credentialsUnbounded` counts the installation's, and may be " +
+          'higher. No secret, and no public field either: the set itself is read from its object.',
+        response: {
+          200: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['items'],
+            properties: {
+              items: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['objectId', 'objectKind', 'objectName', 'kind', 'updatedAt'],
+                  properties: {
+                    objectId: { type: 'integer' },
+                    objectKind: { type: 'string' },
+                    objectName: { type: 'string' },
+                    kind: { type: 'string' },
+                    updatedAt: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      await reply
+        .header('cache-control', PRIVATE)
+        .send({ items: await service.unboundedCredentials(await visibilityOf(request)) });
+    },
+  );
+
   // ── 16. the kinds an operator can store, and the form for each ───────────────────────────
   app.get(
     '/credential-kinds',
@@ -1809,7 +1870,11 @@ export async function objectRoutes(
   );
 
   // ── 17. store a credential set ───────────────────────────────────────────────────────────
-  app.put<{ Params: { id: number; kind: string }; Body: { values: Record<string, unknown> } }>(
+  app.put<{
+    Params: { id: number; kind: string };
+    Querystring: { dryRun?: string };
+    Body: { values: Record<string, unknown> };
+  }>(
     '/objects/:id/credentials/:kind',
     {
       config: onObject('write'),
@@ -1830,8 +1895,12 @@ export async function objectRoutes(
           'inside them whoever wrote the sensor, and to none outside, and `withholds` says how ' +
           'many sensors beneath are outside now. A write that widens them (an entry added, the ' +
           'list emptied, strict key checking turned off) clears the secrets it does not send ' +
-          'again, and `secretsCleared` names them.',
+          'again, and `secretsCleared` names them. **`?dryRun=true` is the same write, rolled ' +
+          'back** (`U-21`): the same checks, the same refusals and the same answer, with nothing ' +
+          'stored and nothing in the history, so a form can say what a save will do before it ' +
+          'is confirmed.',
         params: credentialKindParams,
+        querystring: dryRunQuery,
         body: {
           type: 'object',
           additionalProperties: false,
@@ -1849,13 +1918,14 @@ export async function objectRoutes(
           request.params.kind,
           request.body.values,
           optionalIfMatch(request.headers['if-match']),
+          { preview: request.query.dryRun === 'true' },
         ),
       );
     },
   );
 
   // ── 18. remove a credential set ──────────────────────────────────────────────────────────
-  app.delete<{ Params: { id: number; kind: string } }>(
+  app.delete<{ Params: { id: number; kind: string }; Querystring: { dryRun?: string } }>(
     '/objects/:id/credentials/:kind',
     {
       config: onObject('write'),
@@ -1868,16 +1938,26 @@ export async function objectRoutes(
           "group's one is now in use rather than leaving it to be discovered. **403** when the " +
           'set that comes back into force would reach a sensor somewhere nobody with `write` on ' +
           'where it is stored vouched for, and you do not have that `write` either (`A-41`); ' +
-          'the set stays.',
+          'the set stays. `sensors` is how many sensors beneath were using the set. ' +
+          '**`?dryRun=true` is the same removal, rolled back** (`U-21`): what would lose the ' +
+          'set and what would come into force, or the same 403, with the set left where it is.',
         params: credentialKindParams,
+        querystring: dryRunQuery,
         response: {
           200: {
             type: 'object',
             additionalProperties: false,
-            required: ['kind', 'removed', 'nowInherited'],
+            required: ['kind', 'removed', 'sensors', 'nowInherited'],
             properties: {
               kind: { type: 'string' },
               removed: { type: 'boolean' },
+              sensors: {
+                type: 'integer',
+                minimum: 0,
+                description:
+                  'How many sensors at or beneath this object resolved this kind to the set ' +
+                  'removed. Zero when there was no set to remove.',
+              },
               nowInherited: {
                 oneOf: [{ $ref: 'ms:credentialView' }, { type: 'null' }],
               },
@@ -1892,6 +1972,7 @@ export async function objectRoutes(
         request.params.id,
         request.params.kind,
         optionalIfMatch(request.headers['if-match']),
+        { preview: request.query.dryRun === 'true' },
       );
       await reply.send({ kind: request.params.kind, ...outcome });
     },

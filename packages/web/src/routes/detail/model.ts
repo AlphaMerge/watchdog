@@ -1,5 +1,6 @@
 import type { HistoryChannel, SettingView, TriggerKind } from '../../api/types';
 import type { ChartGroup } from '@ms/shared/charts';
+import type { TabDefinition } from '../../components/tabs-model';
 import { labelFor, seedDefaults, type FieldModel, type JsonSchema } from '../../forms/schema';
 
 /**
@@ -13,6 +14,24 @@ import { labelFor, seedDefaults, type FieldModel, type JsonSchema } from '../../
  * and a function cannot Fast Refresh — editing any of the five would reload the page instead of
  * hot-updating it.
  */
+
+// ---------------------------------------------------------------------------------------------
+// The page's sections (U-04, U-21).
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Which sections this kind actually has. A device has no channels and no history, and a sensor
+ * stores no credential set: it uses the one in force on its device, which is where that is read
+ * and changed (`U-21`).
+ */
+export function tabsFor(detail: { kind: string }): TabDefinition[] {
+  const tabs: TabDefinition[] = [{ id: 'overview', label: 'Overview' }];
+  if (detail.kind === 'sensor') tabs.push({ id: 'history', label: 'History' });
+  tabs.push({ id: 'log', label: 'Log' }, { id: 'settings', label: 'Settings' });
+  if (detail.kind !== 'sensor') tabs.push({ id: 'credentials', label: 'Credentials' });
+  tabs.push({ id: 'triggers', label: 'Triggers' }, { id: 'changes', label: 'Changes' });
+  return tabs;
+}
 
 // ---------------------------------------------------------------------------------------------
 // Channel readings (U-04).

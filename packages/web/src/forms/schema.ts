@@ -137,6 +137,20 @@ export function fieldsOf(schema: JsonSchema, prefix = ''): FieldModel[] {
 }
 
 /**
+ * Whether a string field holds more than one line (`U-21`).
+ *
+ * Asked of a secret, where it decides the control: a single-line input drops the line breaks out
+ * of whatever is pasted into it, and an SSH private key without its line breaks is not a key. No
+ * schema keyword says "multi-line", so the length it allows stands in for one: nothing that fits
+ * on a line is declared with room for four thousand characters.
+ */
+export function isMultiline(schema: JsonSchema): boolean {
+  return schema.maxLength !== undefined && schema.maxLength > MULTILINE_ABOVE;
+}
+
+const MULTILINE_ABOVE = 4_096;
+
+/**
  * The value a field starts at when nothing is stored.
  *
  * The schema's own `default` where it has one, because the core applies and *stores* defaults at

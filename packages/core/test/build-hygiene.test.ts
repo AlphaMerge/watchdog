@@ -188,6 +188,10 @@ describe('credential-shaped response fields', () => {
       'secretsCleared',
       'The names of the secret fields a credential write cleared because it widened where the set may go (A-41b), never their values.',
     ],
+    [
+      'secretsSet',
+      "The names of the secret fields a credential set holds a value for (U-21), never their values: what a form needs to offer keep, replace and clear, and what the set's audit entries already name. credential-view.test.ts asserts no value is in the answer.",
+    ],
   ]);
 
   const SHAPE =

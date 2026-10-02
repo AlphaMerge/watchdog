@@ -17,14 +17,15 @@ import type {
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
 import { TabPanel, Tabs } from '../components/Tabs';
-import type { TabDefinition } from '../components/tabs-model';
 import { rollup, stateFor } from '../tree/model';
 import { ChannelTable } from './detail/ChannelTable';
+import { CredentialsPanel } from './detail/CredentialsPanel';
 import { HistoryPanel } from './detail/HistoryPanel';
 import { SettingsPanel } from './detail/SettingsPanel';
 import { StateLogPanel } from './detail/StateLogPanel';
 import { ActorLink, MoreButton } from './LogsView';
 import { usePaged } from './logs-model';
+import { tabsFor } from './detail/model';
 import { ParamsForm } from './detail/ParamsForm';
 import { TriggersPanel } from './detail/TriggersPanel';
 import { PageTitle } from '../components/PageTitle';
@@ -43,7 +44,7 @@ const KIND_GLYPH: Record<string, string> = {
 /**
  * The object detail page (`U-04`), which for a sensor is *the* page.
  *
- * **Six tabs rather than one long column**, and the tab lives in the URL. "Look at the triggers
+ * **Tabs rather than one long column**, and the tab lives in the URL. "Look at the triggers
  * on this sensor" is the kind of thing one person sends another, and a tab held in component
  * state cannot be linked to and does not survive a reload.
  *
@@ -109,6 +110,7 @@ export function ObjectDetailView(): React.JSX.Element {
               <Card title="Channels">
                 <LiveChannels
                   sensorId={detail.id}
+                  sensorType={detail.sensorType}
                   channels={channels.status === 'ready' ? channels.data.items : null}
                   lookups={lookups.status === 'ready' ? lookups.data.items : null}
                 />
@@ -169,6 +171,18 @@ export function ObjectDetailView(): React.JSX.Element {
         </TabPanel>
       )}
 
+      {active === 'credentials' && (
+        <TabPanel id="credentials">
+          {/* Keyed by the object: a link from an inherited set goes to its owner's tab, which is
+              this same component, and a form left open must not follow it there. */}
+          <CredentialsPanel
+            key={detail.id}
+            object={detail}
+            ancestors={ancestors.status === 'ready' ? ancestors.data.items : null}
+          />
+        </TabPanel>
+      )}
+
       {active === 'triggers' && (
         <TabPanel id="triggers">
           <Card title="Notification triggers">
@@ -186,19 +200,6 @@ export function ObjectDetailView(): React.JSX.Element {
       )}
     </div>
   );
-}
-
-/** Which sections this kind actually has. A device has no channels and no history. */
-function tabsFor(detail: ObjectDetail): TabDefinition[] {
-  const tabs: TabDefinition[] = [{ id: 'overview', label: 'Overview' }];
-  if (detail.kind === 'sensor') tabs.push({ id: 'history', label: 'History' });
-  tabs.push(
-    { id: 'log', label: 'Log' },
-    { id: 'settings', label: 'Settings' },
-    { id: 'triggers', label: 'Triggers' },
-    { id: 'changes', label: 'Changes' },
-  );
-  return tabs;
 }
 
 function Header({
@@ -324,10 +325,12 @@ function Breadcrumb({
  */
 function LiveChannels({
   sensorId,
+  sensorType,
   channels,
   lookups,
 }: {
   sensorId: number;
+  sensorType: string | undefined;
   channels: readonly ChannelRecord[] | null;
   lookups: readonly LookupSummary[] | null;
 }): React.JSX.Element {
@@ -360,6 +363,7 @@ function LiveChannels({
   return (
     <ChannelTable
       channels={channels}
+      sensorType={sensorType}
       values={values.status === 'ready' ? values.data : null}
       lookups={lookups}
       now={Date.now()}

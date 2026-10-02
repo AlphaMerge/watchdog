@@ -316,12 +316,26 @@ describe(
         const views = await h.service.credentials(sensorId, true);
         assert.equal(views.length, 1);
         assert.deepEqual(Object.keys(views[0] ?? {}).sort(), [
+          'bounded',
           'kind',
           'publicParams',
           'source',
           'updatedAt',
         ]);
         assert.equal(JSON.stringify(views).includes(COMMUNITY), false);
+
+        // Read where it is stored, it also names which secrets hold a value (`U-21`): names.
+        const own = await h.service.credentials(deviceId, true);
+        assert.deepEqual(Object.keys(own[0] ?? {}).sort(), [
+          'bounded',
+          'kind',
+          'publicParams',
+          'secretsSet',
+          'source',
+          'updatedAt',
+        ]);
+        assert.deepEqual(own[0]?.secretsSet, ['community']);
+        assert.equal(JSON.stringify(own).includes(COMMUNITY), false);
       });
     });
 

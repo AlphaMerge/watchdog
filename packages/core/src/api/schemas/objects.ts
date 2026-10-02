@@ -316,12 +316,26 @@ export const credentialViewSchema = {
   $id: 'ms:credentialView',
   type: 'object',
   additionalProperties: false,
-  required: ['kind', 'publicParams', 'source', 'updatedAt'],
+  required: ['kind', 'publicParams', 'source', 'updatedAt', 'bounded'],
   properties: {
     kind: { enum: CREDENTIAL_KINDS },
     publicParams: { type: 'object', additionalProperties: true },
     source: { $ref: 'ms:settingSource' },
     updatedAt: { type: 'string' },
+    bounded: {
+      type: 'boolean',
+      description:
+        "Whether `allowedTargets`, or an SSH set's `hostKeys` with strict checking, bound where " +
+        'the set goes (`A-41b`). False means `write` on the object it is stored on is trust ' +
+        'with it.',
+    },
+    secretsSet: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'The names of the secret fields that hold a value, never the values (`U-21`). Only on a ' +
+        'set stored on the object asked about, for its form to offer keep, replace and clear.',
+    },
   },
 } as const;
 

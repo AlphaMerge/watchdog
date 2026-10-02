@@ -1,5 +1,7 @@
+import { Link } from 'react-router-dom';
 import type { ChannelRecord, ChannelValue, LookupSummary, SensorValues } from '../../api/types';
 import { Empty } from '../../components/Panels';
+import { channelLinkFor } from './credentials-model';
 import { formatValue, howLongAgo } from './model';
 
 /**
@@ -13,11 +15,14 @@ import { formatValue, howLongAgo } from './model';
  */
 export function ChannelTable({
   channels,
+  sensorType,
   values,
   lookups,
   now,
 }: {
   channels: readonly ChannelRecord[];
+  /** The sensor's type, for a channel whose number has a page that lists what it counts. */
+  sensorType?: string | undefined;
   values: SensorValues | null;
   lookups: readonly LookupSummary[] | null;
   now: number;
@@ -69,6 +74,7 @@ export function ChannelTable({
                     </span>
                   )}
                   <Processing channel={channel} />
+                  <CountedOn sensorType={sensorType} channelKey={channel.key} />
                 </span>
               </th>
               <td className="py-2 pr-3 text-right align-top">
@@ -120,6 +126,28 @@ function Reading({
         {howLongAgo(value.at, now)}
       </time>
     </span>
+  );
+}
+
+/**
+ * The page that lists what a channel counts, where there is one (`U-21`).
+ *
+ * A count says how many and not which. Core Health's **Credential sets without targets** was the
+ * only place an operator learned a set had no bounds, and it could not say which set.
+ */
+function CountedOn({
+  sensorType,
+  channelKey,
+}: {
+  sensorType: string | undefined;
+  channelKey: string;
+}): React.JSX.Element | null {
+  const link = channelLinkFor(sensorType, channelKey);
+  if (link === null) return null;
+  return (
+    <Link to={link.to} className="text-xs text-accent hover:underline">
+      {link.label} →
+    </Link>
   );
 }
 

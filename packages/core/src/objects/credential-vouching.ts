@@ -555,6 +555,22 @@ export async function withheldByBounds(
   return sensors.size;
 }
 
+/**
+ * How many sensors at or beneath `ownerId` resolve this kind to the set stored on it (`U-21`): what
+ * removing that set takes it from. The nearest-set rule is `routesAtOrUnder`'s, so a sensor under
+ * a device with a set of its own is not counted against the group's.
+ */
+export async function sensorsUsing(
+  q: Queryable,
+  types: CredentialTypes,
+  ownerId: ObjectId,
+  kind: string,
+): Promise<number> {
+  const routes = await routesAtOrUnder(q, types, [ownerId], { kinds: [kind] });
+  return new Set(routes.filter((route) => route.ownerId === ownerId).map((route) => route.sensorId))
+    .size;
+}
+
 /** One sensor a probe's configuration is about to send credentials to. */
 export interface SensorBeingSent {
   readonly sensorId: number;

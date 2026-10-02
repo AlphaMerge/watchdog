@@ -302,6 +302,27 @@ export interface CredentialView {
   readonly publicParams: Readonly<Record<string, unknown>>;
   readonly source: SettingSource;
   readonly updatedAt: string;
+  /**
+   * Whether allowed targets or SSH host keys bound where the set goes (`A-41b`). Said here rather
+   * than left for a client to work out from `publicParams`: the rule has an exception (the one
+   * legacy `hostKeyFingerprint` bounds nothing) and lives in one function, `isRestricted`.
+   */
+  readonly bounded: boolean;
+  /**
+   * The names of the secret fields that hold a value (`U-21`), so a form can offer keep, replace
+   * and clear. **Names, never values.** Only on a set stored on the object asked about, which is
+   * the only one that object's form edits, and only where the core has a vault to ask.
+   */
+  readonly secretsSet?: readonly string[];
+}
+
+/** A credential set with no bounds, as the list of them shows it (`U-21`). */
+export interface UnboundedCredential {
+  readonly objectId: ObjectId;
+  readonly objectKind: ObjectKind;
+  readonly objectName: string;
+  readonly kind: CredentialKind;
+  readonly updatedAt: string;
 }
 
 export interface SettingView {

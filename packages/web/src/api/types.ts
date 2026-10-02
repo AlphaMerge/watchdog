@@ -230,6 +230,68 @@ export interface HistorySeries {
   adjustments: QueryAdjustment[];
 }
 
+/**
+ * A credential set in force for an object (`A-05`, `U-21`).
+ *
+ * **There is no field a secret could occupy.** `publicParams` is the half its kind does not mark
+ * `writeOnly`, and `secretsSet` is names. The core returns a secret to nobody, so nothing here
+ * could show one if it tried.
+ */
+export interface CredentialView {
+  kind: string;
+  publicParams: Record<string, unknown>;
+  /** Where it is stored: this object, or an ancestor. Never `default`. */
+  source: SettingSource;
+  updatedAt: string;
+  /**
+   * Whether allowed targets, or an SSH set's host keys, bound where it goes (`A-41b`). The core
+   * says so rather than this UI working it out: the rule has an exception and lives in one place.
+   */
+  bounded: boolean;
+  /** Names of the secrets that hold a value. Only on a set stored on the object asked about. */
+  secretsSet?: string[];
+}
+
+/** What storing a set answers (`A-41b`), and what `?dryRun=true` answers without storing it. */
+export interface CredentialWrite extends CredentialView {
+  /** Sensors beneath that are outside its bounds now: not sent it, and read Unknown. */
+  withholds: number;
+  /** Secrets the write cleared because it widened where the set may go and did not send them. */
+  secretsCleared: string[];
+}
+
+/** What removing a set answers, and what `?dryRun=true` answers with the set left in place. */
+export interface CredentialRemoval {
+  kind: string;
+  removed: boolean;
+  /** Sensors at or beneath the object that were using the set removed. */
+  sensors: number;
+  /** The ancestor's set that comes into force, or null when nothing above defines one. */
+  nowInherited: CredentialView | null;
+}
+
+/** One kind from `GET /credential-kinds`: its name, and the schema its form is generated from. */
+export interface CredentialKindSummary {
+  id: string;
+  name: string;
+  description: string;
+  schema: Record<string, unknown>;
+}
+
+/** One row of `GET /credentials/unbounded`: a set with no bounds, and the object it is on. */
+export interface UnboundedCredential {
+  objectId: number;
+  objectKind: ObjectKind;
+  objectName: string;
+  kind: string;
+  updatedAt: string;
+}
+
+/** As much of `GET /objects/:id/access/effective` as a view reads: what this account may do. */
+export interface EffectiveAccess {
+  right: 'none' | 'read' | 'write' | 'full';
+}
+
 /** `GET /objects/:id/pause` — why an object is paused, and whether this is the one to resume. */
 export interface PauseView {
   objectId: number;

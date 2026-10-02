@@ -240,14 +240,15 @@ by group, so a report you may not read is absent from the list rather than refus
 `/objects/:id` — and for a sensor, this is *the* page. Six tabs, and **the tab lives in the URL**,
 so a link to a sensor's triggers is a link somebody can send.
 
-| Tab          | Shows                                                                          |
-| ------------ | ------------------------------------------------------------------------------ |
-| **Overview** | State with its cause and since when, the channel table with current readings    |
-| **History**  | Charts over 2 days / 30 days / 365 days (sensors only)                          |
-| **Log**      | This object's state changes                                                     |
-| **Settings** | Every inheritable setting in effect, what it resolves to, and where it came from |
-| **Triggers** | The notification triggers on this object                                        |
-| **Changes**  | The audit trail for this object                                                 |
+| Tab             | Shows                                                                            |
+| --------------- | -------------------------------------------------------------------------------- |
+| **Overview**    | State with its cause and since when, the channel table with current readings      |
+| **History**     | Charts over 2 days / 30 days / 365 days (sensors only)                            |
+| **Log**         | This object's state changes                                                       |
+| **Settings**    | Every inheritable setting in effect, what it resolves to, and where it came from   |
+| **Credentials** | The credential sets stored here and inherited (everything but a sensor)           |
+| **Triggers**    | The notification triggers on this object                                          |
+| **Changes**     | The audit trail for this object                                                   |
 
 Add a sensor beneath a device at `/objects/:id/add-sensor`. Everything after "which type" is
 generated from the type's `paramsSchema`, which is what keeps adding a sensor type a one-file job.
@@ -266,9 +267,34 @@ A set with **allowed targets**, or an SSH set with **host keys**, is not vouched
 (`A-41b`). A device inside its bounds gets it whoever saved the device, and those saves are not
 refused. A device outside them does not get it, whoever saved it. Its sensors read **Unknown** on
 their **Overview** with the reason: outside the targets, a device named by host name where the
-targets name only addresses, or a probe too old to check more than one host key. There is no
-credential view yet (`U-21`): sets are written through the API, and Core Health's **Credential
-sets without targets** is where the sets with no bounds are counted.
+targets name only addresses, or a probe too old to check more than one host key.
+
+### Credentials
+
+The **Credentials** tab is on a probe, a group and a device, and on the root. A sensor has none:
+it uses the set in force on its device.
+
+- **What is in force, and where it is stored.** Each set shows its kind, its public fields and
+  whether it is stored here or inherited. An inherited set links to its owner's tab, which is
+  where it is changed. If the owner is outside what you may see, the tab says so and does not
+  name it.
+- **A secret is never shown, to anyone.** The tab names which secrets a set holds. The form
+  shows each as set, with **Replace** and **Clear**. Leaving one alone keeps it.
+- **The form comes from the kind's own schema**, so allowed targets and SSH host keys are
+  fields in it like any other. A private key goes in a box that keeps its line breaks.
+- **A set with no bounds is flagged**, with the reason it matters: `write` on the object it is
+  stored on is trust with the set ([administration.md](administration.md)). The flag links to
+  `/credentials/unbounded`, the list of every such set on the objects you can see. Core Health's
+  **Credential sets without targets** links there too. That channel counts the whole
+  installation, so it can read higher than the list is long.
+- **A save is checked before it is made.** If it leaves sensors outside the set's bounds, the
+  form stops and says how many: they are not sent the set and read **Unknown**. If it widens the
+  bounds, it says which secrets that clears. Nothing is stored until you confirm. After the
+  save the tab says what the core answered.
+- **Removing a set asks first**, and says how many sensors use it and what they will use
+  instead: the set on an ancestor, or nothing. A removal the core would refuse (`A-41`) is
+  refused before the confirmation.
+- **Without `write` on the object the tab is read-only.**
 
 On the **Settings** tab, each row is a toggle rather than a plain input, because the source is the
 half that matters: "60 seconds" is not the same fact as "60 seconds, because the group two levels

@@ -32,7 +32,11 @@ import { versionConflict } from './repository.js';
 import type { ObjectRepository } from './repository.js';
 import type { CredentialVault } from '../vault/service.js';
 import type { ChannelDraft, SensorTypeGate } from './sensor-type-gate.js';
-import { vouch as vouchForCredentials, withheldByBounds } from './credential-vouching.js';
+import {
+  sensorsUsing,
+  vouch as vouchForCredentials,
+  withheldByBounds,
+} from './credential-vouching.js';
 import {
   actorOf,
   assertMayName,
@@ -54,6 +58,7 @@ import type {
   CredentialChange,
   CredentialKind,
   CredentialView,
+  UnboundedCredential,
   DeleteExpectation,
   DeleteReport,
   ListExpansions,
@@ -1333,12 +1338,44 @@ export class ObjectService {
     const visible = includeInherited
       ? resolved
       : resolved.filter((row) => row.source.kind === 'own');
-    return visible.map((row) => ({
-      kind: row.kind,
-      publicParams: row.publicParams,
-      source: row.source,
-      updatedAt: row.updatedAt,
-    }));
+    const vault = this.#vault;
+    return Promise.all(
+      visible.map(async (row) => {
+        const view = credentialViewOf(row);
+        if (vault === undefined || row.source.kind !== 'own') return view;
+        // Which secrets the set stored here holds, by name (`U-21`): what its form needs to offer
+        // keep, replace and clear. An inherited set is edited on its owner, and says nothing.
+        const secretsSet = await vault.secretNames(this.#db, id, row.kind);
+        return secretsSet === null ? view : { ...view, secretsSet };
+      }),
+    );
+  }
+
+  /**
+   * The credential sets with no bounds, on the objects this reader can see (`U-21`).
+   *
+   * What Core Health's `credentialsUnbounded` counts, as a list to work through. The count is the
+   * installation's and is read with `read` on the root; this is each reader's part of it, so a set
+   * on an object outside their view is absent, as the object is from every other list (`A-12`).
+   * Empty without a vault, as `credentialKinds` is.
+   */
+  async unboundedCredentials(visibility: Visibility): Promise<UnboundedCredential[]> {
+    const vault = this.#vault;
+    if (vault === undefined) return [];
+    const sets = await vault.unbounded(this.#db);
+    const visible = await visibility.visibleAmong(
+      this.#db,
+      sets.map((set) => set.objectId),
+    );
+    return sets
+      .filter((set) => visible.has(set.objectId))
+      .map((set) => ({
+        objectId: set.objectId,
+        objectKind: set.objectKind as ObjectKind,
+        objectName: set.objectName,
+        kind: set.kind as CredentialKind,
+        updatedAt: set.updatedAt,
+      }));
   }
 
   /**
@@ -1369,17 +1406,19 @@ export class ObjectService {
     kind: string,
     values: Readonly<Record<string, unknown>>,
     pre: Precondition = { kind: 'none' },
+    options: { preview?: boolean } = {},
   ): Promise<CredentialView & { withholds: number; secretsCleared: readonly string[] }> {
     const vault = this.#requireVault();
     const actor = actorOf(writer);
-    return this.#db.tx(async (q) => {
+    const preview = options.preview === true;
+    return this.#txOrPreview(preview, async (q) => {
       const object = await this.#repo.get(q, id);
       if (object === null) throw notFound(id);
       if (pre.kind === 'version' && object.version !== pre.expected) {
         throw versionConflict(id, pre.expected, object.version);
       }
 
-      const summary = await vault.write(q, id, kind, values);
+      const summary = await vault.write(q, id, kind, values, { preview });
       // Whoever may write where a set is stored vouches for everything beneath that it now
       // reaches (`A-41`): the sensors that inherited another set of this kind until now.
       await this.#checkCredentials(q, writer, [id], { sayWhich: true, kinds: [kind] });
@@ -1388,26 +1427,30 @@ export class ObjectService {
       // audit entry, rather than leaving it to be found from the sensors.
       const withholds = await withheldByBounds(q, this.#sensorTypes, id, kind);
       const bounded = isRestricted(restrictionOf(kind, summary.publicParams));
-      await this.#audit.record(
-        q,
-        actor,
-        [
-          {
-            action: 'credential.set',
-            objectId: id,
-            credentialKind: kind,
-            created: summary.created,
-            secretsSet: summary.secretsSet,
-            secretsKept: summary.secretsKept,
-            ...(summary.secretsCleared.length === 0
-              ? {}
-              : { secretsCleared: summary.secretsCleared }),
-            ...(bounded ? { withholds } : {}),
-            publicParams: summary.publicParams,
-          },
-        ],
-        new Date(),
-      );
+      // A preview changes nothing, so it has nothing to put in the history. Skipped rather than
+      // left to the rollback: a sink is not obliged to keep its record in this transaction.
+      if (!preview) {
+        await this.#audit.record(
+          q,
+          actor,
+          [
+            {
+              action: 'credential.set',
+              objectId: id,
+              credentialKind: kind,
+              created: summary.created,
+              secretsSet: summary.secretsSet,
+              secretsKept: summary.secretsKept,
+              ...(summary.secretsCleared.length === 0
+                ? {}
+                : { secretsCleared: summary.secretsCleared }),
+              ...(bounded ? { withholds } : {}),
+              publicParams: summary.publicParams,
+            },
+          ],
+          new Date(),
+        );
+      }
 
       // Through `q`, not the pool: the row was written in this transaction and has not been
       // committed, so a resolver on its own connection cannot see it — and would report the
@@ -1418,14 +1461,36 @@ export class ObjectService {
       /* c8 ignore next -- the row was just written in this transaction */
       if (view === undefined) throw notFound(id);
       return {
-        kind: view.kind,
-        publicParams: view.publicParams,
-        source: view.source,
-        updatedAt: view.updatedAt,
+        ...credentialViewOf(view),
         withholds,
         secretsCleared: summary.secretsCleared,
       };
     });
+  }
+
+  /**
+   * Runs a write in a transaction, or runs it and takes it back (`U-21`).
+   *
+   * **A preview is the write itself, rolled back, and not a second calculation of what the write
+   * would do.** What a credential write answers — the sensors its bounds now keep it from, the
+   * secrets a widening clears, the refusal when its writer cannot vouch — is decided by the vault,
+   * the voucher check and the tree as they stand, in that transaction. A separate estimate would
+   * be a second place for each of those rules to live, and the one an operator is shown before
+   * confirming is the one that must not drift. The answer leaves the transaction as the reason it
+   * failed, so nothing in it commits and no after-commit hook runs.
+   */
+  async #txOrPreview<T>(preview: boolean, work: (q: Queryable) => Promise<T>): Promise<T> {
+    if (!preview) return this.#db.tx(work);
+    try {
+      await this.#db.tx(async (q) => {
+        throw new Previewed(await work(q));
+      });
+    } catch (error) {
+      if (error instanceof Previewed) return error.answer as T;
+      throw error;
+    }
+    /* c8 ignore next -- the transaction above always throws */
+    throw new Error('a preview committed');
   }
 
   /**
@@ -1441,27 +1506,34 @@ export class ObjectService {
     id: ObjectId,
     kind: string,
     pre: Precondition = { kind: 'none' },
-  ): Promise<{ removed: boolean; nowInherited: CredentialView | null }> {
+    options: { preview?: boolean } = {},
+  ): Promise<{ removed: boolean; sensors: number; nowInherited: CredentialView | null }> {
     const vault = this.#requireVault();
     const actor = actorOf(writer);
-    return this.#db.tx(async (q) => {
+    const preview = options.preview === true;
+    return this.#txOrPreview(preview, async (q) => {
       const object = await this.#repo.get(q, id);
       if (object === null) throw notFound(id);
       if (pre.kind === 'version' && object.version !== pre.expected) {
         throw versionConflict(id, pre.expected, object.version);
       }
 
+      // Counted while the set is still there to be resolved to (`U-21`): the sensors that lose
+      // it, which is what somebody removing it is asked to confirm.
+      const sensors = await sensorsUsing(q, this.#sensorTypes, id, kind);
       const removed = await vault.clear(q, id, kind);
       // What an ancestor stores now reaches everything this set did, and the remover has to be
       // able to vouch for sending it there (`A-41`).
       if (removed) {
         await this.#checkCredentials(q, writer, [id], { sayWhich: true, kinds: [kind] });
-        await this.#audit.record(
-          q,
-          actor,
-          [{ action: 'credential.deleted', objectId: id, credentialKind: kind }],
-          new Date(),
-        );
+        if (!preview) {
+          await this.#audit.record(
+            q,
+            actor,
+            [{ action: 'credential.deleted', objectId: id, credentialKind: kind }],
+            new Date(),
+          );
+        }
       }
 
       // Same reason: the delete is not committed yet, so a resolver on the pool would still see
@@ -1472,15 +1544,9 @@ export class ObjectService {
         ) ?? null;
       return {
         removed,
-        nowInherited:
-          inherited === null
-            ? null
-            : {
-                kind: inherited.kind,
-                publicParams: inherited.publicParams,
-                source: inherited.source,
-                updatedAt: inherited.updatedAt,
-              },
+        // Zero when there was no set here to remove: nothing resolved to one.
+        sensors,
+        nowInherited: inherited === null ? null : credentialViewOf(inherited),
       };
     });
   }
@@ -2624,6 +2690,31 @@ function diffSettings(
     }
   }
   return changes;
+}
+
+/** What a preview's transaction is failed with: the answer it worked out (`U-21`). */
+class Previewed extends Error {
+  readonly answer: unknown;
+
+  constructor(answer: unknown) {
+    super('a previewed write, rolled back');
+    this.name = 'Previewed';
+    this.answer = answer;
+  }
+}
+
+/**
+ * A resolved set as a read shows it. One place, so that every answer carrying a set says whether
+ * it is bounded by the same rule the delivery and Core Health's count use (`A-41b`).
+ */
+function credentialViewOf(row: ResolvedCredential): CredentialView {
+  return {
+    kind: row.kind,
+    publicParams: row.publicParams,
+    source: row.source,
+    updatedAt: row.updatedAt,
+    bounded: isRestricted(restrictionOf(row.kind, row.publicParams)),
+  };
 }
 
 /**

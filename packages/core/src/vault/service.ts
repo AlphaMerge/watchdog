@@ -84,6 +84,15 @@ export interface CredentialWriteSummary {
   readonly publicParams: Readonly<Record<string, unknown>>;
 }
 
+/** A credential set with no bounds, and the object it is stored on (`U-21`). No secret. */
+export interface UnboundedSet {
+  readonly objectId: number;
+  readonly objectKind: string;
+  readonly objectName: string;
+  readonly kind: string;
+  readonly updatedAt: string;
+}
+
 export class CredentialVault {
   readonly #resolver: InheritanceResolver;
   readonly #sealer: VaultSealer;
@@ -141,13 +150,16 @@ export class CredentialVault {
    * field with a value rotates it; sending `null` removes it.
    *
    * Takes a `Queryable` rather than opening its own transaction: the caller writes the audit
-   * entry in the same one, so an entry cannot exist for a change that rolled back.
+   * entry in the same one, so an entry cannot exist for a change that rolled back. `preview` is
+   * for a caller that will roll it back on purpose (`U-21`): the same write, with nothing said
+   * about it in the log.
    */
   async write(
     q: Queryable,
     objectId: number,
     kind: string,
     values: Readonly<Record<string, unknown>>,
+    options: { preview?: boolean } = {},
   ): Promise<CredentialWriteSummary> {
     const definition = this.definition(kind);
     const [existing] = await q.query<{
@@ -223,18 +235,22 @@ export class CredentialVault {
       [objectId, kind, JSON.stringify(publicParams), sealed.bytes, sealed.keyId],
     );
 
-    this.#logger.info(
-      {
-        objectId,
-        kind,
-        created: existing === undefined,
-        // Field names, never values — this line goes to a log file.
-        secretsSet,
-        secretsRemoved: removed,
-        secretsCleared,
-      },
-      'credential set written',
-    );
+    // A preview's transaction is rolled back (`U-21`), and a line saying a set was written would
+    // be a line about something that did not happen.
+    if (options.preview !== true) {
+      this.#logger.info(
+        {
+          objectId,
+          kind,
+          created: existing === undefined,
+          // Field names, never values — this line goes to a log file.
+          secretsSet,
+          secretsRemoved: removed,
+          secretsCleared,
+        },
+        'credential set written',
+      );
+    }
 
     return {
       kind,
@@ -280,10 +296,77 @@ export class CredentialVault {
    * Health. Each goes wherever somebody with `write` on its owner vouches for.
    */
   async unboundedSets(q: Queryable): Promise<number> {
-    const rows = await q.query<{ kind: string; public_params: Record<string, unknown> }>(
-      'SELECT kind::text AS kind, public_params FROM credential_set',
+    return (await this.unbounded(q)).length;
+  }
+
+  /**
+   * The sets `unboundedSets` counts, each with the object it is stored on (`U-21`): the list an
+   * operator works through to bring that number down. One function behind both, so the count on
+   * Core Health and the list it links to cannot disagree about what a bound is.
+   *
+   * The owner's name is here because the list is of owners. **Whether a reader may be told it is
+   * the caller's question**, and `ObjectService.unboundedCredentials` asks it.
+   */
+  async unbounded(q: Queryable): Promise<UnboundedSet[]> {
+    const rows = await q.query<{
+      object_id: string;
+      object_kind: string;
+      object_name: string;
+      kind: string;
+      public_params: Record<string, unknown>;
+      updated_at: Date;
+    }>(
+      `SELECT cs.object_id::text AS object_id, o.kind::text AS object_kind, o.name AS object_name,
+              cs.kind::text AS kind, cs.public_params, cs.updated_at
+       FROM credential_set cs
+       JOIN object o ON o.id = cs.object_id
+       ORDER BY o.name, cs.object_id, cs.kind`,
     );
-    return rows.filter((row) => !isRestricted(restrictionOf(row.kind, row.public_params))).length;
+    return rows
+      .filter((row) => !isRestricted(restrictionOf(row.kind, row.public_params)))
+      .map((row) => ({
+        objectId: Number(row.object_id),
+        objectKind: row.object_kind,
+        objectName: row.object_name,
+        kind: row.kind,
+        updatedAt: row.updated_at.toISOString(),
+      }));
+  }
+
+  /**
+   * The names of the secret fields a stored set holds a value for, or null when there is no such
+   * set (`U-21`). **Names, never values**: what a form needs to offer keep, replace and clear, and
+   * what `credential.set` already writes to the audit log as `secretsSet` and `secretsKept`.
+   *
+   * Only names the kind declares as secrets, in the kind's own order, so that nothing sealed under
+   * a key the kind does not know is said to exist by name. A record that cannot be opened answers
+   * no names and says so in the log, as `#open` does for the probe's read: the form then shows
+   * every secret as not set, which is what the probe will find too.
+   */
+  async secretNames(q: Queryable, objectId: number, kind: string): Promise<string[] | null> {
+    const definition = credentialKind(kind);
+    if (definition === undefined) return null;
+    const [row] = await q.query<{ secret: Buffer; key_id: string }>(
+      'SELECT secret, key_id FROM credential_set WHERE object_id = $1 AND kind = $2',
+      [objectId, kind],
+    );
+    if (row === undefined) return null;
+    let held: Record<string, unknown>;
+    try {
+      held = this.#sealer.open(row.secret, row.key_id, { objectId, kind });
+    } catch (error) {
+      this.#logger.error(
+        {
+          objectId,
+          kind,
+          keyId: row.key_id,
+          err: error instanceof Error ? error.message : String(error),
+        },
+        'a stored credential could not be decrypted; its secrets read as not set',
+      );
+      return [];
+    }
+    return secretFields(definition).filter((field) => field in held);
   }
 
   /**

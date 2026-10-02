@@ -16841,7 +16841,7 @@ because each is a decision rather than a defect:
       and no other, and a name that resolves outside, or differently between the check and the
       connection, is refused with a sentence saying so.
 
-- [ ] **U-21 — A credential view: each object's sets, where they may go, and which have no
+- [x] **U-21 — A credential view: each object's sets, where they may go, and which have no
       bounds** · M · A-05, A-41b · Found 2026-09-29 by `A-41b`. The web UI has no credential view
       at all: sets are written and read only through `/objects/:id/credentials`, and an operator
       learns which sets have no targets only from Core Health's `credentialsUnbounded` count.
@@ -16857,6 +16857,53 @@ because each is a decision rather than a defect:
       **Done when** an operator can store, edit and remove a set without the API, sees which
       sets have no bounds and why that matters, and is told how many sensors a narrowing takes
       to Unknown.
+
+      **Outcome.** A **Credentials** tab on every object but a sensor, and a list of the sets
+      with no bounds at `/credentials/unbounded`.
+      - **The tab.** The sets stored on the object and those inherited: kind, public fields,
+        which secrets are held (by name), and the owner. An inherited set links to its owner's
+        tab. An owner missing from the breadcrumb the core trimmed is "an object outside your
+        view": no name, no link, no id. The root has the tab too, since a set can be stored
+        there.
+      - **The form is `SchemaForm` over the kind's schema from `/credential-kinds`**, so
+        `allowedTargets` and `hostKeys` are ordinary fields and no kind has a form of its own.
+        Keep, replace and clear are the form's own. A sentence beside the save button says what
+        the save does to each secret. **A secret declared with room for more than 4,096
+        characters gets a multi-line box**: a password input strips line breaks, which made a
+        pasted SSH private key unusable.
+      - **No bounds.** Flagged in words on the set, with whose `write` is trust with it, and a
+        link to the list. Core Health's **Credential sets without targets** channel links to the
+        list as well.
+      - **A save is previewed, then made.** `PUT` and `DELETE /objects/:id/credentials/:kind`
+        take `?dryRun=true`: the same service call in a transaction that is rolled back, with no
+        audit entry and no "written" log line. The form stops when the preview's `withholds` is
+        above zero or `secretsCleared` is not empty, says both, and holds the fields until the
+        operator confirms or goes back. After the save the tab says what the write answered.
+      - **Removing asks first.** The removal is previewed, and the confirmation says how many
+        sensors use the set and what they will use instead. A removal `A-41` would refuse is
+        refused before the confirmation.
+      - **Read-only without `write`.** The tab asks `/objects/:id/access/effective` where the
+        core holds accounts to grants, and offers no control until the answer is `write` or
+        `full`.
+      - **API.** `ms:credentialView` gains `bounded` (the core's `isRestricted`, so the legacy
+        fingerprint rule is not copied into the client) and, on a set stored on the object asked
+        about, `secretsSet`: names, never values. The `DELETE` answer gains `sensors`. New:
+        `GET /credentials/unbounded`, filtered by the caller's visibility.
+        `CredentialVault.unboundedSets` is now the length of that list, so the count and the
+        list cannot disagree.
+      - **Tests.** `credential-view.test.ts` (19): preview and write agree and a preview stores
+        and audits nothing; secret names; `bounded`; the removal's count; the list under a
+        branch visibility and a carved hole; the routes' serialisation. `object-visibility`'s
+        sweep now stores unbounded sets on the hidden probe and group and on the branch, and
+        names the new route. Web: `credentials-model.test.ts` (29) and
+        `credentials-panel.test.tsx` (31).
+      - **Mutants: 34, 34 killed** (14 core, 20 web). The route's visibility is killed by the
+        sweep, with real accounts, as well as by the service test.
+      - **Not done.** The tab was not looked at in a browser: no dev stack was started beside
+        the suite run. `withholds` counts the sensors outside the bounds after the write, not
+        the ones the write newly put there, and the sentence says the first. An entry in a list
+        of strings cannot be emptied by deleting its last character (`removeAt` does not
+        descend into arrays); **Remove** works. That is the form's, and older than this ticket.
 
 - [x] **U-22 — the alarms list asks for itself two or three times on every page load** · S ·
       U-06, U-02 · Found 2026-09-29 in `M-18`'s view test: a socket that never opened still

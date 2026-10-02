@@ -1,6 +1,7 @@
 import { useCallback, useId, useMemo, useState } from 'react';
 import {
   fieldsOf,
+  isMultiline,
   newEntryFor,
   readAt,
   removeAt,
@@ -457,18 +458,39 @@ function WriteOnly({
   if (!isSet || replacing) {
     return (
       <div className="flex flex-wrap items-center gap-2">
-        <input
-          id={id}
-          type="password"
-          autoComplete="new-password"
-          value={value}
-          disabled={disabled}
-          aria-describedby={describedBy === '' ? undefined : describedBy}
-          onChange={(event) => {
-            onValue(event.target.value === '' ? undefined : event.target.value);
-          }}
-          className="w-64 border border-control bg-surface px-2 py-1 text-sm text-text"
-        />
+        {isMultiline(field.schema) ? (
+          // **A box that keeps line breaks, for a secret that has them** (`U-21`). A password
+          // input strips them from a paste, which turns a private key into something no server
+          // accepts. What is typed here is visible while it is typed and never afterwards: once
+          // saved the core returns it to nobody, and this box is not filled from a read.
+          <textarea
+            id={id}
+            rows={6}
+            autoComplete="off"
+            autoCapitalize="off"
+            spellCheck={false}
+            value={value}
+            disabled={disabled}
+            aria-describedby={describedBy === '' ? undefined : describedBy}
+            onChange={(event) => {
+              onValue(event.target.value === '' ? undefined : event.target.value);
+            }}
+            className="w-full max-w-xl border border-control bg-surface px-2 py-1 font-mono text-xs text-text"
+          />
+        ) : (
+          <input
+            id={id}
+            type="password"
+            autoComplete="new-password"
+            value={value}
+            disabled={disabled}
+            aria-describedby={describedBy === '' ? undefined : describedBy}
+            onChange={(event) => {
+              onValue(event.target.value === '' ? undefined : event.target.value);
+            }}
+            className="w-64 border border-control bg-surface px-2 py-1 text-sm text-text"
+          />
+        )}
         {isSet && (
           <button
             type="button"

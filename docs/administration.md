@@ -375,7 +375,9 @@ point it at a machine of their own and be sent the group's community at the next
 **`write` on the object a set is stored on is trust with that set, unless the set has targets.**
 Without them, anyone with that `write` may send the set to any address they can put a device at.
 Store a set as low in the tree as its devices allow, and grant `write` there with that in mind.
-Core Health's **Credential sets without targets** counts the sets this is still true of.
+Core Health's **Credential sets without targets** counts the sets this is still true of, and
+links to the list of them. Each object's **Credentials** tab flags its own
+([web-ui.md](web-ui.md#credentials)).
 
 **A set with `allowedTargets` goes to every device inside them, and to none outside, whoever
 wrote the device** (`A-41b`). An entry is a host name (`db1.example.com`), a `*.domain` pattern
