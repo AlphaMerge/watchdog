@@ -7486,6 +7486,14 @@ because each is a decision rather than a defect:
       Owner: after `P-229`, which is changing `db/pool.ts` now. `P-239`'s `ClockFreezeSync`
       rethrows already.
 
+      **Decided 2026-10-04 by WatchDog**, on Roman's "you decide".
+      **`P-229` is finished first**: its
+      session asked only for leave to start its full run while at most one other run is on the
+      VM, and that is given. Its branch `p229-wip` (35 files, uncommitted, in the
+      `elastic-shannon-539fbe` worktree) is rebased on `main`, run whole, landed, and then this
+      ticket is taken. **And `v1.0.0-rc.1` is not cut until both have landed:** a candidate
+      that can answer a lost write as committed would spend `H-09`'s week finding it.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -15272,6 +15280,10 @@ because each is a decision rather than a defect:
       the shapes to follow. A refusal that counts uses the caller cannot see should say that there
       are some, not how many.
 
+      **Decided 2026-10-04 by WatchDog**, on Roman's "you decide". Yes: start it. The refusals keep
+      telling an administrator everything and tell any other writer only that something
+      outside their branch is in the way.
+
 - [x] **A-17 — Grants, maps and reports change without an audit entry** · M · S-10, L-01 ·
       Found scoping `L-01`. `S-10` promised "every create/update/delete recorded with actor,
       timestamp and diff", and three kinds of change never reach `audit_log`:
@@ -16284,6 +16296,18 @@ because each is a decision rather than a defect:
       **Found on the way, not fixed here:** an in-place `POST /objects/:id/clone` with no body is
       answered 400 "body must be object", although the route's own comment says a bodiless clone
       is legitimate. `{}` works.
+
+- [ ] **A-76 — a clone made by someone who is not an administrator carries other groups'
+      positive grants** · S · A-35 · Found 2026-09-29 by `A-35`, decided 2026-10-04 by WatchDog
+      on Roman's "you decide". `A-35`'s clone carries every `object_access` row on what it
+      copies, so a non-administrator's clone gives another group `read` or `write` on a new
+      object in a place of the cloner's choosing, which is granting by another name, and only an
+      administrator may grant. **Decided: a non-administrator's clone carries restrictions
+      (`none`, and `read` where the source was narrower than its parent) and no other group's
+      positive grant**; an administrator's clone carries every row, as now. **Done when** the
+      clone does that, each dropped grant is counted in the answer and audited, and
+      `access-rights.test.ts` asserts both callers against a source holding another group's
+      `write`.
 
 - [x] **A-36 — A core behind a browser and a proxy: the stream takes any origin, a forwarded
       header turns off CSRF, and the proxy is never believed** · M · A-01, A-09, A-19 · Found
@@ -17441,6 +17465,15 @@ because each is a decision rather than a defect:
       (6) The probe's `main.ts` is still not booted by a test, so `onProgress` to
       `sendSweep` is read and not run. **Done when** (1) to (3) are decided and each has a
       scenario, and the rest are fixed or written down.
+
+      **Decided 2026-10-04 by WatchDog**, on Roman's "you decide".
+      (1) A failed check at an edge delivers to
+      a socket whose last answer said signed in and is younger than one sweep interval, and to
+      no other: a blink costs nobody their tree, and a lapse is exposed for one interval at
+      most, which (4) already accepts. (2) An edge's check is bounded by `credentialWaitMs`;
+      past it the edge is treated as (1) and counted on Core Health. (3) Accepted as it
+      stands: a frame whose check never answers is severed by the unread bound and sent
+      nothing. (4) and (5) accepted and written down; (6) stays open.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
@@ -19062,6 +19095,15 @@ because each is a decision rather than a defect:
       **Done when** that is decided and, if it is in, the setting reaches the probe with the
       assignment, is audited, and cannot be set by an account that may only edit the device.
 
+      **Decided 2026-10-04 by WatchDog**, on Roman's "you decide". **In, on the device only.** An
+      exception is one device's own setting, not inherited from a group, so it can never
+      exempt more than the device it names: `targetPolicyException`, the addresses of that
+      device the probe may connect to although its policy refuses them. Only an administrator
+      may set or clear it, every change is audited, it reaches the probe with the assignment,
+      and an account that may only edit the device can neither set it nor read it changed.
+      Without it a site with one link-local device turns the policy off for the whole probe,
+      which is the weaker of the two.
+
 - [x] **A-65 — three loose ends on the SSH and probe side of the target policy** · S · A-57 ·
       Found 2026-10-02 by `A-57` and its review. Sensors that join one connection being opened
       share the first one's lookup and its `AbortSignal`, so the first being cancelled can fail
@@ -19693,6 +19735,14 @@ because each is a decision rather than a defect:
       **Done when** that is decided and the scenario in `credential-pinning.test.ts` shows it.
       Also: a sensor with two credential kinds, one version-dependent, has no case there, and
       no test boots `main.ts`.
+
+      **Decided 2026-10-04 by WatchDog**, on Roman's "you decide".
+      **Damped, and withheld results do not
+      count.** One outage, one alarm: a probe whose protocol version changes more than once in
+      an hour stops moving its named sensors on each alternation; they hold their last state and
+      Probe Health raises one warning naming the flap, cleared when the version has held for an
+      hour. A result for a sensor the core is withholding is dropped and counted on Probe
+      Health, never a failed scan, so a release cannot open with a Down that has no message.
 
 - [x] **A-73 — five loose ends from discovery text and the SSH pool** · S · A-69 · Found
       2026-10-02 by `A-69`. `sweep-progress` takes any 7 to 15 characters as an address. A
