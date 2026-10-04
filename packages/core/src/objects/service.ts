@@ -2462,9 +2462,11 @@ export class ObjectService {
    * tree passes `Visibility.EVERYTHING` and says so.
    *
    * **Its grants are every row only for a caller who may grant** (`A-76`). Anybody else's copy
-   * carries the restrictions and no positive grant, and each it leaves behind is counted in the
-   * answer and audited as `grant.notCarried`. Left out, `carried` is `restrictions`: a caller
-   * that forgets grants nothing.
+   * carries the restrictions and no positive grant, and each positive grant it leaves behind is
+   * counted in the answer and audited as `grant.notCarried`. A `read` left behind because it would
+   * widen at the destination is audited and not counted: whether it would is whether its group
+   * holds `write` there, which is not the cloner's to read. Left out, `carried` is
+   * `restrictions`: a caller that forgets grants nothing.
    */
   async clone(
     writer: Writer,
@@ -2572,15 +2574,18 @@ export class ObjectService {
             after: grant.right,
           })),
           // And one per grant left behind (`A-76`), so the copy's history says which groups its
-          // source granted and it does not.
-          ...copied.notCarried.map((grant): Mutation => ({
-            action: 'grant.notCarried',
-            objectId: grant.objectId,
-            subject: { kind: 'object', id: grant.objectId },
-            groupId: grant.groupId,
-            groupName: grant.groupName,
-            onSource: grant.right,
-          })),
+          // source granted and it does not — the widening reads too, which the answer does not
+          // count; the history is read by administrators.
+          ...[...copied.notCarried, ...copied.wideningReads]
+            .sort((a, b) => a.objectId - b.objectId || a.groupName.localeCompare(b.groupName))
+            .map((grant): Mutation => ({
+              action: 'grant.notCarried',
+              objectId: grant.objectId,
+              subject: { kind: 'object', id: grant.objectId },
+              groupId: grant.groupId,
+              groupName: grant.groupName,
+              onSource: grant.right,
+            })),
         ],
         new Date(),
       );

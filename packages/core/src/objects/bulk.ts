@@ -84,7 +84,7 @@ export interface BulkOutcome {
   code?: string;
   /** What a clone made. */
   createdId?: number;
-  /** How many grants a clone's copy did not carry (`A-76`). */
+  /** How many positive grants a clone's copy did not carry, as `CloneResult` counts them. */
   grantsNotCarried?: number;
   /** How many objects a delete took with it, including the object itself. */
   deleted?: number;

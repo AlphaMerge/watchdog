@@ -86,10 +86,13 @@ A few consequences are worth knowing before somebody reports them as bugs:
 - **A clone copies what its maker can see.** A hole beneath the source is left out and not
   counted. The copy keeps the source's restrictions, every group's, so a hole carved for
   somebody else is still a hole in the copy. That means each `none`, and each `read` that narrows
-  what its group holds where the copy lands. **Only an administrator's copy also keeps the
-  positive grants**: another group's `read`, `write` or `full`. Anybody else's copy leaves them
-  behind, since carrying them to a place of the cloner's choosing would be granting. The answer
-  counts them (`grantsNotCarried`), and each is in the copy's history as `grant.notCarried`. A
+  what its group holds where the copy lands. **Only a caller who may grant — the admin role,
+  with full scope — also keeps the positive grants**: another group's `read`, `write` or `full`.
+  Anybody else's copy leaves them behind, since carrying them to a place of the cloner's choosing
+  would be granting. The answer counts the `write` and `full` left behind (`grantsNotCarried`);
+  a `read` left behind is not counted, since whether it would widen depends on grants where the
+  copy lands that the cloner may not read. Each left behind is in the copy's history as
+  `grant.notCarried`. A
   clone made in place lands in the source's parent, and needs `write` there as a clone into any
   other parent does.
 - **A pause or a setting on a container still reaches into its holes**, as every inherited value

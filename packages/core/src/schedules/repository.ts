@@ -273,6 +273,21 @@ export class ScheduleRepository {
   }
 
   /**
+   * How many rediscovery rules name this schedule, among those `visibility` reads. A count, not
+   * the length of the page above: two pages of fifty agree however many rules lie past them.
+   */
+  async rediscoveryCount(q: Queryable, id: number, visibility: Visibility): Promise<number> {
+    const values: unknown[] = [id];
+    const visible = visibility.where('group_id', (value) => `$${String(values.push(value))}`);
+    const rows = await q.query<{ total: string }>(
+      `SELECT count(*)::text AS total FROM discovery_schedule
+       WHERE schedule_id = $1 AND ${visible}`,
+      values,
+    );
+    return Number(rows[0]?.total ?? 0);
+  }
+
+  /**
    * How many objects name each schedule. One query for a list that shows usage per row.
    *
    * **Among the objects the reader can see** (`A-12`): a schedule belongs to the installation,

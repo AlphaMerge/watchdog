@@ -3362,7 +3362,42 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         );
         const ruledWhole = await call('admin', 'DELETE', url);
         assert.ok(ruledWhole.body.includes(`${MARK}-rediscovery`), ruledWhole.body);
+
+        // Fifty more in the operator's branch: a page of fifty each way, and one past them
+        // hidden. Counted, the refusal still says some are outside their view.
+        await db.query(
+          `INSERT INTO discovery_schedule (group_id, probe_id, name, range_text, cadence, schedule_id)
+           SELECT $1, $2, 'a-rule-' || lpad(n::text, 2, '0'), '10.8.0.0/30', 'daily', $3
+           FROM generate_series(1, 50) AS n`,
+          [branchId, probeId, scheduleId],
+        );
+        const paged = await call('operator', 'DELETE', url);
+        assert.equal(paged.status, 409, paged.body);
+        assert.ok(!paged.body.includes(MARK), paged.body);
+        assert.equal(
+          paged.message,
+          '"a-doomed schedule" is still the permitted window of 50 rediscovery rule(s) you can ' +
+            'see, and of others outside your view',
+        );
+        assert.deepEqual(
+          [
+            (paged.details['usedByRediscovery'] as unknown[]).length,
+            paged.details['usedByRediscoveryTotal'],
+            paged.details['outsideView'],
+          ],
+          [50, 50, true],
+        );
+        const pagedWhole = await call('admin', 'DELETE', url);
+        assert.equal(
+          pagedWhole.message,
+          '"a-doomed schedule" is still the permitted window of 51 rediscovery rule(s)',
+        );
+        assert.deepEqual(
+          [pagedWhole.details['usedByRediscoveryTotal'], pagedWhole.details['outsideView']],
+          [51, false],
+        );
       } finally {
+        await db.query(`DELETE FROM discovery_schedule WHERE name LIKE 'a-rule-%'`);
         await unassign();
         await db.query('UPDATE discovery_schedule SET schedule_id = $2 WHERE id = $1', [
           hiddenRuleId,
@@ -3431,6 +3466,56 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
           new RegExp(
             `on probe "${MARK}-probe" \\(#${String(probeId)}\\) to 10\\.0\\.5\\.2 \\(port \\w+\\) ` +
               'needs write on that probe$',
+          ),
+        );
+      } finally {
+        await harness.service.clearCredential(testActor, probeId, 'snmp');
+      }
+    });
+
+    it('names the address a credential set would reach only to a writer who sees its device', async () => {
+      // `none` on the device and `write` given back on one sensor inside it: the operator may
+      // move that sensor's port, and the refusal is about the sensor they can see — but the
+      // address is the device's, which they cannot.
+      const room = await create({ kind: 'group', parentId: branchId, name: 'a-port-room' });
+      const device = await create({
+        kind: 'device',
+        parentId: room,
+        name: `${MARK}-port-device`,
+        host: '10.0.7.1',
+      });
+      const sensor = await create({
+        kind: 'sensor',
+        parentId: device,
+        name: 'a-port-sensor',
+        sensorType: 'snmp.traffic',
+        params: {},
+      });
+      await grant(device, 'none');
+      await grant(sensor, 'write');
+      await harness.service.setCredential(testActor, probeId, 'snmp', { community: 'port-test' });
+      try {
+        const patch = { kind: 'sensor', params: { port: 1161 } };
+        const refused = await call('operator', 'PATCH', `objects/${String(sensor)}`, patch);
+        assert.equal(refused.status, 403, refused.body);
+        assert.ok(!refused.body.includes(MARK), refused.body);
+        assert.ok(!refused.body.includes('10.0.7.1'), refused.body);
+        assert.match(
+          refused.message,
+          new RegExp(
+            `^bringing the snmp credentials on #${String(probeId)} to a ` +
+              'device outside your view \\(port \\d+\\) needs write on that object$',
+          ),
+        );
+
+        // The control: a reader of the device is told its address.
+        await grant(device, 'read');
+        const seen = await call('operator', 'PATCH', `objects/${String(sensor)}`, patch);
+        assert.equal(seen.status, 403, seen.body);
+        assert.match(
+          seen.message,
+          new RegExp(
+            `on #${String(probeId)} to 10\\.0\\.7\\.1 \\(port \\d+\\) needs write on that object$`,
           ),
         );
       } finally {

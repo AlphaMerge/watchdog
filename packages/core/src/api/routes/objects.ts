@@ -1086,8 +1086,8 @@ export async function objectRoutes(
                     grantsNotCarried: {
                       type: 'integer',
                       description:
-                        '`clone` only: the grants the copy did not carry, as the single ' +
-                        'clone’s answer counts them (`A-76`).',
+                        '`clone` only: the positive grants the copy did not carry, as the ' +
+                        'single clone’s answer counts them (`A-76`).',
                     },
                     deleted: { type: 'integer' },
                   },

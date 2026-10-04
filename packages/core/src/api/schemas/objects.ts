@@ -749,11 +749,14 @@ export const cloneResultSchema = {
       type: 'integer',
       minimum: 0,
       description:
-        'How many grants on what was copied the copy did not carry, because only an ' +
-        'administrator may grant (`A-76`). Anybody else’s copy carries each `none`, and each ' +
-        '`read` that narrows what its group holds where the copy landed, and no other group’s ' +
-        '`read`, `write` or `full`. Each left behind is in the copy’s history as ' +
-        '`grant.notCarried`. Always 0 for an administrator, whose copy carries every grant.',
+        'How many positive grants on what was copied the copy did not carry, because only a ' +
+        'caller who may grant (the admin role with full scope) carries them (`A-76`). Anybody ' +
+        'else’s copy carries each `none`, and each `read` that narrows what its group holds ' +
+        'where the copy landed, and no other group’s `write` or `full`. This counts the ' +
+        '`write` and `full` grants left behind. A `read` left behind because it would widen ' +
+        'where the copy landed is not counted, since whether it would depends on grants there ' +
+        'the caller may not read. Every grant left behind is in the copy’s history as ' +
+        '`grant.notCarried`. Always 0 for a caller who may grant, whose copy carries every grant.',
     },
     clonedCount: {
       type: 'object',

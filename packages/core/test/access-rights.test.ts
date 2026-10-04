@@ -1069,10 +1069,46 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
       ).id;
       const copy = await clone('restrictions', elsewhere);
       assert.deepEqual(await grantsOn(copy.id), [[], ['Epsilon none']]);
-      assert.equal(copy.notCarried, 3);
+      // Delta's `read` is left behind and audited, and not counted: whether it widens is whether
+      // Delta holds `write` where the copy landed, and the answer is the cloner's, who may not
+      // read Delta's grants there. Here and in place, the count is the same two.
+      assert.equal(copy.notCarried, 2);
+      assert.equal((await clone('restrictions')).notCarried, copy.notCarried);
       assert.deepEqual(copy.audited.sort(), ['Delta read', 'Delta write', 'Gamma write']);
       assert.equal((await access.resolve(deltaUser, copy.id)).right, 'none');
       assert.equal((await access.resolve(deltaUser, await sensorOf(copy.id))).right, 'none');
+    });
+
+    it('leaves the access epoch alone when nothing it may carry is there', async () => {
+      // Writing a grant sends every open stream back to re-resolve (migration 052), so a copy
+      // that carries none must not write. A source with only a positive grant, copied by
+      // somebody who may not carry it, has nothing to write.
+      const positiveOnly = (
+        await harness.service.create(testActor, {
+          kind: 'device',
+          parentId: groupId,
+          name: 'Positive only',
+          host: '192.0.2.77',
+        })
+      ).id;
+      await access.grant(positiveOnly, gammaId, 'write', actorNamed('test'));
+      const epoch = async (): Promise<string> =>
+        (await db.query<{ value: string }>('SELECT value::text AS value FROM access_epoch'))[0]
+          ?.value ?? '';
+      const before = await epoch();
+      const result = await harness.service.clone(
+        testActor,
+        positiveOnly,
+        { targetParentId: groupId },
+        Visibility.EVERYTHING,
+        'restrictions',
+      );
+      assert.equal(result.grantsNotCarried, 1);
+      assert.equal(await epoch(), before);
+
+      // The control: a source with a restriction on it is written, and moves the epoch.
+      await clone('restrictions');
+      assert.notEqual(await epoch(), before);
     });
   });
 

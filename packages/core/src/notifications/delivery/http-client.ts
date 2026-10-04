@@ -354,13 +354,15 @@ export class GuardedHttpClient {
  */
 function classify(exchange: Exchange, target: URL): DeliveryResult {
   if (exchange.status >= 200 && exchange.status < 300) {
-    return { ok: true, detail: `${String(exchange.status)} from ${target.host}` };
+    const detail = `${String(exchange.status)} from ${target.host}`;
+    return { ok: true, detail, withoutOutput: detail };
   }
   const excerpt = exchange.body === '' ? '' : ` — ${exchange.body.slice(0, 200)}`;
   return {
     ok: false,
     retryable: exchange.status >= 500 || exchange.status === 429 || exchange.status === 408,
     error: `${String(exchange.status)} from ${target.host}${excerpt}`,
+    withoutOutput: `${String(exchange.status)} from ${target.host}`,
   };
 }
 

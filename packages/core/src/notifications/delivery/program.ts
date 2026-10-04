@@ -276,23 +276,26 @@ function classify(name: string, run: ProgramRun): DeliveryResult {
   const took = `${String(run.durationMs)} ms`;
   switch (run.outcome) {
     case 'exited':
-      if (run.code === 0) return { ok: true, detail: `${name} exited 0 in ${took}` };
+      if (run.code === 0) {
+        const detail = `${name} exited 0 in ${took}`;
+        return { ok: true, detail, withoutOutput: detail };
+      }
       return {
         ok: false,
         retryable: false,
         error: `${name} exited ${String(run.code)}${excerpt(run)}`,
+        withoutOutput: `${name} exited ${String(run.code)}`,
       };
-    case 'timeout':
-      return {
-        ok: false,
-        retryable: true,
-        error: `${name} did not finish within ${took} and was ${run.hardKilled ? 'killed' : 'stopped'}`,
-      };
+    case 'timeout': {
+      const error = `${name} did not finish within ${took} and was ${run.hardKilled ? 'killed' : 'stopped'}`;
+      return { ok: false, retryable: true, error, withoutOutput: error };
+    }
     case 'signalled':
       return {
         ok: false,
         retryable: true,
         error: `${name} was ended by ${run.signal}${excerpt(run)}`,
+        withoutOutput: `${name} was ended by ${run.signal}`,
       };
     case 'failed':
       return {
@@ -301,6 +304,7 @@ function classify(name: string, run: ProgramRun): DeliveryResult {
         // that is missing or not executable stays missing however many times it is tried.
         retryable: TRANSIENT_SPAWN_ERRORS.has(run.code),
         error: `${name} could not be run: ${run.message}`,
+        withoutOutput: `${name} could not be run (${run.code})`,
       };
   }
 }

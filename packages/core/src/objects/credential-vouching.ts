@@ -147,6 +147,8 @@ export function declarationsOf(recipe: string): Map<string, readonly string[]> |
 export interface CredentialRoute {
   readonly sensorId: ObjectId;
   readonly sensorName: string;
+  /** The device the sensor is on, whose address `host` is (`A-16`). */
+  readonly deviceId: ObjectId;
   readonly sensorType: string;
   readonly kind: string;
   readonly ownerId: ObjectId;
@@ -240,6 +242,7 @@ export async function routesAtOrUnder(
     sensor_id: string;
     sensor_name: string;
     sensor_type: string;
+    device_id: string;
     params: Record<string, unknown>;
     host: string | null;
     ip_version: string | null;
@@ -300,6 +303,7 @@ export async function routesAtOrUnder(
     )
     SELECT s.id::text          AS sensor_id,
            s.name              AS sensor_name,
+           s.parent_id::text   AS device_id,
            s.type              AS sensor_type,
            s.params            AS params,
            dc.host             AS host,
@@ -337,6 +341,7 @@ export async function routesAtOrUnder(
     routes.push({
       sensorId: Number(row.sensor_id),
       sensorName: row.sensor_name,
+      deviceId: Number(row.device_id),
       sensorType: row.sensor_type,
       kind: row.kind,
       ownerId: Number(row.owner_id),
@@ -373,14 +378,16 @@ export async function routesAtOrUnder(
   return routes;
 }
 
-/** Which of a refused route's two objects its writer can see (`A-16`). */
+/** Which of a refused route's three objects its writer can see (`A-16`). */
 export interface RouteSeen {
   readonly owner: boolean;
   readonly sensor: boolean;
+  /** The sensor's device, whose address is where the set would go. */
+  readonly device: boolean;
 }
 
-/** Both, for a writer who sees everything: the installation, or an administrator. */
-const ROUTE_SEEN_WHOLE: RouteSeen = { owner: true, sensor: true };
+/** All three, for a writer who sees everything: the installation, or an administrator. */
+const ROUTE_SEEN_WHOLE: RouteSeen = { owner: true, sensor: true, device: true };
 
 /**
  * The refusal of a write that would bring a set somewhere new (`A-41`).
@@ -390,7 +397,8 @@ const ROUTE_SEEN_WHOLE: RouteSeen = { owner: true, sensor: true };
  * and kind only to a writer who can see it, since it is often the group or probe above the branch
  * the writer was given (`A-16`). A sensor the writer cannot see, a hole beneath the device being
  * edited, is not named, and nor is where its set would go, which is its device's address and its
- * own parameters.
+ * own parameters. A sensor re-granted inside a device the writer cannot see is named, with its
+ * parameters, and the device's address is not: it is the device's own fact, as `%host` is.
  */
 export function credentialRefusal(
   route: CredentialRoute,
@@ -400,11 +408,12 @@ export function credentialRefusal(
   const shown = (value: unknown): string =>
     typeof value === 'string' ? value : JSON.stringify(value);
   const fields = route.fields.map(([field, value]) => `${field} ${shown(value)}`).join(', ');
+  const host = seen.device ? route.host : 'a device outside your view';
   const where = !seen.sensor
     ? 'a sensor outside your view'
     : route.fields.length === 0
-      ? route.host
-      : `${route.host} (${fields})`;
+      ? host
+      : `${host} (${fields})`;
   const owner = seen.owner
     ? `${route.ownerKind} "${route.ownerName}" (#${String(route.ownerId)})`
     : `#${String(route.ownerId)}`;
@@ -422,8 +431,12 @@ async function seenBy(q: Queryable, writer: Writer, route: CredentialRoute): Pro
   const voucher = voucherOf(writer);
   if (voucher.kind !== 'account') return ROUTE_SEEN_WHOLE;
   const sees = typeof voucher.sees === 'function' ? await voucher.sees(q) : voucher.sees;
-  const visible = await sees.visibleAmong(q, [route.ownerId, route.sensorId]);
-  return { owner: visible.has(route.ownerId), sensor: visible.has(route.sensorId) };
+  const visible = await sees.visibleAmong(q, [route.ownerId, route.sensorId, route.deviceId]);
+  return {
+    owner: visible.has(route.ownerId),
+    sensor: visible.has(route.sensorId),
+    device: visible.has(route.deviceId),
+  };
 }
 
 /**

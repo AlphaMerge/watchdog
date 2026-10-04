@@ -15511,6 +15511,36 @@ because each is a decision rather than a defect:
       - `moveSeenBy` keeping names;
       - the move route not calling it.
 
+      **Review, closed in a second commit** (one medium, two low):
+      - **The credential refusal printed the device's address to a writer of a sensor inside a
+        device they cannot see.** `seenBy` asked about the owner and the sensor, never the
+        device whose address `host` is. The shape: `none` on the device, `write` given back on a
+        sensor in it, and that sensor's port edited. `CredentialRoute` carries `deviceId` now,
+        and an unseen device reads "a device outside your view", as `%host` does in an echo.
+      - **A test send's `error` and `detail` passed through what the far end said.** A program
+        is handed the real rendering in its arguments and prints it back; a webhook endpoint
+        can answer with its body. When anything was hidden from the caller (any of `%probe`,
+        `%group`, `%device`, `%host`, whether or not the echo used it), the transport's output
+        is replaced by a fixed sentence. The exit code, signal or HTTP status is kept, and the
+        sentence says the full output is in the core's log, which now has it (`said` on the
+        test-send log line). A transport gives the bare outcome as `withoutOutput` on its
+        `DeliveryResult`; the program and HTTP transports do. One that gives none is answered
+        "sent" or "not sent" and nothing more, so forgetting it withholds too much, never too
+        little. An administrator sees everything, so nothing is withheld from one.
+      - **The rediscovery refusal compared two pages of fifty.** With 51 rules and 50 visible it
+        said nothing was outside the view. It counts both now (`rediscoveryCount`), and its
+        message says the count rather than the page's length. `details.usedByRediscoveryTotal`
+        is the visible count, as `usedByTotal` is for assignments.
+
+      Tests: one more in `object-visibility.test.ts` with exactly that device and sensor, and
+      `read` on the device as the control; 50 visible rules and the hidden one added to the
+      schedule test; two in `test-send.test.ts`, a program echoing `%probe` (exit 3 and exit 0)
+      and a webhook endpoint answering 400 with the body, each against an administrator's
+      answer. Mutation 7/7: the address shown regardless; the device asked as the sensor; the
+      output never withheld; the probe dropped from what counts as hidden; the program's or
+      the HTTP client's bare outcome carrying the excerpt; the hidden rule count unfiltered;
+      the total counted from the page.
+
       **Found by the sweep and not fixed here, each a different shape** (follow-ups):
       - **`POST /discovery/:id/provision` reads the hidden part of the group.** `main.ts`
         matches against `devicesInGroup`/`sensorsInGroup` with no visibility. A hidden device's
@@ -16572,21 +16602,25 @@ because each is a decision rather than a defect:
 
         Those are the grants this ticket refuses. So a `read` is carried when it narrows what its
         group holds at the copy's parent. A `read` that narrows in the source and not at the
-        destination is left behind, counted and audited.
+        destination is left behind and audited, and not counted (below).
       - **How it is computed.** Every `none` and every candidate `read` is inserted, then each
         group's nearest grant at each `read`'s new parent is asked, and the widening ones are
         deleted. With the candidates in place, that gives the answer a top-down walk would give.
         The question is asked through `groupRightsOn`, a per-group form of the resolver. Its SQL
         is `rightsOf`'s rule-2 CTE, now shared (`nearestGrants`), so the two cannot drift.
       - **Counted and audited.** `grantsNotCarried` is in the clone's answer (`ms:cloneResult`)
-        and in each bulk clone outcome. Each grant left behind is a `grant.notCarried` entry on
-        the copy, with the right the source held. It sits under `grant`, so it is shown to
+        and in each bulk clone outcome, and counts the `write` and `full` grants left behind.
+        Each grant left behind, a widening `read` too, is a `grant.notCarried` entry on the
+        copy, with the right the source held. It sits under `grant`, so it is shown to
         administrators only, as the grants themselves are (`A-26`).
       - **Does the count leak?** It names nothing and counts nothing outside the caller's view:
         `clone_map` holds only what the caller can see (`A-35`). It does say how many positive
         grants other groups hold on those objects. That is a number the grant routes (`ADMIN`)
         and the copy's history (`A-26`) would not tell a non-administrator. The ticket decided on
-        a count, so it is kept, and it is stated here.
+        a count, so it is kept, and it is stated here. **A widening `read` is not counted**
+        (review): whether a `read` widens is whether its group holds `write` at the
+        destination, so counting the dropped ones told the cloner that of another group's grant
+        there. The count depends on the source alone, the same wherever the copy lands.
 
       Tests:
       - 3 new in `access-rights.test.ts`, against a device holding Gamma's `write`. They also
@@ -16596,8 +16630,8 @@ because each is a decision rather than a defect:
         - **Anybody else's in-place clone** carries Delta's `read` and Epsilon's `none`. It
           counts and audits the two `write`s it leaves behind. Gamma resolves `none` and Delta
           `read` on the copy and its sensor, and the source is untouched.
-        - **A clone to a group Delta holds nothing on** leaves Delta's `read` behind too, and
-          counts 3.
+        - **A clone to a group Delta holds nothing on** leaves Delta's `read` behind too. It
+          audits 3 and counts 2, the in-place clone's count.
       - `object-visibility.test.ts`'s `A-35` clone test also gives the Auditors `write` on the box:
         - the operator's direct, in-place and bulk copies leave it behind;
         - each answers `grantsNotCarried: 1`;
@@ -16616,6 +16650,25 @@ because each is a decision rather than a defect:
       - one dropped grant left unaudited;
       - the bulk outcome's count zeroed;
       - the bulk clone ignoring the caller's bar.
+
+      **Review, closed in a second commit** (three low):
+      - **The count leaked another group's `write` at the destination.** Widening `read`s were
+        counted, and whether a `read` widens is whether its group holds `write` there. Now
+        `#copyGrants` returns them apart (`wideningReads`). They are audited as
+        `grant.notCarried` and not counted, as above.
+      - **The guard before the copy asked for any grant**, so a restrictions clone of a source
+        holding only positive grants still ran the insert and bumped the access epoch
+        (migration 052) for nothing. It asks for exactly the rows the insert would take.
+      - **"Always 0 for an administrator" was wrong** for an admin account whose token is
+        scoped below `full`: `grantsCarriedBy` needs both. The schema, `CloneResult` and
+        `administration.md` say "a caller who may grant (the admin role with full scope)".
+        `docs/api-reference.md` is regenerated.
+
+      Tests: the clone to Elsewhere counts 2, the same as in place, and audits 3; a new test
+      clones a device holding only Gamma's `write` and reads `access_epoch` unchanged, with a
+      restrictions clone of the main source as the control that moves it. Mutation 4/4: the
+      widening reads counted; left out of the audit; the guard asking for any grant; the
+      positive grants dropped when nothing is inserted.
 
 - [x] **A-36 — A core behind a browser and a proxy: the stream takes any origin, a forwarded
       header turns off CSRF, and the proxy is never believed** · M · A-01, A-09, A-19 · Found

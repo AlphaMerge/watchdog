@@ -335,6 +335,66 @@ describe(
       }
     });
 
+    it('withholds what a program said when the echo hid a container from its sender (A-16)', async () => {
+      // The program is handed the real rendering, so it can print the probe's name straight
+      // back. The exit code is the sender's to read; the line it printed is not.
+      const root = await mkdtemp(join(tmpdir(), 'ms-testsend-'));
+      try {
+        await writeFile(
+          join(root, 'echo.sh'),
+          '#!/bin/sh\necho "paged via $1" >&2\nexit "$2"\n',
+          'utf8',
+        );
+        await chmod(join(root, 'echo.sh'), 0o755);
+        const program = new ProgramTransport({
+          config: { directory: root, maxOutputBytes: 4096, killGraceMs: 500, uid: -1, gid: -1 },
+          logger: silent,
+        });
+        const parent = await db.query<{ parent_id: string }>(
+          'SELECT parent_id::text AS parent_id FROM object WHERE id = $1',
+          [sensorId],
+        );
+        const deviceOnly = Visibility.of(
+          new Map([[Number(parent[0]?.parent_id), true]]),
+          false,
+          null,
+        );
+        const withheld =
+          ' (its output is withheld here, because what was sent can name containers outside ' +
+          "your view; the full output is in the core's log)";
+        for (const [code, expected] of [
+          ['3', `echo.sh exited 3${withheld}`],
+          ['0', /^echo\.sh exited 0 in \d+ ms$/],
+        ] as const) {
+          const templateId = await template({
+            method: 'program',
+            settings: { path: 'echo.sh', args: ['%probe', code] },
+            recipients: [],
+          });
+          const hidden = await testerWith(program).send(testActor, {
+            seenBy: deviceOnly,
+            templateId,
+            sensorId,
+          });
+          assert.ok(!JSON.stringify(hidden).includes('Local probe'), JSON.stringify(hidden));
+          const answer = code === '0' ? hidden.detail : hidden.error;
+          if (typeof expected === 'string') assert.equal(answer, expected);
+          else assert.match(answer ?? '', expected);
+
+          // Nothing was hidden from an administrator, so they read what the program said.
+          const whole = await testerWith(program).send(testActor, {
+            seenBy: Visibility.EVERYTHING,
+            templateId,
+            sensorId,
+          });
+          if (code === '3') assert.equal(whole.error, 'echo.sh exited 3 — paged via Local probe');
+          else assert.match(whole.detail ?? '', /^echo\.sh exited 0 in \d+ ms$/);
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
     it('reports a transport that throws, because a 500 explains nothing', async () => {
       const throwing = {
         method: 'email',
@@ -553,8 +613,13 @@ describe(
       before(async () => {
         receiver = createServer((request, response) => {
           arrived.push({ path: request.url ?? '', authorization: request.headers.authorization });
-          request.resume();
-          request.on('end', () => response.writeHead(204).end());
+          // `/echo` refuses with what it was sent, as an endpoint's error page often does.
+          const body: Buffer[] = [];
+          request.on('data', (chunk: Buffer) => body.push(chunk));
+          request.on('end', () => {
+            if (request.url === '/echo') response.writeHead(400).end(Buffer.concat(body));
+            else response.writeHead(204).end();
+          });
         });
         await new Promise<void>((resolve) => receiver.listen(0, '127.0.0.1', resolve));
         port = (receiver.address() as AddressInfo).port;
@@ -628,6 +693,43 @@ describe(
         });
         assert.equal(report.delivered, true, report.error ?? '');
         assert.deepEqual(arrived, [{ path: '/steal', authorization: undefined }]);
+      });
+
+      it('withholds what an endpoint answered when the echo hid a container (A-16)', async () => {
+        const { id: templateId } = await templates.create(testActor, {
+          name: `Echo-${String(process.hrtime.bigint())}`,
+          method: 'webhook',
+          settings: { url: at('pager.example.test', '/echo') },
+          body: 'paged via %probe',
+          summarisation: 'always-immediate',
+        });
+        const parent = await db.query<{ parent_id: string }>(
+          'SELECT parent_id::text AS parent_id FROM object WHERE id = $1',
+          [sensorId],
+        );
+        const deviceOnly = Visibility.of(
+          new Map([[Number(parent[0]?.parent_id), true]]),
+          false,
+          null,
+        );
+        const hidden = await testerWith(webhook).send(editor, {
+          seenBy: deviceOnly,
+          templateId,
+          sensorId,
+        });
+        assert.ok(!JSON.stringify(hidden).includes('Local probe'), JSON.stringify(hidden));
+        assert.equal(
+          hidden.error,
+          `400 from pager.example.test:${String(port)} (its output is withheld here, because ` +
+            'what was sent can name containers outside your view; the full output is in the ' +
+            "core's log)",
+        );
+        const whole = await testerWith(webhook).send(testActor, {
+          seenBy: Visibility.EVERYTHING,
+          templateId,
+          sensorId,
+        });
+        assert.match(whole.error ?? '', /^400 from pager\.example\.test:\d+ — .*Local probe/);
       });
 
       it('says the policy refused a URL that gives a metadata address in brackets', async () => {

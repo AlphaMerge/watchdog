@@ -279,24 +279,32 @@ export class ScheduleService {
       // rediscovery rule's permitted window is a `RESTRICT` foreign key, so the delete reached
       // the database and came back as a constraint violation — a 500 with a constraint name in
       // it, for an operator doing something ordinary and correctable. Named, like the other two.
-      const rediscovery = await this.#repo.rediscoveryUsing(q, id, Visibility.EVERYTHING);
-      if (rediscovery.length > 0) {
-        const seen = visibility.everything
-          ? rediscovery
-          : await this.#repo.rediscoveryUsing(q, id, visibility);
-        const outsideView = seen.length < rediscovery.length;
+      // Counted, as the assignments above are: the list is a page of fifty, so comparing two
+      // of them says nothing about a rule past the fiftieth (`A-16`).
+      const ruled = await this.#repo.rediscoveryCount(q, id, Visibility.EVERYTHING);
+      if (ruled > 0) {
+        const seen = await this.#repo.rediscoveryUsing(q, id, visibility);
+        const total = visibility.everything
+          ? ruled
+          : await this.#repo.rediscoveryCount(q, id, visibility);
+        const outsideView = total < ruled;
         throw new ObjectError(
           'OBJECT_NOT_DELETABLE',
           `"${before.name}" is still the permitted window of ` +
             (!outsideView
-              ? `${String(seen.length)} rediscovery rule(s)`
-              : seen.length === 0
+              ? `${String(total)} rediscovery rule(s)`
+              : total === 0
                 ? 'rediscovery rules outside your view'
-                : `${String(seen.length)} rediscovery rule(s) you can see, and of others ` +
+                : `${String(total)} rediscovery rule(s) you can see, and of others ` +
                   'outside your view'),
           {
             context: { phase: 'schedules' },
-            details: { scheduleId: id, usedByRediscovery: seen, outsideView },
+            details: {
+              scheduleId: id,
+              usedByRediscovery: seen,
+              usedByRediscoveryTotal: total,
+              outsideView,
+            },
           },
         );
       }

@@ -614,8 +614,11 @@ export interface CloneResult {
   readonly object: ObjectDetail;
   readonly clonedCount: CloneCounts;
   /**
-   * How many of the source's grants the copy did not carry, because its maker may not grant
-   * (`A-76`). Each is in the audit log as `grant.notCarried`. Always 0 for an administrator.
+   * How many of the source's positive grants (`write`, `full`) the copy did not carry, because
+   * its maker may not grant (`A-76`). A `read` left behind because it would widen at the
+   * destination is not counted: whether it would is a fact about grants there its maker may not
+   * read. Every grant left behind, counted or not, is in the audit log as `grant.notCarried`.
+   * Always 0 for a caller who may grant (the admin role with full scope).
    */
   readonly grantsNotCarried: number;
   /**

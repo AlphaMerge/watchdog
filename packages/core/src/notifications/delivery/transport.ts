@@ -52,6 +52,8 @@ export type DeliveryResult =
        * text a result carries is the same for everybody, and the names travel beside it.
        */
       readonly skipped?: readonly SkippedRecipient[];
+      /** `detail` with nothing the far end wrote back in it. See `withoutOutput` below. */
+      readonly withoutOutput?: string;
     }
   | {
       readonly ok: false;
@@ -59,6 +61,17 @@ export type DeliveryResult =
       readonly retryable: boolean;
       /** Who it did not reach, when that is why it failed: "nobody to send to". As above. */
       readonly skipped?: readonly SkippedRecipient[];
+      /**
+       * `error` with nothing the far end wrote back in it: the exit code, the signal or the HTTP
+       * status, and no excerpt of what the program printed or the endpoint answered (`A-16`).
+       *
+       * A program is handed the rendered message in its arguments and a webhook in its body, so
+       * either can echo it, and a test send's caller may not be allowed to read what was
+       * rendered. This is what they are told instead. Absent means the transport cannot say
+       * anything without output, and such a caller is told only whether it went — so a transport
+       * that forgets this withholds too much rather than too little.
+       */
+      readonly withoutOutput?: string;
     };
 
 /**

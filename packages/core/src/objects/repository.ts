@@ -1630,8 +1630,9 @@ export class ObjectRepository {
    * so the copy inherits from where it lands and keeps the exceptions its source was given.
    * Without them a `none` carved for another group on something the caller can see vanished
    * from the copy, and that group read it. Every row for an administrator; for anybody else only
-   * the restrictions (`carried`, `A-76`, `#copyGrants`). Both what was carried and what was not
-   * are returned, for the audit.
+   * the restrictions (`carried`, `A-76`, `#copyGrants`). What was carried and what was not are
+   * returned, for the audit — and what was not in two parts, because only the positive grants
+   * are counted in the answer.
    */
   async copySubtree(
     q: Queryable,
@@ -1647,6 +1648,7 @@ export class ObjectRepository {
     droppedCredentialKinds: string[];
     grants: CopiedGrant[];
     notCarried: CopiedGrant[];
+    wideningReads: CopiedGrant[];
   }> {
     // Suppresses the ETag bump on side-table inserts: these objects are seconds old and no
     // client holds a validator for them. O(rows) extra UPDATEs become zero.
@@ -1781,7 +1783,7 @@ export class ObjectRepository {
       SELECT count(*) AS count FROM inserted
     `);
 
-    const { grants, notCarried } = await this.#copyGrants(q, carried);
+    const { grants, notCarried, wideningReads } = await this.#copyGrants(q, carried);
 
     const droppedRows = await q.query<{ kind: string }>(`
       SELECT DISTINCT cs.kind
@@ -1815,6 +1817,7 @@ export class ObjectRepository {
       droppedCredentialKinds: droppedRows.map((row) => row.kind),
       grants,
       notCarried,
+      wideningReads,
     };
   }
 
@@ -1832,9 +1835,12 @@ export class ObjectRepository {
    *   group could not see, would give that group `read` on the copy — the grant this exists to
    *   refuse.
    *
-   * Nothing else: a `write`, a `full`, or a `read` that would widen. Each is returned in
-   * `notCarried`, and the caller counts and audits it. The cloner's own groups are no exception:
-   * the cloner holds `write` where the copy lands, which is the bar for cloning there at all.
+   * Nothing else: a `write` or a `full`, returned in `notCarried` for the caller to count and
+   * audit, or a `read` that would widen, returned in `wideningReads` for the caller to audit and
+   * **not** count. Whether a `read` widens is whether its group holds `write` at the destination,
+   * and a count of them in the answer would tell the cloner that of a group whose grants there
+   * they may not read. The cloner's own groups are no exception: the cloner holds `write` where
+   * the copy lands, which is the bar for cloning there at all.
    *
    * **Whether a `read` narrows is asked after the restrictions are written**, of each group's
    * nearest grant at the copy's parent, through `groupRightsOn`. With every `none` and every
@@ -1845,17 +1851,7 @@ export class ObjectRepository {
   async #copyGrants(
     q: Queryable,
     carried: CarriedGrants,
-  ): Promise<{ grants: CopiedGrant[]; notCarried: CopiedGrant[] }> {
-    // Asked before it is written because the insert bumps the access epoch whether or not it
-    // inserts anything (migration 052), and most clones carry no grant at all: a bulk clone of
-    // five hundred devices would otherwise send every open stream back to re-resolve.
-    const granted = await q.query<{ any: boolean }>(`
-      SELECT EXISTS (
-        SELECT 1 FROM object_access a JOIN clone_map m ON m.src_id = a.object_id
-      ) AS any
-    `);
-    if (granted[0]?.any !== true) return { grants: [], notCarried: [] };
-
+  ): Promise<{ grants: CopiedGrant[]; notCarried: CopiedGrant[]; wideningReads: CopiedGrant[] }> {
     type Row = { object_id: string; group_id: string; name: string; right_: AccessRight };
     const asGrant = (row: Row): CopiedGrant => ({
       objectId: Number(row.object_id),
@@ -1864,6 +1860,36 @@ export class ObjectRepository {
       right: row.right_,
     });
     const restrictionsOnly = carried === 'restrictions';
+    // The positive grants left behind, which inserting nothing does not change.
+    const positive = restrictionsOnly
+      ? await q.query<Row>(`
+          SELECT m.new_id::text AS object_id, a.group_id::text AS group_id, g.name, a.right_
+          FROM clone_map m
+          JOIN object_access a ON a.object_id = m.src_id
+          JOIN user_group g ON g.id = a.group_id
+          WHERE a.right_ NOT IN ('none', 'read')
+          ORDER BY m.new_id, lower(g.name)
+        `)
+      : [];
+
+    // Asked before anything is written because the insert bumps the access epoch whether or not
+    // it inserts anything (migration 052), and most clones carry no grant at all: a bulk clone
+    // of five hundred devices would otherwise send every open stream back to re-resolve. Asked
+    // of exactly the rows the insert would take, so a source with only positive grants, cloned
+    // by somebody who may not carry them, bumps nothing either.
+    const granted = await q.query<{ any: boolean }>(
+      `
+      SELECT EXISTS (
+        SELECT 1 FROM object_access a JOIN clone_map m ON m.src_id = a.object_id
+        WHERE NOT $1::boolean OR a.right_ IN ('none', 'read')
+      ) AS any
+      `,
+      [restrictionsOnly],
+    );
+    if (granted[0]?.any !== true) {
+      return { grants: [], notCarried: positive.map(asGrant), wideningReads: [] };
+    }
+
     const inserted = await q.query<Row>(
       `
       WITH inserted AS (
@@ -1879,16 +1905,9 @@ export class ObjectRepository {
       `,
       [restrictionsOnly],
     );
-    if (!restrictionsOnly) return { grants: inserted.map(asGrant), notCarried: [] };
-
-    const positive = await q.query<Row>(`
-      SELECT m.new_id::text AS object_id, a.group_id::text AS group_id, g.name, a.right_
-      FROM clone_map m
-      JOIN object_access a ON a.object_id = m.src_id
-      JOIN user_group g ON g.id = a.group_id
-      WHERE a.right_ NOT IN ('none', 'read')
-      ORDER BY m.new_id, lower(g.name)
-    `);
+    if (!restrictionsOnly) {
+      return { grants: inserted.map(asGrant), notCarried: [], wideningReads: [] };
+    }
 
     // The reads that would widen what their group holds at the copy's parent.
     const reads = inserted.filter((row) => row.right_ === 'read');
@@ -1917,9 +1936,8 @@ export class ObjectRepository {
     const dropped = new Set(widening);
     return {
       grants: inserted.filter((row) => !dropped.has(row)).map(asGrant),
-      notCarried: [...positive, ...widening]
-        .map(asGrant)
-        .sort((a, b) => a.objectId - b.objectId || a.groupName.localeCompare(b.groupName)),
+      notCarried: positive.map(asGrant),
+      wideningReads: widening.map(asGrant),
     };
   }
 

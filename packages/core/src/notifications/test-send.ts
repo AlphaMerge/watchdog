@@ -29,6 +29,11 @@ export interface NotificationTesterOptions {
   siteName?: string;
 }
 
+/** What replaces a transport's output for a caller who was not shown everything (`A-16`). */
+const WITHHELD =
+  ' (its output is withheld here, because what was sent can name containers outside your ' +
+  "view; the full output is in the core's log)";
+
 /** What a test send did, in enough detail to fix whatever went wrong. */
 export interface TestSendReport {
   readonly templateId: number;
@@ -157,15 +162,28 @@ export class NotificationTester {
     const durationMs = Number((process.hrtime.bigint() - started) / 1_000_000n);
 
     // The echo, as the caller may read it (`A-16`). The example sensor names nothing real.
-    const shown =
+    const seen =
       request.sensorId === undefined
-        ? rendered
-        : render(template, await contextSeenBy(this.#db, context, request.seenBy), escaping);
+        ? context
+        : await contextSeenBy(this.#db, context, request.seenBy);
+    const shown = render(template, seen, escaping);
     if (shown.subject !== rendered.subject || shown.body !== rendered.body) {
       notes.push(
         'Containers outside your view read "(outside your view)" here. The message sent names them.',
       );
     }
+    // And what came back, for the same reason: a program is handed the real rendering in its
+    // arguments, which the echo does not show, and a webhook endpoint can answer with its body.
+    // So whenever anything was hidden from the caller — not only when the echo changed — what
+    // the far end said is withheld. The outcome stays, the exit code or the status, and the
+    // output goes to the log alone.
+    const hid =
+      seen.probeName !== context.probeName ||
+      seen.groupName !== context.groupName ||
+      seen.deviceName !== context.deviceName ||
+      seen.host !== context.host;
+    const said = (text: string, bare: string | undefined, fallback: string): string =>
+      !hid || bare === text ? text : `${bare ?? fallback}${WITHHELD}`;
     const skipped = result.skipped ?? [];
     const missed =
       request.namesAccounts === true
@@ -187,10 +205,14 @@ export class NotificationTester {
       // Who it would have missed, in the one place somebody testing a template is looking.
       detail: result.ok
         ? missed === ''
-          ? result.detail
-          : `${result.detail}; not sent to ${missed}`
+          ? said(result.detail, result.withoutOutput, 'sent')
+          : `${said(result.detail, result.withoutOutput, 'sent')}; not sent to ${missed}`
         : null,
-      error: result.ok ? null : missed === '' ? result.error : `${result.error}: ${missed}`,
+      error: result.ok
+        ? null
+        : missed === ''
+          ? said(result.error, result.withoutOutput, 'not sent')
+          : `${said(result.error, result.withoutOutput, 'not sent')}: ${missed}`,
       retryable: result.ok ? null : result.retryable,
       durationMs,
       notes,
@@ -214,7 +236,12 @@ export class NotificationTester {
       ),
     );
     this.#logger[result.ok ? 'info' : 'warn'](
-      { templateId: template.id, delivered: result.ok, durationMs },
+      {
+        templateId: template.id,
+        delivered: result.ok,
+        durationMs,
+        said: result.ok ? result.detail : result.error,
+      },
       'test notification sent',
     );
     return report;
