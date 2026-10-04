@@ -51,10 +51,21 @@ declare module 'ssh2' {
   export interface ServerConnection extends EventEmitter {
     on(event: 'authentication', listener: (context: AuthContext) => void): this;
     on(event: 'ready' | 'close' | 'end', listener: () => void): this;
-    /** The socket's errors, re-emitted with `level: 'socket'`, and the protocol's own. */
+    /**
+     * The socket's errors, re-emitted with `level: 'socket'` and a string `code` and `syscall`,
+     * and the protocol's own. A DISCONNECT the client sends for any reason but "by application"
+     * arrives with the numeric SSH reason as its `code` (2 protocol error, 3 key exchange
+     * failed, …), so `code` is either.
+     */
     on(
       event: 'error',
-      listener: (error: Error & { readonly code?: string; readonly level?: string }) => void,
+      listener: (
+        error: Error & {
+          readonly code?: string | number;
+          readonly syscall?: string;
+          readonly level?: string;
+        },
+      ) => void,
     ): this;
     on(event: 'session', listener: (accept: () => Session, reject: () => void) => void): this;
     on(event: string, listener: (...args: never[]) => void): this;

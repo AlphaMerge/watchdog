@@ -176,16 +176,28 @@ describe('the SSH simulator, stopped after its client has gone (P-257)', () => {
       while (Date.now() < until) {
         // Held on purpose: the reset lands, and nothing here has read it yet.
       }
+      // Nothing heard yet: the simulator has not read the reset, so whatever is recorded from
+      // here on started in `stop()`.
+      // A length, not `deepEqual(…, [])`: that asserts the type too, and the list stays `never[]`.
+      assert.equal(
+        server.connectionErrors.length,
+        0,
+        `the simulator heard the reset before stop(): ${JSON.stringify(server.connectionErrors)}`,
+      );
       stopped = true;
       await within(server.stop(), 2_000, 'stopping after the client reset');
       await sleep(50);
 
-      // That the write failed is what proves the window was hit; a run that missed it would be
-      // green for the wrong reason.
-      const codes = server.connectionErrors.map((error) => error.code);
+      // **A failed write, and the first thing heard.** `ssh2` re-emits a failed read the same
+      // way, so a run where the simulator merely read the reset would also record ECONNRESET;
+      // `syscall` is what tells the DISCONNECT that `stop()` wrote apart from that, and a run
+      // that missed the window fails here rather than passing for the wrong reason.
+      const first = server.connectionErrors[0];
+      assert.ok(first !== undefined, 'the connection recorded nothing');
+      assert.equal(first.syscall, 'write', JSON.stringify(server.connectionErrors));
       assert.ok(
-        codes.some((code) => code === 'ECONNRESET' || code === 'EPIPE'),
-        `the connection recorded no failed write: ${JSON.stringify(server.connectionErrors)}`,
+        first.code === 'ECONNRESET' || first.code === 'EPIPE',
+        JSON.stringify(server.connectionErrors),
       );
     } finally {
       if (!stopped) await within(server.stop(), 2_000, 'stopping');
@@ -195,7 +207,7 @@ describe('the SSH simulator, stopped after its client has gone (P-257)', () => {
   it('reset() forgets what the connections reported', async () => {
     const server = await TestSshServer.start();
     try {
-      server.connectionErrors.push({ code: 'EPIPE', message: 'write EPIPE' });
+      server.connectionErrors.push({ code: 'EPIPE', syscall: 'write', message: 'write EPIPE' });
       server.reset();
       assert.deepEqual(server.connectionErrors, []);
     } finally {

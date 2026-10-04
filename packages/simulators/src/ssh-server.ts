@@ -86,8 +86,15 @@ export class TestSshServer {
   /**
    * What the connections reported going wrong, in order (`P-257`). A client that vanishes is
    * an ordinary event for a server, and this is where it lands instead of in the test process.
+   * `code` is kept as `ssh2` gave it: a string for a socket error (`'ECONNRESET'`), the numeric
+   * SSH reason for a DISCONNECT the client sent. `syscall` says which socket operation failed,
+   * `'write'` or `'read'`, and is absent for the protocol's own errors.
    */
-  readonly connectionErrors: { readonly code: string | undefined; readonly message: string }[] = [];
+  readonly connectionErrors: {
+    readonly code: string | number | undefined;
+    readonly syscall: string | undefined;
+    readonly message: string;
+  }[] = [];
 
   private constructor(server: Server) {
     this.#server = server;
@@ -113,7 +120,11 @@ export class TestSshServer {
       // reset that arrives mid-command, and the keepalive timeout `ssh2` raises on a client that
       // stops answering. Recorded, so a test can still see it.
       connection.on('error', (error) => {
-        instance.connectionErrors.push({ code: error.code, message: error.message });
+        instance.connectionErrors.push({
+          code: error.code,
+          syscall: error.syscall,
+          message: error.message,
+        });
       });
 
       connection.on('authentication', (context) => {
