@@ -736,9 +736,25 @@ export const cloneResultSchema = {
   $id: 'ms:cloneResult',
   type: 'object',
   additionalProperties: false,
-  required: ['object', 'clonedCount', 'droppedCredentialKinds', 'settingsChanged'],
+  required: [
+    'object',
+    'clonedCount',
+    'grantsNotCarried',
+    'droppedCredentialKinds',
+    'settingsChanged',
+  ],
   properties: {
     object: { $ref: 'ms:objectDetail' },
+    grantsNotCarried: {
+      type: 'integer',
+      minimum: 0,
+      description:
+        'How many grants on what was copied the copy did not carry, because only an ' +
+        'administrator may grant (`A-76`). Anybody else’s copy carries each `none`, and each ' +
+        '`read` that narrows what its group holds where the copy landed, and no other group’s ' +
+        '`read`, `write` or `full`. Each left behind is in the copy’s history as ' +
+        '`grant.notCarried`. Always 0 for an administrator, whose copy carries every grant.',
+    },
     clonedCount: {
       type: 'object',
       additionalProperties: false,

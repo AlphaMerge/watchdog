@@ -3,6 +3,7 @@ import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import {
   AccessService,
+  Visibility,
   atLeast,
   lower,
   type AccessPrincipal,
@@ -952,6 +953,126 @@ describe('per-object access rights', { skip: available ? false : 'no database' }
 
       await groups.update(gammaId, { isAdmin: true }, actorNamed('test'));
       assert.ok((await access.epoch()) > before, 'making a group the administrators did not');
+    });
+  });
+
+  /**
+   * `A-76`: a clone made by somebody who may not grant carries the source's restrictions and no
+   * other grant. Gamma holds `write` on the device — the ticket's case — and Delta a `read` under a
+   * `write` on the group, re-opened to `write` on the sensor; Epsilon is carved out of the sensor.
+   */
+  describe('what a clone carries (A-76)', () => {
+    let deltaId = 0;
+    let epsilonId = 0;
+    let gammaUser = 0;
+    let deltaUser = 0;
+
+    beforeEach(async () => {
+      deltaId = (await groups.create({ name: 'Delta' }, testActor)).id;
+      epsilonId = (await groups.create({ name: 'Epsilon' }, testActor)).id;
+      const member = async (login: string, groupOf: number): Promise<number> => {
+        const account = await accounts.create(
+          { login, password: 'correct-horse-battery', role: 'readwrite' },
+          testActor,
+        );
+        await groups.addMember(groupOf, account.id, testActor);
+        return account.id;
+      };
+      gammaUser = await member('gamma-user', gammaId);
+      deltaUser = await member('delta-user', deltaId);
+
+      const by = actorNamed('test');
+      await access.grant(deviceId, gammaId, 'write', by);
+      await access.grant(groupId, deltaId, 'write', by);
+      await access.grant(deviceId, deltaId, 'read', by);
+      await access.grant(sensorId, deltaId, 'write', by);
+      await access.grant(sensorId, epsilonId, 'none', by);
+    });
+
+    /** Every grant on a copy and its sensor, as `group right` per object, root first. */
+    const grantsOn = async (copy: number): Promise<string[][]> => {
+      const rows = await db.query<{ depth: number; name: string; right_: string }>(
+        `SELECT CASE WHEN o.id = $1 THEN 0 ELSE 1 END AS depth, g.name, a.right_::text AS right_
+         FROM object o
+         JOIN object_access a ON a.object_id = o.id
+         JOIN user_group g ON g.id = a.group_id
+         WHERE o.id = $1 OR o.parent_id = $1
+         ORDER BY 1, g.name`,
+        [copy],
+      );
+      return [0, 1].map((depth) =>
+        rows.filter((row) => row.depth === depth).map((row) => `${row.name} ${row.right_}`),
+      );
+    };
+    const sensorOf = async (copy: number): Promise<number> =>
+      Number(
+        (
+          await db.query<{ id: string }>('SELECT id::text AS id FROM object WHERE parent_id = $1', [
+            copy,
+          ])
+        )[0]?.id,
+      );
+    const clone = async (carried: 'all' | 'restrictions', targetParentId = groupId) => {
+      const before = harness.audit.recorded.length;
+      const result = await harness.service.clone(
+        testActor,
+        deviceId,
+        { targetParentId },
+        Visibility.EVERYTHING,
+        carried,
+      );
+      const audited = harness.audit.recorded
+        .slice(before)
+        .flatMap((entry) =>
+          entry.action === 'grant.notCarried' ? [`${entry.groupName} ${entry.onSource}`] : [],
+        );
+      return { id: result.object.id, notCarried: result.grantsNotCarried, audited };
+    };
+
+    it('carries every grant for an administrator, as before', async () => {
+      const copy = await clone('all');
+      assert.deepEqual(await grantsOn(copy.id), [
+        ['Delta read', 'Gamma write'],
+        ['Delta write', 'Epsilon none'],
+      ]);
+      assert.equal(copy.notCarried, 0);
+      assert.deepEqual(copy.audited, []);
+      assert.equal((await access.resolve(gammaUser, copy.id)).right, 'write');
+    });
+
+    it('carries only the restrictions for anybody else, and counts and audits the rest', async () => {
+      const copy = await clone('restrictions');
+      // Delta's `read` narrows its `write` on the group the copy landed in; Epsilon's `none` is a
+      // `none`. Gamma's `write` and Delta's re-opening `write` are grants, and stay behind.
+      assert.deepEqual(await grantsOn(copy.id), [['Delta read'], ['Epsilon none']]);
+      assert.equal(copy.notCarried, 2);
+      assert.deepEqual(copy.audited.sort(), ['Delta write', 'Gamma write']);
+      // Gamma reads nothing of the copy: it holds nothing on the group, and was given nothing.
+      assert.equal((await access.resolve(gammaUser, copy.id)).right, 'none');
+      // Delta holds `read` on the copy, and on its sensor, where the source gave it `write`.
+      assert.equal((await access.resolve(deltaUser, copy.id)).right, 'read');
+      assert.equal((await access.resolve(deltaUser, await sensorOf(copy.id))).right, 'read');
+      // The source is untouched.
+      assert.equal((await access.resolve(gammaUser, deviceId)).right, 'write');
+      assert.equal((await access.resolve(deltaUser, sensorId)).right, 'write');
+    });
+
+    it('judges a read where the copy lands, so it never hands its group a read', async () => {
+      // A group Delta holds nothing on: the source's `read` was narrower than its parent, and
+      // would be a grant here.
+      const elsewhere = (
+        await harness.service.create(testActor, {
+          kind: 'group',
+          parentId: probeId,
+          name: 'Elsewhere',
+        })
+      ).id;
+      const copy = await clone('restrictions', elsewhere);
+      assert.deepEqual(await grantsOn(copy.id), [[], ['Epsilon none']]);
+      assert.equal(copy.notCarried, 3);
+      assert.deepEqual(copy.audited.sort(), ['Delta read', 'Delta write', 'Gamma write']);
+      assert.equal((await access.resolve(deltaUser, copy.id)).right, 'none');
+      assert.equal((await access.resolve(deltaUser, await sensorOf(copy.id))).right, 'none');
     });
   });
 

@@ -2882,6 +2882,16 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       await access.grant(branchId, auditorsId, 'read', actorNamed('visibility'));
       await access.grant(boxPingId, auditorsId, 'none', actorNamed('visibility'));
       await access.grant(boxReadOnlyId, teamId, 'read', actorNamed('visibility'));
+      // And another group's `write` on the box itself: a grant, which only an administrator may
+      // make, so the operator's copy leaves it behind and says so (`A-76`).
+      await access.grant(boxId, auditorsId, 'write', actorNamed('visibility'));
+      const auditorsOn = async (id: number): Promise<string[]> =>
+        (
+          await db.query<{ right_: string }>(
+            `SELECT right_::text AS right_ FROM object_access WHERE object_id = $1 AND group_id = $2`,
+            [id, auditorsId],
+          )
+        ).map((row) => row.right_);
 
       const cloned = await app.inject({
         method: 'POST',
@@ -2894,9 +2904,12 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       const result = cloned.json<{
         object: { id: number };
         clonedCount: { total: number; sensor: number };
+        grantsNotCarried: number;
       }>();
       // The box and the two sensors the operator can see; the hole is neither copied nor counted.
       assert.deepEqual([result.clonedCount.total, result.clonedCount.sensor], [3, 2]);
+      assert.equal(result.grantsNotCarried, 1, 'the Auditors’ write on the box');
+      assert.deepEqual(await auditorsOn(result.object.id), []);
       assert.deepEqual(await childrenOf(result.object.id), ['a-box-ping', 'a-box-read-only']);
 
       const copies = await db.query<{ name: string; group_name: string; right_: string }>(
@@ -2928,7 +2941,8 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       );
       assert.equal(held.right, 'read', 'the copy inherited write from where it landed');
 
-      // Each carried grant is in the audit log as a grant made by the cloner, beside the clone.
+      // Each carried grant is in the audit log as a grant made by the cloner, beside the clone,
+      // and the one left behind beside them (`A-76`).
       const entries = await db.query<{ action: string; actor_label: string; object_id: string }>(
         `SELECT action, actor_label, object_id::text AS object_id FROM audit_log
          WHERE object_id IN (SELECT id FROM object WHERE parent_id = $1 OR id = $1)
@@ -2941,6 +2955,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
           ['object.cloned', 'operator'],
           ['grant.set', 'operator'],
           ['grant.set', 'operator'],
+          ['grant.notCarried', 'operator'],
         ],
       );
 
@@ -2952,10 +2967,10 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         payload: {},
       });
       assert.equal(inPlace.statusCode, 201, inPlace.body);
-      assert.deepEqual(await childrenOf(inPlace.json<{ object: { id: number } }>().object.id), [
-        'a-box-ping',
-        'a-box-read-only',
-      ]);
+      const inPlaceCopy = inPlace.json<{ object: { id: number }; grantsNotCarried: number }>();
+      assert.deepEqual(await childrenOf(inPlaceCopy.object.id), ['a-box-ping', 'a-box-read-only']);
+      assert.equal(inPlaceCopy.grantsNotCarried, 1);
+      assert.deepEqual(await auditorsOn(inPlaceCopy.object.id), []);
       const bulk = await app.inject({
         method: 'POST',
         url: '/api/v1/objects/bulk',
@@ -2963,9 +2978,14 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         payload: { ids: [boxId], operation: 'clone', targetParentId: spareId },
       });
       assert.equal(bulk.statusCode, 200, bulk.body);
-      const createdId = bulk.json<{ outcomes: { createdId?: number }[] }>().outcomes[0]?.createdId;
+      const bulkOutcome = bulk.json<{
+        outcomes: { createdId?: number; grantsNotCarried?: number }[];
+      }>().outcomes[0];
+      const createdId = bulkOutcome?.createdId;
       assert.ok(createdId !== undefined, bulk.body);
       assert.deepEqual(await childrenOf(createdId), ['a-box-ping', 'a-box-read-only']);
+      assert.equal(bulkOutcome?.grantsNotCarried, 1, bulk.body);
+      assert.deepEqual(await auditorsOn(createdId), []);
 
       // The control: an administrator's clone copies the hole, grant and all.
       const whole = await app.inject({
@@ -2976,6 +2996,9 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       });
       assert.equal(whole.statusCode, 201, whole.body);
       const wholeId = whole.json<{ object: { id: number } }>().object.id;
+      // Every grant, the Auditors' `write` included, and none left behind (`A-76`).
+      assert.equal(whole.json<{ grantsNotCarried: number }>().grantsNotCarried, 0);
+      assert.deepEqual(await auditorsOn(wholeId), ['write']);
       assert.deepEqual(await childrenOf(wholeId), [
         'a-box-ping',
         'a-box-read-only',

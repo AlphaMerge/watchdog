@@ -141,6 +141,27 @@ function administers(user: string): string {
  */
 function rightsOf(user: string, ids: string): string {
   return `
+      ${nearestGrants(ids, user)}
+      -- **Rule 3, across groups**, and only now: each group has already had its own nearest
+      -- ancestor found, so a grant added for one group cannot displace another's.
+      SELECT DISTINCT ON (root_id) root_id, right_
+      FROM nearest
+      ORDER BY root_id, access_rank(right_) DESC
+  `;
+}
+
+/**
+ * Rules 1 and 2: each group's nearest grant on each of `ids`, as a `nearest` CTE of
+ * `(root_id, group_id, right_, depth)`. `user` limits it to that account's groups, or null asks
+ * it of every group (`A-76`). Shared by `rightsOf` and `groupRightsOn`, so the two cannot come to
+ * disagree about which grant is a group's.
+ */
+function nearestGrants(ids: string, user: string | null): string {
+  const member =
+    user === null
+      ? ''
+      : `JOIN user_group_member m ON m.group_id = a.group_id AND m.user_id = ${user}`;
+  return `
       WITH RECURSIVE chain AS (
         SELECT id AS root_id, id, parent_id, 0 AS depth
         FROM object
@@ -153,22 +174,45 @@ function rightsOf(user: string, ids: string): string {
         JOIN chain ON parent.id = chain.parent_id
         WHERE chain.depth < ${String(MAX_WALK_DEPTH)}
       ),
-      -- **Rule 2, per group.** The nearest ancestor defining a right for each of this account's
-      -- groups; depth 0 is the object itself, which is what makes explicit beat inherited.
+      -- **Rule 2, per group.** The nearest ancestor defining a right for each group; depth 0 is
+      -- the object itself, which is what makes explicit beat inherited.
       nearest AS (
         SELECT DISTINCT ON (chain.root_id, a.group_id)
-               chain.root_id, a.right_, chain.depth
+               chain.root_id, a.group_id, a.right_, chain.depth
         FROM chain
         JOIN object_access a ON a.object_id = chain.id
-        JOIN user_group_member m ON m.group_id = a.group_id AND m.user_id = ${user}
+        ${member}
         ORDER BY chain.root_id, a.group_id, chain.depth ASC
       )
-      -- **Rule 3, across groups**, and only now: each group has already had its own nearest
-      -- ancestor found, so a grant added for one group cannot displace another's.
-      SELECT DISTINCT ON (root_id) root_id, right_
-      FROM nearest
-      ORDER BY root_id, access_rank(right_) DESC
   `;
+}
+
+/**
+ * What each group's own grants give it on each of these objects: rule 2 alone, before rule 3
+ * picks among an account's groups (`A-76`).
+ *
+ * For a question about a group rather than an account: whether a `read` copied with a clone
+ * narrows what that group holds where the copy landed, or would hand it something. A group with
+ * no grant at or above an object is absent from that object's map, which means `none`.
+ */
+export async function groupRightsOn(
+  q: Queryable,
+  objectIds: readonly number[],
+): Promise<Map<number, Map<number, AccessRight>>> {
+  const result = new Map<number, Map<number, AccessRight>>();
+  if (objectIds.length === 0) return result;
+  const rows = await q.query<{ root_id: string; group_id: string; right_: AccessRight }>(
+    `${nearestGrants('$1::bigint[]', null)}
+     SELECT root_id::text AS root_id, group_id::text AS group_id, right_ FROM nearest`,
+    [[...objectIds]],
+  );
+  for (const row of rows) {
+    const id = Number(row.root_id);
+    const groups = result.get(id) ?? new Map<number, AccessRight>();
+    groups.set(Number(row.group_id), row.right_);
+    result.set(id, groups);
+  }
+  return result;
 }
 
 /**

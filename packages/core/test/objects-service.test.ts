@@ -702,6 +702,7 @@ describe(
               'Doomed clone',
               5_000,
               Visibility.EVERYTHING,
+              'all',
             );
             // Rows are now written inside this transaction; abandon it.
             throw new Error(`clone wrote ${String(copied.counts.total)} objects, now rolling back`);
@@ -718,7 +719,7 @@ describe(
 
         const error = await rejects(() =>
           h.service.batch('shared', async (q, repo) =>
-            repo.copySubtree(q, source, probeId, 'Too big', 2, Visibility.EVERYTHING),
+            repo.copySubtree(q, source, probeId, 'Too big', 2, Visibility.EVERYTHING, 'all'),
           ),
         );
 
@@ -742,6 +743,7 @@ describe(
             'First clone',
             5_000,
             Visibility.EVERYTHING,
+            'all',
           );
           const second = await repo.copySubtree(
             q,
@@ -750,6 +752,7 @@ describe(
             'Second clone',
             5_000,
             Visibility.EVERYTHING,
+            'all',
           );
           return [first, second];
         });

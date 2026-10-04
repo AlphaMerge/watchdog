@@ -88,6 +88,7 @@ describe(
           'Clone of Big group',
           5_000,
           Visibility.EVERYTHING,
+          'all',
         );
         return { result, elapsedMs: Number(process.hrtime.bigint() - startedAt) / 1e6 };
       });

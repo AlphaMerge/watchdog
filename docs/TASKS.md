@@ -16372,7 +16372,7 @@ because each is a decision rather than a defect:
       answered 400 "body must be object", although the route's own comment says a bodiless clone
       is legitimate. `{}` works.
 
-- [ ] **A-76 — a clone made by someone who is not an administrator carries other groups'
+- [x] **A-76 — a clone made by someone who is not an administrator carries other groups'
       positive grants** · S · A-35 · Found 2026-09-29 by `A-35`, decided 2026-10-04 by WatchDog
       on Roman's "you decide". `A-35`'s clone carries every `object_access` row on what it
       copies, so a non-administrator's clone gives another group `read` or `write` on a new
@@ -16383,6 +16383,65 @@ because each is a decision rather than a defect:
       clone does that, each dropped grant is counted in the answer and audited, and
       `access-rights.test.ts` asserts both callers against a source holding another group's
       `write`.
+
+      **A-76 outcome.**
+      - **The rule.** `copySubtree` takes `carried` (`'all' | 'restrictions'`), and its grant
+        copy is now `#copyGrants`. The direct, in-place and bulk clones get it from one function,
+        `grantsCarriedBy`, which is `clears(request, 'admin')`: the bar the grant routes hold,
+        role and token scope both. `ObjectService.clone` defaults to `restrictions`, so a caller
+        that forgets grants nothing. An administrator's copy carries every row, as before.
+      - **`read` is judged where the copy lands.** This is a deliberate reading of "`read` where
+        the source was narrower than its parent". Judged in the source, two copies would hand a
+        group `read` it does not have there:
+        - a `read` under a `write` that is itself left behind;
+        - a `read` cloned to a group its holder has nothing on.
+
+        Those are the grants this ticket refuses. So a `read` is carried when it narrows what its
+        group holds at the copy's parent. A `read` that narrows in the source and not at the
+        destination is left behind, counted and audited.
+      - **How it is computed.** Every `none` and every candidate `read` is inserted, then each
+        group's nearest grant at each `read`'s new parent is asked, and the widening ones are
+        deleted. With the candidates in place, that gives the answer a top-down walk would give.
+        The question is asked through `groupRightsOn`, a per-group form of the resolver. Its SQL
+        is `rightsOf`'s rule-2 CTE, now shared (`nearestGrants`), so the two cannot drift.
+      - **Counted and audited.** `grantsNotCarried` is in the clone's answer (`ms:cloneResult`)
+        and in each bulk clone outcome. Each grant left behind is a `grant.notCarried` entry on
+        the copy, with the right the source held. It sits under `grant`, so it is shown to
+        administrators only, as the grants themselves are (`A-26`).
+      - **Does the count leak?** It names nothing and counts nothing outside the caller's view:
+        `clone_map` holds only what the caller can see (`A-35`). It does say how many positive
+        grants other groups hold on those objects. That is a number the grant routes (`ADMIN`)
+        and the copy's history (`A-26`) would not tell a non-administrator. The ticket decided on
+        a count, so it is kept, and it is stated here.
+
+      Tests:
+      - 3 new in `access-rights.test.ts`, against a device holding Gamma's `write`. They also
+        cover Delta's `read` under its `write` on the group, re-opened to `write` on the sensor,
+        and Epsilon's `none`.
+        - **An administrator's clone** carries all four, and Gamma resolves `write` on the copy.
+        - **Anybody else's in-place clone** carries Delta's `read` and Epsilon's `none`. It
+          counts and audits the two `write`s it leaves behind. Gamma resolves `none` and Delta
+          `read` on the copy and its sensor, and the source is untouched.
+        - **A clone to a group Delta holds nothing on** leaves Delta's `read` behind too, and
+          counts 3.
+      - `object-visibility.test.ts`'s `A-35` clone test also gives the Auditors `write` on the box:
+        - the operator's direct, in-place and bulk copies leave it behind;
+        - each answers `grantsNotCarried: 1`;
+        - the audit has the `grant.notCarried` row;
+        - an administrator's copy keeps the `write` and answers 0.
+      - `administration.md` says so. `docs/api-reference.md` is regenerated.
+
+      Mutation 10/10, each caught by these tests:
+      - the route carrying everything for anybody;
+      - the repository carrying everything;
+      - the positive grants left uncounted;
+      - no `read` judged widening;
+      - a group with no grant read as `write`;
+      - the widening `read`s not deleted;
+      - the answer's count zeroed;
+      - one dropped grant left unaudited;
+      - the bulk outcome's count zeroed;
+      - the bulk clone ignoring the caller's bar.
 
 - [x] **A-36 — A core behind a browser and a proxy: the stream takes any origin, a forwarded
       header turns off CSRF, and the proxy is never believed** · M · A-01, A-09, A-19 · Found

@@ -84,9 +84,14 @@ A few consequences are worth knowing before somebody reports them as bugs:
   the account may not change, and never what or how much. An administrator, or a grant that
   closes the hole, is how such a subtree is deleted or moved.
 - **A clone copies what its maker can see.** A hole beneath the source is left out and not
-  counted. The copy keeps the source's own grants, every group's, so a hole carved for somebody
-  else is still a hole in the copy. A clone made in place lands in the source's parent, and needs
-  `write` there as a clone into any other parent does.
+  counted. The copy keeps the source's restrictions, every group's, so a hole carved for
+  somebody else is still a hole in the copy. That means each `none`, and each `read` that narrows
+  what its group holds where the copy lands. **Only an administrator's copy also keeps the
+  positive grants**: another group's `read`, `write` or `full`. Anybody else's copy leaves them
+  behind, since carrying them to a place of the cloner's choosing would be granting. The answer
+  counts them (`grantsNotCarried`), and each is in the copy's history as `grant.notCarried`. A
+  clone made in place lands in the source's parent, and needs `write` there as a clone into any
+  other parent does.
 - **A pause or a setting on a container still reaches into its holes**, as every inherited value
   does. It stores nothing on the hidden objects. Acknowledging or forcing an error on the
   container is not inherited: it is written onto each sensor, and reaches only the sensors its

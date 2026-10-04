@@ -301,6 +301,7 @@ describe('bulk operations', { skip: available ? false : 'no database' }, () => {
         {
           kind: 'clone',
           targetParentId: other,
+          grants: 'all',
         },
         Visibility.EVERYTHING,
       );

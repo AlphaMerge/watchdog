@@ -1369,7 +1369,7 @@ Moves an object within its parent's children, the way PRTG's move up / move down
 | `targetParentId` | integer |  |
 | `name` | string |  |
 
-**201** { object, clonedCount, droppedCredentialKinds, settingsChanged }
+**201** { object, grantsNotCarried, clonedCount, droppedCredentialKinds, settingsChanged }
 
 ### `POST /api/v1/objects/bulk`
 

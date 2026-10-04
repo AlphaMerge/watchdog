@@ -458,6 +458,21 @@ export type Mutation =
     }
   | {
       /**
+       * A grant on a clone's source that its copy did not carry, because its maker may not grant
+       * (`A-76`). `objectId` is the copy, so the entry is in the copy's history beside the grants
+       * it did carry, and "why does that group not have `write` here like it has on the
+       * original?" is answered there. Under `grant`, so it is shown to whoever the grants are.
+       */
+      action: 'grant.notCarried';
+      objectId: ObjectId;
+      subject: GrantSubject;
+      groupId: number;
+      groupName: string;
+      /** What the group holds on the source, which it does not on the copy. */
+      onSource: AccessRight;
+    }
+  | {
+      /**
        * A map was created, changed or removed (`A-17`).
        *
        * Unaudited from `G-01` until here, while the repository's header said "rights and audit
@@ -1208,6 +1223,13 @@ function summarise(mutation: Mutation): Record<string, unknown> {
         subject: mutation.subject,
         groupId: mutation.groupId,
         before: mutation.before,
+      };
+    case 'grant.notCarried':
+      return {
+        action: mutation.action,
+        subject: mutation.subject,
+        groupId: mutation.groupId,
+        onSource: mutation.onSource,
       };
     case 'map.created':
     case 'map.deleted':

@@ -49,6 +49,7 @@ import {
 import type { SensorStateCause } from '../state/tables.js';
 import type {
   AcknowledgementView,
+  CarriedGrants,
   SimulatedErrorView,
   ChannelProcessing,
   ChannelRecord,
@@ -2459,12 +2460,18 @@ export class ObjectService {
    * the caller cannot see: a hole beneath the source is left out, and the answer counts only
    * what was copied. The route passes the caller's visibility; a caller that means the whole
    * tree passes `Visibility.EVERYTHING` and says so.
+   *
+   * **Its grants are every row only for a caller who may grant** (`A-76`). Anybody else's copy
+   * carries the restrictions and no positive grant, and each it leaves behind is counted in the
+   * answer and audited as `grant.notCarried`. Left out, `carried` is `restrictions`: a caller
+   * that forgets grants nothing.
    */
   async clone(
     writer: Writer,
     id: ObjectId,
     input: CloneInput,
     visibility: Visibility,
+    carried: CarriedGrants = 'restrictions',
   ): Promise<CloneResult> {
     const actor = actorOf(writer);
     return this.#db.tx(async (q) => {
@@ -2497,6 +2504,7 @@ export class ObjectService {
         rootName,
         this.#maxCloneObjects,
         visibility,
+        carried,
       );
 
       const cloneRoot = await this.#repo.get(q, copied.cloneRootId);
@@ -2563,6 +2571,16 @@ export class ObjectService {
             before: null,
             after: grant.right,
           })),
+          // And one per grant left behind (`A-76`), so the copy's history says which groups its
+          // source granted and it does not.
+          ...copied.notCarried.map((grant): Mutation => ({
+            action: 'grant.notCarried',
+            objectId: grant.objectId,
+            subject: { kind: 'object', id: grant.objectId },
+            groupId: grant.groupId,
+            groupName: grant.groupName,
+            onSource: grant.right,
+          })),
         ],
         new Date(),
       );
@@ -2582,6 +2600,7 @@ export class ObjectService {
       return {
         object: this.#redact(cloneRoot),
         clonedCount: copied.counts,
+        grantsNotCarried: copied.notCarried.length,
         droppedCredentialKinds: copied.droppedCredentialKinds as CredentialKind[],
         settingsChanged,
       };

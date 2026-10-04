@@ -27,13 +27,14 @@ import {
 } from '../schemas/pause.js';
 import { SENSOR_STATES } from '../../state/tables.js';
 import type { ChannelLimitsPatch } from '../../state/limits.js';
-import type { ChannelProcessing } from '../../objects/types.js';
+import type { CarriedGrants, ChannelProcessing } from '../../objects/types.js';
 import { decodeCursor } from '../pagination.js';
 import { etagFor, optionalIfMatch, requireIfMatch, viewedChain } from '../preconditions.js';
 import {
   INSTALLATION,
   READS,
   WRITES,
+  clears,
   every,
   onBodyObject,
   onDerivedObject,
@@ -53,6 +54,15 @@ import {
   type Visibility,
 } from '../../auth/access.js';
 import { AuthError } from '../../auth/errors.js';
+
+/**
+ * Which grants this caller's clone carries (`A-76`): every one for whoever may grant, which is
+ * the bar the grant routes hold (`ADMIN`, role and token scope both), and only the restrictions
+ * for anybody else. One function for the direct, in-place and bulk clones, so the three agree.
+ */
+function grantsCarriedBy(request: FastifyRequest): CarriedGrants {
+  return clears(request, 'admin') ? 'all' : 'restrictions';
+}
 
 /** An outcome for an id the caller may not change, in the shape the route already returns. */
 interface RefusedOutcome {
@@ -965,6 +975,7 @@ export async function objectRoutes(
         request.params.id,
         request.body ?? {},
         await visibilityOf(request),
+        grantsCarriedBy(request),
       );
       await reply
         .status(201)
@@ -1072,6 +1083,12 @@ export async function objectRoutes(
                     problem: { type: 'string' },
                     code: { type: 'string' },
                     createdId: { type: 'integer' },
+                    grantsNotCarried: {
+                      type: 'integer',
+                      description:
+                        '`clone` only: the grants the copy did not carry, as the single ' +
+                        'clone’s answer counts them (`A-76`).',
+                    },
                     deleted: { type: 'integer' },
                   },
                 },
@@ -1103,7 +1120,7 @@ export async function objectRoutes(
           : await bulk.apply(
               await writerFor(request),
               allowed,
-              operationFrom(request.body),
+              operationFrom(request.body, grantsCarriedBy(request)),
               await visibilityOf(request),
             );
       await reply.send({
@@ -2010,17 +2027,20 @@ export async function objectRoutes(
  * "targetParentId is an integer" but not "targetParentId is required when operation is move"
  * without `oneOf`, which produces error messages naming all six branches for a mistake in one.
  */
-function operationFrom(body: {
-  operation: string;
-  targetParentId?: number;
-  cascade?: boolean;
-  key?: string;
-  value?: unknown;
-  minutes?: number;
-  until?: string;
-  from?: string;
-  message?: string;
-}): BulkOperation {
+function operationFrom(
+  body: {
+    operation: string;
+    targetParentId?: number;
+    cascade?: boolean;
+    key?: string;
+    value?: unknown;
+    minutes?: number;
+    until?: string;
+    from?: string;
+    message?: string;
+  },
+  grants: CarriedGrants,
+): BulkOperation {
   const needs = <T>(value: T | undefined, field: string): T => {
     if (value === undefined) {
       throw new ObjectError('OBJECT_INVALID', `${body.operation} needs ${field}`, {
@@ -2037,7 +2057,11 @@ function operationFrom(body: {
     case 'move':
       return { kind: 'move', targetParentId: needs(body.targetParentId, 'targetParentId') };
     case 'clone':
-      return { kind: 'clone', targetParentId: needs(body.targetParentId, 'targetParentId') };
+      return {
+        kind: 'clone',
+        targetParentId: needs(body.targetParentId, 'targetParentId'),
+        grants,
+      };
     case 'delete':
       return { kind: 'delete', cascade: body.cascade ?? false };
     case 'setting':

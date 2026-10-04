@@ -558,6 +558,22 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         diff: [{ field: 'grant.right', before: mutation.before, after: null }],
       };
 
+    // Nothing changed on the copy, so no diff: the entry says what the source had and the copy
+    // was not given, and why is its action (`A-76`).
+    case 'grant.notCarried':
+      return {
+        ...base,
+        objectKind: null,
+        summary: {
+          subject: mutation.subject.kind,
+          subjectId: mutation.subject.id,
+          groupId: mutation.groupId,
+          group: mutation.groupName,
+          onSource: mutation.onSource,
+        },
+        diff: [],
+      };
+
     case 'map.created':
       return {
         ...base,

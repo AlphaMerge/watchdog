@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto';
 import type { Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
-import type { AccessRight, Visibility } from '../auth/access.js';
+import { atLeast, groupRightsOn, type AccessRight, type Visibility } from '../auth/access.js';
 import { limitsFromDeclaration, parseLimits, type ChannelLimits } from '../state/limits.js';
 import { SENSOR_STATES, type SensorState } from '../state/tables.js';
 import type { ChannelDraft } from './sensor-type-gate.js';
 import { ObjectError, notFound } from './errors.js';
 import type {
+  CarriedGrants,
   ChannelProcessing,
   ChannelRecord,
   CloneCounts,
@@ -1583,10 +1584,12 @@ export class ObjectRepository {
    * readable, writable duplicate of a hole, carrying the hidden sensors' `writeOnly` parameters,
    * and the count would say how many objects the hole holds.
    *
-   * **The grants on the copied objects are copied too**, every group's, as their settings are:
-   * own rows only, so the copy inherits from where it lands and keeps the exceptions its source
-   * was given. Without them a `none` carved for another group on something the caller can see
-   * vanished from the copy, and that group read it. They are returned for the audit.
+   * **The grants on the copied objects are copied too**, as their settings are: own rows only,
+   * so the copy inherits from where it lands and keeps the exceptions its source was given.
+   * Without them a `none` carved for another group on something the caller can see vanished
+   * from the copy, and that group read it. Every row for an administrator; for anybody else only
+   * the restrictions (`carried`, `A-76`, `#copyGrants`). Both what was carried and what was not
+   * are returned, for the audit.
    */
   async copySubtree(
     q: Queryable,
@@ -1595,11 +1598,13 @@ export class ObjectRepository {
     rootName: string,
     maxObjects: number,
     visibility: Visibility,
+    carried: CarriedGrants,
   ): Promise<{
     cloneRootId: ObjectId;
     counts: CloneCounts;
     droppedCredentialKinds: string[];
     grants: CopiedGrant[];
+    notCarried: CopiedGrant[];
   }> {
     // Suppresses the ETag bump on side-table inserts: these objects are seconds old and no
     // client holds a validator for them. O(rows) extra UPDATEs become zero.
@@ -1734,33 +1739,7 @@ export class ObjectRepository {
       SELECT count(*) AS count FROM inserted
     `);
 
-    // Asked before it is written because the insert bumps the access epoch whether or not it
-    // inserts anything (migration 052), and most clones carry no grant at all: a bulk clone of
-    // five hundred devices would otherwise send every open stream back to re-resolve.
-    const granted = await q.query<{ any: boolean }>(`
-      SELECT EXISTS (
-        SELECT 1 FROM object_access a JOIN clone_map m ON m.src_id = a.object_id
-      ) AS any
-    `);
-    const grantRows =
-      granted[0]?.any === true
-        ? await q.query<{
-            object_id: string;
-            group_id: string;
-            name: string;
-            right_: AccessRight;
-          }>(`
-            WITH inserted AS (
-              INSERT INTO object_access (object_id, group_id, right_, granted_by)
-              SELECT m.new_id, a.group_id, a.right_, a.granted_by
-              FROM clone_map m JOIN object_access a ON a.object_id = m.src_id
-              RETURNING object_id, group_id, right_
-            )
-            SELECT i.object_id::text AS object_id, i.group_id::text AS group_id, g.name, i.right_
-            FROM inserted i JOIN user_group g ON g.id = i.group_id
-            ORDER BY i.object_id, lower(g.name)
-          `)
-        : [];
+    const { grants, notCarried } = await this.#copyGrants(q, carried);
 
     const droppedRows = await q.query<{ kind: string }>(`
       SELECT DISTINCT cs.kind
@@ -1792,12 +1771,113 @@ export class ObjectRepository {
       cloneRootId: Number(rootRows[0]?.new_id),
       counts,
       droppedCredentialKinds: droppedRows.map((row) => row.kind),
-      grants: grantRows.map((row) => ({
-        objectId: Number(row.object_id),
-        groupId: Number(row.group_id),
-        groupName: row.name,
-        right: row.right_,
-      })),
+      grants,
+      notCarried,
+    };
+  }
+
+  /**
+   * Copies the grants on what `clone_map` copied, every row or only the restrictions (`A-76`).
+   *
+   * **Only an administrator may grant**, and a copy carrying another group's `write` puts that
+   * group's `write` on a new object somewhere of the cloner's choosing, which is granting by
+   * another name. So for anybody else a copy carries what *restricts*:
+   *
+   * - every `none`, which only ever takes away;
+   * - a `read` that is narrower than what its group holds at the copy's parent, **judged where
+   *   the copy landed**, with the positive grants above it already left behind. Judged in the
+   *   source, a `read` under a `write` that is not carried, or a `read` cloned to a place its
+   *   group could not see, would give that group `read` on the copy — the grant this exists to
+   *   refuse.
+   *
+   * Nothing else: a `write`, a `full`, or a `read` that would widen. Each is returned in
+   * `notCarried`, and the caller counts and audits it. The cloner's own groups are no exception:
+   * the cloner holds `write` where the copy lands, which is the bar for cloning there at all.
+   *
+   * **Whether a `read` narrows is asked after the restrictions are written**, of each group's
+   * nearest grant at the copy's parent, through `groupRightsOn`. With every `none` and every
+   * candidate `read` in place the answer is the one a walk from the top would give: a `read`
+   * with a `read` or a `none` of its own group above it inside the copy narrows nothing either
+   * way, and one with none above it is judged against where the copy landed.
+   */
+  async #copyGrants(
+    q: Queryable,
+    carried: CarriedGrants,
+  ): Promise<{ grants: CopiedGrant[]; notCarried: CopiedGrant[] }> {
+    // Asked before it is written because the insert bumps the access epoch whether or not it
+    // inserts anything (migration 052), and most clones carry no grant at all: a bulk clone of
+    // five hundred devices would otherwise send every open stream back to re-resolve.
+    const granted = await q.query<{ any: boolean }>(`
+      SELECT EXISTS (
+        SELECT 1 FROM object_access a JOIN clone_map m ON m.src_id = a.object_id
+      ) AS any
+    `);
+    if (granted[0]?.any !== true) return { grants: [], notCarried: [] };
+
+    type Row = { object_id: string; group_id: string; name: string; right_: AccessRight };
+    const asGrant = (row: Row): CopiedGrant => ({
+      objectId: Number(row.object_id),
+      groupId: Number(row.group_id),
+      groupName: row.name,
+      right: row.right_,
+    });
+    const restrictionsOnly = carried === 'restrictions';
+    const inserted = await q.query<Row>(
+      `
+      WITH inserted AS (
+        INSERT INTO object_access (object_id, group_id, right_, granted_by)
+        SELECT m.new_id, a.group_id, a.right_, a.granted_by
+        FROM clone_map m JOIN object_access a ON a.object_id = m.src_id
+        WHERE NOT $1::boolean OR a.right_ IN ('none', 'read')
+        RETURNING object_id, group_id, right_
+      )
+      SELECT i.object_id::text AS object_id, i.group_id::text AS group_id, g.name, i.right_
+      FROM inserted i JOIN user_group g ON g.id = i.group_id
+      ORDER BY i.object_id, lower(g.name)
+      `,
+      [restrictionsOnly],
+    );
+    if (!restrictionsOnly) return { grants: inserted.map(asGrant), notCarried: [] };
+
+    const positive = await q.query<Row>(`
+      SELECT m.new_id::text AS object_id, a.group_id::text AS group_id, g.name, a.right_
+      FROM clone_map m
+      JOIN object_access a ON a.object_id = m.src_id
+      JOIN user_group g ON g.id = a.group_id
+      WHERE a.right_ NOT IN ('none', 'read')
+      ORDER BY m.new_id, lower(g.name)
+    `);
+
+    // The reads that would widen what their group holds at the copy's parent.
+    const reads = inserted.filter((row) => row.right_ === 'read');
+    const parents = new Map<number, number>();
+    if (reads.length > 0) {
+      const rows = await q.query<{ id: string; parent_id: string }>(
+        'SELECT id::text AS id, parent_id::text AS parent_id FROM object WHERE id = ANY($1::bigint[])',
+        [[...new Set(reads.map((row) => Number(row.object_id)))]],
+      );
+      for (const row of rows) parents.set(Number(row.id), Number(row.parent_id));
+    }
+    const above = await groupRightsOn(q, [...new Set(parents.values())]);
+    const widening = reads.filter((row) => {
+      const parent = parents.get(Number(row.object_id)) ?? 0;
+      const held = above.get(parent)?.get(Number(row.group_id)) ?? 'none';
+      return !atLeast(held, 'write');
+    });
+    if (widening.length > 0) {
+      await q.query(
+        `DELETE FROM object_access a
+         USING unnest($1::bigint[], $2::bigint[]) AS w (object_id, group_id)
+         WHERE a.object_id = w.object_id AND a.group_id = w.group_id`,
+        [widening.map((row) => Number(row.object_id)), widening.map((row) => Number(row.group_id))],
+      );
+    }
+    const dropped = new Set(widening);
+    return {
+      grants: inserted.filter((row) => !dropped.has(row)).map(asGrant),
+      notCarried: [...positive, ...widening]
+        .map(asGrant)
+        .sort((a, b) => a.objectId - b.objectId || a.groupName.localeCompare(b.groupName)),
     };
   }
 

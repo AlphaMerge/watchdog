@@ -4,7 +4,7 @@ import type { ObjectService } from './service.js';
 import type { Visibility } from '../auth/access.js';
 import type { Actor } from './audit.js';
 import { actorOf, type Writer } from './sensor-reads.js';
-import type { ObjectId } from './types.js';
+import type { CarriedGrants, ObjectId } from './types.js';
 import type { PauseRequest } from '../state/pause.js';
 
 /**
@@ -47,7 +47,12 @@ export type BulkOperation =
   | { kind: 'pause'; request: PauseRequest; message: string }
   | { kind: 'resume' }
   | { kind: 'move'; targetParentId: ObjectId }
-  | { kind: 'clone'; targetParentId: ObjectId }
+  | {
+      kind: 'clone';
+      targetParentId: ObjectId;
+      /** Which grants each copy carries, as the single clone decides it (`A-76`). */
+      grants: CarriedGrants;
+    }
   | {
       kind: 'delete';
       /**
@@ -79,6 +84,8 @@ export interface BulkOutcome {
   code?: string;
   /** What a clone made. */
   createdId?: number;
+  /** How many grants a clone's copy did not carry (`A-76`). */
+  grantsNotCarried?: number;
   /** How many objects a delete took with it, including the object itself. */
   deleted?: number;
 }
@@ -203,8 +210,9 @@ export class BulkService {
           id,
           { targetParentId: operation.targetParentId },
           visibility,
+          operation.grants,
         );
-        return { createdId: result.object.id };
+        return { createdId: result.object.id, grantsNotCarried: result.grantsNotCarried };
       }
       case 'setting':
         await this.#objects.setSetting(actor, id, operation.key, operation.value);

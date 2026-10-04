@@ -600,9 +600,24 @@ export interface CloneCounts {
   readonly total: number;
 }
 
+/**
+ * Which of a source's grants a clone carries to its copy (`A-76`).
+ *
+ * `all` for a caller who may grant, which is an administrator: every row, as `A-35` copied them.
+ * `restrictions` for anybody else: each `none`, and each `read` that narrows what its group holds
+ * where the copy landed, and no other grant, since carrying another group's `write` to a place of
+ * the cloner's choosing is granting by another name.
+ */
+export type CarriedGrants = 'all' | 'restrictions';
+
 export interface CloneResult {
   readonly object: ObjectDetail;
   readonly clonedCount: CloneCounts;
+  /**
+   * How many of the source's grants the copy did not carry, because its maker may not grant
+   * (`A-76`). Each is in the audit log as `grant.notCarried`. Always 0 for an administrator.
+   */
+  readonly grantsNotCarried: number;
   /**
    * Kinds only, never values. Says in the 201 why the clone cannot authenticate yet, instead
    * of leaving it to be discovered as a Down sensor twenty minutes later.
