@@ -107,6 +107,12 @@ generates the probe access key, installs both systemd units, and enables and sta
 sudo dpkg -i ms_0.1.0_amd64.deb
 ```
 
+**On a fresh install this ends in an error, and that is expected for now** (`H-30`). The package
+starts both services before you can have set the database password, so the core refuses to
+start (exit 78). `dpkg` then reports *post-installation script subprocess returned error exit
+status 1* and leaves the package half-configured: `dpkg -l ms` reads `iF`, and every later `apt`
+operation complains about it until it is finished. Carry on with §3, which finishes it.
+
 **RHEL, Rocky, AlmaLinux, Fedora:**
 
 ```bash
@@ -176,6 +182,16 @@ refused it. That refusal stops the core at once (exit 78) rather than restarting
 start counts toward the unit's limit of five in ten minutes, the install's own included, so
 `reset-failed` first makes sure this one is not refused (`P-222`;
 [what a start failure does](administration.md#what-a-start-failure-does)).
+
+**After a fresh `.deb` install, finish the package as well**, which §2's error left half-done.
+`dpkg --configure -a` runs the setup again: it resets each unit's start count itself and
+restarts both services.
+
+```bash
+sudo systemctl reset-failed ms-core ms-probe
+sudo dpkg --configure -a
+dpkg -l ms          # the first column reads ii, not iF
+```
 
 ## 4. The first administrator
 

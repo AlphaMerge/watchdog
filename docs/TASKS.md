@@ -7651,18 +7651,28 @@ because each is a decision rather than a defect:
 - [ ] **P-256 — a device that hung and recovered leaves the probe holding more sessions** · S ·
       P-36 · Found 2026-10-04 by `H-15`. One device, with three SSH sensors and five SNMP
       sensors, hung for three minutes (a paused container: its TCP accepted and nothing
-      answered). Probe Health's `sessionsOpen` read:
-      - 5 for the 85 minutes before;
-      - 10 during the hang;
-      - **8 for the 85 minutes after**, to the end of the run, with `sessionsOpened` and
-        `sessionsEvicted` both 0 after the outage.
+      answered). Probe Health's `sessionsOpen` read **5 → 10 → 8**: 5 for the 85 minutes
+      before, 10 during the hang, and 8 for the 85 minutes after, to the end of the run.
+      `sessionsOpened` and `sessionsEvicted` were both 0 after the outage.
 
-      The same sensors, on the same device, were served by 5 sessions before. Either sessions
-      opened while the old ones hung are now kept beside them, or the hung ones are counted and
-      never closed. The runbook tells an operator to read `sessionsOpen` against
-      `sessionsEvicted`, and this pair reads steady and healthy. **Done when** it is explained
-      and either asserted as intended, or the sessions a hang left behind are closed and a test
-      hangs a simulator session and asserts the count returns.
+      **That number is a sum over workers and devices**, not one device's sessions.
+      `sessionsOpen` adds up each worker's own SNMP and SSH pools across every device
+      (`pool.ts` `sessionCounters()`). The pools are module singletons inside each worker
+      (`catalogue-registry.ts`), and dispatch has no device affinity (`pool.ts` `#pump`).
+      There are two hypotheses:
+      - **Redistribution, the leading one.** While the target's checks hung, its other checks
+        went to workers that had no session for it, and each opened its own. Afterwards more
+        workers keep a live session to the same device, each refreshed by its share of the
+        scans, so none goes idle.
+      - **A leak.** A session that hung is counted and never closed.
+
+      The runbook tells an operator to read `sessionsOpen` against `sessionsEvicted`, and this
+      pair reads steady and healthy either way. **First step**: tell the two apart, from
+      sessions per worker and per pool key. **Done when** it is explained, and tests assert:
+      - every leftover session closes after `idleMs` once its checks stop;
+      - a session that hung is closed, not kept.
+
+      A probe-wide count returning to 5 is not the criterion.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
@@ -22395,9 +22405,10 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
         CPUs and the Mac's at 10.37, both from other work.
       - **The surface**: every route in the appendix answered as its table says, against the
         installed core, and the catalogue matched both ways.
-      - **Twelve places** the runbook (or `installation.md`, where it sends the reader) was
-        wrong or unclear. Ten were confirmed and fixed, one ("restart before the triggers")
-        was refuted in effect, and one (`ping`) was found only by running. The worst: on a
+      - **Twelve suspected problems** in the runbook (or in `installation.md`, where it sends
+        the reader). Eleven were wrong or unclear, and are fixed: nine confirmed, one unclear
+        (how to count `scheduled`), and one (`ping`) found only by running. One ("restart
+        before the triggers") was refuted in effect, and the order is kept. The worst: on a
         fresh install, step 1's `dpkg -i` fails and leaves the package half-configured.
       - **New tickets**: `H-30`, `H-31`, `H-32`, `H-33`, `N-20`, `P-254`, `P-255`, `P-256`.
       - **The write-up**: `docs/findings/2026-10-04-field-test-dress-rehearsal.md`.
@@ -23100,12 +23111,22 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       That happens on every fresh install, because no installation can have the password before
       the package has put `core.json` there. Until `dpkg --configure -a`, every later `apt`
       operation complains about a broken package, and `installation.md` mentioned that command only
-      for upgrades. The runbook and `installation.md` now say to expect it. **Done when** a fresh
-      `dpkg -i` ends `ii`, with the core left stopped and a message saying what to configure:
-      for example, `ms-setup` does not start a core whose database password is empty and says so,
-      or a refused first start on a fresh install is reported and not returned as failure. And
-      `smoke-packages.sh` installs once without `MS_SETUP_NO_START` and asserts `ii`. The `.rpm`
-      gets the same question.
+      for upgrades. The runbook's step 1 and `installation.md` §2–§3 now say to expect it and how
+      to finish it. **Done when** a fresh `dpkg -i` ends `ii`, with the core left stopped and a
+      message saying what to configure.
+      - **Judge the effective configuration, not `core.json` alone.** With
+        `LoadCredentialEncrypted=` and `MS_DATABASE__PASSWORD__FROM_FILE`, `core.json`'s
+        password is empty on purpose, and `ms-setup` cannot see the real one. So either decide
+        from what the unit would actually run with (for example `ms-core config check` under the
+        unit's environment and credentials, or a database login), or limit the rule to a first
+        install whose `core.json` was just created from the example. Another option is that a
+        refused first start on a fresh install is reported and not returned as failure.
+      - **Tests**:
+        - `smoke-packages.sh` installs once without `MS_SETUP_NO_START` and asserts `ii`.
+        - One test delivers the password through `*__FROM_FILE` with `core.json`'s left empty,
+          and asserts that the core still starts.
+      - The `.rpm` gets the same question, and `installation.md` §2–§3 lose the expected-error
+        text once it is gone.
 
 - [ ] **H-31 — the packages do not declare the `ping` the ICMP sensors run** · S · P-07 · Found
       2026-10-04 by `H-15`. ICMP runs the system `ping` (`ADR-001` Decision 6). The `.deb`

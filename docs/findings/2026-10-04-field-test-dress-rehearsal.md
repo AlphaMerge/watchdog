@@ -28,8 +28,13 @@
   that `ms_smoke_reap_orphans` would not remove it after an hour. PostgreSQL was provisioned with
   `scripts/smoke/provision-postgres.sh`, the operator's prerequisite.
 - **The machine**: this project's Apple Silicon Mac, 8 CPUs, through Docker Desktop's VM
-  (8 CPUs). Nothing else heavy ran. Mac load was 7–8 at the start, which is other projects'
-  containers, and 2–4 for most of the run. VM load was 0.4–4.2 throughout.
+  (8 CPUs). No other heavy run of this project's was booked, but the machine was not quiet:
+  - **The Mac**: at the start its 5- and 15-minute load was 7–8, from other projects'
+    containers; its one-minute load was 5.4. Its five-minute samples then ran 1.3–10.4, at
+    about 2.8 for half of them, with the peak at 14:03.
+  - **The VM**: its one-minute load ran 0.18–11.95 over the sampler's 372 samples. It was
+    above 8 CPUs from 14:28 to 14:30, with the peak at 14:29:10, from other work. See *Load*
+    below.
 - **The devices**: 31 sensors on 9 devices, all of them development simulators:
   - `target`: ICMP, HTTP, HTTP content, REST, TCP 22 with banner, SSH load, memory and disk,
     SNMP uptime, CPU, memory, traffic and disk, and SNMP traps.
@@ -85,10 +90,15 @@ A sampler inside the box recorded the same every 30 s for the whole run.
 samples peaked at 10.37, at 14:03:38. Both came from other work on the machine, and both are
 well short of `P-220`'s 24 on 8 CPUs. So this run says nothing for or against `P-220`.
 
-**Starts**: the core started four times in under five minutes before the start reading:
-the package, the restart after the password, `dpkg --configure -a`, and step 2. A fifth would
-have been the last before the start limit. `reset-failed` came before each one, as the ticket
-says.
+**Starts**: each unit is allowed five starts in ten minutes, and the sixth is refused.
+`reset-failed` clears the count (`administration.md`, *Your own starts count too*, measured
+it). The core started four times in under five minutes before the start reading: the package,
+the restart after the password, `dpkg --configure -a`, and step 2. Each start after the
+package's followed a `reset-failed`: `installation.md` §3's and step 2's by hand, and
+`dpkg --configure -a`'s inside `ms-setup` (`deploy/setup.sh`, before its own restart). So at
+step 2 each unit had used about one start of its five. The journal shows that each restart of
+the core also restarted the probe (13:40:20, 13:40:34, 13:44:03), so both counts moved
+together.
 
 ## The readings
 
@@ -120,9 +130,11 @@ taken at 13:44:38 (start), 14:45:00 ("24 h") and 16:45:10 ("end"). Rates are per
 **What the criterion's numbers say, as a rehearsal's:**
 
 - **Memory, from the history** (five-minute averages, as step 4 now says to read it).
-  - The core read up to 325 MB in the minutes after step 2's restart, and about 150 MB from
-    ten minutes on. From the "24 h" reading to the end it went 152.6 → 157.9 MB, about
-    +2.6 MB/h.
+  - The restarted core read about 306 MB in the minutes after step 2's restart: 305.7 at the
+    start reading, and 306.3 as the 13:45 bucket's highest sample. It settled to about 150 MB
+    within ten minutes. The 13:40 bucket's 324.8 is not the restarted core: that bucket also
+    holds the previous process's samples, as its `uptime` shows. From the "24 h" reading to
+    the end it went 152.6 → 157.9 MB, about +2.6 MB/h.
   - The probe went 243.7 → 282.9 MB over the same two hours, about +20 MB/h. The 24-hour soak
     measured +0.68.
   - Two hours with an outage in them is not a slope. A week will say whether that is settling
@@ -130,8 +142,9 @@ taken at 13:44:38 (start), 14:45:00 ("24 h") and 16:45:10 ("end"). Rates are per
 - **`schedulerLag`**: 9.7 ms at worst, against a 1,000 ms budget.
 - **`spoolDropped`, `evictedChunks`**: zero throughout.
 - **`workerCrashes`**: zero.
-- **Sessions**: 5 open before the outage, 10 at its peak, and **8 from then to the end**, with
-  none opened or evicted after it. That is `P-256`.
+- **Sessions**: `sessionsOpen`, summed over workers and devices, read 5 before the outage, 10
+  at its peak, and **8 from then to the end**, with none opened or evicted after it. That is
+  `P-256`.
 
 **Sensor states.** At every reading, 28 Up and 3 Down, and every Down is explained:
 
@@ -159,10 +172,12 @@ that is intermittently unreachable on purpose".
 **Notifications.**
 
 - The test send at 13:44:25 was delivered: MailHog had it, `delivered: true`.
-- The outage raised **one** notification request, not three: Probe Health's first Warning,
-  held for the template's default 15-minute summary (`first-down-and-up`).
-- Its **recovery was sent at 15:22:36**, after Probe Health's five-minute recovery hold
-  (`M-18`).
+- The outage raised **two** notification requests: **one alarm despite three Warnings**, and
+  its recovery.
+  - Request 1 was Probe Health's first Warning, held for the template's default 15-minute
+    summary (`first-down-and-up`). The second and third Warnings raised nothing.
+  - Request 2 was the **recovery, sent at 15:22:36**, after Probe Health's five-minute
+    recovery hold (`M-18`).
 - The **Warning itself was delivered at 15:30:36**, in the digest. The recipient was told the
   probe was back eight minutes before being told anything was wrong. That is `N-20`.
 - One outage was one alarm, which is the rule. The order was wrong.
@@ -177,8 +192,14 @@ answered `404`.
 
 ## Where the runbook was wrong or unclear
 
-Each one is confirmed or refuted by the run. Each fix is in `runbook-field-test.md`, or in
-`installation.md` where the runbook sends the reader.
+Twelve suspected problems, each confirmed or refuted by the run:
+
+- **Eleven were real, and are fixed**: nine confirmed, one unclear (10), and one found only by
+  running (4).
+- **One was refuted (9)**, and the order it questioned is kept.
+
+Each fix is in `runbook-field-test.md`, or in `installation.md` where the runbook sends the
+reader.
 
 1. **Step 1 was one command, and on a fresh install that command fails.** *Confirmed, and
    worse than read.* `dpkg -i` starts the services, the core refuses the example's empty
@@ -186,7 +207,9 @@ Each one is confirmed or refuted by the run. Each fix is in `runbook-field-test.
    error exit status 1* and leaves the package `iF`, half-configured. Nothing in the runbook or
    `installation.md` says to finish it with `dpkg --configure -a`; `installation.md` mentions it
    only for upgrades. **Fix**: step 1 now says to expect this, and gives the sequence: §3–§5,
-   `reset-failed`, `dpkg --configure -a`, `ii`. The package behaviour is `H-30`.
+   `reset-failed`, `dpkg --configure -a`, `ii`. `installation.md` §2 says to expect the error
+   and `iF`, and §3 finishes the package with `reset-failed`, `dpkg --configure -a` and a
+   `dpkg -l ms` that reads `ii`. The package behaviour is `H-30`.
 2. **Nothing created Core Health or Probe Health.** *Confirmed.* A fresh install has the root
    object only. Step 4's `<core-health-id>` had nothing to name until both sensors were created
    by hand. **Fix**: step 1's list of what must exist before step 2.
@@ -210,20 +233,25 @@ Each one is confirmed or refuted by the run. Each fix is in `runbook-field-test.
    operator documentation gap is `H-33`.
 8. **"Flat memory" from `/values`.** *Confirmed.* `/values` is one reading, and a slope needs
    `/history`, which a `read` token can read. **Fix**: step 4 gives the history `curl`, and says
-   to leave the first hour after a restart out of the slope. The core read 306–325 MB in the
-   minutes after step 2's restart and about 150 MB from ten minutes on: a slope fitted from
-   the start reading would have read that as memory falling by half.
+   to leave the first hour after a restart out of the slope. The restarted core read about
+   306 MB in the minutes after step 2's restart and about 150 MB within ten minutes: a slope
+   fitted from the start reading would have read that as memory falling by half. The `curl`
+   URL-encodes `from`. A time with a `+00:00` offset pasted raw into the URL decodes to a
+   space and the range is refused, which is why the rehearsal's own reader encoded it.
 9. **Step 2 restarts before step 3's triggers exist, so a restart's alarm cannot be seen.**
    *Refuted in effect.* The restart took 5 s, and Probe Health never left Up. It read "up since
    13:41:34" afterwards, so there was no alarm to see, with or without triggers. The order
    stands.
 10. **"`scheduled` matches what the core assigned."** *Unclear, and now said.* An operator has
     no number to compare with. What matched was 29: every sensor under the probe except Core
-    Health and Probe Health, which the core evaluates, with the five syslog and trap sensors
-    included. `GET /probes/<id>/health` says *connected, 29 sensors scheduled* within 17 s of
+    Health and Probe Health, which the core evaluates. The four syslog and trap sensors (two
+    of each) are included. `GET /probes/<id>/health` says *connected, 29 sensors scheduled* within 17 s of
     the restart. **Fix**: step 2 says how to count, and where to read it.
-11. **`reset-failed` was not in step 2.** *Confirmed by the counting above.* **Fix**: step 2's
-    command block now starts with it, and says why.
+11. **`reset-failed` was not in step 2.** *Confirmed as a gap, not as a failure.* Every other
+    start in the procedure follows one, and step 2's did not. The run came nowhere near the
+    limit, because each earlier start had followed a reset (see *Starts*). **Fix**: step 2's
+    command block now starts with it. The text says each unit gets five starts in ten minutes,
+    that `reset-failed` clears the count, and that a core restart moves the probe's count too.
 12. **`installation.md` §5's approval `curl`.** *Confirmed.* As written it answers `401`
     (`AUTH_REQUIRED`). With a token and no content type it answers `415`. Its `objectId: 2` is
     right only because a probe object created first on a fresh install gets id 2, and nothing
@@ -261,8 +289,11 @@ Each one is confirmed or refuted by the run. Each fix is in `runbook-field-test.
   - `ring.ts` says a first scan "has genuinely received nothing". The listener had.
 - **`N-20`** — a held Warning's recovery is delivered before the Warning itself (the outage,
   above).
-- **`P-256`** — after the target hung and recovered, the probe held 8 device sessions where it
-  had held 5, for the 85 minutes to the end, with none opened or evicted.
+- **`P-256`** — after the target hung and recovered, `sessionsOpen` read 8 where it had read
+  5, for the 85 minutes to the end, with none opened or evicted. It peaked at 10 during the
+  hang. That channel is a sum over every worker's own SNMP and SSH pools and every device. So
+  this may be sessions spread across more workers rather than a leak, and the ticket's first
+  step is to tell those two apart.
 - **`P-255`** — between a probe's connection and its first heartbeat, Probe Health's message
   reads *its own numbers are unavailable — it speaks protocol 28, the same as this build*. It
   gives the protocol as the reason when there is no skew at all.

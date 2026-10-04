@@ -31,9 +31,10 @@ that gets run badly or not at all.
 
 **The procedure itself was rehearsed** on 2026-10-04, on `v1.0.0-rc.2` (arm64) against the
 development simulators, compressed to three hours (`H-15`,
-[the write-up](findings/2026-10-04-field-test-dress-rehearsal.md)). It found twelve places where
-this runbook, or `installation.md` where it sends you, was wrong or unclear. They are fixed in
-both. That proves the steps can be
+[the write-up](findings/2026-10-04-field-test-dress-rehearsal.md)). It checked twelve suspected
+problems in this runbook, or in `installation.md` where it sends you. Eleven were wrong or
+unclear, and are fixed in both; one was refuted, and the order it questioned is kept. That
+proves the steps can be
 followed, and nothing about the product. It is not a row in the table above: it is not a check
 to re-run, and a rehearsal is not part of `H-09`.
 
@@ -126,11 +127,12 @@ sudo systemctl reset-failed ms-core ms-probe
 sudo systemctl restart ms-core ms-probe
 ```
 
-**`reset-failed` first.** Every start counts toward each unit's five in ten minutes, an
-operator's included. The install, the restart after the password and `dpkg --configure -a`
-have already spent three of the core's; one restart of the probe for its listeners spends
-another. Without the reset, the next start after this one is refused and the unit is left
-`failed`.
+**`reset-failed` first.** Each unit is allowed five starts in ten minutes, an operator's
+included, and the sixth is refused and leaves the unit `failed`. `reset-failed` clears that
+count and changes nothing else (`administration.md`, *Your own starts count too*, measured it).
+That is why every start in this runbook follows one: `installation.md` §3's restart, the
+restart here, and `dpkg --configure -a`, whose `ms-setup` runs its own before it restarts the
+services. A restart of the core also restarts the probe, so both counts move together.
 
 Then check `connected` on Probe Health, and that `scheduled` matches what the core assigned:
 every sensor under that probe **except Core Health and Probe Health**, which the core evaluates
@@ -291,13 +293,20 @@ The numbers that decide the criterion:
   trend from the hourly averages, not from two points.
 
   ```bash
-  curl -s -H "Authorization: Bearer $MS_TOKEN" \
-    "localhost:8080/api/v1/sensors/<core-health-id>/history?from=<start-reading-time>&resolutionSeconds=3600"
+  curl -s -G -H "Authorization: Bearer $MS_TOKEN" \
+    --data-urlencode "from=<start-reading-time>" --data-urlencode "resolutionSeconds=3600" \
+    "localhost:8080/api/v1/sensors/<core-health-id>/history"
   ```
 
+  `-G --data-urlencode` matters: a time written with an offset, `2026-10-04T13:44:34+00:00`,
+  pasted straight into the URL has its `+` decoded as a space, and the range is refused. The
+  alternative is a UTC time ending in `Z`, which needs no encoding: `date -u
+  +%Y-%m-%dT%H:%M:%SZ` at the start reading prints one.
+
   **Leave the first hour after a restart out of it.** A restarted service is not at its settled
-  size, and step 2 restarts both just before the start reading. In the dress rehearsal the core
-  read up to 325 MB in the minutes after it, and 150 MB from ten minutes on
+  size, and step 2 restarts both just before the start reading. In the dress rehearsal the
+  restarted core read about 306 MB in the minutes after it (305.7 at the start reading, 306.3
+  the highest five-minute sample), and about 150 MB within ten minutes
   (`findings/2026-10-04-field-test-dress-rehearsal.md`). A slope fitted from the start reading
   measures the settling, not the week.
 - **`schedulerLag`** — p95 against the 1,000 ms budget.
