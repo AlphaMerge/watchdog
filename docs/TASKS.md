@@ -7438,6 +7438,14 @@ because each is a decision rather than a defect:
       - reported as "max" and budgeted as a maximum.
       The entry says which, and why.
 
+- [ ] **P-252 — `notification-timers` reads an idle sample the database pool can spoil** ·
+      S · P-229 · Found 2026-10-04 by `P-229`. Its "2 timers with 2000 pending, 1 idle" case
+      failed twice under load and passed on `main` and on `P-229` alike with nothing else
+      running: whether it passes depends on whether the pool's idle-client timers are still
+      pending when the idle sample is taken. **Done when** the sample counts only the
+      notifier's own timers, or waits for the pool to be idle, and passes ten runs in a row
+      beside one other container.
+
 - [x] **P-250 — a log baseline taken only at a record counts a stall long over** · S · P-216,
       P-245 · Found 2026-09-29 by bc8184 while landing `P-245`, in `P-216` part 3. Probe Health
       took each probe's log baseline only where it wrote a record, and `logDropped` warns above
@@ -16670,6 +16678,24 @@ because each is a decision rather than a defect:
       widening reads counted; left out of the audit; the guard asking for any grant; the
       positive grants dropped when nothing is inserted.
 
+- [ ] **A-77 — four more ways a write tells its caller about what it cannot see** · M ·
+      A-16 · Found 2026-10-04 by `A-16`'s sweep. (1) `POST /discovery/:id/provision` matches
+      against the group with no visibility filter (`main.ts` `devicesInGroup`/`sensorsInGroup`):
+      it reports hidden device ids and counts, creates sensors under hidden devices because it
+      writes as the installation, and its credential refusals name owners. (2)
+      `PUT /objects/:id/settings/dependency.masterId` and bulk `setting` skip the read bar on
+      the master that `PUT /objects/:id/dependency` holds, so `#assertUsableMaster` says
+      whether an id exists and what kind it is, and accepts a hidden master; the dependency
+      route's `OBJECT_CYCLE` `details.path` can list hidden sensor ids. (3) Id-only oracles:
+      `requireGroupProbe` accepts only the group's own probe, so guessing `probeId` reveals a
+      hidden probe's id; `POST /sensors/:id/check` returns `context.probeObjectId`; `A-29`'s
+      read refusal on a move or clone can name a hidden probe's id. (4) A notification sent to
+      an address the writer chose renders `%probe`/`%group`/`%device` in full; that needs a
+      decision, since an address has no view to render for. Also: the email and chat
+      transports set no `withoutOutput`, so a test send with anything hidden answers only
+      "sent" or "not sent". **Done when** (1) to (3) are closed with tests in
+      `object-visibility.test.ts`, and (4) is decided.
+
 - [x] **A-36 — A core behind a browser and a proxy: the stream takes any origin, a forwarded
       header turns off CSRF, and the proxy is never believed** · M · A-01, A-09, A-19 · Found
       2026-09-28 by the round-three review of the API's browser boundary. Three findings, each
@@ -20188,6 +20214,15 @@ because each is a decision rather than a defect:
           negotiated version instead of the advertised one. The endpoint never negotiates
           above what was advertised, so both give the same judged version. After the last,
           `dist` matched `src`.
+
+- [ ] **A-78 — what is left of a probe that flaps** · S · A-72 · Found 2026-10-04 by `A-72`.
+      A sensor let go after a hold re-decides with an empty message until its next scan (the
+      `A-29` release path). Results that arrive before a restarted core has built a probe's
+      first configuration are handled as they were before `A-72`. The held sensors' sentence
+      still says "Upgrading the probe to protocol 24 sends them again" while a flapping probe
+      already speaks 24. And `main.ts` is still booted by no test, so its new wiring
+      (`onProtocolFlapOver` to `configNotifier.flush()`) is read and not run. **Done when**
+      each is fixed with a test or written down.
 
 - [x] **A-73 — five loose ends from discovery text and the SSH pool** · S · A-69 · Found
       2026-10-02 by `A-69`. `sweep-progress` takes any 7 to 15 characters as an address. A
