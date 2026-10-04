@@ -17916,7 +17916,7 @@ because each is a decision rather than a defect:
       a silenced one is not. A check that *hangs* at an edge holds that batch, and every later
       one, for as long as it hangs.
 
-- [ ] **U-27 — a credential check that hangs or rejects at an edge, and one that never
+- [x] **U-27 — a credential check that hangs or rejects at an edge, and one that never
       answers a frame** · M · U-26 ·
       Found 2026-10-02 by `U-26` and its review. **Decisions first.** (1) A check that
       rejects at an edge delivers the batch to a lapsed socket no edge has silenced
@@ -17939,6 +17939,104 @@ because each is a decision rather than a defect:
       past it the edge is treated as (1) and counted on Core Health. (3) Accepted as it
       stands: a frame whose check never answers is severed by the unread bound and sent
       nothing. (4) and (5) accepted and written down; (6) stays open.
+
+      **Done 2026-10-04.**
+
+      - **(1) A failed check at an edge.** `StateBroadcaster` remembers, per admitted socket,
+        when a check last said it was signed in (the instant the question was asked, on a
+        monotonic clock; admission counts, since the upgrade was just authenticated; edges,
+        sweeps and a client's frame all count). Where an edge's check gives no answer,
+        `#atEdge` lets the batch through to a socket vouched for less than one sweep interval
+        ago and **holds back** every other: `StreamSocket.withhold` detaches its subscription
+        synchronously, sends nothing and marks it owed. At the edge a held-back socket and a
+        signed-out one are sent the same thing, nothing, so the edge's instant tells neither
+        anything. The first sweep whose check says it is still signed in calls `resume`, and
+        the route sends `overflow` ("could not confirm this session for a moment; subscribe
+        again"). That is on the sweep's clock, because sent at a later edge it would tell an
+        account when changes happen in branches it cannot see. A signed-out one is closed
+        `4401` there, as before. A subscription the client makes of its own clears what is
+        owed, so its own snapshot is not followed by a second resync. A silenced socket gets
+        nothing, as before. Nothing is dropped untold, and it is counted.
+      - **(2) Bounded, and one question out.** An edge waits `credentialWaitMs` (2 s) from when
+        it arrived. Per check there is one edge question in the database and at most one
+        more waiting to be asked. An edge that arrives while one is out does not take that
+        answer, which was asked before its batch committed (`A-34`). It waits for the next
+        question, asked the moment the one out comes back and shared by every edge that
+        arrived meanwhile (`edgesCoalesced`). Once the question out passes its wait, the
+        edges waiting on the next are decided by (1) at once, and so is every edge after
+        them, asking nothing, until it answers (the sweep's rule from `U-26`). So no batch is
+        held past its bound, none queues behind a hang, and a hung database holds one query
+        of the edges'. The late question counts in `streamChecksOutstanding`; before its wait
+        it does not, so a healthy core still reads 0.
+      - **(3) Accepted as it stands**: a frame whose check never answers holds that socket's
+        frames until the unread bound severs it with `1008`; nothing is sent meanwhile.
+      - **(4) Accepted**: a credential that lapses and comes back inside one sweep interval
+        closes a silenced socket and not one that never knew. (1) leans on the same window: a
+        socket signed out within the last interval can be sent an unvetted batch.
+      - **(5) Accepted**: `streamChecksOutstanding` does not count a probe watcher's
+        re-resolution in flight. Each waits `credentialWaitMs` on the sweep, is asked once per
+        principal and epoch (`#resolving`), and one left out is reviewed on the next tick.
+      - **(6) Not done.** Booting the probe's `main.ts` in a test needs a core that enrols it
+        over mTLS, a config file, a spool directory and a discovery run assigned to that
+        probe before `onProgress` fires. `main()` also runs on import. That is an end-to-end
+        harness, larger than this ticket and unrelated to the stream. The cheaper way is to
+        move the runners' wiring into a function a unit test can call; left for a ticket.
+
+      **Core Health** gains three counters, and the exporter three `_total` series:
+      `streamEdgesUnvetted` (`ms_core_stream_changes_unvetted_total`), `streamWithheld`
+      (`ms_core_stream_sockets_held_back_total`) and `streamEdgesCoalesced`
+      (`ms_core_stream_changes_sharing_check_total`). `streamChecksOutstanding` keeps its
+      stored name, "sweep queries", because a channel's name is written when the sensor is
+      created and an installation would keep the old one; its comment and help text say what
+      it counts now. `administration.md`, `web-ui.md` and the route's description
+      (`api-reference.md`) say what a page sees. Alarm volume untouched: nothing here writes
+      state. No migration and no protocol number; `overflow` is an existing frame.
+
+      **Tests.** `state-stream.test.ts`: the U-26 case "does not bound an edge's check" is
+      replaced by four. A table of 32 rows: last answer 0, interval − 1, interval and three
+      intervals old × silenced or not × check answers yes, answers no, rejects or hangs. Each
+      row checks what the socket and a fresh witness get, the log, all four counters and
+      `checksOutstanding`, then what the next sweep does. One case shows an answer from an
+      edge, a sweep or the socket's own frame vouching for exactly one interval. One shows
+      the `A-34` rule held under sharing: a logout committed while a question is out, then two
+      edges that share the next question, and the signed-out socket gets nothing committed
+      after the logout. The scenario: a database that hangs for 3 s at the first edge, six
+      sockets of which three were last heard from two intervals ago, and edges at 0, 0.1,
+      0.2 s and one after the wait. No edge takes longer than its bound; the two that waited
+      are let go together with the first; the fourth is decided at once with nothing asked.
+      Fresh sockets get A to D, stale ones nothing and one `withhold` each. The counts are
+      4 unvetted, 2 coalesced, 3 held back, 4 failures and 1 outstanding. Once the hung
+      question answers, the next edge asks afresh and the sweep resumes the three.
+      `stream-sign-out.test.ts` +2 over real sockets. In the first, the check fails at a
+      change: the socket heard from now gets it; a signed-in socket and a signed-out socket
+      both last heard from two hours ago get nothing and are not closed; a socket with no
+      subscription is not counted. A sweep that still cannot ask sends nothing. The sweep that
+      can sends the signed-in one `overflow` and closes the signed-out one `4401` with
+      nothing sent; the first resubscribes and is served. In the second, a socket held back
+      that subscribes on its own before the sweep gets its snapshot and no `overflow` after.
+      Every wait is `within`, `until` or `closedWith`.
+      `core-health.test.ts` and `metrics.test.ts` cover the three channels and series.
+      **Mutations 15/15**, each killed. Fresh-age boundary made inclusive; every stale-or-not
+      socket held back; stale sockets not held back; an unvetted edge not counted; answers
+      never vouching; a frame's answer vouching from time zero; edges never sharing a
+      question; an edge joining a question past its wait; the late timer not releasing the
+      waiting edges; the shared question never asked; a late question not counted
+      outstanding; the sweep never resuming; the route's resubscribe not clearing what is
+      owed; the route's `withhold` not detaching; an edge's check unbounded.
+
+      **Found, not fixed.**
+      - After an outage longer than one interval, every page with a subscription is held back
+        at the first unvetted change. All of them are resumed on the same sweep tick, so N
+        snapshot reads land on a database that has just come back. Spreading the resumes
+        over a few ticks would soften it.
+      - A held-back page reloads even when the change could not have reached it, because the
+        broadcaster detaches by socket and does not know what the socket's subscription would
+        have matched. The cost is one snapshot per held-back page, and it only happens after
+        a check failed.
+      - Pre-existing, seen here: when a batch's ancestry read fails, `publish` delivers it to
+        nobody. That is logged ("the live stream is behind") but not counted on Core Health
+        and not resynced, so every open tree silently misses that change. It goes against
+        "never drop without counting", and is the same failure (1) now handles for the check.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

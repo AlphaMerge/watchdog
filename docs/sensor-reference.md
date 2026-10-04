@@ -997,6 +997,9 @@ cost: **light** · evaluated by the core, never by a probe
 | `streamCheckFailures` | Live socket sign-in checks failed | checks | 64-bit counter → rate |
 | `streamUnsure` | Live sockets closed to reconnect | sockets | 64-bit counter → rate |
 | `streamChecksOutstanding` | Live socket sweep queries unanswered | queries | — |
+| `streamEdgesUnvetted` | Live changes sent without a sign-in check | changes | 64-bit counter → rate |
+| `streamWithheld` | Live sockets held back for a sign-in check | sockets | 64-bit counter → rate |
+| `streamEdgesCoalesced` | Live changes sharing a sign-in check | changes | 64-bit counter → rate |
 | `dependencyPauses` | Dependency pauses | sensors | 64-bit counter → rate |
 | `probesDown` | Probes not connected | probes | — |
 | `probesSilent` | Probes not delivering | probes | — |

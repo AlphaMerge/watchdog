@@ -237,7 +237,25 @@ const CORE_METRICS: readonly Metric[] = [
   {
     key: 'streamChecksOutstanding',
     name: 'ms_core_stream_sweep_queries_outstanding',
-    help: 'Queries the live-state sweep asked that have not answered.',
+    help: 'Queries the live-state sweep asked that have not answered, and an edge check past its wait.',
+  },
+  {
+    key: 'streamEdgesUnvetted',
+    name: 'ms_core_stream_changes_unvetted_total',
+    help: 'Live-state changes sent while the sign-in check before them failed or did not answer.',
+    counter: true,
+  },
+  {
+    key: 'streamWithheld',
+    name: 'ms_core_stream_sockets_held_back_total',
+    help: 'Live-state sockets held back from a change because no recent sign-in check vouched for them.',
+    counter: true,
+  },
+  {
+    key: 'streamEdgesCoalesced',
+    name: 'ms_core_stream_changes_sharing_check_total',
+    help: 'Live-state changes that waited for a sign-in check shared with other changes.',
+    counter: true,
   },
   {
     key: 'dependencyPauses',

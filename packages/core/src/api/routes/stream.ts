@@ -396,7 +396,11 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
           'makes a late snapshot and closes nothing. Only when the question fails is the frame ' +
           `not acted on and the socket closed with ${String(STREAM_UNSURE)}, signed in or not: ` +
           'reconnect and subscribe again, waiting longer each time until a subscription is ' +
-          'answered — `hello` is sent to every socket and is not an answer.',
+          'answered — `hello` is sent to every socket and is not an answer.' +
+          '\n\nA change is not held for that answer longer than two seconds. While the core ' +
+          'cannot get it, a change goes only to a socket the core has found signed in within ' +
+          'the last five seconds; any other socket is sent nothing from that change on, and is ' +
+          'sent `overflow` — subscribe again — once the core can say it is still signed in.',
         // No `response`: the route upgrades rather than answering, and a schema describing a
         // 101 would be a shape no client ever parses.
         response: {},
@@ -467,6 +471,38 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         );
         socket.close(STREAM_SIGNED_OUT, SIGNED_OUT[lapse]);
       };
+      /**
+       * Detached by an edge that could not find out whether it is signed in (`U-27`): it has
+       * missed something, and is owed an `overflow` once the sweep can say it is. Cleared by a
+       * subscription of its own, whose snapshot covers what was missed.
+       */
+      let owed = false;
+
+      /**
+       * Stops sending to a socket an edge could not vouch for (`U-27`), and says nothing: called
+       * synchronously from the check a published change runs, as `silence` is, and detaching
+       * here is what keeps that change from reaching it. **A frame now would be the instant of
+       * the edge**, to a socket that may have been signed out — which is why a signed-out socket
+       * and one held back are alike here. A subscription in flight goes on and answers; what it
+       * holds is still stale, and `owed` says so.
+       */
+      const withhold = (): boolean => {
+        if (closed || silenced || detach === undefined) return false;
+        unsubscribe();
+        owed = true;
+        return true;
+      };
+
+      /** The sweep says it is still signed in (`U-27`): back to the start, on the sweep's clock. */
+      const resume = (): void => {
+        if (!owed) return;
+        owed = false;
+        send({
+          type: 'overflow',
+          reason: 'could not confirm this session for a moment; subscribe again',
+        });
+      };
+
       // Absent when there is nothing to check: authentication is off, or the route is public.
       const credential = credentialOf(request);
       // **Never admitted unchecked.** A signed-in socket with nothing to ask about it is exactly the
@@ -480,7 +516,7 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
       const admission: Admission | undefined =
         credential === null || options.credentials === undefined
           ? undefined
-          : stream.admit({ credential, silence, signOut }, options.credentials);
+          : stream.admit({ credential, silence, signOut, withhold, resume }, options.credentials);
 
       /**
        * Whether the socket's credential still authenticates, asked now; the socket is closed if
@@ -761,6 +797,8 @@ export function streamRoutes(app: FastifyInstance, options: StreamRouteOptions):
         }
         subscribed.push(now);
         unsubscribe();
+        // Its own snapshot covers whatever an edge held back from the last one (`U-27`).
+        owed = false;
         const mine = (generation += 1);
         const opening =
           scope.probeId === undefined

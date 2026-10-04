@@ -159,6 +159,10 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
         'ms_core_ingestion_refused_rows_total',
         'ms_core_stream_cutoffs_total',
         'ms_core_stream_probe_changes_coalesced_total',
+        // `U-27`: what an edge did while the sign-in check could not answer it.
+        'ms_core_stream_changes_unvetted_total',
+        'ms_core_stream_sockets_held_back_total',
+        'ms_core_stream_changes_sharing_check_total',
         'ms_core_dependency_pauses_total',
         'ms_core_alarm_steps_fired_total',
         'ms_core_probe_queries_refused_total',

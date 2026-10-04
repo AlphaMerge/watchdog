@@ -53,8 +53,14 @@ export interface CoreHealthSources {
     credentialCheckFailures: number;
     /** Sockets closed to reconnect because their check could not be made (`U-26`). */
     unsure: number;
-    /** The sweep's own queries that have not answered (`U-26`). */
+    /** The sweep's queries that have not answered, and an edge's past its wait (`U-26`, `U-27`). */
     checksOutstanding: number;
+    /** Edges sent without an answer about every socket (`U-27`). */
+    edgesUnvetted: number;
+    /** Sockets an unvetted edge held back until the sweep could vouch for them (`U-27`). */
+    withheld: number;
+    /** Edges that shared one credential question asked as soon as the last came back (`U-27`). */
+    edgesCoalesced: number;
   };
   /** `ProbeReachability.stats()` — probes the core is not currently connected to. */
   probes: () => { probesDown: number; probesSilent: number };
@@ -417,6 +423,11 @@ export class CoreHealthService {
       // Closed to reconnect on a check that failed, and the sweep's questions still out (`U-26`).
       streamUnsure: stream.unsure,
       streamChecksOutstanding: stream.checksOutstanding,
+      // An edge the check could not vet, the sockets it held back, and edges that shared one
+      // question (`U-27`).
+      streamEdgesUnvetted: stream.edgesUnvetted,
+      streamWithheld: stream.withheld,
+      streamEdgesCoalesced: stream.edgesCoalesced,
       dependencyPauses: ingestion.dependencyPauses,
       probesDown: probes.probesDown,
       probesSilent: probes.probesSilent,

@@ -357,6 +357,11 @@ happens within about five seconds, on a timer of the core's own; in those second
 nothing, so what it shows stops moving before the login form appears. While the core's database is
 not answering it cannot ask, and the page waits, still sent nothing, until it can.
 
+A page that is still signed in can be paused the same way by a database that stops answering
+for more than a few seconds: the core sends changes only to pages it has found signed in within
+the last five seconds. When the core can ask again, such a page is told to start over, and it
+reloads what it shows by itself; nothing it missed is lost.
+
 **It does not try to reconnect.** A reconnect would be refused, and a browser cannot tell a
 refused connection from a dropped network, so it would retry for ever while the header still said
 somebody was signed in. Signing in again puts you back where you were, because the address bar

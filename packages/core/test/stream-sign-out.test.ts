@@ -24,6 +24,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { within } from './support/within.js';
 
 /**
  * An open stream is closed when what authenticated it stops doing so (`A-34`).
@@ -69,6 +70,13 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
   /** Sessions with the idle timeout raised to three days, as a wall display's would be (`A-38`). */
   let lasting: StateBroadcaster;
   let lastingApp: FastifyInstance;
+  /**
+   * A broadcaster whose sockets' answers are aged by `answerClock`, which a test moves (`U-27`):
+   * how a socket heard from an hour ago is made without waiting an hour.
+   */
+  let unvetted: StateBroadcaster;
+  let unvettedApp: FastifyInstance;
+  let answerClock = 0;
   const servers: ApiServer[] = [];
   let sensorId = 0;
   let probeId = 0;
@@ -130,6 +138,13 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
     open = new StateBroadcaster({ logger: silent, credentialSweepMs: 3_600_000 });
     openApp = await build(false, open);
     lasting = new StateBroadcaster({ logger: silent, credentialSweepMs: 3_600_000 });
+    unvetted = new StateBroadcaster({
+      logger: silent,
+      credentialSweepMs: 3_600_000,
+      credentialWaitMs: 200,
+      clock: () => answerClock,
+    });
+    unvettedApp = await build(true, unvetted);
     lastingApp = await build(
       true,
       lasting,
@@ -700,6 +715,125 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
       t.mock.restoreAll();
       await stream.sweep();
       assert.equal((await closedWith(watcher.closed)).code, STREAM_SIGNED_OUT);
+    });
+  });
+
+  describe('a change whose check cannot be made (U-27)', () => {
+    it('reaches a socket heard from this interval, holds the rest back saying nothing, and sends them back on the sweep', async (t: TestContext) => {
+      const HOUR = 3_600_000;
+      answerClock = 0;
+      // Heard from an hour and more ago: one signed in, one about to be signed out, and one
+      // that has subscribed to nothing and so has nothing to miss.
+      const quiet = await watching(as('watcher'), unvettedApp);
+      const lapsed = await watching(as('bystander'), unvettedApp);
+      const idle = await unvettedApp.injectWS('/api/v1/stream', { headers: as('watcher') });
+      sockets.push(idle);
+      const idleFrames: Record<string, unknown>[] = [];
+      idle.on('message', (raw: Buffer) => {
+        idleFrames.push(JSON.parse(raw.toString('utf8')) as Record<string, unknown>);
+      });
+      // `hello` may have come before the listener: what counts is that nothing comes after this.
+      await roundTrip(idle);
+      const idleHad = idleFrames.length;
+      answerClock = 2 * HOUR;
+      // Heard from just now.
+      const recent = await watching(as('watcher'), unvettedApp);
+      await logOut('bystander');
+      const had = [quiet, lapsed].map((each) => each.frames.length);
+      const before = unvetted.stats;
+
+      t.mock.method(sessions, 'lapsed', () => Promise.reject(new Error('the database went away')));
+      await within(2_000, 'the change', change(unvetted));
+      await until(() => states(recent.frames) === 1, 'the change on the socket heard from now');
+      for (const each of [quiet.socket, lapsed.socket, idle]) await roundTrip(each);
+      // **Nothing at the edge, to a signed-in socket and a signed-out one alike**, and neither
+      // is closed: which of the two a socket is cannot be read from this instant.
+      assert.deepEqual(
+        [quiet, lapsed].map((each, index) => each.frames.slice(had[index])),
+        [[], []],
+        'something was sent at the edge to a socket nobody could vouch for',
+      );
+      assert.deepEqual([quiet.ended, lapsed.ended], [{}, {}]);
+      assert.equal(idleFrames.length, idleHad);
+      const after = unvetted.stats;
+      assert.equal(after.edgesUnvetted, before.edgesUnvetted + 1);
+      // Two subscriptions held back; the socket with none had nothing to hold.
+      assert.equal(after.withheld, before.withheld + 2);
+      assert.equal(after.credentialCheckFailures, before.credentialCheckFailures + 1);
+
+      // A sweep that cannot ask either says nothing to anybody.
+      await within(2_000, 'a sweep that cannot ask', unvetted.sweep());
+      for (const each of [quiet.socket, lapsed.socket, idle]) await roundTrip(each);
+      assert.deepEqual(
+        [quiet, lapsed].map((each, index) => each.frames.slice(had[index])),
+        [[], []],
+      );
+
+      // The one that can: the signed-in socket is sent back to subscribe, on the sweep's clock;
+      // the signed-out one is closed, having been sent nothing; the idle one is told nothing.
+      t.mock.restoreAll();
+      await within(2_000, 'the sweep', unvetted.sweep());
+      await until(
+        () => quiet.frames.some((frame) => frame['type'] === 'overflow'),
+        'overflow on the socket held back',
+      );
+      assert.deepEqual(quiet.frames.slice(had[0]), [
+        {
+          type: 'overflow',
+          reason: 'could not confirm this session for a moment; subscribe again',
+        },
+      ]);
+      assert.equal((await closedWith(lapsed.closed)).code, STREAM_SIGNED_OUT);
+      assert.deepEqual(
+        lapsed.frames.slice(had[1]),
+        [],
+        'something was sent to a signed-out socket',
+      );
+      await roundTrip(idle);
+      assert.equal(idleFrames.length, idleHad, 'a socket that missed nothing was sent something');
+
+      // It subscribes again, and is served as before.
+      quiet.socket.send(JSON.stringify({ subscribe: {} }));
+      await until(
+        () => quiet.frames.filter((frame) => frame['type'] === 'snapshot').length === 2,
+        'a second snapshot',
+      );
+      await within(2_000, 'the next change', change(unvetted));
+      await until(() => states(quiet.frames) === 1, 'the next change on the socket sent back');
+      await until(() => states(recent.frames) === 2, 'the next change on the other');
+    });
+  });
+
+  describe('a socket held back that subscribes again by itself (U-27)', () => {
+    it('is served its own snapshot, and not sent back again by the sweep', async (t: TestContext) => {
+      answerClock = 0;
+      const quiet = await watching(as('watcher'), unvettedApp);
+      answerClock = 2 * 3_600_000;
+      const recent = await watching(as('watcher'), unvettedApp);
+      const had = quiet.frames.length;
+      t.mock.method(sessions, 'lapsed', () => Promise.reject(new Error('the database went away')));
+      await within(2_000, 'the change', change(unvetted));
+      await until(() => states(recent.frames) === 1, 'the change on the socket heard from now');
+      await roundTrip(quiet.socket);
+      assert.deepEqual(quiet.frames.slice(had), []);
+
+      // The page subscribes again before the core can ask — a navigation, say — and is answered
+      // once it can. Its snapshot covers what it missed, so the sweep has nothing to tell it.
+      t.mock.restoreAll();
+      quiet.socket.send(JSON.stringify({ subscribe: {} }));
+      await until(
+        () => quiet.frames.filter((frame) => frame['type'] === 'snapshot').length === 2,
+        'the snapshot it asked for',
+      );
+      await within(2_000, 'the sweep', unvetted.sweep());
+      await roundTrip(quiet.socket);
+      assert.deepEqual(
+        quiet.frames.slice(had).map((frame) => frame['type']),
+        ['snapshot'],
+        'sent back to subscribe after it had',
+      );
+      await within(2_000, 'the next change', change(unvetted));
+      await until(() => states(quiet.frames) === 1, 'the next change on it');
     });
   });
 

@@ -1198,7 +1198,8 @@ describe(
 
     /**
      * An admitted socket with a subscription to everything and a watch on the probe, which does
-     * with `silence` what the stream route does: detaches both, at once, and closes nothing.
+     * with `silence` what the stream route does: detaches both, at once, and closes nothing. And
+     * with `withhold` (`U-27`): detaches both, and says whether there was anything to detach.
      */
     function admitted(broadcaster: StateBroadcaster, id: string, check: CredentialCheck) {
       const log: string[] = [];
@@ -1208,16 +1209,29 @@ describe(
         broadcaster.subscribe(tree.subscriber, null, EVERYONE),
         broadcaster.watchProbe(watch.watcher, probeId, EVERYONE),
       ];
+      /** Whether its subscriptions are still attached; a holder, for the reason the route's is. */
+      const attached = { now: true };
       const socket: StreamSocket = {
         credential: { kind: 'session', id, userId: 1 },
         silence: (lapse) => {
           log.push(`silence:${lapse}`);
+          attached.now = false;
           for (const each of detach) each();
         },
         signOut: (lapse) => {
           log.push(`signOut:${lapse}`);
+          attached.now = false;
           for (const each of detach) each();
         },
+        withhold: () => {
+          // Logged when it held something back: once, however many edges then ask again.
+          if (!attached.now) return false;
+          attached.now = false;
+          for (const each of detach) each();
+          log.push('withhold');
+          return true;
+        },
+        resume: () => log.push('resume'),
       };
       const admission = broadcaster.admit(socket, check);
       return { log, tree, watch, admission };
@@ -1281,6 +1295,11 @@ describe(
             detach();
           },
           signOut: (lapse) => log.push(`signOut:${lapse}`),
+          withhold: () => {
+            log.push('withhold');
+            return detach();
+          },
+          resume: () => log.push('resume'),
         },
         held.check,
       );
@@ -1521,6 +1540,11 @@ describe(
         credential: { kind: 'session', id, userId: 1 },
         silence: (lapse) => log.push(`silence:${lapse}`),
         signOut: (lapse) => log.push(`signOut:${lapse}`),
+        withhold: () => {
+          log.push('withhold');
+          return false;
+        },
+        resume: () => log.push('resume'),
       });
       const released = timed.admit(socket('released', []), held.check);
       assert.equal(live(), 1);
@@ -1590,6 +1614,11 @@ describe(
         credential: { kind: 'session', id, userId: 1 },
         silence: () => order.push(`silence:${id}`),
         signOut: () => order.push(`signOut:${id}`),
+        withhold: () => {
+          order.push(`withhold:${id}`);
+          return false;
+        },
+        resume: () => order.push(`resume:${id}`),
       });
       const detach = stream.subscribe(recorder().subscriber, null, EVERYONE);
       stream.admit(socket('silenced'), held.check);
@@ -1806,32 +1835,277 @@ describe(
       assert.equal(bounded.stats.subscribers, 0);
     });
 
-    it('does not bound an edge’s check: a batch nobody has vouched for is not delivered', async () => {
-      // The wait is the sweep's and the client frame's. Applied to a published batch it would
-      // turn a check that hangs into one that failed, and a failed check delivers (`A-34`'s
-      // rule for a database that blinked): a signed-out socket would be sent the batch.
-      const bounded = new StateBroadcaster({
-        logger: silent,
-        credentialSweepMs: 3_600_000,
-        credentialWaitMs: 40,
-      });
-      const held = credentials();
-      const allowed = admitted(bounded, 'allowed', held.check);
-      const lapsed = admitted(bounded, 'lapsed', held.check);
-      held.lapse('lapsed');
+    // ---------------------------------------------------------------------------------------
+    // An edge whose check fails, hangs, or is shared with another edge (`U-27`).
+    // ---------------------------------------------------------------------------------------
 
-      const release = held.hold();
-      const publishing = bounded.publish(db, [stateChange()]);
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      assert.equal(allowed.tree.events.length, 0, 'delivered before the check answered');
-      assert.equal(lapsed.tree.events.length, 0, 'delivered to a signed-out socket');
-      release();
-      await within(2_000, 'the publish', publishing);
-      assert.equal(allowed.tree.events.length, 1);
-      assert.equal(lapsed.tree.events.length, 0);
+    const SWEEP = 3_600_000;
+
+    /** A broadcaster whose sockets' answers are aged by a clock the test moves. */
+    function clocked(waitMs = 40) {
+      const clock = { now: 1_000 };
+      const broadcaster = new StateBroadcaster({
+        logger: silent,
+        // The timer an hour away, so every sweep is one the test runs; and an hour is the
+        // interval an answer is young within.
+        credentialSweepMs: SWEEP,
+        credentialWaitMs: waitMs,
+        clock: () => clock.now,
+      });
+      return { clock, broadcaster };
+    }
+
+    it('sends an edge it cannot vet only to a socket vouched for within one sweep interval', async () => {
+      // The table the decision is made of: how old the socket's last good answer is, whether an
+      // edge had already silenced it, and what the check does at this edge. A second socket,
+      // admitted just before the edge, is the witness that the edge happened.
+      const ages = [0, SWEEP - 1, SWEEP, 3 * SWEEP];
+      const outcomes = ['answers yes', 'answers no', 'rejects', 'hangs'] as const;
+      for (const age of ages) {
+        for (const silenced of [false, true]) {
+          for (const outcome of outcomes) {
+            const what = `${String(age)} ms old, ${silenced ? '' : 'not '}silenced, check ${outcome}`;
+            const { clock, broadcaster } = clocked();
+            const held = credentials();
+            const subject = admitted(broadcaster, 'subject', held.check);
+            if (silenced) {
+              held.lapse('subject');
+              await within(2_000, what, broadcaster.publish(db, [stateChange()]));
+              assert.deepEqual(subject.log, ['silence:ended'], what);
+            } else if (outcome === 'answers no') {
+              held.lapse('subject');
+            }
+            clock.now += age;
+            const witness = admitted(broadcaster, 'witness', held.check);
+            const before = broadcaster.stats;
+            const release = outcome === 'hangs' ? held.hold() : (): void => undefined;
+            held.fail(outcome === 'rejects');
+
+            await within(2_000, what, broadcaster.publish(db, [stateChange()]));
+
+            const unvetted = outcome === 'rejects' || outcome === 'hangs';
+            const delivered = !silenced && (outcome === 'answers yes' || (unvetted && age < SWEEP));
+            const heldBack = !silenced && unvetted && age >= SWEEP;
+            const signedOut = silenced || outcome === 'answers no';
+            assert.equal(subject.tree.events.length, delivered ? 1 : 0, what);
+            assert.equal(subject.watch.changes, 0, what);
+            assert.equal(witness.tree.events.length, 1, `${what}: the edge did not happen`);
+            assert.deepEqual(
+              subject.log,
+              signedOut ? ['silence:ended'] : heldBack ? ['withhold'] : [],
+              what,
+            );
+            assert.deepEqual(witness.log, [], what);
+            const after = broadcaster.stats;
+            assert.equal(after.edgesUnvetted - before.edgesUnvetted, unvetted ? 1 : 0, what);
+            assert.equal(after.withheld - before.withheld, heldBack ? 1 : 0, what);
+            assert.equal(
+              after.credentialCheckFailures - before.credentialCheckFailures,
+              unvetted ? 1 : 0,
+              what,
+            );
+            assert.equal(
+              after.signedOut.ended - before.signedOut.ended,
+              signedOut && !silenced ? 1 : 0,
+              what,
+            );
+            // A question past its wait is out, and counted out, until it answers.
+            assert.equal(after.checksOutstanding, outcome === 'hangs' ? 1 : 0, what);
+
+            // The database answers again, and the sweep says what the edge could not.
+            release();
+            held.fail(false);
+            await turns();
+            assert.equal(broadcaster.stats.checksOutstanding, 0, what);
+            await within(2_000, what, broadcaster.sweep());
+            assert.deepEqual(
+              subject.log,
+              signedOut
+                ? ['silence:ended', 'signOut:ended']
+                : heldBack
+                  ? ['withhold', 'resume']
+                  : [],
+              `${what}, after the sweep`,
+            );
+            assert.deepEqual(witness.log, [], what);
+            subject.admission.release();
+            witness.admission.release();
+          }
+        }
+      }
+    });
+
+    it('takes an answer from an edge, a sweep or the socket’s own frame as vouching for one interval', async () => {
+      for (const by of ['edge', 'sweep', 'frame'] as const) {
+        const { clock, broadcaster } = clocked();
+        const held = credentials();
+        const socket = admitted(broadcaster, 'socket', held.check);
+        // Admitted long ago; asked about now.
+        clock.now += 5 * SWEEP;
+        if (by === 'edge') await within(2_000, by, broadcaster.publishProbe(db, probeId));
+        else if (by === 'sweep') await within(2_000, by, broadcaster.sweep());
+        else assert.equal(await within(2_000, by, socket.admission.confirm()), true);
+        held.fail(true);
+
+        // Just inside the interval since that answer: the edge reaches it.
+        clock.now += SWEEP - 1;
+        await within(2_000, by, broadcaster.publish(db, [stateChange()]));
+        assert.equal(socket.tree.events.length, 1, by);
+        // At the interval: held back.
+        clock.now += 1;
+        await within(2_000, by, broadcaster.publish(db, [stateChange()]));
+        assert.equal(socket.tree.events.length, 1, by);
+        assert.deepEqual(socket.log, ['withhold'], by);
+        socket.admission.release();
+      }
+    });
+
+    it('vets an edge that arrives while a question is out by the next question, asked after it', async () => {
+      // `A-34`: a batch committed after a logout is not delivered to the socket it ended. The
+      // question already out was asked before that logout, and says "signed in"; the batch that
+      // arrives while it is out must not take its answer.
+      const { broadcaster } = clocked(2_000);
+      const ended = new Set<string>();
+      const asked: string[][] = [];
+      let gate: (() => void) | undefined;
+      const check: CredentialCheck = {
+        lapsed: async (about) => {
+          const keys = about.map(credentialKey);
+          asked.push(keys);
+          // What is true when it is asked, as a query's snapshot is.
+          const answer = new Map<string, Lapse>();
+          for (const key of keys) if (ended.has(key)) answer.set(key, 'ended');
+          if (asked.length === 1) {
+            await new Promise<void>((resolve) => {
+              gate = resolve;
+            });
+          }
+          return answer;
+        },
+      };
+      const lapsed = admitted(broadcaster, 'lapsed', check);
+      const allowed = admitted(broadcaster, 'allowed', check);
+
+      const change = (message: string) => ({ ...stateChange(), message });
+      const first = broadcaster.publish(db, [change('before the logout')]);
+      await turns();
+      assert.equal(asked.length, 1);
+      // Signed out, and then a second and a third batch commit while the first question is out.
+      ended.add('session:lapsed');
+      const second = broadcaster.publish(db, [change('after the logout')]);
+      const third = broadcaster.publishProbe(db, probeId);
+      await turns();
+      assert.equal(asked.length, 1, 'an edge asked while a question was out');
+      assert.equal(broadcaster.stats.edgesCoalesced, 2);
+
+      gate?.();
+      await within(2_000, 'the three edges', Promise.all([first, second, third]));
+      // One question for the two that waited, asked once the first came back.
+      assert.deepEqual(asked, [
+        ['session:lapsed', 'session:allowed'],
+        ['session:lapsed', 'session:allowed'],
+      ]);
+      // Nothing committed after the logout reached it. (The batch from before may have, or may
+      // have found it silenced already: which of the two is a race between reads, and either is
+      // within `A-34`.)
+      assert.deepEqual(
+        lapsed.tree.events.filter((event) => event.message !== 'before the logout'),
+        [],
+        'a batch committed after the logout went out',
+      );
+      assert.equal(lapsed.watch.changes, 0);
       assert.deepEqual(lapsed.log, ['silence:ended']);
-      allowed.admission.release();
+      assert.equal(allowed.tree.events.length, 2);
+      assert.equal(allowed.watch.changes, 1);
+      assert.equal(broadcaster.stats.edgesUnvetted, 0);
+      assert.equal(broadcaster.stats.credentialCheckFailures, 0);
       lapsed.admission.release();
+      allowed.admission.release();
+    });
+
+    it('holds no edge past its bound while the database hangs for three seconds, and none behind it', async () => {
+      // The scenario `U-26` left: a check that hung at an edge held that batch, and every later
+      // one, for as long as it hung. Six sockets, three of them answered for an hour ago.
+      const { clock, broadcaster } = clocked(2_000);
+      let questions = 0;
+      const check: CredentialCheck = {
+        lapsed: async () => {
+          questions += 1;
+          if (questions === 1) await new Promise((resolve) => setTimeout(resolve, 3_000));
+          return new Map<string, Lapse>();
+        },
+      };
+      const stale = ['a', 'b', 'c'].map((id) => admitted(broadcaster, `stale-${id}`, check));
+      clock.now += 2 * SWEEP;
+      const fresh = ['a', 'b', 'c'].map((id) => admitted(broadcaster, `fresh-${id}`, check));
+
+      const started = performance.now();
+      const took: Record<string, number> = {};
+      const timed = (name: string, edge: Promise<number>): Promise<void> =>
+        edge.then(() => {
+          took[name] = performance.now() - started;
+        });
+      const sleep = (ms: number): Promise<void> =>
+        new Promise((resolve) => setTimeout(resolve, ms));
+
+      // A at 0 asks, and the question hangs. B at 0.1 s and C at 0.2 s wait for the next one.
+      const early = [timed('A', broadcaster.publish(db, [stateChange()]))];
+      await sleep(100);
+      early.push(timed('B', broadcaster.publishProbe(db, probeId)));
+      await sleep(100);
+      early.push(timed('C', broadcaster.publish(db, [stateChange()])));
+      await within(5_000, 'the edges that arrived inside the wait', Promise.all(early));
+      // Nothing waited past two seconds from when it arrived; B and C were let go with A, when
+      // the question went past its wait, since nothing will be asked for them while it is out.
+      assert.ok(took['A'] !== undefined && took['A'] < 2_400, `A took ${String(took['A'])} ms`);
+      assert.ok(took['B'] !== undefined && took['B'] < 2_400, `B took ${String(took['B'])} ms`);
+      assert.ok(took['C'] !== undefined && took['C'] < 2_400, `C took ${String(took['C'])} ms`);
+      // C arrived 0.2 s after A and was let go with it, not at its own bound 0.2 s later.
+      const lag = (took['C'] ?? Infinity) - (took['A'] ?? 0);
+      assert.ok(lag < 100, `C was let go ${String(lag)} ms after A`);
+      assert.equal(broadcaster.stats.checksOutstanding, 1);
+
+      // D, with the question still out past its wait: decided at once, and nothing asked.
+      const askedD = performance.now();
+      await within(1_000, 'D', broadcaster.publish(db, [stateChange()]));
+      const tookD = performance.now() - askedD;
+      assert.ok(tookD < 400, `D waited ${String(tookD)} ms behind a question that hangs`);
+      assert.equal(questions, 1, 'an edge asked again with a question past its wait still out');
+
+      // What went where: the three answered for recently heard A to D, the others none of them.
+      for (const one of fresh) {
+        assert.equal(one.tree.events.length, 3);
+        assert.equal(one.watch.changes, 1);
+        assert.deepEqual(one.log, []);
+      }
+      for (const one of stale) {
+        assert.equal(one.tree.events.length + one.watch.changes, 0);
+        assert.deepEqual(one.log, ['withhold']);
+      }
+      const stats = broadcaster.stats;
+      assert.equal(stats.edgesUnvetted, 4);
+      assert.equal(stats.edgesCoalesced, 2);
+      assert.equal(stats.withheld, 3, 'a socket held back was counted again');
+      assert.equal(stats.credentialCheckFailures, 4);
+
+      // Three seconds in, the question answers. Nothing is acted on for it; the next edge asks.
+      await within(
+        4_000,
+        'the hung question to answer',
+        (async () => {
+          while (broadcaster.stats.checksOutstanding !== 0) await sleep(20);
+        })(),
+      );
+      await within(2_000, 'E', broadcaster.publish(db, [stateChange()]));
+      assert.equal(questions, 2);
+      assert.equal(broadcaster.stats.edgesUnvetted, 4);
+      for (const one of fresh) assert.equal(one.tree.events.length, 4);
+      // Held back until the sweep, which sends each back to subscribe again.
+      for (const one of stale) assert.equal(one.tree.events.length, 0);
+      await within(2_000, 'the sweep', broadcaster.sweep());
+      for (const one of stale) assert.deepEqual(one.log, ['withhold', 'resume']);
+      for (const one of fresh) assert.deepEqual(one.log, []);
+      for (const one of [...stale, ...fresh]) one.admission.release();
     });
 
     it('closes both kinds on the first tick whose check answers, when the one before it hung', async (t) => {

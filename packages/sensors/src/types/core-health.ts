@@ -283,7 +283,39 @@ const CHANNELS: readonly ChannelDef[] = [
   // sweep waits two seconds for each and goes on, and asks nothing new of a check while its
   // last question is still out — so this is one or two on a database that has stopped
   // answering, and zero otherwise. Held above zero, signed-out pages are not being closed.
+  //
+  // An edge's question that is past its two seconds is counted here too (`U-27`) — one at most,
+  // since an edge asks nothing new while it is out. The name predates that and is kept: channel
+  // names are stored when a sensor is created, and an installation would keep the old one.
   { key: 'streamChecksOutstanding', name: 'Live socket sweep queries unanswered', unit: 'queries' },
+  // **Changes sent while the core could not say who is signed in** (`U-27`). The check before a
+  // change failed, took longer than two seconds, or was not asked because the last one is still
+  // out; the change went only to sockets found signed in within the last five seconds. A rate
+  // is a database that is not answering the live stream; zero otherwise.
+  {
+    key: 'streamEdgesUnvetted',
+    name: 'Live changes sent without a sign-in check',
+    unit: 'changes',
+    counter: { bits: 64 },
+  },
+  // **Sockets held back by such a change** (`U-27`): nothing had found them signed in for five
+  // seconds, so they were sent nothing from that change on, and told to subscribe again once the
+  // core could say they still are. Each is a page that reloads its view after an outage.
+  {
+    key: 'streamWithheld',
+    name: 'Live sockets held back for a sign-in check',
+    unit: 'sockets',
+    counter: { bits: 64 },
+  },
+  // **Changes that shared one sign-in check** (`U-27`). One question is out at a time; a change
+  // arriving meanwhile waits for the next, which every such change shares. Nothing is lost or
+  // sent unchecked by it: a rate is changes arriving faster than the database answers.
+  {
+    key: 'streamEdgesCoalesced',
+    name: 'Live changes sharing a sign-in check',
+    unit: 'changes',
+    counter: { bits: 64 },
+  },
   // A count that climbs steadily means a master is flapping — the alarm storm dependencies exist
   // to prevent, showing up as churn instead (`M-11`).
   {

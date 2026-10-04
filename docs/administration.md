@@ -181,6 +181,21 @@ it as one that failed. While that question is still out the next tick asks nothi
 counted the same way, so a database that has stopped answering holds one query of this kind and
 not one per tick; `streamChecksOutstanding` is how many are out, and is 0 on a healthy core.
 
+**A change is not held for the check either.** The question asked before a change goes out
+waits two seconds as well, and one is out at a time: a change that arrives while it is out waits
+for the next question, which every change arriving meanwhile shares, and which is asked as soon
+as the one out comes back (`streamEdgesCoalesced` counts them; nothing is lost or sent unchecked
+by it). When the question fails, or is still out after two seconds, the change goes only to the
+pages the core has found signed in within the last five seconds; while it stays out, later
+changes ask nothing and are decided the same way at once, and it counts in
+`streamChecksOutstanding`. `streamEdgesUnvetted` counts changes sent like that. Any other page is
+**held back**: sent nothing from that change on, which is exactly what a signed-out page is sent,
+and told to subscribe again — it reloads its view by itself — on the first five-second check that
+says it is still signed in; `streamWithheld` counts them. So a database that blinks costs
+nobody their tree, a page signed out in the last five seconds can be sent changes for at most
+those five seconds (as it can when a sign-out is undone inside one check), and a long outage
+ends with every open page reloading its view once.
+
 **A slow database closes nobody.** When a page asks the core for something, the core waits for
 the answer about that page's sign-in however long it takes, and the page gets what it asked for
 late. Only a check that *fails* closes the page's socket, with `1013`, signed in or not; nothing

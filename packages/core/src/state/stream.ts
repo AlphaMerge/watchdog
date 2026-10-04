@@ -133,8 +133,34 @@ export interface StreamStats {
    * out**: a tick that asked afresh every five seconds of a table that is locked would fill the
    * pool with questions nobody is waiting for. Zero on a healthy core; anything else, held, is
    * a database that has stopped answering the stream.
+   *
+   * **And an edge's question, once it is past its wait** (`U-27`): one at most per check, since
+   * an edge asks nothing new while it is out. Not before — an edge's question is in flight for a
+   * millisecond on every published batch, and counted then it would make a healthy core read 1
+   * whenever a sample landed in that millisecond.
    */
   readonly checksOutstanding: number;
+  /**
+   * Edges — a published batch, a probe's change — sent out without an answer about every socket
+   * (`U-27`): the check failed, did not answer in `credentialWaitMs`, or was not asked because the
+   * one before it is still out. Such an edge goes only to sockets vouched for in the last sweep
+   * interval; see `StateBroadcaster.publish`. Zero on a healthy core.
+   */
+  readonly edgesUnvetted: number;
+  /**
+   * Sockets an unvetted edge held back (`U-27`): nobody had said within one sweep interval that
+   * they were still signed in, so they were sent nothing of it, and nothing after it, until the
+   * sweep could say so and sent them back to subscribe again. Counted once each time a socket's
+   * subscription is held back; nothing is dropped without the socket being told.
+   */
+  readonly withheld: number;
+  /**
+   * Edges that arrived while another edge's question was out, and were answered together by one
+   * question asked as soon as it came back (`U-27`). Not lost and not unvetted: each still waits
+   * for a question asked after it arrived. A rate is published batches arriving faster than the
+   * database answers about who is signed in.
+   */
+  readonly edgesCoalesced: number;
 }
 
 export interface StateBroadcasterOptions {
@@ -157,9 +183,15 @@ export interface StateBroadcasterOptions {
    * How long a sweep waits for each of its queries — the credential check, the access epoch, a
    * watcher's view — before it goes on without the answer (`U-26`): counted, and closing
    * nothing. One that never answers would otherwise hold the sweep, and every one after it, for
-   * good. **The sweep's alone**: a client's own frame waits for its answer however long.
+   * good. **The sweep's and an edge's** (`U-27`): a client's own frame waits for its answer
+   * however long.
    */
   credentialWaitMs?: number;
+  /**
+   * Milliseconds on a clock that only goes forward: what a socket's last answer is aged by
+   * (`U-27`). `performance.now` unless a test moves it.
+   */
+  clock?: () => number;
   /**
    * The access epoch, read now (`U-24`). What the sweep compares every probe watcher's view
    * with, so a watcher whose access moved is told on the sweep's clock and on no other. Absent,
@@ -204,6 +236,9 @@ const DEFAULT_CREDENTIAL_SWEEP_MS = 5_000;
  * could not be made, which closes nothing. Shorter than the sweep's interval, so the tick after
  * a check that hung is not skipped for it.
  *
+ * **And for an edge's** (`U-27`): past it, the edge goes only to sockets vouched for within the
+ * last sweep interval, and is not held for the answer.
+ *
  * **Not the bound on a client's frame.** The pool has no query timeout and this wait includes
  * the time a query spends queued for a connection, so a database answering in three seconds
  * fails every check held to two. On the sweep that costs a tick. On a subscription it closed a
@@ -220,12 +255,41 @@ class CredentialCheckTimeout extends Error {
   }
 }
 
-/** A sweep's credential check that was not asked, because the last one is still out. */
+/** A credential check that was not asked, because the last one is still out. */
 class CredentialCheckOutstanding extends Error {
   constructor() {
     super('the credential check before this one has not answered; nothing new was asked');
     this.name = 'CredentialCheckOutstanding';
   }
+}
+
+/** What one credential check said, and when it was asked: what it vouches from (`U-27`). */
+interface Answered {
+  readonly asked: number;
+  readonly lapsed: ReadonlyMap<string, Lapse>;
+}
+
+/**
+ * The one question an edge has out for a check (`U-27`), and the edges waiting for the next.
+ *
+ * **One out, one waiting, and no more.** A batch must be vetted by a question asked after it was
+ * committed (`A-34`), so an edge that arrives while one is out cannot take that one's answer;
+ * it waits for the next, which every edge arriving in the meantime shares, and which is asked the
+ * moment the one out comes back. Not a queue: however many edges arrive, there is one question
+ * in the database and one more to ask.
+ */
+interface EdgeRound {
+  /** Past `credentialWaitMs` and still out: edges ask nothing until it answers. */
+  late: boolean;
+  /** Edges that arrived while it was out and inside its wait, and the credentials they ask about. */
+  next:
+    | {
+        readonly credentials: Map<string, Credential>;
+        readonly answer: Promise<Answered>;
+        readonly resolve: (answer: Answered) => void;
+        readonly reject: (error: unknown) => void;
+      }
+    | undefined;
 }
 
 /** What a subscriber does with an event, and what it is told when it falls behind. */
@@ -294,6 +358,20 @@ export interface StreamSocket {
   silence(lapse: Lapse): void;
   /** Its credential no longer authenticates anything. Close it, saying why. */
   signOut(lapse: Lapse): void;
+  /**
+   * An edge could not find out whether it is still signed in, and nothing has said so within one
+   * sweep interval (`U-27`). **Send it nothing of this edge, and nothing after**: detach what it
+   * subscribed to, synchronously, as `silence` does, and remember that it has missed something.
+   * Close nothing and say nothing — this is the instant of an edge. Returns whether there was a
+   * subscription to detach; one with none has missed nothing.
+   */
+  withhold(): boolean;
+  /**
+   * A sweep has said it is still signed in since an edge held it back (`U-27`): if what it holds
+   * is still the subscription that missed something, tell it to subscribe again (`overflow`).
+   * On the sweep's clock, so the frame says nothing about when the edge was.
+   */
+  resume(): void;
 }
 
 /** A socket's place in the credential sweep, handed back by `admit`. */
@@ -425,10 +503,24 @@ export class StateBroadcaster {
    * and the close is how the client finds out.
    */
   readonly #silenced = new Map<StreamSocket, Lapse>();
+  /**
+   * When a check last said each admitted socket was still signed in, on `#clock`: the instant it
+   * was asked (`U-27`). Admission is the first such answer — the upgrade was authenticated by the
+   * credential a moment before. What an edge whose check failed goes by: see `#atEdge`.
+   */
+  readonly #vouched = new Map<StreamSocket, number>();
+  /** Sockets an unvetted edge held back, until a sweep can say they are signed in (`U-27`). */
+  readonly #withheld = new Set<StreamSocket>();
+  /** The question each check has out for an edge, and the edges waiting on the next (`U-27`). */
+  readonly #edgeRounds = new Map<CredentialCheck, EdgeRound>();
   #sweeper: ReturnType<typeof setInterval> | undefined;
   #sweeping = false;
   readonly #signedOut: Record<Lapse, number> = { ended: 0, expired: 0, revoked: 0, disabled: 0 };
   #credentialCheckFailures = 0;
+  #edgesUnvetted = 0;
+  #withheldCount = 0;
+  #edgesCoalesced = 0;
+  readonly #clock: () => number;
 
   constructor(options: StateBroadcasterOptions) {
     this.#logger = options.logger.child({ component: 'stream' });
@@ -437,6 +529,7 @@ export class StateBroadcaster {
     this.#sweepMs = options.credentialSweepMs ?? DEFAULT_CREDENTIAL_SWEEP_MS;
     this.#waitMs = options.credentialWaitMs ?? DEFAULT_CREDENTIAL_WAIT_MS;
     this.#accessEpoch = options.accessEpoch;
+    this.#clock = options.clock ?? (() => performance.now());
   }
 
   /**
@@ -474,7 +567,13 @@ export class StateBroadcaster {
       credentialCheckFailures: this.#credentialCheckFailures,
       probeCoalesced: this.#probeCoalesced,
       unsure: this.#unsure,
-      checksOutstanding: this.#pending.size + (this.#epochRead === undefined ? 0 : 1),
+      checksOutstanding:
+        this.#pending.size +
+        (this.#epochRead === undefined ? 0 : 1) +
+        [...this.#edgeRounds.values()].filter((round) => round.late).length,
+      edgesUnvetted: this.#edgesUnvetted,
+      withheld: this.#withheldCount,
+      edgesCoalesced: this.#edgesCoalesced,
     };
   }
 
@@ -509,6 +608,8 @@ export class StateBroadcaster {
    */
   admit(socket: StreamSocket, check: CredentialCheck): Admission {
     this.#admitted.set(socket, check);
+    // The upgrade that opened it was authenticated by this credential just now (`U-27`).
+    this.#vouched.set(socket, this.#clock());
     // Only while there is a socket to sweep, so an installation nobody is watching pays nothing.
     this.#arm();
     return {
@@ -516,15 +617,22 @@ export class StateBroadcaster {
         if (!this.#admitted.has(socket)) return false;
         // Rejects when it could not be asked about, decided already or not (`U-26`): "cannot
         // tell" is the caller's, and is the same for every socket. Unbounded: see `confirm`.
-        await this.#examine([socket], 'close', false);
+        await this.#examine([socket], 'frame');
         return this.#admitted.has(socket);
       },
       release: () => {
-        this.#admitted.delete(socket);
-        this.#silenced.delete(socket);
+        this.#forget(socket);
         this.#arm();
       },
     };
+  }
+
+  /** Everything held about a socket that is closed, or being closed. */
+  #forget(socket: StreamSocket): void {
+    this.#admitted.delete(socket);
+    this.#silenced.delete(socket);
+    this.#vouched.delete(socket);
+    this.#withheld.delete(socket);
   }
 
   /**
@@ -556,6 +664,11 @@ export class StateBroadcaster {
    * a check that could not be made, so a database that has stopped answering holds one question
    * of the sweep's and not one per tick. `StreamStats.checksOutstanding` says how many.
    *
+   * **And the only place a socket an edge held back is told to subscribe again** (`U-27`): once
+   * this sweep's check says it is still signed in, `resume` sends it `overflow`. At the edge it
+   * was sent nothing, so a signed-out socket and a signed-in one were alike there; here the
+   * instant is this timer's, as a close is.
+   *
    * **The review of probe watchers is bounded the same way** — the read of the access epoch, and
    * each view asked for again — so a watcher attached does not put the sweep back at the mercy
    * of one query.
@@ -565,7 +678,7 @@ export class StateBroadcaster {
     if (this.#sweeping) return;
     this.#sweeping = true;
     try {
-      await this.#vet('close');
+      await this.#vet('sweep');
       await this.#review();
     } finally {
       this.#sweeping = false;
@@ -669,100 +782,254 @@ export class StateBroadcaster {
   }
 
   /**
-   * `#examine` for every admitted socket, never rejecting. See `sweep`.
+   * `#examine` for every admitted socket, never rejecting. See `sweep`, and `publish` for an edge.
    *
-   * `silence` is what an edge does — a published batch, a probe's change — and `close` what the
-   * sweep does. An edge does not ask again about a socket already silenced, so it costs the one
-   * question it cost before `U-25`, less the sockets already decided; the sweep asks about every
-   * socket, in the one query it always made (`U-26`).
+   * An edge does not ask again about a socket already silenced, so it costs the one question it
+   * cost before `U-25`, less the sockets already decided; the sweep asks about every socket, in
+   * the one query it always made (`U-26`).
    */
-  async #vet(act: 'silence' | 'close'): Promise<void> {
+  async #vet(by: 'edge' | 'sweep'): Promise<void> {
     if (this.#admitted.size === 0) return;
     try {
-      // Bounded for the sweep and for nothing else: an edge that timed out would deliver.
-      await this.#examine([...this.#admitted.keys()], act, act === 'close');
+      await this.#examine([...this.#admitted.keys()], by);
     } catch (error: unknown) {
       this.#logger.warn(
         { err: describeError(error), sockets: this.#admitted.size },
-        'could not check whether open stream sockets are still signed in; they stay open until a ' +
-          'check can say',
+        by === 'edge'
+          ? 'could not check whether open stream sockets are still signed in; a change went only ' +
+              'to those vouched for in the last sweep interval'
+          : 'could not check whether open stream sockets are still signed in; they stay open ' +
+              'until a check can say',
       );
     }
   }
 
   /**
    * Asks each check once about these sockets' credentials, however many sockets share one, and
-   * acts on every socket whose credential lapsed: `silence` stops sending to it and leaves it
-   * open for the sweep, `close` signs it out — and signs out those silenced before. Rejects, each
-   * failure counted, when a check cannot answer — after acting on what the others said.
+   * acts on what it says. Rejects, each failure counted, when a check cannot answer — after
+   * acting on what the others said.
    *
-   * **`silence` does not ask about a socket already silenced; `close` does** (`U-26`). What
-   * `close` does with a socket depends on its check having answered and on nothing else: one
-   * whose check could not, silenced or not, is left exactly as it was.
+   * - **An edge** (`by === 'edge'`) silences a lapsed socket: stops sending to it and leaves it
+   *   open for the sweep. It does not ask about a socket already silenced. Where its check could
+   *   not answer it goes by `#atEdge`'s rule (`U-27`).
+   * - **The sweep and a client's frame** sign a lapsed socket out — and those silenced before. One
+   *   whose check could not answer, silenced or not, is left exactly as it was (`U-26`).
    *
-   * **`bounded` is the sweep's**: it waits no longer than `credentialWaitMs`, and asks a check
-   * nothing while that check's last question from a sweep is still unanswered. A client's own
-   * frame and a published batch wait for their answer.
+   * Every answer that says a socket is signed in is remembered, with when it was asked (`U-27`).
+   *
+   * **How long each waits.** A client's frame waits for its answer however long. The sweep waits
+   * `credentialWaitMs`, and asks a check nothing while that check's last question from a sweep is
+   * still out. An edge waits `credentialWaitMs` from when it arrived, and shares its question as
+   * `#askAtEdge` says.
    */
-  async #examine(
-    sockets: readonly StreamSocket[],
-    act: 'silence' | 'close',
-    bounded: boolean,
-  ): Promise<void> {
+  async #examine(sockets: readonly StreamSocket[], by: 'edge' | 'sweep' | 'frame'): Promise<void> {
     const asking = new Map<CredentialCheck, Map<string, Credential>>();
     for (const socket of sockets) {
       const check = this.#admitted.get(socket);
       if (check === undefined) continue;
-      if (act === 'silence' && this.#silenced.has(socket)) continue;
+      if (by === 'edge' && this.#silenced.has(socket)) continue;
       const asked = asking.get(check) ?? new Map<string, Credential>();
       asked.set(credentialKey(socket.credential), socket.credential);
       asking.set(check, asked);
     }
-    const answers = new Map<CredentialCheck, ReadonlyMap<string, Lapse>>();
+    const answers = new Map<CredentialCheck, Answered>();
     const failures: unknown[] = [];
     await Promise.all(
       [...asking].map(async ([check, asked]) => {
         try {
-          if (!bounded) {
-            answers.set(check, await check.lapsed([...asked.values()]));
-            return;
-          }
-          if (this.#pending.has(check)) throw new CredentialCheckOutstanding();
-          const answer = check.lapsed([...asked.values()]);
-          this.#pending.set(check, answer);
-          const settle = (): void => {
-            if (this.#pending.get(check) === answer) this.#pending.delete(check);
-          };
-          answer.then(settle, settle);
-          answers.set(check, await this.#within(answer, 'the credential check'));
+          answers.set(check, await this.#ask(check, asked, by));
         } catch (error: unknown) {
           this.#credentialCheckFailures += 1;
           failures.push(error);
         }
       }),
     );
+    // Remembered before anything is acted on, by every kind of question.
+    for (const socket of sockets) {
+      const check = this.#admitted.get(socket);
+      if (check === undefined || this.#silenced.has(socket)) continue;
+      const answered = answers.get(check);
+      if (answered === undefined || answered.lapsed.has(credentialKey(socket.credential))) {
+        continue;
+      }
+      // The later of two: an answer asked before another that has already come back is older.
+      const before = this.#vouched.get(socket);
+      if (before === undefined || before < answered.asked) {
+        this.#vouched.set(socket, answered.asked);
+      }
+    }
+    if (by === 'edge') this.#atEdge(sockets, answers);
+    else this.#settle(sockets, answers, by);
+    this.#arm();
+    if (failures.length > 0) throw failures[0];
+  }
+
+  /** One check's answer about these credentials, waited for as `by` waits. See `#examine`. */
+  async #ask(
+    check: CredentialCheck,
+    credentials: ReadonlyMap<string, Credential>,
+    by: 'edge' | 'sweep' | 'frame',
+  ): Promise<Answered> {
+    if (by === 'edge')
+      return this.#within(this.#askAtEdge(check, credentials), 'the credential check');
+    const asked = this.#clock();
+    if (by === 'frame') return { asked, lapsed: await check.lapsed([...credentials.values()]) };
+    if (this.#pending.has(check)) throw new CredentialCheckOutstanding();
+    const answer = check.lapsed([...credentials.values()]);
+    this.#pending.set(check, answer);
+    const settle = (): void => {
+      if (this.#pending.get(check) === answer) this.#pending.delete(check);
+    };
+    answer.then(settle, settle);
+    return { asked, lapsed: await this.#within(answer, 'the credential check') };
+  }
+
+  /**
+   * The answer an edge waits for (`U-27`): to a question asked now, if this check has none out;
+   * to the next one, if it has one out inside its wait; and to nothing — rejected at once — if the
+   * one out is past its wait.
+   *
+   * **Why not the answer already on its way.** That question was asked before this edge's batch
+   * committed, and could say "signed in" about a session whose logout committed in between —
+   * which `A-34` exists to stop. So an edge that arrives while a question is out waits for the
+   * next, asked the moment the one out comes back, and **every edge arriving meanwhile shares
+   * it**: counted in `edgesCoalesced`, and one query however many there were.
+   *
+   * **And why nothing, past the wait.** A question that has not answered in `credentialWaitMs` is
+   * a database that is not answering; asking it again for every edge is a pool full of questions
+   * nobody waits for, which is the sweep's rule too (`U-26`). Edges arriving then are decided by
+   * `#atEdge` straight away, and the edges that were waiting for the next question are decided
+   * with them, so none of them waits past its own bound. When the late one does answer, the next
+   * edge asks afresh.
+   */
+  #askAtEdge(
+    check: CredentialCheck,
+    credentials: ReadonlyMap<string, Credential>,
+  ): Promise<Answered> {
+    const out = this.#edgeRounds.get(check);
+    if (out === undefined) return this.#startEdgeRound(check, credentials);
+    if (out.late) return Promise.reject(new CredentialCheckOutstanding());
+    this.#edgesCoalesced += 1;
+    if (out.next === undefined) {
+      let resolve: (answer: Answered) => void = () => undefined;
+      let reject: (error: unknown) => void = () => undefined;
+      const answer = new Promise<Answered>((done, failed) => {
+        resolve = done;
+        reject = failed;
+      });
+      out.next = { credentials: new Map(), answer, resolve, reject };
+    }
+    for (const [key, credential] of credentials) out.next.credentials.set(key, credential);
+    return out.next.answer;
+  }
+
+  /** Asks `check` for an edge now, as the one question this check has out for edges (`U-27`). */
+  #startEdgeRound(
+    check: CredentialCheck,
+    credentials: ReadonlyMap<string, Credential>,
+  ): Promise<Answered> {
+    const asked = this.#clock();
+    const lapsed = check.lapsed([...credentials.values()]);
+    const round: EdgeRound = { late: false, next: undefined };
+    this.#edgeRounds.set(check, round);
+    /** Hands whoever waits for the next question to `then`, and leaves the round without one. */
+    const handOn = (then: (next: NonNullable<EdgeRound['next']>) => void): void => {
+      const next = round.next;
+      round.next = undefined;
+      if (next !== undefined) then(next);
+    };
+    const timer = setTimeout(() => {
+      round.late = true;
+      // Nothing will be asked for them while this is out: decided now, by what was said before.
+      handOn((next) => {
+        next.reject(new CredentialCheckOutstanding());
+      });
+    }, this.#waitMs).unref();
+    const settle = (): void => {
+      clearTimeout(timer);
+      if (this.#edgeRounds.get(check) === round) this.#edgeRounds.delete(check);
+      // Back inside its wait: the edges that waited on it get a question of their own, now.
+      handOn((next) => {
+        this.#startEdgeRound(check, next.credentials).then(next.resolve, next.reject);
+      });
+    };
+    lapsed.then(settle, settle);
+    return lapsed.then((answer) => ({ asked, lapsed: answer }));
+  }
+
+  /**
+   * What an edge does with what its check said (`U-27` for the rule, `U-25` for the rest).
+   *
+   * A socket the check found lapsed is **silenced**: sent nothing of this edge or any after it,
+   * and left open for the sweep to close. Synchronous, and it detaches the socket's subscription,
+   * so a batch waiting on this check delivers to nobody it silenced; still admitted, so the timer
+   * that closes it stays armed.
+   *
+   * **Where the check could not answer** — it failed, it did not answer in `credentialWaitMs`, or
+   * it was not asked because the one before it is still out — **the edge goes to a socket whose
+   * last answer said signed in and is younger than one sweep interval, and to no other.** A
+   * database that blinks costs nobody their tree, since a socket in use is vouched for at every
+   * edge and every sweep; and a socket whose credential lapsed since its last answer is exposed
+   * for one interval at most, which a credential that lapses and comes back inside one interval
+   * already is. Every other socket is **held back**: `withhold` detaches its subscription, says
+   * nothing, and the sweep that next vouches for it sends it back to subscribe again. Nothing is
+   * dropped without the socket being told, and a socket held back is sent nothing at the edge,
+   * exactly as a signed-out one is — the two cannot be told apart there. Counted: the edge in
+   * `edgesUnvetted`, each socket held back in `withheld`.
+   *
+   * Before `U-27` a failed check delivered to every socket not silenced, a signed-out one
+   * included, and a check that hung held the batch and every later one for as long as it hung.
+   */
+  #atEdge(sockets: readonly StreamSocket[], answers: ReadonlyMap<CredentialCheck, Answered>): void {
+    const now = this.#clock();
+    let unvetted = false;
+    for (const socket of sockets) {
+      const check = this.#admitted.get(socket);
+      // Released while the check was out — closed by its client, or signed out by another check.
+      if (check === undefined) continue;
+      // Found by an earlier edge, and counted there.
+      if (this.#silenced.has(socket)) continue;
+      const answered = answers.get(check);
+      if (answered === undefined) {
+        unvetted = true;
+        const vouched = this.#vouched.get(socket);
+        if (vouched !== undefined && now - vouched < this.#sweepMs) continue;
+        if (socket.withhold()) {
+          this.#withheldCount += 1;
+          this.#withheld.add(socket);
+        }
+        continue;
+      }
+      const lapse = answered.lapsed.get(credentialKey(socket.credential));
+      if (lapse === undefined) continue;
+      this.#signedOut[lapse] += 1;
+      this.#silenced.set(socket, lapse);
+      socket.silence(lapse);
+    }
+    if (unvetted) this.#edgesUnvetted += 1;
+  }
+
+  /**
+   * What the sweep and a client's frame do with what their check said: sign out every socket
+   * whose credential lapsed, and every socket an edge silenced (`U-25`, `U-26`); and, on the
+   * sweep, send a socket an edge held back that is still signed in back to subscribe (`U-27`).
+   */
+  #settle(
+    sockets: readonly StreamSocket[],
+    answers: ReadonlyMap<CredentialCheck, Answered>,
+    by: 'sweep' | 'frame',
+  ): void {
     for (const socket of sockets) {
       const check = this.#admitted.get(socket);
       // Released while the check was out — closed by its client, or signed out by another check.
       if (check === undefined) continue;
       const decided = this.#silenced.get(socket);
-      if (act === 'silence') {
-        // Found by an earlier edge, and counted there.
-        if (decided !== undefined) continue;
-        const lapse = answers.get(check)?.get(credentialKey(socket.credential));
-        if (lapse === undefined) continue;
-        this.#signedOut[lapse] += 1;
-        // Synchronous, and it detaches the socket's subscription: a batch waiting on this check
-        // delivers to nobody it silenced. Still admitted, so the timer that closes it stays armed.
-        this.#silenced.set(socket, lapse);
-        socket.silence(lapse);
-        continue;
-      }
       const answered = answers.get(check);
       // **Cannot tell, so nothing is closed — a silenced socket no more than any other**
-      // (`U-26`). It stays silent and admitted, and the next check that answers closes it.
+      // (`U-26`). It stays silent and admitted, and the next check that answers closes it. One
+      // held back stays held back.
       if (answered === undefined) continue;
-      const now = answered.get(credentialKey(socket.credential));
+      const now = answered.lapsed.get(credentialKey(socket.credential));
       // Found here, so counted here; one an edge found was counted there.
       if (decided === undefined && now !== undefined) this.#signedOut[now] += 1;
       // **Why it fails now, for both kinds** (`U-26`): a session that ended and whose account
@@ -770,23 +1037,24 @@ export class StateBroadcaster {
       // What the edge recorded is the reason only for a credential that has come back since —
       // which has still missed frames, and is closed for that.
       const lapse = now ?? decided;
-      if (lapse === undefined) continue;
-      this.#silenced.delete(socket);
-      this.#admitted.delete(socket);
+      if (lapse === undefined) {
+        // Signed in, and held back by an edge that could not say so: told now, on this clock.
+        if (by === 'sweep' && this.#withheld.delete(socket)) socket.resume();
+        continue;
+      }
+      this.#forget(socket);
       socket.signOut(lapse);
     }
-    this.#arm();
-    if (failures.length > 0) throw failures[0];
   }
 
   /**
-   * The answer to one of the sweep's queries, or a rejection once `credentialWaitMs` has passed
-   * (`U-26`).
+   * The answer to one of the sweep's queries, or an edge's, or a rejection once `credentialWaitMs`
+   * has passed (`U-26`, `U-27`).
    *
    * The query itself is not stopped — there is nothing to stop it with — and what a credential
    * check says after the wait is dropped: acting on it would close a socket at an instant that
-   * is neither the sweep's tick nor the client's frame. Its caller keeps hold of it, so that it
-   * is not asked again while it is out.
+   * is neither the sweep's tick nor the client's frame, or silence one at no edge's. Its caller
+   * keeps hold of it, so that it is not asked again while it is out.
    */
   async #within<T>(answer: Promise<T>, what: string): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -974,8 +1242,9 @@ export class StateBroadcaster {
     this.#announcing.set(probeId, announcing);
 
     // As `publish`: every socket's credential before anything is delivered (`A-34`), and a
-    // lapsed one silenced, not closed — a close here is a frame at the instant of this edge.
-    const vetting = this.#vet('silence');
+    // lapsed one silenced, not closed — a close here is a frame at the instant of this edge. Bounded
+    // and shared as `publish`'s is (`U-27`).
+    const vetting = this.#vet('edge');
     let path: ObjectId[] | undefined;
     let epoch: number | null;
     try {
@@ -1093,12 +1362,17 @@ export class StateBroadcaster {
 
     // **Every socket's credential, asked after this batch committed and before any of it is
     // delivered** (`A-34`), so nothing committed after a logout reaches the socket it ended. Beside
-    // the ancestry read rather than after it, so it costs this batch no time; and never rejecting,
-    // so a check that fails delivers as before and is counted — see `sweep`.
+    // the ancestry read rather than after it, so it costs this batch no time; and never rejecting.
     //
     // **A lapsed socket is silenced here and closed by the sweep** (`U-25`): it is sent nothing
     // of this batch or of any later one, and the close that says so is not timed by this commit.
-    const vetting = this.#vet('silence');
+    //
+    // **Waited for `credentialWaitMs` at most, and asked once however many batches are out**
+    // (`U-27`, `#askAtEdge`). A check that fails or does not answer in time sends the batch only
+    // to sockets vouched for within the last sweep interval, and holds the rest back until the
+    // sweep can say: `#atEdge`. So a database that hangs holds no batch past the wait, and no
+    // later batch behind it.
+    const vetting = this.#vet('edge');
     let ancestry: Map<ObjectId, { name: string; path: ObjectId[] }>;
     let epoch: number | null;
     try {
