@@ -16925,6 +16925,15 @@ because each is a decision rather than a defect:
       - The web discovery and rediscovery forms always send a probe chosen from the visible
         tree, so a branch writer who cannot see the probe cannot yet leave it out from the UI.
 
+- [ ] **A-80 — discovery still shows a hidden probe's id, and its forms cannot leave it out** · S
+      · A-77 · Found 2026-10-04 by `A-77`. `GET /discovery/:id` and the schedules list return
+      `probeId` to a group reader who cannot see that probe, the id `requireGroupProbe` no
+      longer confirms. A scheduled rediscovery's provisioning pass still sees the whole group,
+      and its stored report and problems are readable by any reader of the group. The web
+      discovery and rediscovery forms always send a probe picked from the visible tree, so a
+      branch writer cannot use the new "leave `probeId` out" from the UI. **Done when** each
+      is closed with a test in `object-visibility.test.ts` or the web suite.
+
 - [x] **A-36 — A core behind a browser and a proxy: the stream takes any origin, a forwarded
       header turns off CSRF, and the proxy is never believed** · M · A-01, A-09, A-19 · Found
       2026-09-28 by the round-three review of the API's browser boundary. Three findings, each
@@ -19898,6 +19907,15 @@ because each is a decision rather than a defect:
       - **Not done**: no web control (API only; the device page does not show it either).
         Alibaba's metadata address `100.100.100.200` is outside link-local and not refused
         by `link-local` at all; not looked at further here.
+
+- [ ] **A-79 — what is left of a device's exception to the target policy** · S · A-64 ·
+      Found 2026-10-04 by `A-64`. (1) The device page neither shows nor edits
+      `targetPolicyException`, so it is API-only. (2) Alibaba Cloud's metadata address
+      `100.100.100.200` is outside link-local, so the default `link-local` policy does not
+      refuse it at all; this predates `A-64`. Decide whether the metadata list refuses it
+      under every policy but `none`. (3) The policy section says a restart closes kept SSH
+      connections; true for a policy change, not needed for an exception change: say so.
+      **Done when** each is fixed with a test or written down.
 
 - [x] **A-65 — three loose ends on the SSH and probe side of the target policy** · S · A-57 ·
       Found 2026-10-02 by `A-57` and its review. Sensors that join one connection being opened
