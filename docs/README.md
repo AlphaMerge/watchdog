@@ -27,6 +27,7 @@ the hard constraints, the design rules, and the decisions that need an ADR to re
 | Work out why a sensor is Down, Unknown or still Warning | [state-machine.md](state-machine.md), [troubleshooting.md](troubleshooting.md) |
 | Know how much hardware to buy                           | [sizing.md](sizing.md)                                                         |
 | Give somebody an account and the right permissions      | [administration.md](administration.md)                                         |
+| Send alarms by email, and prove the relay works         | [administration.md → Email](administration.md#email)                           |
 | Back it up, or restore onto a different host            | [runbook-backup-restore.md](runbook-backup-restore.md)                         |
 | Qualify a release candidate                             | [runbook-field-test.md](runbook-field-test.md)                                 |
 | Decide what the v1 release candidate is                | [proposal, 2026-09-28](findings/2026-09-28-v1-release-candidate.md)            |
@@ -78,7 +79,7 @@ one.
 | Document                                               | What it is                                                                  |
 | -------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | [installation.md](installation.md)                     | Installing, the first administrator, remote probes, upgrading, uninstalling   |
-| [administration.md](administration.md)                 | Roles and rights, device credentials, inheritance, pausing, what to watch     |
+| [administration.md](administration.md)                 | Roles and rights, device credentials, inheritance, pausing, email, what to watch |
 | [sizing.md](sizing.md)                                 | How much hardware, from measurements rather than estimates                    |
 | [troubleshooting.md](troubleshooting.md)               | Symptoms, and the one number that diagnoses each                              |
 | [runbook-backup-restore.md](runbook-backup-restore.md) | What is in a backup, restoring elsewhere, and what to rehearse                |

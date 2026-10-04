@@ -180,22 +180,15 @@ names the channel. What you are adding is delivery, not thresholds.
 { "kind": "state", "settings": { "state": "down", "initialTemplateId": 1, "recoveryTemplateId": 1 } }
 ```
 
-**Delivery needs a relay, and nothing sets one.** The example `core.json` has no
-`notifications` section, so email goes nowhere until you add one and restart the core (after
-`reset-failed`):
+**Delivery needs a relay, and the example leaves it empty.** The `notifications` section of the
+installed `core.json` has no relay and no sender, so email goes nowhere until you set them and
+restart the core (after `reset-failed`). Every setting, the fallback, and the password from a
+file rather than `core.json` are in [`administration.md` → Email](administration.md#email). Set
+`siteName` too, so the week's mail says which installation sent it.
 
-```json
-"notifications": {
-  "siteName": "Field test",
-  "smtp": {
-    "sender": "ms-core@example.org",
-    "primary": { "host": "relay.example.org", "port": 587, "security": "starttls", "auth": "none" }
-  }
-}
-```
-
-**Then prove it before the week, not during it.** `POST /api/v1/templates/<id>/test` with
-`{"sensorId": <probe-health-id>}` sends one real message through the template, the relay and the
+**Then prove it before the week, not during it.** The
+[test send](administration.md#the-test-send), `POST /api/v1/templates/<id>/test` with
+`{"sensorId": <probe-health-id>}`, sends one real message through the template, the relay and the
 recipients, and answers `"delivered": true` or the relay's error. A week with no alarm and a
 broken relay looks exactly like a week with nothing to report.
 

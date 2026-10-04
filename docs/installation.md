@@ -220,6 +220,11 @@ the core the password through `MS_DATABASE__PASSWORD__FROM_FILE` in a drop-in
 setup cannot see a password delivered that way, which is why it never judges `core.json` by its
 password: only a `core.json` it has just created is a first installation.
 
+**Email is the other setting a first installation leaves empty.** `notifications.smtp` in the
+same file names the relay alarms are sent through; until it is set the core starts, says at start
+that no relay is configured, and sends no email. Setting it, and the test send that proves it, are
+in [`administration.md` → Email](administration.md#email).
+
 ## 4. The first administrator
 
 There is no default password, because an installation with a known one is worse than an

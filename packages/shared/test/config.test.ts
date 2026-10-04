@@ -1,10 +1,11 @@
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
-import { loadConfig } from '../src/config/load.js';
+import { loadConfig, type ConfigSources } from '../src/config/load.js';
+import { PRODUCT_ENV } from '../src/config/product-env.js';
 import {
   coreConfigSchema,
   DEFAULT_RATE_LIMIT_PER_MINUTE,
@@ -171,6 +172,29 @@ describe('loadConfig', () => {
     });
     assert.equal(core.config.sessions.idleTimeoutMinutes, 720);
     loadConfig({ schema: probeConfigSchema, env: {}, argv: ['--config', example('probe.json')] });
+  });
+
+  it('ships the relay in the example, empty, which is email off (`H-33`)', () => {
+    // Written out, so an operator finds the setting where they set the database — and empty,
+    // so it is exactly the installation that had no section: one that starts, says at start
+    // that no relay is configured, and sends no email.
+    const path = fileURLToPath(new URL('../../../../deploy/examples/core.json', import.meta.url));
+    const written = (
+      JSON.parse(readFileSync(path, 'utf8')) as {
+        notifications?: { smtp?: { primary?: object; fallback?: object; sender?: string } };
+      }
+    ).notifications;
+    assert.ok(written?.smtp?.primary !== undefined && written.smtp.fallback !== undefined);
+    assert.equal(written.smtp.sender, '');
+
+    const { config } = loadConfig({ schema: coreConfigSchema, env: {}, argv: ['--config', path] });
+    const none = loadConfig({ schema: coreConfigSchema, env: {}, argv: [] }).config;
+    assert.equal(config.notifications.smtp.primary.host, '');
+    assert.deepEqual(config.notifications.smtp, none.notifications.smtp);
+    assert.equal(config.notifications.publicUrl, none.notifications.publicUrl);
+    assert.equal(config.notifications.siteName, none.notifications.siteName);
+    // The password is the operator's to add, and better from a file than in this one.
+    assert.equal(JSON.stringify(written.smtp).includes('password'), false);
   });
 
   it('loads the probe schema with its own defaults', () => {
@@ -603,7 +627,55 @@ describe('loadConfig environment scoping', () => {
 
     assert.equal(config.api.port, 9000);
     assert.deepEqual(sources.envOverrides, ['MS_API__PORT']);
-    assert.deepEqual(sources.ignoredEnv, ['MS_BUILD_VERSION', 'MS_NODE', 'MS_TEST_DB_HOST']);
+    // Ignored, all three; reported, only the one the product does not set itself (`H-32`).
+    assert.deepEqual(sources.ignoredEnv, ['MS_TEST_DB_HOST']);
+  });
+
+  describe('what the product sets itself (`H-32`)', () => {
+    const everyProductName = (): NodeJS.ProcessEnv =>
+      Object.fromEntries([...PRODUCT_ENV.keys()].map((name) => [name, 'set by the product']));
+
+    const services: readonly (readonly [string, (env: NodeJS.ProcessEnv) => ConfigSources])[] = [
+      ['core', (env) => loadConfig({ schema: coreConfigSchema, env, argv: [] }).sources],
+      ['probe', (env) => loadConfig({ schema: probeConfigSchema, env, argv: [] }).sources],
+    ];
+    for (const [service, sourcesOf] of services) {
+      it(`is never reported as ignored by the ${service}, and never read as a setting`, () => {
+        // `MS_CONFIG_FILE` would be read as the file; it has its own tests.
+        const env = everyProductName();
+        delete env['MS_CONFIG_FILE'];
+        const sources = sourcesOf(env);
+        assert.deepEqual(sources.ignoredEnv, []);
+        assert.deepEqual(sources.envOverrides, []);
+      });
+
+      it(`leaves a misspelt section reported beside it, by the ${service}`, () => {
+        const env = everyProductName();
+        delete env['MS_CONFIG_FILE'];
+        const sources = sourcesOf({
+          ...env,
+          MS_DATABSE__PASSWORD: 'a typo',
+          MS_BUILD_VERSIONS: '1.0.0',
+        });
+        // A name one letter from a product name is not one.
+        assert.deepEqual(sources.ignoredEnv, ['MS_BUILD_VERSIONS', 'MS_DATABSE__PASSWORD']);
+      });
+    }
+
+    it('names no section of either schema, which would make it a setting', () => {
+      const sections = new Set(
+        [coreConfigSchema, probeConfigSchema].flatMap((schema) =>
+          Object.keys((schema as { properties?: object }).properties ?? {}),
+        ),
+      );
+      for (const name of PRODUCT_ENV.keys()) {
+        assert.match(name, /^MS_[A-Z][A-Z0-9_]*$/u, name);
+        const first = (name.slice('MS_'.length).split('__')[0] ?? '')
+          .toLowerCase()
+          .replace(/_([a-z0-9])/gu, (_, letter: string) => letter.toUpperCase());
+        assert.equal(sections.has(first), false, `${name} names the section ${first}`);
+      }
+    });
   });
 
   it('still rejects a misspelt setting inside a real section', () => {

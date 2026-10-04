@@ -8,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
   statSync,
   writeFileSync,
@@ -15,6 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import { coreConfigSchema, PRODUCT_ENV, probeConfigSchema } from '@ms/shared';
 
 /**
  * The operator's scripts, run for real against stub `systemctl`, `psql`, `pg_dump` and
@@ -1714,3 +1716,84 @@ describe(
     });
   },
 );
+
+describe('the MS_* variables the product sets itself, and who reports them (`H-32`)', () => {
+  const sections = new Set(
+    [coreConfigSchema, probeConfigSchema].flatMap((schema) =>
+      Object.keys((schema as { properties?: object }).properties ?? {}),
+    ),
+  );
+  /** Whether the loader reads `name` as a setting: its first segment, camel-cased, is a section. */
+  const isSetting = (name: string): boolean => {
+    const first = (
+      name
+        .slice('MS_'.length)
+        .replace(/__FROM_FILE$/u, '')
+        .split('__')[0] ?? ''
+    )
+      .toLowerCase()
+      .replace(/_([a-z0-9])/gu, (_, letter: string) => letter.toUpperCase());
+    return sections.has(first);
+  };
+  const namesIn = (text: string): Set<string> =>
+    new Set(text.match(/\bMS_[A-Z][A-Z0-9_]*/gu) ?? []);
+  const read = (path: string): string => readFileSync(join(repoRoot, path), 'utf8');
+  /** Every file under a directory, relative to the repository. */
+  const filesUnder = (dir: string): string[] =>
+    readdirSync(join(repoRoot, dir), { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => join(entry.parentPath, entry.name).slice(repoRoot.length + 1));
+  /** Every service's own source, and nothing compiled or installed. */
+  const sourceFiles = (): string[] =>
+    readdirSync(join(repoRoot, 'packages'))
+      .filter((pkg) => existsSync(join(repoRoot, 'packages', pkg, 'src')))
+      .flatMap((pkg) => filesUnder(join('packages', pkg, 'src')));
+  /** The launcher `package.sh` writes for each service, exactly as the heredoc has it. */
+  const launcher = (): string => {
+    const found = /<<LAUNCHER\n([\s\S]*?)\nLAUNCHER\n/u.exec(read('scripts/package.sh'));
+    assert.ok(found?.[1] !== undefined, 'package.sh writes no launcher this test can find');
+    return found[1];
+  };
+
+  it('lists every one the launchers, the units and the installers set or read', () => {
+    const sources = new Map<string, string>([['the launcher in package.sh', launcher()]]);
+    for (const file of filesUnder('deploy')) sources.set(file, read(file));
+    // So that a scan that found nothing cannot pass.
+    assert.ok(namesIn(launcher()).has('MS_BUILD_VERSION'));
+    assert.ok(sources.has('deploy/setup.sh') && sources.has('deploy/systemd/ms-core.service'));
+    for (const [where, text] of sources) {
+      for (const name of namesIn(text)) {
+        if (isSetting(name)) continue;
+        assert.ok(
+          PRODUCT_ENV.has(name),
+          `${name}, in ${where}, is neither a setting nor in PRODUCT_ENV, so every ` +
+            'installation would report it as ignored',
+        );
+      }
+    }
+  });
+
+  it('lists every one a service hands to its workers', () => {
+    const handed = sourceFiles()
+      .filter((file) => file.endsWith('.ts'))
+      .flatMap((file) => [...read(file).matchAll(/\bconst \w+_ENV = '(MS_[A-Z0-9_]+)'/gu)])
+      .map((match) => match[1] ?? '');
+    assert.ok(handed.includes('MS_TARGET_POLICY'), handed.join(', '));
+    for (const name of handed) assert.ok(PRODUCT_ENV.has(name), name);
+  });
+
+  it('lists nothing that nothing sets or reads', () => {
+    const used = namesIn(
+      [
+        read('scripts/package.sh'),
+        ...filesUnder('deploy').map(read),
+        ...sourceFiles()
+          .filter((file) => !file.endsWith(join('config', 'product-env.ts')))
+          .map(read),
+      ].join('\n'),
+    );
+    for (const name of PRODUCT_ENV.keys()) {
+      assert.ok(used.has(name), `${name} is in PRODUCT_ENV and nothing uses it`);
+    }
+  });
+});

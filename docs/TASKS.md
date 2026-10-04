@@ -23192,15 +23192,37 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
         the refusal without `ping`, and at `1 0` approves the probe, creates an `icmp.ping`
         sensor on 127.0.0.1 and waits for it to read Up.
 
-- [ ] **H-32 — every start reports the launcher's own `MS_BUILD_VERSION` as ignored** · S ·
+- [x] **H-32 — every start reports the launcher's own `MS_BUILD_VERSION` as ignored** · S ·
       H-11 · Found 2026-10-04 by `H-15`. `/opt/ms/bin/ms-core` exports `MS_BUILD_VERSION`, and
       the core's start log (`"ignoredEnv":["MS_BUILD_VERSION"]`) and every `config check`
       (`ignored MS_*    MS_BUILD_VERSION`) list it as an environment variable the operator set
       and the configuration ignored. An operator reading for a mistyped override is shown one on
       every installation. **Done when** a variable the launcher sets is not reported as ignored,
       and a test runs `config check` through the packaged launcher and asserts the line is gone.
+      - **Outcome (2026-10-04)**: **one list, `PRODUCT_ENV`** (`packages/shared/src/config/
+        product-env.ts`), of the 20 `MS_*` names the product sets or reads itself, each with
+        who: `MS_CONFIG_FILE`, `MS_BUILD_VERSION`/`_PROFILE`/`_COMMIT`/`_DIRTY`, `MS_NODE`, the
+        three the probe hands its workers (`MS_TARGET_POLICY`, `MS_POWERSHELL`,
+        `MS_SCRIPT_DIR`), `ms-setup`'s five `MS_SETUP_*` and `ms-recover`'s six `MS_RECOVER_*`.
+        `loadConfig` leaves those out of `ignoredEnv`, so the start log and `config check`
+        both stop naming them; anything else that names no section is still reported, and a
+        misspelt *leaf* is still a hard error, as before. `*__FROM_FILE` names are settings and
+        never reached the list.
+      - **The list cannot rot quietly.** `deploy-scripts.test.ts` reads every `MS_*` name in the
+        launcher heredoc in `package.sh` and in every file under `deploy/` (units, WinSW,
+        installers, `setup.sh`, `recover.sh`), and fails on one that is neither a setting nor
+        listed; it fails on a `*_ENV = 'MS_…'` constant in a package's source that is not
+        listed, and on a listed name nothing uses. `config.test.ts` checks no listed name names
+        a section of either schema. `package-provenance.test.ts` runs the real `package.sh`,
+        takes the launcher it wrote, and runs `ms-core` and `ms-probe config check` through it
+        against the packaged example configuration: valid, version `9.9.9` from the launcher,
+        no `ignored MS_*` line — and with `MS_DATABSE__PASSWORD` set, that line naming it.
+        Not in `smoke-install.sh`: the unit test runs the launcher itself, and no launcher
+        changed.
+      - **Mutation 9/9** on the new logic (the loader's check, the list, `isProductEnv`), each
+        killed; see `H-33` for the two on the example.
 
-- [ ] **H-33 — no operator document says how to send email** · S · N-07 · Found 2026-10-04 by
+- [x] **H-33 — no operator document says how to send email** · S · N-07 · Found 2026-10-04 by
       `H-15`. `notifications.smtp` (sender, primary and fallback relay) is in the configuration
       schema and nowhere else an operator reads. `deploy/examples/core.json` has no
       `notifications` section, and `installation.md` and `administration.md` do not name the
@@ -23209,6 +23231,27 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       **Done when** `administration.md` documents `notifications` (relay, fallback, sender,
       `publicUrl`, `siteName`) with the test send, and the example `core.json` carries the section,
       with an empty relay, in a shape `config check` accepts.
+      - **Outcome (2026-10-04)**: `administration.md` → **Email**: every relay setting with its
+        default (sender, host, port, `security`, `verifyCertificate`, `auth`, `user`/`password`,
+        `heloName`, `timeoutMs`), when the fallback is tried, `publicUrl` and `%linksensor`,
+        `siteName`, the password through `MS_NOTIFICATIONS__SMTP__PRIMARY__PASSWORD__FROM_FILE`
+        and an encrypted credential in a drop-in, and the test send as two `curl` lines (make a
+        template, `POST /api/v1/templates/<id>/test`; `readwrite`/`admin`, token scope `write`).
+        `installation.md` §3 points at it, the runbook's relay step links to it instead of its
+        own JSON, and `docs/README.md` indexes it.
+      - **The example's section is the defaults, written out**: empty sender and hosts, the
+        fallback's port `0`, no `user` or `password` keys — so the database password stays the
+        only `"password"` in the file, which `smoke-install.sh` and `deploy-scripts.test.ts`
+        grep for. An empty relay was already email off and said so: the core starts and warns
+        *no SMTP relay is configured*, and each email fails unretried with that reason
+        (`email-delivery.test.ts`). `config check` passes the example, so `H-30`'s first install
+        and every later `ms-setup` run are unchanged. Tests: `config.test.ts` loads the example
+        and finds its `notifications.smtp` equal to the schema's defaults; `config-check.test.ts`
+        checks it, exit 0, nothing on stderr; the `H-32` launcher test checks the packaged copy.
+        Mutation 2/2 on the example (a fallback port, a sender).
+      - **Found, not fixed**: a relay with a host and port `0` — the fallback's default — passes
+        `config check` and fails every send through it. The schema's comment says that is "an
+        error", and it is, at send time. The documentation says to set both.
 
 ## Release 1.1 — Windows
 

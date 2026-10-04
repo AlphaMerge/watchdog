@@ -980,6 +980,138 @@ do not count this".
 
 ---
 
+## Email
+
+Every email notification goes out through one SMTP relay the installation names, and a second
+one for when the first fails. It is configuration, `notifications` in `/etc/ms/core.json`, rather
+than something set in the UI: it holds a password, it is set once per installation, and a file
+the operating system protects is a better place for that than a table any administrator can read
+(`N-07`). The example `core.json` a release installs has the section, with the relay empty.
+
+**Empty is off, and the core says so.** With no `smtp.primary.host`, or no `smtp.sender`, the core
+starts as it always does and logs, at `warn`, *no SMTP relay is configured; email notifications
+will queue and fail until one is set*. Each email a trigger then owes fails without a retry, with
+*no SMTP relay is configured — set notifications.smtp.primary.host and
+notifications.smtp.sender* in the notification log, and a test send answers the same. HTTP
+actions, Slack, Teams and programs are not affected. `ms-core config check` passes such a file: it
+is a valid configuration, not a broken one.
+
+```json
+{
+  "notifications": {
+    "publicUrl": "https://monitoring.example.org",
+    "siteName": "Head office",
+    "smtp": {
+      "sender": "ms-core@example.org",
+      "primary": {
+        "host": "relay.example.org",
+        "port": 587,
+        "security": "starttls",
+        "verifyCertificate": true,
+        "auth": "login",
+        "user": "ms-core",
+        "heloName": "",
+        "timeoutMs": 20000
+      },
+      "fallback": {
+        "host": "relay2.example.org",
+        "port": 587,
+        "security": "starttls",
+        "verifyCertificate": true,
+        "auth": "none",
+        "heloName": "",
+        "timeoutMs": 20000
+      }
+    }
+  }
+}
+```
+
+| Setting | Default | |
+| --- | --- | --- |
+| `smtp.sender` | empty | The `From` address, unless a template's `senderOverride` gives another. Without it nothing is sent. |
+| `host` | empty | The relay, by name or address. An empty primary is no email at all; an empty fallback is no fallback. |
+| `port` | `587`; the fallback's `0` | **The fallback has no port until you give it one**, so that a fallback given only a host is not quietly a second attempt on 587. Set both. |
+| `security` | `starttls` | `starttls` connects in the clear and *requires* the upgrade, so a relay that stops offering it fails rather than being sent the password in the clear. `tls` is TLS from the first byte, usually on 465. `none` is for a relay on the same host. |
+| `verifyCertificate` | `true` | Whether the relay's certificate must verify, against the trust store the core runs with and for the name in `host`. `false` keeps the encryption and drops the check, for a relay whose certificate the host cannot verify. |
+| `auth` | `none` | `none`; `auto`, which lets the relay's `EHLO` choose; or `plain`, `login` or `cram-md5` to force one. Anything but `none` sends `user` and `password`. |
+| `user`, `password` | empty | The relay account. The password is better given from a file, below, than written here. |
+| `heloName` | empty | What the core calls itself in `EHLO`. Empty is the machine's own name; some relays refuse one that does not resolve. |
+| `timeoutMs` | `20000` | For the connection, the greeting and each wait on the socket. 100 to 300,000. |
+| `publicUrl` | empty | The web UI as the people receiving an alarm reach it — usually the reverse proxy's address. |
+| `siteName` | `MonitoringSystem` | What `%sitename` says. |
+
+`host`, `port` and the rest are the same for `smtp.primary` and `smtp.fallback`.
+
+- **The fallback is tried when the primary fails, for any reason, and only then** — a recipient
+  the primary refused included, because a relay that refuses an address the other accepts is
+  the split arrangement a fallback is for. A message the fallback sent is a `warn` line from
+  `email`, *the primary relay failed; the message went out through the fallback*, and a message
+  neither sent names both reasons: `primary: …; fallback: …`.
+- **`publicUrl` is what `%linksensor` is built from**: `<publicUrl>/objects/<sensor id>`. Empty
+  renders it as `sensor <id>`, because a link built from the address the core listens on —
+  loopback, by default — is one nobody receiving the alarm could open. Its host is also a name
+  the core answers to ([The names the core answers to](#the-names-the-core-answers-to)).
+- **`siteName` tells installations apart** in a mailbox that hears from more than one. Put it in
+  the subject.
+- **The relay is read at start.** A change takes `ms-core config check` and a restart:
+
+```bash
+sudo /opt/ms/bin/ms-core config check
+sudo systemctl restart ms-core
+```
+
+### The relay's password, from a file
+
+Any setting can come from the environment, and a name ending `__FROM_FILE` reads it from the file
+it names (the whitespace around it dropped, a final newline included), which is how the database
+password stays out of `core.json` too. Leave `password` out of `core.json`, encrypt the password as
+a systemd credential, and name it in a drop-in:
+
+```bash
+sudo systemd-creds encrypt --name=smtp-password plaintext /etc/ms/smtp-password.cred
+sudo shred -u plaintext
+sudo systemctl edit ms-core
+```
+
+```ini
+[Service]
+LoadCredentialEncrypted=smtp-password:/etc/ms/smtp-password.cred
+Environment=MS_NOTIFICATIONS__SMTP__PRIMARY__PASSWORD__FROM_FILE=%d/smtp-password
+```
+
+The fallback's is `MS_NOTIFICATIONS__SMTP__FALLBACK__PASSWORD__FROM_FILE`. Where `systemd-creds`
+is not available, a file of mode `0640`, owned `root:ms-core`, named directly works the same way.
+The environment wins over the file, and the drop-in survives upgrades. A `config check` run by
+hand does not have the drop-in's environment, so it cannot judge the password: the test send
+below is what does.
+
+### The test send
+
+**Prove the relay before an alarm needs it.** A week with a broken relay and no alarm looks
+exactly like a week with nothing to report. A test send goes through a template — its rendering,
+its recipients, the relay and the fallback — and **really sends**. It needs the `readwrite` or
+`admin` role, and from an API token the `write` or `full` scope, and it is written to the audit
+log. The UI has it under **Templates**; from a shell, with a template to send through:
+
+```bash
+auth=(-H "Authorization: Bearer ${MS_TOKEN}" -H 'content-type: application/json')
+curl -s "${auth[@]}" -X POST http://127.0.0.1:8080/api/v1/templates -d '{
+  "name": "Email to operations", "method": "email", "settings": {},
+  "subject": "[%sitename] %sensor is %status", "body": "%lastmessage\n%linksensor",
+  "recipients": [{"kind": "address", "value": "ops@example.org"}]}'        # → its id
+curl -s "${auth[@]}" -X POST http://127.0.0.1:8080/api/v1/templates/<id>/test -d '{}'
+```
+
+The answer says `"delivered": true` with the relay that took it in `detail` (`primary: <message
+id>`), or `"delivered": false` with each relay's reason in `error`. Without a `sensorId` the
+message is rendered against an example sensor, which is what an installation with none yet
+needs; `{"sensorId": <id>}` renders it against that one. `notes` lists what a real notification
+would have met that the test skipped — a template switched off, outside its schedule, or folded
+into a digest — because a test that delivers proves the relay, and not that an alarm would.
+
+---
+
 ## What to watch
 
 The system monitors itself with real sensors, and every subsystem with a queue, a pool or a

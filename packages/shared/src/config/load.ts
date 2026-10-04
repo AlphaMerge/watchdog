@@ -4,6 +4,7 @@ import { Ajv, type ErrorObject, type JSONSchemaType, type ValidateFunction } fro
 import * as ajvFormats from 'ajv-formats';
 import type { FormatsPlugin } from 'ajv-formats';
 import { ConfigError } from '../errors/app-error.js';
+import { isProductEnv } from './product-env.js';
 import { ruleProblems } from './schema.js';
 
 /** Where a configuration value came from. Reported at boot so operators can see the layering. */
@@ -11,8 +12,10 @@ export interface ConfigSources {
   file: string | null;
   envOverrides: string[];
   /**
-   * `MS_*` variables that are not configuration — the launcher's `MS_BUILD_VERSION`, an
-   * operator's `MS_NODE`, a test harness's own knobs. Reported so they stay discoverable.
+   * `MS_*` variables that name no section, so the configuration did not read them: a misspelt
+   * section, or a harness's own knob. Reported so they stay discoverable. The variables the
+   * product sets or reads itself — the launcher's `MS_BUILD_VERSION`, `MS_NODE` — are not
+   * listed: they are `PRODUCT_ENV`, and an operator cannot have meant them as settings (`H-32`).
    */
   ignoredEnv: string[];
 }
@@ -150,10 +153,12 @@ function collectEnvOverlay(
     // The prefix is a shared namespace, not ours alone: the release launcher exports
     // MS_BUILD_VERSION, operators set MS_NODE, harnesses add their own knobs. Only variables
     // whose first segment names a real configuration section are treated as settings. A typo
-    // in a leaf name is still a hard error, which is where typos actually happen.
+    // in a leaf name is still a hard error, which is where typos actually happen. A typo in a
+    // section is reported as ignored; what the product sets itself is not, or every
+    // installation would report one (`H-32`).
     const section = path[0];
     if (section === undefined || !sections.has(section)) {
-      ignored.push(rawKey);
+      if (!isProductEnv(rawKey)) ignored.push(rawKey);
       continue;
     }
 

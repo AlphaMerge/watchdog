@@ -102,8 +102,9 @@ export function runConfigCheck<T>(options: ConfigCheckOptions<T>): number {
       options.write(`  environment     ${loaded.sources.envOverrides.join(', ')}`);
     }
     if (loaded.sources.ignoredEnv.length > 0) {
-      // Not a failure — `MS_BUILD_VERSION` and friends are ordinary — but worth showing, because
-      // a *misspelt section* looks exactly like one of those and is otherwise silent.
+      // Not a failure — a harness's own knob is ordinary — but worth showing, because a
+      // *misspelt section* looks exactly like one and is otherwise silent. What the product sets
+      // itself never reaches here (`PRODUCT_ENV`, `H-32`).
       options.write(`  ignored MS_*    ${loaded.sources.ignoredEnv.join(', ')}`);
     }
     return 0;

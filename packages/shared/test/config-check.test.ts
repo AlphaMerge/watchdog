@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import { CONFIG_WARNING_PREFIX, runConfigCheck, type ConfigFindings } from '../src/config/check.js';
 import { coreConfigSchema, probeConfigSchema } from '../src/config/schema.js';
@@ -158,11 +159,43 @@ describe('checking a configuration', () => {
     const path = tempFile(JSON.stringify({}));
     const { code, out } = check(['--config', path], coreConfigSchema, { MS_APIS__PORT: '7070' });
 
-    assert.equal(code, 0, 'an unknown section is not an error — MS_BUILD_VERSION is ordinary');
+    assert.equal(code, 0, 'an unknown section is not an error — a harness’s own knob is ordinary');
     assert.ok(
       out.some((line) => line.includes('MS_APIS__PORT')),
       'but it is shown, because it looks exactly like a typo and behaves like one',
     );
+  });
+
+  it('names none the launcher sets, and still names a typo beside them (`H-32`)', () => {
+    // What `/opt/ms/bin/ms-core` exports. Every check on every installation listed it.
+    const launcher = { MS_BUILD_VERSION: '1.0.0', MS_NODE: '/usr/bin/node' };
+    const path = tempFile(JSON.stringify({}));
+    const clean = check(['--config', path], coreConfigSchema, launcher);
+    assert.equal(clean.code, 0);
+    assert.deepEqual(
+      clean.out.filter((line) => line.includes('ignored MS_')),
+      [],
+    );
+
+    const typo = check(['--config', path], coreConfigSchema, {
+      ...launcher,
+      MS_DATABSE__PASSWORD: 'secret',
+    });
+    assert.equal(typo.code, 0);
+    assert.deepEqual(
+      typo.out.filter((line) => line.includes('ignored MS_')),
+      ['  ignored MS_*    MS_DATABSE__PASSWORD'],
+    );
+  });
+
+  it('passes the shipped core.json, relay and all, as an operator first finds it (`H-33`)', () => {
+    const example = fileURLToPath(
+      new URL('../../../../deploy/examples/core.json', import.meta.url),
+    );
+    const { code, out, err } = check(['--config', example]);
+    assert.equal(code, 0, err.join('\n'));
+    assert.deepEqual(err, []);
+    assert.equal(out[0], 'configuration is valid for ms-core 9.9.9');
   });
 
   it('checks a probe configuration with the probe schema', () => {

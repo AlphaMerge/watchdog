@@ -827,6 +827,47 @@ describe(
       assert.notEqual(result.status, 0);
       assert.match(result.stderr, /node_modules\/left-pad is 1\.3\.1, and the lock says 1\.3\.0/u);
     });
+
+    it('ships launchers whose own variables a config check does not report (`H-32`)', () => {
+      // `/opt/ms/bin/ms-core` exports MS_BUILD_VERSION, and every start and every `config check`
+      // on every installation listed it as a variable the operator set and the configuration
+      // ignored. The launcher here is the one package.sh wrote, unchanged, in front of this
+      // checkout's compiled services — the stub build's `main.js` is one line — and it checks the
+      // example configuration the package ships.
+      const { result, stage } = packageIn(packagingRepository());
+      assert.equal(result.status, 0, result.stderr);
+      const installed = mkdtempSync(join(tmpdir(), 'ms-launcher-'));
+      mkdirSync(join(installed, 'bin'));
+      mkdirSync(join(installed, 'app'));
+      for (const svc of ['core', 'probe']) {
+        cpSync(join(stage, 'bin', `ms-${svc}`), join(installed, 'bin', `ms-${svc}`));
+        symlinkSync(join(repoRoot, 'packages', svc), join(installed, 'app', svc));
+        const check = (env: NodeJS.ProcessEnv): SpawnSyncReturns<string> =>
+          spawnSync(
+            join(installed, 'bin', `ms-${svc}`),
+            ['config', 'check', '--config', join(stage, 'etc', `${svc}.json`)],
+            {
+              encoding: 'utf8',
+              timeout: 60_000,
+              env: { PATH: process.env['PATH'] ?? '', HOME: installed, ...env },
+            },
+          );
+
+        const clean = check({});
+        assert.equal(clean.status, 0, `${svc}: ${clean.stdout}${clean.stderr}`);
+        // The launcher's own version, which nothing else here sets: so the launcher ran.
+        assert.match(
+          clean.stdout,
+          new RegExp(`^configuration is valid for ms-${svc} 9\\.9\\.9$`, 'mu'),
+        );
+        assert.doesNotMatch(clean.stdout, /ignored MS_/u, svc);
+
+        // And a variable an operator misspelt is still named, beside the launcher's.
+        const typo = check({ MS_DATABSE__PASSWORD: 'a typo' });
+        assert.equal(typo.status, 0, `${svc}: ${typo.stdout}${typo.stderr}`);
+        assert.match(typo.stdout, /^ {2}ignored MS_\* {4}MS_DATABSE__PASSWORD$/mu, svc);
+      }
+    });
   },
 );
 
