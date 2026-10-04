@@ -1,4 +1,5 @@
 import { describeError, type Logger } from '@ms/shared';
+import { savepoint, type Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 
 /**
@@ -24,10 +25,6 @@ import { MAX_WALK_DEPTH } from '../db/walk.js';
 interface Db {
   query<T extends Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<T[]>;
   tx<T>(fn: (q: Queryable) => Promise<T>): Promise<T>;
-}
-
-interface Queryable {
-  query<T extends Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<T[]>;
 }
 
 /** What this needs from the state service: re-decide these sensors, and say how many moved. */
@@ -169,6 +166,14 @@ export class ProbeReachability {
   }
 
   /**
+   * Whether any probe is held offline, so that `resync` has anything to do. The normal state of
+   * an installation is no, and then a tree change costs `ReachabilitySync` no statement at all.
+   */
+  holdsAny(): boolean {
+    return this.#byProbe.size > 0;
+  }
+
+  /**
    * Re-derives the overlay from the tree, after the tree has changed (`P-103`).
    *
    * `lost` snapshots a probe's sensors once, and that snapshot outlived the topology it was
@@ -195,6 +200,11 @@ export class ProbeReachability {
    * Re-read rather than patched. Working out which sensors a move added or removed means walking
    * the tree anyway, and a snapshot that is *recomputed* cannot drift from the tree in the way
    * the one it replaces did.
+   *
+   * **Each of its two catches is around a savepoint** (`P-249`). Both carry on after a failed
+   * statement, inside a transaction that is the caller's, and a failed statement aborts it: the
+   * caller's `COMMIT` would then roll back the move this exists to follow, and every other write
+   * in it. Rolled back to the savepoint instead, the move commits and only this read is lost.
    */
   async resync(q: Queryable): Promise<number> {
     if (this.#byProbe.size === 0) return 0;
@@ -204,7 +214,7 @@ export class ProbeReachability {
     const touched = new Set<number>();
     for (const [probeObjectId, held] of this.#byProbe) {
       try {
-        const sensorIds = await this.#sensorsUnder(probeObjectId, q);
+        const sensorIds = await savepoint(q, (inner) => this.#sensorsUnder(probeObjectId, inner));
         if (!sameMembers(sensorIds, held.sensorIds)) touched.add(probeObjectId);
         this.#byProbe.set(probeObjectId, { ...held, sensorIds });
       } catch (error) {
@@ -242,12 +252,15 @@ export class ProbeReachability {
     const alarms = [...touched].flatMap((probeObjectId) => this.#probeAlarms(probeObjectId));
 
     try {
-      const moved = await this.#states.reevaluate(q, [...changed, ...alarms], this.#now(), {
-        message: 'the probe carrying this sensor changed',
+      const moved = await savepoint(q, async (inner) => {
+        const count = await this.#states.reevaluate(inner, [...changed, ...alarms], this.#now(), {
+          message: 'the probe carrying this sensor changed',
+        });
+        // In the same transaction: a master that has just become Unknown is not Down, so anything
+        // it was holding is released here rather than at whatever recomputes next (`P-135`).
+        await this.#dependencies.recompute(inner, this.#now());
+        return count;
       });
-      // In the same transaction: a master that has just become Unknown is not Down, so anything
-      // it was holding is released here rather than at whatever recomputes next (`P-135`).
-      await this.#dependencies.recompute(q, this.#now());
       this.#logger.info(
         { sensors: changed.length, moved },
         'the tree moved sensors across a lost probe’s boundary',

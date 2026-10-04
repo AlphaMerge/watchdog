@@ -25,6 +25,13 @@ export const SQLSTATE = {
   queryCanceled: '57014',
   /** `idle_in_transaction_session_timeout` ended the session. The connection is gone. */
   idleInTransactionTimeout: '25P03',
+  /**
+   * `in_failed_sql_transaction`: a statement failed earlier in this transaction, so nothing after
+   * it runs and nothing in it commits. PostgreSQL answers every statement but the end of the
+   * transaction with it, and answers that end, a `COMMIT`, with no error at all (`P-249`), so
+   * `Database` raises it at the `COMMIT` itself.
+   */
+  inFailedTransaction: '25P02',
 } as const;
 
 /**
@@ -130,6 +137,37 @@ export interface Queryable {
    * own callback, because the statement has already committed by the time it returns.
    */
   afterCommit?(fn: () => void): void;
+  /**
+   * Runs `fn` inside a savepoint of this transaction (`P-249`). Called through `savepoint()`,
+   * which runs `fn` straight on a `Queryable` without this.
+   *
+   * **For code that must catch a database error inside someone else's transaction.** A failed
+   * statement aborts the whole transaction, and PostgreSQL answers its `COMMIT` with `ROLLBACK`
+   * and no error, so a catch that carries on loses every write the transaction made, the
+   * caller's included. Inside a savepoint, a throw rolls back to it and the transaction goes on.
+   *
+   * Absent on a plain pool query, where each statement is a transaction of its own and a failed
+   * one aborts nothing else.
+   */
+  savepoint?<T>(fn: (q: Queryable) => Promise<T>): Promise<T>;
+}
+
+/**
+ * Runs `fn` so that a database error it throws can be caught without aborting the transaction `q`
+ * belongs to (`P-249`).
+ *
+ * Inside a transaction, `fn` runs in a savepoint. If it throws, the savepoint is rolled back,
+ * anything `fn` asked to run after the commit is dropped, and the error is rethrown for the caller
+ * to catch; the transaction carries on as it was before `fn` began. If `fn` returns after catching
+ * a failure of its own, the savepoint is rolled back all the same, and this throws a
+ * `DatabaseError` (`25P02`) rather than answer for work that was not done. On a plain pool `fn`
+ * simply runs: there is no transaction for a failure to abort.
+ *
+ * **Every catch of a database error inside a transaction goes through this, or rethrows.** The
+ * list is `P-249`'s outcome in `docs/TASKS.md`.
+ */
+export function savepoint<T>(q: Queryable, fn: (q: Queryable) => Promise<T>): Promise<T> {
+  return q.savepoint === undefined ? fn(q) : q.savepoint(fn);
 }
 
 export class DatabaseError extends AppError {
@@ -305,9 +343,15 @@ export class Database implements Queryable {
     }
   }
 
-  /** Runs `fn` inside a transaction, rolling back on any throw. */
+  /**
+   * Runs `fn` inside a transaction, rolling back on any throw.
+   *
+   * **And throws if the transaction did not commit** (`P-249`): a statement in it failed and the
+   * failure was caught, so PostgreSQL answered the `COMMIT` with `ROLLBACK`. The error is a
+   * `DatabaseError` with SQLSTATE `25P02`.
+   */
   async transaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
-    return this.#transaction(fn, undefined);
+    return this.#transaction(fn, undefined, undefined);
   }
 
   /**
@@ -318,22 +362,35 @@ export class Database implements Queryable {
    * they are inside a transaction.
    *
    * `limits` apply to this transaction alone (`P-229`).
+   *
+   * **A transaction that did not commit throws, and runs no `afterCommit` hook** (`P-249`). A
+   * statement that fails aborts the transaction, and PostgreSQL then answers the `COMMIT` with
+   * command tag `ROLLBACK` and no error. Before this read the tag, a failure caught inside `fn`
+   * (by a sink, say) was answered as success, the hooks announced a commit that had not happened,
+   * and nothing had been written. Code that must catch a database error inside a transaction
+   * catches it around `savepoint()`.
    */
   async tx<T>(fn: (q: Queryable) => Promise<T>, limits?: TxLimits): Promise<T> {
     const committed: (() => void)[] = [];
-    const result = await this.#transaction(async (client) => {
-      const q = new ClientQueryable(
-        client,
-        this.#describe,
-        (hook) => committed.push(hook),
-        (cause) => {
-          this.#note(cause, limits);
-        },
-      );
-      return fn(q);
-    }, limits);
-    // After the COMMIT returned, so nothing here can be undone by a rollback. Each hook is
-    // isolated: one that throws must not stop the next, and must not turn a committed
+    const state: TxState = { savepoints: 0, failed: undefined };
+    const result = await this.#transaction(
+      async (client) => {
+        const q = new ClientQueryable(
+          client,
+          this.#describe,
+          (hook) => committed.push(hook),
+          (cause) => {
+            this.#note(cause, limits);
+          },
+          state,
+        );
+        return fn(q);
+      },
+      limits,
+      state,
+    );
+    // After the COMMIT returned, and said COMMIT, so nothing here can be undone by a rollback. Each
+    // hook is isolated: one that throws must not stop the next, and must not turn a committed
     // transaction into a failed call — the work is already durable.
     for (const hook of committed) {
       try {
@@ -364,24 +421,36 @@ export class Database implements Queryable {
   async #transaction<T>(
     fn: (client: PoolClient) => Promise<T>,
     limits: TxLimits | undefined,
+    state: TxState | undefined,
   ): Promise<T> {
     const { client, release } = await this.#checkout();
     let broken: unknown;
+    let ended = false;
     try {
       await client.query('BEGIN');
       if (limits !== undefined) await this.#limit(client, limits);
       const result = await fn(client);
-      await client.query('COMMIT');
+      const commit = await client.query('COMMIT');
+      // **PostgreSQL rolls back a transaction an error aborted, and says so only here** (`P-249`):
+      // the `COMMIT` succeeds, with command tag `ROLLBACK`. Answering `result` would be answering
+      // for writes that are gone.
+      if (commit.command === 'ROLLBACK') {
+        ended = true;
+        throw rolledBackAtCommit(this.#describe, state?.failed);
+      }
       return result;
     } catch (error) {
       this.#note(error, limits);
-      try {
-        await client.query('ROLLBACK');
-      } catch (rollbackError) {
-        // The original error is the interesting one; note the rollback failure and move on.
-        this.#logger.error({ err: describeError(rollbackError) }, 'rollback failed');
-        // A session whose rollback failed is in a state nobody knows, so it is not reused.
-        broken = rollbackError;
+      // Over already when the COMMIT rolled it back; a ROLLBACK now would only draw a warning.
+      if (!ended) {
+        try {
+          await client.query('ROLLBACK');
+        } catch (rollbackError) {
+          // The original error is the interesting one; note the rollback failure and move on.
+          this.#logger.error({ err: describeError(rollbackError) }, 'rollback failed');
+          // A session whose rollback failed is in a state nobody knows, so it is not reused.
+          broken = rollbackError;
+        }
       }
       throw error;
     } finally {
@@ -470,6 +539,7 @@ export class ClientQueryable implements Queryable {
   readonly #description: string;
   readonly #onCommit: ((fn: () => void) => void) | undefined;
   readonly #onFailure: ((cause: unknown) => void) | undefined;
+  readonly #state: TxState | undefined;
 
   constructor(
     client: PoolClient,
@@ -477,11 +547,17 @@ export class ClientQueryable implements Queryable {
     onCommit?: (fn: () => void) => void,
     /** Told of every failed statement before it is wrapped, so the pool can count timeouts. */
     onFailure?: (cause: unknown) => void,
+    /**
+     * The transaction this executor is inside, which `tx` passes and which makes `savepoint`
+     * available. Built around a raw client without it, there may be no transaction to save in.
+     */
+    state?: TxState,
   ) {
     this.#client = client;
     this.#description = description;
     this.#onCommit = onCommit;
     this.#onFailure = onFailure;
+    this.#state = state;
   }
 
   afterCommit(fn: () => void): void {
@@ -490,18 +566,110 @@ export class ClientQueryable implements Queryable {
     this.#onCommit?.(fn);
   }
 
+  async savepoint<T>(fn: (q: Queryable) => Promise<T>): Promise<T> {
+    const state = this.#state;
+    // Built around a raw client rather than by `tx`, there is no transaction this knows of, and
+    // outside one `SAVEPOINT` is itself an error.
+    if (state === undefined) return fn(this);
+    state.savepoints += 1;
+    const name = `ms_savepoint_${String(state.savepoints)}`;
+    // What had failed before this began. A failure inside that this rolls back aborted nothing,
+    // so the transaction's account of what aborted it goes back to this.
+    const failedBefore = state.failed;
+    // **Held until the savepoint is released, and dropped if it is rolled back.** A hook is an
+    // announcement of what this work did, and work rolled back to here did nothing.
+    const hooks: (() => void)[] = [];
+    const inner = new ClientQueryable(
+      this.#client,
+      this.#description,
+      (hook) => hooks.push(hook),
+      this.#onFailure,
+      state,
+    );
+    await this.query(`SAVEPOINT ${name}`);
+    let result: T;
+    try {
+      result = await fn(inner);
+    } catch (error) {
+      await this.#rollBackTo(name, failedBefore);
+      throw error;
+    }
+    try {
+      await this.query(`RELEASE SAVEPOINT ${name}`);
+    } catch (released) {
+      // `fn` caught a failure of its own and returned, so the savepoint is aborted and refuses to
+      // be released. Its work is gone; answering `result` would be answering for it.
+      await this.#rollBackTo(name, failedBefore);
+      throw new DatabaseError(
+        'a savepoint was rolled back: a statement in it failed and the failure was caught there',
+        {
+          context: {
+            phase: 'savepoint',
+            database: this.#description,
+            sqlstate: SQLSTATE.inFailedTransaction,
+            released: (released instanceof Error ? released.message : String(released)).slice(
+              0,
+              200,
+            ),
+          },
+        },
+      );
+    }
+    for (const hook of hooks) this.#onCommit?.(hook);
+    return result;
+  }
+
   async query<T extends QueryResultRow>(text: string, values?: readonly unknown[]): Promise<T[]> {
     try {
       const result = await this.#client.query<T>(text, values as unknown[] | undefined);
       return result.rows;
     } catch (cause) {
       this.#onFailure?.(cause);
-      throw new DatabaseError('query failed', {
+      const error = new DatabaseError('query failed', {
         context: { statement: firstLine(text), database: this.#description },
         cause,
       });
+      // The first failure is what aborted the transaction; anything after it is `25P02`.
+      if (this.#state !== undefined) this.#state.failed ??= error;
+      throw error;
     }
   }
+
+  /** Back to the savepoint, and forget it: its work, and its failures, are undone. */
+  async #rollBackTo(name: string, failedBefore: DatabaseError | undefined): Promise<void> {
+    // If this fails the session is in a state nobody knows; the error goes up, and the
+    // transaction's own rollback discards the connection.
+    await this.query(`ROLLBACK TO SAVEPOINT ${name}`);
+    await this.query(`RELEASE SAVEPOINT ${name}`);
+    if (this.#state !== undefined) this.#state.failed = failedBefore;
+  }
+}
+
+/** What one `tx` shares with every executor and savepoint inside it (`P-249`). */
+interface TxState {
+  /** Savepoints begun, so that each is named apart from the ones around it. */
+  savepoints: number;
+  /** The failure that aborted the transaction, if one has and no savepoint undid it. */
+  failed: DatabaseError | undefined;
+}
+
+/** A `COMMIT` that PostgreSQL answered with `ROLLBACK` (`P-249`). */
+function rolledBackAtCommit(database: string, failed: DatabaseError | undefined): DatabaseError {
+  const first = failed?.message.slice(0, 200);
+  return new DatabaseError(
+    'the transaction was rolled back, not committed: a statement in it failed and the failure ' +
+      'was caught inside it, so nothing it wrote was kept',
+    {
+      context: {
+        phase: 'commit',
+        commandTag: 'ROLLBACK',
+        database,
+        sqlstate: SQLSTATE.inFailedTransaction,
+        ...(first === undefined ? {} : { abortedBy: first }),
+        ...(failed?.sqlstate === undefined ? {} : { abortedBySqlstate: failed.sqlstate }),
+      },
+    },
+  );
 }
 
 /**

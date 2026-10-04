@@ -1,8 +1,11 @@
 import type { Logger } from '@ms/shared';
 import { describeError } from '@ms/shared';
-import type { Queryable } from '../db/pool.js';
+import { savepoint, type Queryable } from '../db/pool.js';
 import type { Actor, AuditSink, Mutation } from '../objects/audit.js';
 import type { ProbeReachability } from './reachability.js';
+
+/** What this sink needs of `ProbeReachability`. */
+export type Resyncable = Pick<ProbeReachability, 'holdsAny' | 'resync'>;
 
 export interface ReachabilitySyncOptions {
   /**
@@ -11,7 +14,7 @@ export interface ReachabilitySyncOptions {
    * the same reason. Undefined means nothing is watching probes yet, which is a core still
    * starting up and has no overlay to keep in step.
    */
-  reachability: () => ProbeReachability | undefined;
+  reachability: () => Resyncable | undefined;
   logger: Logger;
 }
 
@@ -34,7 +37,7 @@ export interface ReachabilitySyncOptions {
  * and an installation with nothing offline pays one `Map.size` check per mutation.
  */
 export class ReachabilitySync implements AuditSink {
-  readonly #reachability: () => ProbeReachability | undefined;
+  readonly #reachability: () => Resyncable | undefined;
   readonly #logger: Logger;
 
   constructor(options: ReachabilitySyncOptions) {
@@ -50,9 +53,15 @@ export class ReachabilitySync implements AuditSink {
   ): Promise<void> {
     if (!mutations.some(movesSensors)) return;
     const reachability = this.#reachability();
-    if (reachability === undefined) return;
+    // Nothing offline is nothing to keep in step, and costs no statement: not even a savepoint.
+    if (reachability?.holdsAny() !== true) return;
     try {
-      await reachability.resync(q);
+      // **In a savepoint** (`P-249`). The catch below carries on inside the mutation's own
+      // transaction, and a statement that failed in there aborted it: PostgreSQL answers the
+      // mutation's COMMIT with ROLLBACK, and the move this exists to follow is lost with its
+      // audit row. Rolled back to here, the mutation commits. `resync` has savepoints of its own
+      // around what it catches; this one is for whatever it does not.
+      await savepoint(q, (inner) => reachability.resync(inner));
     } catch (error) {
       // Never fatal to the mutation. The overlay being stale is what this fixes; refusing a
       // legitimate move because the fix could not run would be worse than the defect.

@@ -11,6 +11,7 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
+import { failingOn } from './support/failing.js';
 import { buildHarness, silent, testActor } from './support/tree.js';
 
 const available = await databaseAvailable();
@@ -178,6 +179,49 @@ describe(
         assert.equal(reading.freePercent, 42);
         assert.equal(reading.freeBytes, 420_000_000);
         assert.ok(reading.databaseBytes > 0, 'and what this database occupies');
+      });
+
+      describe('P-249: a read the database refuses, inside the caller’s transaction', () => {
+        // Both reads are caught and answered with a safe default, inside the transaction the
+        // housekeeper reads the disk in. Caught without a savepoint, the failure aborted that
+        // transaction, and its COMMIT rolled back whatever else it had written.
+        const kept = async (): Promise<number> =>
+          Number(
+            (await db.query<{ n: string }>('SELECT count(*)::text AS n FROM p249_disk'))[0]?.n,
+          );
+
+        before(async () => {
+          await db.query('CREATE TABLE IF NOT EXISTS p249_disk (n int)');
+        });
+
+        beforeEach(async () => {
+          await db.query('DELETE FROM p249_disk');
+        });
+
+        it('keeps the transaction when the database’s size cannot be read', async () => {
+          const { watcher } = fakeDisk(42);
+          const reading = await db.tx(async (q: Queryable) => {
+            await q.query('INSERT INTO p249_disk VALUES (1)');
+            return watcher.read(failingOn(q, (text) => text.includes('pg_database_size')));
+          });
+          assert.equal(reading?.databaseBytes, 0, 'answered as before');
+          assert.equal(await kept(), 1, 'and the caller’s write committed');
+        });
+
+        it('keeps the transaction when where the database is cannot be read', async () => {
+          const watcher = new DiskWatcher({
+            logger: silent,
+            path: '',
+            dataDir: '/tmp',
+            measure: () => Promise.resolve({ totalBytes: 100, freeBytes: 30 }),
+          });
+          const reading = await db.tx(async (q: Queryable) => {
+            await q.query('INSERT INTO p249_disk VALUES (1)');
+            return watcher.read(failingOn(q, (text) => text.includes('inet_server_addr')));
+          });
+          assert.equal(reading, null, 'taken as remote, as before');
+          assert.equal(await kept(), 1, 'and the caller’s write committed');
+        });
       });
 
       it('answers nothing rather than zero when the filesystem cannot be read', async () => {

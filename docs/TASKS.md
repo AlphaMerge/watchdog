@@ -7464,7 +7464,7 @@ because each is a decision rather than a defect:
       each skip path, and a test covers the new session; moving either sweep's take below its
       early return, or dropping the session reset, fails them.
 
-- [ ] **P-249 — a mutation that failed inside its transaction is answered as committed** · M ·
+- [x] **P-249 — a mutation that failed inside its transaction is answered as committed** · M ·
       P-103, P-111 · Found 2026-09-29 while designing `P-239`'s failure path, and measured.
       **High**: a silent loss behind a success answer.
       - **Measured** with node-pg against the test database. The sequence was `BEGIN`, an
@@ -7501,6 +7501,58 @@ because each is a decision rather than a defect:
       `elastic-shannon-539fbe` worktree) is rebased on `main`, run whole, landed, and then this
       ticket is taken. **And `v1.0.0-rc.1` is not cut until both have landed:** a candidate
       that can answer a lost write as committed would spend `H-09`'s week finding it.
+
+      **P-249 outcome.** `Database.tx` and `transaction()` read the `COMMIT`'s command tag, and a
+      `ROLLBACK` throws a `DatabaseError` with SQLSTATE `25P02` (`SQLSTATE.inFailedTransaction`,
+      `phase: commit`, `abortedBy`/`abortedBySqlstate` naming the first failure no savepoint
+      undid); no `afterCommit` hook runs, and the API answers it as a masked 500. `savepoint(q, fn)`
+      in `db/pool.ts` runs `fn` in a savepoint of `q`'s transaction (straight on the pool, where
+      there is none): a throw rolls back to it and is rethrown, an `fn` that caught its own failure
+      and returned is rolled back and answered with a `25P02` too, and `afterCommit` hooks taken
+      inside are kept only if it is released. Nested savepoints are named apart.
+
+      **Every catch in `packages/core/src` was read (143 `try`/`catch` and 12 `.catch`).** Inside a
+      transaction, and each one's choice:
+      - **Into a savepoint:** `probes/reachability-sync.ts:65` (`ReachabilitySync`, now also
+        skipped without a statement while no probe is held: `holdsAny()`);
+        `probes/reachability.ts:220` (`resync`'s per-probe read) and `:269` (its re-evaluation and
+        dependency recompute); `timeseries/disk.ts:166` (`databaseIsLocal`) and `:177`
+        (`currentDatabaseBytes`), read in the housekeeper's transaction.
+      - **Rethrows:** `objects/repository.ts:268` (the tree-lock wait, as `OBJECT_TREE_BUSY`);
+        `auth/access.ts:1020`; `auth/groups.ts:333`; `main.ts:1677` (`engineOrRefuse`);
+        `probes/clock-freeze.ts:328` (`ClockFreezeSync`'s path, `P-239`); `db/pool.ts:593`/`:599`
+        (the savepoint's own, after rolling back to it).
+      - **No statement in the `try`, so nothing to abort:** `vault/service.ts:357` (unsealing),
+        `notifications/templates.ts:370` (parsing a trigger), `timeseries/disk.ts:82` (`statfs`);
+        `notifications/engine.ts:1312`/`:1342` (a trigger's stored settings, parsed).
+      - **Take a `Queryable` but are only ever handed the pool:** `reports/runs.ts:148` (`claim`,
+        from `runs.ts:466`), `state/stream.ts:985` and `:1109` (`publishProbe`/`publish`, from
+        `main.ts:1347` and `:471`). Handed a transaction one day, a caught failure there now
+        throws at the `COMMIT` rather than being lost.
+      - **The audit sinks:** `DatabaseAuditSink` and `CompositeAuditSink` catch nothing;
+        `LoggingAuditSink`, `ConfigChangeNotifier` and `ResultCacheInvalidator` send no statement;
+        `ScheduleSync`, `DependencySync` and `TriggerSync` catch nothing; `ReachabilitySync`
+        savepoints and `ClockFreezeSync` rethrows, as above. Every service's audit writer (objects,
+        maps, libraries, reports, triggers, identity, discovery, probes) calls its sink with no
+        catch around it, and nothing that enqueues a notification inside a transaction catches.
+
+      **The rest are around a transaction, not in one**, so the transaction has already rolled back
+      when they run, and they now also receive the `25P02` and treat it as the failure it is. That
+      includes every `P-229` give-way: the housekeeper's compress, drop, evict, state-retention and
+      reap (`housekeeper.ts:917`, `:963`, `:1064`, `:1140`, `:1185`), the late-refusal save under
+      `LATE_REFUSAL_SAVE_LIMITS` (`credential-vouching.ts:1852`), and bulk's and provisioning's
+      stop on a busy tree (`bulk.ts:170`, `provision.ts:324`/`:376`, each object its own
+      transaction). None of them catches a 55P03 or 57014 inside the transaction it limited.
+
+      Tests: `transaction-outcome.test.ts` (new: the tag thrown from `tx` and `transaction()`, no
+      hook, a savepoint rolled back or released with its hooks, one whose work caught its own
+      failure, nesting, the pool; and through the API, a sink catching without a savepoint is a 500
+      with nothing created and no audit row, and with one a 201 with both);
+      `probe-offline.test.ts` (each `resync` catch, and the sink's, keep the caller's transaction);
+      `disk-guard.test.ts` (both disk reads). Mutants 12/12: the tag not read, or read and answered
+      anyway; hooks run on a rolled-back COMMIT; a savepoint not rolled back, not released, its
+      hooks kept, or its failure left as the transaction's; and each of the five savepoints above
+      taken away.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then

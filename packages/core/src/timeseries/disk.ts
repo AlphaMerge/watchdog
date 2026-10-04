@@ -1,6 +1,6 @@
 import { statfs } from 'node:fs/promises';
 import type { Logger } from '@ms/shared';
-import type { Queryable } from '../db/pool.js';
+import { savepoint, type Queryable } from '../db/pool.js';
 
 /**
  * How full the disk the readings are on is (`S-17`, `WORKFLOW.MD §13` row 7).
@@ -151,10 +151,16 @@ async function defaultMeasure(path: string): Promise<{ totalBytes: number; freeB
  * a private address might be this machine or the one in the next rack, and this cannot tell.
  * Unknown counts as remote: the cost of being wrong the other way is evicting real data because
  * an unrelated disk filled.
+ *
+ * **Both reads here catch inside the caller's transaction, so both are in a savepoint**
+ * (`P-249`). The housekeeper reads the disk in a transaction, and a failed statement caught
+ * without one aborts it: whatever else it wrote would be rolled back at its COMMIT.
  */
 async function databaseIsLocal(q: Queryable): Promise<boolean> {
   try {
-    const rows = await q.query<{ addr: string | null }>('SELECT host(inet_server_addr()) AS addr');
+    const rows = await savepoint(q, (inner) =>
+      inner.query<{ addr: string | null }>('SELECT host(inet_server_addr()) AS addr'),
+    );
     const addr = rows[0]?.addr ?? null;
     return addr === null || addr === '127.0.0.1' || addr === '::1';
   } catch {
@@ -164,8 +170,8 @@ async function databaseIsLocal(q: Queryable): Promise<boolean> {
 
 async function currentDatabaseBytes(q: Queryable): Promise<number> {
   try {
-    const rows = await q.query<{ bytes: string }>(
-      'SELECT pg_database_size(current_database())::text AS bytes',
+    const rows = await savepoint(q, (inner) =>
+      inner.query<{ bytes: string }>('SELECT pg_database_size(current_database())::text AS bytes'),
     );
     return Number(rows[0]?.bytes ?? 0);
   } catch {

@@ -7,6 +7,7 @@ import { SensorStateService } from '../src/state/service.js';
 import { ALL_CLEAR } from '../src/state/limits.js';
 import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
 import type { Database } from '../src/db/pool.js';
+import { failingOn } from './support/failing.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -341,6 +342,154 @@ describe('a probe going offline', { skip: available ? false : 'no database' }, (
     } finally {
       harness.audit.also = undefined;
     }
+  });
+
+  describe('P-249: what resync catches does not cost the caller its transaction', () => {
+    /** A row the caller's transaction writes, which is kept only if that transaction commits. */
+    const written = async (): Promise<number> =>
+      Number(
+        (await db.query<{ n: string }>('SELECT count(*)::text AS n FROM p249_written'))[0]?.n ?? 0,
+      );
+
+    before(async () => {
+      await db.query('CREATE TABLE IF NOT EXISTS p249_written (n int)');
+    });
+
+    beforeEach(async () => {
+      await db.query('DELETE FROM p249_written');
+    });
+
+    /** A spare live probe, and the device moved onto it without anything keeping the overlay. */
+    const moveAway = async (): Promise<void> => {
+      const spare = await harness.service.create(testActor, {
+        kind: 'probe',
+        parentId: harness.rootId,
+        name: `spare-${String(process.hrtime.bigint())}`,
+      });
+      await harness.service.move(testActor, deviceId, spare.id, { kind: 'none' });
+    };
+
+    it('keeps the transaction when the re-evaluation fails a statement', async () => {
+      // A recompute that fails a statement, once the probe is down: `resync` catches what its
+      // re-evaluation throws, inside the caller's transaction, so that a move is never refused
+      // for it. Without a savepoint that catch aborted the caller's transaction, and the COMMIT
+      // after it rolled back the caller's every write.
+      let failing = false;
+      reachability = new ProbeReachability({
+        db,
+        logger: silentLogger,
+        states,
+        dependencies: {
+          recompute: async (q, at) => {
+            if (failing) await q.query('SELECT 1/0');
+            return harness.dependencies?.recompute(q, at) ?? { moved: 0 };
+          },
+        },
+        coreEvaluatedTypes: ['core.factory', 'ms.core.health'],
+      });
+      await scanned();
+      await reachability.lost(probeId, 'link');
+      await moveAway();
+      failing = true;
+
+      const moved = await db.tx(async (q) => {
+        await q.query('INSERT INTO p249_written VALUES (1)');
+        return reachability.resync(q);
+      });
+
+      assert.equal(moved, 0, 'the re-evaluation did not land');
+      assert.equal(await written(), 1, 'and the caller’s transaction committed all the same');
+      assert.equal(reachability.stats().sensorsUnknown, 0, 'with the overlay corrected');
+    });
+
+    it('keeps the transaction, and the other probes, when one probe’s sensors cannot be read', async () => {
+      // Two probes down. The read of one fails; the other's still moves its sensors. Without a
+      // savepoint around each read the failed one aborted the transaction, and everything after
+      // it, the other probe's re-evaluation and the caller's COMMIT, went with it.
+      const other = await harness.service.create(testActor, {
+        kind: 'probe',
+        parentId: harness.rootId,
+        name: `other-${String(process.hrtime.bigint())}`,
+      });
+      await scanned();
+      await reachability.lost(probeId, 'link');
+      await reachability.lost(other.id, 'link');
+      await moveAway();
+      const [sensorId] = sensorIds;
+      assert.ok(sensorId !== undefined);
+      assert.equal((await stateOf(sensorId))?.state, 'unknown');
+
+      await db.tx(async (q) => {
+        await q.query('INSERT INTO p249_written VALUES (1)');
+        await reachability.resync(
+          failingOn(
+            q,
+            (text, values) => text.includes('WITH RECURSIVE below') && values?.[0] === other.id,
+          ),
+        );
+      });
+
+      assert.equal(await written(), 1, 'the caller’s transaction committed');
+      assert.equal(
+        (await stateOf(sensorId))?.state,
+        'up',
+        'and the probe whose sensors could be read moved them',
+      );
+      assert.equal(reachability.stats().probesDown, 2, 'the other probe is still held as it was');
+    });
+
+    it('commits the mutation when whatever the sink calls fails a statement and throws', async () => {
+      // `ReachabilitySync` catches anything `resync` throws so as not to refuse the mutation, and
+      // that catch is inside the mutation's transaction too.
+      let calls = 0;
+      harness.audit.also = new ReachabilitySync({
+        reachability: () => ({
+          holdsAny: () => true,
+          resync: async (q) => {
+            calls += 1;
+            await q.query('SELECT 1/0');
+            return 0;
+          },
+        }),
+        logger: silentLogger,
+      });
+      try {
+        const spare = await harness.service.create(testActor, {
+          kind: 'probe',
+          parentId: harness.rootId,
+          name: `spare-${String(process.hrtime.bigint())}`,
+        });
+        await harness.service.move(testActor, deviceId, spare.id, { kind: 'none' });
+        assert.equal(calls, 2, 'the create and the move each reached it');
+        const [row] = await db.query<{ parent_id: string }>(
+          'SELECT parent_id::text AS parent_id FROM object WHERE id = $1',
+          [deviceId],
+        );
+        assert.equal(Number(row?.parent_id), spare.id, 'and the move was kept');
+      } finally {
+        harness.audit.also = undefined;
+      }
+    });
+
+    it('costs a tree change no statement while no probe is held', async () => {
+      let calls = 0;
+      harness.audit.also = new ReachabilitySync({
+        reachability: () => ({
+          holdsAny: () => false,
+          resync: () => {
+            calls += 1;
+            return Promise.resolve(0);
+          },
+        }),
+        logger: silentLogger,
+      });
+      try {
+        await moveAway();
+        assert.equal(calls, 0);
+      } finally {
+        harness.audit.also = undefined;
+      }
+    });
   });
 
   it('one outage is one transition per sensor, not two', async () => {
