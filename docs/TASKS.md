@@ -7706,6 +7706,31 @@ because each is a decision rather than a defect:
       `target-policy-transports`, `pinned-transports`, `target-policy-exception`) close the
       client and stop the simulator at once in the same way. The simulator fix covers them, and
       none needed a change.
+      **In the full suite (2026-10-05)** on main with this fix, `ssh-shared-open` passed, and 20
+      isolated runs after it passed 20/20. Before the fix it had failed in both full suites of
+      2026-10-04.
+
+- [ ] **P-258 — two resolver-budget tests fail when the machine is loaded** · S · A-41 · Found
+      2026-10-05 in `P-257`. `check-pool.test.ts` "reports a resolver that hangs as a refusal,
+      not as the check timing out" (resolver budget 3,000 ms inside a 6,000 ms check timeout)
+      and `process-runner.test.ts` "reports a resolver that hangs as a refusal, from a process
+      of its own" (`/did not resolve within 4000 ms/`) each failed once while the probe suite
+      ran beside them. The check-pool one then failed the 2026-10-05 full suite, and 1 of 5
+      runs alone at VM load 5–13 with the Mac at 20 on 8 CPUs; both pass on a quiet VM. Under
+      contention the resolver's timer fires late enough that the check's own timeout wins, and
+      the test reads that as the wrong refusal. **Done when** each asserts the order of the two
+      outcomes without depending on how late a timer fires (a fake clock, or a check timeout
+      far enough from the resolver's that load cannot cross them), and twenty runs of each
+      pass beside a running probe suite.
+
+- [ ] **P-259 — nothing tests a device that resets the connection mid-command** · S · A-65 ·
+      Found 2026-10-05 in `P-257`. Read from the code, an SSH device that drops the connection
+      while a command runs cannot raise an uncaught exception in a probe — `SshSession` listens
+      for the client's errors and ssh2 ends the channel — but the exec then resolves with
+      `code: null` rather than failing with the sensor id, target and phase `CLAUDE.md` asks
+      every check failure to carry. No test covers it. **Done when** an `ssh-session` test has
+      the simulator reset the connection mid-command, asserts the check fails (not succeeds
+      on an empty result) with a message naming the phase, and the probe stays healthy.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
