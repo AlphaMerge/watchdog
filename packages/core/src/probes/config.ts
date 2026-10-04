@@ -62,7 +62,8 @@ export interface ProbeConfigOptions {
    * Absent in a test that is not about that, which then sends every set it resolves — the
    * behaviour before `A-41`. `main.ts` always supplies it.
    */
-  credentialCheck?: Pick<CredentialVouching, 'refusals' | 'withhold'>;
+  credentialCheck?: Pick<CredentialVouching, 'refusals' | 'withhold'> &
+    Partial<Pick<CredentialVouching, 'judgedVersion'>>;
 }
 
 /**
@@ -302,10 +303,16 @@ export class ProbeConfigService {
     const probeObjectId = Number(row.probe_id);
     const peerVersion = peerVersionOf(probeObjectId);
     const connected = peerVersion > 0;
+    // While the probe's version flaps, at the version its configurations are judged at (`A-72`):
+    // a sensor the flap holds is refused in the words it stands Unknown with, and not run, which
+    // a result the core then dropped as made for a withheld sensor would have shown as nothing.
+    const judged = connected
+      ? (this.#credentialCheck?.judgedVersion?.(probeObjectId, peerVersion) ?? peerVersion)
+      : PROTOCOL_VERSION;
     const refused = await this.#credentialCheck?.refusals(
       probeObjectId,
       beingSent([{ sensor_id: String(sensorId), ...row }], credentials),
-      connected ? peerVersion : PROTOCOL_VERSION,
+      judged,
     );
     const withheld = refused?.get(sensorId);
     if (withheld !== undefined) {

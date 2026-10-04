@@ -1423,6 +1423,91 @@ describe(
       }
     });
 
+    it('keeps what each probe’s protocol version has done, one row a probe that goes with it, and rolls back to nothing (069)', async () => {
+      // `A-72`: the version a probe's last configuration was built for, the run of changes that
+      // ended in it, and from its second change the floor the configurations are judged at.
+      const fresh = await createScratchDatabase('probe_protocol_flap');
+      try {
+        const all = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 69),
+        );
+        await all.up();
+        const q = fresh.db;
+        assert.equal(await tableExists(q, 'probe_protocol_flap'), true);
+        const [root] = await q.query<{ id: string }>(`SELECT id FROM object WHERE kind = 'root'`);
+        const insert = async (kind: string, name: string, parent: string): Promise<string> => {
+          const [row] = await q.query<{ id: string }>(
+            'INSERT INTO object (parent_id, kind, name) VALUES ($1, $2, $3) RETURNING id::text',
+            [parent, kind, name],
+          );
+          return row?.id ?? assert.fail('no row');
+        };
+        const probe = await insert('probe', 'probe', root?.id ?? '');
+        const other = await insert('probe', 'other', root?.id ?? '');
+        const put = (probeId: string, values: string): Promise<unknown> =>
+          q.query(
+            `INSERT INTO probe_protocol_flap
+               (probe_id, version, changed_at, run_since, run_changes, flap_floor)
+             VALUES ($1, ${values})`,
+            [probeId],
+          );
+        const probes = async (): Promise<string[]> =>
+          (
+            await q.query<{ line: string }>(
+              `SELECT probe_id::text || ':' || version::text || ':' || run_changes::text AS line
+               FROM probe_protocol_flap ORDER BY probe_id`,
+            )
+          ).map((row) => row.line);
+
+        // A version with no run; a first change; a flap.
+        await put(probe, '24, NULL, NULL, 0, NULL');
+        await q.query('DELETE FROM probe_protocol_flap');
+        await put(probe, `23, now(), now(), 1, NULL`);
+        await q.query('DELETE FROM probe_protocol_flap');
+        await put(probe, `24, now(), now() - interval '3 minutes', 2, 23`);
+        await put(other, '27, NULL, NULL, 0, NULL');
+        assert.deepEqual(await probes(), [`${probe}:24:2`, `${other}:27:0`]);
+        await assert.rejects(put(probe, '24, NULL, NULL, 0, NULL'), /probe_protocol_flap_pkey/);
+
+        const refused: [string, RegExp][] = [
+          ['0, NULL, NULL, 0, NULL', /probe_protocol_flap_version_check/],
+          ['24, now(), NULL, 1, NULL', /probe_protocol_flap_run/],
+          ['24, NULL, NULL, 1, NULL', /probe_protocol_flap_run/],
+          ['24, now(), now(), 0, NULL', /probe_protocol_flap_run/],
+          [`24, now() - interval '1 minute', now(), 1, NULL`, /probe_protocol_flap_run/],
+          ['24, now(), now(), 2, NULL', /probe_protocol_flap_floor/],
+          ['24, now(), now(), 1, 23', /probe_protocol_flap_floor/],
+          ['24, now(), now(), 2, 25', /probe_protocol_flap_floor/],
+          ['24, now(), now(), 2, 0', /probe_protocol_flap_flap_floor_check/],
+          ['24, now(), now(), -1, NULL', /probe_protocol_flap_run_changes_check/],
+          [`24, 'infinity', now(), 1, NULL`, /probe_protocol_flap_changed_at_check/],
+          [`24, now(), '-infinity', 1, NULL`, /probe_protocol_flap_run_since_check/],
+        ];
+        const third = await insert('probe', 'third', root?.id ?? '');
+        for (const [values, why] of refused) {
+          await assert.rejects(put(third, values), why, values);
+        }
+        await assert.rejects(put('999999', '24, NULL, NULL, 0, NULL'), /foreign key/);
+
+        // A deleted probe takes its row.
+        await q.query('DELETE FROM object WHERE id = $1', [other]);
+        assert.deepEqual(await probes(), [`${probe}:24:2`]);
+
+        await all.down(1);
+        assert.equal(await tableExists(q, 'probe_protocol_flap'), false);
+        assert.equal(await tableExists(q, 'late_refusal_grace'), true, 'and nothing else');
+        const again = await all.up();
+        assert.deepEqual(
+          again.applied.map((one) => one.id),
+          [69],
+        );
+        assert.deepEqual(await probes(), [], 'the record does not come back with the table');
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('applies the real migration set forward and all the way back', async () => {
       const fresh = await createScratchDatabase('roundtrip');
       try {

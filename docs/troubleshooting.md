@@ -114,13 +114,10 @@ failed in**, and the underlying error, because "ETIMEDOUT" alone is not a diagno
   still dropped, and counted on **Refusals delivered late**. A core that stopped before it had
   built the probe's next configuration after the change loses nothing either (`A-68`): what the
   probe was last left is stored too, and the first configuration after the restart finds the
-  change and begins the ten minutes then. Three things can still lose it, and then such a
-  refusal is a failed scan, and two of them Down, with one alarm:
-  - **The probe changed its protocol version twice inside an hour** (rolled back, upgraded, and
-    rolled back again), and its spool still held refusals after the second rollback. A version
-    change alone begins the ten minutes once in an hour (`A-68`); after that such a refusal is a
-    failed scan of a sensor the core is withholding for the probe's age, and shows as Down when
-    the probe is upgraded, until the sensor's next scan.
+  change and begins the ten minutes then. A refusal for a sensor the core is itself withholding
+  from the probe, after a rollback below protocol 24 or in a flap of its version, is dropped
+  whenever it arrives after the core has built the probe's configuration, and counted on **Results for sensors withheld** (`A-72`). Two things can
+  still lose it, and then such a refusal is a failed scan, and two of them Down, with one alarm:
   - **The core's clock was set forward across the restart**, by more than was left of the ten
     minutes. The stored time then reads as long past. (Set back, it gives the ten minutes from
     the restart and no more, and the log says so at `warn`.)

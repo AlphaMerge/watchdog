@@ -555,6 +555,85 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(read({ connected: false }), null);
     });
 
+    it('carries the results dropped for withheld sensors as a counter of their own, and gaps it where nothing counts them (`A-72`)', () => {
+      const asked: number[] = [];
+      const read = (sources: Partial<ProbeHealthSources>, link: ProbeLink = connected()) =>
+        new ProbeHealthService({
+          db,
+          logger: silent,
+          vouching: everyVoucherHolds,
+          sources: { link: () => link, ...sources },
+          ingest: () => Promise.resolve(),
+        }).read(probeId);
+      const { reading, message } = read({
+        refusals: () => ({ refused: 9, foreignRecently: 0 }),
+        lateRefusals: () => 3,
+        withheldResults: (probeObjectId) => {
+          asked.push(probeObjectId);
+          return 4;
+        },
+      });
+      assert.deepEqual(asked, [probeId]);
+      assert.deepEqual(
+        [reading['resultsWithheld'], reading['lateRefusals'], reading['reportsRefused']],
+        [4, 3, 9],
+        'three numbers, none inside another',
+      );
+      assert.doesNotMatch(message, /withheld/iu);
+      assert.deepEqual(
+        readingsFrom(reading).find((one) => one.key === 'resultsWithheld'),
+        { key: 'resultsWithheld', value: 4, counter: '4', counterBits: 64 },
+      );
+      assert.equal(read({ withheldResults: () => 0 }).reading['resultsWithheld'], 0);
+      assert.equal(read({}).reading['resultsWithheld'], null);
+      assert.equal(
+        read({ withheldResults: () => 4 }, { connected: false }).reading['resultsWithheld'],
+        null,
+      );
+    });
+
+    it('names a protocol version flap, reads 0 for none, and gaps it where nothing knows (`A-72`)', () => {
+      const flap = {
+        version: 24,
+        floor: 23,
+        changes: 5,
+        sinceMs: 12 * 60_000 + 1,
+        remainingMs: 59 * 60_000 + 30_000,
+      };
+      const read = (protocolFlap?: () => typeof flap | null, link: ProbeLink = connected()) =>
+        new ProbeHealthService({
+          db,
+          logger: silent,
+          vouching: everyVoucherHolds,
+          sources: { link: () => link, ...(protocolFlap === undefined ? {} : { protocolFlap }) },
+          ingest: () => Promise.resolve(),
+        }).read(probeId);
+      const flapping = read(() => flap);
+      assert.equal(flapping.reading['protocolFlap'], 5);
+      // First after the link, because it is why sensors under the probe stand Unknown.
+      assert.ok(
+        flapping.message.startsWith(
+          'connected, 120 sensors scheduled, its protocol version changed 5 times in 13 minutes ' +
+            'and is 24 now, so the ' +
+            'sensors its version decides hold where they stood, as at protocol 23, until it has ' +
+            'held one version for an hour (60 minutes from now if it holds), scheduler lag',
+        ),
+        flapping.message,
+      );
+      // A minute is never said as none.
+      assert.match(
+        read(() => ({ ...flap, changes: 2, sinceMs: 0, remainingMs: 0 })).message,
+        /changed 2 times in 1 minute and .* for an hour \(1 minute from now/u,
+      );
+
+      const none = read(() => null);
+      assert.equal(none.reading['protocolFlap'], 0, 'no flap is a reading');
+      assert.doesNotMatch(none.message, /protocol version changed/u);
+      assert.equal(read().reading['protocolFlap'], null, 'nothing that knows: a gap');
+      assert.equal(read(() => flap, { connected: false }).reading['protocolFlap'], null);
+      assert.doesNotMatch(read(() => flap, { connected: false }).message, /changed/u);
+    });
+
     it('turns the probe Down when its worker pool has given up', () => {
       // **The alarm for a probe that is up and monitoring nothing** (`P-62`). Every other channel
       // reads like a quiet night: the link is connected, `poolUsage` is 0%, nothing is deferred or

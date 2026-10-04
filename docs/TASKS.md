@@ -19859,7 +19859,7 @@ because each is a decision rather than a defect:
         certificate's names and not its addresses. The heartbeat does not honour
         `NODE_USE_ENV_PROXY`, which `fetch` did where it was set; not tried.
 
-- [ ] **A-72 — a probe that flaps its protocol version pages every time** · M · A-68, A-41c ·
+- [x] **A-72 — a probe that flaps its protocol version pages every time** · M · A-68, A-41c ·
       Found 2026-10-02 by `A-68`, measured: five alternations raise three Unknown pages and two
       recoveries, with or without a refusal sent, because each downgrade withholds the probe's
       named sensors and each upgrade lets them go. And a marked result that arrives past the
@@ -19877,6 +19877,61 @@ because each is a decision rather than a defect:
       Probe Health raises one warning naming the flap, cleared when the version has held for an
       hour. A result for a sensor the core is withholding is dropped and counted on Probe
       Health, never a failed scan, so a release cannot open with a Down that has no message.
+
+      **A-72 outcome.** Migration 069; no protocol number (nothing on the wire changed).
+      - **Where the flap lives**: `CredentialVouching`, beside `A-68`'s record. Every
+        configuration notes the version it is built for (`nextVersionRecord`, a pure function).
+        A second change inside an hour of the one before is a flap, and from it the probe is
+        judged at the flap's floor, the lowest version since the change before it and never
+        above the one spoken, until the version has held `PROTOCOL_FLAP_HOLD_MS` (an hour)
+        since its last change. "Check now" is judged at the floor too (`judgedVersion`). Only
+        what the version decides is held: a name entry added in a flap sends the sensor at once.
+        The minute `prune` ends it and asks for the probe's configuration through `main.ts`'s
+        `configNotifier.flush()`, so the held sensors are let go then and not at a reconnect.
+      - **Stored**: `probe_protocol_flap`, one row per probe (version, last change, run start,
+        changes, floor), checked so a run and a floor cannot disagree; down drops it. Written
+        inside `A-61`'s bounded write, on the same per-probe line and in the same transaction
+        as `late_refusal_grace`, only when the version changes; a steady build writes nothing.
+        Read back at start with `storedStop`'s clock rules (`restoredVersion`, a table of cases).
+      - **Probe Health**: `protocolFlap` (changes in the flap, 0 out of one, warns from 2, the
+        message names version, floor, how long and how long to hold) and `resultsWithheld` (a
+        counter, no limit). On `/metrics`: `ms_probe_protocol_flap_changes`,
+        `ms_probe_results_withheld_total`.
+      - **Withheld results**: a result for a sensor the probe's last configuration withheld is
+        dropped in `reported()` and counted (`withheldDropped` → `ProbeRefusals.withheld`), a
+        reading included; a refusal inside its ten minutes is counted late first. Before, a
+        marked one past the window was a failed scan, and an unmarked one too.
+      - **Measured** (`credential-pinning.test.ts`, the alternating scenario, against the
+        database): five alternations in twelve minutes, then held. Held probes page
+        `initial:unknown` once per named sensor, nothing more through the flap, and
+        `recovery:unknown` once after the hour; the same probe on a core with no hold
+        (`protocolFlapHoldMs: 0`) pages three times and recovers twice, as `A-68` measured. A
+        real Probe Health sensor through ingestion and the channel resolver makes exactly one
+        Warning transition for the flap and is Up after the hour. Refusals past the window for a
+        withheld sensor: no Down, counted on `resultsWithheld`.
+      - **Upgrade effects**: the table starts empty and a flap already under way is counted from
+        the first change after the upgrade. A withheld sensor whose probe keeps sending results
+        stays Unknown where it used to turn Down. The `A-41c` case of a probe too old to be
+        sent a set now counts its marked result as withheld (dropped) rather than refused.
+      - **Tests**: table-driven `nextVersionRecord`/`isFlapping` (12 rows and the boundary) and
+        `restoredVersion` (9); the flap through `withhold` (five alternations, the hour boundary,
+        upgrade-first, upward, an operator's change, invalid versions, a flap between two
+        versions that both leave the name moving no record); the two-kind sensor (4 rows: one
+        kind version-dependent, the other outside, unvouched, or the core's); dropped results
+        (4); store and restart (7); the end of a flap (3); four database scenarios (alternation
+        with a no-hold core to compare, one Probe Health warning, an operator's change in a
+        flap with "check now", a restart in the middle); the migration up and down; Probe
+        Health, refusals, metrics and channel declarations. `main.ts` is read for its wiring,
+        **not booted**: no test starts it, and that gap stands.
+      - **Mutation: 11/12 killed**, one equivalent: `Math.min(floor, peerVersion)` in
+        `#noteVersion`, where the floor is already never above the version just recorded. Two
+        survived first (check now at the floor; the left version recorded at the floor) and
+        were killed by the tests added for them. After the last, `dist` matched `src`.
+      - **Not done, for follow-up**: a sensor let go re-decides with an empty message until its
+        next scan (the `A-29` release path, not this ticket's drop); a core restarted before it
+        has built a probe's first configuration does not yet know what it withholds, so results
+        in that moment are taken as before; the held sentence still says "Upgrading the probe to
+        protocol 24 sends them again" while a flapping probe is at 24.
 
 - [x] **A-73 — five loose ends from discovery text and the SSH pool** · S · A-69 · Found
       2026-10-02 by `A-69`. `sweep-progress` takes any 7 to 15 characters as an address. A

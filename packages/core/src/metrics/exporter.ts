@@ -323,6 +323,17 @@ const PROBE_METRICS: readonly Metric[] = [
     counter: true,
   },
   {
+    key: 'resultsWithheld',
+    name: 'ms_probe_results_withheld_total',
+    help: "This probe's results for sensors the core withholds from it, dropped as made under an earlier configuration. Not among the reports refused.",
+    counter: true,
+  },
+  {
+    key: 'protocolFlap',
+    name: 'ms_probe_protocol_flap_changes',
+    help: "How many times this probe's protocol version changed in the run that made it a flap; 0 when it is not flapping.",
+  },
+  {
     key: 'schedulerLag',
     name: 'ms_probe_scheduler_lag_p95_seconds',
     help: 'How late the timing wheel fired, 95th percentile over the last 1,024 ticks.',

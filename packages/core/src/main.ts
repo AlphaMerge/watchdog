@@ -580,6 +580,12 @@ async function serve(): Promise<void> {
     rights: (principal, objectIds, q) => objectAccess.resolveManyFor(principal, objectIds, q),
     vouching,
     audit: new CompositeAuditSink(credentialAdoptionAuditSinks(auditSinks)),
+    // A probe whose version flap is over has its configuration built again at once, so what the
+    // flap held is let go then and not at its next reconnect (`A-72`). Every connected probe is
+    // recomputed and only a changed fingerprint is pushed, as for any change.
+    onProtocolFlapOver: () => {
+      configNotifier.flush();
+    },
   });
   credentialVouchingRef = credentialVouching;
   // Before anything is sent, and before the API can write: the installation vouches for every set
@@ -1502,6 +1508,8 @@ async function serve(): Promise<void> {
       timeRefusals: (gid) => ingestion.timeRefusals(gid),
       refusals: (probeObjectId) => refusals.countsFor(probeObjectId),
       lateRefusals: (probeObjectId) => refusals.lateFor(probeObjectId),
+      withheldResults: (probeObjectId) => refusals.withheldFor(probeObjectId),
+      protocolFlap: (probeObjectId) => credentialVouching.protocolFlap(probeObjectId),
       frozenSensors: (probeObjectId) => clockFreeze.frozenOn(probeObjectId),
       // The sweep, and only the sweep, drains the probes' folded memory lows (`P-219`, `P-245`).
       drainMemory: () => probeEndpoint.drainMemory(),

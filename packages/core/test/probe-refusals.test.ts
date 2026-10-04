@@ -91,6 +91,24 @@ describe('what the core refused from each probe (`P-228`)', () => {
     assert.deepEqual(refusals.stats(), { refused: 4, foreign: 0 });
   });
 
+  it('counts a result for a withheld sensor apart from both, per probe (`A-72`)', () => {
+    const refusals = new ProbeRefusals(clock().now);
+    refusals.withheld(7, 2);
+    refusals.withheld(7);
+    refusals.withheld(8, 5);
+    refusals.withheld(8, 0);
+    refusals.withheld(8, -3);
+    refusals.late(7, 6);
+    refusals.refused(7, 4);
+
+    assert.equal(refusals.withheldFor(7), 3);
+    assert.equal(refusals.withheldFor(8), 5);
+    assert.equal(refusals.withheldFor(42), 0, 'a count, not a gap');
+    assert.equal(refusals.lateFor(7), 6);
+    assert.deepEqual(refusals.countsFor(7), { refused: 4, foreignRecently: 0 });
+    assert.deepEqual(refusals.stats(), { refused: 4, foreign: 0 });
+  });
+
   it('ignores nothing-to-count rather than moving either number', () => {
     const refusals = new ProbeRefusals(clock().now);
     refusals.refused(7, 0);

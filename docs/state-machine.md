@@ -227,14 +227,59 @@ nothing once it has run out. Five alternations give what one downgrade gives.
   probe's version change being judged by the window already there.
 - **What the hour costs a probe that is honest.** One rolled back, forward and back again inside
   an hour has, at the second rollback, only what is left of the first window. A refusal its
-  spool still holds after that is a failed scan of a sensor the core is itself withholding for
-  the probe's age: the sensor stands Unknown meanwhile, and two such are a Down, with its one
-  alarm, when the probe is upgraded and the sensor let go, until its next scan. The same is
-  true of a single downgrade whose refusals arrive more than ten minutes late
-  (`credential-pinning.test.ts`, the alternating scenario, pins both as one Down each).
-- **What alternating still does, and the grace never caused**: each downgrade withholds the
-  probe's named sensors (Unknown, the Unknown trigger's page) and each upgrade lets them go (its
-  recovery). That is the reconnects' doing: a probe that sends no refusal at all raises the same.
+  spool still holds after that is for a sensor the core is itself withholding from the probe,
+  and is dropped and counted as such (below, `A-72`). Before `A-72` it was a failed scan, and two
+  of them were a Down, with its alarm, when the sensor was let go.
+- **What alternating did, and the grace never caused**: each downgrade withheld the probe's
+  named sensors (Unknown, the Unknown trigger's page) and each upgrade let them go (its
+  recovery), a probe that sent no refusal at all included. `A-72` holds them instead, below.
+
+**A probe whose protocol version changes more than once in an hour holds what its version
+decides** (`A-72`). One outage, one alarm: a probe rolled back and forward five times in twelve
+minutes paged three times for each of its named sensors and recovered twice (`A-68`'s scenario).
+The core now notes the version every configuration for a probe is built for, and:
+
+- **The first change is what it always was.** A downgrade below `credentialAddressPinning`
+  withholds the probe's named sensors (Unknown, one page each); an upgrade lets them go.
+- **A second change inside an hour of the one before is a flap**, and from it the configuration
+  is judged at the flap's **floor**: the lowest version the probe has spoken since the change
+  before it, never higher than the one it speaks now. The named sensors stand where the floor
+  puts them, so every later alternation moves none of them, pages nothing and recovers nothing.
+  A flap that begins with an upgrade withholds at the downgrade after it, as the version
+  requires; a probe is never sent a set it cannot be trusted with. "Check now" is judged at the
+  floor too.
+- **It is over when the version has held for an hour** (`PROTOCOL_FLAP_HOLD_MS`) since its last
+  change. The minute timer that removes spent windows notices, and asks for the probe's
+  configuration at once rather than at its next reconnect: what the floor held is let go then,
+  with its one recovery. One downgrade, a flap, and an hour held is one page and one recovery
+  per sensor (`credential-pinning.test.ts`, the alternating scenario, beside a core with no hold
+  that still pages three times).
+- **Only what the version decides is held.** A change somebody makes inside a flap (a name entry
+  added to the targets, a device given its address, a voucher lost) is made at once: the core
+  decides the device itself, whatever the probe speaks.
+- **Probe Health raises one warning for it.** **Protocol version changes in a flap**
+  (`protocolFlap`) reads how many times the version changed in the flap, 0 out of one, and warns
+  from 2; the sensor's message names the version, the floor, how long it has gone on and how
+  long it must hold. One warning when it begins, cleared when it is over, however many times the
+  probe reconnects in between.
+- **Stored, so a restart keeps it**: one row per probe in `probe_protocol_flap` (migration 069),
+  written in the same bounded write, on the same per-probe line, as the late-refusal record,
+  and only when the version changes; a steady build writes nothing. Read back at start with
+  the same clock rules as a window: a change more than an hour old is over, and one stored
+  ahead of the clock is taken as now and written down again.
+
+**A result for a sensor the core is withholding from that probe is dropped and counted**
+(`A-72`), whatever it is: a marked refusal past its ten minutes, a failed scan, a reading. The
+probe's last configuration did not send it the sensor, so nothing it says of it was measured
+under that configuration. It is counted on Probe Health's **Results for sensors withheld**
+(`resultsWithheld`, `ms_probe_results_withheld_total`), a counter with no limit, and is neither a
+failed scan nor a hold, and lets nothing go. A refusal inside its ten minutes is still counted
+as late, first. What it closes is the Down a withheld sensor opened with when it was let go:
+the results its probe's spool still held had been read as failed scans meanwhile. What it does
+not close: a sensor let go re-decides with no message of its own until its next scan (the same
+as any hold released, `A-29`), and a core restarted before it has built a probe's first
+configuration does not yet know what it withholds from it, so results in that moment are taken
+as before.
 
 **The record survives a core restart** (`A-61`). Which sensors a configuration stopped leaving to
 a probe, and when, is held in the core's memory, which is what a refusal is judged by, and stored

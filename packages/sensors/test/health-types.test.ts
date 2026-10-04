@@ -101,6 +101,41 @@ describe('the self-monitoring sensor types', () => {
     ]);
   });
 
+  it('carries the results dropped for withheld sensors as a number beside the late refusals, and not an alarm (`A-72`)', () => {
+    const channels = probeHealth.channels({});
+    assert.deepEqual(
+      channels.find((one) => one.key === 'resultsWithheld'),
+      {
+        key: 'resultsWithheld',
+        name: 'Results for sensors withheld',
+        unit: 'results',
+        counter: { bits: 64 },
+      },
+    );
+    const keys = channels.map((one) => one.key);
+    assert.equal(keys.indexOf('resultsWithheld'), keys.indexOf('lateRefusals') + 1);
+  });
+
+  it('warns on a protocol version flap, and only from a second change (`A-72`)', () => {
+    // The one warning in place of a page and a recovery for every named sensor at every change:
+    // 0 for no flap, and a flap is two changes or more. No lookup and no error: the probe is
+    // working, and its sensors are held where they stood.
+    const channels = probeHealth.channels({});
+    const flap = channels.find((one) => one.key === 'protocolFlap');
+    assert.deepEqual(flap, {
+      key: 'protocolFlap',
+      name: 'Protocol version changes in a flap',
+      unit: 'changes',
+      limits: {
+        upperWarning: 1.5,
+        warningMessage:
+          "this probe's protocol version changed more than once in an hour; the sensors its version decides hold where they stood until it has held one version for an hour",
+      },
+    });
+    const keys = channels.map((one) => one.key);
+    assert.equal(keys.indexOf('protocolFlap'), keys.indexOf('protocol') + 1);
+  });
+
   it('carries the late-refusal record’s given-up writes as a number on Core Health and not an alarm', () => {
     // `A-68`. A write that gave way to a delete is made again within the minute, and the running
     // core has lost nothing meanwhile: a limit or a lookup would be an alarm for a group somebody

@@ -27,6 +27,10 @@ import { RecentCount } from '../health/recent-count.js';
  * tell the two apart by guessing. A counter with no limit: it rises for ten minutes after a
  * credential set's targets or a device's address change, and then stops.
  *
+ * **And a fourth, for `late`'s reason** (`A-72`): `withheld` is a result of any kind for a sensor
+ * the core's own configuration withholds from the probe, dropped. The probe was not sent the
+ * sensor, so it made the result under a configuration before.
+ *
  * Keyed by probe object, the thing Probe Health reads by and the thing ownership is decided
  * against. A GID that owns no object yet has nothing it could legitimately report, so what it
  * sends is refused and counted in the totals only: there is no Probe Health sensor to show it on.
@@ -39,6 +43,7 @@ export class ProbeRefusals {
   readonly #refused = new Map<number, number>();
   readonly #foreign = new Map<number, RecentCount>();
   readonly #late = new Map<number, number>();
+  readonly #withheld = new Map<number, number>();
   #refusedTotal = 0;
   #foreignTotal = 0;
 
@@ -84,6 +89,21 @@ export class ProbeRefusals {
   /** How many of one probe's refusals arrived late, since start. Zero, not a gap, for none. */
   lateFor(probeObjectId: number): number {
     return this.#late.get(probeObjectId) ?? 0;
+  }
+
+  /**
+   * A result for a sensor the core withholds from this probe, dropped (`A-72`): the probe's
+   * configuration does not carry the sensor, so it was made under one before. Not counted as
+   * refused, for `late`'s reason: nothing is wrong with the probe.
+   */
+  withheld(probeObjectId: number, n = 1): void {
+    if (n <= 0) return;
+    this.#withheld.set(probeObjectId, (this.#withheld.get(probeObjectId) ?? 0) + n);
+  }
+
+  /** How many of one probe's results were for a withheld sensor, since start. Zero for none. */
+  withheldFor(probeObjectId: number): number {
+    return this.#withheld.get(probeObjectId) ?? 0;
   }
 
   /** One probe's numbers, now. A probe nothing was ever refused from reads zero, not a gap. */

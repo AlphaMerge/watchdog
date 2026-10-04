@@ -68,6 +68,8 @@ export interface IngestionServiceOptions {
       readonly unearned: number;
       /** Refusals made under the configuration before the probe's last, and dropped (`A-53`). */
       readonly late: number;
+      /** Results for a sensor withheld from the probe, and dropped (`A-72`). */
+      readonly withheldDropped: number;
       stored(landed: boolean): Promise<void>;
     }>;
   };
@@ -412,6 +414,22 @@ export class IngestionService {
             { source: origin.gid, probeObjectId: origin.probeObjectId, results: reported.late },
             'a probe refused to scan sensors its configuration has since stopped leaving to ' +
               'it; dropped, as neither a failed scan nor a reason to hold them',
+          );
+        }
+        if (reported.withheldDropped > 0) {
+          // **For a sensor the core is withholding from this probe** (`A-72`): made under a
+          // configuration before, whatever it says. Dropped, so the sensor does not open with a
+          // Down nobody can read when it is let go, and counted on Probe Health on its own, as
+          // late refusals are: the probe did nothing wrong.
+          this.#refusals?.withheld(origin.probeObjectId, reported.withheldDropped);
+          this.#logger.info(
+            {
+              source: origin.gid,
+              probeObjectId: origin.probeObjectId,
+              results: reported.withheldDropped,
+            },
+            'a probe reported on sensors its configuration withholds from it; dropped, as made ' +
+              'under a configuration before',
           );
         }
       } catch (error: unknown) {

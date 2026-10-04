@@ -787,10 +787,134 @@ export interface CredentialVouchingOptions {
    */
   wallNow?: () => number;
   /**
+   * How long a probe's protocol version has to hold for a flap to be over, and how close together
+   * two changes have to come to make one (`A-72`). `PROTOCOL_FLAP_HOLD_MS` when absent; zero
+   * holds nothing, for a test that asks as whichever probe a case needs.
+   */
+  protocolFlapHoldMs?: number;
+  /**
+   * Told of the probes whose flap `prune` found over (`A-72`), so that their configurations are
+   * built again and what the flap held is let go now rather than at the next reconnect. The
+   * notifier's push in `main.ts`. Absent, it waits for the next configuration.
+   */
+  onProtocolFlapOver?: (probeIds: readonly number[]) => void;
+  /**
    * How long a configuration waits for its record to be stored before it goes out without
    * (`A-61`). `LATE_REFUSAL_SAVE_WAIT_MS` when absent. Injected by a test.
    */
   saveWaitMs?: number;
+}
+
+/**
+ * How long a probe's protocol version has to hold before a flap is over, and how close together
+ * two changes of it make one (`A-72`).
+ *
+ * **One outage, one alarm.** The version a probe connects with decides whether it is left its
+ * named sensors (`A-41c`), so a probe that reconnects under an older version withholds them,
+ * each with an Unknown and its page, and one that reconnects under the newer lets them go, each
+ * with a recovery. Five alternations were three pages and two recoveries for every such sensor
+ * (`A-68`, measured). A second change within this long of the one before is a flap: from it the
+ * probe's configurations are judged at the lowest version the flap has spoken, so the sensors
+ * that version decides stay as they stood, and Probe Health raises the one warning that names it.
+ * It is over when the version has held this long, and the next configuration judges by the
+ * version the probe speaks.
+ *
+ * An hour, as `A-68`'s window is remembered an hour: a probe rolled back and forward by people
+ * does not do so twice inside one, and what it costs one that is is an hour of its named sensors
+ * Unknown with a warning on its Probe Health saying why, rather than a page each way.
+ */
+export const PROTOCOL_FLAP_HOLD_MS = 60 * 60_000;
+
+/**
+ * What a probe's protocol version has done lately, as the core keeps it for that probe (`A-72`).
+ * Times are on `CredentialVouching`'s monotonic clock.
+ */
+export interface VersionRecord {
+  /** The version the probe's last configuration was built for. */
+  readonly version: number;
+  /** When that version began, or null when this record has seen no change that still counts. */
+  readonly changedAt: number | null;
+  /** When the run of changes it ends began: the first change of a flap. Null with no change. */
+  readonly since: number | null;
+  /** How many changes that run has had, each within the hold of the one before it. */
+  readonly changes: number;
+  /**
+   * The lowest version the run has spoken since it became a flap, at its second change: what the
+   * probe's configurations are judged at while it lasts. Null until then.
+   */
+  readonly floor: number | null;
+}
+
+/**
+ * The record after a configuration is built for a probe speaking `version` at `now` (`A-72`).
+ * Pure, so the rule is a table.
+ *
+ * - **The first configuration** starts the record, with no change.
+ * - **The same version** changes nothing, except that a run whose last change is a hold old is
+ *   over and forgotten, flap and all.
+ * - **Another version, with no change within the hold before it**: the first change of a run.
+ *   Nothing is held: the configuration is judged at the version spoken, as it always was.
+ * - **Another version within the hold of the last change**: a flap, or a flap going on. The
+ *   floor is the lowest of the version the last configuration was built for and every version
+ *   since, so the sensors that version decides hold where they stood at the change that made
+ *   it a flap, and a lower version spoken later is still never sent more than it may be.
+ */
+export function nextVersionRecord(
+  record: VersionRecord | undefined,
+  version: number,
+  now: number,
+  holdMs: number,
+): VersionRecord {
+  if (record === undefined) {
+    return { version, changedAt: null, since: null, changes: 0, floor: null };
+  }
+  const current = settledRecord(record, now, holdMs);
+  if (version === current.version) return current;
+  if (current.changedAt === null) {
+    return { version, changedAt: now, since: now, changes: 1, floor: null };
+  }
+  return {
+    version,
+    changedAt: now,
+    since: current.since ?? current.changedAt,
+    changes: current.changes + 1,
+    floor: Math.min(current.floor ?? current.version, version),
+  };
+}
+
+/** The record with a run that has held for `holdMs` forgotten: what it is once the version held. */
+function settledRecord(record: VersionRecord, now: number, holdMs: number): VersionRecord {
+  if (record.changedAt === null || now - record.changedAt < holdMs) return record;
+  return { version: record.version, changedAt: null, since: null, changes: 0, floor: null };
+}
+
+/** Whether the record is a flap at `now`: two changes or more, the last within the hold. */
+export function isFlapping(
+  record: VersionRecord | undefined,
+  now: number,
+  holdMs: number,
+): record is VersionRecord & { changedAt: number; since: number; floor: number } {
+  return (
+    record !== undefined &&
+    record.floor !== null &&
+    record.changedAt !== null &&
+    record.since !== null &&
+    now - record.changedAt < holdMs
+  );
+}
+
+/** A probe's flap as Probe Health reads it (`A-72`): what it names, and when it is over. */
+export interface ProtocolFlap {
+  /** The version the probe speaks now. */
+  readonly version: number;
+  /** What its configurations are judged at while the flap lasts. */
+  readonly floor: number;
+  /** How many times the version has changed since the run began, two or more. */
+  readonly changes: number;
+  /** How long ago the run's first change was. */
+  readonly sinceMs: number;
+  /** How long the version still has to hold for the flap to be over. */
+  readonly remainingMs: number;
 }
 
 /**
@@ -886,6 +1010,59 @@ export function storedStop(storedAtMs: number, wallNowMs: number, graceMs: numbe
   return { verdict: 'kept', elapsedMs };
 }
 
+/**
+ * A probe's stored version record as a core starting at `wallNowMs` takes it up (`A-72`), on its
+ * monotonic clock reading `nowMs`. Pure, so the clock's jumps are a table, as `storedStop`'s are.
+ *
+ * - **The version** is taken as stored: it is what the next configuration is compared with, so a
+ *   probe whose version changed while the core was stopped is found to have changed.
+ * - **A last change older than the hold, by however much**, is no change: the run is over and the
+ *   flap with it. A clock set forward across the restart lands here too, and ends a flap early,
+ *   which lets go at the next configuration what it held: the side that pages, once, and never
+ *   the side that sends a probe what it may not have.
+ * - **A last change later than the clock reads**: the clock was set back. It is taken as now, so
+ *   a flap gets the whole hold from this start and no more, and the row is written again so a
+ *   second start does not give it twice (`ahead`).
+ * - **When the run began** only says how long it has gone on: taken as stored, and never later
+ *   than the last change.
+ */
+export function restoredVersion(
+  row: {
+    readonly version: number;
+    readonly changed_ms: string | null;
+    readonly since_ms: string | null;
+    readonly run_changes: number;
+    readonly flap_floor: number | null;
+  },
+  wallNowMs: number,
+  nowMs: number,
+  holdMs: number,
+): { record: VersionRecord; ahead: boolean } {
+  const quiet: VersionRecord = {
+    version: row.version,
+    changedAt: null,
+    since: null,
+    changes: 0,
+    floor: null,
+  };
+  if (row.changed_ms === null || row.run_changes < 1) return { record: quiet, ahead: false };
+  const stop = storedStop(Number(row.changed_ms), wallNowMs, holdMs);
+  if (stop.verdict === 'spent' || stop.elapsedMs >= holdMs) return { record: quiet, ahead: false };
+  const changedAt = nowMs - stop.elapsedMs;
+  const sinceWall = row.since_ms === null ? Number.NaN : Number(row.since_ms);
+  const ranMs = Number.isFinite(sinceWall) ? Math.max(0, wallNowMs - sinceWall) : 0;
+  return {
+    record: {
+      version: row.version,
+      changedAt,
+      since: Math.min(changedAt, nowMs - ranMs),
+      changes: row.run_changes,
+      floor: row.run_changes >= 2 ? Math.min(row.flap_floor ?? row.version, row.version) : null,
+    },
+    ahead: stop.verdict === 'ahead',
+  };
+}
+
 /** What one start read back from the stored record (`A-61`). */
 export interface RestoredStops {
   /** Entries taken up, each with what was left of its grace. */
@@ -901,6 +1078,8 @@ export interface RestoredStops {
   spent: number;
   /** Sensors taken up as what a probe's last configuration left it (`A-68`). */
   left: number;
+  /** Probes whose protocol version was still flapping when the core stopped, and is (`A-72`). */
+  flapping: number;
 }
 
 /** What one boot's `adopt` did. */
@@ -981,6 +1160,13 @@ export interface ReportedBatch {
    */
   readonly late: number;
   /**
+   * Results of any kind for a sensor this probe's last configuration withheld (`A-72`): the core
+   * is not sending it the sensor, so whatever it says of it was made under a configuration
+   * before. Not in `results`: never a failed scan, so a sensor let go does not open with a Down
+   * nobody can read. Holding nothing and letting nothing go. Counted by the caller.
+   */
+  readonly withheldDropped: number;
+  /**
    * Says what became of `results`. Stored, a master among the sensors they let go settles what
    * depends on it. Not stored, the sensors are held again as they were: the probe sends the batch
    * again, and lets them go then. Never throws.
@@ -1037,7 +1223,11 @@ export class CredentialVouching {
   #epoch: string | null = null;
   /** Keyed by account and role: a role is a ceiling, and changing it does not move the epoch. */
   readonly #writable = new Map<string, Map<number, boolean>>();
-  readonly #withheldByProbe = new Map<number, number>();
+  /**
+   * What each probe's last configuration withheld, by sensor, with the sentence (`A-41`). A
+   * result from the probe for one of these is dropped (`A-72`).
+   */
+  readonly #withheldByProbe = new Map<number, ReadonlyMap<number, string>>();
   /** What each probe is refusing to scan, by sensor (`A-41c`). */
   readonly #refusedByProbe = new Map<number, Map<number, ProbeRefusal>>();
   /**
@@ -1070,6 +1260,18 @@ export class CredentialVouching {
    * and read back at start.
    */
   readonly #versionSent = new Map<number, number>();
+  /**
+   * What each probe's protocol version has done lately (`A-72`): the version its last
+   * configuration was built for, and the run of changes that ended in it. A flap is judged from
+   * this, and it is stored, one row a probe, so a core restarted in the middle of one still holds.
+   */
+  readonly #versions = new Map<number, VersionRecord>();
+  /** Probes whose version record has moved since it was last stored (`A-72`). */
+  readonly #versionsUnsaved = new Set<number>();
+  /** Probes whose late-refusal rows the next write is to store (`A-61`). */
+  readonly #graceDue = new Set<number>();
+  readonly #flapHoldMs: number;
+  readonly #onFlapOver: ((probeIds: readonly number[]) => void) | undefined;
   /** Probes whose entries here are not what the table holds: a write failed. Written again. */
   readonly #unsaved = new Set<number>();
   /** Each probe's write that is running, and the one waiting behind it (`#saved`). */
@@ -1091,6 +1293,8 @@ export class CredentialVouching {
     this.#now = options.now ?? ((): number => performance.now());
     this.#wallNow = options.wallNow ?? ((): number => Date.now());
     this.#saveWaitMs = options.saveWaitMs ?? LATE_REFUSAL_SAVE_WAIT_MS;
+    this.#flapHoldMs = Math.max(0, options.protocolFlapHoldMs ?? PROTOCOL_FLAP_HOLD_MS);
+    this.#onFlapOver = options.onProtocolFlapOver;
     this.#db = options.db;
     this.#logger = options.logger.child({ component: 'credential-vouching' });
     this.#types = options.sensorTypes;
@@ -1101,9 +1305,39 @@ export class CredentialVouching {
 
   stats(): CredentialVouchingStats {
     let withheld = 0;
-    for (const count of this.#withheldByProbe.values()) withheld += count;
+    for (const refused of this.#withheldByProbe.values()) withheld += refused.size;
     for (const refused of this.#refusedByProbe.values()) withheld += refused.size;
     return { checked: this.#checked, withheld, recordWritesGivenUp: this.#recordWritesGivenUp };
+  }
+
+  /**
+   * The flap this probe's protocol version is in now, or null when it is in none (`A-72`): for
+   * Probe Health, which raises the one warning that names it.
+   */
+  protocolFlap(probeId: number): ProtocolFlap | null {
+    const record = this.#versions.get(probeId);
+    const now = this.#now();
+    if (!isFlapping(record, now, this.#flapHoldMs)) return null;
+    return {
+      version: record.version,
+      floor: record.floor,
+      changes: record.changes,
+      sinceMs: Math.max(0, now - record.since),
+      remainingMs: Math.max(0, this.#flapHoldMs - (now - record.changedAt)),
+    };
+  }
+
+  /**
+   * The version a configuration for this probe is judged at, when it speaks `peerVersion`
+   * (`A-72`): that version, or while the probe's version flaps, the lowest it has spoken since
+   * the flap began. Asks, and records nothing: "check now" is decided by it, so that pressing the
+   * button on a sensor a flap holds says what the sensor says.
+   */
+  judgedVersion(probeId: number, peerVersion: number): number {
+    const record = this.#versions.get(probeId);
+    return isFlapping(record, this.#now(), this.#flapHoldMs)
+      ? Math.min(record.floor, peerVersion)
+      : peerVersion;
   }
 
   /**
@@ -1225,26 +1459,34 @@ export class CredentialVouching {
    *
    * The whole answer for the probe, so a sensor withheld last time and not sent now — paused,
    * moved to another probe, vouched for again — is let go.
+   *
+   * **Judged at the version a flap holds** (`A-72`). The version the probe speaks is noted first;
+   * while it flaps, every decision below that turns on a version is made at the lowest it has
+   * spoken since the flap began, so the sensors it decides stand as they stood and nothing a
+   * version decides moves until it has held for `PROTOCOL_FLAP_HOLD_MS`. Never higher than the
+   * version spoken: a probe is never sent a set it cannot be trusted with.
    */
   async withhold(
     probeId: number,
     sensors: readonly SensorBeingSent[],
     peerVersion: number = PROTOCOL_VERSION,
   ): Promise<Map<number, string>> {
+    const judged = this.#noteVersion(probeId, peerVersion);
     const left = new Set<number>();
-    const refused = await this.#check(probeId, sensors, peerVersion, left);
+    const refused = await this.#check(probeId, sensors, judged, left);
     // A sensor refused for another of its kinds is not sent at all, and so not the probe's.
     for (const sensorId of refused.keys()) left.delete(sensorId);
-    const otherwise = await this.#leftUnderVersionBefore(probeId, sensors, peerVersion, left);
+    const otherwise = await this.#leftUnderVersionBefore(probeId, sensors, judged, left);
     const stopped = this.#noteStopped(probeId, left, otherwise);
-    const moved = this.#noteLeft(probeId, left, peerVersion) || stopped;
+    const moved = this.#noteLeft(probeId, left, judged) || stopped;
     // Stored before this configuration is handed to anybody (`A-61`), and only when it changed
     // what is recorded, which most configurations do not: a steady build writes nothing. Waited
     // for within a bound, and never behind another probe's write.
-    if (moved || this.#unsaved.has(probeId)) await this.#saved(probeId);
-    const before = this.#withheldByProbe.get(probeId) ?? 0;
+    const grace = moved || this.#unsaved.has(probeId);
+    if (grace || this.#versionsUnsaved.has(probeId)) await this.#saved(probeId, grace);
+    const before = this.#withheldByProbe.get(probeId)?.size ?? 0;
     if (refused.size === 0) this.#withheldByProbe.delete(probeId);
-    else this.#withheldByProbe.set(probeId, refused.size);
+    else this.#withheldByProbe.set(probeId, new Map(refused));
     if (refused.size !== before) {
       this.#logger.info(
         { probeId, withheld: refused.size, before },
@@ -1258,6 +1500,42 @@ export class CredentialVouching {
     const sent = new Set(sensors.map((sensor) => sensor.sensorId).filter((id) => !refused.has(id)));
     await this.#keepReported(probeId, (sensorId) => sent.has(sensorId));
     return refused;
+  }
+
+  /**
+   * Notes the version a configuration is being built for, and says what it is judged at
+   * (`A-72`): the version, or the floor of a flap.
+   *
+   * **A change of version is what is recorded, and stored**: the first configuration a probe is
+   * built on this core, and each one under another version than the last. A steady build moves
+   * nothing and writes nothing, as `A-61`'s record does not. What a probe can make the core write
+   * by this is one row, its own, once per reconnect under another version.
+   *
+   * A version that is not a positive whole number is judged as it is and recorded nowhere: every
+   * caller passes a live session's, and the column takes nothing else.
+   */
+  #noteVersion(probeId: number, peerVersion: number): number {
+    if (!Number.isSafeInteger(peerVersion) || peerVersion <= 0) return peerVersion;
+    const now = this.#now();
+    const record = this.#versions.get(probeId);
+    const next = nextVersionRecord(record, peerVersion, now, this.#flapHoldMs);
+    if (next !== record) {
+      // A record that has only aged is not written: its time says what it is at the next start.
+      if (record === undefined || next.version !== record.version) {
+        this.#versionsUnsaved.add(probeId);
+      }
+      this.#versions.set(probeId, next);
+      if (next.changes === 2 && next.version !== record?.version) {
+        this.#logger.warn(
+          { probeId, version: next.version, floor: next.floor, holdMs: this.#flapHoldMs },
+          'a probe’s protocol version changed twice inside the hold; the sensors its version ' +
+            'decides hold where they stood until it has held one version for the hold',
+        );
+      }
+    }
+    return isFlapping(next, now, this.#flapHoldMs)
+      ? Math.min(next.floor, peerVersion)
+      : peerVersion;
   }
 
   /**
@@ -1422,21 +1700,107 @@ export class CredentialVouching {
    * the failed scan it had been before `A-61`.
    */
   async #save(probeId: number, write: RecordWrite): Promise<void> {
-    const entries = [...(this.#stoppedLeaving.get(probeId) ?? [])];
+    // What this write is for, taken as it runs: a request made while it waited its turn is in it.
+    const grace = this.#graceDue.delete(probeId);
+    const version = this.#versionsUnsaved.delete(probeId) ? this.#versions.get(probeId) : undefined;
+    if (!grace && version === undefined) return;
+    const entries = grace ? [...(this.#stoppedLeaving.get(probeId) ?? [])] : [];
     const sensorIds = entries.map(([sensorId]) => sensorId);
     const wall = this.#wallNow();
     const now = this.#now();
     const stoppedAtMs = entries.map(([, at]) => wall - (now - at));
-    const leftIds = [...(this.#leftToProbe.get(probeId) ?? [])];
+    const leftIds = grace ? [...(this.#leftToProbe.get(probeId) ?? [])] : [];
     const leftVersion = this.#versionSent.get(probeId) ?? null;
+    const onWall = (at: number | null): number | null => (at === null ? null : wall - (now - at));
     try {
-      const written = await this.#db.tx(async (q) => {
+      const { written, versionWritten } = await this.#db.tx(async (q) => {
         await q.query(
           `SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)`,
           [`${String(LATE_REFUSAL_SAVE_LOCK_MS)}ms`, `${String(LATE_REFUSAL_SAVE_STATEMENT_MS)}ms`],
         );
-        return q.query<{ sensor_id: string }>(
-          `WITH gone AS (
+        const rows = grace
+          ? await this.#saveGrace(q, probeId, sensorIds, stoppedAtMs, leftIds, leftVersion)
+          : [];
+        // The probe's own row (`A-72`), in the same transaction and under the same bounds: a probe
+        // that is gone writes nothing, as a sensor that is gone does above.
+        const versionRows =
+          version === undefined
+            ? []
+            : await q.query<{ probe_id: string }>(
+                `INSERT INTO probe_protocol_flap
+                   (probe_id, version, changed_at, run_since, run_changes, flap_floor)
+                 SELECT p.id, $2::integer, to_timestamp($3::float8 / 1000.0),
+                        to_timestamp($4::float8 / 1000.0), $5::integer, $6::integer
+                 FROM object p WHERE p.id = $1
+                 ON CONFLICT (probe_id) DO UPDATE
+                   SET version = EXCLUDED.version, changed_at = EXCLUDED.changed_at,
+                       run_since = EXCLUDED.run_since, run_changes = EXCLUDED.run_changes,
+                       flap_floor = EXCLUDED.flap_floor
+                 RETURNING probe_id::text AS probe_id`,
+                [
+                  probeId,
+                  version.version,
+                  onWall(version.changedAt),
+                  onWall(version.since),
+                  version.changes,
+                  version.floor,
+                ],
+              );
+        return { written: rows, versionWritten: versionRows.length > 0 };
+      });
+      // A probe that is gone has no record to keep, and nothing to write again.
+      if (version !== undefined && !versionWritten && this.#versions.get(probeId) === version) {
+        this.#versions.delete(probeId);
+      }
+      if (!grace) return;
+      this.#unsaved.delete(probeId);
+      // What was not written has no sensor, or no probe, to be about any more.
+      const stored = new Set(written.map((row) => Number(row.sensor_id)));
+      const stopped = this.#stoppedLeaving.get(probeId);
+      for (const [sensorId, at] of entries) {
+        if (!stored.has(sensorId) && stopped?.get(sensorId) === at) stopped.delete(sensorId);
+      }
+      if (stopped?.size === 0) this.#stoppedLeaving.delete(probeId);
+    } catch (error: unknown) {
+      if (grace) this.#unsaved.add(probeId);
+      if (version !== undefined) this.#versionsUnsaved.add(probeId);
+      this.#gaveUp(write);
+      const fields = {
+        probeId,
+        entries: sensorIds.length,
+        left: leftIds.length,
+        version: version?.version ?? null,
+        err: describeError(error),
+      };
+      if (gaveWay(error)) {
+        this.#logger.warn(
+          fields,
+          'gave up storing which sensors a configuration stopped leaving to a probe, or what its ' +
+            'protocol version has done, for a lock or for time; it is written again at the next ' +
+            'configuration or within a minute',
+        );
+      } else {
+        this.#logger.error(
+          fields,
+          'could not store which sensors a configuration stopped leaving to a probe, or what its ' +
+            'protocol version has done; a core restarted before the next write reads a late ' +
+            'refusal for them as a failed scan, and does not know the probe was flapping',
+        );
+      }
+    }
+  }
+
+  /** The late-refusal rows of one probe, as `#save` writes them (`A-61`, `A-68`). */
+  #saveGrace(
+    q: Queryable,
+    probeId: number,
+    sensorIds: readonly number[],
+    stoppedAtMs: readonly number[],
+    leftIds: readonly number[],
+    leftVersion: number | null,
+  ): Promise<{ sensor_id: string }[]> {
+    return q.query<{ sensor_id: string }>(
+      `WITH gone AS (
              DELETE FROM late_refusal_grace
              WHERE probe_id = $1
                AND sensor_id <> ALL($2::bigint[]) AND sensor_id <> ALL($4::bigint[])
@@ -1457,40 +1821,8 @@ export class CredentialVouching {
            ON CONFLICT (probe_id, sensor_id) DO UPDATE
              SET stopped_at = EXCLUDED.stopped_at, left_version = EXCLUDED.left_version
            RETURNING sensor_id::text AS sensor_id`,
-          [probeId, sensorIds, stoppedAtMs, leftIds, leftVersion],
-        );
-      });
-      this.#unsaved.delete(probeId);
-      // What was not written has no sensor, or no probe, to be about any more.
-      const stored = new Set(written.map((row) => Number(row.sensor_id)));
-      const stopped = this.#stoppedLeaving.get(probeId);
-      for (const [sensorId, at] of entries) {
-        if (!stored.has(sensorId) && stopped?.get(sensorId) === at) stopped.delete(sensorId);
-      }
-      if (stopped?.size === 0) this.#stoppedLeaving.delete(probeId);
-    } catch (error: unknown) {
-      this.#unsaved.add(probeId);
-      this.#gaveUp(write);
-      const fields = {
-        probeId,
-        entries: sensorIds.length,
-        left: leftIds.length,
-        err: describeError(error),
-      };
-      if (gaveWay(error)) {
-        this.#logger.warn(
-          fields,
-          'gave up storing which sensors a configuration stopped leaving to a probe, for a ' +
-            'lock or for time; it is written again at the next configuration or within a minute',
-        );
-      } else {
-        this.#logger.error(
-          fields,
-          'could not store which sensors a configuration stopped leaving to a probe; a core ' +
-            'restarted before the next write reads a late refusal for them as a failed scan',
-        );
-      }
-    }
+      [probeId, sensorIds, stoppedAtMs, leftIds, leftVersion],
+    );
   }
 
   /**
@@ -1506,7 +1838,9 @@ export class CredentialVouching {
    * answers or a pool with none to give, so the caller is let go after `#saveWaitMs` whatever
    * the write is doing, with the probe marked for the next configuration or prune to write again.
    */
-  #saved(probeId: number): Promise<void> {
+  #saved(probeId: number, grace = true): Promise<void> {
+    // What is due is marked now, and taken by whichever write runs next for the probe.
+    if (grace) this.#graceDue.add(probeId);
     let waiting = this.#saveWaiting.get(probeId);
     if (waiting === undefined) {
       const before = this.#saveRunning.get(probeId) ?? Promise.resolve();
@@ -1525,7 +1859,9 @@ export class CredentialVouching {
     const write = waiting.done;
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
-        this.#unsaved.add(probeId);
+        // The version record needs no mark: a write that has not landed puts its own back when
+        // it ends, and one that never ends holds every write behind it in the line regardless.
+        if (grace) this.#unsaved.add(probeId);
         this.#gaveUp(asked);
         this.#logger.warn(
           { probeId, waitedMs: this.#saveWaitMs },
@@ -1592,10 +1928,45 @@ export class CredentialVouching {
               left_version
        FROM late_refusal_grace`,
     );
+    const versions = await this.#db.query<{
+      probe_id: string;
+      version: number;
+      changed_ms: string | null;
+      since_ms: string | null;
+      run_changes: number;
+      flap_floor: number | null;
+    }>(
+      `SELECT probe_id::text AS probe_id, version,
+              (extract(epoch FROM changed_at) * 1000)::float8::text AS changed_ms,
+              (extract(epoch FROM run_since) * 1000)::float8::text AS since_ms,
+              run_changes, flap_floor
+       FROM probe_protocol_flap`,
+    );
     const wall = this.#wallNow();
     const now = this.#now();
-    const tally: RestoredStops = { restored: 0, ahead: 0, remembered: 0, spent: 0, left: 0 };
+    const tally: RestoredStops = {
+      restored: 0,
+      ahead: 0,
+      remembered: 0,
+      spent: 0,
+      left: 0,
+      flapping: 0,
+    };
     const rewrite = new Set<number>();
+    /** Probes whose version record is to be written again: a time ahead of this clock (`A-72`). */
+    const versionsAhead = new Set<number>();
+    for (const row of versions) {
+      const probeId = Number(row.probe_id);
+      // A probe this core has built a configuration for keeps what that one said.
+      if (this.#versions.has(probeId)) continue;
+      const restored = restoredVersion(row, wall, now, this.#flapHoldMs);
+      this.#versions.set(probeId, restored.record);
+      if (restored.ahead) {
+        this.#versionsUnsaved.add(probeId);
+        versionsAhead.add(probeId);
+      }
+      if (isFlapping(restored.record, now, this.#flapHoldMs)) tally.flapping += 1;
+    }
     // What each probe was last left, and under which version (`A-68`): what the first
     // configuration this core builds for it is compared with. A probe this core has already
     // built one for, were it ever to have, keeps what that one said.
@@ -1642,11 +2013,17 @@ export class CredentialVouching {
         rewrite.add(probeId);
       }
     }
-    await Promise.all([...rewrite].map((probeId) => this.#saved(probeId)));
-    if (rows.length > 0) {
-      this.#logger[tally.ahead > 0 ? 'warn' : 'info'](
-        { ...tally },
-        tally.ahead > 0
+    await Promise.all([
+      ...[...rewrite].map((probeId) => this.#saved(probeId)),
+      ...[...versionsAhead]
+        .filter((probeId) => !rewrite.has(probeId))
+        .map((probeId) => this.#saved(probeId, false)),
+    ]);
+    if (rows.length > 0 || versions.length > 0) {
+      const ahead = tally.ahead + versionsAhead.size;
+      this.#logger[ahead > 0 ? 'warn' : 'info'](
+        { ...tally, versions: versions.length, versionsAhead: versionsAhead.size },
+        ahead > 0
           ? 'read which sensors a configuration stopped leaving to a probe; some were stored at ' +
               'a time ahead of this clock, which was set back, and are given the grace from now'
           : 'read which sensors a configuration stopped leaving to a probe',
@@ -1674,8 +2051,38 @@ export class CredentialVouching {
       }
       if (stopped.size === 0) this.#stoppedLeaving.delete(probeId);
     }
+    // A flap whose version has held for the hold is over (`A-72`). Nothing is written for it: the
+    // stored time says the same at the next start. Whoever builds configurations is told, so
+    // what it held is let go now and not at the probe's next reconnect.
+    const over: number[] = [];
+    for (const [probeId, record] of this.#versions) {
+      if (record.floor === null || isFlapping(record, now, this.#flapHoldMs)) continue;
+      this.#versions.set(probeId, settledRecord(record, now, this.#flapHoldMs));
+      over.push(probeId);
+    }
+    if (over.length > 0) {
+      this.#logger.info(
+        { probeIds: over, holdMs: this.#flapHoldMs },
+        'a probe’s protocol version has held for the hold; what its flap held is let go at the ' +
+          'next configuration',
+      );
+      try {
+        this.#onFlapOver?.(over);
+      } catch (error: unknown) {
+        this.#logger.error(
+          { probeIds: over, err: describeError(error) },
+          'could not ask for the configurations of probes whose flap is over; each is let go ' +
+            'at its next one',
+        );
+      }
+    }
     // Together: each probe has its own line, and none of them waits past its bound.
-    await Promise.all([...moved].map((probeId) => this.#saved(probeId)));
+    await Promise.all([
+      ...[...moved].map((probeId) => this.#saved(probeId)),
+      ...[...this.#versionsUnsaved]
+        .filter((probeId) => !moved.has(probeId))
+        .map((probeId) => this.#saved(probeId, false)),
+    ]);
   }
 
   /** Whether a configuration stopped leaving this sensor to the probe within the grace. */
@@ -1712,6 +2119,13 @@ export class CredentialVouching {
    * or lasts longer by it, only an error with no readings is taken, only for a sensor this probe
    * was left, and only inside the grace.
    *
+   * **A result for a sensor the core withholds from this probe is dropped, whatever it is**
+   * (`A-72`). The probe's last configuration did not send it the sensor, so the result was made
+   * under one before. Past the grace a marked one used to be the failed scan its mark had no claim
+   * to, while the sensor stood Unknown for the core's own reason, and two of them were a Down the
+   * sensor opened with when it was let go, in words that no longer applied. It is counted
+   * (`withheldDropped`) and nothing else: no failed scan, no hold, no release.
+   *
    * **The next result that is not a refusal lets it go, and that result decides the sensor.** The
    * hold is dropped without re-deciding anything, so the machine makes one transition, from
    * Unknown to what the result says. Re-decided first, a sensor that was Down before the refusal
@@ -1732,9 +2146,16 @@ export class CredentialVouching {
     /** When the machine last took a result for a sensor, if it has. */
     lastResultAt: (sensorId: number) => Date | null | undefined = () => undefined,
   ): Promise<ReportedBatch> {
-    // Nothing held by anyone and nothing marked, which is every batch of every probe but a few.
-    if (this.#refusedByProbe.size === 0 && !results.some((result) => result.withheld === true)) {
-      return { results, unearned: 0, late: 0, stored: NOTHING_LET_GO };
+    /** What this probe's last configuration withheld (`A-72`). */
+    const withheldHere = this.#withheldByProbe.get(probeId);
+    // Nothing held by anyone, nothing withheld from this probe and nothing marked, which is every
+    // batch of every probe but a few.
+    if (
+      this.#refusedByProbe.size === 0 &&
+      withheldHere === undefined &&
+      !results.some((result) => result.withheld === true)
+    ) {
+      return { results, unearned: 0, late: 0, withheldDropped: 0, stored: NOTHING_LET_GO };
     }
 
     const held = this.#refusedByProbe.get(probeId);
@@ -1748,6 +2169,7 @@ export class CredentialVouching {
     let news: number | undefined;
     let unearned = 0;
     let late = 0;
+    let withheldDropped = 0;
     const inOrder = [...results].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
     for (const result of inOrder) {
       const at = Date.parse(result.at);
@@ -1759,6 +2181,15 @@ export class CredentialVouching {
       if (refusal && !earned && this.#stoppedWithinGrace(probeId, result.sensorId)) {
         // Made under the configuration before this one (`A-53`). Neither kept nor held.
         late += 1;
+        continue;
+      }
+      if (withheldHere?.has(result.sensorId) === true) {
+        // **The core is not sending this probe the sensor** (`A-72`), so whatever the probe says
+        // of it was made under a configuration before, past the grace or with no grace at all.
+        // Taken as a failed scan, two of them were a Down the sensor opened with when it was let
+        // go, in words nobody could place. Dropped instead, and counted: it measures nothing,
+        // holds nothing and lets nothing go, whatever it is, a reading included.
+        withheldDropped += 1;
         continue;
       }
       if (!earned) {
@@ -1827,11 +2258,14 @@ export class CredentialVouching {
       if (other !== probeId) release(other, [...measured]);
     }
 
-    if (releases.length === 0) return { results: kept, unearned, late, stored: NOTHING_LET_GO };
+    if (releases.length === 0) {
+      return { results: kept, unearned, late, withheldDropped, stored: NOTHING_LET_GO };
+    }
     return {
       results: kept,
       unearned,
       late,
+      withheldDropped,
       stored: async (landed) => {
         for (const { probeId: owner, was, hold } of releases) {
           if (landed) {
@@ -1863,6 +2297,7 @@ export class CredentialVouching {
         ...this.#leftToProbe.keys(),
         ...this.#stoppedLeaving.keys(),
         ...this.#withheldByProbe.keys(),
+        ...this.#versions.keys(),
       ]);
       if (probes.size === 0) return;
       const sensors = new Set<number>();
@@ -1904,6 +2339,10 @@ export class CredentialVouching {
         this.#stoppedLeaving.delete(probeId);
         this.#versionSent.delete(probeId);
         this.#unsaved.delete(probeId);
+        // Its version record went with it too (`A-72`).
+        this.#versions.delete(probeId);
+        this.#versionsUnsaved.delete(probeId);
+        this.#graceDue.delete(probeId);
         if (this.#withheldByProbe.delete(probeId)) {
           await this.#vouching?.settle(`credentials:${String(probeId)}`, new Map());
         }

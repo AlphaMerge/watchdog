@@ -10,6 +10,7 @@ import {
   type Logger,
 } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
+import type { ProtocolFlap } from '../objects/credential-vouching.js';
 import { storedVoucher, type VoucherCheck } from '../objects/vouching.js';
 import type { TimeRefusals } from '../ingestion/service.js';
 import type { DeliveryVerdict } from '../probes/delivery.js';
@@ -52,6 +53,16 @@ export interface ProbeHealthSources {
    * not count them, and then the channel gaps.
    */
   lateRefusals?: (probeObjectId: number) => number;
+  /**
+   * How many of this probe's results were for a sensor the core withholds from it, and dropped
+   * (`A-72`), from `ProbeRefusals.withheldFor`. Absent, the channel gaps.
+   */
+  withheldResults?: (probeObjectId: number) => number;
+  /**
+   * The flap this probe's protocol version is in, or null when none (`A-72`), from
+   * `CredentialVouching.protocolFlap`. Absent, the channel gaps and the sentence says nothing.
+   */
+  protocolFlap?: (probeObjectId: number) => ProtocolFlap | null;
   /**
    * How many of this probe's sensors its clock has frozen (`P-232`). Absent on a build without
    * the sweep, and then the channel gaps.
@@ -324,6 +335,11 @@ export class ProbeHealthService {
     // is wrong, only the core it is compared against can.
     const refused = this.#sources.timeRefusals?.(link.gid) ?? null;
     const refusals = this.#sources.refusals?.(probeObjectId);
+    // `undefined` when nothing says, which gaps; null when the probe is in no flap (`A-72`).
+    const flap =
+      this.#sources.protocolFlap === undefined
+        ? undefined
+        : this.#sources.protocolFlap(probeObjectId);
 
     const reading: ProbeHealthReading = {
       ...blank(),
@@ -339,11 +355,17 @@ export class ProbeHealthService {
       // A skew of `unknown` gaps rather than taking a code: a lookup maps a reading to a state
       // and has no Unknown to map to, so the honest answer is no reading.
       protocol: skewCode(skew.kind),
+      // How many times the version changed in the run that made it a flap, and 0 in none: a
+      // probe that is not flapping is a reading, not a gap (`A-72`).
+      protocolFlap: flap === undefined ? null : (flap?.changes ?? 0),
       reportsRefused: refusals?.refused ?? null,
       reportsForeign: refusals?.foreignRecently ?? null,
       // Not among `reportsRefused` (`A-56`): the probe refused honestly, under a configuration
       // it no longer has, and the two have to be told apart on the sensor.
       lateRefusals: this.#sources.lateRefusals?.(probeObjectId) ?? null,
+      // Apart from both again (`A-72`): results the probe made for a sensor the core has since
+      // stopped sending it, dropped. Nothing is wrong with the probe.
+      resultsWithheld: this.#sources.withheldResults?.(probeObjectId) ?? null,
       schedulerLag: health?.schedulerLagMs?.p95 ?? null,
       poolUsage: poolUsage(health?.poolBusy, health?.poolSize),
       // Absent below protocol 19 (`P-236`); the memory cap also wherever memory cannot be read.
@@ -466,6 +488,7 @@ export class ProbeHealthService {
         options.coreClockOwned === true && link.clockOffsetMs !== null
           ? -link.clockOffsetMs / 1_000
           : undefined,
+        flap ?? undefined,
       ),
     };
   }
@@ -817,6 +840,8 @@ function describe(
    * reports it as the core's clock (`P-247`). Said in words, since the channels gap.
    */
   aheadOfCoreSeconds?: number,
+  /** The flap the probe's protocol version is in, which the sentence names (`A-72`). */
+  flap?: ProtocolFlap,
 ): string {
   const parts: string[] = [];
   const scheduled = reading['scheduled'];
@@ -825,6 +850,16 @@ function describe(
       ? 'connected'
       : `connected, ${String(scheduled)} sensors scheduled`,
   );
+  // **The flap, named** (`A-72`): first, because it is why sensors under this probe are Unknown
+  // and say nothing of it themselves, and the core's, so on a probe of any version.
+  if (flap !== undefined) {
+    parts.push(
+      `its protocol version changed ${String(flap.changes)} times in ${minutes(flap.sinceMs)} ` +
+        `and is ${String(flap.version)} now, so the sensors its version decides hold where they ` +
+        `stood, as at protocol ${String(flap.floor)}, until it has held one version for an hour ` +
+        `(${minutes(flap.remainingMs)} from now if it holds)`,
+    );
+  }
   // Before the probe's own numbers, because it is the core's and reads on a probe of any version
   // — and because it is the one part of this sentence that is about trust rather than load.
   const foreign = reading['reportsForeign'];
@@ -886,6 +921,12 @@ function describe(
   // sentence: `outdated` says upgrade the probe, `ahead` says upgrade this core (`P-178`).
   if (skew.kind === 'outdated' || skew.kind === 'ahead') parts.push(explainSkew(skew));
   return parts.join(', ');
+}
+
+/** A span as an operator reads it in a sentence: whole minutes, rounded up, never none. */
+function minutes(ms: number): string {
+  const whole = Math.max(1, Math.ceil(ms / 60_000));
+  return `${String(whole)} minute${whole === 1 ? '' : 's'}`;
 }
 
 function round(value: number, places: number): number {

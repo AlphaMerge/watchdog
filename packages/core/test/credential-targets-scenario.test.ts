@@ -244,6 +244,9 @@ describe(
         sensorTypes: gate,
         rights: (principal, objectIds, q) => access.resolveManyFor(principal, objectIds, q),
         vouching,
+        // A case here asks as a probe at 22 and then at 21 of one probe, which is not a probe
+        // reconnecting: no flap is held (`A-72`, whose scenarios are in credential-pinning).
+        protocolFlapHoldMs: 0,
       });
       config = new ProbeConfigService({
         db,

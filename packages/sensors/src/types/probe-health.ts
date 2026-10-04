@@ -69,6 +69,22 @@ const CHANNELS: readonly ChannelDef[] = [
     name: 'Protocol version skew',
     lookup: 'ms.probe.protocol',
   },
+  // **A probe whose protocol version will not settle** (`A-72`). The version decides whether a
+  // probe is left its named sensors, so each change withheld them or let them go: a page or a
+  // recovery for every such sensor, every time. From a second change inside an hour the core holds
+  // them where they stood, and this is the one warning in their place: how many times the version
+  // has changed in the run, 0 when it is not flapping. It clears when the version has held an
+  // hour. The core's own number, read on a probe of any version.
+  {
+    key: 'protocolFlap',
+    name: 'Protocol version changes in a flap',
+    unit: 'changes',
+    limits: {
+      upperWarning: 1.5,
+      warningMessage:
+        "this probe's protocol version changed more than once in an hour; the sensors its version decides hold where they stood until it has held one version for an hour",
+    },
+  },
   // **What the core refused from this probe** (`P-228`). A probe may report on the sensors under
   // it, answer the queries put to it and progress the discovery runs dispatched to it, and the
   // core now refuses anything else where it arrives. Both are the core's own numbers, like the
@@ -103,6 +119,16 @@ const CHANNELS: readonly ChannelDef[] = [
   // should not behind every change to a set's targets. No limit and no lookup, so no state and
   // no alarm: it rises after such a change and stops. The core's own number, like the two above.
   { key: 'lateRefusals', name: 'Refusals delivered late', unit: 'results', counter: { bits: 64 } },
+  // **Results for a sensor the core withholds from this probe** (`A-72`), of any kind, dropped:
+  // its configuration does not carry the sensor, so each was made under one before. Counted
+  // apart from `reportsRefused` for `lateRefusals`' reason: the probe did nothing wrong. No limit
+  // and no lookup, so no state and no alarm. The core's own number.
+  {
+    key: 'resultsWithheld',
+    name: 'Results for sensors withheld',
+    unit: 'results',
+    counter: { bits: 64 },
+  },
   // **Only the wheel can measure this**, because only it knows the instant each tick should have
   // run at (`P-01`). p95 rather than the mean: a scheduler is late in bursts.
   {

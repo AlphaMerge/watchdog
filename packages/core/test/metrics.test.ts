@@ -478,6 +478,47 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       );
     });
 
+    it('exports a probe’s results dropped for withheld sensors, and its version flap, and neither where nothing knows them (`A-72`)', async () => {
+      const label = `{probe="${String(probeId)}"}`;
+      let dropped = 2;
+      let changes: number | null = 5;
+      const core = coreHealth();
+      const probe = new ProbeHealthService({
+        vouching: everyVoucherHolds,
+        db,
+        logger: silent,
+        sources: {
+          link: () => connected,
+          withheldResults: () => dropped,
+          protocolFlap: () =>
+            changes === null
+              ? null
+              : { version: 24, floor: 23, changes, sinceMs: 60_000, remainingMs: 60_000 },
+        },
+        ingest: () => Promise.resolve(),
+      });
+      const exports = new MetricsExporter({
+        db,
+        logger: silent,
+        coreHealth: () => core,
+        probeHealth: () => probe,
+      });
+      const first = (await exports.scrape()).body;
+      assert.equal(parse(first).get(`ms_probe_results_withheld_total${label}`), 2);
+      assert.equal(parse(first).get(`ms_probe_protocol_flap_changes${label}`), 5);
+      assert.match(first, /^# TYPE ms_probe_results_withheld_total counter$/mu);
+      assert.match(first, /^# TYPE ms_probe_protocol_flap_changes gauge$/mu);
+      dropped = 3;
+      changes = null;
+      const second = parse((await exports.scrape()).body);
+      assert.equal(second.get(`ms_probe_results_withheld_total${label}`), 3);
+      assert.equal(second.get(`ms_probe_protocol_flap_changes${label}`), 0, 'no flap is a 0');
+
+      const without = parse((await varying(() => connected).scrape()).body);
+      assert.equal(without.has(`ms_probe_results_withheld_total${label}`), false);
+      assert.equal(without.has(`ms_probe_protocol_flap_changes${label}`), false);
+    });
+
     it('exports a probe’s late refusals apart from the reports refused from it (`A-56`)', async () => {
       const label = `{probe="${String(probeId)}"}`;
       let late = 3;
