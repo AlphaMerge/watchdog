@@ -16851,9 +16851,13 @@ because each is a decision rather than a defect:
         `onBodyObject('read', 'masterId')` declaration is gone, since keeping it would make two
         checks. To a caller who cannot see everything, a hidden master and a missing one are
         both `AUTH_FORBIDDEN` "a master has to be a sensor you can read, and object N does not
-        exist or you cannot read it", whatever kind the hidden object is. It is checked before
-        `setDependency` writes anything, so leaving "master for parent device" is not left half
-        done. An `OBJECT_CYCLE`'s `details.path` has `null` for each step the caller cannot see.
+        exist or you cannot read it", whatever kind the hidden object is. A missing master and a
+        hidden one make the same queries: the visibility question is asked whatever the read
+        found, so a round trip saved does not say which ids exist. `setDependency` is one
+        transaction, so a refusal of any kind (a hidden master, a master that is not a sensor, a
+        loop) leaves the parent device's master as it was, for administrators too. Before, that
+        clear committed in a transaction of its own ahead of the refusal. An `OBJECT_CYCLE`'s
+        `details.path` has `null` for each step the caller cannot see.
         Bulk outcomes now carry any `AppError`'s own code, where an `AuthError` was
         `INTERNAL_ERROR`.
       - **Id-only oracles.**
@@ -16876,12 +16880,14 @@ because each is a decision rather than a defect:
         already got it from the guarded HTTP client.
 
       Tests:
-      - A new describe in `object-visibility.test.ts`, 6 tests. Each runs as the branch operator
+      - A new describe in `object-visibility.test.ts`, 7 tests. Each runs as the branch operator
         and as an administrator for the control:
         - provisioning a hidden device, a hidden Ping, a read-only device and a new host, through
           the real wiring;
         - a hidden sensor, a hidden device and an unused id as master on all three routes, plus
-          the parent device's setting surviving a refusal;
+          the parent device's master surviving every refusal: hidden, not a sensor, and a loop;
+        - the same count of repository reads and visibility questions for a hidden master as for
+          an unused id, through spies rather than timing;
         - a loop through a hidden master;
         - the group's own hidden probe answered as a wrong probe or an unused one, for a run, a
           rule and a rule edit, and a run started with the probe left out;
@@ -16893,7 +16899,7 @@ because each is a decision rather than a defect:
       - `test-send.test.ts`: one, a relay quoting the message back.
       - `docs/api-reference.md` regenerated: new descriptions, and `probeId` optional.
 
-      Mutation 12/12, each caught:
+      Mutation 13/13, each caught:
       - the hidden-device match;
       - the write check;
       - the hidden-sensor count;
@@ -16905,7 +16911,10 @@ because each is a decision rather than a defect:
       - check-now always naming the probe;
       - the implied-probe refusal;
       - email's bare outcome carrying the relay's words;
-      - `setDependency`'s early master check removed.
+      - the parent device's master cleared in a transaction of its own (this replaces the
+        mutant that removed the early master check, since the single transaction replaced that
+        check);
+      - a missing master answered without the visibility question.
 
       **Not fixed here (follow-ups):**
       - Run and rule reads (`GET /discovery/:id`, the schedules list) still return `probeId`

@@ -835,10 +835,28 @@ export class ObjectService {
     delaySeconds: number | undefined,
     pre: Precondition = { kind: 'none' },
   ): Promise<PauseView> {
-    const subject = await this.#repo.get(this.#db, id);
+    // **One transaction for the whole change** (`A-77`). Leaving "master object for parent device"
+    // clears the device's setting before the new master is written, and every refusal of that
+    // master — one the writer cannot read, one that is not a sensor, a loop — comes after. In
+    // transactions of their own, a refused request still cleared the device's master.
+    await this.#db.tx(async (q) => {
+      await this.#dependencyIn(q, writer, id, mode, masterId, delaySeconds, pre);
+    });
+    return this.pauseState(id);
+  }
+
+  async #dependencyIn(
+    q: Queryable,
+    writer: Writer,
+    id: ObjectId,
+    mode: DependencyMode,
+    masterId: ObjectId | undefined,
+    delaySeconds: number | undefined,
+    pre: Precondition,
+  ): Promise<void> {
+    const subject = await this.#repo.get(q, id);
     if (subject === null) throw notFound(id);
-    const parent =
-      subject.parentId === null ? null : await this.#repo.get(this.#db, subject.parentId);
+    const parent = subject.parentId === null ? null : await this.#repo.get(q, subject.parentId);
 
     const resolved = resolveDependencyMode(
       mode,
@@ -857,12 +875,7 @@ export class ObjectService {
       });
     }
 
-    // The master is read before anything is written (`A-77`): leaving "master object for parent
-    // device" below clears a setting first, and a refusal must not leave that half done.
     const { targetId, masterId: value } = resolved.write;
-    if (typeof value === 'number' && value !== id) {
-      await this.#seenMaster(this.#db, writer, id, value);
-    }
     const actor = actorOf(writer);
 
     // Leaving "master object for parent device" has to undo what entering it did, or the mode
@@ -872,24 +885,27 @@ export class ObjectService {
     // A sensor's parent is always a device; the hierarchy trigger enforces it, and the type
     // knows, so there is nothing to check for null here.
     if (mode !== 'device' && subject.kind === 'sensor') {
-      const parentOwn = await this.#resolver.own(subject.parentId);
+      const parentOwn = await this.#resolver.withExecutor(q).own(subject.parentId);
       if (parentOwn[DEPENDENCY_MASTER_ID.key] === id) {
-        await this.clearSetting(actor, subject.parentId, DEPENDENCY_MASTER_ID.key);
+        await this.#clearSettingIn(q, actor, subject.parentId, DEPENDENCY_MASTER_ID.key, {
+          kind: 'none',
+        });
       }
     }
 
     if (value === undefined) {
-      await this.clearSetting(actor, targetId, DEPENDENCY_MASTER_ID.key, pre);
+      await this.#clearSettingIn(q, actor, targetId, DEPENDENCY_MASTER_ID.key, pre);
     } else {
-      await this.setSetting(writer, targetId, DEPENDENCY_MASTER_ID.key, value, pre);
+      await this.#setSettingIn(q, writer, targetId, DEPENDENCY_MASTER_ID.key, value, pre);
     }
     if (delaySeconds !== undefined) {
       // On the object that carries the dependency, not the one the request named — otherwise a
       // delay set alongside "master object for parent device" would land on the sensor and be
       // inherited by nothing.
-      await this.setSetting(writer, targetId, DEPENDENCY_DELAY_SECONDS.key, delaySeconds);
+      await this.#setSettingIn(q, writer, targetId, DEPENDENCY_DELAY_SECONDS.key, delaySeconds, {
+        kind: 'none',
+      });
     }
-    return this.pauseState(id);
   }
 
   // ── simulated error (M-14) ───────────────────────────────────────────────────────────────
@@ -1335,9 +1351,10 @@ export class ObjectService {
     const master = await this.#repo.get(q, masterId);
     const sees = await voucherSight(q, writer);
     const hides = sees !== null && !sees.everything;
-    if (master !== null && (!hides || (await sees.visibleAmong(q, [masterId])).has(masterId))) {
-      return { master, sees };
-    }
+    // **Asked whatever the read found** (`A-77`), so that a missing master and a hidden one cost
+    // the same queries: answering a missing one a round trip sooner would say which ids exist.
+    const visible = !hides || (await sees.visibleAmong(q, [masterId])).has(masterId);
+    if (master !== null && visible) return { master, sees };
     if (hides) {
       throw new AuthError(
         'AUTH_FORBIDDEN',
@@ -1748,40 +1765,49 @@ export class ObjectService {
     value: unknown,
     pre: Precondition = { kind: 'none' },
   ): Promise<void> {
-    await this.#db.tx(async (q) => {
-      const object = await this.#repo.get(q, id);
-      if (object === null) throw notFound(id);
-      if (pre.kind === 'version' && object.version !== pre.expected) {
-        throw versionConflict(id, pre.expected, object.version);
-      }
+    await this.#db.tx((q) => this.#setSettingIn(q, writer, id, key, value, pre));
+  }
 
-      // A schedule id is the one setting whose value names a row in another table, and jsonb
-      // carries no foreign key. An id that resolves to nothing is a silent "never paused" —
-      // the assignment looks set, the UI shows a schedule, and monitoring never stops — so it
-      // is refused here rather than discovered when a maintenance window does not happen.
-      if (key === SCHEDULE_ID.key && typeof value === 'number' && this.#schedules !== undefined) {
-        if ((await this.#schedules.get(q, value)) === null) {
-          throw new ObjectError('OBJECT_INVALID', `no schedule ${String(value)}`, {
-            context: { objectId: id, phase: 'settings' },
-            details: { key, scheduleId: value },
-          });
-        }
-      }
+  async #setSettingIn(
+    q: Queryable,
+    writer: Writer,
+    id: ObjectId,
+    key: string,
+    value: unknown,
+    pre: Precondition,
+  ): Promise<void> {
+    const object = await this.#repo.get(q, id);
+    if (object === null) throw notFound(id);
+    if (pre.kind === 'version' && object.version !== pre.expected) {
+      throw versionConflict(id, pre.expected, object.version);
+    }
 
-      if (key === DEPENDENCY_MASTER_ID.key && typeof value === 'number') {
-        await this.#assertUsableMaster(q, writer, id, value);
+    // A schedule id is the one setting whose value names a row in another table, and jsonb
+    // carries no foreign key. An id that resolves to nothing is a silent "never paused" —
+    // the assignment looks set, the UI shows a schedule, and monitoring never stops — so it
+    // is refused here rather than discovered when a maintenance window does not happen.
+    if (key === SCHEDULE_ID.key && typeof value === 'number' && this.#schedules !== undefined) {
+      if ((await this.#schedules.get(q, value)) === null) {
+        throw new ObjectError('OBJECT_INVALID', `no schedule ${String(value)}`, {
+          context: { objectId: id, phase: 'settings' },
+          details: { key, scheduleId: value },
+        });
       }
+    }
 
-      const bound = this.#resolver.withExecutor(q);
-      const before = (await bound.own(id))[key] ?? null;
-      await bound.set(id, key, value);
-      await this.#audit.record(
-        q,
-        actorOf(writer),
-        [{ action: 'setting.set', objectId: id, key, before, after: value }],
-        new Date(),
-      );
-    });
+    if (key === DEPENDENCY_MASTER_ID.key && typeof value === 'number') {
+      await this.#assertUsableMaster(q, writer, id, value);
+    }
+
+    const bound = this.#resolver.withExecutor(q);
+    const before = (await bound.own(id))[key] ?? null;
+    await bound.set(id, key, value);
+    await this.#audit.record(
+      q,
+      actorOf(writer),
+      [{ action: 'setting.set', objectId: id, key, before, after: value }],
+      new Date(),
+    );
   }
 
   /** Reverts to inherited, discarding the local value. Transactional for the same reason. */
@@ -1791,26 +1817,34 @@ export class ObjectService {
     key: string,
     pre: Precondition = { kind: 'none' },
   ): Promise<boolean> {
-    return this.#db.tx(async (q) => {
-      const object = await this.#repo.get(q, id);
-      if (object === null) throw notFound(id);
-      if (pre.kind === 'version' && object.version !== pre.expected) {
-        throw versionConflict(id, pre.expected, object.version);
-      }
+    return this.#db.tx((q) => this.#clearSettingIn(q, actor, id, key, pre));
+  }
 
-      const bound = this.#resolver.withExecutor(q);
-      const before = (await bound.own(id))[key] ?? null;
-      const reverted = await bound.clear(id, key);
-      if (reverted) {
-        await this.#audit.record(
-          q,
-          actor,
-          [{ action: 'setting.reverted', objectId: id, key, before }],
-          new Date(),
-        );
-      }
-      return reverted;
-    });
+  async #clearSettingIn(
+    q: Queryable,
+    actor: Actor,
+    id: ObjectId,
+    key: string,
+    pre: Precondition,
+  ): Promise<boolean> {
+    const object = await this.#repo.get(q, id);
+    if (object === null) throw notFound(id);
+    if (pre.kind === 'version' && object.version !== pre.expected) {
+      throw versionConflict(id, pre.expected, object.version);
+    }
+
+    const bound = this.#resolver.withExecutor(q);
+    const before = (await bound.own(id))[key] ?? null;
+    const reverted = await bound.clear(id, key);
+    if (reverted) {
+      await this.#audit.record(
+        q,
+        actor,
+        [{ action: 'setting.reverted', objectId: id, key, before }],
+        new Date(),
+      );
+    }
+    return reverted;
   }
 
   /**

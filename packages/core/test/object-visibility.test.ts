@@ -3859,8 +3859,9 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       }
       assert.deepEqual(await harness.service.settings(pingId), before, 'nothing was written');
 
-      // **Refused before anything is written.** Leaving "master for parent device" clears the
-      // device's setting first, and a refused master must not leave that half done.
+      // **Refused, and nothing written** (`A-77`). Leaving "master for parent device" clears the
+      // device's setting first, and every refusal of the new master — hidden, not a sensor, a
+      // loop — must leave that undone, for an administrator as for anybody.
       const room = await create({ kind: 'group', parentId: branchId, name: 'a-master-room' });
       const device = await create({
         kind: 'device',
@@ -3874,18 +3875,84 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         name: 'a-device-master',
         sensorType: 'icmp.ping',
       });
-      await harness.service.setDependency(testActor, master, 'device', undefined, undefined);
-      await grant(room, 'write');
-      const away = await call('operator', 'PUT', `objects/${String(master)}/dependency`, {
-        mode: 'object',
-        masterId: otherSensorId,
+      // On a second device, a sensor whose own master is that one: depending on it is a loop.
+      const beside = await create({
+        kind: 'device',
+        parentId: room,
+        name: 'a-master-beside',
+        host: '10.0.13.2',
       });
-      assert.equal(away.status, 403, away.body);
-      assert.equal(
-        (await harness.resolver.own(device))['dependency.masterId'],
-        master,
-        'the device still names its master',
-      );
+      const follower = await create({
+        kind: 'sensor',
+        parentId: beside,
+        name: 'a-master-follower',
+        sensorType: 'icmp.ping',
+      });
+      await harness.service.setDependency(testActor, master, 'device', undefined, undefined);
+      await harness.service.setDependency(testActor, follower, 'object', master, undefined);
+      await grant(room, 'write');
+      for (const [login, masterId, status, code] of [
+        ['operator', otherSensorId, 403, 'AUTH_FORBIDDEN'],
+        ['operator', beside, 400, 'OBJECT_INVALID'],
+        ['admin', beside, 400, 'OBJECT_INVALID'],
+        ['operator', follower, 409, 'OBJECT_CYCLE'],
+        ['admin', follower, 409, 'OBJECT_CYCLE'],
+      ] as const) {
+        const away = await call(login, 'PUT', `objects/${String(master)}/dependency`, {
+          mode: 'object',
+          masterId,
+        });
+        assert.equal(away.status, status, `${login}, ${String(masterId)}: ${away.body}`);
+        assert.match(away.body, new RegExp(`"code":"${code}"`), away.body);
+        assert.equal(
+          (await harness.resolver.own(device))['dependency.masterId'],
+          master,
+          `${login}, ${code}: the device still names its master`,
+        );
+      }
+    });
+
+    it('asks the same queries about a hidden master as about one never issued (A-77)', async () => {
+      // A missing master answered a round trip sooner than a hidden one, so the time a refusal
+      // took said which ids exist. Counted rather than timed: both make the same reads.
+      const repository = harness.repository;
+      const read = repository.get.bind(repository);
+      // From the prototype's own property, so it is called with whichever `this` asked.
+      const asked = Object.getOwnPropertyDescriptor(Visibility.prototype, 'visibleAmong')
+        ?.value as (
+        this: Visibility,
+        ...args: Parameters<Visibility['visibleAmong']>
+      ) => ReturnType<Visibility['visibleAmong']>;
+      let reads = 0;
+      let visibility = 0;
+      repository.get = (...args) => {
+        reads += 1;
+        return read(...args);
+      };
+      Visibility.prototype.visibleAmong = function (this: Visibility, ...args) {
+        visibility += 1;
+        return asked.apply(this, args);
+      };
+      const cost = async (masterId: number): Promise<[number, number]> => {
+        reads = 0;
+        visibility = 0;
+        const refused = await call(
+          'operator',
+          'PUT',
+          `objects/${String(pingId)}/settings/dependency.masterId`,
+          { value: masterId },
+        );
+        assert.equal(refused.status, 403, refused.body);
+        return [reads, visibility];
+      };
+      try {
+        const hidden = await cost(otherSensorId);
+        assert.deepEqual(await cost(NEVER_ISSUED), hidden);
+        assert.ok(hidden[1] >= 1, 'the visibility of the master was asked');
+      } finally {
+        repository.get = read;
+        Visibility.prototype.visibleAmong = asked;
+      }
     });
 
     it('lists a refused loop’s steps only where its writer can see them', async () => {
