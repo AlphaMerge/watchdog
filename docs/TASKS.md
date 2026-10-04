@@ -7775,6 +7775,26 @@ because each is a decision rather than a defect:
       the simulator reset the connection mid-command, asserts the check fails (not succeeds
       on an empty result) with a message naming the phase, and the probe stays healthy.
 
+- [ ] **P-260 — a check in a child process spends its timeout loading the catalogue** · S ·
+      P-36 · Found 2026-10-05 in `P-258`. `check-child.ts` arms the check's abort timer, and
+      only then imports the registry module, so the catalogue's load counts against the
+      check's own timeout. Measured at load 6.5–29: the import took 0.45–14.8 s. An EXE/Script
+      sensor with a 10 s timeout on a loaded probe can be left 2 s of its own and then report
+      *the check exceeded its timeout*, which names the script when the time went to the
+      probe. The runner's kill counts from spawn as well (timeout + 2 s), so a slow start eats
+      into both. **Done when** the timeout starts when the check does — the registry imported
+      before the timer is armed, and the runner's margin covering the child's start — or a
+      timeout that fired during the load says so (*the probe took N ms to start the check*)
+      and Probe Health counts it; with a test that stalls the import and asserts which.
+
+- [ ] **P-261 — `pinned-target.test.ts` leaves 190 ms for a timer to be late** · S · P-258 ·
+      Found 2026-10-05 in `P-258`. The test at ~383 asserts a 200 ms resolution bound finished
+      in under 390 ms. P-258 measured worker timers 2.5–323 ms late under load, so this is the
+      next test to read red on a loaded machine for no fault of the product. **Done when** it
+      asserts the bound without a wall-clock ceiling that load can cross (a fake clock, or a
+      ceiling with a margin argued from a measurement), and twenty runs pass beside a running
+      sensors suite.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
