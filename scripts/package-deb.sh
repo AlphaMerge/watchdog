@@ -50,6 +50,18 @@ fi
 
 version="${MS_BUILD_VERSION:-$(node -p "require('${repo_root}/package.json').version" 2>/dev/null || sed -n 's/.*"version": "\([^"]*\)".*/\1/p' "${repo_root}/package.json" | head -1)}"
 
+# **The package's version is not the release's when the release is a pre-release.** Semver writes
+# a candidate `1.0.0-rc.1`; rpm refuses a `-` in `Version:` outright, and dpkg reads everything
+# after the last `-` as a packaging revision, so `1.0.0-rc.1` sorts *after* `1.0.0` and the
+# release would be refused as a downgrade of its own candidate. Both formats spell a
+# pre-release with `~`, which sorts before anything, so `1.0.0~rc.1` < `1.0.0`. The staged tree,
+# the tarball and `VERSION` keep the release's own spelling; only what the package manager
+# compares changes.
+# Through a variable: bash 5 tilde-expands a bare `~` in the replacement to $HOME, and an
+# escaped one keeps its backslash in bash 3.2.
+tilde="~"
+pkg_version="${version/-/${tilde}}"
+
 if [ "${probe_only}" -eq 1 ]; then
   name="ms-probe"
   services=(probe)
@@ -73,8 +85,8 @@ case "$(uname -m)" in
   *) echo "error: unsupported architecture $(uname -m)" >&2; exit 1 ;;
 esac
 
-root="${repo_root}/build/deb/${name}_${version}_${arch}"
-out="${repo_root}/release/${name}_${version}_${arch}.deb"
+root="${repo_root}/build/deb/${name}_${pkg_version}_${arch}"
+out="${repo_root}/release/${name}_${pkg_version}_${arch}.deb"
 rm -rf "${root}"
 mkdir -p "${root}/DEBIAN" "${root}/opt/ms" "${repo_root}/release"
 
@@ -113,7 +125,7 @@ installed_kb="$(du -sk "${root}/opt" | cut -f1)"
 # the version it found, which is a better error than apt refusing to consider the package.
 cat > "${root}/DEBIAN/control" <<CONTROL
 Package: ${name}
-Version: ${version}
+Version: ${pkg_version}
 Section: net
 Priority: optional
 Architecture: ${arch}

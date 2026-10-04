@@ -62,6 +62,10 @@ Ubuntu core, from the package rather than the tarball — that is what an operat
 sudo dpkg -i ms_<version>_amd64.deb
 ```
 
+A candidate's package spells its version with `~` where the tag has `-`: `v1.0.0-rc.1` is
+`ms_1.0.0~rc.1_amd64.deb` and `ms-1.0.0~rc.1-1.x86_64.rpm`, so that `1.0.0` sorts after it and
+upgrades it. The tarball and `/opt/ms/VERSION` keep the tag's spelling.
+
 ## 2. Restart everything, once, before you start counting
 
 **This step exists because of `P-28`.** A probe at the v1 target could never reconnect: the core

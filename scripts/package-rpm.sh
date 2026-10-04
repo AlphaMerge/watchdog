@@ -47,6 +47,18 @@ fi
 
 version="${MS_BUILD_VERSION:-$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' "${repo_root}/package.json" | head -1)}"
 
+# **The package's version is not the release's when the release is a pre-release.** Semver writes
+# a candidate `1.0.0-rc.1`; rpm refuses a `-` in `Version:` outright, and dpkg reads everything
+# after the last `-` as a packaging revision, so `1.0.0-rc.1` sorts *after* `1.0.0` and the
+# release would be refused as a downgrade of its own candidate. Both formats spell a
+# pre-release with `~`, which sorts before anything, so `1.0.0~rc.1` < `1.0.0`. The staged tree,
+# the tarball and `VERSION` keep the release's own spelling; only what the package manager
+# compares changes.
+# Through a variable: bash 5 tilde-expands a bare `~` in the replacement to $HOME, and an
+# escaped one keeps its backslash in bash 3.2.
+tilde="~"
+pkg_version="${version/-/${tilde}}"
+
 if [ "${probe_only}" -eq 1 ]; then
   name="ms-probe"
   services=(probe)
@@ -75,7 +87,7 @@ rm -rf "${top}"
 mkdir -p "${top}"/{BUILD,RPMS,SOURCES,SPECS} "${repo_root}/release"
 
 echo "==> laying out ${name} ${version} (${arch})"
-payload="${top}/SOURCES/${name}-${version}"
+payload="${top}/SOURCES/${name}-${pkg_version}"
 mkdir -p "${payload}/opt/ms"
 cp -R "${stage}/app" "${payload}/opt/ms/app"
 cp -R "${stage}/bin" "${payload}/opt/ms/bin"
@@ -106,19 +118,19 @@ find "${payload}/opt/ms/docs" "${payload}/opt/ms/etc" "${payload}/opt/ms/deploy"
 find "${payload}/opt/ms/docs" "${payload}/opt/ms/etc" "${payload}/opt/ms/deploy" "${payload}/usr" -type d -exec chmod 0755 {} + 2>/dev/null || true
 chmod 0644 "${payload}/opt/ms/VERSION"
 
-(cd "${top}/SOURCES" && tar -czf "${name}-${version}.tar.gz" "${name}-${version}")
+(cd "${top}/SOURCES" && tar -czf "${name}-${pkg_version}.tar.gz" "${name}-${pkg_version}")
 
 conflicts=''
 [ "${probe_only}" -eq 1 ] && conflicts="Conflicts:      ms"
 
 cat > "${top}/SPECS/${name}.spec" <<SPEC
 Name:           ${name}
-Version:        ${version}
+Version:        ${pkg_version}
 Release:        1
 Summary:        ${summary}
 License:        Proprietary
 URL:            https://example.invalid/monitoringsystem
-Source0:        ${name}-${version}.tar.gz
+Source0:        ${name}-${pkg_version}.tar.gz
 BuildArch:      ${arch}
 Requires:       openssl, systemd, shadow-utils
 ${conflicts}
