@@ -195,6 +195,67 @@ describe(
       assert.deepEqual(await kept(), []);
     });
 
+    describe('afterRollback: undoing what was changed in memory beside the transaction', () => {
+      it('runs, newest first, when the transaction throws, and not when it commits', async () => {
+        const ran: string[] = [];
+        await assert.rejects(() =>
+          scratch.db.tx((q) => {
+            q.afterRollback?.(() => ran.push('first'));
+            q.afterRollback?.(() => ran.push('second'));
+            return Promise.reject(new Error('the caller failed'));
+          }),
+        );
+        assert.deepEqual(ran, ['second', 'first']);
+
+        ran.length = 0;
+        await scratch.db.tx((q) => {
+          q.afterRollback?.(() => ran.push('committed'));
+          return Promise.resolve();
+        });
+        assert.deepEqual(ran, [], 'a commit undoes nothing');
+      });
+
+      it('runs when the COMMIT is answered ROLLBACK', async () => {
+        const ran: string[] = [];
+        await assert.rejects(
+          () =>
+            scratch.db.tx(async (q) => {
+              q.afterRollback?.(() => ran.push('undone'));
+              await q.query('SELECT 1/0').catch(() => undefined);
+            }),
+          rolledBack,
+        );
+        assert.deepEqual(ran, ['undone']);
+      });
+
+      it('runs at once for a savepoint rolled back, and the transaction goes on', async () => {
+        const ran: string[] = [];
+        await scratch.db.tx(async (q) => {
+          await savepoint(q, async (inner) => {
+            inner.afterRollback?.(() => ran.push('undone'));
+            await inner.query('SELECT 1/0');
+          }).catch(() => undefined);
+          assert.deepEqual(ran, ['undone'], 'before the transaction ends');
+        });
+        assert.deepEqual(ran, ['undone'], 'and once');
+      });
+
+      it('is handed on by a released savepoint, and runs if the transaction rolls back', async () => {
+        const ran: string[] = [];
+        await assert.rejects(() =>
+          scratch.db.tx(async (q) => {
+            await savepoint(q, (inner) => {
+              inner.afterRollback?.(() => ran.push('undone'));
+              return Promise.resolve();
+            });
+            assert.deepEqual(ran, [], 'released is not rolled back');
+            throw new Error('a later sink failed');
+          }),
+        );
+        assert.deepEqual(ran, ['undone']);
+      });
+    });
+
     it('runs straight on the pool, where a failed statement aborts nothing else', async () => {
       // No transaction to save in: a `SAVEPOINT` outside one is itself an error.
       await scratch.db.query(`INSERT INTO kept VALUES (1, 'pool')`);

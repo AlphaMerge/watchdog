@@ -166,7 +166,10 @@ export class ProbeDeliveryWatch {
       return 0;
     }
 
-    let moved = 0;
+    // **What a tree change left owed a re-decision** (`P-249`). A resync whose re-evaluation
+    // failed keeps the overlay right and the states behind it, and a sensor behind an offline
+    // probe sends nothing that would settle it. Never throws; what fails stays owed.
+    let moved = await this.#options.reachability.retryGivenUp();
     let silent = 0;
     let marked = 0;
     let deferred = 0;

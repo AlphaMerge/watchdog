@@ -83,6 +83,21 @@ export interface ProbeReachabilityOptions {
   now?: () => Date;
 }
 
+/** What one offline probe holds, and why, and since when. */
+interface HeldBy {
+  readonly sensorIds: number[];
+  readonly reason: OfflineReason;
+  readonly since: Date;
+}
+
+/**
+ * How many sensors may be owed a re-decision at once (`P-249`). The installation's sensor count
+ * bounds it in practice; this bounds it if something keeps failing.
+ */
+const MAX_GIVEN_UP = 50_000;
+/** How many of their ids a log line names. */
+const GIVEN_UP_LOGGED = 50;
+
 /** Just enough of `DependencyPauses` to settle the flags after sensors have moved. */
 export interface DependencyRecomputer {
   recompute(q: Queryable, at: Date): Promise<{ moved: number }>;
@@ -126,12 +141,14 @@ export class ProbeReachability {
    * *disconnected* probe is fine again just because it has stopped expecting results from it.
    * `found` is the link's, `resumed` is the sweep's, and neither undoes the other's work.
    */
-  readonly #byProbe = new Map<
-    number,
-    { sensorIds: number[]; reason: OfflineReason; since: Date }
-  >();
+  readonly #byProbe = new Map<number, HeldBy>();
   /** Which probe holds each sensor in `#unreachable`, for the alarm engine's hold (`M-22`). */
   readonly #carrier = new Map<number, number>();
+  /**
+   * Sensors whose re-decision a resync gave up (`P-249`), owed one by the next resync or delivery
+   * sweep. At most `MAX_GIVEN_UP`; past that the rest are logged as dropped.
+   */
+  readonly #givenUp = new Set<number>();
   #outages = 0;
 
   constructor(options: ProbeReachabilityOptions) {
@@ -205,18 +222,33 @@ export class ProbeReachability {
    * statement, inside a transaction that is the caller's, and a failed statement aborts it: the
    * caller's `COMMIT` would then roll back the move this exists to follow, and every other write
    * in it. Rolled back to the savepoint instead, the move commits and only this read is lost.
+   *
+   * **And what it changes in memory is put back if the caller's transaction does not commit**
+   * (`P-249`). The overlay changes here, before the commit, because the state service and the
+   * alarm engine read it inside this same transaction to re-decide what moved. A sink after this
+   * one can still fail and roll the move back, and an overlay left describing the tree as the
+   * move would have made it held a sensor still under its live probe Unknown for every result
+   * that probe sent, or the reverse: `P-103`'s defect, reached by a rollback. So the change is
+   * undone in `afterRollback`, probe by probe, and only where nothing has replaced it since.
+   *
+   * **Sensors whose re-decision was given up are re-decided later** (`P-249`). The overlay is
+   * right once this has run, and the next resync would see nothing cross it, while a sensor
+   * behind an offline probe sends no result to settle it. So they are kept, a bounded set, and
+   * re-decided by the next resync or the delivery sweep's `retryGivenUp`, whichever is first.
    */
   async resync(q: Queryable): Promise<number> {
     if (this.#byProbe.size === 0) return 0;
 
     const before = new Set(this.#unreachable);
-    // The probes whose held set this changes, to or from empty included (`M-24`).
-    const touched = new Set<number>();
+    // The probes whose held set this changes, to or from empty included (`M-24`), and the entry
+    // each had, which a rollback puts back.
+    const replaced = new Map<number, { was: HeldBy; now: HeldBy }>();
     for (const [probeObjectId, held] of this.#byProbe) {
       try {
         const sensorIds = await savepoint(q, (inner) => this.#sensorsUnder(probeObjectId, inner));
-        if (!sameMembers(sensorIds, held.sensorIds)) touched.add(probeObjectId);
-        this.#byProbe.set(probeObjectId, { ...held, sensorIds });
+        if (!sameMembers(sensorIds, held.sensorIds)) {
+          replaced.set(probeObjectId, { was: held, now: { ...held, sensorIds } });
+        }
       } catch (error) {
         // Leave this probe's snapshot as it was, for the reason `lost` gives: one probe the
         // database will not answer for must not discard the overlay for the others.
@@ -227,14 +259,30 @@ export class ProbeReachability {
       }
     }
 
-    this.#unreachable.clear();
-    this.#carrier.clear();
-    for (const [probeObjectId, held] of this.#byProbe) {
-      for (const id of held.sensorIds) {
-        this.#unreachable.add(id);
-        this.#carrier.set(id, probeObjectId);
-      }
+    // Only over an entry nothing has replaced while the tree was being read: a `found` or a `lost`
+    // in between is newer than this, and is kept.
+    const applied = new Map<number, { was: HeldBy; now: HeldBy }>();
+    for (const [probeObjectId, change] of replaced) {
+      if (this.#byProbe.get(probeObjectId) !== change.was) continue;
+      this.#byProbe.set(probeObjectId, change.now);
+      applied.set(probeObjectId, change);
     }
+    if (applied.size > 0) {
+      this.#rebuild();
+      q.afterRollback?.(() => {
+        for (const [probeObjectId, change] of applied) {
+          if (this.#byProbe.get(probeObjectId) === change.now) {
+            this.#byProbe.set(probeObjectId, change.was);
+          }
+        }
+        this.#rebuild();
+        this.#logger.info(
+          { probes: [...applied.keys()] },
+          'a tree change rolled back; the lost probes’ sensors are as they were before it',
+        );
+      });
+    }
+    const touched = new Set(applied.keys());
 
     // Both directions: sensors that left an offline probe go back to what their last reading
     // says, and sensors that arrived under one become Unknown. Only the ones that actually
@@ -243,17 +291,20 @@ export class ProbeReachability {
       ...[...before].filter((id) => !this.#unreachable.has(id)),
       ...[...this.#unreachable].filter((id) => !before.has(id)),
     ];
-    if (changed.length === 0 && touched.size === 0) return 0;
+    // And whatever an earlier resync gave up re-deciding, which nothing else will.
+    const owed = [...this.#givenUp];
+    if (changed.length === 0 && touched.size === 0 && owed.length === 0) return 0;
     // **And the alarm of every probe whose held set changed** (`M-24`), with them. Sensors that
     // arrive under a probe lost while it carried nothing are held behind its Probe Health, and
     // that alarm was never re-decided, so a trigger on Unknown heard nothing for the outage. A
     // probe whose last sensors were moved off it has an episode that ended, and its alarm is owed
     // the all-clear.
     const alarms = [...touched].flatMap((probeObjectId) => this.#probeAlarms(probeObjectId));
+    const redecide = [...new Set([...changed, ...alarms, ...owed])];
 
     try {
       const moved = await savepoint(q, async (inner) => {
-        const count = await this.#states.reevaluate(inner, [...changed, ...alarms], this.#now(), {
+        const count = await this.#states.reevaluate(inner, redecide, this.#now(), {
           message: 'the probe carrying this sensor changed',
         });
         // In the same transaction: a master that has just become Unknown is not Down, so anything
@@ -261,20 +312,92 @@ export class ProbeReachability {
         await this.#dependencies.recompute(inner, this.#now());
         return count;
       });
+      this.#settled(q, owed);
       this.#logger.info(
-        { sensors: changed.length, moved },
+        { sensors: changed.length, owed: owed.length, moved },
         'the tree moved sensors across a lost probe’s boundary',
       );
       return moved;
     } catch (error) {
-      // The overlay is already right; only the stored states are behind, and the next result or
-      // sweep for each sensor will settle them. Rolling the overlay back would put the stale
-      // snapshot the whole method exists to remove straight back in.
+      // The overlay is right; only the stored states are behind. Rolling the overlay back would
+      // put the stale snapshot the whole method exists to remove straight back in, so the
+      // sensors are owed a re-decision instead.
+      this.#giveUp(redecide, error);
+      return 0;
+    }
+  }
+
+  /**
+   * Re-decides, in a transaction of its own, the sensors a resync gave up re-deciding (`P-249`).
+   * The delivery sweep calls it every pass. Never throws: what fails stays owed for the next.
+   */
+  async retryGivenUp(): Promise<number> {
+    const owed = [...this.#givenUp];
+    if (owed.length === 0) return 0;
+    try {
+      const moved = await this.#db.tx(async (q) => {
+        const count = await this.#states.reevaluate(q, owed, this.#now(), {
+          message: 'the probe carrying this sensor changed',
+        });
+        await this.#dependencies.recompute(q, this.#now());
+        return count;
+      });
+      for (const id of owed) this.#givenUp.delete(id);
+      this.#logger.info({ sensors: owed.length, moved }, 'sensors owed a re-decision settled');
+      return moved;
+    } catch (error) {
       this.#logger.error(
-        { sensors: changed.length, err: describeError(error) },
-        'could not re-evaluate sensors after a topology change; the overlay is correct',
+        { sensors: owed.slice(0, GIVEN_UP_LOGGED), owed: owed.length, err: describeError(error) },
+        'could not re-decide the sensors a tree change left owed; the next sweep tries again',
       );
       return 0;
+    }
+  }
+
+  /** How many sensors are owed a re-decision a resync gave up (`P-249`). */
+  givenUp(): number {
+    return this.#givenUp.size;
+  }
+
+  /** Owed no longer, once the transaction that re-decided them has committed. */
+  #settled(q: Queryable, owed: readonly number[]): void {
+    if (owed.length === 0) return;
+    const settle = (): void => {
+      for (const id of owed) this.#givenUp.delete(id);
+    };
+    if (q.afterCommit === undefined) settle();
+    else q.afterCommit(settle);
+  }
+
+  #giveUp(sensorIds: readonly number[], error: unknown): void {
+    let dropped = 0;
+    for (const id of sensorIds) {
+      if (this.#givenUp.has(id)) continue;
+      if (this.#givenUp.size >= MAX_GIVEN_UP) dropped += 1;
+      else this.#givenUp.add(id);
+    }
+    this.#logger.error(
+      {
+        sensors: sensorIds.slice(0, GIVEN_UP_LOGGED),
+        count: sensorIds.length,
+        owed: this.#givenUp.size,
+        dropped,
+        err: describeError(error),
+      },
+      'could not re-evaluate sensors after a topology change; the overlay is correct, and they ' +
+        'are re-decided at the next resync or delivery sweep',
+    );
+  }
+
+  /** `#unreachable` and `#carrier`, from `#byProbe`. */
+  #rebuild(): void {
+    this.#unreachable.clear();
+    this.#carrier.clear();
+    for (const [probeObjectId, held] of this.#byProbe) {
+      for (const id of held.sensorIds) {
+        this.#unreachable.add(id);
+        this.#carrier.set(id, probeObjectId);
+      }
     }
   }
 

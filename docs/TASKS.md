@@ -7515,13 +7515,14 @@ because each is a decision rather than a defect:
       transaction, and each one's choice:
       - **Into a savepoint:** `probes/reachability-sync.ts:65` (`ReachabilitySync`, now also
         skipped without a statement while no probe is held: `holdsAny()`);
-        `probes/reachability.ts:220` (`resync`'s per-probe read) and `:269` (its re-evaluation and
+        `probes/reachability.ts:252` (`resync`'s per-probe read) and `:321` (its re-evaluation and
         dependency recompute); `timeseries/disk.ts:166` (`databaseIsLocal`) and `:177`
         (`currentDatabaseBytes`), read in the housekeeper's transaction.
       - **Rethrows:** `objects/repository.ts:268` (the tree-lock wait, as `OBJECT_TREE_BUSY`);
         `auth/access.ts:1020`; `auth/groups.ts:333`; `main.ts:1677` (`engineOrRefuse`);
-        `probes/clock-freeze.ts:328` (`ClockFreezeSync`'s path, `P-239`); `db/pool.ts:593`/`:599`
-        (the savepoint's own, after rolling back to it).
+        `probes/clock-freeze.ts:328` (`ClockFreezeSync`'s path, `P-239`); `db/pool.ts:631`/`:642`
+        (the savepoint's own, after rolling back to it) and `:415` (`tx`'s, after its
+        `afterRollback` hooks).
       - **No statement in the `try`, so nothing to abort:** `vault/service.ts:357` (unsealing),
         `notifications/templates.ts:370` (parsing a trigger), `timeseries/disk.ts:82` (`statfs`);
         `notifications/engine.ts:1312`/`:1342` (a trigger's stored settings, parsed).
@@ -7553,6 +7554,45 @@ because each is a decision rather than a defect:
       anyway; hooks run on a rolled-back COMMIT; a savepoint not rolled back, not released, its
       hooks kept, or its failure left as the transaction's; and each of the five savepoints above
       taken away.
+
+      **Review follow-up: the reachability overlay now follows the tree that committed.**
+      - *Medium.* `resync` changed `#byProbe`, `#unreachable` and `#carrier` inside the mutation's
+        transaction, and nothing undid it when a later sink (`ClockFreezeSync`, `TriggerSync`) or
+        the `COMMIT` rolled the mutation back. A sensor left under its live probe was then held
+        Unknown for every result that probe sent, or one left under the lost probe read reachable:
+        `P-103` again. **The change is still made before the commit, not in `afterCommit`**,
+        because the state service's `#withLiveFacts` and the alarm engine's `carrierOf`/`heldBy`
+        read the overlay inside the same transaction, through no `Queryable`, to re-decide what
+        moved. Deferring the change would have them re-decide against the old one. Instead
+        `Queryable.afterRollback(fn)` is new. `tx` runs these hooks, newest first, when it throws
+        or its `COMMIT` answers `ROLLBACK`. A savepoint runs its own when it is rolled back to, and
+        hands them to the enclosing transaction when it is released. `resync` registers one that
+        puts each probe's entry back, if nothing has replaced it since, and rebuilds the sets. It
+        also applies a re-read only over an entry nothing replaced while the tree was being read.
+        What remains: a result that another connection decides while the mutation is still open
+        sees the provisional overlay, as before. If the mutation then rolls back, that sensor's
+        stored state is wrong until its next result, which the restored overlay decides
+        correctly.
+      - *Low.* A re-evaluation `resync` gave up (its savepoint rolled back) left the sensors'
+        stored states behind an overlay that was right, and nothing re-decided them. They are now
+        owed one, in a set of at most 50,000 that is logged with their ids. The next resync
+        re-decides them even when nothing crosses the overlay, and so does the delivery sweep
+        through `ProbeReachability.retryGivenUp()`, in its own transaction, every pass (its catch,
+        `reachability.ts:348`, is around that transaction, not in it). They stop
+        being owed only once the transaction that re-decided them commits.
+
+      Tests: `transaction-outcome.test.ts` (`afterRollback` on a throw, on a ROLLBACK `COMMIT`, at
+      a savepoint's rollback, handed on at its release, newest first, never on a commit);
+      `probe-offline.test.ts` (a move under a lost probe, and one off it, rolled back by a later
+      sink leave the overlay as it was and the live probe's result counts as Up; a failed
+      re-evaluation is settled to `unknown`/`probe` by `retryGivenUp` and by the next resync, and
+      stays owed if that transaction rolls back); `probe-delivery-watch.test.ts` (the sweep
+      retries every pass). The existing committed-move tests still pass. Mutants 13/13: `tx`
+      runs no undo, or runs it oldest first; a savepoint's rollback runs none, or its release
+      drops them; `resync` registers none, its undo restores no entry or rebuilds no set; owed
+      sensors are left out of the next resync, by the list or by the early return; a give-up is
+      not recorded; a re-decision clears what is owed before its commit; `retryGivenUp` clears
+      nothing; the sweep does not call it.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then

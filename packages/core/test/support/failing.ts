@@ -17,6 +17,7 @@ export function failingOn(
     query: <T extends QueryResultRow>(text: string, values?: readonly unknown[]) =>
       fails(text, values) ? q.query<T>('SELECT 1/0') : q.query<T>(text, values),
     afterCommit: (fn: () => void) => q.afterCommit?.(fn),
+    afterRollback: (fn: () => void) => q.afterRollback?.(fn),
     savepoint: <T>(fn: (inner: Queryable) => Promise<T>) =>
       savepoint(q, (inner) => fn(failingOn(inner, fails))),
   };

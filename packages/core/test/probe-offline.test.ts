@@ -7,6 +7,8 @@ import { SensorStateService } from '../src/state/service.js';
 import { ALL_CLEAR } from '../src/state/limits.js';
 import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
 import type { Database } from '../src/db/pool.js';
+import { CompositeAuditSink } from '../src/audit/store.js';
+import type { AuditSink } from '../src/objects/audit.js';
 import { failingOn } from './support/failing.js';
 import {
   createScratchDatabase,
@@ -489,6 +491,179 @@ describe('a probe going offline', { skip: available ? false : 'no database' }, (
       } finally {
         harness.audit.also = undefined;
       }
+    });
+  });
+
+  describe('P-249: the overlay follows the tree that committed', () => {
+    /** `ReachabilitySync`, then a sink after it that fails: the mutation rolls back. */
+    const syncThenFail = (): AuditSink =>
+      new CompositeAuditSink([
+        new ReachabilitySync({ reachability: () => reachability, logger: silentLogger }),
+        { record: () => Promise.reject(new Error('a sink after the overlay’s failed')) },
+      ]);
+
+    const spareProbe = async (): Promise<number> =>
+      (
+        await harness.service.create(testActor, {
+          kind: 'probe',
+          parentId: harness.rootId,
+          name: `spare-${String(process.hrtime.bigint())}`,
+        })
+      ).id;
+
+    it('leaves the overlay alone when a move under a lost probe rolls back', async () => {
+      // A device on a live probe, moved under the lost one, and the move rolled back by a sink
+      // after the overlay's. The sensor is still under its live probe, and its results count.
+      const spare = await spareProbe();
+      const stranded = await harness.service.create(testActor, {
+        kind: 'device',
+        parentId: spare,
+        name: 'stays-put',
+        host: '127.0.0.3',
+      });
+      const sensor = await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: stranded.id,
+        name: 'Ping',
+        sensorType: 'icmp.ping',
+        params: { count: 3 },
+      });
+      await scanned([sensor.id]);
+      await reachability.lost(probeId, 'link');
+      const unknownBefore = reachability.stats().sensorsUnknown;
+
+      harness.audit.also = syncThenFail();
+      try {
+        await assert.rejects(() =>
+          harness.service.move(testActor, stranded.id, probeId, { kind: 'none' }),
+        );
+      } finally {
+        harness.audit.also = undefined;
+      }
+
+      assert.equal(reachability.reachable(sensor.id), true, 'not held behind the lost probe');
+      assert.equal(reachability.carrierOf(sensor.id), undefined);
+      assert.equal(reachability.stats().sensorsUnknown, unknownBefore);
+      await scanned([sensor.id]);
+      assert.equal(
+        (await stateOf(sensor.id))?.state,
+        'up',
+        'and what its live probe sends is counted, not short-circuited to unknown',
+      );
+    });
+
+    it('leaves the overlay alone when a move off a lost probe rolls back', async () => {
+      // The reverse: the device stays under the lost probe, so its sensors stay held.
+      await scanned();
+      await reachability.lost(probeId, 'link');
+      const spare = await spareProbe();
+
+      harness.audit.also = syncThenFail();
+      try {
+        await assert.rejects(() =>
+          harness.service.move(testActor, deviceId, spare, { kind: 'none' }),
+        );
+      } finally {
+        harness.audit.also = undefined;
+      }
+
+      for (const sensorId of sensorIds) {
+        assert.equal(reachability.reachable(sensorId), false, 'still behind the lost probe');
+        assert.equal(reachability.carrierOf(sensorId), probeId);
+      }
+      const byNumber = (a: number, b: number): number => a - b;
+      assert.deepEqual(
+        [...(reachability.heldBy(probeId)?.sensorIds ?? [])].sort(byNumber),
+        [...sensorIds].sort(byNumber),
+      );
+    });
+
+    /** A reachability whose dependency recompute fails a statement while `failing` says so. */
+    const flaky = (failing: { now: boolean }): ProbeReachability =>
+      new ProbeReachability({
+        db,
+        logger: silentLogger,
+        states,
+        dependencies: {
+          recompute: async (q, at) => {
+            if (failing.now) await q.query('SELECT 1/0');
+            return harness.dependencies?.recompute(q, at) ?? { moved: 0 };
+          },
+        },
+        coreEvaluatedTypes: ['core.factory', 'ms.core.health'],
+      });
+
+    /** A device on a live probe moved under the lost one while the re-evaluation fails. */
+    const arriveWhileFailing = async (failing: { now: boolean }): Promise<number> => {
+      const spare = await spareProbe();
+      const arriving = await harness.service.create(testActor, {
+        kind: 'device',
+        parentId: spare,
+        name: 'arrives',
+        host: '127.0.0.4',
+      });
+      const sensor = await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: arriving.id,
+        name: 'Ping',
+        sensorType: 'icmp.ping',
+        params: { count: 3 },
+      });
+      await scanned([sensor.id]);
+      await reachability.lost(probeId, 'link');
+      failing.now = true;
+      harness.audit.also = new ReachabilitySync({
+        reachability: () => reachability,
+        logger: silentLogger,
+      });
+      try {
+        await harness.service.move(testActor, arriving.id, probeId, { kind: 'none' });
+      } finally {
+        harness.audit.also = undefined;
+      }
+      failing.now = false;
+      assert.equal(reachability.reachable(sensor.id), false, 'the overlay took it over');
+      assert.equal((await stateOf(sensor.id))?.state, 'up', 'but its re-decision was given up');
+      assert.ok(reachability.givenUp() > 0, 'and it is owed one');
+      return sensor.id;
+    };
+
+    it('re-decides at the delivery sweep what a failed re-evaluation gave up', async () => {
+      const failing = { now: false };
+      reachability = flaky(failing);
+      const sensorId = await arriveWhileFailing(failing);
+
+      await reachability.retryGivenUp();
+
+      assert.deepEqual(await stateOf(sensorId), { state: 'unknown', cause: 'probe' });
+      assert.equal(reachability.givenUp(), 0, 'and owes nothing more');
+    });
+
+    it('re-decides at the next resync, though nothing crosses the overlay then', async () => {
+      const failing = { now: false };
+      reachability = flaky(failing);
+      const sensorId = await arriveWhileFailing(failing);
+
+      await db.tx((q) => reachability.resync(q));
+
+      assert.deepEqual(await stateOf(sensorId), { state: 'unknown', cause: 'probe' });
+      assert.equal(reachability.givenUp(), 0);
+    });
+
+    it('stays owed when the transaction that re-decided it rolls back', async () => {
+      const failing = { now: false };
+      reachability = flaky(failing);
+      const sensorId = await arriveWhileFailing(failing);
+
+      await assert.rejects(() =>
+        db.tx(async (q) => {
+          await reachability.resync(q);
+          throw new Error('the caller’s transaction failed after it');
+        }),
+      );
+
+      assert.equal((await stateOf(sensorId))?.state, 'up');
+      assert.ok(reachability.givenUp() > 0, 'still owed');
     });
   });
 

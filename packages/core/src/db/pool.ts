@@ -138,6 +138,19 @@ export interface Queryable {
    */
   afterCommit?(fn: () => void): void;
   /**
+   * Runs `fn` if this work does not commit: the transaction rolled back, or the savepoint it was
+   * asked for in was rolled back to (`P-249`). Hooks run newest first, each isolated.
+   *
+   * **For undoing what was changed in memory alongside the transaction**, where that memory has
+   * to be right while the transaction runs and so cannot wait for `afterCommit`: the probe
+   * reachability overlay, which the state service and the alarm engine read inside the same
+   * transaction. Without it a rolled-back mutation left the overlay describing a tree that was
+   * never written.
+   *
+   * Absent on a plain pool query, as `afterCommit` is.
+   */
+  afterRollback?(fn: () => void): void;
+  /**
    * Runs `fn` inside a savepoint of this transaction (`P-249`). Called through `savepoint()`,
    * which runs `fn` straight on a `Queryable` without this.
    *
@@ -372,33 +385,45 @@ export class Database implements Queryable {
    */
   async tx<T>(fn: (q: Queryable) => Promise<T>, limits?: TxLimits): Promise<T> {
     const committed: (() => void)[] = [];
-    const state: TxState = { savepoints: 0, failed: undefined };
-    const result = await this.#transaction(
-      async (client) => {
-        const q = new ClientQueryable(
-          client,
-          this.#describe,
-          (hook) => committed.push(hook),
-          (cause) => {
-            this.#note(cause, limits);
-          },
-          state,
-        );
-        return fn(q);
+    const undone: (() => void)[] = [];
+    const state: TxState = {
+      savepoints: 0,
+      failed: undefined,
+      hookThrew: (error) => {
+        this.#logger.error({ err: describeError(error) }, 'an after-rollback hook threw');
       },
-      limits,
-      state,
-    );
+    };
+    let result: T;
+    try {
+      result = await this.#transaction(
+        async (client) => {
+          const q = new ClientQueryable(
+            client,
+            this.#describe,
+            (hook) => committed.push(hook),
+            (cause) => {
+              this.#note(cause, limits);
+            },
+            state,
+            (hook) => undone.push(hook),
+          );
+          return fn(q);
+        },
+        limits,
+        state,
+      );
+    } catch (error) {
+      // Nothing committed, a COMMIT answered ROLLBACK included: what was changed in memory beside
+      // it is put back, newest first.
+      runHooks(undone.reverse(), state.hookThrew);
+      throw error;
+    }
     // After the COMMIT returned, and said COMMIT, so nothing here can be undone by a rollback. Each
     // hook is isolated: one that throws must not stop the next, and must not turn a committed
     // transaction into a failed call — the work is already durable.
-    for (const hook of committed) {
-      try {
-        hook();
-      } catch (error: unknown) {
-        this.#logger.error({ err: describeError(error) }, 'an after-commit hook threw');
-      }
-    }
+    runHooks(committed, (error) => {
+      this.#logger.error({ err: describeError(error) }, 'an after-commit hook threw');
+    });
     return result;
   }
 
@@ -540,6 +565,7 @@ export class ClientQueryable implements Queryable {
   readonly #onCommit: ((fn: () => void) => void) | undefined;
   readonly #onFailure: ((cause: unknown) => void) | undefined;
   readonly #state: TxState | undefined;
+  readonly #onRollback: ((fn: () => void) => void) | undefined;
 
   constructor(
     client: PoolClient,
@@ -552,18 +578,25 @@ export class ClientQueryable implements Queryable {
      * available. Built around a raw client without it, there may be no transaction to save in.
      */
     state?: TxState,
+    /** Where `afterRollback` hooks go: the transaction's, or the savepoint's they were taken in. */
+    onRollback?: (fn: () => void) => void,
   ) {
     this.#client = client;
     this.#description = description;
     this.#onCommit = onCommit;
     this.#onFailure = onFailure;
     this.#state = state;
+    this.#onRollback = onRollback;
   }
 
   afterCommit(fn: () => void): void {
     // Absent when this executor was built around a raw client rather than by `tx`, which is the
     // honest answer: without a transaction to wait for there is nothing to defer to.
     this.#onCommit?.(fn);
+  }
+
+  afterRollback(fn: () => void): void {
+    this.#onRollback?.(fn);
   }
 
   async savepoint<T>(fn: (q: Queryable) => Promise<T>): Promise<T> {
@@ -579,19 +612,29 @@ export class ClientQueryable implements Queryable {
     // **Held until the savepoint is released, and dropped if it is rolled back.** A hook is an
     // announcement of what this work did, and work rolled back to here did nothing.
     const hooks: (() => void)[] = [];
+    // And the undoing of what it changed in memory: run when it is rolled back to, and handed to
+    // the transaction (or the savepoint around this one) when it is released, since that can
+    // still roll back.
+    const undone: (() => void)[] = [];
     const inner = new ClientQueryable(
       this.#client,
       this.#description,
       (hook) => hooks.push(hook),
       this.#onFailure,
       state,
+      (hook) => undone.push(hook),
     );
     await this.query(`SAVEPOINT ${name}`);
     let result: T;
     try {
       result = await fn(inner);
     } catch (error) {
-      await this.#rollBackTo(name, failedBefore);
+      // The undoing runs even if the rollback to here fails: then the transaction is lost too.
+      try {
+        await this.#rollBackTo(name, failedBefore);
+      } finally {
+        runHooks(undone.reverse(), state.hookThrew);
+      }
       throw error;
     }
     try {
@@ -599,7 +642,11 @@ export class ClientQueryable implements Queryable {
     } catch (released) {
       // `fn` caught a failure of its own and returned, so the savepoint is aborted and refuses to
       // be released. Its work is gone; answering `result` would be answering for it.
-      await this.#rollBackTo(name, failedBefore);
+      try {
+        await this.#rollBackTo(name, failedBefore);
+      } finally {
+        runHooks(undone.reverse(), state.hookThrew);
+      }
       throw new DatabaseError(
         'a savepoint was rolled back: a statement in it failed and the failure was caught there',
         {
@@ -616,6 +663,7 @@ export class ClientQueryable implements Queryable {
       );
     }
     for (const hook of hooks) this.#onCommit?.(hook);
+    for (const hook of undone) this.#onRollback?.(hook);
     return result;
   }
 
@@ -651,6 +699,19 @@ interface TxState {
   savepoints: number;
   /** The failure that aborted the transaction, if one has and no savepoint undid it. */
   failed: DatabaseError | undefined;
+  /** Where an `afterRollback` hook that threw is reported. */
+  readonly hookThrew: (error: unknown) => void;
+}
+
+/** Runs each hook, so that one that throws neither stops the rest nor escapes. */
+function runHooks(hooks: readonly (() => void)[], threw: (error: unknown) => void): void {
+  for (const hook of hooks) {
+    try {
+      hook();
+    } catch (error: unknown) {
+      threw(error);
+    }
+  }
 }
 
 /** A `COMMIT` that PostgreSQL answered with `ROLLBACK` (`P-249`). */

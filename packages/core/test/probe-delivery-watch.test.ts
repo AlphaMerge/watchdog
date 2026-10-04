@@ -63,11 +63,18 @@ function fakeReachability(options: { lostFails?: boolean } = {}) {
   // A reason map rather than a boolean, because that is what the real one keeps — and because the
   // sweep now reads it instead of shadowing it (`P-77`).
   const reasons = new Map<number, string>();
+  const retries = { count: 0, answer: 0 };
   return {
     calls,
     reasons,
+    retries,
     service: {
       offlineReason: (probeObjectId: number) => reasons.get(probeObjectId),
+      // Counted, not listed in `calls`, so the sequences below stay about marking (`P-249`).
+      retryGivenUp: () => {
+        retries.count += 1;
+        return Promise.resolve(retries.answer);
+      },
       lost: (probeObjectId: number, reason?: string) => {
         calls.push(`lost:${String(probeObjectId)}:${reason ?? 'link'}`);
         // The real `lost` logs and returns without marking when it cannot read the probe's
@@ -115,7 +122,13 @@ function watchOver(
     uptimeMs: () => clock.uptimeMs,
     ...(options.maxPerSweep === undefined ? {} : { maxPerSweep: options.maxPerSweep }),
   });
-  return { watch, calls: reach.calls, reasons: reach.reasons, reach: reach.service };
+  return {
+    watch,
+    calls: reach.calls,
+    reasons: reach.reasons,
+    reach: reach.service,
+    retries: reach.retries,
+  };
 }
 
 describe('the probe delivery sweep', () => {
@@ -314,6 +327,17 @@ describe('the probe delivery sweep', () => {
     await watch.settle();
     assert.equal(calls.length, 10, 'every one of them, in four passes');
     assert.equal(watch.stats().deferred, 0);
+  });
+
+  it('re-decides, every sweep, what a tree change left owed (`P-249`)', async () => {
+    // A resync whose re-evaluation failed leaves the overlay right and the states behind, and a
+    // sensor behind an offline probe sends nothing that would settle it. The sweep is what does.
+    const links = new Map([[7, link({ sinceResultsMs: 0 })]]);
+    const { watch, retries } = watchOver(links, { uptimeMs: UPTIME });
+    retries.answer = 2;
+    assert.equal(await watch.settle(), 2, 'what it re-decided counts as moved');
+    await watch.settle();
+    assert.equal(retries.count, 2);
   });
 
   it('survives a database that cannot list probes', async () => {
