@@ -22290,13 +22290,23 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       `build.json` is deleted outright reads as a working tree, which is `full`. Both smokes fail
       on a missing `build.json`.
 
-- [ ] **H-14 — An x86_64 build, proven once** · S · — · Every package so far was built on
+- [x] **H-14 — An x86_64 build, proven once** · S · — · Every package so far was built on
       this project's Apple Silicon machine, so every `.deb` has been `arm64`, and `package.sh` says
       native addons must be built on the target's architecture. The field host will almost
       certainly be x86_64. `argon2` ships a `linux-x64` prebuild and `ssh2`'s `cpu-features` is
       optional, so it looks feasible, and it is unproven. **Done when** an `amd64` `.deb` has been
       built — under emulation, or on an x86_64 runner — and installed by the smoke test, or the
       reason it cannot be is written down with what the field host must do instead.
+      **Outcome (2026-10-04)**: built from `v1.0.0-rc.2` under `linux/amd64` emulation on the
+      same machine — an amd64 toolchain image ran `package.sh`, and the deb and rpm scripts
+      re-execed in amd64 containers — with the tag's manifest unchanged and every native addon
+      ELF x86-64. `smoke-packages.sh` installed, upgraded and removed the amd64 `.deb` and `.rpm`,
+      and the Debian install and the restore passed against the amd64 tarball, the installed
+      services running x86_64 code. The Ubuntu 24.04 install could not run: under Docker
+      Desktop's Rosetta every unit systemd 255 starts through `systemd-executor` dies, PostgreSQL
+      first, before anything of ours is installed. Checksums, timings and the diagnosis are in
+      `docs/findings/2026-10-04-v1-release-candidate-cut.md`. No re-cut was needed: the field
+      host installs `ms_1.0.0~rc.2_amd64.deb` from the same tag.
 
 - [ ] **H-15 — The field-test dress rehearsal** · M · H-11, H-12, H-13, H-14 ·
       `docs/runbook-field-test.md` end to end on the smoke-install Ubuntu 24.04 box, against the
@@ -22994,6 +23004,15 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       done: `smoke-install.sh` ran on 2026-10-02 with the assertion passing, and `H-26` is
       ticked on it. `deploy/windows/ms-setup.ps1` gets
       the same question in Release 1.1.
+
+- [ ] **H-29 — the x86_64 package has not been installed on Ubuntu** · S · H-14 · Found
+      2026-10-04. `H-14` proved the amd64 `.deb` on Debian 12 and Rocky 9 under emulation, and the
+      Ubuntu 24.04 box could not boot there: Docker Desktop's Rosetta kills every unit systemd 255
+      starts through `systemd-executor`. The field host is most likely Ubuntu on x86_64, which is
+      the one combination no smoke test has run. **Done when** `MS_SMOKE_DISTRO=ubuntu
+      scripts/smoke-install.sh` and the `.deb` install have passed against the rc's x86_64
+      packages on an x86_64 machine, or under QEMU emulation rather than Rosetta — or the field
+      test's step 1, on the field host, is recorded as that proof.
 
 ## Release 1.1 — Windows
 
