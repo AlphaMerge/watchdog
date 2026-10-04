@@ -267,6 +267,11 @@ export class SensorCatalogue {
           // What the probe lets a sensor connect to (`A-57`). Whatever `policy` arrived with
           // the context is dropped, as `pinned` is: a check does not choose its own.
           policy: this.#policy,
+          // And the one device's exception to it (`A-64`), which is the core's to send and the
+          // device's alone: it arrives with the assignment, and `checkedTarget` reads it.
+          ...(context.target.policyException === undefined
+            ? {}
+            : { policyException: context.target.policyException }),
         },
         scrub: (text: string) => scrubSecrets(text, secrets),
       });

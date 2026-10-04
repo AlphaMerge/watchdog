@@ -24,6 +24,9 @@ const TRACKED = [
   'inheritsTriggers',
   'host',
   'ipVersion',
+  // Who let a device's sensors reach an address the probe's policy refuses (`A-64`). Absent on
+  // a device with none, so it is in a diff only where one was set or cleared.
+  'targetPolicyException',
   'sensorType',
 ] as const;
 

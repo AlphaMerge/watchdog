@@ -72,6 +72,11 @@ export interface HttpRequestOptions {
    */
   readonly targetPolicy?: TargetPolicy;
   /**
+   * The addresses of this device the request may reach although `targetPolicy` refuses them
+   * (`CheckTarget.policyException`, `A-64`). Handed to the guard with the policy.
+   */
+  readonly targetPolicyException?: readonly string[];
+  /**
    * The address every connection of this request goes to, in place of resolving `host`
    * (`A-41c`): the one checked against the credential set's targets.
    *
@@ -172,6 +177,9 @@ function checkedForRequest(
     host: options.host,
     ...(options.pinned === undefined ? {} : { pinned: options.pinned }),
     ...(options.targetPolicy === undefined ? {} : { policy: options.targetPolicy }),
+    ...(options.targetPolicyException === undefined
+      ? {}
+      : { exception: options.targetPolicyException }),
     ...(options.resolve === undefined ? {} : { resolve: options.resolve }),
     timeoutMs: options.timeoutMs,
     signal,
@@ -583,5 +591,8 @@ export function readCommon(
     ...(target.pinned === undefined ? {} : { pinned: target.pinned }),
     ...(target.resolve === undefined ? {} : { resolve: target.resolve }),
     ...(target.policy === undefined ? {} : { targetPolicy: target.policy }),
+    ...(target.policyException === undefined
+      ? {}
+      : { targetPolicyException: target.policyException }),
   };
 }

@@ -142,6 +142,12 @@ export const objectDetailSchema = {
     // device
     host: { type: 'string' },
     ipVersion: { enum: ['auto', 'v4', 'v6'] },
+    /**
+     * The addresses of this device its probe may connect to although its target policy refuses
+     * them (`A-64`). Absent when there are none. Changed only by an administrator, through
+     * `PUT /objects/:id/target-policy-exception`.
+     */
+    targetPolicyException: { type: 'array', items: { type: 'string' } },
     // probe
     gid: { type: ['string', 'null'] },
     // sensor

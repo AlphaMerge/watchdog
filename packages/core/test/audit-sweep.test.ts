@@ -215,6 +215,18 @@ const FIXTURES: Record<string, Fixture> = {
     await k.post(url, { value: 300 }).catch(() => undefined);
     return { url };
   },
+  'PUT /api/v1/objects/:id/target-policy-exception': async (k) => {
+    const device = await k.post('/api/v1/objects', {
+      kind: 'device',
+      parentId: k.probeId,
+      name: k.name('excepted'),
+      host: '169.254.10.5',
+    });
+    return {
+      url: `/api/v1/objects/${id(device.id)}/target-policy-exception`,
+      payload: { addresses: ['169.254.10.5'] },
+    };
+  },
   'PUT /api/v1/objects/:id/credentials/:kind': async (k) => ({
     url: `/api/v1/objects/${id(await k.group())}/credentials/snmp`,
     payload: { values: { community: PLANTED_SECRET } },

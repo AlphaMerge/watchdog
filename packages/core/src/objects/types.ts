@@ -67,6 +67,17 @@ export type ObjectDetail =
       readonly parentId: ObjectId;
       readonly host: string;
       readonly ipVersion: IpVersion;
+      /**
+       * The addresses of this device its probe may connect to although the probe's target
+       * policy refuses them (`A-64`). **Absent when there are none**, which is nearly every
+       * device, so a device without one reads, diffs and audits as it did before.
+       *
+       * The device's own and never inherited: not a setting, so the resolver never sees it.
+       * Readable by whoever may read the device, as the host is; written only through
+       * `PUT /objects/:id/target-policy-exception`, which only an administrator clears, and never
+       * by a create, an update, a clone or a template.
+       */
+      readonly targetPolicyException?: readonly string[];
     })
   | (ObjectBase & {
       readonly kind: 'sensor';

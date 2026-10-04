@@ -1,5 +1,5 @@
 import { isIP, type LookupFunction } from 'node:net';
-import { refuses, type TargetPolicy } from '@ms/shared';
+import { excepts, refuses, type TargetPolicy } from '@ms/shared';
 import type { CheckTarget } from '../contract.js';
 import {
   resolveBoundMs,
@@ -27,6 +27,12 @@ import {
  * **A refusal here is an ordinary failed check**, not `CredentialsWithheldError`: no credential
  * set is behind it, the sensor reads Down, and the message names the device, the address and
  * the policy.
+ *
+ * **One device's exception is read here and nowhere else** (`A-64`): `CheckTarget.policyException`,
+ * the addresses of that device an administrator let its sensors reach although the policy
+ * refuses them. Every function below that judges an address asks `excepts` about it after the
+ * policy has refused it, so the exception can only ever let through an address the lookup
+ * answered with (or the device was given as) and the list names. A name is never in the list.
  */
 
 /** Set by the probe from `probe.targetPolicy`, in the environment its workers inherit. */
@@ -87,6 +93,8 @@ export interface TargetCheck {
   readonly policy?: TargetPolicy;
   /** `CheckTarget.resolve`. Absent, the system's resolver. */
   readonly resolve?: ResolveHost;
+  /** `CheckTarget.policyException` (`A-64`). Absent, nothing is excepted. */
+  readonly exception?: readonly string[];
   /** What the transport has to connect in. The one lookup is given part of it (`resolveBoundMs`). */
   readonly timeoutMs?: number;
   readonly signal: AbortSignal;
@@ -105,12 +113,13 @@ export interface TargetCheck {
  */
 export function guardOf(
   target: CheckTarget,
-): Pick<TargetCheck, 'host' | 'pinned' | 'policy' | 'resolve'> {
+): Pick<TargetCheck, 'host' | 'pinned' | 'policy' | 'resolve' | 'exception'> {
   return {
     host: target.host,
     ...(target.pinned === undefined ? {} : { pinned: target.pinned }),
     ...(target.policy === undefined ? {} : { policy: target.policy }),
     ...(target.resolve === undefined ? {} : { resolve: target.resolve }),
+    ...(target.policyException === undefined ? {} : { exception: target.policyException }),
   };
 }
 
@@ -118,7 +127,7 @@ export function guardOf(
 class ResolveGivenUp extends Error {}
 
 function refusal(
-  check: Pick<TargetCheck, 'host' | 'verb'>,
+  check: Pick<TargetCheck, 'host' | 'verb' | 'exception'>,
   policy: TargetPolicy,
   address: string,
   reason: string,
@@ -127,12 +136,32 @@ function refusal(
     address === check.host
       ? `${check.host}, which is ${reason}`
       : `${check.host}: it resolves to ${address}, which is ${reason}`;
+  // Said only where the device has one, so that a refusal on a device with an exception says
+  // why the exception did not cover it (`A-64`).
+  const excepted =
+    check.exception === undefined || check.exception.length === 0
+      ? ''
+      : `; this device’s exception (${check.exception.join(', ')}) does not cover ${address}`;
   return new TargetRefusedError(
     `refusing to ${check.verb} ${what}; this probe’s target policy (${policy}) refuses it, ` +
       'as it does every cloud instance-metadata address, and probe.targetPolicy “none” ' +
-      'refuses nothing',
+      `refuses nothing${excepted}`,
     { target: check.host, address, policy },
   );
+}
+
+/**
+ * Whether the policy refuses this address for this device, and why: its reason, or null where
+ * the policy allows it or the device's exception names it (`A-64`). The one judgement every
+ * function here makes.
+ */
+function judged(
+  policy: TargetPolicy,
+  address: string,
+  exception: readonly string[] | undefined,
+): string | null {
+  const reason = refuses(policy, address);
+  return reason === null || excepts(exception, address) ? null : reason;
 }
 
 /**
@@ -147,11 +176,19 @@ export function refuseBlockedAddress(
   host: string,
   declared: TargetPolicy | undefined,
   verb: string,
+  exception?: readonly string[],
 ): void {
   const policy = declared ?? DEFAULT_TARGET_POLICY;
   if (policy === 'none' || isIP(host) === 0) return;
-  const reason = refuses(policy, host);
-  if (reason !== null) throw refusal({ host, verb }, policy, host, reason);
+  const reason = judged(policy, host, exception);
+  if (reason !== null) {
+    throw refusal(
+      { host, verb, ...(exception === undefined ? {} : { exception }) },
+      policy,
+      host,
+      reason,
+    );
+  }
 }
 
 /**
@@ -165,18 +202,20 @@ export function refuseBlockedAddress(
  *
  * **The policy's own answer for loopback decides it**, asked of `refuses` and not kept as a
  * second list: wherever a policy refuses `127.0.0.1` it refuses a path, and where it allows
- * one it allows the other.
+ * one it allows the other. A device whose exception names `127.0.0.1` (`A-64`) is allowed its
+ * path for the same reason: the path is judged as that address, exception and all.
  */
 export function refuseLocalSocket(
   path: string,
   declared: TargetPolicy | undefined,
   verb: string,
+  exception?: readonly string[],
 ): void {
   const policy = declared ?? DEFAULT_TARGET_POLICY;
-  const reason = refuses(policy, '127.0.0.1');
+  const reason = judged(policy, '127.0.0.1', exception);
   if (reason === null) return;
   throw refusal(
-    { host: path, verb },
+    { host: path, verb, ...(exception === undefined ? {} : { exception }) },
     policy,
     path,
     `a socket on this probe’s own machine, as 127.0.0.1 is, and that is ${reason}`,
@@ -200,8 +239,10 @@ export function refuseLocalSocket(
 export async function checkedTarget(check: TargetCheck): Promise<CheckedTarget | null> {
   const host = check.host;
   const policy = check.policy ?? DEFAULT_TARGET_POLICY;
+  // The policy, and then this device's exception to it (`A-64`), over one address at a time: the
+  // pinned one, the one the device was given as, or each the lookup answered with.
   const judge = (address: string): void => {
-    const reason = policy === 'none' ? null : refuses(policy, address);
+    const reason = policy === 'none' ? null : judged(policy, address, check.exception);
     if (reason !== null) throw refusal(check, policy, address, reason);
   };
 

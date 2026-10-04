@@ -1,6 +1,7 @@
 // Side-effect import: @fastify/swagger augments FastifySchema with `description`, which the
 // generated OpenAPI document carries into the API reference (H-07).
 import '@fastify/swagger';
+import { MAX_EXCEPTION_ADDRESSES } from '@ms/shared';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { ObjectError } from '../../objects/errors.js';
 import { actorFor } from '../authentication.js';
@@ -31,6 +32,7 @@ import type { CarriedGrants, ChannelProcessing } from '../../objects/types.js';
 import { decodeCursor } from '../pagination.js';
 import { etagFor, optionalIfMatch, requireIfMatch, viewedChain } from '../preconditions.js';
 import {
+  ADMIN,
   INSTALLATION,
   READS,
   WRITES,
@@ -1767,6 +1769,59 @@ export async function objectRoutes(
       // The newly effective value comes back with the response, so the form repaints without
       // a second round trip.
       await reply.send({ key, reverted, effective: view?.effective, own: null });
+    },
+  );
+
+  // ── 14b. one device's exception to its probe's target policy ─────────────────────────────
+  app.put<{ Params: { id: number }; Body: { addresses: string[] } }>(
+    '/objects/:id/target-policy-exception',
+    {
+      // **The bar the grant routes hold** (`A-64`): an administrator, with a `full` token. The
+      // target policy exists because whoever may write a device could otherwise point a probe
+      // at the cloud's metadata service; an exception that account could write would be the
+      // policy turned off by the person it is there for.
+      config: ADMIN,
+      schema: {
+        tags: ['objects'],
+        summary:
+          'Set or clear the addresses one device may reach although its probe’s policy refuses them',
+        description:
+          'The addresses of this device its probe may connect to although `probe.targetPolicy` ' +
+          'refuses them (`A-64`), replacing any it had; an empty list clears it. **Only an ' +
+          'administrator**, with a `full` token, may change it; anyone who may read the device ' +
+          'sees it, as `targetPolicyException` on the device. **A device only, and never ' +
+          'inherited**: a group, a probe or the root is refused with 409, and a device has none ' +
+          'until one is set here: a clone or a template starts without one. **Addresses, one at ' +
+          'a time**: not a name, a range or a zone, not multicast or the unspecified address, ' +
+          'and never a cloud instance-metadata service (`169.254.169.254`, `169.254.170.2`, ' +
+          '`fd00:ec2::254`), each refused with 400. A sensor on the device whose host is a ' +
+          'name connects only when every address the name resolves to is allowed by the ' +
+          'policy or named here. Takes `If-Match`. Audited as an update of the device. Reaches ' +
+          'a probe at protocol 28 or later; an older probe refuses those addresses as before.',
+        params: idParams,
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['addresses'],
+          properties: {
+            addresses: {
+              type: 'array',
+              maxItems: MAX_EXCEPTION_ADDRESSES,
+              items: { type: 'string', minLength: 1, maxLength: 64 },
+            },
+          },
+        },
+        response: { 200: { $ref: 'ms:objectDetail' } },
+      },
+    },
+    async (request, reply) => {
+      const updated = await service.setTargetPolicyException(
+        actorFor(request),
+        request.params.id,
+        request.body.addresses,
+        optionalIfMatch(request.headers['if-match']),
+      );
+      await reply.header('ETag', etagFor(updated.version)).send(await answerFor(request, updated));
     },
   );
 

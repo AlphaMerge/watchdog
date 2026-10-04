@@ -171,6 +171,83 @@ export function refuses(policy: TargetPolicy, given: string): string | null {
 }
 
 /**
+ * The most addresses one device's exception may name (`A-64`). A device has a handful of
+ * addresses; a list longer than this is a range written out one address at a time.
+ */
+export const MAX_EXCEPTION_ADDRESSES = 16;
+
+/**
+ * The cloud instance-metadata services that hand out credentials to whoever asks, which **no
+ * exception reaches** (`A-64`): the address every major provider answers on, AWS's task-role
+ * endpoint for containers, and AWS's IPv6 one. Other link-local addresses a provider answers on
+ * (its DNS and time servers) are ordinary devices, and may be excepted.
+ */
+const METADATA_SERVICES: readonly string[] = ['169.254.169.254', '169.254.170.2', 'fd00:ec2::254'];
+
+/**
+ * An address as it is compared: an IPv4 address as its four numbers, an IPv6 address as its eight
+ * groups with any zone dropped, and an IPv4-mapped address as the IPv4 address it carries. Null
+ * for anything that is not an address. So `::ffff:a9fe:a9fe`, `::ffff:169.254.169.254` and
+ * `169.254.169.254` are one address, and `fe80::1%eth0` is `fe80::1`.
+ */
+function addressKey(given: string): string | null {
+  const plain = unmapped(given.trim());
+  const four = octets(plain);
+  if (four !== null) return four.join('.');
+  const six = groups(plain);
+  return six === null ? null : six.map((group) => group.toString(16)).join(':');
+}
+
+/** Whether an address is a metadata service no exception reaches, in any spelling (`A-64`). */
+export function isMetadataService(address: string): boolean {
+  const key = addressKey(address);
+  return key !== null && METADATA_SERVICES.some((known) => addressKey(known) === key);
+}
+
+/**
+ * Why an address cannot be in a device's target-policy exception, or null when it can (`A-64`).
+ *
+ * **Addresses, one at a time.** Not a name, which whoever runs its DNS could point anywhere; not
+ * a range, which exempts more than the device; not a zone, which is the probe's interface and not
+ * the device's address. Not what every policy refuses (multicast, broadcast, reserved), not the
+ * unspecified address, which names no device, and never a metadata service.
+ */
+export function exceptionProblem(entry: string): string | null {
+  if (entry.includes('/')) return 'is a range, and an exception names addresses one at a time';
+  if (entry.includes('%')) return 'carries a zone; name the address without it';
+  if (!isIPv4(entry) && !isIPv6(entry)) return 'is not an IPv4 or IPv6 address';
+  if (isMetadataService(entry)) {
+    return 'is a cloud instance-metadata service, which no exception reaches';
+  }
+  if (refuses('none', entry) !== null) {
+    return 'is multicast or reserved, which every policy refuses';
+  }
+  const key = addressKey(entry);
+  if (key === '0.0.0.0' || key === '0:0:0:0:0:0:0:0') {
+    return 'is the unspecified address, which names no device';
+  }
+  return null;
+}
+
+/**
+ * Whether one device's exception lets its sensors connect to an address the probe's policy
+ * refuses (`A-64`).
+ *
+ * **The address the lookup answered, and nothing else.** A name is never in the list, so a name
+ * is let through only as far as every address it answers with is: one answer outside the list
+ * still refuses the whole name. **Each entry is held to `exceptionProblem` here again**, on the
+ * probe, whatever the core let through: an entry that is not an address, or is a metadata service
+ * or anything every policy refuses, excepts nothing. An address matches an entry only when the two
+ * are one address, so that is also what keeps a metadata service out in any spelling.
+ */
+export function excepts(exception: readonly string[] | undefined, address: string): boolean {
+  if (exception === undefined || exception.length === 0) return false;
+  const key = addressKey(address);
+  if (key === null) return false;
+  return exception.some((entry) => exceptionProblem(entry) === null && addressKey(entry) === key);
+}
+
+/**
  * Checks every address a hostname resolved to.
  *
  * All of them, not the first: a name that resolves to one public address and one link-local one

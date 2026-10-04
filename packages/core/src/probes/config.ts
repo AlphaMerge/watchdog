@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { restrictionOf, type CredentialRestriction } from '@ms/sensors';
-import { PROTOCOL_VERSION, type SensorAssignment } from '@ms/shared';
+import { capabilitiesFor, PROTOCOL_VERSION, type SensorAssignment } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
 import type {
   BuildingFor,
@@ -144,6 +144,7 @@ export class ProbeConfigService {
       params: Record<string, unknown> | null;
       host: string | null;
       ip_version: string | null;
+      target_policy_exception: string[] | null;
     }>(
       `
       WITH RECURSIVE branch AS (
@@ -158,7 +159,8 @@ export class ProbeConfigService {
              sc.type        AS sensor_type,
              sc.params      AS params,
              dc.host        AS host,
-             dc.ip_version  AS ip_version
+             dc.ip_version  AS ip_version,
+             dc.target_policy_exception AS target_policy_exception
       FROM branch b
       JOIN object s          ON s.id = b.id AND s.kind = 'sensor'
       JOIN sensor_config sc  ON sc.object_id = s.id
@@ -224,10 +226,7 @@ export class ProbeConfigService {
         sensorId,
         sensorType: row.sensor_type,
         params: row.params ?? {},
-        target: {
-          host: row.host ?? '',
-          ipVersion: (row.ip_version ?? 'auto') as SensorAssignment['target']['ipVersion'],
-        },
+        target: targetFor(row, peerVersion),
         intervalSeconds: intervals.get(sensorId)?.value ?? 60,
         timeoutMs: timeouts.get(sensorId)?.value ?? 30_000,
         ...(forSensor === undefined ? {} : { credentials: forSensor }),
@@ -270,6 +269,7 @@ export class ProbeConfigService {
       params: Record<string, unknown> | null;
       host: string | null;
       ip_version: string | null;
+      target_policy_exception: string[] | null;
     }>(
       `
       WITH RECURSIVE up AS (
@@ -284,7 +284,8 @@ export class ProbeConfigService {
              sc.type       AS sensor_type,
              sc.params     AS params,
              dc.host       AS host,
-             dc.ip_version AS ip_version
+             dc.ip_version AS ip_version,
+             dc.target_policy_exception AS target_policy_exception
       FROM object s
       JOIN sensor_config sc ON sc.object_id = s.id
       JOIN device_config dc ON dc.object_id = s.parent_id
@@ -343,10 +344,7 @@ export class ProbeConfigService {
         sensorId,
         sensorType: row.sensor_type,
         params: row.params ?? {},
-        target: {
-          host: row.host ?? '',
-          ipVersion: (row.ip_version ?? 'auto') as SensorAssignment['target']['ipVersion'],
-        },
+        target: targetFor(row, peerVersion),
         intervalSeconds: intervals.get(sensorId)?.value ?? 60,
         timeoutMs: timeouts.get(sensorId)?.value ?? 30_000,
         ...(forSensor === undefined ? {} : { credentials: forSensor }),
@@ -437,6 +435,33 @@ interface ResolvedCredentials {
   restrictions: Map<number, Map<string, CredentialRestriction>>;
 }
 
+/**
+ * Where a sensor points, as the probe that scans it is told (`A-64`): its device's host and
+ * family, and the device's exception to the target policy where it has one and the probe can be
+ * sent it.
+ *
+ * **Not to a probe below 28** (`targetPolicyException`). `target` is a closed schema on the
+ * probe, so an older one would refuse the whole configuration for the field; left out, it refuses
+ * those addresses as its policy says, which is what it did before there was an exception.
+ */
+function targetFor(
+  row: {
+    host: string | null;
+    ip_version: string | null;
+    target_policy_exception: string[] | null;
+  },
+  peerVersion: number,
+): SensorAssignment['target'] {
+  const exception = row.target_policy_exception ?? [];
+  return {
+    host: row.host ?? '',
+    ipVersion: (row.ip_version ?? 'auto') as SensorAssignment['target']['ipVersion'],
+    ...(exception.length > 0 && capabilitiesFor(peerVersion).targetPolicyException
+      ? { policyException: [...exception] }
+      : {}),
+  };
+}
+
 /** The sensors being sent a set, as the credential check asks about them (`A-41`). */
 function beingSent(
   rows: readonly {
@@ -490,6 +515,12 @@ export function fingerprint(
       stableJson(sensor.params),
       sensor.target.host,
       sensor.target.ipVersion,
+      // Only where there is one (`A-64`), so that every assignment without one hashes as it did
+      // before the field existed and an upgrade re-sends nothing; where there is, a change to it
+      // is a change to the sensor, and the probe is sent it.
+      ...(sensor.target.policyException === undefined
+        ? []
+        : [sensor.target.policyException.join(',')]),
       sensor.intervalSeconds,
       sensor.timeoutMs,
       // **The stamp, never the credential.** A rotated community string has to change this, or

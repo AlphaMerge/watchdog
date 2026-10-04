@@ -374,7 +374,7 @@ Four rules follow from how the redactor works:
 
   ```ts
   const checked = await checkedTarget({
-    ...guardOf(context.target), // the host, with the pin, the policy and the resolver
+    ...guardOf(context.target), // the host, with the pin, the policy, its exception, the resolver
     timeoutMs,
     signal: context.signal,
     verb: 'connect to',
@@ -390,8 +390,13 @@ Four rules follow from how the redactor works:
   socket and hand it one made with that lookup, as `support/db/socket.ts` does for `pg`
   (`stream`), `mysql2` (`stream`) and `tedious` (`connector`), leaving the driver the name so
   that TLS names it. Only a transport that can do none of these, as PowerShell cannot, calls
-  `refuseBlockedAddress` for a device given as an address and is listed in `administration.md`
-  as checked by address only. A refusal is an ordinary failed check; do not catch it.
+  `refuseBlockedAddress` for a device given as an address, handing it
+  `context.target.policyException`, and is listed in `administration.md` as checked by address
+  only. A refusal is an ordinary failed check; do not catch it. **Spread `guardOf`, never pick
+  the policy out of the target by hand** (`A-64`): it also carries the device's exception to the
+  policy, and a transport that passed the policy alone would refuse an address an administrator
+  excepted. A transport that keeps a connection open between checks, as the SSH pool does, keys
+  it by the exception too, so one opened under an exception is not reused once it is withdrawn.
 
 The form (`U-08`) follows from the same annotation: a `writeOnly` parameter renders as
 "set, write-only" with Replace and Clear, never as a filled input, and is omitted from the save

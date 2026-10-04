@@ -56,6 +56,12 @@ export interface SshTarget {
    * every check waiting for this connection has been cancelled, and not when one has.
    */
   readonly guard?: (signal?: AbortSignal) => Promise<readonly PinnedAddress[] | undefined>;
+  /**
+   * The device's exception to the target policy that `guard` was built with (`A-64`). Read only
+   * for the pool's key: a connection opened under an exception is not handed to a check once the
+   * exception is withdrawn or changed, since the pool does not ask `guard` about one it holds.
+   */
+  readonly exception?: readonly string[];
 }
 
 export interface SshSessionOptions {

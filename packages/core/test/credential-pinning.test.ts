@@ -4902,8 +4902,12 @@ describe(
     });
 
     it('a probe whose version flaps between the core’s and the one before raises one Probe Health warning, cleared once it has held an hour (A-72)', async () => {
+      // The newer of the two is the core's own, so that a probe speaking it has no skew and the
+      // warning there is the flap's; the older is below the one a database set needs, so that
+      // the query is withheld there. Two versions apart since 28 (`A-64`) added one above 27.
       const DATABASE = versionFor('databaseAddressPinning');
-      assert.equal(DATABASE, PROTOCOL_VERSION, 'the newer of the two is the core’s own');
+      const CORE = PROTOCOL_VERSION;
+      assert.ok(DATABASE <= CORE, 'the core’s own version pins a database set');
       const running = { credentials, config };
       ({ credentials, config } = restartedCore());
       const lookups = await loadLookups({ logger: silent });
@@ -4946,7 +4950,7 @@ describe(
           resolver: new ChannelResolver({ logger: silent, lookups }),
           refusals,
         });
-        let speaking = DATABASE;
+        let speaking = CORE;
         let sweeps = 0;
         // Stamped a second apart, behind the core's clock, so each is newer than the last.
         const base = Date.now() - 600_000;
@@ -4986,7 +4990,7 @@ describe(
           );
         const healthState = async (): Promise<string> => (await stateOf(watch)).state;
 
-        assert.equal(await speak(DATABASE), true);
+        assert.equal(await speak(CORE), true);
         await fromProbe([{ ...measured(query, at(-90)), message: '1 row in 3 ms' }], probe);
         assert.equal(await healthState(), 'up');
 
@@ -4997,12 +5001,12 @@ describe(
         assert.equal(await warnings(), 1);
         // Four more changes, three minutes apart: the query stays held, and Probe Health stays
         // in the one warning, now naming the flap, at the core's version as at the older.
-        for (const version of [DATABASE, DATABASE - 1, DATABASE, DATABASE - 1, DATABASE]) {
+        for (const version of [CORE, DATABASE - 1, CORE, DATABASE - 1, CORE]) {
           ahead.ms += 180_000;
           assert.equal(await speak(version), false, `held at ${String(version)}`);
           assert.equal(await healthState(), 'warning');
           // At the core's own version the skew is gone, and the warning is the flap's.
-          if (version === DATABASE) {
+          if (version === CORE) {
             assert.match(
               (await stateOf(watch)).message,
               /^Protocol version changes in a flap is \d changes, above the warning limit of 1\.5 changes — this probe's protocol version changed more than once in an hour/,
@@ -5016,7 +5020,7 @@ describe(
         // Probe Health is Up again.
         ahead.ms += PROTOCOL_FLAP_HOLD_MS;
         await credentials.prune();
-        assert.equal(await speak(DATABASE), true);
+        assert.equal(await speak(CORE), true);
         assert.equal(await healthState(), 'up');
         assert.equal(await warnings(), 1);
         assert.equal((await stateOf(query)).state, 'up');
@@ -5119,8 +5123,11 @@ describe(
     });
 
     it('a core rolled back and upgraded again inside the hour, its probe unchanged, is no flap: no warning, and nothing held past what each core requires (A-72)', async () => {
+      // The probe advertises the core's own version; the build it is rolled back to is below the
+      // one a database set needs (two versions back since `A-64` added 28 above 27).
       const DATABASE = versionFor('databaseAddressPinning');
-      assert.equal(DATABASE, PROTOCOL_VERSION);
+      const CORE = PROTOCOL_VERSION;
+      assert.ok(DATABASE <= CORE);
       const running = { credentials, config };
       ({ credentials, config } = restartedCore());
       try {
@@ -5150,8 +5157,8 @@ describe(
          */
         const meet = async (coreVersion: number): Promise<boolean> => {
           const sent = (
-            await config.assignmentsFor(probe, Math.min(coreVersion, DATABASE), {
-              advertisedVersion: DATABASE,
+            await config.assignmentsFor(probe, Math.min(coreVersion, CORE), {
+              advertisedVersion: CORE,
               live: () => true,
             })
           ).sensors.some((one) => one.sensorId === query);
@@ -5175,7 +5182,7 @@ describe(
             ingest: () => Promise.resolve(),
           }).read(probe).reading['protocolFlap'];
 
-        assert.equal(await meet(DATABASE), true);
+        assert.equal(await meet(CORE), true);
         await fromProbe([{ ...measured(query, at(-90)), message: '1 row in 3 ms' }], probe);
         assert.deepEqual(await paged(query), []);
 
@@ -5191,9 +5198,9 @@ describe(
         // The probe changed nothing, so there is no flap, no warning and no hour held.
         ahead.ms += 300_000;
         await restart();
-        assert.equal(await meet(DATABASE), true);
+        assert.equal(await meet(CORE), true);
         assert.equal(credentials.protocolFlap(probe), null);
-        assert.equal(flapReading(DATABASE), 0);
+        assert.equal(flapReading(CORE), 0);
         assert.deepEqual(await paged(query), ['initial:unknown', 'recovery:unknown']);
         assert.equal(await downs([query]), 0);
         // Its row is what it advertised, written once, and never moved.
@@ -5202,7 +5209,7 @@ describe(
             'SELECT version, run_changes, changed_at FROM probe_protocol_flap WHERE probe_id = $1',
             [probe],
           ),
-          [{ version: DATABASE, run_changes: 0, changed_at: null }],
+          [{ version: CORE, run_changes: 0, changed_at: null }],
         );
       } finally {
         ({ credentials, config } = running);

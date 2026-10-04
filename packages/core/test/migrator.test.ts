@@ -1508,6 +1508,94 @@ describe(
       }
     });
 
+    it('gives a device an exception to its probe’s target policy, bounded, and rolls back to none (070)', async () => {
+      // `A-64`: on `device_config`, as the host is, so that nothing inherits it.
+      const fresh = await createScratchDatabase('target_policy_exception');
+      try {
+        const all = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 70),
+        );
+        await all.up();
+        const q = fresh.db;
+        const column = async (): Promise<boolean> =>
+          (
+            await q.query(
+              `SELECT 1 FROM information_schema.columns
+               WHERE table_name = 'device_config' AND column_name = 'target_policy_exception'`,
+            )
+          ).length === 1;
+        assert.equal(await column(), true);
+        const [root] = await q.query<{ id: string }>(`SELECT id FROM object WHERE kind = 'root'`);
+        const [probe] = await q.query<{ id: string }>(
+          `INSERT INTO object (parent_id, kind, name) VALUES ($1, 'probe', 'probe')
+           RETURNING id::text`,
+          [root?.id],
+        );
+        const [device] = await q.query<{ id: string; version: number }>(
+          `INSERT INTO object (parent_id, kind, name) VALUES ($1, 'device', 'bmc')
+           RETURNING id::text, version`,
+          [probe?.id],
+        );
+        const deviceId = device?.id ?? assert.fail('no device');
+        // A device written as every existing write writes one has none.
+        await q.query(`INSERT INTO device_config (object_id, host) VALUES ($1, '169.254.10.5')`, [
+          deviceId,
+        ]);
+        const list = async (): Promise<string[]> =>
+          (
+            await q.query<{ list: string[] }>(
+              'SELECT target_policy_exception AS list FROM device_config WHERE object_id = $1',
+              [deviceId],
+            )
+          )[0]?.list ?? assert.fail('no row');
+        assert.deepEqual(await list(), []);
+        const version = async (): Promise<number> =>
+          (
+            await q.query<{ version: number }>('SELECT version FROM object WHERE id = $1', [
+              deviceId,
+            ])
+          )[0]?.version ?? 0;
+        const before = await version();
+        const set = (value: string[] | null): Promise<unknown> =>
+          q.query('UPDATE device_config SET target_policy_exception = $2 WHERE object_id = $1', [
+            deviceId,
+            value,
+          ]);
+        await set(['169.254.10.5', 'fe80::5']);
+        assert.deepEqual(await list(), ['169.254.10.5', 'fe80::5']);
+        assert.equal(await version(), before + 1, 'a change to it is a change to the device');
+
+        await set(Array.from({ length: 16 }, (_, at) => `169.254.10.${String(at + 1)}`));
+        await assert.rejects(
+          set(Array.from({ length: 17 }, (_, at) => `169.254.10.${String(at + 1)}`)),
+          /device_config_target_policy_exception_bounded/,
+        );
+        await assert.rejects(
+          q.query(
+            `UPDATE device_config SET target_policy_exception = ARRAY['169.254.10.5', NULL]
+             WHERE object_id = $1`,
+            [deviceId],
+          ),
+          /device_config_target_policy_exception_bounded/,
+        );
+        await assert.rejects(set(['']), /device_config_target_policy_exception_bounded/);
+        await assert.rejects(set(null), /null value/);
+
+        await all.down(1);
+        assert.equal(await column(), false);
+        assert.equal(await tableExists(q, 'probe_protocol_flap'), true, 'and nothing else');
+        const again = await all.up();
+        assert.deepEqual(
+          again.applied.map((one) => one.id),
+          [70],
+        );
+        assert.deepEqual(await list(), [], 'an exception does not come back with the column');
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('applies the real migration set forward and all the way back', async () => {
       const fresh = await createScratchDatabase('roundtrip');
       try {

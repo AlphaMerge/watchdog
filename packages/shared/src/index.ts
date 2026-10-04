@@ -146,9 +146,13 @@ export { runProgram } from './process/run.js';
 export type { ProgramRun, ProgramRunOptions } from './process/run.js';
 
 export {
+  exceptionProblem,
+  excepts,
   isLinkLocal,
   isMetadataAddress,
+  isMetadataService,
   isPrivate,
+  MAX_EXCEPTION_ADDRESSES,
   refuses,
   refusedAddresses,
   sameOrigin,

@@ -44,6 +44,10 @@ export async function sshCheck<T>(
       host,
       port,
       ...(context.target.pinned === undefined ? {} : { pinned: context.target.pinned }),
+      // What the guard below excepts (`A-64`), so that a connection is keyed by it.
+      ...(context.target.policyException === undefined
+        ? {}
+        : { exception: context.target.policyException }),
       // **Only when a connection has to be opened** (`A-57`): the name is resolved once and
       // checked against the probe's target policy, and the connection is made to an address
       // that lookup answered with. A connection the pool already holds is used with no lookup,

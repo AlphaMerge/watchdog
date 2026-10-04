@@ -52,6 +52,8 @@ interface ObjectRow {
   child_count: string;
   host: string | null;
   ip_version: string | null;
+  /** `A-64`. Null on every kind but a device; an empty array on a device with none. */
+  target_policy_exception: string[] | null;
   sensor_type: string | null;
   params: Record<string, unknown> | null;
   probe_gid: string | null;
@@ -80,7 +82,7 @@ const DETAIL_COLUMNS = `
   o.id, o.parent_id, o.kind, o.name, o.tags, o.priority, o.comments, o.inherits_triggers,
   o.version, o.created_at, o.updated_at,
   (SELECT count(*) FROM object c WHERE c.parent_id = o.id) AS child_count,
-  dc.host, dc.ip_version,
+  dc.host, dc.ip_version, dc.target_policy_exception,
   sc.type AS sensor_type, sc.params,
   pc.gid AS probe_gid
 `;
@@ -156,6 +158,11 @@ function toDetail(row: ObjectRow): ObjectDetail {
         parentId: Number(row.parent_id),
         host: row.host ?? '',
         ipVersion: (row.ip_version ?? 'auto') as IpVersion,
+        // Absent rather than empty when there is none (`A-64`), so that a device without one
+        // reads, diffs and is audited exactly as before the column existed.
+        ...(row.target_policy_exception === null || row.target_policy_exception.length === 0
+          ? {}
+          : { targetPolicyException: row.target_policy_exception }),
       };
     case 'sensor':
       return {
@@ -1501,6 +1508,22 @@ export class ObjectRepository {
       ],
     );
     return rows.length;
+  }
+
+  /**
+   * Replaces one device's exception to its probe's target policy (`A-64`); an empty list clears
+   * it. The caller has checked the device, the precondition, who is asking and every entry.
+   * `device_config_touch_owner` bumps the device's version, as any change to its host does.
+   */
+  async setTargetPolicyException(
+    q: Queryable,
+    id: ObjectId,
+    addresses: readonly string[],
+  ): Promise<void> {
+    await q.query('UPDATE device_config SET target_policy_exception = $2 WHERE object_id = $1', [
+      id,
+      [...addresses],
+    ]);
   }
 
   /**

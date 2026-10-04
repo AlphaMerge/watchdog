@@ -405,6 +405,46 @@ describe('configuration messages', () => {
     );
   });
 
+  it('carries one device’s exception to the target policy in its target, bounded (A-64)', () => {
+    const excepted = {
+      ...assignment,
+      target: { host: 'h', ipVersion: 'auto', policyException: ['169.254.10.5', 'fe80::1'] },
+    };
+    const message = parseCoreToProbe({ type: 'config-set', version: 'v', sensors: [excepted] });
+    assert.ok(message.type === 'config-set');
+    assert.deepEqual(message.sensors[0]?.target.policyException, ['169.254.10.5', 'fe80::1']);
+    // And refused as any target is, where it is not a short list of short strings.
+    for (const policyException of [
+      [],
+      Array.from({ length: 17 }, (_, at) => `169.254.10.${String(at)}`),
+      ['x'.repeat(65)],
+      [5],
+      '169.254.10.5',
+    ]) {
+      assert.throws(
+        () =>
+          parseCoreToProbe({
+            type: 'config-set',
+            version: 'v',
+            sensors: [{ ...assignment, target: { host: 'h', ipVersion: 'auto', policyException } }],
+          }),
+        ProtocolError,
+        JSON.stringify(policyException),
+      );
+    }
+    // **Why it is gated** (`targetPolicyException`, 28): `target` is closed, so a field it does
+    // not name refuses the whole message. A probe whose schema predates the field refuses it so.
+    assert.throws(
+      () =>
+        parseCoreToProbe({
+          type: 'config-set',
+          version: 'v',
+          sensors: [{ ...assignment, target: { host: 'h', ipVersion: 'auto', exception: [] } }],
+        }),
+      ProtocolError,
+    );
+  });
+
   it('leaves sensor parameters alone, because the catalogue is what validates them', () => {
     const message = parseCoreToProbe({
       type: 'config-set',

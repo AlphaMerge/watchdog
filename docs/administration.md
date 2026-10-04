@@ -725,8 +725,8 @@ no new notification. Ping sensors are not affected. Devices reached at an APIPA 
 their `fe80::` address, and the link-local service addresses a cloud provider answers on, such
 as its DNS and time servers, are the cases to look for. **If those are yours to monitor, set
 `probe.targetPolicy` to `none` on that probe and restart it**: the sensors are Up at their next
-scan. There is no per-device exception, by design: whoever writes the device is who the rule is
-there for.
+scan. **Or, for one device, an administrator excepts its address** (`A-64`, below), which
+leaves the policy in force for every other device on the probe and is the narrower of the two.
 
 **The database sensors joined this later** (`A-62`), so the same holds for them at the upgrade
 that brings it: a PostgreSQL, MySQL or SQL Server sensor on a device given as a *name* that
@@ -879,6 +879,54 @@ policy reads them as it reads sensors:
   to `none` on that probe, restarts it and runs discovery again.
 - **A discovery pass is sent IPv4 addresses and nothing else** (`A-69`): a probe refuses a
   pass naming anything that is not a dotted quad, and the core offers only its IPv4 hosts.
+
+### One device's exception to the policy
+
+**`targetPolicyException`** is a device's own list of the addresses its probe may connect to
+although `probe.targetPolicy` refuses them (`A-64`): the one legitimate link-local device on a
+site, without turning the policy off for every other sensor on the probe.
+
+- **Only an administrator sets or clears it**, with `PUT /api/v1/objects/:id/target-policy-exception`
+  and a body of `{ "addresses": [...] }`; an empty list clears it. It is the bar the grant
+  routes hold: the `admin` role, and from an API token one with `full` scope. An account that
+  may edit the device, `full` on it included, is refused with 403, and the device's edit
+  (`PATCH`) and the settings routes do not take it. The policy is there because whoever may
+  write a device could otherwise point a probe at the cloud's metadata service; an exception
+  that account could write would be the policy turned off by the person it is there for.
+- **Whoever may read the device sees it**, as `targetPolicyException` on the device, the way
+  they see its host. A device with none has no such field.
+- **A device's own, and never inherited.** It is not a setting, so the resolver never sees it:
+  a group, a probe or the root cannot carry one (409), and a device has none until one is set
+  on it. A clone, a template and discovery start a device without one. Changing the device's
+  host does not clear it, and does not need to: the list names addresses, so a host changed to
+  a name the list does not cover is refused as before.
+- **Addresses, one at a time, at most 16.** Not a name, which whoever runs its DNS could point
+  anywhere; not a range, which exempts more than the device; not an address with a zone. Not
+  multicast, broadcast or the unspecified address. **Never a cloud instance-metadata
+  service**, whatever the policy: `169.254.169.254`, `169.254.170.2` (container task
+  credentials) and `fd00:ec2::254`, in any spelling. Each is refused with 400, and the probe
+  ignores such an entry if one reaches it. The rest of `169.254.0.0/16`, a provider's DNS and
+  time servers included, may be excepted.
+- **It is matched against the address the lookup answered.** A device given as an address is
+  allowed when the address is listed. A device given as a name is resolved once, as always, and
+  connects only when *every* address the name answers with is allowed by the policy or listed:
+  one answer outside the list refuses the whole name, so a name somebody repoints elsewhere is
+  refused. An IPv4-mapped spelling is the IPv4 address. A refusal on a device with an exception
+  says so: `… this device’s exception (169.254.10.5) does not cover 169.254.10.6`.
+- **Wherever the policy is judged for the device's sensors**: every transport in the table
+  above, a pinned address included, the Windows sensors' address, and a PostgreSQL socket path,
+  which is judged as `127.0.0.1` and so is allowed where the list names `127.0.0.1`. A server
+  SQL Server redirects the login to is judged with the device's list too: it is an address the
+  device's sensor would connect to. Not discovery, which has no device yet, and not webhooks.
+- **Every change is audited**, as an update of the device with the field's before and after, in
+  the device's history like any other edit of it. The same write pushes the probe its new
+  configuration. A kept SSH connection opened under an exception is not reused once the
+  exception is changed or withdrawn; the next check opens a new one and is judged again.
+- **It reaches a probe at protocol 28 or later.** An older probe is sent the device's sensors
+  without it and refuses those addresses as its policy says, as it did before: it fails closed.
+  Upgrade the probe for the exception to take effect.
+- **The web interface has no control for it yet**: set and clear it through the API, and read
+  it on the device there.
 
 ---
 

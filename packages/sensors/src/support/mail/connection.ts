@@ -45,6 +45,8 @@ export interface MailConnectionOptions {
    * socket's `lookup` answers with those. A pinned address is checked as it stands.
    */
   readonly targetPolicy?: TargetPolicy;
+  /** The device's exception to it (`CheckTarget.policyException`, `A-64`). */
+  readonly targetPolicyException?: readonly string[];
   /** How that one lookup is made (`CheckTarget.resolve`). Absent, the system's resolver. */
   readonly resolve?: ResolveHost;
 }
@@ -113,6 +115,9 @@ export class MailConnection {
       family,
       ...(pinned === undefined ? {} : { pinned }),
       ...(options.targetPolicy === undefined ? {} : { policy: options.targetPolicy }),
+      ...(options.targetPolicyException === undefined
+        ? {}
+        : { exception: options.targetPolicyException }),
       ...(options.resolve === undefined ? {} : { resolve: options.resolve }),
       timeoutMs: options.timeoutMs,
       signal,

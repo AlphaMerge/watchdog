@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  exceptionProblem,
+  excepts,
   isLinkLocal,
   isMetadataAddress,
+  isMetadataService,
   isPrivate,
   refusedAddresses,
   refuses,
@@ -160,5 +163,99 @@ describe('a metadata address that is not link-local', () => {
       refused.map((one) => one.address),
       ['::ffff:a9fe:a9fe', 'fd00:ec2::254'],
     );
+  });
+});
+
+/**
+ * One device's exception to the policy (`A-64`): the addresses it names, matched as addresses.
+ */
+describe('a device’s exception', () => {
+  it('takes an address of either family, and nothing else', () => {
+    for (const entry of ['169.254.10.5', 'fe80::1', '10.0.0.1', '::1', '2001:db8::7']) {
+      assert.equal(exceptionProblem(entry), null, entry);
+    }
+    const refused: [string, RegExp][] = [
+      ['169.254.10.0/24', /a range/],
+      ['fe80::/10', /a range/],
+      ['fe80::1%eth0', /zone/],
+      ['device.example', /not an IPv4 or IPv6 address/],
+      ['', /not an IPv4 or IPv6 address/],
+      ['169.254.10', /not an IPv4 or IPv6 address/],
+      ['224.0.0.1', /multicast/],
+      ['255.255.255.255', /multicast/],
+      ['ff02::1', /multicast/],
+      ['0.0.0.0', /unspecified/],
+      ['::', /unspecified/],
+      ['::ffff:0.0.0.0', /unspecified/],
+    ];
+    for (const [entry, why] of refused) assert.match(exceptionProblem(entry) ?? '', why, entry);
+  });
+
+  it('never names a metadata service, however it is spelt', () => {
+    for (const entry of [
+      '169.254.169.254',
+      ...MAPPED_METADATA.filter((one) => !one.includes('%')),
+      '169.254.170.2',
+      '::ffff:169.254.170.2',
+      'fd00:ec2::254',
+      'FD00:0EC2:0:0:0:0:0:254',
+    ]) {
+      assert.match(exceptionProblem(entry) ?? '', /instance-metadata service/, entry);
+      assert.equal(isMetadataService(entry), true, entry);
+    }
+    // The rest of the range, and the provider's other services in it, are ordinary devices.
+    for (const entry of ['169.254.169.253', '169.254.169.123', '169.254.170.3', 'fe80::a9fe']) {
+      assert.equal(exceptionProblem(entry), null, entry);
+      assert.equal(isMetadataService(entry), false, entry);
+    }
+  });
+
+  it('lets through the address it names and no other, in any spelling', () => {
+    const exception = ['169.254.10.5', 'fe80::1'];
+    const table: [string, boolean][] = [
+      ['169.254.10.5', true],
+      ['::ffff:169.254.10.5', true],
+      ['::ffff:a9fe:a05', true],
+      ['fe80::1', true],
+      ['FE80:0:0:0:0:0:0:1', true],
+      ['fe80::1%eth0', true],
+      ['169.254.10.6', false],
+      ['169.254.10.50', false],
+      ['fe80::2', false],
+      ['10.0.0.1', false],
+      ['device.example', false],
+      ['', false],
+    ];
+    for (const [address, allowed] of table) {
+      assert.equal(excepts(exception, address), allowed, address);
+    }
+    assert.equal(excepts(undefined, '169.254.10.5'), false);
+    assert.equal(excepts([], '169.254.10.5'), false);
+  });
+
+  it('never lets through what no exception reaches, whatever the list says', () => {
+    // The list comes from the core, and the probe holds this line itself.
+    const listed = [
+      '169.254.169.254',
+      '::ffff:a9fe:a9fe',
+      'fd00:ec2::254',
+      '169.254.170.2',
+      '224.0.0.1',
+      '0.0.0.0',
+      '169.254.10.0/24',
+      'fe80::1%eth0',
+    ];
+    for (const address of [
+      '169.254.169.254',
+      '::ffff:169.254.169.254',
+      'fd00:ec2::254',
+      '169.254.170.2',
+      '224.0.0.1',
+      '0.0.0.0',
+      '169.254.10.5',
+      'fe80::1',
+    ]) {
+      assert.equal(excepts(listed, address), false, address);
+    }
   });
 });

@@ -91,6 +91,7 @@ export function readTransport(
   ipVersion: 'auto' | 'v4' | 'v6';
   pinned?: PinnedAddress;
   targetPolicy?: TargetPolicy;
+  targetPolicyException?: readonly string[];
   resolve?: ResolveHost;
 } {
   const raw = params['security'];
@@ -106,6 +107,10 @@ export function readTransport(
     ...(target.pinned === undefined ? {} : { pinned: target.pinned }),
     // And the probe's target policy with the resolver it is checked through (`A-57`).
     ...(target.policy === undefined ? {} : { targetPolicy: target.policy }),
+    // And the device's exception to it (`A-64`).
+    ...(target.policyException === undefined
+      ? {}
+      : { targetPolicyException: target.policyException }),
     ...(target.resolve === undefined ? {} : { resolve: target.resolve }),
   };
 }

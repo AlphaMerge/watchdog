@@ -57,7 +57,14 @@ export function windowsOptions(context: CheckContext): PowerShellOptions {
   // **An address is held to the probe's target policy; a name is not resolved here** (`A-57`).
   // PowerShell resolves a name itself, and Kerberos wants the name, so a check of the name
   // would be on an answer the connection never uses.
-  if (!isLocal(named)) refuseBlockedAddress(named, context.target.policy, 'connect to');
+  if (!isLocal(named)) {
+    refuseBlockedAddress(
+      named,
+      context.target.policy,
+      'connect to',
+      context.target.policyException,
+    );
+  }
 
   const raw = context.credentials['windows'] ?? {};
   const username = typeof raw['username'] === 'string' ? raw['username'].trim() : '';

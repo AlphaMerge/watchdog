@@ -302,7 +302,9 @@ export async function runDbCheck(driver: DbDriver, context: CheckContext): Promi
   // to what the policy says of that**: refused wherever loopback is, since the same server
   // at 127.0.0.1 would be, and handed to the driver as it stands wherever loopback is allowed.
   const local = driver.id === 'postgresql' && host.startsWith('/') && pinned === undefined;
-  if (local) refuseLocalSocket(host, context.target.policy, 'connect to');
+  if (local) {
+    refuseLocalSocket(host, context.target.policy, 'connect to', context.target.policyException);
+  }
   const checked = local
     ? null
     : await checkedTarget({

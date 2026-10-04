@@ -137,6 +137,14 @@ export interface CheckTarget {
    * that answered. Absent, where a test calls a type directly, the default: `link-local`.
    */
   readonly policy?: TargetPolicy;
+  /**
+   * The addresses of this device the probe may connect to although `policy` refuses them
+   * (`A-64`): the device's own exception, set by an administrator, never inherited, and sent by
+   * the core from protocol 28. Handed to `checkedTarget` with `policy` (`guardOf`), and matched
+   * there against each address a lookup answered with: a name is let through only as far as every
+   * address it has is. A metadata service is refused whatever this says.
+   */
+  readonly policyException?: readonly string[];
 }
 
 /** What a check is handed when it runs. */

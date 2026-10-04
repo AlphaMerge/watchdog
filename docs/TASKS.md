@@ -19716,7 +19716,7 @@ because each is a decision rather than a defect:
         device and a Ping sensor), which is right for ping; whether a site's own template
         can add a connecting sensor to such a host was not looked at.
 
-- [ ] **A-64 — the target policy has no exception for one device** · M · A-57 · Found
+- [x] **A-64 — the target policy has no exception for one device** · M · A-57 · Found
       2026-10-02 by `A-57`. `probe.targetPolicy` is one setting for a probe, so a site with one
       legitimate link-local device sets `none` for every sensor on it. **A decision first:**
       whether an exception belongs on the device (an inherited setting, through the resolver,
@@ -19732,6 +19732,56 @@ because each is a decision rather than a defect:
       and an account that may only edit the device can neither set it nor read it changed.
       Without it a site with one link-local device turns the policy off for the whole probe,
       which is the weaker of the two.
+
+      **A-64 outcome.** A device carries `targetPolicyException`, the addresses its probe may
+      connect to although its policy refuses them; only an administrator sets it, and it is
+      never inherited. Migration 070, protocol 28.
+      - **Where it lives**: a column on `device_config` (070, `text[]`, at most 16, no NULL or
+        empty entry), not an `object_setting`, so the resolver never sees it and a group, a
+        probe or the root cannot carry one (409). Clone, template, discovery and tree-plan
+        inserts name host and family only, so a new device has none. A host change does not
+        clear it: it names addresses, not the host.
+      - **Who**: `PUT /api/v1/objects/:id/target-policy-exception` `{ addresses }`, `ADMIN`
+        (admin role, `full` token: the grant routes' bar); `[]` clears; `If-Match` taken.
+        `PATCH` refuses the field (closed schema), the settings routes refuse the key. **Decided:
+        readable by whoever may read the device** (on the detail, absent when empty), as the
+        host is; the ticket's "nor read it changed" read as "nor change it".
+      - **What**: addresses only (`exceptionProblem` in `@ms/shared`), checked by the core and
+        again by the probe on every match. **Decided: no CIDR at all**, not even a /24: a range
+        exempts more than the device. No names, zones, multicast/broadcast, unspecified, and
+        **never a metadata service** (`169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`, any
+        spelling); the rest of link-local may be excepted.
+      - **Judged in one place**: `checkedTarget`'s `judge`, `refuseBlockedAddress` (Windows) and
+        `refuseLocalSocket` (a socket path is `127.0.0.1`, so excepted where that is listed) all
+        go through `judged()` → `excepts()`, after the policy refuses. It matches the address
+        the lookup answered; a name passes only when every answer is allowed or listed.
+        `guardOf` carries it as `exception`; HTTP and mail plumb it beside `targetPolicy`; the
+        catalogue passes `CheckTarget.policyException` through. A refusal on a device with one
+        names the list. The SSH pool keys a held connection by it, so withdrawing it is not
+        outlived by a connection it allowed.
+      - **Wire**: `target.policyException` on an assignment, capability `targetPolicyException`
+        at 28. `target` is closed on the probe, so the core sends it only at ≥ 28 (an older
+        probe would reject the whole message); below that the probe refuses as before. The
+        fingerprint includes it only when present, so no assignment without one re-hashes at
+        upgrade. "Check now" follows the session's version.
+      - **Audit**: an `object.updated` of the device, with `targetPolicyException` tracked in
+        `diff.ts` (absent when empty, so no other device's diff changes); an unchanged list
+        writes nothing. That entry is also what pushes the probe.
+      - **Tests**: `sensors/test/target-policy-exception.test.ts` (395: the table of 3 policies
+        × 8 exceptions × 16 hosts through the real `checkedTarget` with a fake lookup, plus
+        pinned, Windows, socket path, catalogue, and TCP, HTTP, mail and SSH under `private`
+        against loopback simulators); `core/test/target-policy-exception.test.ts` (13: admin
+        sets, readwrite with `full` and readonly 403, write-scoped admin token 403, PATCH and
+        settings 400, invalid entries 400, non-device 409, clone without, If-Match, audit rows,
+        assignment at 28 and not 27, check now); `shared` target-policy, messages and
+        capabilities; migrator 070 forward/back; audit-sweep fixture. Two A-72 tests in
+        `credential-pinning.test.ts` assumed the core's own version was 27 (database pinning);
+        they now flap between the core's own and one below 27.
+      - Mutation: 14/14, one first survived (an unchanged-list check that ignored the
+        addresses) and a test was added for it.
+      - **Not done**: no web control (API only; the device page does not show it either).
+        Alibaba's metadata address `100.100.100.200` is outside link-local and not refused
+        by `link-local` at all; not looked at further here.
 
 - [x] **A-65 — three loose ends on the SSH and probe side of the target policy** · S · A-57 ·
       Found 2026-10-02 by `A-57` and its review. Sensors that join one connection being opened

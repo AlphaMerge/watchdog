@@ -4,7 +4,7 @@
 
 The live document is at `GET /api/v1/openapi.json` on any running installation, and is the one to feed to a client generator. This page is for reading.
 
-166 routes.
+167 routes.
 
 ## Conventions
 
@@ -1248,7 +1248,7 @@ Flat filtered listing, keyset-paginated. `q` searches names and device hosts as 
 | `params` | object |  |
 | `gid` | string,null |  |
 
-**201** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
+**201** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
 
 ### `GET /api/v1/objects/root`
 
@@ -1256,7 +1256,7 @@ Flat filtered listing, keyset-paginated. `q` searches names and device hosts as 
 | --- | --- | --- | --- |
 | `include` | query | string |  |
 
-**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
+**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
 
 ### `GET /api/v1/objects/tops`
 
@@ -1290,7 +1290,7 @@ One object. Send the `ETag` back as `If-None-Match` for a 304 when nothing in th
 | `include` | query | string |  |
 | `id` | path | integer | **required** |
 
-**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
+**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
 
 ### `PATCH /api/v1/objects/{id}`
 
@@ -1315,7 +1315,7 @@ Changes what it is given and keeps the rest. **Where a sensor sends its inherite
 | `params` | object |  |
 | `gid` | string,null |  |
 
-**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
+**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
 
 ### `DELETE /api/v1/objects/{id}`
 
@@ -1340,7 +1340,7 @@ Moves an object within its parent's children, the way PRTG's move up / move down
 | --- | --- | --- |
 | `move` | `up` · `down` · `first` · `last` | **required** |
 
-**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
+**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
 
 ### `POST /api/v1/objects/{id}/move`
 
@@ -1431,6 +1431,24 @@ The same totals as `/objects/:id/counts`, over every object the caller can read 
 | `id` | path | integer | **required** |
 
 **200** { items }
+
+### `PUT /api/v1/objects/{id}/target-policy-exception`
+
+Set or clear the addresses one device may reach although its probe’s policy refuses them
+
+The addresses of this device its probe may connect to although `probe.targetPolicy` refuses them (`A-64`), replacing any it had; an empty list clears it. **Only an administrator**, with a `full` token, may change it; anyone who may read the device sees it, as `targetPolicyException` on the device. **A device only, and never inherited**: a group, a probe or the root is refused with 409, and a device has none until one is set here: a clone or a template starts without one. **Addresses, one at a time**: not a name, a range or a zone, not multicast or the unspecified address, and never a cloud instance-metadata service (`169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`), each refused with 400. A sensor on the device whose host is a name connects only when every address the name resolves to is allowed by the policy or named here. Takes `If-Match`. Audited as an update of the device. Reaches a probe at protocol 28 or later; an older probe refuses those addresses as before.
+
+| Parameter | In | Type | |
+| --- | --- | --- | --- |
+| `id` | path | integer | **required** |
+
+**Body**
+
+| Field | Type | |
+| --- | --- | --- |
+| `addresses` | string[] | **required** |
+
+**200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
 
 ## probes
 

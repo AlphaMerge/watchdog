@@ -155,6 +155,17 @@ export interface ProbeCapabilities {
    * targets leave a named device to its probe, because that probe would connect by name.
    */
   databaseAddressPinning: boolean;
+  /**
+   * Honours one device's exception to its target policy (`A-64`): `target.policyException` on an
+   * assignment, the addresses of that device it may connect to although its policy refuses them.
+   *
+   * **A new field in a closed schema**, so gated: `target` is `additionalProperties: false` on
+   * the probe's copy, and a probe below this would reject the whole configuration message rather
+   * than ignore one field. Below this the core leaves the field out, and the probe refuses those
+   * addresses as its policy says, which is what it did before the exception existed: an older
+   * probe fails closed.
+   */
+  targetPolicyException: boolean;
 }
 
 /**
@@ -184,6 +195,7 @@ const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
   ['flowOverwritten', 25],
   ['listenerOverwritten', 26],
   ['databaseAddressPinning', 27],
+  ['targetPolicyException', 28],
 ];
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -212,6 +224,8 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   databaseAddressPinning:
     'check a named database server against the addresses its credentials allow, and connect ' +
     'to the address it checked',
+  targetPolicyException:
+    'connect to an address one device is excepted for, although its target policy refuses it',
 };
 
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
@@ -236,6 +250,7 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     flowOverwritten: has(25),
     listenerOverwritten: has(26),
     databaseAddressPinning: has(27),
+    targetPolicyException: has(28),
   };
 }
 

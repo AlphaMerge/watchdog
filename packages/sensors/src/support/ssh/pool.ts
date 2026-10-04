@@ -444,6 +444,9 @@ function keyOf(target: SshTarget, credentials: SshCredentials, options: SshSessi
     target.pinned?.address ?? '',
     // The addresses the target policy checked are **not** in the key (`A-57`): they are read
     // only to open a connection, and a name is one connection whatever it resolves to later.
+    // **The device's exception to that policy is** (`A-64`): a connection held is never checked
+    // again, so one opened to an address only the exception allowed must not outlive it.
+    [...(target.exception ?? [])].sort().join(','),
     credentialFingerprint(credentials),
     // A connection was checked against the keys accepted when it opened. Accepting fewer has to
     // open a new one, or a key taken off the list would go on being trusted until it idled out.

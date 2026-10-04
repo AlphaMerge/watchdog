@@ -1,5 +1,6 @@
 import { Ajv, type ErrorObject } from 'ajv';
 import { AppError } from '../errors/app-error.js';
+import { MAX_EXCEPTION_ADDRESSES } from '../net/target-policy.js';
 
 /**
  * The core↔probe wire protocol.
@@ -40,6 +41,13 @@ import { AppError } from '../errors/app-error.js';
  * connected or not, heartbeat age, protocol skew — and says in its message why the rest is
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
+ *
+ * Version 28 adds `targetPolicyException` (`A-64`): an assignment's `target` may carry
+ * `policyException`, the addresses of that one device its probe may connect to although the
+ * probe's target policy refuses them, set by an administrator on the device and never inherited.
+ * `target` is a closed schema, so the core sends the field only to a probe at 28; an older probe
+ * is sent the assignment without it and refuses those addresses as its policy says, as it did
+ * before. Nothing else changes shape.
  *
  * Version 27 adds `databaseAddressPinning` (`A-62`): a probe's PostgreSQL, MySQL and SQL Server
  * sensors connect to the address the probe checked, on a socket the driver is handed, where an
@@ -132,7 +140,7 @@ import { AppError } from '../errors/app-error.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 27;
+export const PROTOCOL_VERSION = 28;
 
 /**
  * The oldest peer version this build still understands.
@@ -156,7 +164,19 @@ export interface SensorAssignment {
   sensorId: number;
   sensorType: string;
   params: Record<string, unknown>;
-  target: { host: string; ipVersion: 'auto' | 'v4' | 'v6' };
+  target: {
+    host: string;
+    ipVersion: 'auto' | 'v4' | 'v6';
+    /**
+     * The addresses of this device its probe may connect to although the probe's target policy
+     * refuses them (`A-64`): the device's own `targetPolicyException`, which only an
+     * administrator sets and which is never inherited. Absent when the device has none, and
+     * always absent for a probe below protocol 28 (`targetPolicyException`), which would refuse
+     * the whole message for an unknown field. Addresses only; the probe matches each address a
+     * lookup answers with, and never excepts a metadata service whatever this says.
+     */
+    policyException?: string[];
+  };
   intervalSeconds: number;
   timeoutMs: number;
   /**
@@ -1248,6 +1268,15 @@ const sensorAssignmentSchema = {
       properties: {
         host: { type: 'string', maxLength: 255 },
         ipVersion: { type: 'string', enum: ['auto', 'v4', 'v6'] },
+        // One device's exception to the target policy (`A-64`, protocol 28). Bounded here as
+        // the core bounds it; what each entry may be is `exceptionProblem`'s, which the probe
+        // applies again when it matches one.
+        policyException: {
+          type: 'array',
+          minItems: 1,
+          maxItems: MAX_EXCEPTION_ADDRESSES,
+          items: { type: 'string', minLength: 2, maxLength: 64 },
+        },
       },
       required: ['host', 'ipVersion'],
       additionalProperties: false,

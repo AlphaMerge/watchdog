@@ -1,5 +1,5 @@
 import { isRestricted, restrictionOf } from '@ms/sensors';
-import type { Logger } from '@ms/shared';
+import { exceptionProblem, MAX_EXCEPTION_ADDRESSES, type Logger } from '@ms/shared';
 import { changedParamKeys } from '../audit/diff.js';
 import type { Database, Queryable } from '../db/pool.js';
 import type { Reach, Visibility } from '../auth/access.js';
@@ -1754,6 +1754,101 @@ export class ObjectService {
         );
       }
       return reverted;
+    });
+  }
+
+  /**
+   * Replaces one device's exception to its probe's target policy (`A-64`); an empty list clears it.
+   *
+   * **Who may call this is the route's to decide**, and it decides administrators only: an
+   * exception is a hole in a guard that exists because whoever may write a device could otherwise
+   * point a probe anywhere. This checks what the exception may hold, and that it is on a device:
+   * a group, a probe or the root cannot carry one, so it can never exempt more than one device.
+   *
+   * Entries are trimmed and kept once each, in the order given. Each must be an address
+   * (`exceptionProblem`): not a name, not a range, never a metadata service. Audited as the device
+   * update it is, with the field's before and after, which is also what pushes the probe its new
+   * configuration. Returns the device as a reader sees it.
+   */
+  async setTargetPolicyException(
+    actor: Actor,
+    id: ObjectId,
+    addresses: readonly string[],
+    pre: Precondition = { kind: 'none' },
+  ): Promise<ObjectDetail> {
+    const wanted: string[] = [];
+    for (const given of addresses) {
+      const entry = given.trim();
+      const problem = exceptionProblem(entry);
+      if (problem !== null) {
+        throw new ObjectError(
+          'OBJECT_INVALID',
+          `“${entry}” cannot be excepted from the target policy: it ${problem}`,
+          {
+            context: { objectId: id, phase: 'target-policy-exception' },
+            details: { address: entry, problem },
+          },
+        );
+      }
+      if (!wanted.includes(entry)) wanted.push(entry);
+    }
+    if (wanted.length > MAX_EXCEPTION_ADDRESSES) {
+      throw new ObjectError(
+        'OBJECT_INVALID',
+        `an exception names at most ${String(MAX_EXCEPTION_ADDRESSES)} addresses, and this ` +
+          `names ${String(wanted.length)}`,
+        { context: { objectId: id, phase: 'target-policy-exception' } },
+      );
+    }
+
+    return this.#db.tx(async (q) => {
+      const before = await this.#repo.get(q, id);
+      if (before === null) throw notFound(id);
+      if (before.kind !== 'device') {
+        throw new ObjectError(
+          'OBJECT_KIND_MISMATCH',
+          `only a device can be excepted from the target policy; object ${String(id)} is a ` +
+            `${before.kind}, and an exception there would reach every device beneath it`,
+          {
+            context: { objectId: id, phase: 'target-policy-exception' },
+            details: { storedKind: before.kind },
+          },
+        );
+      }
+      if (pre.kind === 'version' && before.version !== pre.expected) {
+        throw versionConflict(id, pre.expected, before.version);
+      }
+      const had = before.targetPolicyException ?? [];
+      // Unchanged is no write: no version bump, no audit entry and no push.
+      if (had.length === wanted.length && had.every((entry, at) => entry === wanted[at])) {
+        return this.#redact(before);
+      }
+
+      await this.#repo.setTargetPolicyException(q, id, wanted);
+      const after = await this.#repo.get(q, id);
+      if (after === null) throw notFound(id);
+      const safeBefore = this.#redact(before);
+      const safeAfter = this.#redact(after);
+      await this.#audit.record(
+        q,
+        actor,
+        [
+          {
+            action: 'object.updated',
+            objectId: id,
+            kind: safeAfter.kind,
+            before: safeBefore,
+            after: safeAfter,
+            changedParams: [],
+          },
+        ],
+        new Date(),
+      );
+      this.#logger.info(
+        { objectId: id, before: had, after: wanted },
+        'a device’s exception to its probe’s target policy was changed',
+      );
+      return safeAfter;
     });
   }
 

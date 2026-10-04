@@ -55,6 +55,7 @@ describe('what a protocol version can do', () => {
       flowOverwritten: false,
       listenerOverwritten: false,
       databaseAddressPinning: false,
+      targetPolicyException: false,
     });
   });
 
@@ -402,8 +403,9 @@ describe('the health a peer can be sent', () => {
   });
 
   it('sends everything to a core that knows it', () => {
-    assert.equal(PROTOCOL_VERSION, 27);
+    assert.equal(PROTOCOL_VERSION, 28);
     assert.deepEqual(healthForPeer(health, 26), health);
+    assert.deepEqual(healthForPeer(health, 27), health);
     assert.deepEqual(healthForPeer(health, PROTOCOL_VERSION), health);
   });
 
@@ -526,11 +528,23 @@ describe('the health a peer can be sent', () => {
           'connect to the address it checked',
       ),
     );
-    assert.deepEqual(missingCapabilities(27), []);
+    assert.deepEqual(missingCapabilities(27), [
+      'connect to an address one device is excepted for, although its target policy refuses it',
+    ]);
     // Stripping what a peer does not know is by capability: 27 has no health field, so a core
     // at 26 is sent what a core at 27 is.
     const health = { memoryMb: 1, trapOverwritten: 9, syslogOverwritten: 2 };
     assert.deepEqual(healthForPeer(health, 26), healthForPeer(health, 27));
+  });
+});
+
+describe('one device’s exception to the target policy (`A-64`)', () => {
+  it('is understood from 28, and by nothing older', () => {
+    // A field in `target`, which is a closed schema on the probe: below 28 it is not sent at all.
+    assert.equal(versionFor('targetPolicyException'), 28);
+    assert.equal(capabilitiesFor(27).targetPolicyException, false);
+    assert.equal(capabilitiesFor(28).targetPolicyException, true);
+    assert.deepEqual(missingCapabilities(28), []);
   });
 });
 
