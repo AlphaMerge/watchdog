@@ -16,10 +16,10 @@ that gets run badly or not at all.
 
 | | Last verified | How |
 | --- | --- | --- |
-| Clean install on Ubuntu | **2026-09-28, locally** | `MS_SMOKE_DISTRO=ubuntu scripts/smoke-install.sh` |
-| Clean install on Debian | 2026-09-03, locally | `scripts/smoke-install.sh` |
-| `.deb` and `.rpm` install, upgrade, remove | **2026-09-28, locally** | `scripts/smoke-packages.sh` |
-| Backup and restore onto a different host | 2026-09-03, locally | `scripts/smoke-restore.sh` |
+| Clean install on Ubuntu | **2026-10-04, `v1.0.0-rc.2`, locally (arm64)** | `MS_SMOKE_DISTRO=ubuntu scripts/smoke-install.sh` |
+| Clean install on Debian | **2026-10-04, `v1.0.0-rc.2`, locally (arm64)** | `scripts/smoke-install.sh` |
+| `.deb` and `.rpm` install, upgrade, remove | **2026-10-04, `v1.0.0-rc.2`, locally (arm64)** | `scripts/smoke-packages.sh` |
+| Backup and restore onto a different host | **2026-10-04, `v1.0.0-rc.2`, locally (arm64)** | `scripts/smoke-restore.sh` |
 | 5,000 sensors for 24 h | 2026-08-30 | `docs/findings/2026-08-30-soak-24h.md` |
 
 > **"Last verified" is a date, not a guarantee, and that is deliberate.** These four used to read
