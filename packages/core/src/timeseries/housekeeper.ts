@@ -1,6 +1,12 @@
 import { describeError, type HousekeepingConfig, type Logger } from '@ms/shared';
 import { AuditRepository } from '../audit/store.js';
-import type { Database, Queryable } from '../db/pool.js';
+import {
+  DatabaseError,
+  SQLSTATE,
+  type Database,
+  type Queryable,
+  type TxLimits,
+} from '../db/pool.js';
 import type { PassWitness } from '../health/heartbeat.js';
 import type { DiskReading, DiskWatcher } from './disk.js';
 import type { EngineCapabilities } from './engine.js';
@@ -162,6 +168,12 @@ export interface HousekeepingReport {
    * and it is never zero quietly — every one is logged at error and alarmed on.
    */
   evictedChunks: number;
+  /**
+   * Chunks not compressed or dropped because a lock on them was not granted in two seconds
+   * (`P-229`), each tried again next pass. Something outside the core held them: usually a
+   * backup, which is why a drop does not queue behind it and take every reader with it.
+   */
+  lockedChunks: number;
   /** A step that failed. The pass continues: every step is guarded by a watermark, not by the
    *  success of the one before it, so a compression failure must not stop retention. */
   failures: { step: string; message: string }[];
@@ -433,6 +445,7 @@ export class Housekeeper {
             Object.values(report.tiers).reduce((sum, tier) => sum + tier.bucketsWritten, 0),
           compressedChunks: report.compressedChunks,
           droppedChunks: report.droppedChunks,
+          lockedChunks: report.lockedChunks,
           prunedAuditEntries: report.prunedAuditEntries,
           reapedChannels: report.reapedChannels,
           failures: report.failures.length,
@@ -463,6 +476,24 @@ export class Housekeeper {
     if (this.#pruneReportsEnabled) {
       await this.#step(report, 'report-retention', () => this.#pruneReports(report));
     }
+  }
+
+  /**
+   * A chunk whose lock was not granted in two seconds: skipped, counted, and tried again next
+   * pass (`P-229`). A warning each, naming the table, because what holds it is outside the core
+   * and the log is where an operator finds out it is there.
+   */
+  #locked(
+    report: HousekeepingReport,
+    table: string,
+    chunk: string | null,
+    action: 'compress' | 'drop' | 'evict',
+  ): void {
+    report.lockedChunks += 1;
+    this.#logger.warn(
+      { table, action, ...(chunk === null ? {} : { chunk }) },
+      'housekeeping could not lock a chunk within 2 s; it is tried again next pass',
+    );
   }
 
   async #step(report: HousekeepingReport, step: string, run: () => Promise<void>): Promise<void> {
@@ -718,7 +749,7 @@ export class Housekeeper {
       written += await this.#db.tx(async (q) => {
         await this.#store.allowDecompression(q);
         return this.#store.rollUp(q, tier, start, boundary, { channels, conflict });
-      });
+      }, ROLLUP_LIMITS);
     }
     return written;
   }
@@ -794,7 +825,7 @@ export class Housekeeper {
         const count = await this.#store.rollUp(q, tier, start, boundary);
         await this.#store.advanceWatermark(q, tier, boundary);
         return count;
-      });
+      }, ROLLUP_LIMITS);
       cursor = end;
     }
     return { written, reached: cursor };
@@ -840,7 +871,13 @@ export class Housekeeper {
       );
       for (const chunk of chunks) {
         if (this.#aborted()) return;
-        await this.#db.tx((q) => this.#store.compact(q, chunk));
+        try {
+          await this.#db.tx((q) => this.#store.compact(q, chunk), COMPRESS_LIMITS);
+        } catch (error) {
+          if (!lockNotGranted(error)) throw error;
+          this.#locked(report, target.table, chunk, 'compress');
+          continue;
+        }
         report.compressedChunks += 1;
         this.#logger.info({ table: target.table, chunk }, 'chunk compressed');
       }
@@ -876,9 +913,17 @@ export class Housekeeper {
       );
       if (olderThan === null) continue;
 
-      const dropped = await this.#db.tx((q) =>
-        this.#store.dropOlderThan(q, target.table, olderThan),
-      );
+      let dropped: readonly string[];
+      try {
+        dropped = await this.#db.tx(
+          (q) => this.#store.dropOlderThan(q, target.table, olderThan),
+          DROP_LIMITS,
+        );
+      } catch (error) {
+        if (!lockNotGranted(error)) throw error;
+        this.#locked(report, target.table, null, 'drop');
+        continue;
+      }
       report.droppedChunks += dropped.length;
       for (const chunk of dropped) {
         this.#logger.info(
@@ -969,7 +1014,18 @@ export class Housekeeper {
         // stopping as soon as the disk is healthy is the difference between shedding what is
         // needed and shedding everything eviction is allowed to.
         const to = new Date(Math.min(oldest.getTime() + EVICTION_STEP_MS, cap.getTime()));
-        const dropped = await this.#db.tx((q) => this.#store.dropOlderThan(q, target.table, to));
+        let dropped: readonly string[];
+        try {
+          dropped = await this.#db.tx(
+            (q) => this.#store.dropOlderThan(q, target.table, to),
+            DROP_LIMITS,
+          );
+        } catch (error) {
+          if (!lockNotGranted(error)) throw error;
+          // The next table may not be held; this one is tried again next pass.
+          this.#locked(report, target.table, null, 'evict');
+          break;
+        }
         if (dropped.length === 0) break;
 
         report.evictedChunks += dropped.length;
@@ -1024,18 +1080,27 @@ export class Housekeeper {
     // One transaction for all three steps: the snapshot is only valid for this drop, and a crash
     // between the drop and the anchor is exactly the "no known state at all" this exists to
     // prevent.
-    const anchored = await this.#db.tx(async (q) => {
-      const candidates = await this.#store.stateAtHorizon(q, olderThan);
-      const dropped = await this.#store.dropOlderThan(q, 'sensor_state', olderThan);
-      report.droppedChunks += dropped.length;
-      for (const chunk of dropped) {
-        this.#logger.info(
-          { table: 'sensor_state', chunk, olderThan: olderThan.toISOString() },
-          'chunk dropped by retention',
-        );
-      }
-      return this.#store.anchorStates(q, olderThan, candidates);
-    });
+    let anchored: number;
+    try {
+      anchored = await this.#db.tx(async (q) => {
+        const candidates = await this.#store.stateAtHorizon(q, olderThan);
+        const dropped = await this.#store.dropOlderThan(q, 'sensor_state', olderThan);
+        report.droppedChunks += dropped.length;
+        for (const chunk of dropped) {
+          this.#logger.info(
+            { table: 'sensor_state', chunk, olderThan: olderThan.toISOString() },
+            'chunk dropped by retention',
+          );
+        }
+        return this.#store.anchorStates(q, olderThan, candidates);
+      }, DROP_LIMITS);
+    } catch (error) {
+      // The drop and the anchor are one transaction, so neither happened, which is the safe
+      // half: nothing was dropped that is not anchored. Tried again next pass.
+      if (!lockNotGranted(error)) throw error;
+      this.#locked(report, 'sensor_state', null, 'drop');
+      return;
+    }
 
     report.anchoredSensors = anchored;
     if (anchored > 0) {
@@ -1243,6 +1308,37 @@ function emptyReport(): HousekeepingReport {
     reapedRows: 0,
     disk: null,
     evictedChunks: 0,
+    lockedChunks: 0,
     failures: [],
   };
+}
+
+/**
+ * The limits housekeeping gives its own work, over the pool's 60 s and 5 s (`P-229`).
+ *
+ * - **A rollup slice, ten minutes.** One slice is bounded, but it is a full day of every channel
+ *   on a large installation, and a backfill is old ground that may be decompressed first.
+ * - **A chunk compressed, thirty minutes, and two seconds for its lock.** Compression rewrites a
+ *   whole chunk, and it must not wait behind a reader for long while holding its place.
+ * - **A chunk dropped, two seconds for its lock**, and the pool's statement limit. A drop wants an
+ *   exclusive lock. Behind a backup's `ACCESS SHARE` it waits, and every reader of the
+ *   table queues behind *it* — ingestion included. Two seconds bounds that, and a drop that did not
+ *   get its lock is skipped, counted and tried again next pass.
+ *
+ * The long ones are named `ms-core:housekeeping`, so Core Health's oldest-statement channel does
+ * not warn about work given ten minutes on purpose. Their lock timeouts are counted here, in
+ * `lockedChunks`, rather than as the core's.
+ */
+const ROLLUP_LIMITS: TxLimits = { statementTimeoutMs: 600_000, work: 'housekeeping' };
+const COMPRESS_LIMITS: TxLimits = {
+  statementTimeoutMs: 1_800_000,
+  lockTimeoutMs: 2_000,
+  work: 'housekeeping',
+  ownLockTimeouts: true,
+};
+const DROP_LIMITS: TxLimits = { lockTimeoutMs: 2_000, ownLockTimeouts: true };
+
+/** A lock that was not granted within the limit (`P-229`). */
+function lockNotGranted(error: unknown): boolean {
+  return error instanceof DatabaseError && error.sqlstate === SQLSTATE.lockNotAvailable;
 }

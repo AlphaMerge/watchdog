@@ -42,6 +42,33 @@ export interface DatabaseConfig {
   poolSize: number;
   connectTimeoutMs: number;
   /**
+   * The longest one statement from the core's pool may run, in milliseconds; 0 is no limit
+   * (`P-229`).
+   *
+   * **Every limit here exists because PostgreSQL's default is none**, and a pool of twenty is
+   * shared by the API, ingestion, alarms and housekeeping. So one query that never finishes holds
+   * a connection for ever, and twenty of them starve the core. Sixty seconds is thirty times the
+   * slowest read path's budget (a stream snapshot, 2 s). The work that is allowed longer is given
+   * it by name, in its own transaction: rollups, compression, report rendering and migrations.
+   */
+  statementTimeoutMs: number;
+  /**
+   * The longest a statement from the core's pool waits for a lock, in milliseconds; 0 is no limit
+   * (`P-229`).
+   *
+   * The failure this bounds: a session outside the core (an operator's `psql` left in a
+   * transaction, a backup) holds a row or a table the core writes. Each write that needs it takes
+   * a connection and waits, until the pool is empty. A request that times out here is answered 503
+   * with `Retry-After`, and a probe's batch is re-offered.
+   */
+  lockTimeoutMs: number;
+  /**
+   * How long a transaction of the core's may sit idle before PostgreSQL ends its session, in
+   * milliseconds; 0 is no limit (`P-229`). A transaction the core opened and then forgot holds
+   * its locks until this fires, and the session is discarded, not reused.
+   */
+  idleInTransactionTimeoutMs: number;
+  /**
    * Apply pending schema migrations at start-up.
    *
    * On by default: this is a standalone product an operator upgrades by unpacking a tarball and
@@ -1104,6 +1131,9 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
         'ssl',
         'poolSize',
         'connectTimeoutMs',
+        'statementTimeoutMs',
+        'lockTimeoutMs',
+        'idleInTransactionTimeoutMs',
         'autoMigrate',
       ],
       properties: {
@@ -1117,6 +1147,16 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
         // migrations themselves run on another.
         poolSize: { type: 'integer', minimum: 2, maximum: 500, default: 20 },
         connectTimeoutMs: { type: 'integer', minimum: 100, maximum: 120_000, default: 10_000 },
+        // `P-229`. Each 0 for off. The floor below which a value that is not 0 is refused is a
+        // rule (`DATABASE_TIMEOUT_FLOORS`), since a schema cannot say "0, or at least this".
+        statementTimeoutMs: { type: 'integer', minimum: 0, maximum: 3_600_000, default: 60_000 },
+        lockTimeoutMs: { type: 'integer', minimum: 0, maximum: 600_000, default: 5_000 },
+        idleInTransactionTimeoutMs: {
+          type: 'integer',
+          minimum: 0,
+          maximum: 3_600_000,
+          default: 60_000,
+        },
         autoMigrate: { type: 'boolean', default: true },
       },
     },
@@ -1390,8 +1430,31 @@ export function heartbeatUrlProblem(url: string): string | undefined {
   return undefined;
 }
 
+/**
+ * The least each database timeout may be when it is not 0 (`P-229`). A statement limit of 5 ms is
+ * a typo for 5 s, and it would cancel nearly everything the core does, so it is refused by name
+ * rather than obeyed.
+ */
+const DATABASE_TIMEOUT_FLOORS = {
+  statementTimeoutMs: 1_000,
+  lockTimeoutMs: 100,
+  idleInTransactionTimeoutMs: 1_000,
+} as const;
+
 RULES.set(coreConfigSchema, (config: CoreConfig): readonly string[] => {
   const problems: string[] = [];
+  for (const [key, floor] of Object.entries(DATABASE_TIMEOUT_FLOORS) as [
+    keyof typeof DATABASE_TIMEOUT_FLOORS,
+    number,
+  ][]) {
+    const value = config.database[key];
+    if (value !== 0 && value < floor) {
+      problems.push(
+        `database.${key}: ${String(value)} ms is shorter than ${String(floor)} ms, and would ` +
+          'cancel ordinary work; set 0 for no limit, or a value in milliseconds',
+      );
+    }
+  }
   for (const entry of config.api.trustedProxies) {
     const problem = trustedProxyProblem(entry);
     if (problem !== undefined) problems.push(problem);

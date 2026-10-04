@@ -9,7 +9,7 @@ import {
   type Logger,
   type LogOutputStats,
 } from '@ms/shared';
-import type { Database, Queryable } from '../db/pool.js';
+import type { Database, Queryable, TimeoutCounts } from '../db/pool.js';
 import { storedVoucher, type VoucherCheck } from '../objects/vouching.js';
 import { ROLLUP_TIERS } from '../timeseries/tiers.js';
 import { CORE_CLOCK_BEHIND_SECONDS, judgeCoreClock, type CoreClockVerdict } from './core-clock.js';
@@ -196,6 +196,11 @@ export interface CoreHealthSources {
    * gave way, were not waited for, or failed (`A-68`). A running total; the channel is a counter.
    */
   lateRefusalWritesGivenUp?: () => number;
+  /**
+   * `Database.timeouts()` — the pool's statements cancelled and lock waits given up (`P-229`).
+   * The core pool's alone: a pool built for one kind of work keeps its own.
+   */
+  database: () => TimeoutCounts;
   /** `DeliveryHealthReader.read()` — undelivered alarms, and how old the oldest one is. */
   delivery: (q: Queryable) => Promise<{
     pending: number;
@@ -367,6 +372,7 @@ export class CoreHealthService {
     const coreClock = await this.#coreClock();
 
     const discards = this.#sources.ingestionDiscards();
+    const timeouts = this.#sources.database();
     const reading: CoreHealthReading = {
       ingestQueue: ingestion.queuedRows,
       writeLatency: ingestion.writeMs.p95,
@@ -448,6 +454,9 @@ export class CoreHealthService {
       // And again: failed since the last reading, and the whole count on the first (`H-18`).
       heartbeatFailures:
         heartbeat === undefined ? null : meters.heartbeat.take(heartbeat.failures, uptime, true),
+      dbStatementTimeouts: timeouts.statements,
+      dbLockTimeouts: timeouts.locks,
+      dbOldestQuerySeconds: queues.oldestStatement,
     };
     return { reading, parkedError: queues.parked.lastError };
   }
@@ -606,6 +615,7 @@ export class CoreHealthService {
     reap: number | null;
     credentials: number | null;
     unbounded: number | null;
+    oldestStatement: number | null;
   }> {
     try {
       return await this.#db.tx(async (q) => ({
@@ -619,6 +629,7 @@ export class CoreHealthService {
           this.#sources.unboundedCredentials === undefined
             ? null
             : await this.#sources.unboundedCredentials(q),
+        oldestStatement: await oldestStatement(q),
       }));
     } catch (error: unknown) {
       if (!degrade) throw error;
@@ -634,6 +645,7 @@ export class CoreHealthService {
         reap: null,
         credentials: null,
         unbounded: null,
+        oldestStatement: null,
       };
     }
   }
@@ -765,6 +777,29 @@ async function parkedBackfill(q: Queryable): Promise<{ count: number; lastError:
      WHERE retry_at IS NOT NULL`,
   );
   return { count: rows[0]?.n ?? 0, lastError: rows[0]?.last_error ?? null };
+}
+
+/**
+ * How long the core's oldest running statement has been running, in whole seconds (`P-229`).
+ *
+ * `state = 'active'` includes a statement waiting on a lock, which is the case this is for: a
+ * pool starving behind a lock held elsewhere is twenty statements active and going nowhere.
+ * `ms-core` alone, so a pool built for other work (`ms-core:reports`, `ms-core:migrate`) and a
+ * transaction housekeeping gave ten minutes (`ms-core:housekeeping`) are not what it warns
+ * about; and not this reading's own statement. Zero when nothing is running, which is a
+ * measurement, not a gap. `clock_timestamp()`, because `now()` is when this transaction began.
+ */
+async function oldestStatement(q: Queryable): Promise<number> {
+  const rows = await q.query<{ seconds: number | null }>(
+    `SELECT extract(epoch FROM clock_timestamp() - min(query_start))::float8 AS seconds
+     FROM pg_stat_activity
+     WHERE application_name = 'ms-core'
+       AND state = 'active'
+       AND datname = current_database()
+       AND pid <> pg_backend_pid()`,
+  );
+  const seconds = rows[0]?.seconds ?? null;
+  return seconds === null ? 0 : Math.max(0, Math.round(seconds));
 }
 
 async function count(q: Queryable, sql: string): Promise<number> {

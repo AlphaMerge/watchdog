@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
+import { Client } from 'pg';
 import type { HousekeepingConfig } from '@ms/shared';
 import { Migrator } from '../src/db/migrator.js';
 import { MIGRATIONS } from '../src/db/migrations/index.js';
@@ -10,9 +11,11 @@ import { ROLLUP_TIERS, SAMPLE_TABLES } from '../src/timeseries/tiers.js';
 import {
   createScratchDatabase,
   databaseAvailable,
+  testDatabaseConfig,
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, silent, testActor } from './support/tree.js';
+import { within } from './support/within.js';
 
 const available = await databaseAvailable();
 
@@ -499,6 +502,52 @@ describe(
       assert.ok(report.droppedChunks >= 1);
       const left = await db.query<{ count: string }>('SELECT count(*) AS count FROM sample');
       assert.equal(left[0]?.count, '0', 'the hundred-day-old reading is gone');
+    });
+
+    it('skips a chunk it cannot lock in two seconds, counts it, and drops it next pass (P-229)', async () => {
+      // A backup reading the table, as `pg_dump` does: `ACCESS SHARE` on every chunk. A drop
+      // wants `ACCESS EXCLUSIVE`, and before `P-229` it waited behind the reader for as long as
+      // the dump took, with every other reader of the table, ingestion's included, queued
+      // behind the drop.
+      await insertSamples(db, CHANNEL, [[new Date(Date.now() - 100 * DAY_MS), 1]]);
+      await db.query("INSERT INTO rollup_watermark (tier, watermark) VALUES ('sample_5m', now())");
+      const config = housekeeping({
+        retention: {
+          rawDays: 40,
+          fiveMinuteDays: 365,
+          hourlyDays: 730,
+          dailyDays: 3_650,
+          auditDays: 730,
+          stateDays: 3_650,
+          reportDays: 90,
+          reportRunDays: 730,
+        },
+      });
+      const backup = new Client({ ...testDatabaseConfig(), database: scratch.name });
+      await backup.connect();
+      let held: Awaited<ReturnType<Housekeeper['runOnce']>>;
+      try {
+        await backup.query('BEGIN');
+        await backup.query('SELECT count(*) FROM sample');
+        // Bounded: a drop with no lock limit waits for the backup, which waits for this.
+        held = await within(
+          20_000,
+          'the pass to skip the held chunk',
+          housekeeper(config).runOnce(),
+        );
+      } finally {
+        await backup.query('ROLLBACK');
+        await backup.end();
+      }
+      assert.equal(held.droppedChunks, 0);
+      assert.ok(held.lockedChunks >= 1, 'counted, not silent');
+      assert.deepEqual(held.failures, [], 'a chunk it could not lock is not a failed step');
+      const kept = await db.query<{ count: string }>('SELECT count(*) AS count FROM sample');
+      assert.equal(kept[0]?.count, '1');
+
+      const next = await housekeeper(config).runOnce();
+      assert.ok(next.droppedChunks >= 1, 'tried again, and dropped, once nothing holds it');
+      assert.equal(next.lockedChunks, 0);
     });
 
     it('will not drop raw the rollup has not consumed, however old it is', async () => {

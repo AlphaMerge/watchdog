@@ -7562,6 +7562,180 @@ because each is a decision rather than a defect:
       - `#present` registering regardless of the reading (4 tests);
       - never removing a metric once registered (1 test).
 
+- [x] **P-229 — One lock or one stuck query can hold a pool connection for ever, and twenty starve
+      the core** · M · P-12 · Reserved in round 3 and verified 2026-09-29. The core's one pool (20
+      connections by default, shared by the API, ingestion, triggers, notifications, the stream and
+      the housekeeper) set no `statement_timeout`, `lock_timeout` or
+      `idle_in_transaction_session_timeout`, and PostgreSQL's defaults for all three are off. No
+      installer set them either. `pool-starvation.test.ts` reproduced it: an outside session holds
+      one row, five core updates of that row take a pool of five, `pg_stat_activity` shows each
+      waiting on the lock, and a read of an unlocked table fails with "timeout exceeded when trying
+      to connect" after `connectTimeoutMs`. The five end only when the holder rolls back. Realistic
+      holders: an operator's `psql` left in a transaction; a backup's `ACCESS SHARE` on an old
+      chunk with housekeeping's `drop_chunks` queued behind it and every later reader queued
+      behind the drop; a long-range query nothing cancels.
+      **Fix, agreed with WatchDog:** the three on every pooled session through the connection's
+      startup options, from `database.statementTimeoutMs` (60 s), `database.lockTimeoutMs` (5 s)
+      and `database.idleInTransactionTimeoutMs` (60 s), each 0 for off. The defaults rest on
+      `docs/findings/2026-09-28-object-visibility.md` (the slowest read path's budget, a stream
+      snapshot, is 2 s) and `docs/findings/2026-09-29-tree-build-with-authentication.md` (a
+      5,000-object tree in one request, 3.5 s at most). Longer or shorter limits per path, as
+      `SET LOCAL` inside that path's one transaction: rollups 10 minutes; `compress_chunk` 30
+      minutes and a 2 s lock; `drop_chunks` a 2 s lock, the chunk skipped and counted and retried
+      next pass; the tree lock 30 s; report rendering 10 minutes. TCP keepalive on the pool, since
+      a statement timeout cannot fire on a server that has gone.
+      **Done when:**
+      1. 55P03 (a lock timeout) answers 503 with `Retry-After`: it passes. 57014 (a cancelled
+         statement) answers 503 with no `Retry-After` and a message naming
+         `database.statementTimeoutMs`: the same query times out again, so a client must not
+         retry it by itself. 57014 also comes from a hand's `pg_cancel_backend`, so the log carries
+         the server's own message, which tells the two apart.
+      2. Every waiter on the tree lock that is not a request has a defined 55P03 behaviour.
+         Provisioning under the 30 s lock stops that run with a reason and never takes the pump
+         with it. The outcome lists every caller that is not a request and what each does.
+      3. No override reaches the pool: `SET LOCAL` only where the work is one transaction. Work
+         that spans transactions or holds a session gets its own client, or its own pool, built
+         with the timeouts off, and nothing ever `SET`s or `RESET`s a pooled client, since a
+         `RESET` that throws hands the pool a client at 0. The test and perf harnesses (5,000-object
+         builds, `MS_BENCH_FILL`, the replay soak) are not cut by the 60 s default.
+      4. 25P03 ends the backend. The client that sees it is released with the error, so the pool
+         discards it; a test shows the next checkout gets a live client and the process survives,
+         with the client in use when it happens, not only idle.
+      5. Core Health's `dbOldestQuerySeconds` is the oldest `state = 'active'` statement of
+         `application_name = 'ms-core'`, not this one's own backend. A statement blocked on a lock
+         is active, and shows.
+      6. One outage, one alarm. A batch refused for a lock timeout is not a `P-228` refusal and
+         raises nothing on Probe Health; it is a Core Health count. A scenario test holds a lock
+         for 30 s on the table ingestion writes: exactly one Core Health warning, no Probe Health
+         warning, and the probe's re-offer leaves no gap once it is released.
+      7. The entry cites the findings the defaults rest on (above).
+      8. `pool-starvation.test.ts` is the acceptance test. Mutants as usual, the 57014/55P03 split
+         and the discard among them.
+
+      **P-229 outcome.** `docs/administration.md` has the operator's side under "A lock held
+      outside the core", with the query that finds the holder.
+      - **Every pooled session has the three limits from its first statement**: `-c` startup
+        options, always all three, since 0 is this configuration's "no limit" and leaving one out
+        would let a role's or a database's default decide. Keepalive after 30 s idle. A value that
+        is not 0 but under a second (100 ms for the lock limit) is refused at start-up by name as
+        a likely typo (`DATABASE_TIMEOUT_FLOORS`, a config rule, since a schema cannot say "0 or
+        at least this").
+      - **Per-transaction limits are `set_config(..., true)` straight after `BEGIN`**
+        (`Database.tx(fn, limits)`), with `work` naming the transaction `ms-core:<work>` in
+        `pg_stat_activity`. A test on a pool of one shows the next caller of the same session gets
+        the pool's limits and name back, after a transaction that failed as well. Nothing in the
+        core `SET`s or `RESET`s a pooled session.
+      - **A pool of its own for work that is not one transaction** (`Database.withLimits`):
+        migrations, two sessions and no limits, at start-up and in `ms-core migrate`, since the
+        migrator holds a session lock across transactions; report rendering, four sessions and ten
+        minutes a statement, with its own `HistoryService` and `ReportContext`, closed after the
+        report sweep. The housekeeper's session advisory lock stays on a pooled client: it holds
+        the session but sets nothing and runs two short statements on it, so no limit reaches it.
+      - **The test and perf harnesses run with no limits**: `testDatabaseConfig()` sets all three
+        to 0, and every perf file builds its pool through `createScratchDatabase`, which uses it.
+        (`SHIPPED` in the ingestion and replay harnesses is the shipped *ingestion* config, not
+        the database's.) A test asserts a scratch pool's sessions carry none, and a test of the
+        limits sets its own.
+      - **Answers.** 55P03 is `DATABASE_LOCK_TIMEOUT`, 503, `Retry-After: 5`. 57014 is
+        `DATABASE_STATEMENT_TIMEOUT`, 503, no `Retry-After`, naming `database.statementTimeoutMs`.
+        `OBJECT_TREE_BUSY` is 503, `Retry-After: 30`. `HttpError` carries headers and the server's
+        error handler sends them; a test drives a PATCH into a row held by an outside session and
+        reads the header off the wire, and the same PATCH succeeds once it is let go. Each is
+        logged at warn with the server's own message ("due to statement timeout", "due to user
+        request"), not as an unexpected failure.
+      - **The tree lock waits 30 s** (`TREE_LOCK_WAIT_MS`): `lock_timeout` is set for that one
+        statement and put back to what it was, the pool's or the transaction's own, and a test
+        reads it back both ways. **Every caller of it that is not one request**, found by reading
+        each caller of create, createTree, reorder, move, clone, delete and batch:
+        - *discovery provisioning*, from the API's provision route and from scheduled rediscovery
+          (`RediscoveryService` → `main.ts`'s `provision`): the first host whose device or sensor
+          gives up stops the run; that host's problem says why, every host after it is named "not
+          provisioned: the run stopped …", the report is recorded, and `provision` returns, so
+          the pump and the rediscovery sweep carry on. A re-run finishes the rest. Tested both
+          ways: a new host's device meeting the busy tree, and a device already there whose
+          template's sensor meets it first, where the per-sensor catch would otherwise have
+          recorded one sensor's problem and gone on to wait again for every host after it;
+        - *bulk operations* (one request, but a loop): the first object that gives up stops the
+          selection, and every object after it is reported `OBJECT_TREE_BUSY`, "not attempted".
+          Only move, clone and delete take the tree lock. A row lock timing out on one object is
+          that object's failure, and the loop carries on, since the next object's row is another;
+        - `ObjectService.batch` has no caller outside tests.
+      - **Housekeeping** gives each rollup and backfill slice 10 minutes; a compression 30 minutes
+        and a 2 s lock; each retention drop, disk eviction and state-retention drop a 2 s lock.
+        A chunk not locked in time is skipped, counted in the pass report's `lockedChunks`,
+        logged at warn with its table, and tried again next pass. It is not a failed step, and not
+        a `dbLockTimeouts` count (`ownLockTimeouts`). The long ones are named
+        `ms-core:housekeeping`.
+      - **A checked-out client is listened to** until it is returned, and one that failed goes
+        back with its error. pg-pool listens only to idle clients, so before this a session
+        PostgreSQL ended under a checked-out client (idle-in-transaction timeout,
+        `pg_terminate_backend`, a restart) was an uncaught exception, and the core exited. Tested
+        both ways: idle in a transaction past the limit, and terminated under `withClient`. The
+        next checkout is a new session and works. A failed `ROLLBACK` discards its session too.
+      - **Core Health**: `dbStatementTimeouts` and `dbLockTimeouts`, 64-bit counters, warning on
+        any rate, counted once per failure however many layers it passes through;
+        `dbOldestQuerySeconds`, a gauge, warning past 30 s, `ms-core` and `state = 'active'`
+        only, not the reading's own backend, `clock_timestamp()` not `now()`. Tested with a
+        statement blocked by an outside lock (counted) and a `ms-core:housekeeping` one (not).
+        Exported as `ms_core_db_statements_cancelled_total` and
+        `ms_core_db_lock_waits_given_up_total` (counters) and `ms_core_db_oldest_statement_seconds`.
+      - **The scenario** (`database-lock-scenario.test.ts`): `sample` held in `SHARE` mode for a
+        minute of the scenario's clock (the probe's batch and two sweeps of each health sensor),
+        with `lockTimeoutMs` at 300 ms. The probe's batches are answered `storage-error` and
+        spooled; Core Health goes to warning exactly once and back to up; Probe Health never
+        leaves up, and the probe's refusal counts stay at zero; once it is released, every
+        reading the probe took is stored, the held ones included.
+      - **Every wait behind an outside lock in these tests has its own bound** (`within`, moved
+        to `test/support/within.ts` from `state-stream.test.ts`, and CLAUDE.md points there).
+        The first mutation run showed why: with the pool's lock limit taken out, the acceptance
+        test did not fail, it hung, and only the container's `timeout` ended it (rule 22). It now
+        fails in 5 s.
+      - **Carried onto `main` 118 commits on** (built on `7b0419e6`, landed on `b07200b`), and
+        re-read against what those commits added:
+        - *The late-refusal record's write* (`A-61`, `A-68`) set its own 300 ms lock and 2 s
+          statement limits by `set_config` inside its transaction. It now passes them to
+          `Database.tx` (`LATE_REFUSAL_SAVE_LIMITS`), the one mechanism, and owns both kinds of
+          give-way: `TxLimits` gained `ownStatementTimeouts` beside `ownLockTimeouts`. Its
+          give-ways are `recordWritesGivenUp` on Core Health already, a channel with no alarm
+          because a group's delete makes a few on purpose, so counted by the pool as well they
+          would have been a second channel, and a warning, for the same write. The real-database
+          test of it giving way to a held row and to a delete now also asserts the pool counted
+          neither, and `database-limits.test.ts` covers an owned statement timeout.
+        - *`A-72`'s protocol-flap row*, rebased onto round eight: it is written in that same
+          transaction, so it runs under the same limits and its give-ways are the same one count.
+          No limit is set by hand anywhere in the core now; the tree lock's own wait, set and put
+          back inside the caller's transaction, is the one `set_config` of a limit left, and is
+          `P-229`'s. `A-72`'s start-up read-back is two plain reads of small tables and its
+          minute prune writes only through this transaction, so neither meets the pool's limits.
+        - *The tree lock*: the same seven methods take it, and they have the same two callers
+          that are not one request, provisioning (which now carries the run's `A-41` voucher) and
+          bulk. Nothing added since calls create, move, clone or delete from anywhere else.
+        - *Every transaction added since* (the discovery run's end, rediscovery's deletes, the
+          credential voucher adoption at start, vouching's release, clock-freeze moves, Probe
+          Health's release of a lost probe's alarms, the chain validator, the audit route's
+          reads, the credential write's preview) runs database statements and
+          nothing else inside it, so the idle-in-transaction limit cannot meet one waiting on the
+          network. The flat-name check's advisory lock (`pg_advisory_xact_lock` on a name) waits
+          under the pool's 5 s and answers `DATABASE_LOCK_TIMEOUT` past it. `withClient` and
+          `transaction()` still have only the housekeeper's and the migrator's callers.
+        - Core Health's sources gained `A-41b`, `A-41c` and `A-68` channels in the meantime; the
+          three here follow them in the catalogue and in `sensor-reference.md`.
+      - **Mutants, 14.** Caught: no lock limit on the pool; no listener on a checked-out client
+        (the uncaught exception); a transaction's limit set for the session; a failure counted at
+        every layer it passes; a caller-owned lock timeout counted; 55P03 answered as 57014 is;
+        57014 answered with `Retry-After`; the error handler not sending the headers; the tree's
+        wait left in place after it; a bulk selection waiting for every object; provisioning
+        carrying on past a busy tree when a sensor meets it (the second provisioning case, added
+        for it; the first reaches only the device); a locked retention chunk as a failed step;
+        the oldest statement counting work of any `ms-core:` name. **Equivalent:** returning a
+        failed client for reuse rather than with its error, because pg-pool already discards a
+        client it can no longer query (`_release` checks `_queryable`). The error is still passed,
+        so the discard does not rest on that detail. **Re-planted on `main`**, all fourteen, and
+        two more for what the carry added: a caller-owned statement timeout counted
+        (`database-limits.test.ts`), and the late-refusal write's give-ways left to the pool
+        (`credential-pinning.test.ts`, the fake and the real database both). 15 of 16 caught, the
+        same one equivalent.
+
 - [x] **P-238 — a start refused on migration drift does not say which migration** · S · P-222,
       H-03 · Found 2026-09-29, when the development `ms-server` had restarted about 470 times
       with "an already-applied migration has been edited; the database and this build disagree

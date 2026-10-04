@@ -110,11 +110,15 @@ export async function buildHarness(
     clockFrozenSensors?: () => ReadonlySet<number>;
     /** The factories held for their inputs' probe (`M-26`); `FactoryReach.unreached`. */
     unreachedFactories?: () => ReadonlySet<number>;
+    /** How long a change waits for the tree lock (`P-229`); 30 s unless a test is about it. */
+    treeLockWaitMs?: number;
   } = {},
 ): Promise<Harness> {
   await new Migrator({ db, logger: silent, migrations: MIGRATIONS }).up();
 
-  const repository = new ObjectRepository();
+  const repository = new ObjectRepository(
+    options.treeLockWaitMs === undefined ? {} : { treeLockWaitMs: options.treeLockWaitMs },
+  );
   const resolver = new InheritanceResolver({ db, logger: silent });
   const audit = new CapturingAuditSink();
   // Opt-in, because most tests here are about the tree and would only be paying for a cache.

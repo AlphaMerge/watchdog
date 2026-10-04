@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { Queryable } from '../db/pool.js';
+import { DatabaseError, SQLSTATE, type Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 import { atLeast, groupRightsOn, type AccessRight, type Visibility } from '../auth/access.js';
 import { limitsFromDeclaration, parseLimits, type ChannelLimits } from '../state/limits.js';
@@ -33,6 +33,9 @@ import type {
 
 /** One advisory-lock namespace for every structural change to the tree. */
 const TREE_LOCK = `hashtext('ms:object-tree')::bigint`;
+
+/** How long a change waits for the tree lock before it answers `OBJECT_TREE_BUSY` (`P-229`). */
+export const TREE_LOCK_WAIT_MS = 30_000;
 
 interface ObjectRow {
   id: string;
@@ -207,6 +210,12 @@ export interface CopiedGrant {
  * atomic without rewriting every signature.
  */
 export class ObjectRepository {
+  readonly #treeLockWaitMs: number;
+
+  constructor(options: { treeLockWaitMs?: number } = {}) {
+    this.#treeLockWaitMs = options.treeLockWaitMs ?? TREE_LOCK_WAIT_MS;
+  }
+
   // ── locks ────────────────────────────────────────────────────────────────────────────────
 
   /**
@@ -215,7 +224,7 @@ export class ObjectRepository {
    * while they are in flight, which is what makes a deletion report exact.
    */
   async lockTreeShared(q: Queryable): Promise<void> {
-    await q.query(`SELECT pg_advisory_xact_lock_shared(${TREE_LOCK})`);
+    await this.#lockTree(q, `SELECT pg_advisory_xact_lock_shared(${TREE_LOCK})`);
   }
 
   /**
@@ -228,7 +237,40 @@ export class ObjectRepository {
    * migration 001's own comment warns about.
    */
   async lockTreeExclusive(q: Queryable): Promise<void> {
-    await q.query(`SELECT pg_advisory_xact_lock(${TREE_LOCK})`);
+    await this.#lockTree(q, `SELECT pg_advisory_xact_lock(${TREE_LOCK})`);
+  }
+
+  /**
+   * Waits for the tree lock for 30 s at most, then gives up as `OBJECT_TREE_BUSY` (`P-229`).
+   *
+   * **Its own wait, not the pool's.** The pool's `lock_timeout` is 5 s, and a structural change
+   * that holds the tree for longer is ordinary: deleting a large subtree, building 5,000 objects
+   * in one request (3.5 s at most, measured). So the wait is set for this one statement and put
+   * back to what it was, with `set_config(..., true)` both times, which the transaction's end
+   * clears whatever happens. **With no wait at all**, as before, a change stuck behind a lock
+   * held elsewhere held a pool connection for as long as that lasted.
+   */
+  async #lockTree(q: Queryable, statement: string): Promise<void> {
+    const [before] = await q.query<{ previous: string }>(
+      `SELECT current_setting('lock_timeout') AS previous,
+              set_config('lock_timeout', $1, true)`,
+      [String(this.#treeLockWaitMs)],
+    );
+    try {
+      await q.query(statement);
+    } catch (error) {
+      if (error instanceof DatabaseError && error.sqlstate === SQLSTATE.lockNotAvailable) {
+        const seconds = Math.round(this.#treeLockWaitMs / 1_000);
+        throw new ObjectError(
+          'OBJECT_TREE_BUSY',
+          `another change to the object tree has held it for ${String(seconds)} s; ` +
+            'this one gave up waiting and changed nothing — try again shortly',
+          { context: { phase: 'tree-lock', waitedMs: this.#treeLockWaitMs }, cause: error },
+        );
+      }
+      throw error;
+    }
+    await q.query(`SELECT set_config('lock_timeout', $1, true)`, [before?.previous ?? '0']);
   }
 
   // ── reads ────────────────────────────────────────────────────────────────────────────────

@@ -29,6 +29,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { within } from './support/within.js';
 import { Visibility } from '../src/auth/access.js';
 import { credentialKey, type CredentialCheck, type Lapse } from '../src/auth/credentials.js';
 
@@ -2457,25 +2458,3 @@ describe(
     });
   },
 );
-
-/**
- * `promise`, or a failure naming `what` once `ms` have passed.
- *
- * **For every wait on the far end of a socket.** A test's own `timeout` fails the test and does
- * not cancel it, so an `await` that never settles never reaches the `finally` that stops the
- * server — and the server's open handles then keep the whole file's process alive, which is a
- * suite that never finishes rather than a test that fails.
- */
-async function within<T>(ms: number, what: string, promise: Promise<T>): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const late = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      reject(new Error(`timed out after ${String(ms)} ms waiting for ${what}`));
-    }, ms);
-  });
-  try {
-    return await Promise.race([promise, late]);
-  } finally {
-    clearTimeout(timer);
-  }
-}

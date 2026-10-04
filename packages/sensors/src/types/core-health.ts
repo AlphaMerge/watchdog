@@ -563,6 +563,48 @@ const CHANNELS: readonly ChannelDef[] = [
         'the core log says why',
     },
   },
+  // `P-229`. The database pool's limits, seen working. **Counters**, so the counter path turns
+  // them into rates: what matters is whether statements are still being given up on, not that
+  // one was last week. **Any rate is a warning**: each one is a request answered 503 or a probe's
+  // batch re-offered, and the core log names the statement and the server's own reason.
+  {
+    key: 'dbStatementTimeouts',
+    name: 'Database statements cancelled',
+    unit: 'statements',
+    counter: { bits: 64 },
+    limits: {
+      upperWarning: 0.000_01,
+      warningMessage:
+        'database statements are being cancelled, most often for running past ' +
+        'database.statementTimeoutMs; the core log names them',
+    },
+  },
+  {
+    key: 'dbLockTimeouts',
+    name: 'Database lock waits given up',
+    unit: 'statements',
+    counter: { bits: 64 },
+    limits: {
+      upperWarning: 0.000_01,
+      warningMessage:
+        'something is holding locks the core needs for longer than database.lockTimeoutMs; ' +
+        'look for a long transaction outside the core',
+    },
+  },
+  // **A gauge, and the one that shows a pool starving while it happens.** The oldest statement of
+  // the core's own that is running now. A statement waiting on a lock is running, so a lock held
+  // outside the core shows here from its first second, before any limit has fired. Work given a
+  // longer limit on purpose (rollups, compression, reports, migrations) is named otherwise in
+  // `pg_stat_activity` and is not counted.
+  {
+    key: 'dbOldestQuerySeconds',
+    name: 'Oldest database statement running',
+    unit: 's',
+    limits: {
+      upperWarning: 30,
+      warningMessage: 'a database statement of the core has been running for more than 30 s',
+    },
+  },
 ];
 
 export const coreHealth: SensorType = {

@@ -22,7 +22,7 @@ import type { Database } from '../db/pool.js';
 import type { HistoryService } from '../timeseries/history.js';
 import { AlarmService } from '../state/alarms.js';
 import { StateLogService } from '../timeseries/state-log.js';
-import { logIfUnexpected, toHttpError } from './errors.js';
+import { logIfUnexpected, toHttpError, type HttpError } from './errors.js';
 import { registerAuthentication } from './authentication.js';
 import {
   INSTALLATION,
@@ -707,7 +707,7 @@ export class ApiServer {
     this.#app.setErrorHandler((error: FastifyError, request, reply) => {
       // Fastify's own schema failures arrive here; map them onto the same envelope so a client
       // never has to parse two error shapes.
-      const mapped =
+      const mapped: HttpError =
         error.validation === undefined
           ? toHttpError(error, request.id)
           : {
@@ -724,6 +724,8 @@ export class ApiServer {
             };
 
       logIfUnexpected(this.#logger, error, mapped.status);
+      // `Retry-After` on an answer that says to try again (`P-229`).
+      if (mapped.headers !== undefined) void reply.headers(mapped.headers);
       void reply.status(mapped.status).send(mapped.body);
     });
 

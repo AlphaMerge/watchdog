@@ -73,6 +73,7 @@ export function fixedCoreHealth(
       ...(options.lateRefusalWritesGivenUp === undefined
         ? {}
         : { lateRefusalWritesGivenUp: options.lateRefusalWritesGivenUp }),
+      database: () => ({ statements: 4, locks: 3 }),
     },
     ingest: () => Promise.resolve(),
   });

@@ -7,7 +7,7 @@ import type { CoreHealthSources } from '../health/core-health.js';
 import type { EmailTransport } from '../notifications/delivery/email.js';
 import { reportAuditSinks, type AuditSinkSet } from '../objects/audit-composition.js';
 import { PeriodicSweep } from '../support/periodic-sweep.js';
-import type { HistoryService } from '../timeseries/history.js';
+import { HistoryService } from '../timeseries/history.js';
 import { ReportContext } from './context.js';
 import { ReportDelivery, ReportOutputRepository } from './delivery.js';
 import { checkReportFonts, configureReportFonts } from './fonts.js';
@@ -34,6 +34,13 @@ export interface Reporting {
   stats: NonNullable<CoreHealthSources['reports']>;
 }
 
+/** How long one statement of a report's may run: ten minutes, where the core pool's is 60 s. */
+const REPORT_RENDER_LIMITS = {
+  statementTimeoutMs: 600_000,
+  poolSize: 4,
+  work: 'reports',
+} as const;
+
 /**
  * Reports (`E-01`…`E-12`), constructed and started — in the full build profile only (`H-12`).
  *
@@ -42,7 +49,20 @@ export interface Reporting {
  * waking every minute. Everything here was in `main.ts` and moved unchanged.
  */
 export async function startReporting(options: ReportingOptions): Promise<Reporting> {
-  const { db, logger, lifecycle, access, history, auditSinks, email } = options;
+  const { db, logger, lifecycle, access, auditSinks, email } = options;
+
+  // **Rendering reads through a pool of its own** (`P-229`). A year of hourly buckets for a few
+  // hundred sensors is minutes of reading, which the core pool's 60 s statement limit would cut,
+  // and a longer limit on the core pool would let any request run that long. Four sessions: the
+  // sweep's two concurrent renders, and room for a preview beside them. Closed after the sweep,
+  // since hooks run last-registered first.
+  const renderDb = db.withLimits(REPORT_RENDER_LIMITS);
+  lifecycle.onShutdown({
+    name: 'report database',
+    timeoutMs: 5_000,
+    run: () => renderDb.close(),
+  });
+  const history = new HistoryService({ db: renderDb, logger });
 
   // Mounted here at the same time the routes were written, rather than a phase later: the maps
   // note in `main.ts` is the record of what happens otherwise.
@@ -50,7 +70,7 @@ export async function startReporting(options: ReportingOptions): Promise<Reporti
   // Reads through the same `AccessService` the object API uses, for the reason the map resolver
   // does: a report must not become a second, more permissive way to read a sensor (`E-03`).
   const reportContext = new ReportContext({
-    db,
+    db: renderDb,
     repository: reportRepository,
     access,
     logger,

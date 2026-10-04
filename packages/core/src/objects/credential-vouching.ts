@@ -13,7 +13,7 @@ import {
 import { atLeast, type AccessPrincipal, type AccessRight } from '../auth/access.js';
 import type { AccountRole } from '../auth/accounts.js';
 import { AuthError } from '../auth/errors.js';
-import { DatabaseError, type Queryable } from '../db/pool.js';
+import { DatabaseError, type Queryable, type TxLimits } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 import type { Actor, AuditSink, Mutation } from './audit.js';
 import {
@@ -756,7 +756,7 @@ export interface SensorBeingSent {
 }
 
 export interface CredentialVouchingOptions {
-  db: Queryable & { tx<T>(fn: (q: Queryable) => Promise<T>): Promise<T> };
+  db: Queryable & { tx<T>(fn: (q: Queryable) => Promise<T>, limits?: TxLimits): Promise<T> };
   logger: Logger;
   sensorTypes: CredentialBoundTypes;
   /** What each account may do to each owner: `AccessService.resolveManyFor`. */
@@ -960,6 +960,19 @@ export const LATE_REFUSAL_SAVE_STATEMENT_MS = 2_000;
  * a statement the server is running, and this bounds a connection that never answers.
  */
 export const LATE_REFUSAL_SAVE_WAIT_MS = 3_000;
+
+/**
+ * The write's own two limits, over the pool's (`P-229`), set for its one transaction by
+ * `Database.tx`. **Its give-ways are its own to count**: they are `recordWritesGivenUp` on Core
+ * Health already (`A-68`), a channel with no alarm because a delete of a group makes a few on
+ * purpose, so the pool's lock and statement counts, which warn on any rate, leave them out.
+ */
+const LATE_REFUSAL_SAVE_LIMITS: TxLimits = {
+  lockTimeoutMs: LATE_REFUSAL_SAVE_LOCK_MS,
+  statementTimeoutMs: LATE_REFUSAL_SAVE_STATEMENT_MS,
+  ownLockTimeouts: true,
+  ownStatementTimeouts: true,
+};
 
 /** `lock_not_available`, `query_canceled` and `deadlock_detected`: a write that gave way. */
 const GAVE_WAY = new Set(['55P03', '57014', '40P01']);
@@ -1674,6 +1687,8 @@ export class CredentialVouching {
    * picks could be the operator's delete. The lock timeout is well under that, so **this write
    * is always the one to give up**: it is the one that can be made again. Giving up for a lock
    * or for time is expected under contention and is logged at `warn`; anything else at `error`.
+   * Both limits are `LATE_REFUSAL_SAVE_LIMITS`, set by `Database.tx` for this transaction alone,
+   * and neither give-way is counted by the pool (`P-229`): `recordWritesGivenUp` counts it.
    *
    * **An entry whose sensor or probe is gone is dropped, not written again.** The join skips it,
    * the statement says which rows it wrote, and what it did not write has nothing left to be
@@ -1714,10 +1729,6 @@ export class CredentialVouching {
     const onWall = (at: number | null): number | null => (at === null ? null : wall - (now - at));
     try {
       const { written, versionWritten } = await this.#db.tx(async (q) => {
-        await q.query(
-          `SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)`,
-          [`${String(LATE_REFUSAL_SAVE_LOCK_MS)}ms`, `${String(LATE_REFUSAL_SAVE_STATEMENT_MS)}ms`],
-        );
         const rows = grace
           ? await this.#saveGrace(q, probeId, sensorIds, stoppedAtMs, leftIds, leftVersion)
           : [];
@@ -1747,7 +1758,7 @@ export class CredentialVouching {
                 ],
               );
         return { written: rows, versionWritten: versionRows.length > 0 };
-      });
+      }, LATE_REFUSAL_SAVE_LIMITS);
       // A probe that is gone has no record to keep, and nothing to write again.
       if (version !== undefined && !versionWritten && this.#versions.get(probeId) === version) {
         this.#versions.delete(probeId);

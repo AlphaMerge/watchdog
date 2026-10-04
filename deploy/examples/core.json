@@ -31,6 +31,9 @@
     "ssl": false,
     "poolSize": 20,
     "connectTimeoutMs": 10000,
+    "statementTimeoutMs": 60000,
+    "lockTimeoutMs": 5000,
+    "idleInTransactionTimeoutMs": 60000,
     "autoMigrate": true
   },
   "ingestion": {

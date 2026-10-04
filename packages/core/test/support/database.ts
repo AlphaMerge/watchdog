@@ -20,6 +20,11 @@ export function testDatabaseConfig(): DatabaseConfig {
     ssl: false,
     poolSize: 5,
     connectTimeoutMs: 3_000,
+    // Off (`P-229`). The perf harnesses build 5,000 objects in one request and fill a database
+    // for an hour, which a 60 s statement limit would cut. A test of the limits sets its own.
+    statementTimeoutMs: 0,
+    lockTimeoutMs: 0,
+    idleInTransactionTimeoutMs: 0,
     // Tests drive the migrator explicitly; nothing should migrate behind their back.
     autoMigrate: false,
   };

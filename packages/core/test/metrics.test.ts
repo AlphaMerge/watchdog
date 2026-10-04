@@ -104,6 +104,11 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       assert.equal(metrics.get('ms_core_alarm_sweep_overdue_seconds'), 0);
       assert.equal(metrics.get('ms_core_alarm_steps_fired_total'), 6);
       assert.equal(metrics.get('ms_core_probe_queries_refused_total'), 2);
+      // `P-229`: the pool's limits. The oldest statement is read from `pg_stat_activity`, so it
+      // is whatever this database is running, and a measurement rather than a gap either way.
+      assert.equal(metrics.get('ms_core_db_statements_cancelled_total'), 4);
+      assert.equal(metrics.get('ms_core_db_lock_waits_given_up_total'), 3);
+      assert.ok((metrics.get('ms_core_db_oldest_statement_seconds') ?? -1) >= 0);
     });
 
     it('carries each probe’s numbers, labelled by probe', async () => {
@@ -157,10 +162,16 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
         'ms_core_dependency_pauses_total',
         'ms_core_alarm_steps_fired_total',
         'ms_core_probe_queries_refused_total',
+        'ms_core_db_statements_cancelled_total',
+        'ms_core_db_lock_waits_given_up_total',
       ]) {
         assert.match(body, new RegExp(`# TYPE ${name} counter`), name);
       }
-      for (const name of ['ms_core_ingestion_queue_rows', 'ms_core_alarm_sweep_overdue_seconds']) {
+      for (const name of [
+        'ms_core_ingestion_queue_rows',
+        'ms_core_alarm_sweep_overdue_seconds',
+        'ms_core_db_oldest_statement_seconds',
+      ]) {
         assert.match(body, new RegExp(`# TYPE ${name} gauge`), name);
       }
     });

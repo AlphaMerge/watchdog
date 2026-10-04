@@ -150,7 +150,17 @@ export class BulkService {
     const alreadyGone = new Set<ObjectId>();
     const outcomes: BulkOutcome[] = [];
 
+    // Set when a change waited 30 s for the tree lock and gave up (`P-229`).
+    let busy: string | null = null;
     for (const id of unique) {
+      if (busy !== null) {
+        // **Not attempted, and said so per object.** The tree lock is one lock for the whole
+        // installation, so every object after the first that waited for it would wait 30 s as
+        // well: five hundred of them is four hours inside one request. The operator is told
+        // which ones were not tried, and runs the selection again once the tree is free.
+        outcomes.push({ objectId: id, ok: false, problem: busy, code: 'OBJECT_TREE_BUSY' });
+        continue;
+      }
       try {
         outcomes.push({
           objectId: id,
@@ -164,6 +174,11 @@ export class BulkService {
           problem: reasonFor(error, id, alreadyGone),
           code: error instanceof ObjectError ? error.code : 'INTERNAL_ERROR',
         });
+        if (error instanceof ObjectError && error.code === 'OBJECT_TREE_BUSY') {
+          busy =
+            `not attempted: object ${String(id)} waited for the object tree and gave up, ` +
+            'so the rest of this selection was not tried';
+        }
       }
     }
 

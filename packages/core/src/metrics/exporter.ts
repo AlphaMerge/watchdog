@@ -82,6 +82,25 @@ const CORE_METRICS: readonly Metric[] = [
     help: 'Database write latency, 95th percentile over the last 1,024 writes.',
     scale: MS,
   },
+  // The pool's limits at work (`P-229`). The two counts are the ones to alert on by rate; the
+  // oldest statement is the one that shows a pool starving behind a lock while it happens.
+  {
+    key: 'dbStatementTimeouts',
+    name: 'ms_core_db_statements_cancelled_total',
+    help: 'Database statements cancelled, most often for running past database.statementTimeoutMs.',
+    counter: true,
+  },
+  {
+    key: 'dbLockTimeouts',
+    name: 'ms_core_db_lock_waits_given_up_total',
+    help: 'Database statements that gave up waiting for a lock after database.lockTimeoutMs.',
+    counter: true,
+  },
+  {
+    key: 'dbOldestQuerySeconds',
+    name: 'ms_core_db_oldest_statement_seconds',
+    help: 'How long the core’s oldest running database statement has run, lock waits included.',
+  },
   {
     key: 'ingestRefused',
     name: 'ms_core_ingestion_refused_rows_total',

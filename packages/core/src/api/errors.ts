@@ -1,5 +1,5 @@
 import { AppError, describeError, type Logger } from '@ms/shared';
-import { DatabaseError } from '../db/pool.js';
+import { DatabaseError, postgresErrorIn, SQLSTATE } from '../db/pool.js';
 import { ObjectError } from '../objects/errors.js';
 import { MapError } from '../maps/errors.js';
 import { ReportError } from '../reports/errors.js';
@@ -29,7 +29,18 @@ export interface HttpErrorBody {
 export interface HttpError {
   status: number;
   body: HttpErrorBody;
+  /** Response headers the answer needs, `Retry-After` being the one (`P-229`). */
+  headers?: Readonly<Record<string, string>>;
 }
+
+/**
+ * How long a client told to try again should wait, in seconds (`P-229`).
+ *
+ * A lock not granted in `database.lockTimeoutMs` (5 s by default) is held by something that
+ * usually finishes: five seconds is one more such wait. The tree lock is waited on for 30 s
+ * before a change gives up, so a client is told to wait that long before it adds to the queue.
+ */
+const RETRY_AFTER_SECONDS = { lock: 5, tree: 30 } as const;
 
 /** What an `AppError` code answers: its status, and whether its own sentence goes with it. */
 export interface AppErrorAnswer {
@@ -97,6 +108,7 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
     message: string,
     context: Record<string, unknown> = {},
     details: Record<string, unknown> = {},
+    retryAfterSeconds?: number,
   ): HttpError => ({
     status,
     body: {
@@ -108,6 +120,9 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
         ...(correlationId === undefined ? {} : { correlationId }),
       },
     },
+    ...(retryAfterSeconds === undefined
+      ? {}
+      : { headers: { 'retry-after': String(retryAfterSeconds) } }),
   });
 
   if (error instanceof ObjectError) {
@@ -119,6 +134,8 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
       {
         ...error.details,
       },
+      // Another change has held the tree for as long as this one waited (`P-229`).
+      error.code === 'OBJECT_TREE_BUSY' ? RETRY_AFTER_SECONDS.tree : undefined,
     );
   }
 
@@ -243,6 +260,32 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
         { sqlstate, ...(error.constraint === undefined ? {} : { constraint: error.constraint }) },
       );
     }
+    if (sqlstate === SQLSTATE.lockNotAvailable) {
+      // **A lock held elsewhere for longer than `database.lockTimeoutMs`** (`P-229`). The request
+      // was fine and the same one can succeed once whatever holds the lock lets go, so it is a
+      // 503 with `Retry-After` rather than a 500. What held it is not named: that is another
+      // session's business, and the core log has the statement.
+      return envelope(
+        503,
+        'DATABASE_LOCK_TIMEOUT',
+        'the database was busy with a change this request had to wait for; try again shortly',
+        {},
+        {},
+        RETRY_AFTER_SECONDS.lock,
+      );
+    }
+    if (sqlstate === SQLSTATE.queryCanceled) {
+      // **A statement ran past `database.statementTimeoutMs`, or somebody cancelled it**
+      // (`P-229`). No `Retry-After`: the same query takes as long again, and a client that
+      // retried by itself would only queue the same work behind itself. The log carries the
+      // server's own message, which is what tells a timeout from a hand's `pg_cancel_backend`.
+      return envelope(
+        503,
+        'DATABASE_STATEMENT_TIMEOUT',
+        'the request needed a database query that ran longer than database.statementTimeoutMs ' +
+          'allows and was cancelled; narrow the request, or ask an administrator to raise the limit',
+      );
+    }
     // Nothing else from a database failure is safe to hand back. `DatabaseError.context`
     // carries the statement text and `host:port/database`, which is reconnaissance for anyone
     // who can reach the API. It is logged in full instead — see logIfUnexpected.
@@ -275,5 +318,12 @@ export function toHttpError(error: unknown, correlationId?: string): HttpError {
 /** Anything that escapes as a 500 is a bug; log it with everything we know. */
 export function logIfUnexpected(logger: Logger, error: unknown, status: number): void {
   if (status < 500) return;
+  const sqlstate = postgresErrorIn(error)?.sqlstate;
+  if (sqlstate === SQLSTATE.lockNotAvailable || sqlstate === SQLSTATE.queryCanceled) {
+    // What the limits exist to do (`P-229`), so not "unexpected" — but a line each, carrying the
+    // server's own message, which is what says whether a limit or a hand cancelled it.
+    logger.warn({ err: describeError(error) }, 'a request gave up on the database');
+    return;
+  }
   logger.error({ err: describeError(error) }, 'request failed unexpectedly');
 }

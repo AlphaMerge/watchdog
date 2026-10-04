@@ -1022,6 +1022,9 @@ cost: **light** · evaluated by the core, never by a probe
 | `hostsRefused` | Requests refused for an unknown Host | requests | — |
 | `rateLimited` | Requests refused by the rate limit | requests | default limits: warn above 0 |
 | `heartbeatFailures` | Heartbeats that did not arrive | requests | default limits: warn above 0 |
+| `dbStatementTimeouts` | Database statements cancelled | statements | 64-bit counter → rate; default limits: warn above 0.00001 |
+| `dbLockTimeouts` | Database lock waits given up | statements | 64-bit counter → rate; default limits: warn above 0.00001 |
+| `dbOldestQuerySeconds` | Oldest database statement running | s | default limits: warn above 30 |
 
 Takes no parameters.
 

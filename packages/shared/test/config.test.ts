@@ -427,6 +427,51 @@ describe('the heartbeat a receiver outside the core is sent (H-18)', () => {
   });
 });
 
+describe('the database pool’s limits (P-229)', () => {
+  const load = (database: Record<string, unknown>) =>
+    loadConfig({
+      schema: coreConfigSchema,
+      env: {},
+      argv: ['--config', tempFile('core.json', JSON.stringify({ database }))],
+    });
+
+  it('limits all three unless they are set', () => {
+    const { config } = loadConfig({ schema: coreConfigSchema, env: {}, argv: [] });
+    assert.equal(config.database.statementTimeoutMs, 60_000);
+    assert.equal(config.database.lockTimeoutMs, 5_000);
+    assert.equal(config.database.idleInTransactionTimeoutMs, 60_000);
+  });
+
+  it('takes 0 as no limit, and the floor itself as a limit', () => {
+    const off = load({ statementTimeoutMs: 0, lockTimeoutMs: 0, idleInTransactionTimeoutMs: 0 });
+    assert.equal(off.config.database.statementTimeoutMs, 0);
+    assert.equal(off.config.database.lockTimeoutMs, 0);
+    assert.equal(off.config.database.idleInTransactionTimeoutMs, 0);
+    const least = load({
+      statementTimeoutMs: 1_000,
+      lockTimeoutMs: 100,
+      idleInTransactionTimeoutMs: 1_000,
+    });
+    assert.equal(least.config.database.lockTimeoutMs, 100);
+  });
+
+  it('refuses a limit under its floor by name, since 5 is a typo for 5 s and not a limit', () => {
+    for (const [key, value] of [
+      ['statementTimeoutMs', 5],
+      ['lockTimeoutMs', 99],
+      ['idleInTransactionTimeoutMs', 999],
+    ] as const) {
+      const error = captureError(() => load({ [key]: value }));
+      assert.ok(error instanceof ConfigError, key);
+      assert.match(
+        error.message,
+        new RegExp(`database\\.${key}: ${String(value)} ms is shorter than`),
+        key,
+      );
+    }
+  });
+});
+
 describe('which proxies are believed (A-36)', () => {
   const load = (trustedProxies: unknown) =>
     loadConfig({

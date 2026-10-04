@@ -928,6 +928,8 @@ alarm.
 | `resultsUnreadableTime` | **Any value above zero is a warning.** Results dropped because their time is not a date, which our probe never sends: a broken or hostile build. What it drops is usually a failed check (`P-247`) |
 | `probesDown` | Probes not connected. Their sensors are not being checked |
 | `lateRefusalWritesGivenUp` | Writes of the record behind **Refusals delivered late** that were not made when they were due: the statement gave way to something holding a row it needs (a device or group being deleted at that moment), a configuration stopped waiting for it after 3 s, or it failed (`A-68`). A counter with no limit and no state: each is made again at the probe's next configuration or within a minute, and the running core has lost nothing meanwhile. What one costs is a core restarted before the write is made again, which then reads a probe's late refusal as a failed scan. A few after a large delete are expected; a rate that stays up is a database these writes cannot get into, and the core log says why at `warn` or `error`. `ms_core_late_refusal_writes_given_up_total` on `/metrics` |
+| `dbLockTimeouts`, `dbStatementTimeouts` | **Any rate above zero is a warning.** The core gave up waiting for a lock, or a statement was cancelled. Each is a request answered 503 or a probe's batch offered again, and the core log names the statement. See [a lock held outside the core](#a-lock-held-outside-the-core) |
+| `dbOldestQuerySeconds` | The core's oldest statement still running, a lock wait included. Warns past 30 s. The first channel to move when something outside the core is holding a lock it needs |
 
 ### Probe Health — `ms.probe.health`
 
@@ -1379,6 +1381,56 @@ A refused check is logged once per episode, not once per check: the first line n
 its type and the queue's bound, then *still refusing checks at a full queue* every 30 s with the
 count, and *no longer refusing checks* once 30 s pass without one. `refused` on Probe Health has
 every one.
+
+### A lock held outside the core
+
+PostgreSQL waits for a lock, and for a statement, as long as it takes, unless it is told
+otherwise. The core's pool is twenty sessions shared by the API, ingestion, alarms and
+housekeeping. So one session outside the core holding a row the core writes can take them all:
+an operator's `psql` left in a transaction, a backup, a job on another host. Each write that
+needs the row waits on it with a session, until there are none left and a request for an
+unrelated page waits `connectTimeoutMs` and fails (`P-229`).
+
+Every session of the core's therefore carries three limits from the moment it connects:
+
+| Setting | Default | What happens when it fires |
+| --- | --- | --- |
+| `database.lockTimeoutMs` | 5 s | The statement gives up waiting for a lock, and its session goes back to the pool. A request is answered **503 with `Retry-After: 5`**: nothing was wrong with it. A probe's batch is answered `storage-error`, and the probe keeps it and offers it again, so no reading is lost |
+| `database.statementTimeoutMs` | 60 s | The statement is cancelled. A request is answered **503 without `Retry-After`**, with a message naming this setting: the same query would take as long again. Sixty seconds is thirty times the slowest read path's budget |
+| `database.idleInTransactionTimeoutMs` | 60 s | A transaction left open and idle is ended by PostgreSQL, releasing its locks. The session is discarded, not reused |
+
+Each is 0 for no limit, and a value under a second (100 ms for the lock limit) is refused at
+start-up as a likely typo. The work that needs longer gets it by name, in its own transaction
+or its own pool, and never by changing a pooled session:
+
+- **Migrations run with no limits**, on two sessions of their own, at start-up and in
+  `ms-core migrate`.
+- **Report rendering** reads through four sessions of its own with ten minutes a statement.
+- **Housekeeping** gives a rollup slice ten minutes and a compression thirty. A chunk it
+  compresses or drops is waited for **two seconds**. Behind a backup, `drop_chunks` would
+  otherwise hold its place in the lock queue, and every reader of the table, ingestion
+  included, would queue behind it. A chunk not locked in time is skipped, counted in the pass
+  report as `lockedChunks`, logged as a warning naming the table, and tried again next pass.
+- **A change to the object tree** (create, move, delete, clone) waits for the tree lock up to
+  **30 s**, then answers `OBJECT_TREE_BUSY`, 503 with `Retry-After: 30`, and changes nothing. A
+  bulk selection stops at the first object that gave up and reports the rest as not attempted.
+  A discovery's provisioning stops and names every host it did not reach. A re-run finishes
+  both.
+
+**What you see.** `dbOldestQuerySeconds` climbs from the first second a statement is blocked.
+`dbLockTimeouts` warns while waits are being given up, and recovers when they stop. One lock is
+one Core Health warning: it does not also raise Probe Health, because a batch the core could
+not write is the core's trouble, not the probe's. To find the holder:
+
+```sql
+SELECT pid, application_name, state, now() - xact_start AS open_for, query
+FROM pg_stat_activity
+WHERE datname = current_database() AND xact_start IS NOT NULL
+ORDER BY xact_start;
+```
+
+The core's own sessions are `ms-core`, and `ms-core:<work>` for work given its own limits. The
+oldest transaction that is neither is usually the one to ask about.
 
 ### A core that is still starting
 

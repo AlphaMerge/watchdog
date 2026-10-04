@@ -23,7 +23,18 @@ export interface MigrateOptions {
  */
 export async function runMigrateCommand(options: MigrateOptions): Promise<number> {
   const { action, config, logger, write } = options;
-  const db = new Database({ config: config.database, logger });
+  // None of the pool's limits (`P-229`): a migration may rewrite a table for as long as that takes,
+  // and the migrator holds a session lock across transactions.
+  const db = new Database({
+    config: {
+      ...config.database,
+      statementTimeoutMs: 0,
+      lockTimeoutMs: 0,
+      idleInTransactionTimeoutMs: 0,
+    },
+    logger,
+    work: 'migrate',
+  });
 
   try {
     const migrator = new Migrator({ db, logger, migrations: MIGRATIONS });

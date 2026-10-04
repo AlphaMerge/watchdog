@@ -965,7 +965,7 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
     /** The version records as the writes that landed left them, for a core started on them. */
     flapTable: () => StoredFlap[];
     /** The timeouts each write's transaction set, before its statement. */
-    bounds: unknown[][];
+    bounds: unknown[];
     logged: Logged[];
     leave: (sensorIds: readonly number[], version?: number) => Promise<unknown>;
     /** The table as the writes that landed left it, for a core started on it. */
@@ -996,7 +996,7 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
       (flap.stored ?? []).map((row) => [row.probe_id, row]),
     );
     const order: string[] = [];
-    const bounds: unknown[][] = [];
+    const bounds: unknown[] = [];
     const logged: Logged[] = [];
     /** What the table holds, by probe and sensor, after every write that landed. */
     const rows = new Map<string, StoredRow>(
@@ -1005,11 +1005,8 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
     /** Whether the statement being run is inside a transaction, which the write has to be. */
     let inside = false;
     const query = async <R>(sql: string, values: readonly unknown[] = []): Promise<R[]> => {
-      if (sql.includes('set_config')) {
-        assert.equal(inside, true, 'the timeouts are set for a transaction, not for a session');
-        bounds.push([...values]);
-        return [];
-      }
+      // Nothing here sets a limit itself: `Database.tx` does, for the transaction (`P-229`).
+      assert.ok(!sql.includes('set_config'), 'no limit is set by hand, on a session or not');
       if (sql.includes('INSERT INTO late_refusal_grace')) {
         assert.equal(inside, true, 'the write runs in the transaction its timeouts were set in');
         const [probeId, sensorIds, stoppedAtMs, leftIds, version] = values as [
@@ -1089,8 +1086,9 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
     const credentials = new CredentialVouching({
       db: {
         query,
-        tx: async (fn) => {
+        tx: async (fn, limits) => {
           inside = true;
+          bounds.push(limits);
           try {
             return await fn({ query });
           } finally {
@@ -1494,10 +1492,15 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
       await leave([1, 2, 3]);
       await leave([2, 3]);
       assert.equal(written.length, 2);
-      assert.deepEqual(bounds, [
-        ['300ms', '2000ms'],
-        ['300ms', '2000ms'],
-      ]);
+      // Set by `Database.tx` for the write's transaction alone, and its give-ways counted by the
+      // write (`recordWritesGivenUp`) rather than by the pool, whose counts warn (`P-229`).
+      const own = {
+        lockTimeoutMs: 300,
+        statementTimeoutMs: 2_000,
+        ownLockTimeouts: true,
+        ownStatementTimeouts: true,
+      };
+      assert.deepEqual(bounds, [own, own]);
       assert.equal(LATE_REFUSAL_SAVE_LOCK_MS, 300);
       assert.equal(LATE_REFUSAL_SAVE_STATEMENT_MS, 2_000);
       assert.equal(LATE_REFUSAL_SAVE_WAIT_MS, 3_000);
@@ -4128,6 +4131,9 @@ describe(
         return performance.now() - started;
       };
       const givenUp = credentials.stats().recordWritesGivenUp;
+      // The pool counts neither give-way: this write counts its own, and the pool's counts warn
+      // on Core Health, where a delete of a group would raise a warning for nothing (`P-229`).
+      const pool = db.timeouts();
 
       // Another connection holds the sensor's row, as an update of it would. The write needs a
       // key-share lock on that row, waits its 300 ms for it, and gives up.
@@ -4160,6 +4166,7 @@ describe(
         'the delete was not the one aborted',
       );
       assert.equal(credentials.stats().recordWritesGivenUp, givenUp + 2);
+      assert.deepEqual(db.timeouts(), pool, 'the write’s give-ways are not the pool’s count');
       // And the write is made again, for what is left: no row for a sensor that is gone.
       await credentials.prune();
       assert.equal(await rows(doomed.sensor), 0);

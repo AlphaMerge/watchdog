@@ -1,5 +1,7 @@
 import { strict as assert } from 'node:assert';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { after, before, beforeEach, describe, it } from 'node:test';
+import { Client } from 'pg';
 import { CORE_HEALTH_CHANNELS, CORE_HEALTH_COUNTERS, coreHealth } from '@ms/sensors';
 import type { AvailableMemoryLow, CheckResult } from '@ms/shared';
 import {
@@ -17,6 +19,7 @@ import type { Database } from '../src/db/pool.js';
 import {
   createScratchDatabase,
   databaseAvailable,
+  testDatabaseConfig,
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, silent, testActor } from './support/tree.js';
@@ -72,6 +75,8 @@ function sources(
     unboundedCredentials: number;
     credentialsWithheld: number;
     lateRefusalWritesGivenUp: number;
+    statementTimeouts: number;
+    lockTimeouts: number;
     disk: { freePercent: number; freeBytes: number; databaseBytes: number } | null;
     evictedChunks: number;
     machineMemory: AvailableMemoryLow | null;
@@ -134,6 +139,10 @@ function sources(
     ...(overrides.lateRefusalWritesGivenUp === undefined
       ? {}
       : { lateRefusalWritesGivenUp: () => overrides.lateRefusalWritesGivenUp ?? 0 }),
+    database: () => ({
+      statements: overrides.statementTimeouts ?? 0,
+      locks: overrides.lockTimeouts ?? 0,
+    }),
     delivery: () => {
       if (overrides.deliveryThrows === true) {
         return Promise.reject(new Error('the notification queue would not answer'));
@@ -544,6 +553,47 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(await read(7), 7);
       assert.equal(await read(0), 0, 'none is a reading, not a gap');
       assert.equal(await read(), null);
+    });
+
+    it('reads the pool’s cancelled statements and lock waits given up, as counters (P-229)', async () => {
+      const reading = await build({ statementTimeouts: 3, lockTimeouts: 2 }).read();
+      assert.equal(reading['dbStatementTimeouts'], 3);
+      assert.equal(reading['dbLockTimeouts'], 2);
+      assert.ok(CORE_HEALTH_COUNTERS.has('dbStatementTimeouts'));
+      assert.ok(CORE_HEALTH_COUNTERS.has('dbLockTimeouts'));
+      assert.ok(!CORE_HEALTH_COUNTERS.has('dbOldestQuerySeconds'), 'a gauge');
+    });
+
+    it('shows a statement of the core’s waiting on a lock as the oldest running, and not work named otherwise (P-229)', async () => {
+      await db.query('CREATE TABLE IF NOT EXISTS hot (id int PRIMARY KEY, n int NOT NULL)');
+      await db.query('INSERT INTO hot VALUES (1, 0) ON CONFLICT DO NOTHING');
+      const holder = new Client({ ...testDatabaseConfig(), database: scratch.name });
+      await holder.connect();
+      const blocked: Promise<unknown>[] = [];
+      try {
+        await holder.query('BEGIN');
+        await holder.query('UPDATE hot SET n = n + 1 WHERE id = 1');
+        assert.equal((await build().read())['dbOldestQuerySeconds'], 0, 'nothing running');
+
+        // Housekeeping's own, given ten minutes on purpose: not what this channel is about.
+        blocked.push(
+          db.tx((q) => q.query('UPDATE hot SET n = n + 1 WHERE id = 1'), {
+            work: 'housekeeping',
+          }),
+        );
+        await sleep(1_500);
+        assert.equal((await build().read())['dbOldestQuerySeconds'], 0, 'named otherwise');
+
+        // The core's: an update of a sensor's runtime row, as ingestion's would be.
+        blocked.push(db.query('UPDATE hot SET n = n + 1 WHERE id = 1'));
+        await sleep(1_500);
+        const oldest = (await build().read())['dbOldestQuerySeconds'];
+        assert.ok(oldest !== null && oldest !== undefined && oldest >= 1, `read ${String(oldest)}`);
+      } finally {
+        await holder.query('ROLLBACK');
+        await holder.end();
+        await Promise.all(blocked);
+      }
     });
 
     it('counts what is actually queued in the housekeeping tables', async () => {
@@ -1091,6 +1141,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(channels['backfillParked'], null);
       assert.equal(channels['credentialsToReenter'], null);
       assert.equal(channels['credentialsUnbounded'], null);
+      assert.equal(channels['dbOldestQuerySeconds'], null);
     });
 
     it('still throws for the sweep, which must not write a row of zeros', async () => {

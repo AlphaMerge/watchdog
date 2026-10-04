@@ -214,6 +214,7 @@ describe(
         discardedUnreadableTime: 0,
       }),
       credentialsToReenter: () => Promise.resolve(0),
+      database: () => ({ statements: 0, locks: 0 }),
       delivery: () => Promise.resolve({ pending: 0, failed: 0, oldestPendingAgeMs: 0 }),
     });
 

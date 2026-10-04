@@ -6,6 +6,77 @@ export interface DatabaseOptions {
   logger: Logger;
   /** Overrides the database name — the integration tests point at a scratch database. */
   databaseOverride?: string;
+  /**
+   * What this pool's sessions are called in `pg_stat_activity`: `ms-core`, or `ms-core:<work>`
+   * for a pool built for one kind of work (`withLimits`). Core Health's oldest-statement channel
+   * reads `ms-core` alone, so work given a longer limit on purpose is not what it warns about.
+   */
+  work?: string;
+}
+
+/** The SQLSTATEs `P-229` answers, named once. Callers switch on these, never on the text. */
+export const SQLSTATE = {
+  /** `lock_timeout` fired, or a `NOWAIT` found the lock taken. The same request can succeed. */
+  lockNotAvailable: '55P03',
+  /**
+   * `statement_timeout` fired, or somebody ran `pg_cancel_backend`. Only the server's message
+   * tells the two apart, and it is translated, so the log carries it and nothing parses it.
+   */
+  queryCanceled: '57014',
+  /** `idle_in_transaction_session_timeout` ended the session. The connection is gone. */
+  idleInTransactionTimeout: '25P03',
+} as const;
+
+/**
+ * Limits for one transaction, over the pool's (`P-229`).
+ *
+ * Set with `set_config(..., true)` straight after `BEGIN`, so they end with the transaction and
+ * never reach the next caller of that connection. **Nothing in the core `SET`s or `RESET`s a
+ * pooled session**: a `RESET` that fails hands the pool a connection with no limits at all, and
+ * nothing would say so.
+ */
+export interface TxLimits {
+  /** `statement_timeout` for this transaction, in milliseconds; 0 is no limit. */
+  readonly statementTimeoutMs?: number;
+  /** `lock_timeout` for this transaction, in milliseconds; 0 is no limit. */
+  readonly lockTimeoutMs?: number;
+  /**
+   * Names the transaction `ms-core:<work>` in `pg_stat_activity`. Work that has a longer
+   * statement limit is named, so the oldest-statement channel does not warn about it.
+   */
+  readonly work?: string;
+  /**
+   * The caller catches this transaction's lock timeouts and counts them itself — housekeeping
+   * skipping a chunk it could not lock in two seconds — so they are not `dbLockTimeouts`.
+   */
+  readonly ownLockTimeouts?: boolean;
+  /**
+   * The same for this transaction's cancelled statements: the late-refusal record's write, which
+   * gives way for time as well as for a lock and is counted on Core Health as a write given up
+   * (`A-61`, `A-68`), so the pool's count would be a second channel warning for the same one.
+   */
+  readonly ownStatementTimeouts?: boolean;
+}
+
+/**
+ * A pool of its own, with other limits, for work that cannot live inside one transaction. A limit
+ * left out is the configured one.
+ */
+export interface PoolLimits {
+  readonly statementTimeoutMs?: number;
+  readonly lockTimeoutMs?: number;
+  readonly idleInTransactionTimeoutMs?: number;
+  readonly poolSize: number;
+  /** Its sessions are `ms-core:<work>` in `pg_stat_activity`. */
+  readonly work: string;
+}
+
+/** The pool's statements that PostgreSQL cancelled or that waited too long for a lock. */
+export interface TimeoutCounts {
+  /** 57014 (`statement_timeout`, or a hand's `pg_cancel_backend`), apart from those owned. */
+  readonly statements: number;
+  /** 55P03, apart from the ones a caller said it counts itself. */
+  readonly locks: number;
 }
 
 /** The fields `pg` puts on a driver error. Not exported by `pg`'s types in a usable shape. */
@@ -107,15 +178,30 @@ export class DatabaseError extends AppError {
  *
  * Deliberately thin: this is not a query builder. Repositories own their SQL, and time-series
  * access sits behind its own interface (S-12) so the storage engine stays swappable.
+ *
+ * **Every session carries three limits from the moment it connects** (`P-229`):
+ * `statement_timeout`, `lock_timeout` and `idle_in_transaction_session_timeout`, from
+ * `database.*` in the configuration, passed as startup options so no statement can run before
+ * them. PostgreSQL's default for each is none, and before they were set one lock held outside
+ * the core could take every connection in the pool and keep them.
  */
 export class Database implements Queryable {
   readonly #pool: Pool;
   readonly #logger: Logger;
   readonly #describe: string;
+  readonly #config: DatabaseConfig;
+  readonly #database: string;
+  readonly #application: string;
+  readonly #counted = new WeakSet<object>();
+  #statementTimeouts = 0;
+  #lockTimeouts = 0;
 
   constructor(options: DatabaseOptions) {
     const { config } = options;
     const database = options.databaseOverride ?? config.database;
+    this.#config = config;
+    this.#database = database;
+    this.#application = options.work === undefined ? 'ms-core' : `ms-core:${options.work}`;
     this.#logger = options.logger.child({ component: 'database' });
     this.#describe = `${config.host}:${String(config.port)}/${database}`;
 
@@ -128,7 +214,17 @@ export class Database implements Queryable {
       ssl: config.ssl ? { rejectUnauthorized: true } : false,
       max: config.poolSize,
       connectionTimeoutMillis: config.connectTimeoutMs,
-      application_name: 'ms-core',
+      application_name: this.#application,
+      // Always all three, 0 included: 0 is this configuration's "no limit", and leaving one out
+      // would let a role's or a database's own default decide instead.
+      options:
+        `-c statement_timeout=${String(config.statementTimeoutMs)} ` +
+        `-c lock_timeout=${String(config.lockTimeoutMs)} ` +
+        `-c idle_in_transaction_session_timeout=${String(config.idleInTransactionTimeoutMs)}`,
+      // A statement limit is enforced by the server, so it cannot end a wait on a server that has
+      // gone. Keepalive is what notices a connection to a host that vanished without a reset.
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 30_000,
     };
 
     this.#pool = new Pool(poolConfig);
@@ -153,11 +249,42 @@ export class Database implements Queryable {
     };
   }
 
+  /** Statements cancelled and lock waits given up, since this pool was built (`P-229`). */
+  timeouts(): TimeoutCounts {
+    return { statements: this.#statementTimeouts, locks: this.#lockTimeouts };
+  }
+
+  /**
+   * A pool of its own, with other limits, for work that spans transactions or holds a session
+   * (`P-229`): migrations, which run with none, and report rendering, which may take minutes.
+   *
+   * **A second pool rather than a changed session**, because the only way to give a pooled
+   * session other limits for longer than one transaction is to `SET` them and `RESET` them
+   * afterwards, and a `RESET` that fails returns the session to the pool with the wrong ones.
+   * The caller closes it. Its counts are its own; Core Health reads this pool's.
+   */
+  withLimits(limits: PoolLimits): Database {
+    return new Database({
+      config: {
+        ...this.#config,
+        poolSize: limits.poolSize,
+        statementTimeoutMs: limits.statementTimeoutMs ?? this.#config.statementTimeoutMs,
+        lockTimeoutMs: limits.lockTimeoutMs ?? this.#config.lockTimeoutMs,
+        idleInTransactionTimeoutMs:
+          limits.idleInTransactionTimeoutMs ?? this.#config.idleInTransactionTimeoutMs,
+      },
+      logger: this.#logger,
+      databaseOverride: this.#database,
+      work: limits.work,
+    });
+  }
+
   async query<T extends QueryResultRow>(text: string, values?: readonly unknown[]): Promise<T[]> {
     try {
       const result = await this.#pool.query<T>(text, values as unknown[] | undefined);
       return result.rows;
     } catch (cause) {
+      this.#note(cause, undefined);
       throw new DatabaseError('query failed', {
         context: { statement: firstLine(text), database: this.#describe },
         cause,
@@ -167,33 +294,20 @@ export class Database implements Queryable {
 
   /** Checks out one client for the duration of `fn`, with no implicit transaction. */
   async withClient<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
-    const client = await this.#connect();
+    const { client, release } = await this.#checkout();
     try {
       return await fn(client);
+    } catch (error) {
+      this.#note(error, undefined);
+      throw error;
     } finally {
-      client.release();
+      release();
     }
   }
 
   /** Runs `fn` inside a transaction, rolling back on any throw. */
   async transaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
-    const client = await this.#connect();
-    try {
-      await client.query('BEGIN');
-      const result = await fn(client);
-      await client.query('COMMIT');
-      return result;
-    } catch (error) {
-      try {
-        await client.query('ROLLBACK');
-      } catch (rollbackError) {
-        // The original error is the interesting one; note the rollback failure and move on.
-        this.#logger.error({ err: describeError(rollbackError) }, 'rollback failed');
-      }
-      throw error;
-    } finally {
-      client.release();
-    }
+    return this.#transaction(fn, undefined);
   }
 
   /**
@@ -202,13 +316,22 @@ export class Database implements Queryable {
    * Prefer this over `transaction()`: everything reached through the executor keeps the
    * `DatabaseError` wrapping that callers switch on, and repositories stay unaware of whether
    * they are inside a transaction.
+   *
+   * `limits` apply to this transaction alone (`P-229`).
    */
-  async tx<T>(fn: (q: Queryable) => Promise<T>): Promise<T> {
+  async tx<T>(fn: (q: Queryable) => Promise<T>, limits?: TxLimits): Promise<T> {
     const committed: (() => void)[] = [];
-    const result = await this.transaction(async (client) => {
-      const q = new ClientQueryable(client, this.#describe, (hook) => committed.push(hook));
+    const result = await this.#transaction(async (client) => {
+      const q = new ClientQueryable(
+        client,
+        this.#describe,
+        (hook) => committed.push(hook),
+        (cause) => {
+          this.#note(cause, limits);
+        },
+      );
       return fn(q);
-    });
+    }, limits);
     // After the COMMIT returned, so nothing here can be undone by a rollback. Each hook is
     // isolated: one that throws must not stop the next, and must not turn a committed
     // transaction into a failed call — the work is already durable.
@@ -238,15 +361,106 @@ export class Database implements Queryable {
     await this.#pool.end();
   }
 
-  async #connect(): Promise<PoolClient> {
+  async #transaction<T>(
+    fn: (client: PoolClient) => Promise<T>,
+    limits: TxLimits | undefined,
+  ): Promise<T> {
+    const { client, release } = await this.#checkout();
+    let broken: unknown;
     try {
-      return await this.#pool.connect();
+      await client.query('BEGIN');
+      if (limits !== undefined) await this.#limit(client, limits);
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      this.#note(error, limits);
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        // The original error is the interesting one; note the rollback failure and move on.
+        this.#logger.error({ err: describeError(rollbackError) }, 'rollback failed');
+        // A session whose rollback failed is in a state nobody knows, so it is not reused.
+        broken = rollbackError;
+      }
+      throw error;
+    } finally {
+      release(broken);
+    }
+  }
+
+  /** One statement, straight after `BEGIN`, so the limits cover everything `fn` sends. */
+  async #limit(client: PoolClient, limits: TxLimits): Promise<void> {
+    const settings: [string, string][] = [];
+    if (limits.statementTimeoutMs !== undefined) {
+      settings.push(['statement_timeout', String(limits.statementTimeoutMs)]);
+    }
+    if (limits.lockTimeoutMs !== undefined) {
+      settings.push(['lock_timeout', String(limits.lockTimeoutMs)]);
+    }
+    if (limits.work !== undefined) {
+      settings.push(['application_name', `${this.#application}:${limits.work}`]);
+    }
+    if (settings.length === 0) return;
+    const values = settings.flat();
+    const calls = settings.map(
+      (_, index) => `set_config($${String(index * 2 + 1)}, $${String(index * 2 + 2)}, true)`,
+    );
+    await client.query(`SELECT ${calls.join(', ')}`, values);
+  }
+
+  /**
+   * Counts a cancelled statement or a lock not granted, once however many layers it passes
+   * through: the same failure reaches here from the statement and again from its transaction.
+   */
+  #note(error: unknown, limits: TxLimits | undefined): void {
+    const found = postgresErrorIn(error);
+    if (found === undefined || this.#counted.has(found.error)) return;
+    this.#counted.add(found.error);
+    if (found.sqlstate === SQLSTATE.queryCanceled && limits?.ownStatementTimeouts !== true) {
+      this.#statementTimeouts += 1;
+    } else if (found.sqlstate === SQLSTATE.lockNotAvailable && limits?.ownLockTimeouts !== true) {
+      this.#lockTimeouts += 1;
+    }
+  }
+
+  /**
+   * A client from the pool, listened to until it is returned (`P-229`).
+   *
+   * pg-pool listens for a client's `error` only while the client is idle in the pool. A session
+   * PostgreSQL ends while the client is checked out (`idle_in_transaction_session_timeout`, an
+   * administrator's `pg_terminate_backend`, a server restart) emits `error` with nobody
+   * listening, which Node makes an uncaught exception, and the core exits. So every client
+   * handed out here has a listener while it is out, and one that failed goes back with its
+   * error, which makes the pool discard it rather than hand it to the next caller.
+   */
+  async #checkout(): Promise<{ client: PoolClient; release: (failure?: unknown) => void }> {
+    let client: PoolClient;
+    try {
+      client = await this.#pool.connect();
     } catch (cause) {
       throw new DatabaseError('cannot connect to the database', {
         context: { database: this.#describe },
         cause,
       });
     }
+    let lost: Error | undefined;
+    const onError = (error: Error): void => {
+      lost = error;
+      this.#logger.warn(
+        { err: describeError(error) },
+        'a database session in use ended; it will be discarded, not reused',
+      );
+    };
+    client.on('error', onError);
+    return {
+      client,
+      release: (failure?: unknown) => {
+        client.off('error', onError);
+        const discard = lost ?? failure;
+        client.release(discard === undefined ? undefined : errorOf(discard));
+      },
+    };
   }
 }
 
@@ -255,11 +469,19 @@ export class ClientQueryable implements Queryable {
   readonly #client: PoolClient;
   readonly #description: string;
   readonly #onCommit: ((fn: () => void) => void) | undefined;
+  readonly #onFailure: ((cause: unknown) => void) | undefined;
 
-  constructor(client: PoolClient, description: string, onCommit?: (fn: () => void) => void) {
+  constructor(
+    client: PoolClient,
+    description: string,
+    onCommit?: (fn: () => void) => void,
+    /** Told of every failed statement before it is wrapped, so the pool can count timeouts. */
+    onFailure?: (cause: unknown) => void,
+  ) {
     this.#client = client;
     this.#description = description;
     this.#onCommit = onCommit;
+    this.#onFailure = onFailure;
   }
 
   afterCommit(fn: () => void): void {
@@ -273,12 +495,34 @@ export class ClientQueryable implements Queryable {
       const result = await this.#client.query<T>(text, values as unknown[] | undefined);
       return result.rows;
     } catch (cause) {
+      this.#onFailure?.(cause);
       throw new DatabaseError('query failed', {
         context: { statement: firstLine(text), database: this.#description },
         cause,
       });
     }
   }
+}
+
+/**
+ * The PostgreSQL error inside `error`, and its SQLSTATE: the error itself, or one it was caused
+ * by, however many layers wrap it (a `DatabaseError`, then an `ObjectError` that names it).
+ */
+export function postgresErrorIn(error: unknown): { error: object; sqlstate: string } | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (typeof current !== 'object' || current === null) return undefined;
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) {
+      return { error: current, sqlstate: code };
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return undefined;
+}
+
+function errorOf(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
 }
 
 function firstLine(text: string): string {

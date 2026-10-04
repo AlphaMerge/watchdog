@@ -204,6 +204,15 @@ const MIGRATION_PROGRESS_MS = 15_000;
  */
 const MIGRATION_EXTEND_MS = 3 * MIGRATION_PROGRESS_MS;
 
+/** A migration's pool: two sessions, as the migrator needs, and none of the limits (`P-229`). */
+const MIGRATION_LIMITS = {
+  statementTimeoutMs: 0,
+  lockTimeoutMs: 0,
+  idleInTransactionTimeoutMs: 0,
+  poolSize: 2,
+  work: 'migrate',
+} as const;
+
 /**
  * Brings the schema up to date at start-up when `database.autoMigrate` is set.
  *
@@ -305,7 +314,15 @@ async function serve(): Promise<void> {
   );
 
   if (config.database.autoMigrate) {
-    await migrateOnStart(db, logger, lifecycle);
+    // **Its own pool, with no limits** (`P-229`). A migration may rewrite a table for as long
+    // as that takes, and the migrator holds a session lock across transactions, so neither the
+    // pool's 60 s statement limit nor a lock limit it cannot set per transaction may apply.
+    const migrations = db.withLimits(MIGRATION_LIMITS);
+    try {
+      await migrateOnStart(migrations, logger, lifecycle);
+    } finally {
+      await migrations.close();
+    }
   } else {
     // Refusing to start is the safe failure: the alternative is running against a schema this
     // build was not written for. `refuseSchema` knows all three ways that happens (`H-03`).
@@ -1398,6 +1415,7 @@ async function serve(): Promise<void> {
       unboundedCredentials: (q) => vault.unboundedSets(q),
       credentialsWithheld: () => credentialVouching.stats().withheld,
       lateRefusalWritesGivenUp: () => credentialVouching.stats().recordWritesGivenUp,
+      database: () => db.timeouts(),
       alarms: () => alarmScheduler.stats,
       disk: () => housekeeper.stats.disk,
       evictedChunks: () => housekeeper.stats.evictedChunks,
