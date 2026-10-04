@@ -51,6 +51,11 @@ declare module 'ssh2' {
   export interface ServerConnection extends EventEmitter {
     on(event: 'authentication', listener: (context: AuthContext) => void): this;
     on(event: 'ready' | 'close' | 'end', listener: () => void): this;
+    /** The socket's errors, re-emitted with `level: 'socket'`, and the protocol's own. */
+    on(
+      event: 'error',
+      listener: (error: Error & { readonly code?: string; readonly level?: string }) => void,
+    ): this;
     on(event: 'session', listener: (accept: () => Session, reject: () => void) => void): this;
     on(event: string, listener: (...args: never[]) => void): this;
     end(): void;

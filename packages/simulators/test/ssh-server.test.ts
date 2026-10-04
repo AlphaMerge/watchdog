@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { connect, type Socket } from 'node:net';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { MuteSshServer } from '../src/ssh-server.js';
+import { MuteSshServer, TestSshServer } from '../src/ssh-server.js';
 
 /**
  * The SSH simulator's silent mode (`A-73`).
@@ -134,5 +134,72 @@ describe('the SSH simulator that accepts and never speaks', () => {
     assert.equal(refused, 'ECONNREFUSED');
     // Stopped twice is the afterEach's business, and must not hang or throw.
     mute = await MuteSshServer.start();
+  });
+});
+
+describe('the SSH simulator, stopped after its client has gone (P-257)', () => {
+  /**
+   * What `ssh-shared-open`'s `after` hook did one run in five: a probe worker holding an SSH
+   * session is terminated, and the simulator is stopped at once. Stopping ends each connection,
+   * which writes a DISCONNECT to a client that is no longer there. Made certain here rather than
+   * left to timing: the client resets the connection, and the event loop is held until the reset
+   * has landed and before the simulator has read it, so `stop()` is the first to touch the dead
+   * socket, which is the window the worker's termination left open.
+   */
+  it('hears the failed write on the connection rather than throwing it in the test process', async () => {
+    const server = await TestSshServer.start();
+    let stopped = false;
+    try {
+      const socket = connect(server.port, server.host);
+      socket.on('error', () => undefined);
+      const heard: Buffer[] = [];
+      const pastHeader = within(
+        new Promise<void>((resolve) => {
+          socket.on('data', (chunk: Buffer) => {
+            heard.push(chunk);
+            // The server sends its KEXINIT after its identification line only once it has read
+            // ours, and that is when `ssh2` stops silencing the connection's errors itself.
+            const all = Buffer.concat(heard);
+            const lineEnd = all.indexOf('\r\n');
+            if (lineEnd >= 0 && all.length > lineEnd + 2) resolve();
+          });
+        }),
+        2_000,
+        'the server reading the client identification',
+      );
+      socket.write('SSH-2.0-p257\r\n');
+      await pastHeader;
+      assert.equal(server.connections, 1);
+
+      socket.resetAndDestroy();
+      const until = Date.now() + 50;
+      while (Date.now() < until) {
+        // Held on purpose: the reset lands, and nothing here has read it yet.
+      }
+      stopped = true;
+      await within(server.stop(), 2_000, 'stopping after the client reset');
+      await sleep(50);
+
+      // That the write failed is what proves the window was hit; a run that missed it would be
+      // green for the wrong reason.
+      const codes = server.connectionErrors.map((error) => error.code);
+      assert.ok(
+        codes.some((code) => code === 'ECONNRESET' || code === 'EPIPE'),
+        `the connection recorded no failed write: ${JSON.stringify(server.connectionErrors)}`,
+      );
+    } finally {
+      if (!stopped) await within(server.stop(), 2_000, 'stopping');
+    }
+  });
+
+  it('reset() forgets what the connections reported', async () => {
+    const server = await TestSshServer.start();
+    try {
+      server.connectionErrors.push({ code: 'EPIPE', message: 'write EPIPE' });
+      server.reset();
+      assert.deepEqual(server.connectionErrors, []);
+    } finally {
+      await within(server.stop(), 2_000, 'stopping');
+    }
   });
 });

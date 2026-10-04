@@ -83,6 +83,11 @@ export class TestSshServer {
   readonly seen: string[] = [];
   /** Connections accepted. What proves the pool reused one rather than opening another. */
   connections = 0;
+  /**
+   * What the connections reported going wrong, in order (`P-257`). A client that vanishes is
+   * an ordinary event for a server, and this is where it lands instead of in the test process.
+   */
+  readonly connectionErrors: { readonly code: string | undefined; readonly message: string }[] = [];
 
   private constructor(server: Server) {
     this.#server = server;
@@ -98,6 +103,17 @@ export class TestSshServer {
       instance.#connections.add(connection);
       connection.on('close', () => {
         instance.#connections.delete(connection);
+      });
+      // **Heard, because nothing else would hear it** (`P-257`). `ssh2` re-emits every error on
+      // the socket as an 'error' on the connection, and an 'error' nobody listens for is thrown
+      // — here, in the test process, where `node:test` fails whichever test or hook started the
+      // write. `stop()` ending a connection writes a DISCONNECT, and a client that has already
+      // gone — a probe worker terminated with its session open, as `ssh-shared-open` does — sent
+      // a reset that makes that write fail with ECONNRESET or EPIPE. The same path carries a
+      // reset that arrives mid-command, and the keepalive timeout `ssh2` raises on a client that
+      // stops answering. Recorded, so a test can still see it.
+      connection.on('error', (error) => {
+        instance.connectionErrors.push({ code: error.code, message: error.message });
       });
 
       connection.on('authentication', (context) => {
@@ -192,6 +208,7 @@ export class TestSshServer {
     this.#behaviour = { password: 'monitor' };
     this.seen.length = 0;
     this.connections = 0;
+    this.connectionErrors.length = 0;
     this.#fallback = { stderr: 'command not found\n', code: 127 };
   }
 

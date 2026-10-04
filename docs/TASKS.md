@@ -7674,7 +7674,7 @@ because each is a decision rather than a defect:
 
       A probe-wide count returning to 5 is not the criterion.
 
-- [ ] **P-257 — `ssh-shared-open.test.ts` fails about one run in five on its own** · S · A-65 ·
+- [x] **P-257 — `ssh-shared-open.test.ts` fails about one run in five on its own** · S · A-65 ·
       Found 2026-10-04 in the suite for `H-30`/`H-31`. Both its tests pass, then its `after` hook
       stops the pools and the SSH simulator, and a write still in flight on a worker's SSH
       connection raises `write EPIPE` after the test has ended. `node:test` turns that into a
@@ -7684,6 +7684,28 @@ because each is a decision rather than a defect:
       it makes every full suite read red until it is fixed. **Done when** the hook waits for every
       worker's SSH sessions to close before stopping the server (or the simulator closes its
       sockets so a late write is not an error), and twenty isolated runs pass.
+
+      **P-257 outcome.** The error was the simulator's, in the test process, and not the
+      probe's. `TestSshServer` never listened for `'error'` on its connections; `ssh2` re-emits
+      every socket error there (`lib/server.js:1230`), and an unheard one is thrown. `stop()`
+      ends each connection by writing a DISCONNECT, and a client already gone (here the
+      terminated worker) makes that write fail. `node:test` blames the hook that started the
+      write, which is how it read as the `after` hook. A worker can't raise `uncaughtException`
+      in the test process, and the probe's `SshSession` listens for `'error'` from the start of
+      `open` onward. Reproduced on purpose: the client resets and the loop is held until the
+      reset lands, then `stop()`. A trace shows `TestSshServer.stop` → `Client.end` →
+      `Protocol.disconnect` → `socket.write`, re-emitted at `server.js:1232` with nothing
+      listening. It failed with ECONNRESET there; the ticket's EPIPE is the same write, but
+      where the client's FIN reached the server before the reset (not seen here). The simulator
+      now records connection errors in `connectionErrors` (cleared by `reset()`), and
+      `packages/simulators/test/ssh-server.test.ts` holds that case. With the listener removed
+      it fails with `Error: write ECONNRESET`; with it, 5/5. `ssh-shared-open` passed 20/20
+      isolated and 10/10 while the probe suite ran. The flake itself never showed here: before
+      the fix it passed 45/45 isolated and 45/45 under load, so the deterministic test is the
+      evidence. The other `TestSshServer` users (`ssh-session`, `ssh-sensors`,
+      `target-policy-transports`, `pinned-transports`, `target-policy-exception`) close the
+      client and stop the simulator at once in the same way. The simulator fix covers them, and
+      none needed a change.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
