@@ -591,6 +591,11 @@ export interface MoveResult {
   } | null;
   readonly settingsChanged: readonly SettingChange[];
   readonly credentialsChanged: readonly CredentialChange[];
+  /**
+   * How many devices the move cleared an exception to the target policy on (`A-64`): those it
+   * took to another probe, which only an administrator's move may do. Zero for every other move.
+   */
+  readonly exceptionsCleared: number;
 }
 
 /** An `ObjectRef` in an answer about another object, with no name when its reader cannot see it. */

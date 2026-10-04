@@ -1527,6 +1527,40 @@ export class ObjectRepository {
   }
 
   /**
+   * Holds one object's row until the transaction ends, so that what is read of it next is the
+   * last committed state and no other writer changes it in between (`A-64`). A write that compares
+   * a precondition and records a `before` takes this first; without it two writers on one version
+   * both pass, and the second's `before` is a state it never replaced.
+   */
+  async lockForUpdate(q: Queryable, id: ObjectId): Promise<void> {
+    await q.query('SELECT 1 FROM object WHERE id = $1 FOR UPDATE', [id]);
+  }
+
+  /**
+   * The devices at or under an object that carry an exception to the target policy (`A-64`), in
+   * id order: what a move to another probe would carry there.
+   */
+  async exceptedDevicesIn(q: Queryable, id: ObjectId): Promise<ObjectId[]> {
+    const rows = await q.query<{ id: string }>(
+      `
+      WITH RECURSIVE subtree AS (
+        SELECT id, 0 AS depth FROM object WHERE id = $1
+        UNION ALL
+        SELECT c.id, subtree.depth + 1 FROM object c JOIN subtree ON c.parent_id = subtree.id
+        WHERE subtree.depth < ${String(MAX_WALK_DEPTH)}
+      )
+      SELECT dc.object_id::text AS id
+      FROM subtree s
+      JOIN device_config dc ON dc.object_id = s.id
+      WHERE cardinality(dc.target_policy_exception) > 0
+      ORDER BY dc.object_id
+      `,
+      [id],
+    );
+    return rows.map((row) => Number(row.id));
+  }
+
+  /**
    * The version predicate *is* the lock — no `SELECT … FOR UPDATE` on this path. Zero rows
    * updated plus an existence re-check inside the same transaction tells 404 from 412.
    */

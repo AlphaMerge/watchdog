@@ -46,7 +46,11 @@ export const MAX_BULK = 500;
 export type BulkOperation =
   | { kind: 'pause'; request: PauseRequest; message: string }
   | { kind: 'resume' }
-  | { kind: 'move'; targetParentId: ObjectId }
+  /**
+   * `grants` as for a clone: whether an exception to the target policy may cross to another probe
+   * (`A-64`). Absent, it may not.
+   */
+  | { kind: 'move'; targetParentId: ObjectId; grants?: CarriedGrants }
   | {
       kind: 'clone';
       targetParentId: ObjectId;
@@ -172,8 +176,9 @@ export class BulkService {
           objectId: id,
           ok: false,
           problem: reasonFor(error, id, alreadyGone),
-          // Any refusal's own code: a master the caller cannot read is `AUTH_FORBIDDEN` (`A-77`),
-          // and `INTERNAL_ERROR` beside it would send them looking for a fault.
+          // Any refusal's own code: a master the caller cannot read (`A-77`), or a move that would
+          // take an excepted device to another probe (`A-64`), is `AUTH_FORBIDDEN`, and
+          // `INTERNAL_ERROR` beside it would send them looking for a fault.
           code: error instanceof AppError ? error.code : 'INTERNAL_ERROR',
         });
         if (error instanceof ObjectError && error.code === 'OBJECT_TREE_BUSY') {
@@ -219,7 +224,13 @@ export class BulkService {
         await this.#objects.resume(actor, id, visibility);
         return {};
       case 'move':
-        await this.#objects.move(writer, id, operation.targetParentId, { kind: 'none' });
+        await this.#objects.move(
+          writer,
+          id,
+          operation.targetParentId,
+          { kind: 'none' },
+          operation.grants,
+        );
         return {};
       case 'clone': {
         const result = await this.#objects.clone(

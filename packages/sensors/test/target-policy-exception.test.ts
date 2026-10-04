@@ -257,6 +257,40 @@ describe('the exception everywhere else the policy is judged', () => {
     assert.equal(dns.calls.length, 0);
   });
 
+  it('never lets through a zoned address: another link’s fe80::5 is another machine', async () => {
+    const exception = ['fe80::5'];
+    assert.equal(await checkedTarget(check(answering(), { host: 'fe80::5', exception })), null);
+    for (const host of ['fe80::5%eth1', 'fe80::5%2']) {
+      const error = await checkedTarget(check(answering(), { host, exception })).then(
+        () => assert.fail(`${host} was let through`),
+        (thrown: unknown) => thrown,
+      );
+      assert.ok(error instanceof TargetRefusedError, String(error));
+      assert.equal(error.address, host);
+    }
+    // Nor as an answer a name was given, nor as the address the probe pinned and re-checks
+    // before it connects, nor where a Windows sensor names one.
+    await assert.rejects(
+      checkedTarget(check(answering('fe80::5%eth1'), { exception })),
+      TargetRefusedError,
+    );
+    await assert.rejects(
+      checkedTarget(
+        check(answering(), { pinned: { address: 'fe80::5%eth1', family: 6 }, exception }),
+      ),
+      TargetRefusedError,
+    );
+    assert.deepEqual(
+      await checkedTarget(
+        check(answering(), { pinned: { address: 'fe80::5', family: 6 }, exception }),
+      ),
+      { addresses: [{ address: 'fe80::5', family: 6 }], byGuard: false },
+    );
+    assert.throws(() => {
+      refuseBlockedAddress('fe80::5%eth1', 'link-local', 'connect to', exception);
+    }, TargetRefusedError);
+  });
+
   it('refuseBlockedAddress lets through the address named and no other', () => {
     refuseBlockedAddress('169.254.10.5', 'link-local', 'connect to', ['169.254.10.5']);
     refuseBlockedAddress('10.0.0.5', 'private', 'connect to', ['10.0.0.5']);

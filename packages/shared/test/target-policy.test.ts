@@ -218,7 +218,12 @@ describe('a device’s exception', () => {
       ['::ffff:a9fe:a05', true],
       ['fe80::1', true],
       ['FE80:0:0:0:0:0:0:1', true],
-      ['fe80::1%eth0', true],
+      // A zone names a link, and another link's fe80::1 is another machine: never excepted,
+      // since an entry cannot say which link it meant.
+      ['fe80::1%eth0', false],
+      ['fe80::1%eth1', false],
+      ['fe80::1%2', false],
+      ['169.254.10.5%eth0', false],
       ['169.254.10.6', false],
       ['169.254.10.50', false],
       ['fe80::2', false],

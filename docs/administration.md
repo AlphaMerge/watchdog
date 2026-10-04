@@ -900,6 +900,14 @@ site, without turning the policy off for every other sensor on the probe.
   on it. A clone, a template and discovery start a device without one. Changing the device's
   host does not clear it, and does not need to: the list names addresses, so a host changed to
   a name the list does not cover is refused as before.
+- **It does not travel to another probe.** The addresses are on one probe's network; under
+  another probe they may be other machines. A move that changes the nearest probe of a device
+  with an exception, or of any device in the moved subtree, is refused with 403 to anybody but
+  an administrator (the grant routes' bar again), saying so: an administrator must move it, or
+  clear the exception first. An administrator's move clears the exception on every such device,
+  each audited as an update of `targetPolicyException` in the same transaction, after the move's
+  own entry, and the answer's `exceptionsCleared` says how many. A bulk move does the same per
+  device, and a refused one is reported as `AUTH_FORBIDDEN`. A move under the same probe keeps it.
 - **Addresses, one at a time, at most 16.** Not a name, which whoever runs its DNS could point
   anywhere; not a range, which exempts more than the device; not an address with a zone. Not
   multicast, broadcast or the unspecified address. **Never a cloud instance-metadata
@@ -911,7 +919,10 @@ site, without turning the policy off for every other sensor on the probe.
   allowed when the address is listed. A device given as a name is resolved once, as always, and
   connects only when *every* address the name answers with is allowed by the policy or listed:
   one answer outside the list refuses the whole name, so a name somebody repoints elsewhere is
-  refused. An IPv4-mapped spelling is the IPv4 address. A refusal on a device with an exception
+  refused. An IPv4-mapped spelling is the IPv4 address. **An address with a zone is never
+  excepted**, as a host, an answer or a pinned address: `fe80::5%eth1` is whatever answers at
+  `fe80::5` on that link, another link's `fe80::5` is another machine, and a list entry cannot
+  say which link it meant, so the match fails closed. A refusal on a device with an exception
   says so: `… this device’s exception (169.254.10.5) does not cover 169.254.10.6`.
 - **Wherever the policy is judged for the device's sensors**: every transport in the table
   above, a pinned address included, the Windows sensors' address, and a PostgreSQL socket path,
@@ -919,7 +930,10 @@ site, without turning the policy off for every other sensor on the probe.
   SQL Server redirects the login to is judged with the device's list too: it is an address the
   device's sensor would connect to. Not discovery, which has no device yet, and not webhooks.
 - **Every change is audited**, as an update of the device with the field's before and after, in
-  the device's history like any other edit of it. The same write pushes the probe its new
+  the device's history like any other edit of it. The write holds the device while it compares
+  `If-Match` and takes the before, so of two administrators on one version the second is
+  answered 412, and without `If-Match` the before is the list the write actually replaced. The
+  same write pushes the probe its new
   configuration. A kept SSH connection opened under an exception is not reused once the
   exception is changed or withdrawn; the next check opens a new one and is judged again.
 - **It reaches a probe at protocol 28 or later.** An older probe is sent the device's sensors

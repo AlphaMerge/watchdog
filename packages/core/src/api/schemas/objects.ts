@@ -698,6 +698,7 @@ export const moveResultSchema = {
     'probeChanged',
     'settingsChanged',
     'credentialsChanged',
+    'exceptionsCleared',
   ],
   properties: {
     object: { $ref: 'ms:objectDetail' },
@@ -734,6 +735,13 @@ export const moveResultSchema = {
           after: { enum: ['own', 'inherited', 'none'] },
         },
       },
+    },
+    exceptionsCleared: {
+      type: 'integer',
+      minimum: 0,
+      description:
+        'Devices whose exception to the target policy the move cleared because it took them to ' +
+        'another probe (`A-64`). Only an administrator’s move does; anybody else’s is refused.',
     },
   },
 } as const;

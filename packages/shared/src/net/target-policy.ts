@@ -188,7 +188,8 @@ const METADATA_SERVICES: readonly string[] = ['169.254.169.254', '169.254.170.2'
  * An address as it is compared: an IPv4 address as its four numbers, an IPv6 address as its eight
  * groups with any zone dropped, and an IPv4-mapped address as the IPv4 address it carries. Null
  * for anything that is not an address. So `::ffff:a9fe:a9fe`, `::ffff:169.254.169.254` and
- * `169.254.169.254` are one address, and `fe80::1%eth0` is `fe80::1`.
+ * `169.254.169.254` are one address, and `fe80::1%eth0` is `fe80::1`: which is right for asking
+ * whether it is a metadata service, and why `excepts` refuses a zoned address before it asks.
  */
 function addressKey(given: string): string | null {
   const plain = unmapped(given.trim());
@@ -242,6 +243,10 @@ export function exceptionProblem(entry: string): string | null {
  */
 export function excepts(exception: readonly string[] | undefined, address: string): boolean {
   if (exception === undefined || exception.length === 0) return false;
+  // **A zoned address is never excepted** (review of `A-64`). `fe80::1%eth1` is whatever answers
+  // at `fe80::1` on that link, and another link has its own `fe80::1`: a different machine. An
+  // entry cannot carry a zone, so it cannot say which link it meant, and the match fails closed.
+  if (address.includes('%')) return false;
   const key = addressKey(address);
   if (key === null) return false;
   return exception.some((entry) => exceptionProblem(entry) === null && addressKey(entry) === key);

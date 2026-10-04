@@ -19879,6 +19879,22 @@ because each is a decision rather than a defect:
         they now flap between the core's own and one below 27.
       - Mutation: 14/14, one first survived (an unchanged-list check that ignored the
         addresses) and a test was added for it.
+      - **Review (one medium, two low), closed.** *A move to another probe*: a move that changes
+        the nearest probe of any device in the moved subtree carrying an exception is refused
+        403 to a caller who may not grant (`grantsCarriedBy`, the clone's bar), naming why; an
+        administrator's move clears each one, audited `object.updated` after the `object.moved`
+        in the same transaction, and `MoveResult.exceptionsCleared` counts them. Bulk move
+        passes the caller's grants per id and reports `AUTH_FORBIDDEN`. Same-probe moves keep
+        it. *Zones*: `excepts()` is false for any address with a zone, so `fe80::5%eth1` is never
+        excepted as a host, an answer or a pinned address. *If-Match*: the write takes
+        `SELECT … FOR UPDATE` on the object before comparing and reading `before`; two
+        administrators on one version, the second is 412, and the audit's `before` is the row
+        replaced. Tests: core 18 (+5: race with a held writer, refused/subtree/bulk, admin
+        clears and audits, subtree clears only the excepted, same-probe keeps), sensors +1
+        (zoned host, answer, pinned, Windows), shared table (zoned now false). Mutation: 10/10
+        (the subtree mutant first passed the non-admin group test for another reason, a 403 on
+        the target probe; the test now moves to a group the account may write and checks the
+        message).
       - **Not done**: no web control (API only; the device page does not show it either).
         Alibaba's metadata address `100.100.100.200` is outside link-local and not refused
         by `link-local` at all; not looked at further here.

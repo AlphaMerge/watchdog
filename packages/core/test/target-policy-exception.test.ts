@@ -458,6 +458,188 @@ describe(
       });
     });
 
+    describe('two administrators at once', () => {
+      it('the second is answered 412 on the version the first replaced, and nothing is put back', async () => {
+        await put(deviceId, ['169.254.10.5', 'fe80::5']);
+        const seen = (await read(deviceId)).version;
+        // Another administrator's write, committed after both requests below have begun: it
+        // holds the device, takes `fe80::5` out, and commits only once they are waiting.
+        let release = (): void => undefined;
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const first = db.tx(async (q) => {
+          await q.query('SELECT 1 FROM object WHERE id = $1 FOR UPDATE', [deviceId]);
+          await q.query(
+            `UPDATE device_config SET target_policy_exception = ARRAY['169.254.10.5']
+             WHERE object_id = $1`,
+            [deviceId],
+          );
+          await held;
+        });
+        const ifMatch = { ...as('admin'), 'if-match': `W/"${String(seen)}"` };
+        const racing = [
+          put(deviceId, ['169.254.10.5', 'fe80::5', '10.0.0.5'], ifMatch),
+          put(deviceId, ['169.254.10.5', 'fe80::5'], ifMatch),
+        ];
+        // Both requests are in their transactions, waiting on the device, before it commits.
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        release();
+        await first;
+        const answers = await Promise.all(racing);
+        assert.deepEqual(
+          answers.map((one) => one.statusCode),
+          [412, 412],
+          answers.map((one) => one.body).join('\n'),
+        );
+        assert.deepEqual(await stored(deviceId), ['169.254.10.5'], 'what the first left');
+
+        // Without If-Match the later write wins, and its `before` is the row it replaced.
+        let releaseAgain = (): void => undefined;
+        const heldAgain = new Promise<void>((resolve) => {
+          releaseAgain = resolve;
+        });
+        const second = db.tx(async (q) => {
+          await q.query('SELECT 1 FROM object WHERE id = $1 FOR UPDATE', [deviceId]);
+          await q.query(
+            `UPDATE device_config SET target_policy_exception = ARRAY['169.254.10.9']
+             WHERE object_id = $1`,
+            [deviceId],
+          );
+          await heldAgain;
+        });
+        const late = put(deviceId, ['169.254.10.5']);
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        releaseAgain();
+        await second;
+        assert.equal((await late).statusCode, 200);
+        const rows = await auditRows(deviceId);
+        assert.deepEqual(rows.at(-1)?.diff, [
+          { field: 'targetPolicyException', before: ['169.254.10.9'], after: ['169.254.10.5'] },
+        ]);
+      });
+    });
+
+    describe('a move to another probe does not take an exception with it', () => {
+      let otherProbe = 0;
+      let otherGroup = 0;
+      let sameProbeGroup = 0;
+      beforeEach(async () => {
+        otherProbe = (
+          await h.service.create(testActor, {
+            kind: 'probe',
+            parentId: h.rootId,
+            name: 'Remote probe',
+          })
+        ).id;
+        otherGroup = (
+          await h.service.create(testActor, { kind: 'group', parentId: otherProbe, name: 'Rack Z' })
+        ).id;
+        sameProbeGroup = (
+          await h.service.create(testActor, { kind: 'group', parentId: probeId, name: 'Rack B' })
+        ).id;
+        // The read-write account may write at both ends of every move here.
+        await access.grant(otherGroup, teamId, 'full', actorNamed('test'));
+        await access.grant(sameProbeGroup, teamId, 'full', actorNamed('test'));
+        await put(deviceId, ['169.254.10.5']);
+      });
+      const move = (id: number, targetParentId: number, role: AccountRole) =>
+        app.inject({
+          method: 'POST',
+          url: `/api/v1/objects/${String(id)}/move`,
+          headers: as(role),
+          payload: { targetParentId },
+        });
+      const parentOf = async (id: number): Promise<number | null> =>
+        (await h.service.get(id)).parentId;
+
+      it('is refused to anybody who may not grant, saying why, and nothing moves', async () => {
+        const refused = await move(deviceId, otherGroup, 'readwrite');
+        assert.equal(refused.statusCode, 403, refused.body);
+        assert.match(
+          refused.json<{ error: { message: string } }>().error.message,
+          /exception to the target policy .*another probe.*an administrator must move it, or clear the exception first/,
+        );
+        assert.equal(await parentOf(deviceId), groupId);
+        assert.deepEqual(await stored(deviceId), ['169.254.10.5']);
+        // The subtree: the group that holds the device, moved somewhere the account may write,
+        // so that the exception is the only reason it is refused.
+        const group = await move(groupId, otherGroup, 'readwrite');
+        assert.equal(group.statusCode, 403, group.body);
+        assert.match(
+          group.json<{ error: { message: string } }>().error.message,
+          /moving "Rack A" takes 1 device\(s\) with an exception to the target policy/,
+        );
+        assert.equal(await parentOf(groupId), probeId);
+        // And in a batch, by the same code.
+        const bulk = await app.inject({
+          method: 'POST',
+          url: '/api/v1/objects/bulk',
+          headers: as('readwrite'),
+          payload: { ids: [deviceId], operation: 'move', targetParentId: otherGroup },
+        });
+        assert.equal(bulk.statusCode, 200, bulk.body);
+        const [outcome] = bulk.json<{ outcomes: { ok: boolean; code?: string }[] }>().outcomes;
+        assert.deepEqual(
+          { ok: outcome?.ok, code: outcome?.code },
+          { ok: false, code: 'AUTH_FORBIDDEN' },
+        );
+        assert.equal(await parentOf(deviceId), groupId);
+      });
+
+      it('an administrator’s move clears it on the device, audited, and says so', async () => {
+        const moved = await move(deviceId, otherGroup, 'admin');
+        assert.equal(moved.statusCode, 200, moved.body);
+        const body = moved.json<{ exceptionsCleared: number; object: DeviceBody }>();
+        assert.equal(body.exceptionsCleared, 1);
+        assert.equal('targetPolicyException' in body.object, false);
+        assert.equal(body.object.version, (await read(deviceId)).version);
+        assert.deepEqual(await stored(deviceId), []);
+        assert.deepEqual((await auditRows(deviceId)).at(-1)?.diff, [
+          { field: 'targetPolicyException', before: ['169.254.10.5'], after: null },
+        ]);
+        const order = await db.query<{ action: string }>(
+          `SELECT action FROM audit_log WHERE object_id = $1 ORDER BY id DESC LIMIT 2`,
+          [deviceId],
+        );
+        assert.deepEqual(
+          order.map((row) => row.action),
+          ['object.updated', 'object.moved'],
+        );
+      });
+
+      it('an administrator’s move of the group clears it on every device beneath, and only those', async () => {
+        const moved = await move(groupId, otherProbe, 'admin');
+        assert.equal(moved.statusCode, 200, moved.body);
+        assert.equal(moved.json<{ exceptionsCleared: number }>().exceptionsCleared, 1);
+        assert.deepEqual(await stored(deviceId), []);
+        assert.deepEqual(await stored(siblingId), []);
+        assert.deepEqual(await auditRows(siblingId), [], 'nothing to clear on the sibling');
+        // A batch move by an administrator clears as the single one does.
+        await put(deviceId, ['169.254.10.5']);
+        const bulk = await app.inject({
+          method: 'POST',
+          url: '/api/v1/objects/bulk',
+          headers: as('admin'),
+          payload: { ids: [deviceId], operation: 'move', targetParentId: sameProbeGroup },
+        });
+        assert.equal(bulk.statusCode, 200, bulk.body);
+        assert.equal(bulk.json<{ outcomes: { ok: boolean }[] }>().outcomes[0]?.ok, true);
+        assert.deepEqual(await stored(deviceId), []);
+      });
+
+      it('a move under the same probe keeps it, for anybody who may move it', async () => {
+        const moved = await move(deviceId, sameProbeGroup, 'readwrite');
+        assert.equal(moved.statusCode, 200, moved.body);
+        assert.equal(moved.json<{ exceptionsCleared: number }>().exceptionsCleared, 0);
+        assert.equal(await parentOf(deviceId), sameProbeGroup);
+        assert.deepEqual(await stored(deviceId), ['169.254.10.5']);
+        // And a device with none crosses probes for anybody, as before.
+        const sibling = await move(siblingId, otherGroup, 'readwrite');
+        assert.equal(sibling.statusCode, 200, sibling.body);
+      });
+    });
+
     describe('it reaches the probe with the assignment', () => {
       const own = (sensors: readonly SensorAssignment[]): SensorAssignment =>
         sensors.find((sensor) => sensor.sensorId === sensorId) ?? assert.fail('not assigned');

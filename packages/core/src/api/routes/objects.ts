@@ -907,6 +907,9 @@ export async function objectRoutes(
         request.params.id,
         request.body.targetParentId,
         optionalIfMatch(request.headers['if-match']),
+        // Whether a device's exception to the target policy may cross to another probe, cleared
+        // (`A-64`): the grant routes' bar, as a clone's grants are.
+        grantsCarriedBy(request),
       );
       await reply
         .header('ETag', etagFor(result.object.version))
@@ -2116,7 +2119,11 @@ function operationFrom(
     case 'resume':
       return { kind: 'resume' };
     case 'move':
-      return { kind: 'move', targetParentId: needs(body.targetParentId, 'targetParentId') };
+      return {
+        kind: 'move',
+        targetParentId: needs(body.targetParentId, 'targetParentId'),
+        grants,
+      };
     case 'clone':
       return {
         kind: 'clone',

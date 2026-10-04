@@ -1892,6 +1892,11 @@ export class ObjectService {
     }
 
     return this.#db.tx(async (q) => {
+      // **Locked before it is read** (review of `A-64`): the precondition is compared, and the
+      // audit's `before` taken, from the row this write replaces. Read without the lock, two
+      // administrators on one version both passed, and the second put back what the first had
+      // taken out with a `before` that was never stored.
+      await this.#repo.lockForUpdate(q, id);
       const before = await this.#repo.get(q, id);
       if (before === null) throw notFound(id);
       if (before.kind !== 'device') {
@@ -2513,6 +2518,12 @@ export class ObjectService {
     id: ObjectId,
     targetParentId: ObjectId,
     pre: Precondition,
+    /**
+     * Whether the mover may grant (`clears(request, 'admin')`), as a clone is told. It decides
+     * what happens to a device's exception to the target policy when the move takes it to
+     * another probe (`A-64`): an administrator's move clears it, anybody else's is refused.
+     */
+    grants: CarriedGrants = 'restrictions',
   ): Promise<MoveResult> {
     const actor = actorOf(writer);
     return this.#db.tx(async (q) => {
@@ -2560,6 +2571,7 @@ export class ObjectService {
           probeChanged: null,
           settingsChanged: [],
           credentialsChanged: [],
+          exceptionsCleared: 0,
         };
       }
 
@@ -2567,6 +2579,27 @@ export class ObjectService {
       const beforeSettings = await bound.resolveAll(id);
       const beforeCredentials = await bound.resolveCredentials(id);
       const fromProbe = await this.#repo.nearestProbe(q, id);
+
+      // **A device's exception to the target policy does not travel to another probe** (`A-64`,
+      // review). It names addresses on one probe's network; under another, the same addresses can
+      // be other machines. Carried there by a move, it would be an exception set by whoever moved
+      // it, which only an administrator may set: so anybody else is refused, and an
+      // administrator's move clears it on every device that crosses, each audited.
+      const landsUnder = await this.#repo.nearestProbe(q, targetParentId);
+      const crossing =
+        (fromProbe?.id ?? null) !== (landsUnder?.id ?? null)
+          ? await this.#repo.exceptedDevicesIn(q, id)
+          : [];
+      if (crossing.length > 0 && grants !== 'all') {
+        throw new AuthError(
+          'AUTH_FORBIDDEN',
+          `moving "${object.name}" takes ${String(crossing.length)} device(s) with an exception ` +
+            `to the target policy (${crossing.join(', ')}) to another probe, where those ` +
+            'addresses may be other machines; an administrator must move it, or clear the ' +
+            'exception first',
+          { objectId: id, phase: 'move', excepted: crossing.length },
+        );
+      }
       const sentFrom = await this.#whereSent(q, object, fromProbe?.id ?? null);
 
       const fromParentId = object.parentId;
@@ -2632,17 +2665,53 @@ export class ObjectService {
       if (sentFrom !== (await this.#whereSent(q, moved, toProbe?.id ?? null))) {
         await this.#clearSecretsSentElsewhere(q, actor, [id]);
       }
+      // After the move's own entry, so the history reads in the order it happened.
+      for (const deviceId of crossing) {
+        await this.#clearTargetPolicyException(q, actor, deviceId);
+      }
+      const answered = crossing.length === 0 ? moved : await this.#repo.get(q, id);
+      if (answered === null) throw notFound(id);
 
       return {
-        object: this.#redact(moved),
+        object: this.#redact(answered),
         fromParentId,
         toParentId: targetParentId,
         movedCount,
         probeChanged: fromProbe?.id === toProbe?.id ? null : { from: fromProbe, to: toProbe },
         settingsChanged: diffSettings(beforeSettings, afterSettings),
         credentialsChanged: diffCredentials(beforeCredentials, afterCredentials),
+        exceptionsCleared: crossing.length,
       };
     });
+  }
+
+  /**
+   * Clears one device's exception to the target policy inside a write that has decided it must
+   * go (`A-64`): an administrator's move to another probe. Audited as the device update it is.
+   */
+  async #clearTargetPolicyException(q: Queryable, actor: Actor, id: ObjectId): Promise<void> {
+    const before = await this.#repo.get(q, id);
+    if (before === null) throw notFound(id);
+    await this.#repo.setTargetPolicyException(q, id, []);
+    const after = await this.#repo.get(q, id);
+    if (after === null) throw notFound(id);
+    const safeBefore = this.#redact(before);
+    const safeAfter = this.#redact(after);
+    await this.#audit.record(
+      q,
+      actor,
+      [
+        {
+          action: 'object.updated',
+          objectId: id,
+          kind: safeAfter.kind,
+          before: safeBefore,
+          after: safeAfter,
+          changedParams: [],
+        },
+      ],
+      new Date(),
+    );
   }
 
   /**

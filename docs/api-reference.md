@@ -1354,7 +1354,7 @@ Moves an object within its parent's children, the way PRTG's move up / move down
 | --- | --- | --- |
 | `targetParentId` | integer | **required** |
 
-**200** { object, fromParentId, toParentId, movedCount, probeChanged, settingsChanged, credentialsChanged }
+**200** { object, fromParentId, toParentId, movedCount, probeChanged, settingsChanged, credentialsChanged, exceptionsCleared }
 
 ### `POST /api/v1/objects/{id}/clone`
 
