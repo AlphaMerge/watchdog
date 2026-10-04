@@ -843,7 +843,10 @@ export const PROTOCOL_FLAP_HOLD_MS = 60 * 60_000;
  * Times are on `CredentialVouching`'s monotonic clock.
  */
 export interface VersionRecord {
-  /** The version the probe's last configuration was built for. */
+  /**
+   * The version the probe advertised when its last configuration was built: what it says it
+   * speaks, and not what it was negotiated down to (`BuildingFor`).
+   */
   readonly version: number;
   /** When that version began, or null when this record has seen no change that still counts. */
   readonly changedAt: number | null;
@@ -916,11 +919,48 @@ export function isFlapping(
   );
 }
 
+/**
+ * The version a configuration negotiated at `peerVersion` is judged at, given the probe's record
+ * (`A-72`): that version, or while the probe flaps, the floor of what it advertised if that is
+ * lower. Never above the negotiated version, which is what the pair can do: a probe advertising
+ * more than this core speaks flaps all the same, and is held at no more than the core's own.
+ */
+export function judgedAt(
+  record: VersionRecord | undefined,
+  peerVersion: number,
+  now: number,
+  holdMs: number,
+): number {
+  return isFlapping(record, now, holdMs) ? Math.min(record.floor, peerVersion) : peerVersion;
+}
+
+/**
+ * Who a configuration is being built for (`A-72`), as the probe endpoint knows it.
+ *
+ * - **What the probe advertised** in its hello, which is what a flap is counted in. The version a
+ *   configuration is judged at is the one the pair negotiated, the lower of this and the core's
+ *   own, and a core upgraded and rolled back changes that for every probe at once. A flap is
+ *   something a probe does, so it is counted in what the probe says, and a core's own version
+ *   moving counts nothing.
+ * - **Whether its session is still the probe's live one.** A build is chained behind its
+ *   session's other work, and a session superseded or closed meanwhile can finish one after its
+ *   successor's: what such a build found is not recorded, since what it would record is a
+ *   connection the probe no longer has. Asked synchronously, right before anything is recorded,
+ *   so a session cannot close between the asking and the recording.
+ */
+export interface BuildingFor {
+  readonly advertisedVersion: number;
+  readonly live: () => boolean;
+}
+
 /** A probe's flap as Probe Health reads it (`A-72`): what it names, and when it is over. */
 export interface ProtocolFlap {
-  /** The version the probe speaks now. */
+  /** The version the probe advertises now. */
   readonly version: number;
-  /** What its configurations are judged at while the flap lasts. */
+  /**
+   * The lowest version it has advertised since the flap began: its configurations are judged at
+   * this, or at the version negotiated with it if that is lower, while the flap lasts.
+   */
   readonly floor: number;
   /** How many times the version has changed since the run began, two or more. */
   readonly changes: number;
@@ -1360,10 +1400,7 @@ export class CredentialVouching {
    * button on a sensor a flap holds says what the sensor says.
    */
   judgedVersion(probeId: number, peerVersion: number): number {
-    const record = this.#versions.get(probeId);
-    return isFlapping(record, this.#now(), this.#flapHoldMs)
-      ? Math.min(record.floor, peerVersion)
-      : peerVersion;
+    return judgedAt(this.#versions.get(probeId), peerVersion, this.#now(), this.#flapHoldMs);
   }
 
   /**
@@ -1486,23 +1523,48 @@ export class CredentialVouching {
    * The whole answer for the probe, so a sensor withheld last time and not sent now — paused,
    * moved to another probe, vouched for again — is let go.
    *
-   * **Judged at the version a flap holds** (`A-72`). The version the probe speaks is noted first;
-   * while it flaps, every decision below that turns on a version is made at the lowest it has
-   * spoken since the flap began, so the sensors it decides stand as they stood and nothing a
-   * version decides moves until it has held for `PROTOCOL_FLAP_HOLD_MS`. Never higher than the
-   * version spoken: a probe is never sent a set it cannot be trusted with.
+   * **Judged at the version a flap holds** (`A-72`). While the version the probe advertises flaps,
+   * every decision below that turns on a version is made at the lowest it has advertised since
+   * the flap began, or at the negotiated version if that is lower, so the sensors it decides stand
+   * as they stood and nothing a version decides moves until it has held for
+   * `PROTOCOL_FLAP_HOLD_MS`. Never higher than the negotiated version: a probe is never sent a set
+   * it cannot be trusted with.
+   *
+   * **Recorded only for the probe's live session** (`building`). What is asked is asked first;
+   * then, if the session is still the probe's, the version is noted and what the probe is left is
+   * recorded, in one synchronous step, and stored; then, if it still is, what is withheld is held.
+   * A build for a session that has gone records nothing, holds nothing and lets nothing go: its
+   * answer goes back to a caller that has nobody to send it to. Without `building` (a caller with
+   * no session, a test) the negotiated version is taken as advertised, and the build as live.
    */
   async withhold(
     probeId: number,
     sensors: readonly SensorBeingSent[],
     peerVersion: number = PROTOCOL_VERSION,
+    building?: BuildingFor,
   ): Promise<Map<number, string>> {
-    const judged = this.#noteVersion(probeId, peerVersion);
+    const advertised = building?.advertisedVersion ?? peerVersion;
+    const live = building?.live ?? ((): boolean => true);
+    // Asked, not noted: what this build is judged at if it is the probe's, which is noted below.
+    const judged = judgedAt(
+      this.#recordAfter(probeId, advertised),
+      peerVersion,
+      this.#now(),
+      this.#flapHoldMs,
+    );
     const left = new Set<number>();
     const refused = await this.#check(probeId, sensors, judged, left);
     // A sensor refused for another of its kinds is not sent at all, and so not the probe's.
     for (const sensorId of refused.keys()) left.delete(sensorId);
     const otherwise = await this.#leftUnderVersionBefore(probeId, sensors, judged, left);
+    if (!live()) {
+      this.#logger.info(
+        { probeId, peerVersion, advertised },
+        'a configuration was built for a probe session that has closed; nothing it found is recorded',
+      );
+      return refused;
+    }
+    this.#noteVersion(probeId, advertised);
     const stopped = this.#noteStopped(probeId, left, otherwise);
     const moved = this.#noteLeft(probeId, left, judged) || stopped;
     // Stored before this configuration is handed to anybody (`A-61`), and only when it changed
@@ -1510,6 +1572,8 @@ export class CredentialVouching {
     // for within a bound, and never behind another probe's write.
     const grace = moved || this.#unsaved.has(probeId);
     if (grace || this.#versionsUnsaved.has(probeId)) await this.#saved(probeId, grace);
+    // Closed while its record was stored: the session that follows it holds its own.
+    if (!live()) return refused;
     const before = this.#withheldByProbe.get(probeId)?.size ?? 0;
     if (refused.size === 0) this.#withheldByProbe.delete(probeId);
     else this.#withheldByProbe.set(probeId, new Map(refused));
@@ -1529,39 +1593,39 @@ export class CredentialVouching {
   }
 
   /**
-   * Notes the version a configuration is being built for, and says what it is judged at
-   * (`A-72`): the version, or the floor of a flap.
-   *
-   * **A change of version is what is recorded, and stored**: the first configuration a probe is
-   * built on this core, and each one under another version than the last. A steady build moves
-   * nothing and writes nothing, as `A-61`'s record does not. What a probe can make the core write
-   * by this is one row, its own, once per reconnect under another version.
-   *
-   * A version that is not a positive whole number is judged as it is and recorded nowhere: every
-   * caller passes a live session's, and the column takes nothing else.
+   * The probe's version record as it would be with `advertised` noted now (`A-72`), and noted
+   * nowhere. A version that is not a positive whole number moves nothing: every caller passes a
+   * hello's, which the protocol has already checked, and the column takes nothing else.
    */
-  #noteVersion(probeId: number, peerVersion: number): number {
-    if (!Number.isSafeInteger(peerVersion) || peerVersion <= 0) return peerVersion;
-    const now = this.#now();
+  #recordAfter(probeId: number, advertised: number): VersionRecord | undefined {
     const record = this.#versions.get(probeId);
-    const next = nextVersionRecord(record, peerVersion, now, this.#flapHoldMs);
-    if (next !== record) {
-      // A record that has only aged is not written: its time says what it is at the next start.
-      if (record === undefined || next.version !== record.version) {
-        this.#versionsUnsaved.add(probeId);
-      }
-      this.#versions.set(probeId, next);
-      if (next.changes === 2 && next.version !== record?.version) {
-        this.#logger.warn(
-          { probeId, version: next.version, floor: next.floor, holdMs: this.#flapHoldMs },
-          'a probe’s protocol version changed twice inside the hold; the sensors its version ' +
-            'decides hold where they stood until it has held one version for the hold',
-        );
-      }
+    if (!Number.isSafeInteger(advertised) || advertised <= 0) return record;
+    return nextVersionRecord(record, advertised, this.#now(), this.#flapHoldMs);
+  }
+
+  /**
+   * Notes the version the probe advertised for a configuration being built for it (`A-72`).
+   *
+   * **A move of the record is what is stored**: the first configuration a probe is built on
+   * this core, each one under another advertised version than the last, and one that finds the
+   * last change a hold old, which ends the run. A steady build moves nothing and writes nothing,
+   * as `A-61`'s record does not. What a probe can make the core write by this is one row, its
+   * own, once per reconnect under another version and once an hour after.
+   */
+  #noteVersion(probeId: number, advertised: number): void {
+    const record = this.#versions.get(probeId);
+    const next = this.#recordAfter(probeId, advertised);
+    if (next === undefined || next === record) return;
+    // An ended run is written too, so a clock set back across a restart cannot bring it back.
+    this.#versionsUnsaved.add(probeId);
+    this.#versions.set(probeId, next);
+    if (next.changes === 2 && next.version !== record?.version) {
+      this.#logger.warn(
+        { probeId, version: next.version, floor: next.floor, holdMs: this.#flapHoldMs },
+        'a probe’s protocol version changed twice inside the hold; the sensors its version ' +
+          'decides hold where they stood until it has held one version for the hold',
+      );
     }
-    return isFlapping(next, now, this.#flapHoldMs)
-      ? Math.min(next.floor, peerVersion)
-      : peerVersion;
   }
 
   /**
@@ -2075,14 +2139,18 @@ export class CredentialVouching {
       }
       if (stopped.size === 0) this.#stoppedLeaving.delete(probeId);
     }
-    // A flap whose version has held for the hold is over (`A-72`). Nothing is written for it: the
-    // stored time says the same at the next start. Whoever builds configurations is told, so
-    // what it held is let go now and not at the probe's next reconnect.
+    // A run whose version has held for the hold is over (`A-72`), and a flap with it. **The ended
+    // run is written**, as a settled row: left as it was, its stored times would bring the flap
+    // back at a start whose wall clock had been set back across the restart, and page each
+    // sensor it held a second time. Whoever builds configurations is told of a flap, so what it
+    // held is let go now and not at the probe's next reconnect.
     const over: number[] = [];
     for (const [probeId, record] of this.#versions) {
-      if (record.floor === null || isFlapping(record, now, this.#flapHoldMs)) continue;
-      this.#versions.set(probeId, settledRecord(record, now, this.#flapHoldMs));
-      over.push(probeId);
+      const settled = settledRecord(record, now, this.#flapHoldMs);
+      if (settled === record) continue;
+      this.#versions.set(probeId, settled);
+      this.#versionsUnsaved.add(probeId);
+      if (record.floor !== null) over.push(probeId);
     }
     if (over.length > 0) {
       this.#logger.info(

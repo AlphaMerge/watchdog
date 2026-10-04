@@ -27,6 +27,7 @@ import {
 } from '../src/transport/probe-endpoint.js';
 import { HostAllowList } from '../src/api/hardening.js';
 import { fingerprint, type ProbeAssignments } from '../src/probes/config.js';
+import { within } from './support/within.js';
 
 const silentLogger = pino({ level: 'silent' });
 
@@ -643,6 +644,88 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
 
       second.close();
     } finally {
+      await endpoint.stop();
+    }
+  });
+
+  it('tells the configuration source what the probe advertised, and whether a build is still for the probe’s session (A-72)', async () => {
+    // A build is chained behind its session's other work, so one for a session superseded
+    // meanwhile can end after its successor's. The source records nothing for a build whose
+    // session is not live, and this is where it learns which that is: here the first session's
+    // build is held until the second's has been asked and answered.
+    const calls: {
+      peerVersion: number | undefined;
+      building: { readonly advertisedVersion: number; readonly live: () => boolean } | undefined;
+    }[] = [];
+    const asked: (() => void)[] = [];
+    const askedTwice = [0, 1].map(
+      (index) =>
+        new Promise<void>((resolve) => {
+          asked[index] = resolve;
+        }),
+    );
+    let releaseFirst: () => void = () => undefined;
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const endpoint = new ProbeEndpoint({
+      config: endpointConfig(dir, { heartbeatIntervalMs: 30_000 }),
+      logger: silentLogger,
+      coreVersion: '9.9.9',
+      probeConfig: {
+        probeObjectFor: () => Promise.resolve(7),
+        assignmentsFor: async (_probeObjectId, peerVersion, building) => {
+          calls.push({ peerVersion, building });
+          asked[calls.length - 1]?.();
+          if (calls.length === 1) await firstHeld;
+          return { version: 'v1', sensors: [], stamps: new Map<number, string>() };
+        },
+        touch: () => Promise.resolve(),
+      },
+    });
+    /** The `index`th build the source was asked for, and who it was told it is for. */
+    const call = (
+      index: number,
+    ): {
+      peerVersion: number | undefined;
+      building: { readonly advertisedVersion: number; readonly live: () => boolean };
+    } => {
+      const one = calls.at(index);
+      if (one?.building === undefined) return assert.fail(`build ${String(index)} said nothing`);
+      return { peerVersion: one.peerVersion, building: one.building };
+    };
+    const address = await endpoint.start();
+    try {
+      // An older probe: negotiated and advertised are the same.
+      const first = await TestProbe.connect(dir, address.port);
+      first.send(hello({ gid: 'probe-a72', protocolVersion: PROTOCOL_VERSION - 1 }));
+      await within(2_000, 'the first session’s build', askedTwice[0] ?? assert.fail());
+      assert.equal(call(0).peerVersion, PROTOCOL_VERSION - 1);
+      assert.equal(call(0).building.advertisedVersion, PROTOCOL_VERSION - 1);
+      assert.equal(call(0).building.live(), true);
+
+      // A newer one under the same identity: negotiated down to the core's, advertised as said.
+      const second = await TestProbe.connect(dir, address.port);
+      second.send(hello({ gid: 'probe-a72', protocolVersion: PROTOCOL_VERSION + 1 }));
+      await within(2_000, 'the second session’s build', askedTwice[1] ?? assert.fail());
+      assert.equal(call(1).peerVersion, PROTOCOL_VERSION);
+      assert.equal(call(1).building.advertisedVersion, PROTOCOL_VERSION + 1);
+      assert.equal(call(1).building.live(), true);
+      assert.equal(call(0).building.live(), false, 'the superseded session’s build is not live');
+
+      releaseFirst();
+      await within(2_000, 'the superseded socket to close', first.waitForClose(1_000));
+      assert.equal(call(0).building.live(), false);
+      assert.equal(call(1).building.live(), true, 'and does not unseat its successor');
+
+      second.close();
+      // The core sees the close a moment later; two seconds at most.
+      for (let tries = 0; tries < 100 && call(1).building.live(); tries += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.equal(call(1).building.live(), false, 'a closed session is not live either');
+    } finally {
+      releaseFirst();
       await endpoint.stop();
     }
   });

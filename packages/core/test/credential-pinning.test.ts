@@ -41,6 +41,7 @@ import {
   nextVersionRecord,
   restoredVersion,
   storedStop,
+  type BuildingFor,
   type SensorBeingSent,
   type VersionRecord,
 } from '../src/objects/credential-vouching.js';
@@ -2455,8 +2456,16 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
       assert.equal(credentials.protocolFlap(7), null);
       assert.deepEqual(await speak(PINNING), new Map(), 'let go at the version it speaks');
       assert.equal(credentials.stats().withheld, 0);
-      // The hold running out is not a write: the stored time says it at the next start.
-      assert.equal(flaps.length, 3);
+      // The run's end is written, settled, so that no start can find it still going.
+      assert.equal(flaps.length, 4);
+      assert.deepEqual(flaps.at(-1), {
+        probe_id: '7',
+        version: PINNING,
+        changed_ms: null,
+        since_ms: null,
+        run_changes: 0,
+        flap_floor: null,
+      });
       // And a change after it is a first change again: as it always was.
       tick(60_000);
       assert.deepEqual(await speak(PINNING - 1), all(CANNOT));
@@ -2529,6 +2538,130 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
       }
       assert.deepEqual(flaps, []);
       assert.equal(credentials.protocolFlap(7), null);
+    });
+
+    describe('counted in what the probe advertises, and never in the core’s own version', () => {
+      /** Who a build is for: what the probe advertised, on a session that is live. */
+      const advertising = (version: number): BuildingFor => ({
+        advertisedVersion: version,
+        live: () => true,
+      });
+      const sensors = [1, 2, 3].map(leftToProbe);
+
+      it('a core rolled back and upgraded again, its probe unchanged, is no flap: each build is judged as its core requires, and nothing more is held', async () => {
+        const { credentials, flaps, tick } = flapping();
+        // The probe advertises one version newer than pinning needs, throughout. The cores it
+        // meets negotiate the lower of that and their own: 24, then 23, then 24 again.
+        const meet = (negotiated: number): Promise<Map<number, string>> =>
+          credentials.withhold(7, sensors, negotiated, advertising(PINNING + 1));
+        assert.deepEqual(await meet(PINNING), new Map());
+        tick(180_000);
+        assert.deepEqual(await meet(PINNING - 1), all(CANNOT), 'as the older core requires');
+        tick(180_000);
+        assert.deepEqual(await meet(PINNING), new Map(), 'let go at once: nothing held');
+        assert.equal(credentials.protocolFlap(7), null);
+        assert.equal(credentials.judgedVersion(7, PINNING), PINNING);
+        assert.deepEqual(
+          flaps.map((row) => [row.version, row.run_changes]),
+          [[PINNING + 1, 0]],
+          'one row, at the first build, and the probe’s version has not moved since',
+        );
+      });
+
+      it('a probe that flaps above the core’s version is counted, and judged at no more than the core speaks', async () => {
+        const { credentials, tick } = flapping();
+        const as = (advertised: number, negotiated: number): Promise<Map<number, string>> =>
+          credentials.withhold(7, sensors, negotiated, advertising(advertised));
+        await as(PINNING + 2, PINNING);
+        tick(60_000);
+        await as(PINNING + 1, PINNING);
+        tick(60_000);
+        assert.deepEqual(await as(PINNING + 2, PINNING), new Map());
+        assert.deepEqual(credentials.protocolFlap(7), {
+          version: PINNING + 2,
+          floor: PINNING + 1,
+          changes: 2,
+          sinceMs: 60_000,
+          remainingMs: HOLD,
+        });
+        // A floor above what the pair negotiates never lifts a build above it.
+        assert.equal(credentials.judgedVersion(7, PINNING - 1), PINNING - 1);
+        assert.deepEqual(await as(PINNING + 2, PINNING - 1), all(CANNOT));
+      });
+    });
+
+    describe('recorded only for the probe’s live session', () => {
+      const sensors = [1, 2, 3].map(leftToProbe);
+      /** Sessions of probe 7, of which `current` is the live one. */
+      function sessions(): {
+        current: { name: string };
+        as: (name: string, advertised: number) => BuildingFor;
+      } {
+        const current = { name: 'S0' };
+        return {
+          current,
+          as: (name, advertised) => ({
+            advertisedVersion: advertised,
+            live: () => current.name === name,
+          }),
+        };
+      }
+
+      it('a build for a superseded session that ends after its successor’s records nothing: no change, no hold, no result dropped', async () => {
+        const { credentials, flaps } = flapping();
+        const { current, as } = sessions();
+        assert.deepEqual(
+          await credentials.withhold(7, sensors, PINNING, as('S0', PINNING)),
+          new Map(),
+        );
+        const writes = flaps.length;
+        // S1 connects at 23 and its build begins. Before it ends, S2 connects at 24 and
+        // supersedes it, and S2's build runs to the end first.
+        current.name = 'S1';
+        const stale = credentials.withhold(7, sensors, PINNING - 1, as('S1', PINNING - 1));
+        current.name = 'S2';
+        assert.deepEqual(
+          await credentials.withhold(7, sensors, PINNING, as('S2', PINNING)),
+          new Map(),
+          'S2 is judged at what it speaks',
+        );
+        // S1's ends: its answer goes back to a caller with nobody to send it to.
+        assert.deepEqual(await stale, all(CANNOT));
+        // And a build of S1's that begins only now is the same.
+        await credentials.withhold(7, sensors, PINNING - 1, as('S1', PINNING - 1));
+
+        assert.equal(credentials.protocolFlap(7), null, 'no change was invented');
+        assert.equal(credentials.judgedVersion(7, PINNING), PINNING);
+        assert.equal(flaps.length, writes, 'nothing stored');
+        assert.equal(credentials.stats().withheld, 0, 'nothing held');
+        // What S2's probe reports of the sensors it was sent is taken.
+        const batch = await credentials.reported(7, [measured(1, T(0))]);
+        assert.equal(batch.withheldDropped, 0);
+        assert.equal(batch.results.length, 1);
+        // S2 at 24 a second time is the version it already is: still nothing.
+        assert.deepEqual(
+          await credentials.withhold(7, sensors, PINNING, as('S2', PINNING)),
+          new Map(),
+        );
+        assert.equal(credentials.protocolFlap(7), null);
+      });
+
+      it('a session that closes while its record is being stored holds nothing', async () => {
+        const { credentials, control } = flapping();
+        const { current, as } = sessions();
+        await credentials.withhold(7, sensors, PINNING, as('S0', PINNING));
+        // S1 at 23 stops leaving the sensors to the probe, which is a write; it is held up.
+        current.name = 'S1';
+        control.stalled = 7;
+        const building = credentials.withhold(7, sensors, PINNING - 1, as('S1', PINNING - 1));
+        await new Promise((done) => setImmediate(done));
+        current.name = 'S2';
+        control.release();
+        assert.deepEqual(await building, all(CANNOT));
+        assert.equal(credentials.stats().withheld, 0, 'its answer is held by nobody');
+        const batch = await credentials.reported(7, [measured(1, T(0))]);
+        assert.equal(batch.withheldDropped, 0);
+      });
     });
 
     describe('a sensor with two kinds, one of them decided by the version', () => {
@@ -2731,6 +2864,54 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
         second.clock.wall = first.clock.wall + HOLD;
         assert.equal((await second.credentials.restore()).flapping, 0);
         assert.deepEqual(await second.speak(PINNING), new Map());
+      });
+
+      it('a flap the prune ended is stored ended, so a clock set back across the restart does not bring it back', async () => {
+        const first = flapping();
+        await first.speak(PINNING);
+        await first.speak(PINNING - 1);
+        first.tick(60_000);
+        await first.speak(PINNING);
+        first.tick(HOLD);
+        await first.credentials.prune();
+        assert.equal(first.credentials.protocolFlap(7), null);
+        assert.deepEqual(first.flapTable(), [
+          {
+            probe_id: '7',
+            version: PINNING,
+            changed_ms: null,
+            since_ms: null,
+            run_changes: 0,
+            flap_floor: null,
+          },
+        ]);
+
+        // Restarted with the wall clock two hours behind: back before the flap began.
+        for (const setBack of [HOLD / 2, 2 * HOLD]) {
+          const second = flapping([], { stored: first.flapTable() });
+          second.clock.wall = first.clock.wall - setBack;
+          assert.equal((await second.credentials.restore()).flapping, 0);
+          assert.deepEqual(await second.speak(PINNING), new Map(), 'nothing held again');
+          assert.equal(second.credentials.protocolFlap(7), null);
+          // And the probe's next change is a first one, as it always was.
+          second.tick(60_000);
+          assert.deepEqual(await second.speak(PINNING - 1), all(CANNOT));
+          assert.equal(second.credentials.protocolFlap(7), null);
+        }
+      });
+
+      it('a single change the prune found a hold old is stored ended too, and the next is a first change', async () => {
+        const first = flapping();
+        await first.speak(PINNING);
+        await first.speak(PINNING - 1);
+        first.tick(HOLD);
+        await first.credentials.prune();
+        assert.equal(first.flapTable()[0]?.run_changes, 0);
+        const second = flapping([], { stored: first.flapTable() });
+        second.clock.wall = first.clock.wall - HOLD;
+        await second.credentials.restore();
+        assert.deepEqual(await second.speak(PINNING), new Map(), 'a first change: let go');
+        assert.equal(second.credentials.protocolFlap(7), null);
       });
 
       it('writes again a record stored ahead of the clock, and only that', async () => {
@@ -4932,6 +5113,97 @@ describe(
           state: 'unknown',
           message: WITHHELD_CREDENTIALS.probeCannotPin,
         });
+      } finally {
+        ({ credentials, config } = running);
+      }
+    });
+
+    it('a core rolled back and upgraded again inside the hour, its probe unchanged, is no flap: no warning, and nothing held past what each core requires (A-72)', async () => {
+      const DATABASE = versionFor('databaseAddressPinning');
+      assert.equal(DATABASE, PROTOCOL_VERSION);
+      const running = { credentials, config };
+      ({ credentials, config } = restartedCore());
+      try {
+        const probe = await create({ kind: 'probe', parentId: h.rootId, name: 'core rolled back' });
+        const group = await create({ kind: 'group', parentId: probe, name: 'rolled databases' });
+        await h.service.setCredential(testActor, group, 'database', {
+          username: 'monitor',
+          password: 'rolled-password',
+          allowedTargets: ['10.20.0.0/16'],
+        });
+        const device = await create({
+          kind: 'device',
+          parentId: group,
+          name: 'rolled database',
+          host: 'db.rolled.test',
+        });
+        const query = await create({
+          kind: 'sensor',
+          parentId: device,
+          name: 'rolled query',
+          sensorType: 'test.db.pinned',
+          params: { port: 5432 },
+        });
+        /**
+         * The probe, which advertises the core's version throughout, meets a core whose own
+         * version is `coreVersion`, as the endpoint builds for it: negotiated at the lower.
+         */
+        const meet = async (coreVersion: number): Promise<boolean> => {
+          const sent = (
+            await config.assignmentsFor(probe, Math.min(coreVersion, DATABASE), {
+              advertisedVersion: DATABASE,
+              live: () => true,
+            })
+          ).sensors.some((one) => one.sensorId === query);
+          await scheduler.sweep(later(3_600));
+          return sent;
+        };
+        /** The core is restarted, as a build whose own version is the one it is next met at. */
+        const restart = async (): Promise<void> => {
+          ({ credentials, config } = restartedCore());
+          await credentials.restore();
+        };
+        const flapReading = (negotiated: number): number | null | undefined =>
+          new ProbeHealthService({
+            db,
+            logger: silent,
+            vouching: everyVoucherHolds,
+            sources: {
+              link: () => linkAt(negotiated),
+              protocolFlap: (probeId) => credentials.protocolFlap(probeId),
+            },
+            ingest: () => Promise.resolve(),
+          }).read(probe).reading['protocolFlap'];
+
+        assert.equal(await meet(DATABASE), true);
+        await fromProbe([{ ...measured(query, at(-90)), message: '1 row in 3 ms' }], probe);
+        assert.deepEqual(await paged(query), []);
+
+        // Rolled back five minutes on, to a build one version older: the query needs the newer,
+        // and is withheld, as that build requires, with its one page.
+        ahead.ms += 300_000;
+        await restart();
+        assert.equal(await meet(DATABASE - 1), false);
+        assert.deepEqual(await paged(query), ['initial:unknown']);
+        assert.equal(flapReading(DATABASE - 1), 0);
+
+        // Upgraded again five minutes later: the query is let go at once, with its one recovery.
+        // The probe changed nothing, so there is no flap, no warning and no hour held.
+        ahead.ms += 300_000;
+        await restart();
+        assert.equal(await meet(DATABASE), true);
+        assert.equal(credentials.protocolFlap(probe), null);
+        assert.equal(flapReading(DATABASE), 0);
+        assert.deepEqual(await paged(query), ['initial:unknown', 'recovery:unknown']);
+        assert.equal(await downs([query]), 0);
+        // Its row is what it advertised, written once, and never moved.
+        assert.deepEqual(
+          await db.query(
+            'SELECT version, run_changes, changed_at FROM probe_protocol_flap WHERE probe_id = $1',
+            [probe],
+          ),
+          [{ version: DATABASE, run_changes: 0, changed_at: null }],
+        );
       } finally {
         ({ credentials, config } = running);
       }

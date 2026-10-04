@@ -2,7 +2,11 @@ import { createHash } from 'node:crypto';
 import { restrictionOf, type CredentialRestriction } from '@ms/sensors';
 import { PROTOCOL_VERSION, type SensorAssignment } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
-import type { CredentialVouching, SensorBeingSent } from '../objects/credential-vouching.js';
+import type {
+  BuildingFor,
+  CredentialVouching,
+  SensorBeingSent,
+} from '../objects/credential-vouching.js';
 import { ObjectError } from '../objects/errors.js';
 import type { CredentialKind, InheritanceResolver } from '../settings/inheritance.js';
 import type { CredentialVault } from '../vault/service.js';
@@ -127,6 +131,12 @@ export class ProbeConfigService {
      * only the default for a caller that has no probe on the line.
      */
     peerVersion: number = PROTOCOL_VERSION,
+    /**
+     * Who it is built for, when it is built for a session (`A-72`): what the probe advertised,
+     * which a flap of its protocol version is counted in, and whether the session is still the
+     * probe's, without which nothing the build finds is recorded.
+     */
+    building?: BuildingFor,
   ): Promise<ProbeAssignments> {
     const rows = await this.#db.query<{
       sensor_id: string;
@@ -178,7 +188,7 @@ export class ProbeConfigService {
       // this was said, whatever the probe's last configuration withheld, and whatever the probe
       // itself had refused to scan, stayed held: its last sensor paused, deleted or moved to
       // another probe read Unknown until the core restarted.
-      await this.#credentialCheck?.withhold(probeObjectId, [], peerVersion);
+      await this.#credentialCheck?.withhold(probeObjectId, [], peerVersion, building);
       return EMPTY_ASSIGNMENTS;
     }
 
@@ -191,6 +201,7 @@ export class ProbeConfigService {
         probeObjectId,
         beingSent(evaluatedHere, resolved),
         peerVersion,
+        building,
       )) ?? new Map<number, string>();
     const assignable = evaluatedHere.filter((row) => !withheld.has(Number(row.sensor_id)));
     if (assignable.length === 0) return EMPTY_ASSIGNMENTS;

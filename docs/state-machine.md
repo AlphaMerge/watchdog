@@ -237,13 +237,24 @@ nothing once it has run out. Five alternations give what one downgrade gives.
 **A probe whose protocol version changes more than once in an hour holds what its version
 decides** (`A-72`). One outage, one alarm: a probe rolled back and forward five times in twelve
 minutes paged three times for each of its named sensors and recovered twice (`A-68`'s scenario).
-The core now notes the version every configuration for a probe is built for, and:
+The core now notes, for every configuration it builds for a probe, the version the probe
+**advertised** in its hello, and:
 
+- **A flap is the probe's doing, never the core's.** It is counted in the version the probe
+  advertises, not the one the pair negotiated (the lower of that and the core's own). A core
+  upgraded and rolled back moves the negotiated version of every probe at once and the
+  advertised version of none, so it counts nothing: no warning, and nothing held past what each
+  core requires (`credential-pinning.test.ts`, the core-rollback scenario).
+- **Only the probe's live session is recorded.** A configuration is built behind its session's
+  other work, so one for a session superseded or closed meanwhile can finish after its
+  successor's. Nothing such a build found is recorded: not the version, not what the probe is
+  left, not what is withheld. Whether the session is still the probe's is asked right before
+  anything is recorded, in the same step, and again before what is withheld is held.
 - **The first change is what it always was.** A downgrade below `credentialAddressPinning`
   withholds the probe's named sensors (Unknown, one page each); an upgrade lets them go.
 - **A second change inside an hour of the one before is a flap**, and from it the configuration
-  is judged at the flap's **floor**: the lowest version the probe has spoken since the change
-  before it, never higher than the one it speaks now. The named sensors stand where the floor
+  is judged at the flap's **floor**: the lowest version the probe has advertised since the
+  change before it, or the negotiated version if that is lower. The named sensors stand where the floor
   puts them, so every later alternation moves none of them, pages nothing and recovers nothing.
   A flap that begins with an upgrade withholds at the downgrade after it, as the version
   requires; a probe is never sent a set it cannot be trusted with. "Check now" is judged at the
@@ -264,9 +275,11 @@ The core now notes the version every configuration for a probe is built for, and
   probe reconnects in between.
 - **Stored, so a restart keeps it**: one row per probe in `probe_protocol_flap` (migration 069),
   written in the same bounded write, on the same per-probe line, as the late-refusal record,
-  and only when the version changes; a steady build writes nothing. Read back at start with
-  the same clock rules as a window: a change more than an hour old is over, and one stored
-  ahead of the clock is taken as now and written down again.
+  when the version changes and when a run of changes ends; a steady build writes nothing. Read
+  back at start with the same clock rules as a window: a change more than an hour old is over,
+  and one stored ahead of the clock is taken as now and written down again. **An ended run is
+  stored ended**, so a wall clock set back across a restart cannot bring a flap back and page
+  what it held a second time.
 
 **A result for a sensor the core is withholding from that probe is dropped and counted**
 (`A-72`), whatever it is: a marked refusal past its ten minutes, a failed scan, a reading. The

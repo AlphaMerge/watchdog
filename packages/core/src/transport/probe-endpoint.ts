@@ -72,7 +72,15 @@ export interface ResultReceiver {
 export interface ProbeConfigSource {
   /** The probe object this GID owns, or null while it is unclaimed. */
   probeObjectFor(gid: string): Promise<number | null>;
-  assignmentsFor(probeObjectId: number, peerVersion?: number): Promise<ProbeAssignments>;
+  /**
+   * `building` says who it is for (`A-72`): the version the probe advertised, and whether the
+   * session is still the probe's live one, asked by the source right before it records anything.
+   */
+  assignmentsFor(
+    probeObjectId: number,
+    peerVersion?: number,
+    building?: { readonly advertisedVersion: number; readonly live: () => boolean },
+  ): Promise<ProbeAssignments>;
   touch(objectId: number): Promise<void>;
 }
 
@@ -366,6 +374,11 @@ interface ProbeSession {
   pending: Promise<void>;
   /** What this peer speaks. Config is only sent to version 3 and above. */
   protocolVersion: number;
+  /**
+   * What the probe said it speaks in its hello, before negotiation (`A-72`): what a flap of its
+   * version is counted in, so that a core upgraded and rolled back moves no probe's count.
+   */
+  advertisedVersion: number;
   /**
    * Whether an administrator has approved this probe (`R-01`).
    *
@@ -1301,6 +1314,7 @@ export class ProbeEndpoint {
       // cannot produce, and one that answered for this core alone is how `P-166` sent `final`
       // to a probe whose schema refused it.
       protocolVersion: negotiatedVersion(hello.protocolVersion),
+      advertisedVersion: hello.protocolVersion,
       approved,
       probeObjectId: null,
       sentVersion: null,
@@ -1454,7 +1468,14 @@ export class ProbeEndpoint {
         const assignments =
           session.probeObjectId === null
             ? EMPTY_ASSIGNMENTS
-            : await source.assignmentsFor(session.probeObjectId, session.protocolVersion);
+            : await source.assignmentsFor(session.probeObjectId, session.protocolVersion, {
+                advertisedVersion: session.advertisedVersion,
+                // **Still the probe's session** (`A-72`): open, and the one its gid points at. A
+                // build chained behind a session that was superseded or closed meanwhile can end
+                // after its successor's, and what it found would be recorded over the live one's.
+                live: () =>
+                  !session.connection.closed && this.#sessions.get(session.info.gid) === session,
+              });
         // **Gone while its configuration was read** (`A-50`). What was read carries every sensor's
         // decrypted credentials, and a connection that has closed has nowhere to send them; the
         // next session asks again.

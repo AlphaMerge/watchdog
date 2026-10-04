@@ -20159,6 +20159,35 @@ because each is a decision rather than a defect:
         has built a probe's first configuration does not yet know what it withholds, so results
         in that moment are taken as before; the held sentence still says "Upgrading the probe to
         protocol 24 sends them again" while a flapping probe is at 24.
+      - **Review, three findings closed.**
+        - **A flap is counted in what the probe advertises** (medium). The record had held the
+          negotiated version, so a core upgraded and rolled back inside the hour was change 2
+          for every probe at once: a warning on each, and an hour held. The endpoint now hands
+          the build the hello's version (`BuildingFor.advertisedVersion`). Changes of that are
+          what is counted and stored, and a build is judged at the lower of the negotiated
+          version now and the flap's floor (`judgedAt`). Scenario: a core restarted older and
+          newer again five minutes apart, its probe unchanged, gives one page as the older core
+          requires, one recovery, no flap, `protocolFlap` 0, and the probe's row unmoved. The
+          five-alternation scenario pages as before.
+        - **Only the probe's live session is recorded** (low). A build for a superseded
+          session could end after its successor's, note its version as a change, and hold the
+          named sensors for an hour while the live session's results were dropped. The endpoint
+          passes `live()`: the connection is open and the gid still points at this session.
+          `withhold` asks first, notes the version and what the probe is left in the same
+          synchronous step, stores it, and asks again before holding what it withholds. Tests:
+          the exact S1-at-23 / S2-at-24 interleaving, a session closing during the store, and
+          the endpoint handing over both (a superseded session reads not live, its successor
+          live, a closed one not live).
+        - **An ended run is stored ended** (low). `prune` ended a flap in memory only, so a
+          wall clock set back across a restart brought it back. It now writes the settled row
+          (`run_changes` 0, times null) through the same bounded transaction. So does a build
+          that finds the run a hold old, and so does a single change that times out, which
+          would otherwise make the next change look like a flap. Tests: a clock set back by
+          half an hour and by two hours finds no flap; a single change ended by the prune.
+        - **Mutation: 11/12 killed**, one equivalent: the judgement's peek taking the
+          negotiated version instead of the advertised one. The endpoint never negotiates
+          above what was advertised, so both give the same judged version. After the last,
+          `dist` matched `src`.
 
 - [x] **A-73 — five loose ends from discovery text and the SSH pool** · S · A-69 · Found
       2026-10-02 by `A-69`. `sweep-progress` takes any 7 to 15 characters as an address. A
