@@ -375,6 +375,7 @@ build does not construct them (`H-12`).
 | `/api/v1/objects/{id}/settings` | GET | 401 |
 | `/api/v1/objects/{id}/settings/{key}` | PUT · DELETE | 401 |
 | `/api/v1/objects/{id}/simulate-error` | POST · DELETE | 401 |
+| `/api/v1/objects/{id}/target-policy-exception` | PUT | 401 |
 | `/api/v1/objects/{id}/tree` | GET | 401 |
 | `/api/v1/objects/{id}/triggers` | GET · POST | 401 |
 | `/api/v1/openapi.json` | GET | 401 |
