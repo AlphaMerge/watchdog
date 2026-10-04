@@ -550,6 +550,92 @@ describe(
       assert.equal(next.lockedChunks, 0);
     });
 
+    /** A session outside the core holding `table` in `mode` until `release` is called. */
+    async function holding(table: string, mode: string): Promise<{ release: () => Promise<void> }> {
+      const other = new Client({ ...testDatabaseConfig(), database: scratch.name });
+      await other.connect();
+      await other.query('BEGIN');
+      await other.query(`LOCK TABLE ${table} IN ${mode} MODE`);
+      return {
+        release: async () => {
+          await other.query('ROLLBACK');
+          await other.end();
+        },
+      };
+    }
+
+    it('gives up a reap batch that runs past its limit, halves the next, and so always moves (P-229)', async () => {
+      // **Review finding on `P-229`.** The reap ran under the pool's minute with nothing of its
+      // own, and a batch past it failed every pass on the same oldest channels, so nothing behind
+      // them was ever reaped and `dbStatementTimeouts` warned for good. A held table stands in
+      // for a batch too slow to finish: the delete waits, and its statement limit cancels it.
+      const queued = Array.from({ length: 40 }, (_, index) => 900_000 + index);
+      await db.query('INSERT INTO channel_reap (channel_id) SELECT unnest($1::int[])', [queued]);
+      const keeper = new Housekeeper({
+        db,
+        logger: silent,
+        config: housekeeping(),
+        longStatementMs: 300,
+      });
+      const pass = (): ReturnType<Housekeeper['runOnce']> =>
+        within(20_000, 'the pass to give the reap up', keeper.runOnce());
+      const left = async (): Promise<number> =>
+        Number(
+          (await db.query<{ n: string }>('SELECT count(*)::text AS n FROM channel_reap'))[0]?.n,
+        );
+
+      const held = await holding('sample', 'SHARE');
+      let first: Awaited<ReturnType<Housekeeper['runOnce']>>;
+      let second: Awaited<ReturnType<Housekeeper['runOnce']>>;
+      try {
+        first = await pass();
+        second = await pass();
+      } finally {
+        await held.release();
+      }
+      assert.equal(first.reapBatch, 32);
+      assert.equal(first.timedOutStatements, 1, 'counted');
+      assert.deepEqual(first.failures, [], 'not a failed step');
+      assert.equal(first.reapedChannels, 0);
+      assert.equal(second.reapBatch, 16, 'half as many the next pass');
+      assert.equal(second.timedOutStatements, 1);
+      assert.equal(await left(), 40, 'nothing was reaped while it could not finish');
+
+      // Free again: the halved batch is reaped, and the next doubles back.
+      const third = await pass();
+      assert.equal(third.reapedChannels, 8);
+      assert.equal(third.timedOutStatements, 0);
+      const fourth = await pass();
+      assert.equal(fourth.reapedChannels, 16);
+      assert.equal(await left(), 16);
+    });
+
+    it('gives up a state-retention scan that runs past its limit, counted and not a failed step (P-229)', async () => {
+      // **Review finding on `P-229`.** The scan of every quiet sensor's state ran with the drop's
+      // lock limit and the pool's minute, so after a large retention cut a 57014 failed the step
+      // on every pass. It now has housekeeping's long limit, and past even that it is given up.
+      const keeper = new Housekeeper({
+        db,
+        logger: silent,
+        config: housekeeping(),
+        longStatementMs: 300,
+      });
+      const held = await holding('sensor_state', 'ACCESS EXCLUSIVE');
+      let report: Awaited<ReturnType<Housekeeper['runOnce']>>;
+      try {
+        report = await within(20_000, 'the pass to give the scan up', keeper.runOnce());
+      } finally {
+        await held.release();
+      }
+      assert.equal(report.timedOutStatements, 1, 'counted');
+      assert.deepEqual(report.failures, [], 'not a failed step');
+      assert.equal(report.lockedChunks, 0, 'the scan’s limit, not the drop’s lock limit');
+
+      const free = await keeper.runOnce();
+      assert.equal(free.timedOutStatements, 0);
+      assert.deepEqual(free.failures, []);
+    });
+
     it('will not drop raw the rollup has not consumed, however old it is', async () => {
       // Fifty days of raw with a forty-day horizon: retention wants this chunk. The five-minute
       // tier has only reached sixty days ago, so those readings have never been summarised —

@@ -291,7 +291,14 @@ export class ProvisionService {
         const already = sensorsByDevice.get(deviceId) ?? [];
         const names: string[] = [];
         let masterSensorId: number | null = null;
-        for (const spec of plan.sensors) {
+        // Set when a sensor met a tree that stayed busy (`P-229`): the run stops after this host.
+        let busy: ObjectError | null = null;
+        // **The master first, on a device this pass created** (`P-229`). A run that stops on a
+        // busy tree keeps what it made, and a device is mastered only by the pass that created it,
+        // so a master tried last would leave a device stopped part-way with no master for good:
+        // a re-run only matches it. Which spec is the master does not change, only when it is
+        // tried.
+        for (const spec of created ? masterFirst(plan.sensors) : plan.sensors) {
           if (hasSensor(already, spec)) {
             report.sensorsSkipped += 1;
             continue;
@@ -315,8 +322,13 @@ export class ProvisionService {
             // the first, and which one won would depend on template order.
             if (spec.master === true && masterSensorId === null) masterSensorId = sensor.id;
           } catch (error) {
-            // The whole run's problem, not this sensor's (`P-229`): the host's catch stops it.
-            if (treeBusy(error)) throw error;
+            // The whole run's problem, not this sensor's (`P-229`). The rest of this device's
+            // sensors would wait for the tree too, so none is tried; but what this pass made of the
+            // device is still finished below, its master and its record, before the run stops.
+            if (treeBusy(error)) {
+              busy = error;
+              break;
+            }
             // **Per sensor, not per host.** A template naming a sensor that cannot be created —
             // a required parameter it does not supply, a type whose schema changed under it —
             // must not take the rest of that device's sensors with it. Found the first time
@@ -359,6 +371,8 @@ export class ProvisionService {
 
         await this.#recordDevice(input.run.id, host.address, deviceId);
         report.devices.push({ address: host.address, deviceId, created, sensors: names });
+        // Now the run stops, by the host's catch, as it does for a device that met the tree.
+        if (busy !== null) throw busy;
       } catch (error) {
         // Recorded, never silent. A host that could not be provisioned is the one thing an
         // operator needs to see after a discovery, and a run that reported success while
@@ -397,8 +411,15 @@ export class ProvisionService {
 }
 
 /** A change that waited for the tree lock and gave up (`P-229`). */
-function treeBusy(error: unknown): boolean {
+function treeBusy(error: unknown): error is ObjectError {
   return error instanceof ObjectError && error.code === 'OBJECT_TREE_BUSY';
+}
+
+/** The specs with the first one marked master moved to the front, the rest in their order. */
+function masterFirst(specs: readonly SensorSpec[]): readonly SensorSpec[] {
+  const at = specs.findIndex((spec) => spec.master === true);
+  if (at <= 0) return specs;
+  return [specs[at] as SensorSpec, ...specs.slice(0, at), ...specs.slice(at + 1)];
 }
 
 function counts(report: ProvisionReport): Record<string, number> {

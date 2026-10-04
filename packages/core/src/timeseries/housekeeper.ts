@@ -174,6 +174,14 @@ export interface HousekeepingReport {
    * backup, which is why a drop does not queue behind it and take every reader with it.
    */
   lockedChunks: number;
+  /**
+   * Statements of housekeeping's own cancelled at their limit and given up, each tried again
+   * next pass (`P-229`): a reap batch, which the next pass makes half as large so the queue
+   * always moves, and the state-retention scan. Not failed steps, and not `dbStatementTimeouts`.
+   */
+  timedOutStatements: number;
+  /** The channels the reap tried this pass: `MAX_REAP_PER_PASS`, or fewer after a timeout. */
+  reapBatch: number;
   /** A step that failed. The pass continues: every step is guarded by a watermark, not by the
    *  success of the one before it, so a compression failure must not stop retention. */
   failures: { step: string; message: string }[];
@@ -209,6 +217,11 @@ export interface HousekeeperOptions {
    * Injectable so a test can make a pass run out of time after a chosen number of days.
    */
   monotonicMs?: () => number;
+  /**
+   * How long the reap's statements and the state-retention scan may each run (`P-229`). Ten
+   * minutes, over the pool's minute; a test shortens it to see the give-way.
+   */
+  longStatementMs?: number;
 }
 
 /**
@@ -241,6 +254,13 @@ export class Housekeeper {
   readonly #witness: PassWitness | undefined;
   readonly #now: () => Date;
   readonly #monotonicMs: () => number;
+  readonly #longStatementMs: number;
+  /**
+   * How many channels the next reap takes (`P-229`): halved after a batch ran past its limit,
+   * down to one, and doubled back after one that did not. A batch that cannot finish is otherwise
+   * the same oldest batch every pass, and nothing behind it is ever reaped.
+   */
+  #reapBatch = MAX_REAP_PER_PASS;
   #lastDisk: DiskReading | null = null;
   #evictedChunks = 0;
   readonly #store: TimeSeriesStore;
@@ -271,6 +291,7 @@ export class Housekeeper {
     this.#witness = options.witness;
     this.#now = options.now ?? (() => new Date());
     this.#monotonicMs = options.monotonicMs ?? (() => Number(process.hrtime.bigint() / 1_000_000n));
+    this.#longStatementMs = options.longStatementMs ?? LONG_STATEMENT_MS;
   }
 
   /**
@@ -446,6 +467,7 @@ export class Housekeeper {
           compressedChunks: report.compressedChunks,
           droppedChunks: report.droppedChunks,
           lockedChunks: report.lockedChunks,
+          timedOutStatements: report.timedOutStatements,
           prunedAuditEntries: report.prunedAuditEntries,
           reapedChannels: report.reapedChannels,
           failures: report.failures.length,
@@ -476,6 +498,25 @@ export class Housekeeper {
     if (this.#pruneReportsEnabled) {
       await this.#step(report, 'report-retention', () => this.#pruneReports(report));
     }
+  }
+
+  /** A reap batch's limits: the long statement limit, named, its timeouts its own (`P-229`). */
+  #reapLimits(): TxLimits {
+    return {
+      statementTimeoutMs: this.#longStatementMs,
+      work: 'housekeeping',
+      ownStatementTimeouts: true,
+    };
+  }
+
+  /** State retention's: the long limit for the scan, and the drop's two seconds for its lock. */
+  #stateRetentionLimits(): TxLimits {
+    return {
+      ...DROP_LIMITS,
+      statementTimeoutMs: this.#longStatementMs,
+      work: 'housekeeping',
+      ownStatementTimeouts: true,
+    };
   }
 
   /**
@@ -1082,6 +1123,8 @@ export class Housekeeper {
     // prevent.
     let anchored: number;
     try {
+      // The scan of every quiet sensor's state is long after a large retention cut, so it is
+      // given housekeeping's long limit, and the drop still only two seconds for its lock.
       anchored = await this.#db.tx(async (q) => {
         const candidates = await this.#store.stateAtHorizon(q, olderThan);
         const dropped = await this.#store.dropOlderThan(q, 'sensor_state', olderThan);
@@ -1093,12 +1136,21 @@ export class Housekeeper {
           );
         }
         return this.#store.anchorStates(q, olderThan, candidates);
-      }, DROP_LIMITS);
+      }, this.#stateRetentionLimits());
     } catch (error) {
       // The drop and the anchor are one transaction, so neither happened, which is the safe
       // half: nothing was dropped that is not anchored. Tried again next pass.
-      if (!lockNotGranted(error)) throw error;
-      this.#locked(report, 'sensor_state', null, 'drop');
+      if (lockNotGranted(error)) {
+        this.#locked(report, 'sensor_state', null, 'drop');
+        return;
+      }
+      if (!statementCancelled(error)) throw error;
+      report.timedOutStatements += 1;
+      this.#logger.warn(
+        { table: 'sensor_state', limitMs: this.#longStatementMs },
+        'state retention ran past its limit and was given up; nothing was dropped, and it is ' +
+          'tried again next pass',
+      );
       return;
     }
 
@@ -1111,14 +1163,37 @@ export class Housekeeper {
     }
   }
 
-  /** Deletes readings belonging to channels that no longer exist (S-05). */
+  /**
+   * Deletes readings belonging to channels that no longer exist (S-05).
+   *
+   * **It cannot wedge** (`P-229`). A batch is a delete through compressed chunks, so it is given
+   * housekeeping's long limit rather than the pool's minute; and a batch that runs past even that
+   * is given up, counted, and the next pass takes half as many channels, down to one. Without
+   * that the same oldest batch failed every pass and nothing behind it was reaped.
+   */
   async #reap(report: HousekeepingReport): Promise<void> {
-    const candidates = await this.#db.tx((q) => this.#store.reapCandidates(q, MAX_REAP_PER_PASS));
+    const batch = this.#reapBatch;
+    const candidates = await this.#db.tx((q) => this.#store.reapCandidates(q, batch));
     if (candidates.length === 0) return;
+    report.reapBatch = batch;
 
     // One transaction: dropping the queue entry without the rows would orphan them for ever,
     // because nothing else remembers the channel ever existed.
-    const rows = await this.#db.tx((q) => this.#store.reapChannels(q, candidates));
+    let rows: number;
+    try {
+      rows = await this.#db.tx((q) => this.#store.reapChannels(q, candidates), this.#reapLimits());
+    } catch (error) {
+      if (!statementCancelled(error)) throw error;
+      this.#reapBatch = Math.max(1, Math.floor(batch / 2));
+      report.timedOutStatements += 1;
+      this.#logger.warn(
+        { channels: candidates.length, limitMs: this.#longStatementMs, next: this.#reapBatch },
+        'reaping orphaned readings ran past its limit and was given up; the next pass reaps ' +
+          'fewer channels at a time',
+      );
+      return;
+    }
+    this.#reapBatch = Math.min(MAX_REAP_PER_PASS, batch * 2);
     report.reapedChannels = candidates.length;
     report.reapedRows = rows;
     this.#logger.info({ channels: candidates.length, rows }, 'orphaned readings reaped');
@@ -1309,9 +1384,14 @@ function emptyReport(): HousekeepingReport {
     disk: null,
     evictedChunks: 0,
     lockedChunks: 0,
+    timedOutStatements: 0,
+    reapBatch: 0,
     failures: [],
   };
 }
+
+/** Ten minutes: a rollup slice's limit, and the reap's and the state-retention scan's. */
+const LONG_STATEMENT_MS = 600_000;
 
 /**
  * The limits housekeeping gives its own work, over the pool's 60 s and 5 s (`P-229`).
@@ -1324,12 +1404,15 @@ function emptyReport(): HousekeepingReport {
  *   exclusive lock. Behind a backup's `ACCESS SHARE` it waits, and every reader of the
  *   table queues behind *it* — ingestion included. Two seconds bounds that, and a drop that did not
  *   get its lock is skipped, counted and tried again next pass.
+ * - **A reap batch, and the state-retention scan, ten minutes too** (`longStatementMs`). Each is
+ *   a delete or a scan through old, compressed ground. One that runs past it is given up and
+ *   counted in `timedOutStatements`, and a reap's next batch is half the size, so neither wedges.
  *
  * The long ones are named `ms-core:housekeeping`, so Core Health's oldest-statement channel does
  * not warn about work given ten minutes on purpose. Their lock timeouts are counted here, in
  * `lockedChunks`, rather than as the core's.
  */
-const ROLLUP_LIMITS: TxLimits = { statementTimeoutMs: 600_000, work: 'housekeeping' };
+const ROLLUP_LIMITS: TxLimits = { statementTimeoutMs: LONG_STATEMENT_MS, work: 'housekeeping' };
 const COMPRESS_LIMITS: TxLimits = {
   statementTimeoutMs: 1_800_000,
   lockTimeoutMs: 2_000,
@@ -1337,6 +1420,11 @@ const COMPRESS_LIMITS: TxLimits = {
   ownLockTimeouts: true,
 };
 const DROP_LIMITS: TxLimits = { lockTimeoutMs: 2_000, ownLockTimeouts: true };
+
+/** A statement cancelled at its limit, or by a hand (`P-229`). */
+function statementCancelled(error: unknown): boolean {
+  return error instanceof DatabaseError && error.sqlstate === SQLSTATE.queryCanceled;
+}
 
 /** A lock that was not granted within the limit (`P-229`). */
 function lockNotGranted(error: unknown): boolean {

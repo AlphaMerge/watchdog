@@ -7743,6 +7743,32 @@ because each is a decision rather than a defect:
         (`database-limits.test.ts`), and the late-refusal write's give-ways left to the pool
         (`credential-pinning.test.ts`, the fake and the real database both). 15 of 16 caught, the
         same one equivalent.
+      - **Review, four findings closed** (two medium, two low):
+        - *Provisioning stopped on a busy tree before finishing a device it had created.* The
+          sensor's catch threw past the master dependency and the device's record, and a re-run
+          only matches a device, which is never mastered (`D-05`), so the host's outage was an
+          alarm per sensor. Now the sensor loop stops, the device's master and record are written
+          and it is in `report.devices`, and then the run stops. On a device the pass created, the
+          master spec is tried first, so a run stopped part-way still made it; which spec is master
+          is unchanged. What is left: a tree taken in the instant between a new device and its
+          master leaves that device masterless, as the rule a re-run follows requires. Tested:
+          busy on a new device's second sensor, then a re-run, then the master Down and the other
+          two paused (one alarm, not three).
+        - *The reap ran under the pool's minute and could wedge.* A batch now has the ten minutes
+          (`longStatementMs`) and owns its timeout; one past it is given up, counted in the pass
+          report's `timedOutStatements`, and the next batch is half the size, down to one, doubling
+          back after one that finishes (`reapBatch` in the report). Tested with a held `sample` and
+          a 300 ms limit: 32, then 16, both given up; then 8 and 16 reaped.
+        - *The state-retention scan had only the drop's lock limit.* It now has the long limit too,
+          and a 57014 is counted in `timedOutStatements` and given up, not a failed step. Tested
+          with `sensor_state` held.
+        - *A statement limit under the tree's wait cancelled the wait as 57014*, so bulk and
+          provisioning did not stop. The wait's statement now has no statement limit, the lock
+          limit bounding it, and both are put back after it. Tested with a statement limit of half
+          the wait (150 ms against 300 ms, as 10 s against 30 s): `OBJECT_TREE_BUSY`, both back.
+        - Mutants 7/7: the sensor catch rethrowing at once; the master not tried first; the reap
+          batch not halved; the reap without its long limit; the scan's 57014 a failed step; the
+          wait's statement limit left on; the statement limit not put back.
 
 - [x] **P-238 — a start refused on migration drift does not say which migration** · S · P-222,
       H-03 · Found 2026-09-29, when the development `ms-server` had restarted about 470 times

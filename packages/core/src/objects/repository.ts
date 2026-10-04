@@ -249,11 +249,18 @@ export class ObjectRepository {
    * back to what it was, with `set_config(..., true)` both times, which the transaction's end
    * clears whatever happens. **With no wait at all**, as before, a change stuck behind a lock
    * held elsewhere held a pool connection for as long as that lasted.
+   *
+   * **And no statement limit on that one statement.** A wait for a lock is time the statement
+   * runs, so a `database.statementTimeoutMs` under the tree's wait would cancel it as 57014 first,
+   * and a bulk selection or a provisioning run would not see a busy tree and stop. The lock limit
+   * is what bounds this statement; the statement limit is put back after it with the lock limit.
    */
   async #lockTree(q: Queryable, statement: string): Promise<void> {
-    const [before] = await q.query<{ previous: string }>(
-      `SELECT current_setting('lock_timeout') AS previous,
-              set_config('lock_timeout', $1, true)`,
+    const [before] = await q.query<{ lock: string; statement: string }>(
+      `SELECT current_setting('lock_timeout') AS lock,
+              current_setting('statement_timeout') AS statement,
+              set_config('lock_timeout', $1, true),
+              set_config('statement_timeout', '0', true)`,
       [String(this.#treeLockWaitMs)],
     );
     try {
@@ -270,7 +277,10 @@ export class ObjectRepository {
       }
       throw error;
     }
-    await q.query(`SELECT set_config('lock_timeout', $1, true)`, [before?.previous ?? '0']);
+    await q.query(
+      `SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)`,
+      [before?.lock ?? '0', before?.statement ?? '0'],
+    );
   }
 
   // ── reads ────────────────────────────────────────────────────────────────────────────────
