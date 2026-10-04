@@ -7710,7 +7710,7 @@ because each is a decision rather than a defect:
       isolated runs after it passed 20/20. Before the fix it had failed in both full suites of
       2026-10-04.
 
-- [ ] **P-258 — two resolver-budget tests fail when the machine is loaded** · S · A-41 · Found
+- [x] **P-258 — two resolver-budget tests fail when the machine is loaded** · S · A-41 · Found
       2026-10-05 in `P-257`. `check-pool.test.ts` "reports a resolver that hangs as a refusal,
       not as the check timing out" (resolver budget 3,000 ms inside a 6,000 ms check timeout)
       and `process-runner.test.ts` "reports a resolver that hangs as a refusal, from a process
@@ -7722,6 +7722,49 @@ because each is a decision rather than a defect:
       outcomes without depending on how late a timer fires (a fake clock, or a check timeout
       far enough from the resolver's that load cannot cross them), and twenty runs of each
       pass beside a running probe suite.
+
+      **P-258 outcome. The tests' fault, not the probe's, and not late timers.** Timestamped at
+      submit, dispatch, worker receipt, the resolution's bound and both timeouts, in a run beside
+      two probe suites (load 6.5–29), where the old tests failed 5 of 40. In the pool the check's
+      timeout is armed at dispatch, the worker had the message 0.3 ms later, and then the fixture
+      imported `@ms/sensors/pinned-target` before calling it: 5,081 ms in one failing run and
+      5,712 ms in another, so the 3 s bound started 5.1 s and 5.7 s into a 6 s check. The timers
+      themselves were 2–32 ms late in the main thread and 3–323 ms in the worker, and the
+      refusal took up to 510 ms to reach the main thread. In the child the same import took
+      4,725 ms after the child had armed its 8 s abort, and the refusal read "cancelled while
+      … being resolved". A probe's worker loads its catalogue,
+      `pinTarget` included, before it says ready, so its two clocks start together. No
+      process-isolated type pins (only the two EXE/Script types run in a child), so no child
+      resolves a name.
+      - **Pool:** one worker is handed `test.load-resolver`, which imports the module, before
+        the timed check, and the test asserts the check ran in that worker. What separates the
+        two clocks is then one thread's timer against another's plus one message, under 0.9 s
+        measured, against a 3 s margin.
+      - **Process runner:** three clocks start at different moments: the runner's kill at spawn
+        (timeout + 2 s), the child's abort once it has read its request, and the bound once the
+        check reaches `pinTarget`. Loading the module ahead of the child was tried and failed 3 of
+        20 beside two suites (load 18–50): the runner's kill, which counts the child's start,
+        won. The check is now given 60 s, so the bound is its 10 s cap. That leaves 50 s for
+        starting, importing and late timers, where the most seen was 6.4 s. A child not told its
+        timeout would say 5000 ms. The test takes 10 s instead of 4.
+      - **Runs:** 20 of 20 for each beside one probe suite (load 4.6–12.5), 20 of 20 for each
+        beside two (load 9.8–18.8), and both files whole alone, 77 of 77.
+      - **Mutation:** 8 mutants on what these tests guard, 8 killed: the bound at the whole
+        timeout, the cap at 20 s, the bound's timer tripled, the child and the worker not told
+        the timeout, the pool not sending it, and the worker and the child dropping `withheld`.
+        Taking the warm-up out is a timing change that no single run can catch, so the evidence
+        for it is the loaded runs above.
+      - **Checked, same pattern:** the `sensors` tests that assert a resolution bound
+        (`pinned-target`, `pinned-transports`, `target-policy-transports`) race it against no
+        other clock, or only against one in the same event loop, and bound the time loosely,
+        with one exception: `pinned-target.test.ts` asserts a 200 ms bound ended in under
+        390 ms. `process-runner.test.ts` "lets a check that honours its signal report its own
+        diagnosis" leaves 2 s between the child's abort and the runner's kill, and that 2 s also
+        has to cover the child's start (0.03–0.27 s measured).
+      - **Found, not fixed:** a check in a child process spends its timeout loading the probe's
+        catalogue first. Importing `catalogue-registry.js` took 0.45–14.8 s at load 6.5–29, so an
+        EXE/Script sensor with a 10 s timeout on a loaded probe can get 2 s of its own and report
+        that it exceeded its timeout.
 
 - [ ] **P-259 — nothing tests a device that resets the connection mid-command** · S · A-65 ·
       Found 2026-10-05 in `P-257`. Read from the code, an SSH device that drops the connection

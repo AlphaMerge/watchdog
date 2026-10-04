@@ -81,6 +81,16 @@ const registry: CheckRegistry = {
         );
         throw new Error('unreachable');
 
+      case 'test.load-resolver':
+        // Loads what `test.resolve-hangs` imports, and nothing else, so that a test can load it
+        // into a worker before the check it times (`P-258`). A probe's worker has its catalogue,
+        // `pinTarget` included, loaded before it says ready, so the check's timeout and the
+        // resolution's bound start within a millisecond of each other. The import above starts
+        // the resolution's bound only once it is done, and on a loaded machine it took up to 5.7 s
+        // of a 6 s check.
+        await import('@ms/sensors/pinned-target');
+        return { channels: [{ key: 'value', value: 1 }], message: 'loaded' };
+
       case 'test.limits':
         // What the thread running this check was started with (`P-207`). `resourceLimits` is empty
         // in the main thread, which is how a test tells a worker that was capped from one that was

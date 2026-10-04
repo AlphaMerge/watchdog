@@ -169,14 +169,27 @@ describe('process runner', () => {
   });
 
   it('reports a resolver that hangs as a refusal, from a process of its own', async () => {
-    // `A-41c`: the child is told its timeout and gives the resolution half of it.
+    // `A-41c`: the child is told its timeout and gives the resolution part of it: ten seconds, the
+    // most it gets, where a child not told would give it five.
+    //
+    // **A minute, so that no load can put the check's own clocks ahead of the resolution's**
+    // (`P-258`). Three clocks race here, each started at a different moment: the runner's kill,
+    // when it spawns the child (the timeout plus 2 s); the child's abort, when it has read its
+    // request (the timeout); and the resolution's bound, when the check reaches `pinTarget`,
+    // after the child has started and the fixture has imported it. At 8 s the resolution's 4 s
+    // lost: the import took 4.7 s at load 6. With the module loaded before the child read its
+    // request, the child's start then took more than 6 s at load 18 to 50, and the runner killed
+    // it. A minute leaves 50 s for starting, importing and late timers, where the most seen was
+    // 6.4 s.
     const { runner, seen } = runnerOf();
-    runner.submit(request(23, 'test.resolve-hangs', { timeoutMs: 8_000 }));
-    await until(() => seen.length === 1, 'the refusal', 15_000);
+    runner.submit(request(23, 'test.resolve-hangs', { timeoutMs: 60_000 }));
+    // Past the runner's kill at 62 s, so that a check that loses says how it lost.
+    await until(() => seen.length === 1, 'the refusal', 70_000);
     const result = seen[0]?.result;
     assert.ok(result !== undefined);
     assert.equal(result.withheld, true, result.message);
-    assert.match(result.message, /did not resolve within 4000 ms/);
+    assert.match(result.message, /^Not scanned: switch\.invalid did not resolve within 10000 ms/);
+    assert.doesNotMatch(result.message, /did not finish within/);
   });
 
   it('finds its result past whatever a library printed', async () => {

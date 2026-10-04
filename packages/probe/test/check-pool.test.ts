@@ -136,14 +136,29 @@ describe('check pool', () => {
     // `A-41c`. The pool settles a check that outlasts its timeout as a plain failure, and only
     // then tells the worker to stop: a refusal raised by that abort arrives for a job already
     // settled. So the resolution has its own, shorter bound, and its refusal gets here first.
-    const { pool, seen } = await poolOf();
-    // Six seconds, so that loading the module the fixture imports is well inside the half the
-    // resolution does not get.
-    pool.submit(request(5, 'test.resolve-hangs', { timeoutMs: 6_000 }));
+    //
+    // **One worker, given the module the fixture imports before the check that is timed**
+    // (`P-258`). Loaded inside the check, the import sat between the check's timeout, armed at
+    // dispatch, and the resolution's bound, armed after it: on a loaded machine it took up to
+    // 5.7 s, the check's timeout won, and the test failed for a delay a probe does not have. A
+    // probe's worker loads its catalogue before it says ready, so its two clocks start together,
+    // as these now do. What is left between them is one thread's timer against another's and a
+    // message between them: under 0.9 s at load 6 to 29, where the margin is 3 s.
+    const { pool, seen } = await poolOf({ size: 1 });
+    // Its own generous timeout: a load that outlasted it would leave the module half-loaded in a
+    // worker the pool then replaces.
+    pool.submit(request(6, 'test.load-resolver', { timeoutMs: 30_000 }));
+    await until(() => seen.length === 1, 'the module to load', 35_000);
+    const loaded = seen[0];
+    assert.ok(loaded !== undefined);
+    assert.equal(loaded.result.outcome, 'ok', loaded.result.message);
 
-    await until(() => seen.length === 1, 'the refusal', 10_000);
-    const result = seen[0]?.result;
-    assert.ok(result !== undefined);
+    pool.submit(request(5, 'test.resolve-hangs', { timeoutMs: 6_000 }));
+    await until(() => seen.length === 2, 'the refusal', 10_000);
+    const refused = seen[1];
+    assert.ok(refused !== undefined);
+    assert.equal(refused.meta.workerId, loaded.meta.workerId, 'in the worker that loaded it');
+    const result = refused.result;
     assert.equal(result.outcome, 'error');
     assert.equal(result.withheld, true, result.message);
     assert.match(result.message, /^Not scanned: switch\.invalid did not resolve within 3000 ms/);
