@@ -1,6 +1,6 @@
 {
   "name": "@ms/web",
-  "version": "0.1.0",
+  "version": "1.0.0-rc.1",
   "private": true,
   "type": "module",
   "description": "Web UI, served as static assets by ms-core",
@@ -14,7 +14,7 @@
     "predev": "tsc -b ../shared"
   },
   "dependencies": {
-    "@ms/shared": "0.1.0",
+    "@ms/shared": "1.0.0-rc.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-router-dom": "^7.9.0",

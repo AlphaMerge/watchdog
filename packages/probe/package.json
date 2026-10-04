@@ -1,6 +1,6 @@
 {
   "name": "@ms/probe",
-  "version": "0.1.0",
+  "version": "1.0.0-rc.1",
   "private": true,
   "type": "module",
   "main": "./dist/src/main.js",
@@ -17,10 +17,10 @@
     "test:perf": "node --test --test-concurrency=1 \"dist/test/perf/*.test.js\""
   },
   "dependencies": {
-    "@ms/sensors": "0.1.0",
-    "@ms/shared": "0.1.0"
+    "@ms/sensors": "1.0.0-rc.1",
+    "@ms/shared": "1.0.0-rc.1"
   },
   "devDependencies": {
-    "@ms/simulators": "0.1.0"
+    "@ms/simulators": "1.0.0-rc.1"
   }
 }

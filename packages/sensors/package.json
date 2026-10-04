@@ -1,6 +1,6 @@
 {
   "name": "@ms/sensors",
-  "version": "0.1.0",
+  "version": "1.0.0-rc.1",
   "private": true,
   "type": "module",
   "main": "./dist/src/index.js",
@@ -45,7 +45,7 @@
     "test": "node --test \"dist/test/**/*.test.js\""
   },
   "dependencies": {
-    "@ms/shared": "0.1.0",
+    "@ms/shared": "1.0.0-rc.1",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
     "fast-xml-parser": "^5.11.1",
@@ -56,7 +56,7 @@
     "tedious": "^20.0.0"
   },
   "devDependencies": {
-    "@ms/simulators": "0.1.0",
+    "@ms/simulators": "1.0.0-rc.1",
     "@types/pg": "^8.11.0"
   }
 }
