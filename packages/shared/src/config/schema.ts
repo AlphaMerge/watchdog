@@ -260,7 +260,8 @@ export interface SmtpRelay {
    * What this host calls itself in EHLO.
    *
    * Some relays refuse a HELO that does not resolve, and a container's hostname rarely does.
-   * Empty uses the machine's own name.
+   * Empty leaves it to nodemailer, which sends the machine's name only if it contains a dot and
+   * `[127.0.0.1]` otherwise — so a short hostname needs this set to the host's FQDN.
    */
   heloName: string;
   timeoutMs: number;
@@ -871,9 +872,12 @@ const tlsSchema: JSONSchemaType<TlsConfig> = {
  * One relay's shape.
  *
  * A function rather than a constant because `JSONSchemaType` will not let two properties share
- * one schema object, and because the primary and the fallback differ in exactly one default: an
- * unconfigured fallback has no port either, so an operator who sets only a host gets an error
- * rather than a silent attempt on 587.
+ * one schema object, and because the primary and the fallback differ in exactly one default, the
+ * port. The fallback's is 0, and **0 is not a guarded "no port"**: `buildTransport` hands it to
+ * nodemailer, whose `SMTPConnection` reads `Number(port) || (secure ? 465 : 587)`. So a relay
+ * with a host and port 0 connects on 587, or 465 with `security: 'tls'`, without a word — the
+ * documentation says to set the port whenever the host is set. Not refused at load, because
+ * configurations that rely on it load today.
  */
 function relaySchema(defaultPort: number): JSONSchemaType<SmtpRelay> {
   return {
@@ -1066,8 +1070,8 @@ export const coreConfigSchema: JSONSchemaType<CoreConfig> = {
           properties: {
             sender: { type: 'string', default: '' },
             primary: relaySchema(587),
-            // Nothing by default: a fallback nobody configured must not quietly become a second
-            // attempt against the same host.
+            // Its empty host is what turns it off. Its port of 0 is nodemailer's default once a
+            // host is set (see `relaySchema`).
             fallback: relaySchema(0),
           },
         },

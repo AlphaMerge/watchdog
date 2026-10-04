@@ -23249,9 +23249,13 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
         and finds its `notifications.smtp` equal to the schema's defaults; `config-check.test.ts`
         checks it, exit 0, nothing on stderr; the `H-32` launcher test checks the packaged copy.
         Mutation 2/2 on the example (a fallback port, a sender).
-      - **Found, not fixed**: a relay with a host and port `0` — the fallback's default — passes
-        `config check` and fails every send through it. The schema's comment says that is "an
-        error", and it is, at send time. The documentation says to set both.
+      - **Port `0`, the fallback's default, is not a "no port" state**: `buildTransport` hands it
+        to nodemailer 10.0.1, whose `SMTPConnection` takes `Number(port) || (secure ? 465 : 587)`,
+        so a relay with a host and port `0` connects quietly on 587, or 465 with `security: tls`.
+        Decided not to refuse it at load, since configurations that rely on it load today; the
+        documentation and the schema's comment say what happens and to set the port with the
+        host. Likewise an empty `heloName` is the hostname only when it has a dot, and
+        `[127.0.0.1]` otherwise, which `administration.md` now says.
 
 ## Release 1.1 — Windows
 

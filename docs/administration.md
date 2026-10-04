@@ -1031,12 +1031,12 @@ is a valid configuration, not a broken one.
 | --- | --- | --- |
 | `smtp.sender` | empty | The `From` address, unless a template's `senderOverride` gives another. Without it nothing is sent. |
 | `host` | empty | The relay, by name or address. An empty primary is no email at all; an empty fallback is no fallback. |
-| `port` | `587`; the fallback's `0` | **The fallback has no port until you give it one**, so that a fallback given only a host is not quietly a second attempt on 587. Set both. |
+| `port` | `587`; the fallback's `0` | **`0` is not "no port": it is nodemailer's default**, 587, or 465 when `security` is `tls`. A fallback given only a host connects there without a word. Set the port whenever you set a host. |
 | `security` | `starttls` | `starttls` connects in the clear and *requires* the upgrade, so a relay that stops offering it fails rather than being sent the password in the clear. `tls` is TLS from the first byte, usually on 465. `none` is for a relay on the same host. |
 | `verifyCertificate` | `true` | Whether the relay's certificate must verify, against the trust store the core runs with and for the name in `host`. `false` keeps the encryption and drops the check, for a relay whose certificate the host cannot verify. |
 | `auth` | `none` | `none`; `auto`, which lets the relay's `EHLO` choose; or `plain`, `login` or `cram-md5` to force one. Anything but `none` sends `user` and `password`. |
 | `user`, `password` | empty | The relay account. The password is better given from a file, below, than written here. |
-| `heloName` | empty | What the core calls itself in `EHLO`. Empty is the machine's own name; some relays refuse one that does not resolve. |
+| `heloName` | empty | What the core calls itself in `EHLO`. Empty is the machine's name **only if it has a dot in it**: a short one such as `monitor01` is sent as `[127.0.0.1]`, which a relay that checks `HELO` refuses. For such a relay, set the host's fully qualified name. |
 | `timeoutMs` | `20000` | For the connection, the greeting and each wait on the socket. 100 to 300,000. |
 | `publicUrl` | empty | The web UI as the people receiving an alarm reach it — usually the reverse proxy's address. |
 | `siteName` | `MonitoringSystem` | What `%sitename` says. |

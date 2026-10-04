@@ -836,7 +836,8 @@ describe(
       // example configuration the package ships.
       const { result, stage } = packageIn(packagingRepository());
       assert.equal(result.status, 0, result.stderr);
-      const installed = mkdtempSync(join(tmpdir(), 'ms-launcher-'));
+      // Under `scratch`, which `after` removes: `rmSync` takes the links, not what they point at.
+      const installed = freshDir('launcher');
       mkdirSync(join(installed, 'bin'));
       mkdirSync(join(installed, 'app'));
       for (const svc of ['core', 'probe']) {
