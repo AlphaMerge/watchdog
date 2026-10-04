@@ -386,7 +386,15 @@ SYSCTL
     if printf '%s\t%s\n' "${probe_gid}" "${probe_gid}" 2>/dev/null >"${PING_RANGE}"; then
       echo "==> ICMP sockets allowed for group ms-probe (gid ${probe_gid}), in ${ping_conf}"
     else
-      echo "==> warning: wrote ${ping_conf}, which applies at the next boot; 'sysctl --system' applies it now" >&2
+      # Where /proc/sys/net is read-only, a boot's `systemd-sysctl` and `sysctl --system` are
+      # refused for the same reason, so the file written above is not promised to fix anything.
+      cat >&2 <<REFUSED
+==> warning: this host refused the write to ${PING_RANGE}, so net.ipv4.ping_group_range
+    is still ${range_lo}-${range_hi}, and every ICMP sensor this probe runs will be Down until it
+    includes group ms-probe (gid ${probe_gid}). ${ping_conf} asks for that,
+    but whatever refused this write may refuse it too. Check with:
+        sysctl net.ipv4.ping_group_range
+REFUSED
     fi
   else
     cat >&2 <<RANGE

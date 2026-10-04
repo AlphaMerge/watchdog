@@ -133,7 +133,12 @@ fi
 echo "    ${tarball}"
 
 remove_box() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
+# **This run's installer output, and nobody else's.** Runs share the machine by design (`P-200`:
+# a Debian and an Ubuntu run, or CI and a hand run), and a log at a fixed /tmp path let one run
+# pass on what another one's installer printed.
+logs="$(mktemp -d "${TMPDIR:-/tmp}/ms-smoke-install.XXXXXX")"
 cleanup() {
+  rm -rf "${logs}"
   if [ "${MS_SMOKE_KEEP:-0}" = "1" ]; then
     echo "==> kept ${container} (docker rm -f ${container} removes it)"
     return
@@ -191,15 +196,15 @@ docker exec "${container}" bash -c 'mkdir -p /tmp/unpacked && tar -xzf /tmp/rele
 # hidden for this one attempt.
 ping_path="$(docker exec "${container}" bash -c 'command -v ping')"
 docker exec "${container}" mv "${ping_path}" "${ping_path}.hidden"
-if docker exec "${container}" bash -c 'cd /tmp/unpacked/ms-* && ./install.sh' >/tmp/noping.log 2>&1; then
+if docker exec "${container}" bash -c 'cd /tmp/unpacked/ms-* && ./install.sh' >"${logs}/noping.log" 2>&1; then
   echo "    FAILED — install.sh installed onto a host with no ping" >&2
   failed_early=1
-elif ! grep -q 'ping is required' /tmp/noping.log; then
+elif ! grep -q 'ping is required' "${logs}/noping.log"; then
   echo "    FAILED — install.sh refused, but not for ping:" >&2
-  sed 's/^/      /' /tmp/noping.log >&2
+  sed 's/^/      /' "${logs}/noping.log" >&2
   failed_early=1
 else
-  echo "    no ping: refused — $(grep 'ping is required' /tmp/noping.log)"
+  echo "    no ping: refused — $(grep 'ping is required' "${logs}/noping.log")"
 fi
 docker exec "${container}" mv "${ping_path}.hidden" "${ping_path}"
 docker exec "${container}" test ! -e /opt/ms/bin/ms-core || {
@@ -215,11 +220,11 @@ docker exec "${container}" bash -c 'echo "1 0" > /proc/sys/net/ipv4/ping_group_r
 # **A first install, as an operator runs it: no `--no-start`** (`H-30`). The core's file was just
 # created from the example, with no password, so nothing is started and the installer says what
 # to set — and exits 0, where it used to start the core onto the empty password and fail.
-if docker exec "${container}" bash -c 'cd /tmp/unpacked/ms-* && ./install.sh' >/tmp/first.log 2>&1; then
-  sed 's/^/    /' /tmp/first.log | tail -22
+if docker exec "${container}" bash -c 'cd /tmp/unpacked/ms-* && ./install.sh' >"${logs}/first.log" 2>&1; then
+  sed 's/^/    /' "${logs}/first.log" | tail -22
 else
   echo "    FAILED — a first install exited non-zero:" >&2
-  sed 's/^/      /' /tmp/first.log >&2
+  sed 's/^/      /' "${logs}/first.log" >&2
   failed_early=1
 fi
 echo "==> asserting a first install started nothing, and said what to configure"
@@ -228,9 +233,15 @@ for svc in ms-core ms-probe; do
   printf '    %-9s %s\n' "${svc}:" "${state}"
   [ "${state}" = "inactive" ] || { echo "    FAILED — ${svc} is ${state} after a first install" >&2; failed_early=1; }
 done
+# **Only ms-setup's message, from its heading to its last line.** install.sh ends every run that
+# has a core with its own `reset-failed` and `start` lines, so the whole log would say those
+# whether or not ms-setup said anything.
+sed -n '/core\.json is new, so nothing was started/,/the lines are in the comments of ms-core\.service/p' \
+  "${logs}/first.log" >"${logs}/first-message.log"
 for said in 'core.json is new, so nothing was started' 'database.password' \
-  'MS_DATABASE__PASSWORD__FROM_FILE' 'systemctl reset-failed ms-core ms-probe'; do
-  grep -qF -- "${said}" /tmp/first.log || {
+  'MS_DATABASE__PASSWORD__FROM_FILE' 'systemctl reset-failed ms-core ms-probe' \
+  'systemctl start ms-core ms-probe' 'the lines are in the comments of ms-core.service'; do
+  grep -qF -- "${said}" "${logs}/first-message.log" || {
     echo "    FAILED — the first install did not say '${said}'" >&2
     failed_early=1
   }
@@ -584,9 +595,9 @@ if [ "${expected_profile}" = "v1" ]; then
 fi
 # With a start, the way an upgrade is run: it stops both services, swaps the release in and
 # starts them again (`H-21`) — `--no-start` would now leave them stopped.
-docker exec "${container}" bash -c 'cd /tmp/unpacked/ms-* && ./install.sh' >/tmp/rerun.log 2>&1 || {
+docker exec "${container}" bash -c 'cd /tmp/unpacked/ms-* && ./install.sh' >"${logs}/rerun.log" 2>&1 || {
   echo "    FAILED — the re-run did not succeed:" >&2
-  sed 's/^/      /' /tmp/rerun.log >&2
+  sed 's/^/      /' "${logs}/rerun.log" >&2
   failed=1
 }
 if [ "${expected_profile}" = "v1" ]; then
@@ -599,13 +610,13 @@ if [ "${expected_profile}" = "v1" ]; then
   # and in `ms-setup` after it, and `ms-setup` is the one that shows a pass its warnings. A count
   # of two is the warning printed by both; `grep -c` prints 0 and exits 1 on none, which the
   # comparison reads and `set -e` does not.
-  shown="$(grep -c '^    warning: flowListener.enabled' /tmp/rerun.log || true)"
-  if grep -q 'probe.json is valid for .*The check says:' /tmp/rerun.log && \
+  shown="$(grep -c '^    warning: flowListener.enabled' "${logs}/rerun.log" || true)"
+  if grep -q 'probe.json is valid for .*The check says:' "${logs}/rerun.log" && \
      [ "${shown}" = "1" ]; then
     echo "    a passing check's warning: shown once (flowListener.enabled on a v1 probe)"
   else
     echo "    FAILED — the upgrade did not show the passing check's warning exactly once (${shown}):" >&2
-    sed 's/^/      /' /tmp/rerun.log >&2
+    sed 's/^/      /' "${logs}/rerun.log" >&2
     failed=1
   fi
   docker exec "${container}" cp -p /tmp/probe.json.h26 /etc/ms/probe.json
@@ -695,7 +706,7 @@ if docker exec "${container}" /opt/ms/bin/ms-core config check >/dev/null 2>&1; 
   echo "    FAILED — ms-core config check with no flag passed a core.json that cannot load" >&2
   failed=1
 fi
-if docker exec "${container}" bash -c 'cd /tmp/unpacked/ms-* && ./install.sh' >/tmp/upgrade.log 2>&1; then
+if docker exec "${container}" bash -c 'cd /tmp/unpacked/ms-* && ./install.sh' >"${logs}/upgrade.log" 2>&1; then
   echo "    FAILED — install.sh restarted onto a configuration that cannot load" >&2
   failed=1
 else
@@ -716,9 +727,9 @@ else
     echo "    FAILED — the refusal left the installed tree changed" >&2
     failed=1
   fi
-  grep -q 'Nothing was changed' /tmp/upgrade.log || {
+  grep -q 'Nothing was changed' "${logs}/upgrade.log" || {
     echo "    FAILED — the refusal did not say that nothing was changed:" >&2
-    sed 's/^/      /' /tmp/upgrade.log >&2
+    sed 's/^/      /' "${logs}/upgrade.log" >&2
     failed=1
   }
 fi
@@ -851,7 +862,7 @@ docker exec "${container}" bash -c 'printf "%s\n" "[Service]" \
   > /etc/systemd/system/ms-core.service.d/h30-password-file.conf'
 docker exec "${container}" systemctl daemon-reload
 core_pid_before="$(docker exec "${container}" systemctl show ms-core -p MainPID --value)"
-if docker exec "${container}" /opt/ms/libexec/ms-setup --components core,probe >/tmp/credential.log 2>&1; then
+if docker exec "${container}" /opt/ms/libexec/ms-setup --components core,probe >"${logs}/credential.log" 2>&1; then
   state="$(docker exec "${container}" systemctl is-active ms-core 2>/dev/null || true)"
   core_pid_after="$(docker exec "${container}" systemctl show ms-core -p MainPID --value)"
   if [ "${state}" != active ]; then
@@ -861,7 +872,7 @@ if docker exec "${container}" /opt/ms/libexec/ms-setup --components core,probe >
   elif [ "${core_pid_after}" = "${core_pid_before}" ]; then
     echo "    FAILED — ms-setup did not restart the core (${core_pid_before})" >&2
     failed=1
-  elif grep -q 'is new, so nothing was started' /tmp/credential.log; then
+  elif grep -q 'is new, so nothing was started' "${logs}/credential.log"; then
     echo "    FAILED — a re-run was taken for a first install" >&2
     failed=1
   elif ! matches '"password": ""' docker exec "${container}" cat /etc/ms/core.json; then
@@ -872,7 +883,7 @@ if docker exec "${container}" /opt/ms/libexec/ms-setup --components core,probe >
   fi
 else
   echo "    FAILED — ms-setup refused with the password in a file:" >&2
-  sed 's/^/      /' /tmp/credential.log >&2
+  sed 's/^/      /' "${logs}/credential.log" >&2
   docker exec "${container}" journalctl -u ms-core --no-pager -n 30 || true
   failed=1
 fi

@@ -96,11 +96,13 @@ the root object and nothing else, so none of this is optional:
 
 - **The local probe**, approved onto a probe object you create first (`installation.md` §5).
 - **`ping`, and the probe's right to use it.** The package brings `iputils-ping` (`H-31`). The
-  probe's unit gives `ping` no raw socket, so it uses an unprivileged ICMP socket, which the
-  install allows for the `ms-probe` group: `cat /etc/sysctl.d/60-ms-probe-ping.conf` names that
-  group's id, and `sysctl net.ipv4.ping_group_range` includes it. If the install warned that
-  the range leaves `ms-probe` out, widen it first (`installation.md`, *Before you start*);
-  otherwise every ping sensor reads Down.
+  probe's unit gives `ping` no raw socket, so it uses an unprivileged ICMP socket, which only
+  the groups in `net.ipv4.ping_group_range` may open. Check the live value: the two numbers
+  `sysctl net.ipv4.ping_group_range` prints must include the id `getent group ms-probe` gives.
+  Where the range was still the kernel's empty default, the install set it, and put the same in
+  `/etc/sysctl.d/60-ms-probe-ping.conf`; where it already included the group, that file does not
+  exist, and need not. If the range leaves `ms-probe` out, widen it first (`installation.md`,
+  *Before you start*); otherwise every ping sensor reads Down.
 - **The listeners**, in `/etc/ms/probe.json`, if your devices send syslog or traps:
   `syslogListener.enabled` (UDP and TCP 10514 by default) and `trapListener.enabled` (UDP 162).
   Restart the probe afterwards, after `reset-failed`.
