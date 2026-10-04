@@ -7594,6 +7594,17 @@ because each is a decision rather than a defect:
       not recorded; a re-decision clears what is owed before its commit; `retryGivenUp` clears
       nothing; the sweep does not call it.
 
+- [ ] **P-253 — what is left of a rolled-back change and the reachability overlay** · S ·
+      P-249 · Found 2026-10-04 by `P-249`'s review. A probe result decided on another
+      connection while a mutation is still open sees the overlay that mutation changed; if the
+      mutation rolls back, that sensor's stored state is wrong until its next result. The
+      sensors owed a re-decision are logged, not a Core Health reading. Nothing mechanical
+      stops a future `catch` inside a transaction: a build-hygiene check for a `try` in a
+      `tx` callback that neither rethrows nor uses `savepoint` would be the durable guard.
+      `reports/runs.ts` `claim` and `state/stream.ts` `publish`/`publishProbe` take a
+      `Queryable` and catch without a savepoint, safe only while every caller passes the pool.
+      **Done when** each is fixed with a test or written down as accepted.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -18077,6 +18088,21 @@ because each is a decision rather than a defect:
         nobody. That is logged ("the live stream is behind") but not counted on Core Health
         and not resynced, so every open tree silently misses that change. It goes against
         "never drop without counting", and is the same failure (1) now handles for the check.
+
+- [ ] **U-28 — what is left of the stream's edge checks** · S · U-27 · Found 2026-10-04 by
+      `U-27` and its review. (1) An edge that shares a question waits for the one already out
+      and then a whole second one, but its bound runs from its arrival: with a database that
+      answers in 1.2 s about a third of edges are counted as failed checks and logged, though
+      every query answered inside its own wait. Bound a joiner from when its own question is
+      asked, or give it the remainder of the one out. (2) `edgesCoalesced` is documented as
+      "not lost and not unvetted" (`StreamStats`, the Core Health channel comment,
+      `administration.md`), but coalesced edges released when the shared question goes late
+      are sent by the unvetted rule; say so. (3) When `publish`'s ancestry read fails the batch
+      goes to nobody, logged and not counted, so every open tree misses that change: count it
+      on Core Health and send `overflow` to the sockets it would have reached. (4) After a
+      long outage every held-back page resumes on the same sweep, N snapshot reads at once on
+      a database that has just come back; spread them. **Done when** each is fixed with a
+      test.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
