@@ -29,6 +29,14 @@ that gets run badly or not at all.
 > about to field-test**, rather than trusting this row, and update the date. If CI is running
 > again by then, say so here and the rule can go back to trusting it.
 
+**The procedure itself was rehearsed** on 2026-10-04, on `v1.0.0-rc.2` (arm64) against the
+development simulators, compressed to three hours (`H-15`,
+[the write-up](findings/2026-10-04-field-test-dress-rehearsal.md)). It found twelve places where
+this runbook, or `installation.md` where it sends you, was wrong or unclear. They are fixed in
+both. That proves the steps can be
+followed, and nothing about the product. It is not a row in the table above: it is not a check
+to re-run, and a rehearsal is not part of `H-09`.
+
 **What this runbook adds is what those cannot reach**: real devices that answer in ways a
 simulator does not, and a week of unattended running.
 
@@ -64,7 +72,44 @@ sudo dpkg -i ms_<version>_amd64.deb
 
 A candidate's package spells its version with `~` where the tag has `-`: `v1.0.0-rc.1` is
 `ms_1.0.0~rc.1_amd64.deb` and `ms-1.0.0~rc.1-1.x86_64.rpm`, so that `1.0.0` sorts after it and
-upgrades it. The tarball and `/opt/ms/VERSION` keep the tag's spelling.
+upgrades it. The tarball and `/opt/ms/VERSION` keep the tag's spelling. Check the package's
+SHA-256 against the candidate's record (`docs/findings/2026-10-04-v1-release-candidate-cut.md`)
+before installing it.
+
+**On a fresh install, `dpkg -i` ends in an error, and that is expected** (`H-30`). The package
+starts both services, the example `core.json` has no database password, and the core refuses to
+start (exit 78). `dpkg` then reports *post-installation script subprocess returned error exit
+status 1* and leaves the package half-configured: `dpkg -l ms` reads `iF`. Finish the install
+with [`installation.md`](installation.md) §3–§5, and then let `dpkg` finish too:
+
+```bash
+sudo nano /etc/ms/core.json                     # database.password, and the relay (step 3)
+sudo /opt/ms/bin/ms-core config check
+sudo systemctl reset-failed ms-core ms-probe
+sudo dpkg --configure -a                        # runs the setup again and starts both
+dpkg -l ms                                      # ii
+```
+
+**Then, before step 2, everything the week will read has to exist.** A fresh installation has
+the root object and nothing else, so none of this is optional:
+
+- **The local probe**, approved onto a probe object you create first (`installation.md` §5).
+- **`ping`.** The ICMP sensor runs the system binary, and the package does not depend on it
+  (`H-31`): if `command -v ping` finds nothing, `sudo apt install iputils-ping`. Otherwise every
+  ping sensor reads Down with *the "ping" binary is not available on this probe*.
+- **The listeners**, in `/etc/ms/probe.json`, if your devices send syslog or traps:
+  `syslogListener.enabled` (UDP and TCP 10514 by default) and `trapListener.enabled` (UDP 162).
+  Restart the probe afterwards, after `reset-failed`.
+- **A Core Health sensor and a Probe Health sensor** (`ms.core.health`, `ms.probe.health`),
+  on a device under the probe. Nothing creates them for you, and steps 2 to 4 read both.
+- **The devices**, and their credentials.
+- **A token for the setting up.** Everything after the install is the UI or the API. For the
+  API, sign in and make a `full`-scope token for steps 1 to 3 (`POST /api/v1/auth/tokens`
+  `{"name":"field-test-setup","scope":"full"}`), and revoke it before the week starts. Step 4's
+  `read` token is for the readings, and a `read` token cannot create a trigger.
+- **A new password for the first administrator.** Signing in with the generated one works,
+  and the API does not insist on the change (`mustChangePassword` is the client's to enforce),
+  so a week can run on the password in `first-admin-password` unless you change it.
 
 ## 2. Restart everything, once, before you start counting
 
@@ -77,11 +122,23 @@ So restart both services deliberately, after the devices are added, and confirm 
 back:
 
 ```bash
+sudo systemctl reset-failed ms-core ms-probe
 sudo systemctl restart ms-core ms-probe
 ```
 
-Then check `connected` on Probe Health, and that `scheduled` matches what the core assigned. A
-probe that is connected but scheduling nothing is the shape that defect took.
+**`reset-failed` first.** Every start counts toward each unit's five in ten minutes, an
+operator's included. The install, the restart after the password and `dpkg --configure -a`
+have already spent three of the core's; one restart of the probe for its listeners spends
+another. Without the reset, the next start after this one is refused and the unit is left
+`failed`.
+
+Then check `connected` on Probe Health, and that `scheduled` matches what the core assigned:
+every sensor under that probe **except Core Health and Probe Health**, which the core evaluates
+itself. Syslog and trap sensors count — the probe schedules a scan of its buffer for each.
+`GET /api/v1/probes/<probe-object-id>/health` answers both in its message — *connected, 29
+sensors scheduled, …* — within a heartbeat of the restart; the Probe Health sensor's own values
+follow at the next sweep. A probe that is connected but scheduling nothing is the shape that
+defect took.
 
 **Anything that only breaks on restart is invisible to every other test we have**, which is
 exactly why it is step 2 and not an afterthought.
@@ -108,9 +165,33 @@ a channel without one never will, whatever it reads.
 | `probesDown` | Core Health | **no** | a probe is not connected |
 
 **So six of the seven need no threshold at all.** Their limits ship declared (`S-18`), which means
-Core Health and Probe Health already go Down or Warning on their own; one *state* trigger on each
-of those two sensors — Down and Warning, with a template that names the channel — delivers all six.
-What you are adding is delivery, not thresholds.
+Core Health and Probe Health already go Down or Warning on their own. *State* triggers on those
+two sensors deliver all six: **two on each, one for Down and one for Warning**, because a state
+trigger watches exactly one state. Give each a template whose body carries `%lastmessage`, which
+names the channel. What you are adding is delivery, not thresholds.
+
+```json
+{ "kind": "state", "settings": { "state": "down", "initialTemplateId": 1, "recoveryTemplateId": 1 } }
+```
+
+**Delivery needs a relay, and nothing sets one.** The example `core.json` has no
+`notifications` section, so email goes nowhere until you add one and restart the core (after
+`reset-failed`):
+
+```json
+"notifications": {
+  "siteName": "Field test",
+  "smtp": {
+    "sender": "ms-core@example.org",
+    "primary": { "host": "relay.example.org", "port": 587, "security": "starttls", "auth": "none" }
+  }
+}
+```
+
+**Then prove it before the week, not during it.** `POST /api/v1/templates/<id>/test` with
+`{"sensorId": <probe-health-id>}` sends one real message through the template, the relay and the
+recipients, and answers `"delivered": true` or the relay's error. A week with no alarm and a
+broken relay looks exactly like a week with nothing to report.
 
 **`probesDown` is the exception, and it is deliberate.** It carries no limit because a probe that
 is gone already alarms on its own Probe Health sensor, through the `ms.probe.link` lookup: that
@@ -205,7 +286,20 @@ dependency versions no suite ran against, so re-cut that one too.
 The numbers that decide the criterion:
 
 - **`memory` on both health sensors.** Flat is the pass. The 24-hour soak measured +1.10 MB/h on
-  the core and +0.68 on the probe; a week should not look different in kind.
+  the core and +0.68 on the probe; a week should not look different in kind. `/values` is one
+  reading, which cannot show a slope: read the history since the start reading, and judge the
+  trend from the hourly averages, not from two points.
+
+  ```bash
+  curl -s -H "Authorization: Bearer $MS_TOKEN" \
+    "localhost:8080/api/v1/sensors/<core-health-id>/history?from=<start-reading-time>&resolutionSeconds=3600"
+  ```
+
+  **Leave the first hour after a restart out of it.** A restarted service is not at its settled
+  size, and step 2 restarts both just before the start reading. In the dress rehearsal the core
+  read up to 325 MB in the minutes after it, and 150 MB from ten minutes on
+  (`findings/2026-10-04-field-test-dress-rehearsal.md`). A slope fitted from the start reading
+  measures the settling, not the week.
 - **`schedulerLag`** — p95 against the 1,000 ms budget.
 - **`spoolDropped`, `evictedChunks`** — both must still be zero.
 - **Sensor states.** Every Down should correspond to a device that was actually down. A Down that

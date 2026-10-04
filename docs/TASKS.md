@@ -3150,6 +3150,23 @@ because each is a decision rather than a defect:
       - the raw pattern message instead of the words;
       - the property name left out.
 
+- [ ] **N-20 — a held alarm's recovery is delivered before the alarm** · S · N-05, M-18 · Found
+      2026-10-04 by `H-15`. A template's default summarisation, `first-down-and-up`, sends the
+      first Down and the first Up of a window at once and holds the rest, a Warning included,
+      for the 15-minute digest. In the
+      rehearsal's outage:
+      - Probe Health went to Warning at 15:15:06.
+      - It recovered at 15:17:36, and after its five-minute hold its recovery was **sent at
+        15:22:36**: *Probe Health is up*.
+      - The Warning it recovered from was **delivered at 15:30:36**, in the digest.
+
+      An operator is told a probe is back eight minutes before being told anything was wrong
+      with it. Then the "alarm" arrives about something already over, with nothing in the
+      digest to say so. One outage was still one alarm, which is right. **Done when** a recovery
+      whose alarm is still held goes out with or after it, or the digest says the alarm has
+      already recovered. A scenario test (`M-17`) plays a Warning, a recovery inside the window
+      and the digest, and asserts the order the recipient sees.
+
 ## Phase 5 — Web UI
 
 - [x] **U-01 — Frontend scaffold** · M · F-01 · React 19 + TypeScript + Vite 8, routing, design
@@ -7604,6 +7621,48 @@ because each is a decision rather than a defect:
       `reports/runs.ts` `claim` and `state/stream.ts` `publish`/`publishProbe` take a
       `Queryable` and catch without a savepoint, safe only while every caller passes the pool.
       **Done when** each is fixed with a test or written down as accepted.
+
+- [ ] **P-254 — a trap or syslog message before a sensor's first scan is counted by nobody** ·
+      S · T-06, T-20 · Found 2026-10-04 by `H-15`
+      (`findings/2026-10-04-field-test-dress-rehearsal.md`). After a probe restart, the
+      listener starts receiving at once. Each sensor's cursor is registered only at its first
+      scan, and `Ring.drain` registers it at the *current* sequence, so everything already in the
+      ring is skipped.
+      - Observed: three traps sent 41 s after the restart were counted in Probe Health's
+        `trapReceived`, and in neither trap sensor's `count` or `dropped`.
+      - Three sent once the cursors existed were counted.
+      - That is up to one scan interval of traps or syslog per sensor per restart, lost without
+        a count. A device rebooting alongside the probe sends exactly then. The comment in
+        `ring.ts` says a first scan "has genuinely received nothing", and the listener had.
+
+      **Done when** a sensor's first drain after a listener starts reads from the listener's
+      start (or a message received before the first scan is counted as `dropped`), with a test
+      that sends before the first drain and asserts the count.
+
+- [ ] **P-255 — Probe Health blames the protocol before a probe's first heartbeat** · S · R-06 ·
+      Found 2026-10-04 by `H-15`. Four seconds after a restart,
+      `GET /probes/<id>/health` read *connected; its own numbers are unavailable — it speaks
+      protocol 28, the same as this build*. The numbers were unavailable because no heartbeat
+      had arrived yet. The sentence gives a protocol as the reason when there is no skew, which
+      sends an operator looking at versions. **Done when** a connected probe with no heartbeat
+      yet is described as that, and the protocol is named only when it is the reason, with a
+      test for each.
+
+- [ ] **P-256 — a device that hung and recovered leaves the probe holding more sessions** · S ·
+      P-36 · Found 2026-10-04 by `H-15`. One device, with three SSH sensors and five SNMP
+      sensors, hung for three minutes (a paused container: its TCP accepted and nothing
+      answered). Probe Health's `sessionsOpen` read:
+      - 5 for the 85 minutes before;
+      - 10 during the hang;
+      - **8 for the 85 minutes after**, to the end of the run, with `sessionsOpened` and
+        `sessionsEvicted` both 0 after the outage.
+
+      The same sensors, on the same device, were served by 5 sessions before. Either sessions
+      opened while the old ones hung are now kept beside them, or the hung ones are counted and
+      never closed. The runbook tells an operator to read `sessionsOpen` against
+      `sessionsEvicted`, and this pair reads steady and healthy. **Done when** it is explained
+      and either asserted as intended, or the sessions a hang left behind are closed and a test
+      hangs a simulator session and asserts the count returns.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
@@ -22308,7 +22367,7 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       `docs/findings/2026-10-04-v1-release-candidate-cut.md`. No re-cut was needed: the field
       host installs `ms_1.0.0~rc.2_amd64.deb` from the same tag.
 
-- [ ] **H-15 — The field-test dress rehearsal** · M · H-11, H-12, H-13, H-14 ·
+- [x] **H-15 — The field-test dress rehearsal** · M · H-11, H-12, H-13, H-14 ·
       `docs/runbook-field-test.md` end to end on the smoke-install Ubuntu 24.04 box, against the
       simulators in `docker-compose.dev.yml` (`snmpsim`, the syslog sender, GreenMail, MariaDB,
       MSSQL, the in-house HTTP, SSH and mail servers) with MailHog as the relay: install from the
@@ -22325,6 +22384,25 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       (`docs/findings/2026-09-28-start-exits.md`). **Record every watchdog kill and the host's
       load** beside each step: `P-215`'s rerun saw systemd's watchdog kill idle services at load 24
       on 8 CPUs (`P-220`), and a kill in the rehearsal is a finding, not noise.
+
+      **H-15 outcome (2026-10-04).** The runbook was run end to end on `v1.0.0-rc.2`.
+      - **Setup**: installed from `ms_1.0.0~rc.2_arm64.deb`, its checksum checked against the cut
+        record, on the arm64 Ubuntu 24.04 smoke box with systemd 255. It ran against snmpsim,
+        GreenMail, MariaDB, SQL Server, the target and a syslog sender, with MailHog as the
+        relay: 31 sensors on 9 devices.
+      - **Compression**: 24 h → 1 h and the week → 3 h. T0 was 13:44:34 UTC and the end 16:45.
+      - **Watchdog kills: none.** No restarts after step 2. The VM's load peaked at 11.95 on 8
+        CPUs and the Mac's at 10.37, both from other work.
+      - **The surface**: every route in the appendix answered as its table says, against the
+        installed core, and the catalogue matched both ways.
+      - **Twelve places** the runbook (or `installation.md`, where it sends the reader) was
+        wrong or unclear. Ten were confirmed and fixed, one ("restart before the triggers")
+        was refuted in effect, and one (`ping`) was found only by running. The worst: on a
+        fresh install, step 1's `dpkg -i` fails and leaves the package half-configured.
+      - **New tickets**: `H-30`, `H-31`, `H-32`, `H-33`, `N-20`, `P-254`, `P-255`, `P-256`.
+      - **The write-up**: `docs/findings/2026-10-04-field-test-dress-rehearsal.md`.
+
+      **It proves the procedure only.** `H-09` stays open.
 
 - [x] **H-16 — The Linux-only 1.0 documentation** · S · H-10 · 1.0 is Linux-only (decided
       2026-09-28), and four places still promise Windows. **Done when** each says plainly that 1.0
@@ -23013,6 +23091,48 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       scripts/smoke-install.sh` and the `.deb` install have passed against the rc's x86_64
       packages on an x86_64 machine, or under QEMU emulation rather than Rosetta — or the field
       test's step 1, on the field host, is recorded as that proof.
+
+- [ ] **H-30 — a fresh `.deb` install ends in a dpkg error and a half-configured package** · S ·
+      H-05, P-222 · Found 2026-10-04 by `H-15`. On a fresh install, `postinst` starts both
+      services. The example `core.json` has no database password, so the core refuses at once
+      (exit 78, by design since `P-222`). `ms-setup` then exits 1, and `dpkg` reports
+      *post-installation script subprocess returned error exit status 1* and leaves `ms` at `iF`.
+      That happens on every fresh install, because no installation can have the password before
+      the package has put `core.json` there. Until `dpkg --configure -a`, every later `apt`
+      operation complains about a broken package, and `installation.md` mentioned that command only
+      for upgrades. The runbook and `installation.md` now say to expect it. **Done when** a fresh
+      `dpkg -i` ends `ii`, with the core left stopped and a message saying what to configure:
+      for example, `ms-setup` does not start a core whose database password is empty and says so,
+      or a refused first start on a fresh install is reported and not returned as failure. And
+      `smoke-packages.sh` installs once without `MS_SETUP_NO_START` and asserts `ii`. The `.rpm`
+      gets the same question.
+
+- [ ] **H-31 — the packages do not declare the `ping` the ICMP sensors run** · S · P-07 · Found
+      2026-10-04 by `H-15`. ICMP runs the system `ping` (`ADR-001` Decision 6). The `.deb`
+      declares `Depends: openssl, systemd, adduser` and `Recommends: nodejs`. Ubuntu 24.04's
+      container image has no `ping`, and every `icmp.ping` sensor read Down with *the "ping"
+      binary is not available on this probe*. `installation.md`'s requirements do not list it
+      either. **Done when** the `.deb` and the `.rpm` (and `install.sh`'s check) declare
+      `iputils-ping` / `iputils`, as a dependency or a recommendation with the reason written down,
+      and `installation.md`'s requirements table lists it.
+
+- [ ] **H-32 — every start reports the launcher's own `MS_BUILD_VERSION` as ignored** · S ·
+      H-11 · Found 2026-10-04 by `H-15`. `/opt/ms/bin/ms-core` exports `MS_BUILD_VERSION`, and
+      the core's start log (`"ignoredEnv":["MS_BUILD_VERSION"]`) and every `config check`
+      (`ignored MS_*    MS_BUILD_VERSION`) list it as an environment variable the operator set
+      and the configuration ignored. An operator reading for a mistyped override is shown one on
+      every installation. **Done when** a variable the launcher sets is not reported as ignored,
+      and a test runs `config check` through the packaged launcher and asserts the line is gone.
+
+- [ ] **H-33 — no operator document says how to send email** · S · N-07 · Found 2026-10-04 by
+      `H-15`. `notifications.smtp` (sender, primary and fallback relay) is in the configuration
+      schema and nowhere else an operator reads. `deploy/examples/core.json` has no
+      `notifications` section, and `installation.md` and `administration.md` do not name the
+      setting. An installation set up from the documentation sends no email, and nothing says
+      so until an alarm is due. The field-test runbook now gives the section and a test send.
+      **Done when** `administration.md` documents `notifications` (relay, fallback, sender,
+      `publicUrl`, `siteName`) with the test send, and the example `core.json` carries the section,
+      with an empty relay, in a shape `config check` accepts.
 
 ## Release 1.1 — Windows
 

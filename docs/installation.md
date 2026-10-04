@@ -211,13 +211,21 @@ inbound on the probe host. It presents its certificate and the access key the in
 and then waits: a new probe arrives in **`pending`** and is given no work at all until somebody
 approves it.
 
-Approve it under **Probes** in the UI, or:
+Approve it under **Probes** in the UI, or with an API token (`MS_TOKEN`, scope `full`), first
+creating the probe object it will own — a fresh installation has the root object and nothing
+else:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/api/v1/probes/<gid>/approve -d '{"objectId":2,"local":true}'
+auth=(-H "Authorization: Bearer ${MS_TOKEN}" -H 'content-type: application/json')
+curl -s "${auth[@]}" http://127.0.0.1:8080/api/v1/probes?status=pending     # the probe's gid
+curl -s "${auth[@]}" -X POST http://127.0.0.1:8080/api/v1/objects \
+  -d '{"kind":"probe","parentId":1,"name":"Local probe"}'                   # → its id
+curl -s "${auth[@]}" -X POST http://127.0.0.1:8080/api/v1/probes/<gid>/approve \
+  -d '{"objectId":<id>,"local":true}'
 ```
 
-`objectId` is the probe object in the tree this identity owns from now on. `"local": true` says
+Without the token the request is refused `401`, and without the content type `415`. `objectId`
+is the probe object in the tree this identity owns from now on. `"local": true` says
 this is the probe running beside the core — it cannot be deleted, matching PRTG, and it is the
 one that runs checks which have to execute on the core's own host. It is said explicitly rather
 than guessed, because an address proves nothing on a host with several interfaces.

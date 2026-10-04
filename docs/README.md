@@ -31,6 +31,7 @@ the hard constraints, the design rules, and the decisions that need an ADR to re
 | Qualify a release candidate                             | [runbook-field-test.md](runbook-field-test.md)                                 |
 | Decide what the v1 release candidate is                | [proposal, 2026-09-28](findings/2026-09-28-v1-release-candidate.md)            |
 | Know what the current candidate is and what was checked | [v1.0.0-rc.2, 2026-10-04](findings/2026-10-04-v1-release-candidate-cut.md)     |
+| See the field-test runbook rehearsed, and what it got wrong | [dress rehearsal, 2026-10-04](findings/2026-10-04-field-test-dress-rehearsal.md) |
 | Check a performance claim                               | [findings/](findings/) — every number here was measured                        |
 | Pick up a piece of work                                 | [TASKS.md](TASKS.md)                                                           |
 
