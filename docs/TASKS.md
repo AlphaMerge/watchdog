@@ -7674,6 +7674,17 @@ because each is a decision rather than a defect:
 
       A probe-wide count returning to 5 is not the criterion.
 
+- [ ] **P-257 — `ssh-shared-open.test.ts` fails about one run in five on its own** · S · A-65 ·
+      Found 2026-10-04 in the suite for `H-30`/`H-31`. Both its tests pass, then its `after` hook
+      stops the pools and the SSH simulator, and a write still in flight on a worker's SSH
+      connection raises `write EPIPE` after the test has ended. `node:test` turns that into a
+      file failure. Run on its own five times it failed once, on code no change touched, so it
+      is the test's teardown and not a regression; in the full suite it failed in both runs of
+      2026-10-04 (`H-30`/`H-31`, `H-32`/`H-33`), so under load it is closer to every time, and
+      it makes every full suite read red until it is fixed. **Done when** the hook waits for every
+      worker's SSH sessions to close before stopping the server (or the simulator closes its
+      sockets so a late write is not an error), and twenty isolated runs pass.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -23256,6 +23267,43 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
         documentation and the schema's comment say what happens and to set the port with the
         host. Likewise an empty `heloName` is the hostname only when it has a dot, and
         `[127.0.0.1]` otherwise, which `administration.md` now says.
+
+- [ ] **H-34 — removing the package leaves the probe's ping setting behind** · S · H-31 · Found
+      2026-10-04 in `H-31`. `ms-setup` writes `/etc/sysctl.d/60-ms-probe-ping.conf` when the
+      host's `net.ipv4.ping_group_range` was still the kernel default, opening it to the
+      `ms-probe` group. Neither `apt remove`, `apt purge` nor `dnf remove` removes the file, so
+      after a purge the next boot still applies a range naming a group id that may no longer
+      exist, or that a later account reuses. `installation.md` says the file stays, as the
+      service users do. **Done when** a purge (`.deb`) and an erase (`.rpm`) remove the file if
+      it is still the one `ms-setup` wrote, leave an edited one alone with a line saying so,
+      and `smoke-packages.sh` asserts both.
+
+- [ ] **H-35 — `install.sh` prints its first-install note on every run** · S · H-30 · Found
+      2026-10-04 in `H-30`. The closing summary, "On a first installation nothing was
+      started…", is printed whenever the components include a core, after an upgrade that has
+      just restarted both services as well. It is accurate and reads as if the upgrade had
+      left them stopped. **Done when** the summary follows what `ms-setup` did on that run
+      (first install, started, or `--no-start`), and `smoke-install.sh` asserts the upgrade's
+      summary does not carry the first-install note.
+
+- [ ] **H-36 — two setup paths are proven only inside containers** · S · H-30, H-31 · Found
+      2026-10-04 in `H-30`/`H-31`. Under Docker, systemd 252 and 255 leave a unit's credentials
+      directory empty, so the documented `LoadCredentialEncrypted=` with
+      `MS_DATABASE__PASSWORD__FROM_FILE=%d/db-password` has never run: the smoke test proves the
+      `*__FROM_FILE` path with a plain password file instead. And the ICMP fix is proven only in
+      a box that sets `ping_group_range` to `1 0` in its own network namespace; a real Debian or
+      Ubuntu host has never booted with `60-ms-probe-ping.conf`. **Done when** both have run on a
+      real host — the field test's step 1, or the x86_64 host `H-29` needs — with a ping sensor
+      Up after a reboot and the core started on an encrypted credential, and the outcome is
+      recorded here.
+
+- [ ] **H-37 — the 1.0 release notes must say probes need the new package for ICMP** · S ·
+      H-31 · Found 2026-10-04 in `H-31`. On Debian and Ubuntu a probe's ICMP sensors read Down
+      under its unit until `ms-setup` from a package carrying `H-31` has run, because only that
+      opens `ping_group_range`. A remote probe installed from an earlier build and left on it
+      keeps reading Down. There are no release notes yet. **Done when** whatever ships with
+      `v1.0.0` says so, with the one-line check (`sysctl net.ipv4.ping_group_range` includes
+      `getent group ms-probe`'s id) and the fix (upgrade, or run `ms-setup`).
 
 ## Release 1.1 — Windows
 
