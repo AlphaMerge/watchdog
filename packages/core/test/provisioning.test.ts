@@ -1,11 +1,15 @@
 import { strict as assert } from 'node:assert';
 import { DatabaseAuditSink } from '../src/audit/store.js';
+import { Reach, Visibility } from '../src/auth/access.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { classify, type Evidence } from '@ms/shared';
 import { DeviceTemplateCatalogue, type DeviceTemplate } from '../src/device-templates/index.js';
 import { DiscoveryError } from '../src/discovery/errors.js';
 import { checkFingerprint } from '../src/discovery/fingerprint.js';
 import {
+  HIDDEN_DEVICE_AT_ADDRESS,
+  HIDDEN_DEVICE_BY_NAME,
+  HIDDEN_SENSOR_THERE,
   ProvisionService,
   provisionRun,
   runVoucher,
@@ -43,6 +47,11 @@ import { buildHarness, testActor } from './support/tree.js';
  */
 
 const available = await databaseAvailable();
+
+/** A pass nobody asked for, or an administrator's: it sees and writes the group whole. */
+const WHOLE = { visibility: Visibility.EVERYTHING, writes: Reach.EVERYTHING };
+/** A caller who can see nothing of the group, as a writer granted only a hole's parent would. */
+const NOBODY = { visibility: Visibility.nothing(null), writes: Reach.EVERYTHING };
 
 describe('who vouches for where a run sends credentials (A-41)', () => {
   const rights = (): Promise<Map<number, 'none'>> => Promise.resolve(new Map<number, 'none'>());
@@ -229,6 +238,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
       dispatch: () => ({ kind: 'sent' }),
     });
     provisioner = new ProvisionService({
+      db,
       objects: harness.service,
       templates,
       logger: silentLogger,
@@ -256,11 +266,12 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
       [groupId],
     );
     const sensors = await db.query<{
+      id: string;
       parent_id: string;
       type: string;
       params: Record<string, unknown>;
     }>(
-      `SELECT s.parent_id, sc.type, sc.params FROM object s
+      `SELECT s.id, s.parent_id, sc.type, sc.params FROM object s
        JOIN sensor_config sc ON sc.object_id = s.id
        JOIN object d ON d.id = s.parent_id
        WHERE d.parent_id = $1 AND d.kind = 'device' AND s.kind = 'sensor'`,
@@ -269,6 +280,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
     return {
       devices: devices.map((row) => ({ id: Number(row.id), name: row.name, host: row.host ?? '' })),
       sensors: sensors.map((row) => ({
+        id: Number(row.id),
         deviceId: Number(row.parent_id),
         sensorType: row.type,
         params: row.params,
@@ -285,6 +297,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
       existingSensors: held.sensors,
       actor: testActor,
       credentials: { kind: 'installation' },
+      sight: WHOLE,
     });
   };
 
@@ -407,6 +420,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
         'site',
       );
       provisioner = new ProvisionService({
+        db,
         objects: harness.service,
         templates: site.seal(),
         logger: silentLogger,
@@ -611,6 +625,136 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
     });
   });
 
+  describe('what its caller cannot see (A-77)', () => {
+    it('matches a device its caller cannot see, says so without its id, and adds nothing to it', async () => {
+      const hidden = await harness.service.create(testActor, {
+        kind: 'device',
+        parentId: groupId,
+        name: 'web01.example.com',
+        host: '10.0.0.1',
+      });
+      await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: hidden.id,
+        name: 'Ping',
+        sensorType: 'icmp.ping',
+      });
+      const record = await run();
+      const hosts = [host('10.0.0.1'), host('10.0.0.2', { reverseName: 'web01.example.com' })];
+      const held = await existing();
+      const pass = (sight: typeof WHOLE) =>
+        provisioner.provision({
+          run: record,
+          hosts,
+          existingDevices: held.devices,
+          existingSensors: held.sensors,
+          actor: testActor,
+          credentials: { kind: 'installation' },
+          sight,
+        });
+
+      const blind = await pass(NOBODY);
+      assert.deepEqual(blind.problems, [
+        { address: '10.0.0.1', problem: HIDDEN_DEVICE_AT_ADDRESS },
+        { address: '10.0.0.2', problem: HIDDEN_DEVICE_BY_NAME },
+      ]);
+      assert.deepEqual(blind.devices, []);
+      assert.deepEqual(
+        [blind.matched, blind.devicesCreated, blind.sensorsCreated, blind.sensorsSkipped],
+        [0, 0, 0, 0],
+      );
+      assert.deepEqual(recorded, [], 'nothing recorded against a device its caller cannot see');
+      assert.equal((await existing()).devices.length, 1, 'and no second device made');
+
+      // The control: a caller who sees the group matches both hosts to it by id.
+      const whole = await pass(WHOLE);
+      assert.deepEqual(
+        whole.devices.map((one) => [one.address, one.deviceId]),
+        [
+          ['10.0.0.1', hidden.id],
+          ['10.0.0.2', hidden.id],
+        ],
+      );
+      assert.equal(whole.sensorsSkipped, 2);
+      assert.deepEqual(whole.problems, []);
+    });
+
+    it('counts only the sensors its caller can see, and still makes none twice', async () => {
+      const device = await harness.service.create(testActor, {
+        kind: 'device',
+        parentId: groupId,
+        name: 'seen',
+        host: '10.0.0.1',
+      });
+      const ping = await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: device.id,
+        name: 'Ping',
+        sensorType: 'icmp.ping',
+      });
+      const record = await run();
+      const held = await existing();
+      // The device seen, its Ping not: a `none` carved on the sensor.
+      const visibility = Visibility.of(
+        new Map([
+          [device.id, true],
+          [ping.id, false],
+        ]),
+        false,
+        null,
+      );
+      const report = await provisioner.provision({
+        run: record,
+        hosts: [host('10.0.0.1')],
+        existingDevices: held.devices,
+        existingSensors: held.sensors,
+        actor: testActor,
+        credentials: { kind: 'installation' },
+        sight: { visibility, writes: Reach.EVERYTHING },
+      });
+      assert.equal(report.sensorsSkipped, 0);
+      assert.equal(report.sensorsCreated, 0);
+      assert.deepEqual(report.problems, [
+        { address: '10.0.0.1', problem: `icmp.ping: ${HIDDEN_SENSOR_THERE}` },
+      ]);
+      assert.deepEqual(report.devices, [
+        { address: '10.0.0.1', deviceId: device.id, created: false, sensors: [] },
+      ]);
+    });
+
+    it('adds nothing to a device its caller may see and not write', async () => {
+      const device = await harness.service.create(testActor, {
+        kind: 'device',
+        parentId: groupId,
+        name: 'read-only',
+        host: '10.0.0.1',
+      });
+      const record = await run();
+      const held = await existing();
+      const report = await provisioner.provision({
+        run: record,
+        hosts: [host('10.0.0.1')],
+        existingDevices: held.devices,
+        existingSensors: held.sensors,
+        actor: testActor,
+        credentials: { kind: 'installation' },
+        sight: {
+          visibility: Visibility.EVERYTHING,
+          writes: new Reach(() => Promise.resolve(new Set<number>())),
+        },
+      });
+      assert.equal(report.sensorsCreated, 0);
+      assert.equal(report.matched, 1);
+      assert.deepEqual(report.problems, [
+        {
+          address: '10.0.0.1',
+          problem: `nothing was added to device ${String(device.id)}: adding a sensor to it needs write on it`,
+        },
+      ]);
+      assert.equal((await existing()).sensors.length, 0);
+    });
+  });
+
   describe('the template filter', () => {
     it('uses every template when none are named', async () => {
       const record = await run();
@@ -687,6 +831,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
         existingSensors: [],
         actor: testActor,
         credentials: { kind: 'account', userId: 7, writes: () => Promise.resolve(new Set()) },
+        sight: WHOLE,
       });
 
       assert.equal(report.devicesCreated, 1);
@@ -702,11 +847,43 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
       }
     });
 
+    it('words a credential refusal for whoever asked, not for the installation (A-77)', async () => {
+      // The pass vouches as the installation for what its templates name, and answers its caller:
+      // one who cannot see the group is told the set's owner by id, and not its name.
+      credentials = new Set(['snmp']);
+      await harness.service.setCredential(testActor, groupId, 'snmp', {
+        version: 'v2c',
+        community: 'dc-secret',
+      });
+      const record = await run();
+      const report = await provisioner.provision({
+        run: record,
+        hosts: [host('10.0.0.1', { sysDescr: 'Linux web01 5.15' })],
+        existingDevices: [],
+        existingSensors: [],
+        actor: testActor,
+        credentials: { kind: 'account', userId: 7, writes: () => Promise.resolve(new Set()) },
+        sight: NOBODY,
+      });
+      assert.ok(report.problems.length >= 2);
+      for (const { problem } of report.problems) {
+        assert.match(
+          problem,
+          new RegExp(
+            `^snmp\\.traffic: bringing the snmp credentials on #${String(groupId)} to a sensor ` +
+              'outside your view needs write on that object$',
+          ),
+        );
+        assert.doesNotMatch(problem, /Datacentre|dc-secret/);
+      }
+    });
+
     it('records the host and carries on with the rest', async () => {
       // A run that reported success while skipping a machine is worse than one that reported
       // the failure. One transaction for the lot would also roll back work that was fine.
       const record = await run();
       provisioner = new ProvisionService({
+        db,
         objects: harness.service,
         templates,
         logger: silentLogger,
@@ -913,6 +1090,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
         'test',
       );
       const picky = new ProvisionService({
+        db,
         objects: harness.service,
         templates: held.seal(),
         logger: silentLogger,
@@ -928,6 +1106,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
         existingSensors: [],
         actor: testActor,
         credentials: { kind: 'installation' },
+        sight: WHOLE,
       });
       assert.equal(report.mastersSet, 1);
       const device = report.devices[0];
@@ -957,6 +1136,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
         'test',
       );
       const withoutMaster = new ProvisionService({
+        db,
         objects: harness.service,
         templates: held.seal(),
         logger: silentLogger,
@@ -972,6 +1152,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
         existingSensors: [],
         actor: testActor,
         credentials: { kind: 'installation' },
+        sight: WHOLE,
       });
       assert.equal(report.mastersSet, 0);
       assert.deepEqual(report.problems, [], 'and it is not an error');
@@ -1042,7 +1223,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
         discovery: runs,
         windowFor: () => Promise.resolve(null),
         provision: async (runId) => {
-          await provisionRun(wiring(), runId, unattended);
+          await provisionRun(wiring(), runId, unattended, WHOLE);
         },
         now: () => clock,
       });
@@ -1143,7 +1324,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
 
       // An operator with write on the group asks for it anyway.
       await assert.rejects(
-        provisionRun(wiring(), runId, writer),
+        provisionRun(wiring(), runId, writer, WHOLE),
         (error: unknown) =>
           error instanceof DiscoveryError &&
           error.code === 'DISCOVERY_RUN_FAILED' &&
@@ -1157,7 +1338,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
       assert.equal(await objectsInGroup(), 0);
 
       // Asking again is refused the same way and records nothing twice.
-      await assert.rejects(provisionRun(wiring(), runId, writer), /its rule was deleted/);
+      await assert.rejects(provisionRun(wiring(), runId, writer, WHOLE), /its rule was deleted/);
       assert.equal((await failures(runId)).length, 1);
     });
 
@@ -1179,7 +1360,7 @@ describe('provisioning', { skip: available ? false : 'no database' }, () => {
       const { ruleId, runId } = await firing(false);
       await runs.finished(probeId, runId, 'done', 8, '');
       assert.equal(await rules.remove(ruleId, writer), true);
-      const report = await provisionRun(wiring(), runId, writer);
+      const report = await provisionRun(wiring(), runId, writer, WHOLE);
       assert.equal(report.devicesCreated, 2);
       assert.equal((await runs.get(runId))?.status, 'done');
       assert.deepEqual(await failures(runId), []);

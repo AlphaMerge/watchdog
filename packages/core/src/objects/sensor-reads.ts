@@ -79,6 +79,12 @@ export type Writer = (
 ) & {
   /** Who vouches for where inherited credentials go, when it is not the voucher (`A-41`). */
   readonly credentials?: CredentialVoucher;
+  /**
+   * Whose view a refusal is worded for, when that is not the voucher's (`A-77`). A discovery run
+   * vouches as the installation, which hides nothing from itself, and its refusals go back to the
+   * account that asked for the run, which may not see the owner of a credential set.
+   */
+  readonly answers?: Sees;
 };
 
 /**
@@ -96,6 +102,26 @@ export function asInstallation(actor: Actor): Writer {
 /** Who vouches for a write. */
 export function voucherOf(writer: Writer): Voucher {
   return writer.kind === 'user' || writer.kind === 'token' ? writer.voucher : INSTALLATION_VOUCHES;
+}
+
+/**
+ * What a writer's voucher can see, resolved on this connection, or null for the installation,
+ * which hides nothing from itself (`A-77`). An administrator's is a `Visibility` that sees
+ * everything, so a caller that must not change an administrator's answer asks `everything`.
+ */
+export async function voucherSight(q: Queryable, writer: Writer): Promise<Visibility | null> {
+  const voucher = voucherOf(writer);
+  if (voucher.kind !== 'account') return null;
+  return resolveSees(q, voucher.sees);
+}
+
+/** Whose view a refusal to this writer is worded for, or null when it hides nothing (`A-77`). */
+export async function answeredSight(q: Queryable, writer: Writer): Promise<Visibility | null> {
+  return writer.answers === undefined ? voucherSight(q, writer) : resolveSees(q, writer.answers);
+}
+
+function resolveSees(q: Queryable, sees: Sees): Promise<Visibility> {
+  return typeof sees === 'function' ? sees(q) : Promise.resolve(sees);
 }
 
 /** Who vouches for where a write sends inherited credentials (`A-41`). */
@@ -126,6 +152,12 @@ export interface NamedObject {
   readonly param: string;
   readonly objectId: ObjectId;
   readonly expects: 'sensor' | 'probe';
+  /**
+   * Whether the sensor's parameters hold this id, rather than the tree implying it (`A-77`). A
+   * Probe Health sensor with no `probeId` reports on the probe above it, and a refusal of that one
+   * must not hand the writer an id they never sent.
+   */
+  readonly chosen: boolean;
 }
 
 /** A sensor whose type bars writing one to anybody who cannot read the root. */
@@ -171,6 +203,16 @@ export function refusal(voucher: Voucher, written: WrittenReads, found: Found): 
   for (const named of written.named) {
     const kind = found.kinds.get(named.objectId);
     const readable = kind !== undefined && (!account || found.readable.has(named.objectId));
+    if (!readable && account && !named.chosen) {
+      // **The probe above, which the writer did not name** (`A-77`). Its id would be the answer
+      // to "what is the probe over my branch", so the refusal says what it is and not which.
+      return new AuthError(
+        'AUTH_FORBIDDEN',
+        `${about(named.sensorName)}${named.param} is not set, so it reports on the probe above ` +
+          'it, which you cannot read',
+        { param: named.param, needed: 'read' },
+      );
+    }
     if (!readable) {
       // No sensor id: for a create or a clone it is a number the rollback took back, and the
       // message names the sensor wherever the caller could not tell which one it is about.

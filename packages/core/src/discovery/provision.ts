@@ -1,7 +1,7 @@
 import type { Fingerprint, Logger } from '@ms/shared';
 import type { DeviceTemplateCatalogue } from '../device-templates/catalogue.js';
 import type { SensorSpec } from '../device-templates/definition.js';
-import type { AccessPrincipal, AccessRight } from '../auth/access.js';
+import type { AccessPrincipal, AccessRight, Reach, Visibility } from '../auth/access.js';
 import type { Queryable } from '../db/pool.js';
 import type { Actor } from '../objects/audit.js';
 import { storedAccountWrites } from '../objects/credential-vouching.js';
@@ -105,6 +105,7 @@ export async function provisionRun(
   options: RunProvisioning,
   runId: number,
   actor: Actor,
+  sight: ProvisionSight,
 ): Promise<ProvisionReport> {
   const run = await options.discovery.get(runId);
   if (run === null) {
@@ -135,6 +136,7 @@ export async function provisionRun(
     existingSensors: existing.sensors,
     actor,
     credentials,
+    sight,
   });
   await options.discovery.recordProvisioning(runId, report);
   return report;
@@ -149,7 +151,36 @@ function createdNothing(runId: number, reason: string): DiscoveryError {
   );
 }
 
+/**
+ * What the caller who asked for a provisioning pass may see and change (`A-77`).
+ *
+ * **A pass writes as the installation and answers as its caller.** The sensors come from a
+ * template, which the installation stands behind (`A-29`), so the writes are the installation's;
+ * but which devices they land under, and what the report says about the group, is the caller's
+ * business and nobody else's. A pass may match a device its caller cannot see — two devices at one
+ * address would be the duplicate `D-04` exists to prevent — but it reports it without its id and
+ * creates nothing under it, and it adds nothing to a device its caller may see and not write.
+ *
+ * A pass nobody asked for, a schedule's, has nobody to answer and passes `Visibility.EVERYTHING`
+ * and `Reach.EVERYTHING`, as every internal caller does.
+ */
+export interface ProvisionSight {
+  /** What the caller can see: what the report may name, and the words of a refusal. */
+  readonly visibility: Visibility;
+  /** Which devices the caller may add a sensor to, by the bar naming each would hold it to. */
+  readonly writes: Reach;
+}
+
+/** What a pass reports for a host whose device its caller cannot see (`A-77`). */
+export const HIDDEN_DEVICE_AT_ADDRESS = 'a device outside your view already has this address';
+/** The same, for a device that matched on its name rather than the address. */
+export const HIDDEN_DEVICE_BY_NAME = 'a device outside your view already has this name';
+/** A sensor a template names that is already there, under a device the caller can see. */
+export const HIDDEN_SENSOR_THERE = 'a sensor outside your view is already there';
+
 export interface ProvisionOptions {
+  /** For asking which of a group's devices and sensors the caller can see (`A-77`). */
+  db: Queryable;
   objects: ObjectService;
   templates: DeviceTemplateCatalogue;
   logger: Logger;
@@ -181,9 +212,51 @@ export interface ExistingDevice {
 }
 
 export interface ExistingSensor {
+  id: number;
   deviceId: number;
   sensorType: string;
   params: Record<string, unknown>;
+}
+
+/**
+ * The devices already in a group and every sensor on them, for `D-04`'s idempotency check.
+ *
+ * Direct rather than through `ObjectService.list`, because what is wanted is the whole group at
+ * once with the one field that identifies a device — and paging through a listing API to build
+ * an in-memory index would be a page size somebody has to tune. **Every one, seen or not**: a
+ * device the caller cannot see still stops a second one being made at its address, and what the
+ * caller is told about it is decided by the pass (`A-77`).
+ */
+export async function existingInGroup(
+  q: Queryable,
+  groupId: number,
+): Promise<{ devices: ExistingDevice[]; sensors: ExistingSensor[] }> {
+  const [devices, sensors] = await Promise.all([
+    q.query<{ id: string; name: string; host: string | null }>(
+      `SELECT o.id, o.name, d.host
+       FROM object o
+       JOIN device_config d ON d.object_id = o.id
+       WHERE o.parent_id = $1 AND o.kind = 'device'`,
+      [groupId],
+    ),
+    q.query<{ id: string; parent_id: string; type: string; params: Record<string, unknown> }>(
+      `SELECT s.id, s.parent_id, sc.type, sc.params
+       FROM object s
+       JOIN sensor_config sc ON sc.object_id = s.id
+       JOIN object d ON d.id = s.parent_id
+       WHERE d.parent_id = $1 AND d.kind = 'device' AND s.kind = 'sensor'`,
+      [groupId],
+    ),
+  ]);
+  return {
+    devices: devices.map((row) => ({ id: Number(row.id), name: row.name, host: row.host ?? '' })),
+    sensors: sensors.map((row) => ({
+      id: Number(row.id),
+      deviceId: Number(row.parent_id),
+      sensorType: row.type,
+      params: row.params,
+    })),
+  };
 }
 
 export interface ProvisionInput {
@@ -199,9 +272,12 @@ export interface ProvisionInput {
    * account that started it, or that last wrote the rule that did.
    */
   credentials: CredentialVoucher;
+  /** Who asked, and so what may be matched, reported and written under (`A-77`). */
+  sight: ProvisionSight;
 }
 
 export class ProvisionService {
+  readonly #db: Queryable;
   readonly #objects: ObjectService;
   readonly #templates: DeviceTemplateCatalogue;
   readonly #logger: Logger;
@@ -209,6 +285,7 @@ export class ProvisionService {
   readonly #recordDevice: ProvisionOptions['recordDevice'];
 
   constructor(options: ProvisionOptions) {
+    this.#db = options.db;
     this.#objects = options.objects;
     this.#templates = options.templates;
     this.#logger = options.logger.child({ component: 'provision' });
@@ -245,12 +322,35 @@ export class ProvisionService {
       else held.push(sensor);
     }
 
+    // **What the caller can see of the group, and write** (`A-77`): asked once, for every device
+    // and sensor already there. Both are the caller's grants as every route reads them; neither
+    // asks anything of an administrator or of a schedule's pass.
+    const { visibility, writes } = input.sight;
+    const seen = await visibility.visibleAmong(this.#db, [
+      ...input.existingDevices.map((device) => device.id),
+      ...input.existingSensors.map((sensor) => sensor.id),
+    ]);
+    const writable = new Set(
+      (
+        await writes.split(
+          this.#db,
+          input.existingDevices.map((device) => device.id).filter((id) => seen.has(id)),
+        )
+      ).reached,
+    );
+
     const credentials = await this.#credentialsFor(input.run.groupId);
     // What a template names, the installation stands behind: the template is a file somebody with
     // the server's file system put there (`A-29`). The audit still says who started the run. Where
     // the credentials go is another matter: the addresses are the run's, not the template's, so
     // whoever chose them vouches for sending the group's credentials there (`A-41`).
-    const writer = { ...asInstallation(input.actor), credentials: input.credentials };
+    const writer = {
+      ...asInstallation(input.actor),
+      credentials: input.credentials,
+      // And a refusal goes back to the caller in their own view: the owner of a set they may not
+      // send is often the group or probe above their branch (`A-16`, `A-77`).
+      answers: visibility,
+    };
     // Empty means every template, which is what almost every run wants (`D-06`).
     const only = new Set(input.run.templates);
 
@@ -259,12 +359,40 @@ export class ProvisionService {
         const fingerprint = host.fingerprint ?? unidentified(host.address);
         const plan = this.#templates.plan(fingerprint, credentials, only);
 
-        const existing = index.find(host.address, fingerprint.reverseName);
+        const found = index.find(host.address, fingerprint.reverseName);
         let deviceId: number;
         let created = false;
 
-        if (existing !== null) {
-          deviceId = existing.id;
+        if (found !== null && !seen.has(found.device.id)) {
+          // **Matched, and not the caller's to know about** (`A-77`). Creating a second device
+          // would be the duplicate this pass exists to prevent, and naming this one would hand
+          // over a hidden id. So neither: the host is reported without an id, nothing is made
+          // under the device, and nothing is recorded against it.
+          report.problems.push({
+            address: host.address,
+            problem: found.by === 'address' ? HIDDEN_DEVICE_AT_ADDRESS : HIDDEN_DEVICE_BY_NAME,
+          });
+          continue;
+        }
+        if (found !== null && !writable.has(found.device.id)) {
+          // Seen and not writable: the caller may know it is there, and may not add to it.
+          report.matched += 1;
+          await this.#recordDevice(input.run.id, host.address, found.device.id);
+          report.devices.push({
+            address: host.address,
+            deviceId: found.device.id,
+            created: false,
+            sensors: [],
+          });
+          report.problems.push({
+            address: host.address,
+            problem: `nothing was added to device ${String(found.device.id)}: adding a sensor to it needs write on it`,
+          });
+          continue;
+        }
+
+        if (found !== null) {
+          deviceId = found.device.id;
           report.matched += 1;
         } else {
           const device = await this.#objects.create(writer, {
@@ -286,6 +414,9 @@ export class ProvisionService {
             { id: device.id, name: device.name, host: host.address },
             fingerprint.reverseName,
           );
+          // The caller's, having just been made in a group they write.
+          seen.add(device.id);
+          writable.add(device.id);
         }
 
         const already = sensorsByDevice.get(deviceId) ?? [];
@@ -299,8 +430,17 @@ export class ProvisionService {
         // a re-run only matches it. Which spec is the master does not change, only when it is
         // tried.
         for (const spec of created ? masterFirst(plan.sensors) : plan.sensors) {
-          if (hasSensor(already, spec)) {
-            report.sensorsSkipped += 1;
+          const there = sensorLike(already, spec);
+          if (there !== undefined) {
+            // Counted only where the caller can see it (`A-77`). A hidden one still stops a
+            // duplicate, and the caller is told only that something they cannot see is there.
+            if (seen.has(there.id)) report.sensorsSkipped += 1;
+            else {
+              report.problems.push({
+                address: host.address,
+                problem: `${spec.type}: ${HIDDEN_SENSOR_THERE}`,
+              });
+            }
             continue;
           }
           try {
@@ -314,7 +454,13 @@ export class ProvisionService {
             // Added to the in-memory list as well as created, so two templates naming the same
             // sensor in one pass cannot both create it — `plan` deduplicates, and this is the
             // belt to that braces.
-            already.push({ deviceId, sensorType: spec.type, params: { ...(spec.params ?? {}) } });
+            already.push({
+              id: sensor.id,
+              deviceId,
+              sensorType: spec.type,
+              params: { ...(spec.params ?? {}) },
+            });
+            seen.add(sensor.id);
             sensorsByDevice.set(deviceId, already);
             report.sensorsCreated += 1;
             names.push(sensor.name);
@@ -352,7 +498,7 @@ export class ProvisionService {
             // inherits this one as master and the master itself keeps scanning — `M-11` gets
             // that from one `a.master_id <> o.id` rather than a special case.
             await this.#objects.setDependency(
-              input.actor,
+              writer,
               masterSensorId,
               'device',
               undefined,
@@ -480,14 +626,18 @@ class DeviceIndex {
    * Consulting the short name first would merge `web01.london` and `web01.paris` into one device
    * the first time both were discovered.
    */
-  find(address: string, reverseName?: string): ExistingDevice | null {
+  find(
+    address: string,
+    reverseName?: string,
+  ): { device: ExistingDevice; by: 'address' | 'name' } | null {
     const byAddress = this.#byHost.get(address.trim().toLowerCase());
-    if (byAddress !== undefined) return byAddress;
+    if (byAddress !== undefined) return { device: byAddress, by: 'address' };
 
     const reverse = (reverseName ?? '').trim().toLowerCase();
     if (reverse === '') return null;
 
-    return this.#byName.get(reverse) ?? this.#byShortName.get(shortName(reverse)) ?? null;
+    const byName = this.#byName.get(reverse) ?? this.#byShortName.get(shortName(reverse));
+    return byName === undefined ? null : { device: byName, by: 'name' };
   }
 }
 
@@ -501,7 +651,7 @@ function isAddress(host: string): boolean {
 }
 
 /**
- * Whether a device already has this sensor.
+ * The sensor a device already has that this spec would make, if it has one.
  *
  * **Type *and* parameters, matching how a template plans them.** Two `http.request` sensors on
  * different paths are two sensors and both belong; two on the same path are a duplicate. Only
@@ -509,8 +659,11 @@ function isAddress(host: string): boolean {
  * its schema has, and requiring those to match too would make every re-run create a second copy
  * of everything.
  */
-function hasSensor(existing: readonly ExistingSensor[], spec: SensorSpec): boolean {
-  return existing.some((one) => {
+function sensorLike(
+  existing: readonly ExistingSensor[],
+  spec: SensorSpec,
+): ExistingSensor | undefined {
+  return existing.find((one) => {
     if (one.sensorType !== spec.type) return false;
     for (const [key, value] of Object.entries(spec.params ?? {})) {
       if (JSON.stringify(one.params[key]) !== JSON.stringify(value)) return false;

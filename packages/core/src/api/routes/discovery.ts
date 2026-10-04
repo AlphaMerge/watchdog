@@ -9,8 +9,10 @@ import {
   type DiscoveryLevel,
 } from '@ms/shared';
 import { DiscoveryError, runNotFound } from '../../discovery/errors.js';
+import { probeFor, requireProbeInView } from '../../discovery/scope.js';
+import type { Queryable } from '../../db/pool.js';
 import type { DiscoveryService } from '../../discovery/service.js';
-import type { ProvisionReport } from '../../discovery/provision.js';
+import type { ProvisionReport, ProvisionSight } from '../../discovery/provision.js';
 import type { Actor } from '../../objects/audit.js';
 import type { RediscoveryService, SchedulePatch } from '../../discovery/rediscovery.js';
 import { etagFor } from '../preconditions.js';
@@ -20,14 +22,17 @@ import {
   onObject,
   onObjectOf,
   onQueryObject,
+  reachOf,
   visibilityOf,
 } from '../authorization.js';
 import { actorFor } from '../authentication.js';
 
 export interface DiscoveryRouteOptions {
+  /** For asking whether a probe a caller names is one they can see (`A-77`). */
+  db: Queryable;
   discovery: DiscoveryService;
   /** Absent until D-04 is wired; the provision route then does not exist. */
-  provision?: (runId: number, actor: Actor) => Promise<ProvisionReport>;
+  provision?: (runId: number, actor: Actor, sight: ProvisionSight) => Promise<ProvisionReport>;
   /** Absent until D-07 is wired; the rediscovery routes then do not exist. */
   rediscovery?: RediscoveryService;
 }
@@ -213,14 +218,24 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
         description:
           'Sweeps a range from one probe into one group. The probe is named rather than chosen: ' +
           'discovery is a local-network job, so the probe that can reach 10.0.0.0/24 is the one ' +
-          'on that network.',
+          'on that network. It has to be the probe the group is under, and one the caller can ' +
+          'read: any other is refused `DISCOVERY_PROBE_INVALID` in the same words, so that a ' +
+          'probe above the caller’s branch is answered as an id nobody used (`A-77`). Left out, ' +
+          'it is the probe the group is under, which is how a writer granted a branch below a ' +
+          'probe they cannot see starts one.',
         body: {
           type: 'object',
-          required: ['groupId', 'probeId', 'range'],
+          required: ['groupId', 'range'],
           additionalProperties: false,
           properties: {
             groupId: { type: 'integer', minimum: 1 },
-            probeId: { type: 'integer', minimum: 1 },
+            probeId: {
+              type: 'integer',
+              minimum: 1,
+              description:
+                'The probe the group is under. Left out, that probe is used; named, it has to be ' +
+                'that one and one the caller can read (`A-77`).',
+            },
             range: { type: 'string', minLength: 1, maxLength: 4000 },
             timeoutMs: { type: 'integer', minimum: 100, maximum: 60_000 },
             concurrency: { type: 'integer', minimum: 1, maximum: 512 },
@@ -264,7 +279,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
     async (request, reply) => {
       const body = request.body as {
         groupId: number;
-        probeId: number;
+        probeId?: number;
         range: string;
         timeoutMs?: number;
         concurrency?: number;
@@ -274,7 +289,14 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
         templates?: string[];
       };
       parse(body.range);
-      const run = await discovery.start(body, actorFor(request));
+      // A probe the caller cannot see is answered as a wrong one, or the right one is an oracle.
+      const probeId = await probeFor(
+        options.db,
+        await visibilityOf(request),
+        body.groupId,
+        body.probeId,
+      );
+      const run = await discovery.start({ ...body, probeId }, actorFor(request));
       await reply.code(201).send(run);
       return reply;
     },
@@ -547,7 +569,13 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
             'it found was read from the old probe’s network, and would become devices in the ' +
             'new one’s branch. The run is failed with the reason “its group moved to another ' +
             'probe”, recorded in the audit log, and this answers 409 `DISCOVERY_RUN_FAILED` with ' +
-            'that sentence. Start a new run from the group’s new probe.',
+            'that sentence. Start a new run from the group’s new probe.\n\n' +
+            '**It answers its caller in their own view** (`A-77`). A host at the address of a ' +
+            'device the caller cannot see is reported in `problems` as “a device outside your ' +
+            'view already has this address”, with no id and nothing created under the device; ' +
+            'a sensor a template names that is already there and hidden is reported the same way ' +
+            'and not counted in `sensorsSkipped`; and nothing is added to a device the caller ' +
+            'may read and not write. An administrator is answered as before.',
           params: idParams,
           response: {
             200: {
@@ -601,8 +629,12 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
         if ((await discovery.get(id)) === null) throw runNotFound(id);
         // The caller, not the address they called from: every object this creates is audited
         // under this actor, and "anonymous" beside a device an administrator provisioned is a
-        // record saying nobody did it (`A-20`).
-        return provision(id, actorFor(request));
+        // record saying nobody did it (`A-20`). And it answers them in their own view: it matches,
+        // reports and writes under only the devices they can see and write (`A-77`).
+        return provision(id, actorFor(request), {
+          visibility: await visibilityOf(request),
+          writes: reachOf(request, 'write'),
+        });
       },
     );
   }
@@ -797,11 +829,17 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
             'nothing else.',
           body: {
             type: 'object',
-            required: ['groupId', 'probeId', 'name', 'range', 'cadence'],
+            required: ['groupId', 'name', 'range', 'cadence'],
             additionalProperties: false,
             properties: {
               groupId: { type: 'integer', minimum: 1 },
-              probeId: { type: 'integer', minimum: 1 },
+              probeId: {
+                type: 'integer',
+                minimum: 1,
+                description:
+                  'The probe the group is under. Left out, that probe is used; named, it has to be ' +
+                  'that one and one the caller can read (`A-77`).',
+              },
               name: { type: 'string', minLength: 1, maxLength: 200 },
               range: { type: 'string', minLength: 1, maxLength: 4000 },
               cadence: { type: 'string', enum: ['hourly', 'daily', 'weekly'] },
@@ -853,10 +891,19 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
         },
       },
       async (request, reply) => {
-        const created = await rediscovery.create(
-          request.body as Parameters<RediscoveryService['create']>[0],
-          actorFor(request),
+        const input = request.body as Omit<
+          Parameters<RediscoveryService['create']>[0],
+          'probeId'
+        > & {
+          probeId?: number;
+        };
+        const probeId = await probeFor(
+          options.db,
+          await visibilityOf(request),
+          input.groupId,
+          input.probeId,
         );
+        const created = await rediscovery.create({ ...input, probeId }, actorFor(request));
         await reply.code(201).header('ETag', etagFor(created.version)).send(created);
         return reply;
       },
@@ -944,10 +991,21 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
       },
       async (request: FastifyRequest, reply) => {
         const { id } = request.params as { id: number };
+        const patch = request.body as SchedulePatch;
+        // Only a probe the caller names anew: the rule's own is in every read of it (`A-77`).
+        const current = patch.probeId === undefined ? null : await rediscovery.get(id);
+        if (current !== null && patch.probeId !== undefined && patch.probeId !== current.probeId) {
+          await requireProbeInView(
+            options.db,
+            await visibilityOf(request),
+            current.groupId,
+            patch.probeId,
+          );
+        }
         const updated = await rediscovery.update(
           id,
           expectedVersion(request.headers['if-match'], id),
-          request.body as SchedulePatch,
+          patch,
           actorFor(request),
         );
         if (updated === null) throw noSuchRule(id);

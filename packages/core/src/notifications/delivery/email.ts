@@ -30,6 +30,9 @@ export interface EmailTransportOptions {
   build?: (relay: SmtpRelay, config: SmtpConfig) => Transporter;
 }
 
+const NO_RELAY =
+  'no SMTP relay is configured — set notifications.smtp.primary.host and notifications.smtp.sender';
+
 /** What a relay attempt produced, before the fallback decision is made. */
 interface Attempt {
   readonly relay: string;
@@ -119,14 +122,18 @@ export class EmailTransport implements DeliveryTransport {
         // Not retryable: no amount of waiting configures a relay, and a queue quietly filling
         // with mail nobody set an address for is worse than being told.
         retryable: false,
-        error:
-          'no SMTP relay is configured — set notifications.smtp.primary.host and ' +
-          'notifications.smtp.sender',
+        error: NO_RELAY,
+        withoutOutput: NO_RELAY,
       };
     }
 
     if (message.recipients.length === 0) {
-      return { ok: false, retryable: false, error: 'the template has no recipients' };
+      return {
+        ok: false,
+        retryable: false,
+        error: 'the template has no recipients',
+        withoutOutput: 'the template has no recipients',
+      };
     }
     const resolved = await this.#recipients.resolve(message.recipients, message.about);
     if (resolved.addresses.length === 0) {
@@ -137,6 +144,7 @@ export class EmailTransport implements DeliveryTransport {
         ok: false,
         retryable: false,
         error: NOBODY_TO_SEND_TO,
+        withoutOutput: NOBODY_TO_SEND_TO,
         skipped: resolved.skipped,
       };
     }
@@ -160,7 +168,7 @@ export class EmailTransport implements DeliveryTransport {
     // **Sent, and who was not** — a partial send is still a send, and the people it missed are
     // named where the delivery is recorded rather than dropped without a word (`M-19`).
     if (!result.ok || resolved.skipped.length === 0) return result;
-    return { ok: true, detail: result.detail, skipped: resolved.skipped };
+    return { ...result, skipped: resolved.skipped };
   }
 
   /**
@@ -175,14 +183,18 @@ export class EmailTransport implements DeliveryTransport {
       return {
         ok: false,
         retryable: false,
-        error:
-          'no SMTP relay is configured — set notifications.smtp.primary.host and ' +
-          'notifications.smtp.sender',
+        error: NO_RELAY,
+        withoutOutput: NO_RELAY,
       };
     }
     const to = message.recipients.map(headerSafe).filter((address) => address !== '');
     if (to.length === 0) {
-      return { ok: false, retryable: false, error: 'the report has no recipients' };
+      return {
+        ok: false,
+        retryable: false,
+        error: 'the report has no recipients',
+        withoutOutput: 'the report has no recipients',
+      };
     }
 
     return this.#deliver(
@@ -223,9 +235,16 @@ export class EmailTransport implements DeliveryTransport {
     const reasons = attempts
       .map((attempt) => `${attempt.relay}: ${attempt.result.ok ? 'sent' : attempt.result.error}`)
       .join('; ');
+    const bare = attempts
+      .map(
+        (attempt) =>
+          `${attempt.relay}: ${attempt.result.ok ? 'sent' : (attempt.result.withoutOutput ?? 'not sent')}`,
+      )
+      .join('; ');
     return {
       ok: false,
       error: reasons,
+      withoutOutput: bare,
       // Retryable if *any* relay might work later. One permanent rejection does not make the
       // whole thing permanent when another relay timed out.
       retryable: attempts.some((attempt) => !attempt.result.ok && attempt.result.retryable),
@@ -336,6 +355,8 @@ export class EmailTransport implements DeliveryTransport {
           // to find out. It is in the log with the addresses, which is what they can act on.
           retryable: false,
           error: `${name} rejected every recipient: ${rejected.join(', ')}`,
+          // The addresses are the template's own, and nothing the relay said is in it.
+          withoutOutput: `${name} rejected every recipient: ${rejected.join(', ')}`,
         };
       }
       if (rejected.length > 0) {
@@ -346,9 +367,11 @@ export class EmailTransport implements DeliveryTransport {
           { relay: name, rejected, requestId: mail.requestId, sensorId: mail.sensorId },
           'the relay rejected some recipients',
         );
-        return { ok: true, detail: `${name}: ${messageId}; rejected ${rejected.join(', ')}` };
+        const detail = `${name}: ${messageId}; rejected ${rejected.join(', ')}`;
+        return { ok: true, detail, withoutOutput: detail };
       }
-      return { ok: true, detail: `${name}: ${messageId}` };
+      const detail = `${name}: ${messageId}`;
+      return { ok: true, detail, withoutOutput: detail };
     } catch (error: unknown) {
       return { ok: false, ...classify(error) };
     }
@@ -370,19 +393,26 @@ export class EmailTransport implements DeliveryTransport {
  * reason the protocol has two failure classes. Anything without a code is a connection problem,
  * and those are transient far more often than not.
  */
-function classify(error: unknown): { error: string; retryable: boolean } {
+function classify(error: unknown): { error: string; retryable: boolean; withoutOutput: string } {
   const described = describeError(error);
   const code = (error as { responseCode?: number }).responseCode;
   const command = (error as { command?: string }).command;
   const where = command === undefined ? '' : ` during ${command}`;
 
+  // **The reply code and not the relay's words** for a caller who may not read everything the
+  // message rendered (`A-16`, `A-77`): a relay's rejection can quote what it was sent.
   if (typeof code === 'number') {
     return {
       error: `${String(code)}${where}: ${described.message}`,
       retryable: code >= 400 && code < 500,
+      withoutOutput: `the relay answered ${String(code)}${where}`,
     };
   }
-  return { error: `${described.message}${where}`, retryable: true };
+  return {
+    error: `${described.message}${where}`,
+    retryable: true,
+    withoutOutput: `the relay gave no reply code${where}`,
+  };
 }
 
 /**

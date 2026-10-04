@@ -8,6 +8,8 @@ import { join } from 'node:path';
 import { SCRUBBED } from '@ms/shared';
 import { ProgramTransport } from '../src/notifications/delivery/program.js';
 import { WebhookTransport } from '../src/notifications/delivery/webhook.js';
+import { EmailTransport } from '../src/notifications/delivery/email.js';
+import { addressesOnly } from './support/recipients.js';
 import { MessageContextLoader } from '../src/notifications/context.js';
 import type { OutgoingMessage } from '../src/notifications/delivery/transport.js';
 import { NotificationTester } from '../src/notifications/test-send.js';
@@ -393,6 +395,70 @@ describe(
       } finally {
         await rm(root, { recursive: true, force: true });
       }
+    });
+
+    it('withholds what a mail relay said when the echo hid a container from its sender (A-77)', async () => {
+      // A relay's rejection can quote what it was sent, which names the probe. The reply code is
+      // the sender's to read; the relay's words are not.
+      const relay = {
+        host: 'relay.example.test',
+        port: 25,
+        security: 'none' as const,
+        verifyCertificate: true,
+        auth: 'none' as const,
+        user: '',
+        password: '',
+        heloName: 'ms-core.test',
+        timeoutMs: 1_000,
+      };
+      const email = new EmailTransport({
+        config: {
+          sender: 'monitoring@example.test',
+          primary: relay,
+          fallback: { ...relay, host: '' },
+        },
+        logger: silent,
+        recipients: addressesOnly,
+        build: () =>
+          ({
+            sendMail: (mail: { text?: string }) =>
+              Promise.reject(
+                Object.assign(new Error(`554 rejected: ${String(mail.text)}`), {
+                  responseCode: 554,
+                  command: 'DATA',
+                }),
+              ),
+            close: () => undefined,
+          }) as never,
+      });
+      const parent = await db.query<{ parent_id: string }>(
+        'SELECT parent_id::text AS parent_id FROM object WHERE id = $1',
+        [sensorId],
+      );
+      const deviceOnly = Visibility.of(
+        new Map([[Number(parent[0]?.parent_id), true]]),
+        false,
+        null,
+      );
+      const templateId = await template({ body: 'via %probe' });
+      const hidden = await testerWith(email).send(testActor, {
+        seenBy: deviceOnly,
+        templateId,
+        sensorId,
+      });
+      assert.ok(!JSON.stringify(hidden).includes('Local probe'), JSON.stringify(hidden));
+      assert.equal(
+        hidden.error,
+        'primary: the relay answered 554 during DATA (its output is withheld here, because what ' +
+          "was sent can name containers outside your view; the full output is in the core's log)",
+      );
+      // Nothing was hidden from an administrator, so they read what the relay said.
+      const whole = await testerWith(email).send(testActor, {
+        seenBy: Visibility.EVERYTHING,
+        templateId,
+        sensorId,
+      });
+      assert.match(whole.error ?? '', /^primary: 554 during DATA: 554 rejected: via Local probe/);
     });
 
     it('reports a transport that throws, because a 500 explains nothing', async () => {

@@ -42,6 +42,7 @@ import {
   actorOf,
   assertMayName,
   voucherOf,
+  voucherSight,
   type InstallationBar,
   type NamedObject,
   type Writer,
@@ -827,7 +828,7 @@ export class ObjectService {
    * `setSetting`, so the validation, the audit entry and the recompute are the same ones.
    */
   async setDependency(
-    actor: Actor,
+    writer: Writer,
     id: ObjectId,
     mode: DependencyMode,
     masterId: ObjectId | undefined,
@@ -856,6 +857,14 @@ export class ObjectService {
       });
     }
 
+    // The master is read before anything is written (`A-77`): leaving "master object for parent
+    // device" below clears a setting first, and a refusal must not leave that half done.
+    const { targetId, masterId: value } = resolved.write;
+    if (typeof value === 'number' && value !== id) {
+      await this.#seenMaster(this.#db, writer, id, value);
+    }
+    const actor = actorOf(writer);
+
     // Leaving "master object for parent device" has to undo what entering it did, or the mode
     // is a one-way door: the setting lives on the device, so clearing the sensor's own value
     // would leave it master of a device it no longer claims to be. A single dropdown that
@@ -869,17 +878,16 @@ export class ObjectService {
       }
     }
 
-    const { targetId, masterId: value } = resolved.write;
     if (value === undefined) {
       await this.clearSetting(actor, targetId, DEPENDENCY_MASTER_ID.key, pre);
     } else {
-      await this.setSetting(actor, targetId, DEPENDENCY_MASTER_ID.key, value, pre);
+      await this.setSetting(writer, targetId, DEPENDENCY_MASTER_ID.key, value, pre);
     }
     if (delaySeconds !== undefined) {
       // On the object that carries the dependency, not the one the request named — otherwise a
       // delay set alongside "master object for parent device" would land on the sensor and be
       // inherited by nothing.
-      await this.setSetting(actor, targetId, DEPENDENCY_DELAY_SECONDS.key, delaySeconds);
+      await this.setSetting(writer, targetId, DEPENDENCY_DELAY_SECONDS.key, delaySeconds);
     }
     return this.pauseState(id);
   }
@@ -1259,20 +1267,19 @@ export class ObjectService {
    * nothing in the system able to notice it — so it is refused where it is made rather than
    * detected where it bites.
    */
-  async #assertUsableMaster(q: Queryable, id: ObjectId, masterId: number): Promise<void> {
+  async #assertUsableMaster(
+    q: Queryable,
+    writer: Writer,
+    id: ObjectId,
+    masterId: number,
+  ): Promise<void> {
     if (masterId === id) {
       throw new ObjectError('OBJECT_INVALID', 'an object cannot depend on itself', {
         context: { objectId: id, phase: 'settings' },
         details: { key: DEPENDENCY_MASTER_ID.key },
       });
     }
-    const master = await this.#repo.get(q, masterId);
-    if (master === null) {
-      throw new ObjectError('OBJECT_INVALID', `no object ${String(masterId)} to depend on`, {
-        context: { objectId: id, phase: 'settings' },
-        details: { key: DEPENDENCY_MASTER_ID.key, masterId },
-      });
-    }
+    const { master, sees } = await this.#seenMaster(q, writer, id, masterId);
     if (master.kind !== 'sensor') {
       // Devices and groups have no state of their own — M-02 put state on sensors — so "the
       // device is Down" is not a fact anything could read yet. Refusing is honest; accepting
@@ -1288,15 +1295,61 @@ export class ObjectService {
     }
     const cycle = await this.#dependencies?.wouldCycle(q, id, masterId);
     if (cycle != null) {
+      // **A step the writer cannot see is `null`** (`A-77`): the master's own master, or a sensor
+      // carved out beneath the object being configured. The loop is still refused, and the path
+      // still says how long it is and where the writer's own objects are in it.
+      const path =
+        sees === null || sees.everything
+          ? cycle.path
+          : await (async () => {
+              const visible = await sees.visibleAmong(q, cycle.path);
+              return cycle.path.map((step) => (visible.has(step) ? step : null));
+            })();
       throw new ObjectError(
         'OBJECT_CYCLE',
         'that dependency would form a loop, and a loop of masters can never recover',
         {
           context: { objectId: id, phase: 'settings' },
-          details: { key: DEPENDENCY_MASTER_ID.key, masterId, path: cycle.path },
+          details: { key: DEPENDENCY_MASTER_ID.key, masterId, path },
         },
       );
     }
+  }
+
+  /**
+   * The master a write names, if its writer can read it: the read bar on a dependency's master
+   * (`A-12`), held in one place for every route that can set one (`A-77`) — the dependency route,
+   * the settings route, and a bulk `setting`.
+   *
+   * **A hidden master and a missing one are refused in the same words**, with the same status and
+   * the same details, as `A-29` refuses what a sensor names: otherwise setting a dependency would
+   * be a way to learn which ids exist, and what kind each is. An administrator, and the
+   * installation, can see everything and are told what they were told before.
+   */
+  async #seenMaster(
+    q: Queryable,
+    writer: Writer,
+    id: ObjectId,
+    masterId: number,
+  ): Promise<{ master: ObjectDetail; sees: Visibility | null }> {
+    const master = await this.#repo.get(q, masterId);
+    const sees = await voucherSight(q, writer);
+    const hides = sees !== null && !sees.everything;
+    if (master !== null && (!hides || (await sees.visibleAmong(q, [masterId])).has(masterId))) {
+      return { master, sees };
+    }
+    if (hides) {
+      throw new AuthError(
+        'AUTH_FORBIDDEN',
+        `a master has to be a sensor you can read, and object ${String(masterId)} does not ` +
+          'exist or you cannot read it',
+        { key: DEPENDENCY_MASTER_ID.key, masterId, needed: 'read' },
+      );
+    }
+    throw new ObjectError('OBJECT_INVALID', `no object ${String(masterId)} to depend on`, {
+      context: { objectId: id, phase: 'settings' },
+      details: { key: DEPENDENCY_MASTER_ID.key, masterId },
+    });
   }
 
   /** The schedule in effect on an object, evaluated against the same clock as the pause. */
@@ -1684,9 +1737,12 @@ export class ObjectService {
    * `If-Match` is optional here — requiring a precondition per toggle would double a settings
    * form's request count — but it is honoured when sent, because silently ignoring a
    * precondition a client bothered to compute is worse than not accepting one at all.
+   *
+   * A writer rather than an actor, for the one setting that names another object: a dependency's
+   * master has to be one its writer can read (`A-77`).
    */
   async setSetting(
-    actor: Actor,
+    writer: Writer,
     id: ObjectId,
     key: string,
     value: unknown,
@@ -1713,7 +1769,7 @@ export class ObjectService {
       }
 
       if (key === DEPENDENCY_MASTER_ID.key && typeof value === 'number') {
-        await this.#assertUsableMaster(q, id, value);
+        await this.#assertUsableMaster(q, writer, id, value);
       }
 
       const bound = this.#resolver.withExecutor(q);
@@ -1721,7 +1777,7 @@ export class ObjectService {
       await bound.set(id, key, value);
       await this.#audit.record(
         q,
-        actor,
+        actorOf(writer),
         [{ action: 'setting.set', objectId: id, key, before, after: value }],
         new Date(),
       );
@@ -2105,6 +2161,7 @@ export class ObjectService {
             param: reference.param,
             objectId: reference.objectId,
             expects: reference.expects,
+            chosen: true,
           });
           continue;
         }
@@ -2112,7 +2169,13 @@ export class ObjectService {
         // so when it is evaluated.
         const probe = await this.#repo.nearestProbe(q, sensor.id);
         if (probe !== null) {
-          named.push({ sensorName, param: reference.param, objectId: probe.id, expects: 'probe' });
+          named.push({
+            sensorName,
+            param: reference.param,
+            objectId: probe.id,
+            expects: 'probe',
+            chosen: false,
+          });
         }
       }
     }

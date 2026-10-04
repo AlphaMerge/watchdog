@@ -7,7 +7,8 @@ import {
   type ProbeQueryService,
   type QueryOutcome,
 } from '../../probes/queries.js';
-import { notAudited, onObject } from '../authorization.js';
+import type { Queryable } from '../../db/pool.js';
+import { notAudited, onObject, visibilityOf } from '../authorization.js';
 
 /**
  * Running one check now, with the request waiting on it (`R-09`).
@@ -20,6 +21,8 @@ import { notAudited, onObject } from '../authorization.js';
  */
 
 export interface QueryRoutesOptions {
+  /** For asking whether the caller can see the probe a failure is about (`A-77`). */
+  db: Queryable;
   queries: ProbeQueryService;
   probeConfig: ProbeConfigService;
 }
@@ -130,6 +133,13 @@ export function queryRoutes(app: FastifyInstance, options: QueryRoutesOptions): 
             );
 
       if (outcome.kind === 'failed') {
+        // **The probe by id only to a caller who can see it** (`A-77`). A writer granted a
+        // branch is not given the probe above it, and its id is the one thing here that would
+        // say which object that is. The message says what failed either way.
+        const probeId = found.probeObjectId;
+        const sees = await visibilityOf(request);
+        const shown =
+          sees.everything || (await sees.visibleAmong(options.db, [probeId])).has(probeId);
         // The failure is named in the code as well as the message, so a client can act on it
         // without parsing English — `too-old` puts an upgrade prompt on the screen where
         // `offline` puts a retry.
@@ -137,7 +147,7 @@ export function queryRoutes(app: FastifyInstance, options: QueryRoutesOptions): 
           error: {
             code: `PROBE_QUERY_${outcome.failure.replace('-', '_').toUpperCase()}`,
             message: outcome.message,
-            context: { objectId: sensorId, probeObjectId: found.probeObjectId },
+            context: { objectId: sensorId, ...(shown ? { probeObjectId: probeId } : {}) },
             details: {},
             correlationId: request.id,
           },

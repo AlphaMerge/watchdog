@@ -1607,8 +1607,9 @@ export async function objectRoutes(
     {
       // **And read on the master** (`A-12`). A dependency on a sensor the caller cannot see would
       // tell them, by pausing theirs, every time it went Down — a hidden object's state, read
-      // through a visible one's.
-      config: every(onObject('write'), onBodyObject('read', 'masterId', { optional: true })),
+      // through a visible one's. Held by the service, on the writer's sight, because the settings
+      // route and a bulk `setting` can name a master too, and one check holds all three (`A-77`).
+      config: onObject('write'),
       schema: {
         tags: ['dependencies'],
         description:
@@ -1619,7 +1620,10 @@ export async function objectRoutes(
           'A master pauses its dependents only when it is genuinely Down or Down (Acknowledged); ' +
           'pausing a master by hand or by schedule does not. `delaySeconds` keeps dependents ' +
           'paused after the master recovers, so a flapping link does not alarm on every bounce. ' +
-          'A dependency that would form a loop is refused: a loop of masters can never recover.',
+          'A dependency that would form a loop is refused: a loop of masters can never recover. ' +
+          'The master has to be a sensor the caller can read, here, through the settings route ' +
+          'and in bulk alike; one they cannot read is refused as one that does not exist, and ' +
+          'a step of a refused loop they cannot see reads `null` in `details.path` (`A-77`).',
         params: idParams,
         body: {
           type: 'object',
@@ -1637,7 +1641,7 @@ export async function objectRoutes(
     async (request, reply) => {
       const { mode, masterId, delaySeconds } = request.body;
       const view = await service.setDependency(
-        actorFor(request),
+        await writerFor(request),
         request.params.id,
         mode,
         masterId,
@@ -1714,8 +1718,10 @@ export async function objectRoutes(
       const key = request.params.key;
       assertKnownSettingKeys([key]);
 
+      // A writer, so that a dependency's master is held to the read bar the dependency route's
+      // is (`A-77`).
       await service.setSetting(
-        actorFor(request),
+        await writerFor(request),
         id,
         key,
         request.body.value,

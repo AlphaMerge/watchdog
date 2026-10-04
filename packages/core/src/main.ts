@@ -107,12 +107,18 @@ import { SqlTimeSeriesStore, type TimeSeriesStore } from './timeseries/store.js'
 import { Housekeeper } from './timeseries/housekeeper.js';
 import { ProbeEndpoint } from './transport/probe-endpoint.js';
 import { DiscoveryService } from './discovery/service.js';
-import { ProvisionService, provisionRun, type ProvisionReport } from './discovery/provision.js';
+import {
+  existingInGroup,
+  ProvisionService,
+  provisionRun,
+  type ProvisionReport,
+  type ProvisionSight,
+} from './discovery/provision.js';
 import { RediscoveryService } from './discovery/rediscovery.js';
 import { ProbeRegistry } from './probes/registry.js';
 import { AccountService } from './auth/accounts.js';
 import { GroupService } from './auth/groups.js';
-import { AccessService } from './auth/access.js';
+import { AccessService, Reach, Visibility } from './auth/access.js';
 import { coreCatalogue, startV2Subsystems, v2ApiOptions } from './profile.js';
 import { TokenService } from './auth/tokens.js';
 import { TotpService } from './auth/totp.js';
@@ -1009,6 +1015,7 @@ async function serve(): Promise<void> {
   // that wrote rows directly would be a second way to make an object, with a second set of
   // rules to keep in step.
   const provisioner = new ProvisionService({
+    db,
     objects: service,
     templates: deviceTemplates,
     logger,
@@ -1016,18 +1023,16 @@ async function serve(): Promise<void> {
     recordDevice: (runId, address, deviceId) => discovery.recordDevice(runId, address, deviceId),
   });
 
-  const provision = (runId: number, actor: Actor): Promise<ProvisionReport> =>
+  const provision = (
+    runId: number,
+    actor: Actor,
+    sight: ProvisionSight,
+  ): Promise<ProvisionReport> =>
     provisionRun(
       {
         discovery,
         provisioner,
-        existing: async (groupId) => {
-          const [devices, sensors] = await Promise.all([
-            devicesInGroup(db, groupId),
-            sensorsInGroup(db, groupId),
-          ]);
-          return { devices, sensors };
-        },
+        existing: (groupId) => existingInGroup(db, groupId),
         vouchers: {
           authRequired: config.api.requireAuthentication,
           ruleWriter: async (ruleId) => (await rediscoveryRef?.writerOf(ruleId)) ?? null,
@@ -1036,6 +1041,7 @@ async function serve(): Promise<void> {
       },
       runId,
       actor,
+      sight,
     );
 
   // Scheduled rediscovery (`D-07`). Off by default in the strongest sense: there is no schedule
@@ -1057,7 +1063,12 @@ async function serve(): Promise<void> {
     },
     provision: async (runId) => {
       // The same actor an unattended job always is. `A-01` will give this a real one.
-      await provision(runId, { kind: 'anonymous', remoteAddress: 'scheduled-rediscovery' });
+      // Nobody asked, so nobody is answered: the pass sees the group whole, as it always did.
+      await provision(
+        runId,
+        { kind: 'anonymous', remoteAddress: 'scheduled-rediscovery' },
+        { visibility: Visibility.EVERYTHING, writes: Reach.EVERYTHING },
+      );
     },
   });
   rediscoveryRef = rediscovery;
@@ -1687,47 +1698,6 @@ if (process.argv[1] !== undefined && import.meta.filename === realpathSync(proce
     // Waited for, so a stalled journal cannot discard the one line that says why (`P-216` part 3).
     exitWithLine(status, line);
   });
-}
-
-/**
- * The devices already in a group, for `D-04`'s idempotency check.
- *
- * Direct rather than through `ObjectService.list`, because what is wanted is the whole group at
- * once with the one field that identifies a device — and paging through a listing API to build
- * an in-memory index would be a page size somebody has to tune.
- */
-async function devicesInGroup(
-  db: Database,
-  groupId: number,
-): Promise<{ id: number; name: string; host: string }[]> {
-  const rows = await db.query<{ id: string; name: string; host: string | null }>(
-    `SELECT o.id, o.name, d.host
-     FROM object o
-     JOIN device_config d ON d.object_id = o.id
-     WHERE o.parent_id = $1 AND o.kind = 'device'`,
-    [groupId],
-  );
-  return rows.map((row) => ({ id: Number(row.id), name: row.name, host: row.host ?? '' }));
-}
-
-/** Every sensor on those devices, so a re-run creates none of them twice. */
-async function sensorsInGroup(
-  db: Database,
-  groupId: number,
-): Promise<{ deviceId: number; sensorType: string; params: Record<string, unknown> }[]> {
-  const rows = await db.query<{ parent_id: string; type: string; params: Record<string, unknown> }>(
-    `SELECT s.parent_id, sc.type, sc.params
-     FROM object s
-     JOIN sensor_config sc ON sc.object_id = s.id
-     JOIN object d ON d.id = s.parent_id
-     WHERE d.parent_id = $1 AND d.kind = 'device' AND s.kind = 'sensor'`,
-    [groupId],
-  );
-  return rows.map((row) => ({
-    deviceId: Number(row.parent_id),
-    sensorType: row.type,
-    params: row.params,
-  }));
 }
 
 /**

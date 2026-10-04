@@ -17,8 +17,8 @@ import { DatabaseError, type Queryable, type TxLimits } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 import type { Actor, AuditSink, Mutation } from './audit.js';
 import {
+  answeredSight,
   credentialVoucherOf,
-  voucherOf,
   type CredentialVoucher,
   type Writer,
   type Writes,
@@ -428,9 +428,10 @@ export function credentialRefusal(
 
 /** What the writer of a refused route can see of it (`A-16`). */
 async function seenBy(q: Queryable, writer: Writer, route: CredentialRoute): Promise<RouteSeen> {
-  const voucher = voucherOf(writer);
-  if (voucher.kind !== 'account') return ROUTE_SEEN_WHOLE;
-  const sees = typeof voucher.sees === 'function' ? await voucher.sees(q) : voucher.sees;
+  // Whoever is answered, which for a discovery run is the account that asked for it and not the
+  // installation that vouches for its templates (`A-77`).
+  const sees = await answeredSight(q, writer);
+  if (sees === null) return ROUTE_SEEN_WHOLE;
   const visible = await sees.visibleAmong(q, [route.ownerId, route.sensorId, route.deviceId]);
   return {
     owner: visible.has(route.ownerId),

@@ -109,7 +109,7 @@ import type { ReportOutputRepository } from '../reports/delivery.js';
 import type { ReportFormatter } from '../reports/formatter.js';
 import type { DiscoveryService } from '../discovery/service.js';
 import type { DeviceTemplateCatalogue } from '../device-templates/catalogue.js';
-import type { ProvisionReport } from '../discovery/provision.js';
+import type { ProvisionReport, ProvisionSight } from '../discovery/provision.js';
 import type { RediscoveryService } from '../discovery/rediscovery.js';
 import type { Actor } from '../objects/audit.js';
 import type { ScheduleService } from '../schedules/service.js';
@@ -220,7 +220,7 @@ export interface ApiServerOptions {
   /** Absent until D-03 is wired. */
   deviceTemplates?: DeviceTemplateCatalogue;
   /** Absent until D-04 is wired; the provision route then does not exist. */
-  provision?: (runId: number, actor: Actor) => Promise<ProvisionReport>;
+  provision?: (runId: number, actor: Actor, sight: ProvisionSight) => Promise<ProvisionReport>;
   /** Absent until D-07 is wired; the rediscovery routes then do not exist. */
   rediscovery?: RediscoveryService;
   /** Absent until R-01 is wired; the approval queue then has no routes. */
@@ -774,6 +774,7 @@ export class ApiServer {
         await scope.register(historyRoutes, { history: this.#history });
         if (this.#queries !== undefined && this.#probeConfig !== undefined) {
           await scope.register(queryRoutes, {
+            db: this.#db,
             queries: this.#queries,
             probeConfig: this.#probeConfig,
           });
@@ -841,6 +842,7 @@ export class ApiServer {
         }
         if (this.#discovery !== undefined) {
           await scope.register(discoveryRoutes, {
+            db: this.#db,
             discovery: this.#discovery,
             ...(this.#provision === undefined ? {} : { provision: this.#provision }),
             ...(this.#rediscovery === undefined ? {} : { rediscovery: this.#rediscovery }),

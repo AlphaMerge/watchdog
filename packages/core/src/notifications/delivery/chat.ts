@@ -88,11 +88,14 @@ export class ChatTransport implements DeliveryTransport {
     } catch {
       // Deliberately without the value. A malformed webhook URL is still a webhook URL, and an
       // error message is a thing that gets pasted into a ticket.
-      return { ok: false, retryable: false, error: 'the configured webhook URL is not a URL' };
+      const error = 'the configured webhook URL is not a URL';
+      return { ok: false, retryable: false, error, withoutOutput: error };
     }
 
     const document = this.#format.build(cardFor(message), settings);
 
+    // The guarded client gives its bare outcome as `withoutOutput`, the status and the host and
+    // nothing the service wrote back (`A-16`).
     return this.#http.send({
       url,
       body: JSON.stringify(document),

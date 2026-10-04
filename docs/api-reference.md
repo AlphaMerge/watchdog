@@ -349,7 +349,7 @@ Removes the credential set defined *on this object*. It does not leave the objec
 
 ### `PUT /api/v1/objects/{id}/dependency`
 
-Sets what this object depends on. `parent` inherits from above, `object` names a master sensor, `none` depends on nothing, and `device` makes **this sensor** the master for its parent device — which is what auto-discovery sets on a Ping sensor, and what pauses the rest of a device when it stops answering. A master pauses its dependents only when it is genuinely Down or Down (Acknowledged); pausing a master by hand or by schedule does not. `delaySeconds` keeps dependents paused after the master recovers, so a flapping link does not alarm on every bounce. A dependency that would form a loop is refused: a loop of masters can never recover.
+Sets what this object depends on. `parent` inherits from above, `object` names a master sensor, `none` depends on nothing, and `device` makes **this sensor** the master for its parent device — which is what auto-discovery sets on a Ping sensor, and what pauses the rest of a device when it stops answering. A master pauses its dependents only when it is genuinely Down or Down (Acknowledged); pausing a master by hand or by schedule does not. `delaySeconds` keeps dependents paused after the master recovers, so a flapping link does not alarm on every bounce. A dependency that would form a loop is refused: a loop of masters can never recover. The master has to be a sensor the caller can read, here, through the settings route and in bulk alike; one they cannot read is refused as one that does not exist, and a step of a refused loop they cannot see reads `null` in `details.path` (`A-77`).
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -387,14 +387,14 @@ Parses a range and estimates every level, so an operator picks one knowing what 
 
 Start a discovery run
 
-Sweeps a range from one probe into one group. The probe is named rather than chosen: discovery is a local-network job, so the probe that can reach 10.0.0.0/24 is the one on that network.
+Sweeps a range from one probe into one group. The probe is named rather than chosen: discovery is a local-network job, so the probe that can reach 10.0.0.0/24 is the one on that network. It has to be the probe the group is under, and one the caller can read: any other is refused `DISCOVERY_PROBE_INVALID` in the same words, so that a probe above the caller’s branch is answered as an id nobody used (`A-77`). Left out, it is the probe the group is under, which is how a writer granted a branch below a probe they cannot see starts one.
 
 **Body**
 
 | Field | Type | |
 | --- | --- | --- |
 | `groupId` | integer | **required** |
-| `probeId` | integer | **required** |
+| `probeId` | integer |  |
 | `range` | string | **required** |
 | `timeoutMs` | integer |  |
 | `concurrency` | integer |  |
@@ -456,7 +456,7 @@ Recorded immediately and sent to the probe as well, so a cancel works even while
 
 Create the devices and sensors this run found
 
-**Idempotent.** Devices are matched on address, then reverse name, then short name within the target group, and only sensors that are not already there are created — so running this twice creates nothing the second time. That matters because a discovery is re-run: on a schedule, or by an operator who has configured a credential and wants the sensors it unlocks. **A run whose rule was deleted creates nothing** (`A-41`): the account that wrote the rule vouched for sending the group’s credentials to the addresses it found, and deleting the rule withdraws that. With accounts on, the run is failed with the reason “its rule was deleted”, recorded in the audit log, and this answers 409 `DISCOVERY_RUN_FAILED` with the same sentence. Start a new run to provision those addresses. **Nor does a run whose group has since moved under another probe** (`P-241`): what it found was read from the old probe’s network, and would become devices in the new one’s branch. The run is failed with the reason “its group moved to another probe”, recorded in the audit log, and this answers 409 `DISCOVERY_RUN_FAILED` with that sentence. Start a new run from the group’s new probe.
+**Idempotent.** Devices are matched on address, then reverse name, then short name within the target group, and only sensors that are not already there are created — so running this twice creates nothing the second time. That matters because a discovery is re-run: on a schedule, or by an operator who has configured a credential and wants the sensors it unlocks. **A run whose rule was deleted creates nothing** (`A-41`): the account that wrote the rule vouched for sending the group’s credentials to the addresses it found, and deleting the rule withdraws that. With accounts on, the run is failed with the reason “its rule was deleted”, recorded in the audit log, and this answers 409 `DISCOVERY_RUN_FAILED` with the same sentence. Start a new run to provision those addresses. **Nor does a run whose group has since moved under another probe** (`P-241`): what it found was read from the old probe’s network, and would become devices in the new one’s branch. The run is failed with the reason “its group moved to another probe”, recorded in the audit log, and this answers 409 `DISCOVERY_RUN_FAILED` with that sentence. Start a new run from the group’s new probe. **It answers its caller in their own view** (`A-77`). A host at the address of a device the caller cannot see is reported in `problems` as “a device outside your view already has this address”, with no id and nothing created under the device; a sensor a template names that is already there and hidden is reported the same way and not counted in `sensorsSkipped`; and nothing is added to a device the caller may read and not write. An administrator is answered as before.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -508,7 +508,7 @@ Created **disabled** unless `enabled` says otherwise, and with `autoProvision` o
 | Field | Type | |
 | --- | --- | --- |
 | `groupId` | integer | **required** |
-| `probeId` | integer | **required** |
+| `probeId` | integer |  |
 | `name` | string | **required** |
 | `range` | string | **required** |
 | `cadence` | `hourly` · `daily` · `weekly` | **required** |

@@ -1,3 +1,4 @@
+import type { Visibility } from '../auth/access.js';
 import type { Queryable } from '../db/pool.js';
 import { ObjectRepository } from '../objects/repository.js';
 import { DiscoveryError } from './errors.js';
@@ -27,13 +28,59 @@ export async function requireGroupProbe(
   groupId: number,
   probeId: number,
 ): Promise<void> {
-  if (!(await isUnderProbe(q, groupId, probeId))) {
-    throw new DiscoveryError(
-      'DISCOVERY_PROBE_INVALID',
-      'a discovery runs from the probe its group is under, and that is not the probe given',
-      { context: { groupId, phase: 'discovery' } },
-    );
+  if (!(await isUnderProbe(q, groupId, probeId))) throw wrongProbe(groupId);
+}
+
+/**
+ * Refuses a probe its caller cannot see, in the words `requireGroupProbe` refuses any wrong one
+ * (`A-77`).
+ *
+ * **Otherwise the right probe is an oracle.** `requireGroupProbe` accepts exactly one id, the
+ * probe above the group, so a writer given the group and not the probe could try ids until one
+ * was accepted and learn which object that is. Asked before it, by the routes that take a probe
+ * from their caller, so a hidden probe is answered as an id nobody used: a discovery runs from a
+ * probe its caller can see. A schedule firing has no caller and is not asked.
+ */
+export async function requireProbeInView(
+  q: Queryable,
+  sees: Visibility,
+  groupId: number,
+  probeId: number,
+): Promise<void> {
+  if (sees.everything) return;
+  if (!(await sees.visibleAmong(q, [probeId])).has(probeId)) throw wrongProbe(groupId);
+}
+
+/**
+ * The probe a discovery its caller asked for runs from (`A-77`): the one they named, if they may
+ * name it, or else the one the group is under.
+ *
+ * **Left out is how a writer granted a branch starts one.** Naming the probe above their group is
+ * refused once they cannot see it, as any wrong probe is, and the group's own is still the only
+ * probe a run may use; so the caller may leave the choice to the group, which has only one answer.
+ */
+export async function probeFor(
+  q: Queryable,
+  sees: Visibility,
+  groupId: number,
+  named: number | undefined,
+): Promise<number> {
+  if (named !== undefined) {
+    await requireProbeInView(q, sees, groupId, named);
+    return named;
   }
+  const nearest = await objects.nearestProbe(q, groupId);
+  if (nearest === null) throw wrongProbe(groupId);
+  return nearest.id;
+}
+
+/** The one refusal for every wrong probe, so the checks above cannot come to differ. */
+function wrongProbe(groupId: number): DiscoveryError {
+  return new DiscoveryError(
+    'DISCOVERY_PROBE_INVALID',
+    'a discovery runs from the probe its group is under, and that is not the probe given',
+    { context: { groupId, phase: 'discovery' } },
+  );
 }
 
 /**

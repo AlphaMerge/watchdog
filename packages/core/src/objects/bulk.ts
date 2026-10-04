@@ -1,4 +1,4 @@
-import { describeError, type Logger } from '@ms/shared';
+import { AppError, describeError, type Logger } from '@ms/shared';
 import { ObjectError } from './errors.js';
 import type { ObjectService } from './service.js';
 import type { Visibility } from '../auth/access.js';
@@ -172,7 +172,9 @@ export class BulkService {
           objectId: id,
           ok: false,
           problem: reasonFor(error, id, alreadyGone),
-          code: error instanceof ObjectError ? error.code : 'INTERNAL_ERROR',
+          // Any refusal's own code: a master the caller cannot read is `AUTH_FORBIDDEN` (`A-77`),
+          // and `INTERNAL_ERROR` beside it would send them looking for a fault.
+          code: error instanceof AppError ? error.code : 'INTERNAL_ERROR',
         });
         if (error instanceof ObjectError && error.code === 'OBJECT_TREE_BUSY') {
           busy =
@@ -230,7 +232,9 @@ export class BulkService {
         return { createdId: result.object.id, grantsNotCarried: result.grantsNotCarried };
       }
       case 'setting':
-        await this.#objects.setSetting(actor, id, operation.key, operation.value);
+        // The writer, so a dependency's master is held to the read bar the single routes hold it
+        // to (`A-77`).
+        await this.#objects.setSetting(writer, id, operation.key, operation.value);
         return {};
       case 'revertSetting':
         await this.#objects.clearSetting(actor, id, operation.key);

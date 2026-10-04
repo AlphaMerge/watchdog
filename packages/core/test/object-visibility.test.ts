@@ -20,6 +20,7 @@ import { ScheduleService } from '../src/schedules/service.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import { DiscoveryService } from '../src/discovery/service.js';
 import { RediscoveryService } from '../src/discovery/rediscovery.js';
+import { existingInGroup, ProvisionService, provisionRun } from '../src/discovery/provision.js';
 import { DeviceTemplateCatalogue } from '../src/device-templates/catalogue.js';
 import { BUILT_IN_DEVICE_TEMPLATES } from '../src/device-templates/built-in.js';
 import { LookupCatalogue } from '../src/lookups/catalogue.js';
@@ -128,6 +129,9 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
   let sweptScheduleId = 0;
   let visibleRunId = 0;
   let hiddenRunId = 0;
+  /** The team's read-write account, which starts a run for `A-77`'s provisioning test. */
+  let operatorUserId = 0;
+  let discovery: DiscoveryService;
 
   const cookies = new Map<string, string>();
 
@@ -152,7 +156,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       },
     });
 
-    const discovery = new DiscoveryService({
+    discovery = new DiscoveryService({
       db,
       audit: new DatabaseAuditSink(),
       logger: silent,
@@ -180,6 +184,11 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       contexts,
     });
     const history = new HistoryService({ db, logger: silent });
+    const deviceTemplates = (() => {
+      const catalogue = new DeviceTemplateCatalogue(() => true);
+      for (const template of BUILT_IN_DEVICE_TEMPLATES) catalogue.register(template, 'built-in');
+      return catalogue.seal();
+    })();
     const maps = new MapService({
       db,
       repository: new MapRepository(),
@@ -223,23 +232,34 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       schedules,
       discovery,
       rediscovery,
-      provision: () =>
-        Promise.resolve({
-          devicesCreated: 0,
-          matched: 0,
-          sensorsCreated: 0,
-          sensorsSkipped: 0,
-          mastersSet: 0,
-          problems: [],
-          devices: [],
-        }),
+      // **The real thing, as `main.ts` wires it** (`A-77`): what a pass matches, reports and
+      // writes under is the caller's, and a stub could not show it.
+      provision: (runId, actor, sight) =>
+        provisionRun(
+          {
+            discovery,
+            provisioner: new ProvisionService({
+              db,
+              objects: harness.service,
+              templates: deviceTemplates,
+              logger: silent,
+              credentialsFor: () => Promise.resolve(new Set<string>()),
+              recordDevice: (run, address, device) => discovery.recordDevice(run, address, device),
+            }),
+            existing: (groupId) => existingInGroup(db, groupId),
+            vouchers: {
+              authRequired: true,
+              ruleWriter: (ruleId) => rediscovery.writerOf(ruleId),
+              rights: (principal, objectIds, q) => access.resolveManyFor(principal, objectIds, q),
+            },
+          },
+          runId,
+          actor,
+          sight,
+        ),
       // The built-in ones, so `/device-templates/:templateId` and `/lookups/:id` have one to
       // answer with.
-      deviceTemplates: (() => {
-        const catalogue = new DeviceTemplateCatalogue(() => true);
-        for (const template of BUILT_IN_DEVICE_TEMPLATES) catalogue.register(template, 'built-in');
-        return catalogue.seal();
-      })(),
+      deviceTemplates,
       lookups: (() => {
         const catalogue = new LookupCatalogue();
         for (const lookup of BUILT_IN_LOOKUPS) catalogue.register(lookup, 'built-in', true);
@@ -506,6 +526,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
     // one (`A-14`) — and so granted to the team, which is how the branch account reads it.
     const operator = (await accounts.list()).find((account) => account.login === 'operator');
     assert.ok(operator);
+    operatorUserId = operator.id;
     mapId = (
       await maps.create(
         { userId: operator.id, role: 'readwrite' },
@@ -3564,6 +3585,463 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         [back.probeChanged.from.name, back.probeChanged.to.name],
         [`${MARK}-second-probe`, `${MARK}-probe`],
       );
+    });
+  });
+
+  /**
+   * `A-77`, four more answers to writes that told their caller about what they cannot see. Each
+   * is asked as the team's operator and then as an administrator for the control: the operator's
+   * answer carries no marker and no hidden id, and the administrator's still says what to fix.
+   */
+  describe('four more answers to writes name nothing outside the branch (A-77)', () => {
+    const create = async (input: Record<string, unknown>): Promise<number> =>
+      (await harness.service.create(testActor, input as never)).id;
+    const grant = (id: number, right: 'none' | 'read' | 'write'): Promise<unknown> =>
+      access.grant(id, teamId, right, actorNamed('visibility'));
+    /** Never issued: what a hidden id has to be answered as. */
+    const NEVER_ISSUED = 9_000_000;
+
+    interface Answer {
+      readonly status: number;
+      readonly body: string;
+      readonly json: Record<string, unknown>;
+    }
+    const call = async (
+      login: string,
+      method: 'POST' | 'PUT' | 'PATCH',
+      url: string,
+      payload: object,
+      ifMatch?: string,
+    ): Promise<Answer> => {
+      const response = await app.inject({
+        method,
+        url: `/api/v1/${url}`,
+        headers: { ...as(login), ...(ifMatch === undefined ? {} : { 'if-match': ifMatch }) },
+        payload,
+      });
+      return {
+        status: response.statusCode,
+        body: response.body,
+        json: JSON.parse(response.body) as Record<string, unknown>,
+      };
+    };
+    /** A refusal without the correlation id every answer has its own of. */
+    const told = (answer: Answer): string => {
+      const error = answer.json['error'] as Record<string, unknown> | undefined;
+      return JSON.stringify([
+        answer.status,
+        error?.['code'],
+        error?.['message'],
+        error?.['context'],
+        error?.['details'],
+      ]);
+    };
+    const errorOf = (answer: Answer): { message: string; details: Record<string, unknown> } => {
+      const error = answer.json['error'] as
+        { message?: string; details?: Record<string, unknown> } | undefined;
+      return { message: error?.message ?? '', details: error?.details ?? {} };
+    };
+
+    it('provisions a run into only what its caller can see and write', async () => {
+      // A room the operator writes, holding a device carved out of their view, one they may only
+      // read, one with a hidden Ping, and one with a Ping they can see.
+      const room = await create({ kind: 'group', parentId: branchId, name: 'a-provision-room' });
+      const readOnly = await create({
+        kind: 'device',
+        parentId: room,
+        name: 'a-read-only',
+        host: '10.0.9.1',
+      });
+      const hidden = await create({
+        kind: 'device',
+        parentId: room,
+        name: `${MARK}-provision-hidden`,
+        host: '10.0.9.2',
+      });
+      await create({
+        kind: 'sensor',
+        parentId: hidden,
+        name: `${MARK}-provision-hidden-ping`,
+        sensorType: 'icmp.ping',
+      });
+      const holey = await create({
+        kind: 'device',
+        parentId: room,
+        name: 'a-holey',
+        host: '10.0.9.3',
+      });
+      const hiddenPing = await create({
+        kind: 'sensor',
+        parentId: holey,
+        name: `${MARK}-holey-ping`,
+        sensorType: 'icmp.ping',
+      });
+      const plain = await create({
+        kind: 'device',
+        parentId: room,
+        name: 'a-plain',
+        host: '10.0.9.5',
+      });
+      await create({
+        kind: 'sensor',
+        parentId: plain,
+        name: 'a-plain-ping',
+        sensorType: 'icmp.ping',
+      });
+      await grant(room, 'write');
+      await grant(readOnly, 'read');
+      await grant(hidden, 'none');
+      await grant(hiddenPing, 'none');
+
+      // Started by the operator, who vouches for where it sends credentials (`A-41`); its hosts
+      // are the four devices' addresses and one new one, none of them identified.
+      const run = await discovery.start(
+        { groupId: room, probeId, range: '10.0.9.0/29' },
+        { kind: 'user', userId: operatorUserId, login: 'operator' },
+      );
+      await db.query(
+        `INSERT INTO discovery_host (run_id, address)
+         SELECT $1, unnest($2::inet[])`,
+        [run.id, ['10.0.9.1', '10.0.9.2', '10.0.9.3', '10.0.9.4', '10.0.9.5']],
+      );
+      const beneath = async (id: number): Promise<number> =>
+        Number(
+          (
+            await db.query<{ n: string }>(
+              'SELECT count(*)::text AS n FROM object WHERE parent_id = $1',
+              [id],
+            )
+          )[0]?.n,
+        );
+
+      interface Report {
+        matched: number;
+        devicesCreated: number;
+        sensorsCreated: number;
+        sensorsSkipped: number;
+        problems: { address: string; problem: string }[];
+        devices: { address: string; deviceId: number; created: boolean; sensors?: string[] }[];
+      }
+      const provision = async (login: string): Promise<Report> => {
+        const answer = await call(login, 'POST', `discovery/${String(run.id)}/provision`, {});
+        assert.equal(answer.status, 200, `${login}: ${answer.body}`);
+        return answer.json as unknown as Report;
+      };
+      const problemAt = (report: Report, address: string): string[] =>
+        report.problems.filter((one) => one.address === address).map((one) => one.problem);
+
+      const mine = await provision('operator');
+      const said = JSON.stringify(mine);
+      assert.ok(!said.includes(MARK), said);
+      assert.ok(!mine.devices.some((one) => one.deviceId === hidden), said);
+      assert.ok(!mine.devices.some((one) => one.address === '10.0.9.2'), said);
+      assert.deepEqual(problemAt(mine, '10.0.9.2'), [
+        'a device outside your view already has this address',
+      ]);
+      assert.equal(await beneath(hidden), 1, 'nothing made under the hidden device');
+      // The hidden Ping stops a duplicate and is not counted as one the operator can see.
+      assert.deepEqual(problemAt(mine, '10.0.9.3'), [
+        'icmp.ping: a sensor outside your view is already there',
+      ]);
+      assert.equal(await beneath(holey), 1, 'no second Ping beside the hidden one');
+      // Read, not written: named, and left as it was.
+      assert.deepEqual(problemAt(mine, '10.0.9.1'), [
+        `nothing was added to device ${String(readOnly)}: adding a sensor to it needs write on it`,
+      ]);
+      assert.equal(await beneath(readOnly), 0);
+      assert.deepEqual(
+        [mine.matched, mine.devicesCreated, mine.sensorsCreated, mine.sensorsSkipped],
+        [3, 1, 1, 1],
+        said,
+      );
+      assert.deepEqual(
+        mine.devices.map((one) => [one.address, one.deviceId === holey || one.deviceId === plain]),
+        [
+          ['10.0.9.1', false],
+          ['10.0.9.3', true],
+          ['10.0.9.4', false],
+          ['10.0.9.5', true],
+        ],
+        said,
+      );
+
+      // The control: an administrator matches every device, the hidden one by id, and is told
+      // nothing is outside their view.
+      const whole = await provision('admin');
+      const wholeSaid = JSON.stringify(whole);
+      assert.ok(
+        whole.devices.some((one) => one.address === '10.0.9.2' && one.deviceId === hidden),
+        wholeSaid,
+      );
+      assert.ok(!wholeSaid.includes('outside your view'), wholeSaid);
+      assert.equal(whole.matched, 5, wholeSaid);
+    });
+
+    it('holds a master named through a setting or in bulk to the dependency route’s read bar', async () => {
+      // `a-ping` is the operator's to write. A hidden master, a hidden device and an id never
+      // issued are one answer on every route that can name a master.
+      const routes: {
+        name: string;
+        send: (login: string, masterId: number) => Promise<string>;
+      }[] = [
+        {
+          name: 'the dependency route',
+          send: async (login, masterId) =>
+            told(
+              await call(login, 'PUT', `objects/${String(pingId)}/dependency`, {
+                mode: 'object',
+                masterId,
+              }),
+            ),
+        },
+        {
+          name: 'the settings route',
+          send: async (login, masterId) =>
+            told(
+              await call(login, 'PUT', `objects/${String(pingId)}/settings/dependency.masterId`, {
+                value: masterId,
+              }),
+            ),
+        },
+        {
+          name: 'a bulk setting',
+          send: async (login, masterId) => {
+            const answer = await call(login, 'POST', 'objects/bulk', {
+              ids: [pingId],
+              operation: 'setting',
+              key: 'dependency.masterId',
+              value: masterId,
+            });
+            assert.equal(answer.status, 200, answer.body);
+            const [outcome] = (answer.json['outcomes'] ?? []) as {
+              ok: boolean;
+              problem?: string;
+              code?: string;
+            }[];
+            return JSON.stringify([outcome?.ok, outcome?.code, outcome?.problem]);
+          },
+        },
+      ];
+      const before = await harness.service.settings(pingId);
+      // Only the id differs between the answers, and the caller sent that.
+      const unnamed = (answer: string, id: number): string => answer.replaceAll(String(id), 'N');
+      for (const route of routes) {
+        const hiddenSensor = await route.send('operator', otherSensorId);
+        const hiddenDevice = await route.send('operator', otherDeviceId);
+        const missing = await route.send('operator', NEVER_ISSUED);
+        for (const answer of [hiddenSensor, hiddenDevice, missing]) {
+          assert.ok(!answer.includes(MARK), `${route.name}: ${answer}`);
+          assert.ok(!answer.includes('is a device'), `${route.name}: ${answer}`);
+          assert.match(answer, /does not exist or you cannot read it/, route.name);
+        }
+        assert.equal(
+          unnamed(hiddenSensor, otherSensorId),
+          unnamed(missing, NEVER_ISSUED),
+          route.name,
+        );
+        assert.equal(
+          unnamed(hiddenDevice, otherDeviceId),
+          unnamed(missing, NEVER_ISSUED),
+          route.name,
+        );
+
+        // The control: an administrator is told what each one is.
+        assert.match(
+          await route.send('admin', otherDeviceId),
+          new RegExp(`a master must be a sensor; #${String(otherDeviceId)} is a device`),
+          route.name,
+        );
+        assert.match(
+          await route.send('admin', NEVER_ISSUED),
+          new RegExp(`no object ${String(NEVER_ISSUED)} to depend on`),
+          route.name,
+        );
+      }
+      assert.deepEqual(await harness.service.settings(pingId), before, 'nothing was written');
+
+      // **Refused before anything is written.** Leaving "master for parent device" clears the
+      // device's setting first, and a refused master must not leave that half done.
+      const room = await create({ kind: 'group', parentId: branchId, name: 'a-master-room' });
+      const device = await create({
+        kind: 'device',
+        parentId: room,
+        name: 'a-master-device',
+        host: '10.0.13.1',
+      });
+      const master = await create({
+        kind: 'sensor',
+        parentId: device,
+        name: 'a-device-master',
+        sensorType: 'icmp.ping',
+      });
+      await harness.service.setDependency(testActor, master, 'device', undefined, undefined);
+      await grant(room, 'write');
+      const away = await call('operator', 'PUT', `objects/${String(master)}/dependency`, {
+        mode: 'object',
+        masterId: otherSensorId,
+      });
+      assert.equal(away.status, 403, away.body);
+      assert.equal(
+        (await harness.resolver.own(device))['dependency.masterId'],
+        master,
+        'the device still names its master',
+      );
+    });
+
+    it('lists a refused loop’s steps only where its writer can see them', async () => {
+      // A <- B <- H <- A: `a-loop-a` would depend on `a-loop-b`, whose master is a sensor carved
+      // out of the operator's view, whose master is `a-loop-a`.
+      const room = await create({ kind: 'group', parentId: branchId, name: 'a-loop-room' });
+      const device = await create({
+        kind: 'device',
+        parentId: room,
+        name: 'a-loop-device',
+        host: '10.0.10.1',
+      });
+      const sensorIn = (name: string): Promise<number> =>
+        create({ kind: 'sensor', parentId: device, name, sensorType: 'icmp.ping' });
+      const a = await sensorIn('a-loop-a');
+      const b = await sensorIn('a-loop-b');
+      const h = await sensorIn(`${MARK}-loop-h`);
+      await harness.service.setDependency(testActor, b, 'object', h, undefined);
+      await harness.service.setDependency(testActor, h, 'object', a, undefined);
+      await grant(room, 'write');
+      await grant(h, 'none');
+
+      const loop = async (login: string): Promise<{ body: string; path: unknown }> => {
+        const answer = await call(login, 'PUT', `objects/${String(a)}/dependency`, {
+          mode: 'object',
+          masterId: b,
+        });
+        assert.equal(answer.status, 409, answer.body);
+        assert.equal((answer.json['error'] as { code?: string }).code, 'OBJECT_CYCLE', answer.body);
+        return { body: answer.body, path: errorOf(answer).details['path'] };
+      };
+      const mine = await loop('operator');
+      assert.deepEqual(mine.path, [b, null, a], mine.body);
+      assert.ok(!mine.body.includes(MARK), mine.body);
+      // The control: an administrator is shown every step.
+      assert.deepEqual((await loop('admin')).path, [b, h, a]);
+    });
+
+    it('answers a hidden probe as an id nobody used, when a discovery or a rule names one', async () => {
+      await grant(branchId, 'write');
+      const start = (login: string, probe: number): Promise<Answer> =>
+        call(login, 'POST', 'discovery', {
+          groupId: branchId,
+          probeId: probe,
+          range: '10.0.11.0/30',
+        });
+      const rule = (login: string, probe: number): Promise<Answer> =>
+        call(login, 'POST', 'discovery/schedules', {
+          groupId: branchId,
+          probeId: probe,
+          name: 'a-probe-oracle',
+          range: '10.0.11.0/30',
+          cadence: 'daily',
+        });
+      let ruleId = 0;
+      let ruleTag = '';
+      try {
+        for (const [name, send] of [
+          ['a run', start],
+          ['a rule', rule],
+        ] as const) {
+          // The group's own probe, which the operator cannot see, reads as a wrong one and as one
+          // never issued: guessing ids no longer finds it.
+          const own = await send('operator', probeId);
+          assert.equal(own.status, 400, `${name}: ${own.body}`);
+          assert.match(own.body, /"code":"DISCOVERY_PROBE_INVALID"/, name);
+          assert.equal(told(own), told(await send('operator', NEVER_ISSUED)), name);
+          assert.equal(told(own), told(await send('operator', secondProbeId)), name);
+          // The control: an administrator starts it from the group's probe, and only that one.
+          const admitted = await send('admin', probeId);
+          assert.equal(admitted.status, 201, `${name}: ${admitted.body}`);
+          assert.equal(told(await send('admin', secondProbeId)), told(own), name);
+          if (send === rule) {
+            ruleId = admitted.json['id'] as number;
+            ruleTag = `W/"${String(admitted.json['version'])}"`;
+          }
+        }
+
+        // Left out, the probe is the group's own: how a writer below a probe they cannot see
+        // starts one.
+        const left = await call('operator', 'POST', 'discovery', {
+          groupId: branchId,
+          range: '10.0.11.0/30',
+        });
+        assert.equal(left.status, 201, left.body);
+
+        // A rule's probe changed by an edit: one answer for a hidden probe and one never issued.
+        const url = `discovery/schedules/${String(ruleId)}`;
+        const edit = (body: object): Promise<Answer> =>
+          call('operator', 'PATCH', url, body, ruleTag);
+        const hiddenEdit = await edit({ probeId: secondProbeId });
+        assert.equal(hiddenEdit.status, 400, hiddenEdit.body);
+        assert.match(hiddenEdit.body, /"code":"DISCOVERY_PROBE_INVALID"/);
+        assert.equal(told(hiddenEdit), told(await edit({ probeId: NEVER_ISSUED })));
+        // Its own probe, unchanged, is not asked about: it is in every read of the rule.
+        const kept = await edit({ probeId, name: 'a-kept' });
+        assert.equal(kept.status, 200, kept.body);
+      } finally {
+        await db.query(`DELETE FROM discovery_schedule WHERE name IN ('a-probe-oracle', 'a-kept')`);
+      }
+    });
+
+    it('names the probe a check failed on only to a caller who can see it', async () => {
+      // Nobody is on the line in this harness, so every check is answered 503 `offline`.
+      const check = async (login: string): Promise<Record<string, unknown>> => {
+        const answer = await call(login, 'POST', `sensors/${String(pingId)}/check`, {});
+        assert.equal(answer.status, 503, answer.body);
+        return (answer.json['error'] as { context: Record<string, unknown> }).context;
+      };
+      assert.deepEqual(await check('operator'), { objectId: pingId });
+      // The control, and then a reader of the probe: its id.
+      assert.deepEqual(await check('admin'), { objectId: pingId, probeObjectId: probeId });
+      await grant(probeId, 'read');
+      await grant(branchId, 'read');
+      await grant(deviceId, 'write');
+      assert.deepEqual(await check('operator'), { objectId: pingId, probeObjectId: probeId });
+    });
+
+    it('refuses a move without the id of a probe above it the mover cannot see', async () => {
+      // A Probe Health sensor with no `probeId` reports on the probe above it, which a move
+      // re-checks (`A-29`); the refusal said which object that is.
+      const from = await create({ kind: 'group', parentId: branchId, name: 'a-health-from' });
+      const to = await create({ kind: 'group', parentId: branchId, name: 'a-health-to' });
+      const device = await create({
+        kind: 'device',
+        parentId: from,
+        name: 'a-health-device',
+        host: '10.0.12.1',
+      });
+      await create({
+        kind: 'sensor',
+        parentId: device,
+        name: 'a-probe-health',
+        sensorType: 'ms.probe.health',
+        params: {},
+      });
+      await grant(from, 'write');
+      await grant(to, 'write');
+      const refused = await call('operator', 'POST', `objects/${String(device)}/move`, {
+        targetParentId: to,
+      });
+      assert.equal(refused.status, 403, refused.body);
+      assert.ok(!refused.body.includes(MARK), refused.body);
+      assert.equal(
+        errorOf(refused).message,
+        'sensor "a-probe-health": probeId is not set, so it reports on the probe above it, ' +
+          'which you cannot read',
+      );
+      const context = (refused.json['error'] as { context?: Record<string, unknown> }).context;
+      assert.ok(!Object.values(context ?? {}).includes(probeId), refused.body);
+
+      // The control: an administrator moves it.
+      const moved = await call('admin', 'POST', `objects/${String(device)}/move`, {
+        targetParentId: to,
+      });
+      assert.equal(moved.status, 200, moved.body);
     });
   });
 

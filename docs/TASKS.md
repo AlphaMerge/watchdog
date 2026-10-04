@@ -16807,7 +16807,7 @@ because each is a decision rather than a defect:
       widening reads counted; left out of the audit; the guard asking for any grant; the
       positive grants dropped when nothing is inserted.
 
-- [ ] **A-77 — four more ways a write tells its caller about what it cannot see** · M ·
+- [x] **A-77 — four more ways a write tells its caller about what it cannot see** · M ·
       A-16 · Found 2026-10-04 by `A-16`'s sweep. (1) `POST /discovery/:id/provision` matches
       against the group with no visibility filter (`main.ts` `devicesInGroup`/`sensorsInGroup`):
       it reports hidden device ids and counts, creates sensors under hidden devices because it
@@ -16824,6 +16824,97 @@ because each is a decision rather than a defect:
       transports set no `withoutOutput`, so a test send with anything hidden answers only
       "sent" or "not sent". **Done when** (1) to (3) are closed with tests in
       `object-visibility.test.ts`, and (4) is decided.
+
+      **(4) is left open as a decision, not taken here:** what a notification to an address its
+      writer chose may render needs a ruling, since an address has no view to render for.
+
+      **A-77 outcome.** (1) to (3) are closed, each through `Visibility` and `Reach` as every
+      route reads them and never a walk of its own. An administrator is answered as before.
+      - **Provisioning** (`POST /discovery/:id/provision`). A pass still writes as the
+        installation, since its sensors come from a template, and now answers its caller: the
+        route hands `provisionRun` a `ProvisionSight` (the caller's `Visibility` and `write`
+        `Reach`). A schedule's pass has nobody to answer and passes `EVERYTHING`. It still
+        matches every device in the group, so that a second device is never made at a hidden
+        one's address. But:
+        - a host whose device is hidden is reported as "a device outside your view already has
+          this address" (or "this name"), with no id, nothing recorded and nothing created;
+        - a hidden sensor a template names stops the duplicate and is reported as "a sensor
+          outside your view is already there", not counted in `sensorsSkipped`;
+        - a device the caller may read and not write is matched and named, and nothing is added
+          to it.
+        Credential refusals are worded for the caller: `Writer.answers` carries whose view a
+        refusal is for, and `seenBy` reads it. The group queries moved from `main.ts` to
+        `existingInGroup` in `provision.ts`, so the test wires the real thing.
+      - **A dependency's master.** `setSetting` and `setDependency` take a `Writer`, and
+        `#seenMaster` holds the read bar on the master for all three routes: the dependency
+        route, the settings route and bulk `setting`. The dependency route's
+        `onBodyObject('read', 'masterId')` declaration is gone, since keeping it would make two
+        checks. To a caller who cannot see everything, a hidden master and a missing one are
+        both `AUTH_FORBIDDEN` "a master has to be a sensor you can read, and object N does not
+        exist or you cannot read it", whatever kind the hidden object is. It is checked before
+        `setDependency` writes anything, so leaving "master for parent device" is not left half
+        done. An `OBJECT_CYCLE`'s `details.path` has `null` for each step the caller cannot see.
+        Bulk outcomes now carry any `AppError`'s own code, where an `AuthError` was
+        `INTERNAL_ERROR`.
+      - **Id-only oracles.**
+        - `requireProbeInView` (in `scope.ts`, sharing `wrongProbe` with `requireGroupProbe`)
+          refuses a named probe the caller cannot see in the one sentence for every wrong probe.
+          It covers `POST /discovery`, `POST /discovery/schedules` and a `PATCH` that changes a
+          rule's probe.
+        - **Behaviour change:** `probeId` is now optional on the first two. Left out, it is the
+          group's own probe (`probeFor`). This is how a writer granted a branch below a probe
+          they cannot see still starts a discovery. `discovery-scope.test.ts`'s A-28 HTTP case
+          now names the probe (refused, like a wrong one) and then leaves it out (201).
+        - `POST /sensors/:id/check` puts `probeObjectId` in a failure's context only for a
+          caller who can see the probe.
+        - `A-29`'s refusal of a Probe Health sensor whose probe is implied by the tree
+          (`NamedObject.chosen: false`) says "probeId is not set, so it reports on the probe
+          above it, which you cannot read", with no id. Two `sensor-reads.test.ts` cases that
+          asserted the id were updated.
+      - **`withoutOutput`.** The email transport now sets it on every result: the relay's reply
+        code and command, never its words. Chat's one local refusal sets it too; its sends
+        already got it from the guarded HTTP client.
+
+      Tests:
+      - A new describe in `object-visibility.test.ts`, 6 tests. Each runs as the branch operator
+        and as an administrator for the control:
+        - provisioning a hidden device, a hidden Ping, a read-only device and a new host, through
+          the real wiring;
+        - a hidden sensor, a hidden device and an unused id as master on all three routes, plus
+          the parent device's setting surviving a refusal;
+        - a loop through a hidden master;
+        - the group's own hidden probe answered as a wrong probe or an unused one, for a run, a
+          rule and a rule edit, and a run started with the probe left out;
+        - check-now's context;
+        - a move refused without the probe's id.
+      - `provisioning.test.ts`: four more (hidden device by address and by name, hidden sensor,
+        read-only device, the credential refusal in the caller's view).
+      - `sensor-reads.test.ts`: one rule case.
+      - `test-send.test.ts`: one, a relay quoting the message back.
+      - `docs/api-reference.md` regenerated: new descriptions, and `probeId` optional.
+
+      Mutation 12/12, each caught:
+      - the hidden-device match;
+      - the write check;
+      - the hidden-sensor count;
+      - `answers` dropped;
+      - the master's visibility bar;
+      - bulk writing as the installation;
+      - the cycle path unmasked;
+      - `requireProbeInView` always passing;
+      - check-now always naming the probe;
+      - the implied-probe refusal;
+      - email's bare outcome carrying the relay's words;
+      - `setDependency`'s early master check removed.
+
+      **Not fixed here (follow-ups):**
+      - Run and rule reads (`GET /discovery/:id`, the schedules list) still return `probeId`
+        to a reader of the group who cannot see the probe. That is the same id this ticket stops
+        `requireGroupProbe` from confirming.
+      - A scheduled rediscovery's provisioning pass still sees the whole group. Its report and
+        `problems` are stored on the run, which any reader of the group can read.
+      - The web discovery and rediscovery forms always send a probe chosen from the visible
+        tree, so a branch writer who cannot see the probe cannot yet leave it out from the UI.
 
 - [x] **A-36 — A core behind a browser and a proxy: the stream takes any origin, a forwarded
       header turns off CSRF, and the proxy is never believed** · M · A-01, A-09, A-19 · Found

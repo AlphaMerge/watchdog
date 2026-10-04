@@ -3,7 +3,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { Client } from 'pg';
 import { DatabaseAuditSink } from '../src/audit/store.js';
-import { Visibility } from '../src/auth/access.js';
+import { Reach, Visibility } from '../src/auth/access.js';
 import { Database, type Queryable } from '../src/db/pool.js';
 import { DeviceTemplateCatalogue } from '../src/device-templates/index.js';
 import {
@@ -245,6 +245,7 @@ describe('P-229: the tree lock', { skip: available ? false : 'no database' }, ()
     const run = await discovery.start({ groupId, probeId, range: '10.0.0.0/29' }, testActor);
     const recorded: string[] = [];
     const provisioner = new ProvisionService({
+      db,
       objects: h.service,
       templates,
       logger: silentLogger,
@@ -269,6 +270,7 @@ describe('P-229: the tree lock', { skip: available ? false : 'no database' }, ()
           existingSensors: [],
           actor: testActor,
           credentials: { kind: 'installation' },
+          sight: { visibility: Visibility.EVERYTHING, writes: Reach.EVERYTHING },
         }),
       );
       return { report, tookMs: Number(process.hrtime.bigint() - started) / 1e6, recorded };
@@ -382,6 +384,7 @@ describe('P-229: the tree lock', { skip: available ? false : 'no database' }, ()
         h.service.setDependency(...args),
     } as unknown as ObjectService;
     const provisioner = new ProvisionService({
+      db,
       objects,
       templates: catalogue,
       logger: silentLogger,
@@ -397,8 +400,13 @@ describe('P-229: the tree lock', { skip: available ? false : 'no database' }, ()
          WHERE o.parent_id = $1`,
         [groupId],
       );
-      const present = await db.query<{ device_id: string; type: string; params: object }>(
-        `SELECT o.parent_id AS device_id, c.type, c.params
+      const present = await db.query<{
+        id: string;
+        device_id: string;
+        type: string;
+        params: object;
+      }>(
+        `SELECT o.id, o.parent_id AS device_id, c.type, c.params
          FROM object o JOIN sensor_config c ON c.object_id = o.id
          WHERE o.parent_id = ANY($1::bigint[])`,
         [devices.map((one) => one.id)],
@@ -415,12 +423,14 @@ describe('P-229: the tree lock', { skip: available ? false : 'no database' }, ()
             host: one.host,
           })),
           existingSensors: present.map((one) => ({
+            id: Number(one.id),
             deviceId: Number(one.device_id),
             sensorType: one.type,
             params: one.params as Record<string, unknown>,
           })),
           actor: testActor,
           credentials: { kind: 'installation' },
+          sight: { visibility: Visibility.EVERYTHING, writes: Reach.EVERYTHING },
         }),
       );
     };

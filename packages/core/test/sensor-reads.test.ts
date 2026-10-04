@@ -43,7 +43,7 @@ const ACCOUNT: Voucher = {
 };
 
 const naming = (objectId: number, expects: 'sensor' | 'probe' = 'sensor'): WrittenReads => ({
-  named: [{ sensorName: 'Sum', param: 'channels[0].formula', objectId, expects }],
+  named: [{ sensorName: 'Sum', param: 'channels[0].formula', objectId, expects, chosen: true }],
   bars: [],
   sayWhich: false,
 });
@@ -80,6 +80,32 @@ describe('what a written sensor may name, as rules', () => {
     assert.equal(
       hidden['message'],
       'channels[0].formula names object 42, which does not exist or which you cannot read',
+    );
+  });
+
+  it('names the probe above a sensor only to a writer who can read it (A-77)', () => {
+    // Probe Health with no `probeId`: the id is the tree's, not the writer's, so a refusal of it
+    // must not be how a writer granted a branch learns which object the probe above it is.
+    const implied: WrittenReads = {
+      named: [{ sensorName: 'PH', param: 'probeId', objectId: 3, expects: 'probe', chosen: false }],
+      bars: [],
+      sayWhich: false,
+    };
+    const hidden = observed(refusal(ACCOUNT, implied, found([[3, 'probe']], [])));
+    assert.ok(hidden !== null);
+    assert.equal(hidden['status'], 403);
+    assert.equal(
+      hidden['message'],
+      'probeId is not set, so it reports on the probe above it, which you cannot read',
+    );
+    assert.doesNotMatch(JSON.stringify(hidden), /\b3\b/);
+    // The same probe readable is no refusal, and a probe the writer named is named back.
+    assert.equal(refusal(ACCOUNT, implied, found([[3, 'probe']], [3])), null);
+    assert.match(
+      String(
+        observed(refusal(ACCOUNT, naming(3, 'probe'), found([[3, 'probe']], [])))?.['message'],
+      ),
+      /^channels\[0\]\.formula names object 3, which does not exist or which you cannot read$/,
     );
   });
 
@@ -529,10 +555,11 @@ describe(
         name: 'under-hidden-01',
         host: '10.0.1.1',
       });
+      // Without the probe's id, which the writer never sent and cannot see (`A-77`).
       await refused(
         () => sensor(branch, device.id, 'ms.probe.health', {}),
         403,
-        new RegExp(`^probeId names object ${String(hiddenProbe)}`),
+        /^probeId is not set, so it reports on the probe above it, which you cannot read$/,
       );
     });
 
@@ -558,7 +585,7 @@ describe(
       await refused(
         () => harness.service.move(branch, device.id, underHidden, { kind: 'none' }),
         403,
-        new RegExp(`^sensor "moving-health": probeId names object ${String(hiddenProbe)}`),
+        /^sensor "moving-health": probeId is not set, so it reports on the probe above it, which you cannot read$/,
       );
       const still = await harness.service.get(device.id);
       assert.equal(still.parentId, mine, 'the refused move rolled back');

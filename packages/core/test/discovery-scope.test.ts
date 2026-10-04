@@ -5,7 +5,7 @@ import type { Database } from '../src/db/pool.js';
 import { ApiServer } from '../src/api/server.js';
 import { AuditRepository, DatabaseAuditSink } from '../src/audit/store.js';
 import { AccountService } from '../src/auth/accounts.js';
-import { AccessService } from '../src/auth/access.js';
+import { AccessService, Reach, Visibility } from '../src/auth/access.js';
 import { GroupService } from '../src/auth/groups.js';
 import { LoginThrottle } from '../src/auth/throttle.js';
 import { SessionService } from '../src/auth/sessions.js';
@@ -442,7 +442,11 @@ describe(
         provisioned = 0;
 
         await assert.rejects(
-          () => provisionRun(wiring(), run.id, testActor),
+          () =>
+            provisionRun(wiring(), run.id, testActor, {
+              visibility: Visibility.EVERYTHING,
+              writes: Reach.EVERYTHING,
+            }),
           (error: unknown) => {
             assert.ok(error instanceof DiscoveryError);
             assert.equal(error.code, 'DISCOVERY_RUN_FAILED');
@@ -467,7 +471,10 @@ describe(
         await discovery.finished(probeA, run.id, 'done', 8, '');
         provisioned = 0;
 
-        await provisionRun(wiring(), run.id, testActor);
+        await provisionRun(wiring(), run.id, testActor, {
+          visibility: Visibility.EVERYTHING,
+          writes: Reach.EVERYTHING,
+        });
         assert.equal(provisioned, 1);
         assert.equal((await discovery.get(run.id))?.status, 'done');
       });
@@ -503,13 +510,36 @@ describe(
         assert.equal(await runsFrom(probeB), 0);
       });
 
-      it('lets the same writer use the probe their group is under', async () => {
-        const response = await post('/api/v1/discovery', {
+      it('lets the same writer use the probe their group is under, by leaving it to the group', async () => {
+        // Named, the probe above the branch is one this writer cannot see, and is answered as a
+        // wrong one: otherwise trying ids until one was accepted would say which it is (`A-77`).
+        const named = await post('/api/v1/discovery', {
           groupId: groupA,
           probeId: probeA,
           range: '10.0.2.0/29',
         });
+        assert.equal(named.statusCode, 400, named.body);
+        const wrong = await post('/api/v1/discovery', {
+          groupId: groupA,
+          probeId: 999_999,
+          range: '10.0.2.0/29',
+        });
+        const answer = (response: typeof named): string =>
+          JSON.stringify({ ...response.json<{ error: object }>().error, correlationId: undefined });
+        assert.equal(answer(named), answer(wrong));
+
+        // Left out, it is the group's own, and the run is the probe's.
+        const response = await post('/api/v1/discovery', { groupId: groupA, range: '10.0.2.0/29' });
         assert.equal(response.statusCode, 201, response.body);
+        assert.equal(response.json<{ probeId: number }>().probeId, probeA);
+        const rule = await post('/api/v1/discovery/schedules', {
+          groupId: groupA,
+          name: 'left to the group',
+          range: '10.0.2.0/29',
+          cadence: 'daily',
+        });
+        assert.equal(rule.statusCode, 201, rule.body);
+        assert.equal(rule.json<{ probeId: number }>().probeId, probeA);
       });
     });
 
