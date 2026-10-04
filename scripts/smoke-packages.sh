@@ -101,6 +101,7 @@ fi
 
 one_format() {
   local format="$1" image container pkg install_cmd upgrade_cmd remove_cmd query_cmd
+  local unping_cmd requires_cmd ping_pkg_cmd
   case "${format}" in
     deb)
       image=ms-smoke:bookworm
@@ -108,7 +109,13 @@ one_format() {
       docker build -q -t "${image}" -f "${repo_root}/scripts/smoke/Dockerfile" "${repo_root}/scripts/smoke" >/dev/null
       "${repo_root}/scripts/package-deb.sh" >/dev/null
       pkg="$(ls -t "${repo_root}"/release/ms_*.deb | head -1)"
-      install_cmd='dpkg -i /pkg/PKG'
+      # **Through apt, as `installation.md` §2 says to** (`H-31`): the package depends on
+      # `iputils-ping`, which `dpkg -i` would refuse to resolve, and the box has had it removed
+      # below so that the dependency, not the image, is what brings `ping`.
+      install_cmd='DEBIAN_FRONTEND=noninteractive apt-get install -y -q /pkg/PKG'
+      unping_cmd='apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq iputils-ping'
+      requires_cmd='dpkg-deb -f /pkg/PKG Depends'
+      ping_pkg_cmd='dpkg -s iputils-ping'
       upgrade_cmd='dpkg -i /pkg/PKG'
       remove_cmd='dpkg -P ms'
       query_cmd='dpkg -s ms'
@@ -119,7 +126,11 @@ one_format() {
       docker build -q -t "${image}" -f "${repo_root}/scripts/smoke/Dockerfile.rocky" "${repo_root}/scripts/smoke" >/dev/null
       "${repo_root}/scripts/package-rpm.sh" >/dev/null
       pkg="$(ls -t "${repo_root}"/release/ms-*.rpm | head -1)"
-      install_cmd='rpm -i /pkg/PKG'
+      # Through dnf, which resolves `Requires: iputils`; the image has no `ping` of its own.
+      install_cmd='dnf install -y /pkg/PKG'
+      unping_cmd='! rpm -q iputils >/dev/null'
+      requires_cmd='rpm -qp --requires /pkg/PKG'
+      ping_pkg_cmd='rpm -q iputils'
       # Re-installing the same version is how the upgrade path is exercised without cutting a
       # second release; rpm calls that a conflict unless told otherwise, dpkg does not.
       upgrade_cmd='rpm -U --force /pkg/PKG'
@@ -149,14 +160,17 @@ one_format() {
     -v "${repo_root}/release:/pkg:ro" \
     "${image}" >/dev/null
 
-  # **`MS_SETUP_NO_START=1` for both**, and the reason is a division of labour rather than a
-  # dodge: what a *package* is responsible for is files, users, PKI and scriptlets that behave
-  # differently on an upgrade than on a removal. Whether the services then reach "active" is
-  # `smoke-install.sh`, and since H-05 all three installers run the same `ms-setup` — so proving
-  # it there proves it here. It also keeps the two boxes comparable: TimescaleDB ships no aarch64
-  # RPMs for EL9, so a Rocky box with a working database cannot exist on an arm64 machine, and a
-  # test that only ran on x86_64 would be a test that did not run.
+  # **`MS_SETUP_NO_START=1` for everything after the first install**, and the reason is a division
+  # of labour rather than a dodge: what a *package* is responsible for is files, users, PKI and
+  # scriptlets that behave differently on an upgrade than on a removal. Whether the services then
+  # reach "active" is `smoke-install.sh`, and since H-05 all three installers run the same
+  # `ms-setup` — so proving it there proves it here. It also keeps the two boxes comparable:
+  # TimescaleDB ships no aarch64 RPMs for EL9, so a Rocky box with a working database cannot exist
+  # on an arm64 machine, and a test that only ran on x86_64 would be a test that did not run.
   local in="docker exec -e MS_SETUP_NO_START=1 ${container}"
+  # **The first install is the operator's, with nothing set** (`H-30`): it used to start the core
+  # onto the example's empty password and leave the package half-configured.
+  local fresh="docker exec ${container}"
   # Wait for systemd rather than sleeping at it.
   for _ in $(seq 1 30); do
     ${in} systemctl is-system-running >/dev/null 2>&1 && break
@@ -167,11 +181,92 @@ one_format() {
   # packages describe when they make it a recommendation rather than a hard dependency.
   ${in} node -v >/dev/null || fail "node is not on PATH in ${image}"
 
-  echo "==> installing the package"
-  ${in} bash -c "${install_cmd/PKG/$(basename "${pkg}")}" 2>&1 | sed 's/^/    /' | tail -6
+  # **`ping` is a dependency, and the package says so** (`H-31`). Asked of the package itself, and
+  # then of the box: no `ping` before the install, the distribution's after it.
+  local pkg_name
+  pkg_name="$(basename "${pkg}")"
+  matches 'iputils' ${in} bash -c "${requires_cmd/PKG/${pkg_name}}" \
+    || fail "the package does not declare iputils: $(${in} bash -c "${requires_cmd/PKG/${pkg_name}}" 2>&1 | tr '\n' ' ')"
+  ${in} bash -c "${unping_cmd}" >/dev/null 2>&1 || fail "could not take ping off the box before the install"
+  ${in} bash -c 'command -v ping' >/dev/null 2>&1 && fail "the box still has a ping before the install"
+  # **And the host's kernel default, which a container does not have.** Docker opens
+  # ping_group_range to every group; a real host has `1 0`, nobody. This box's network namespace
+  # is its own, so the setting goes no further than the box.
+  ${in} bash -c 'echo "1 0" > /proc/sys/net/ipv4/ping_group_range' \
+    || fail "could not set ping_group_range in the box"
+
+  echo "==> installing the package, as an operator does the first time (no MS_SETUP_NO_START)"
+  local install_log
+  install_log="$(mktemp)"
+  local install_status=0
+  ${fresh} bash -c "${install_cmd/PKG/${pkg_name}}" >"${install_log}" 2>&1 || install_status=$?
+  sed 's/^/    /' "${install_log}" | tail -16
+  [ "${install_status}" -eq 0 ] || fail "the first install exited ${install_status}"
 
   ${in} bash -c "${query_cmd}" >/dev/null 2>&1 || fail "the package is not registered as installed"
-  echo "    package: registered"
+  if [ "${format}" = deb ]; then
+    # `ii`: installed and configured. A postinst that failed leaves `iF`.
+    local status
+    # shellcheck disable=SC2016 # dpkg-query's own field syntax, for dpkg-query to expand
+    status="$(${in} dpkg-query -W -f='${db:Status-Abbrev}' ms 2>/dev/null | tr -d ' ' || true)"
+    [ "${status}" = "ii" ] || fail "dpkg says '${status}' for ms after a first install, not ii"
+    echo "    package: registered, dpkg says ${status}"
+  else
+    echo "    package: registered, and the install exited 0"
+  fi
+  ${in} bash -c "${ping_pkg_cmd}" >/dev/null 2>&1 || fail "the install did not bring in iputils"
+  echo "    ping: $(${in} bash -c 'command -v ping'), brought in by the dependency"
+
+  echo "==> asserting a first install started nothing, and said what to configure"
+  local svc_state
+  for svc in ms-core ms-probe; do
+    svc_state="$(${in} systemctl is-active "${svc}.service" 2>/dev/null || true)"
+    [ "${svc_state}" = "inactive" ] || fail "${svc} is ${svc_state} after a first install, not inactive"
+    ! ${in} systemctl is-failed --quiet "${svc}.service" || fail "${svc} is failed after a first install"
+  done
+  echo "    ms-core, ms-probe: inactive, not failed"
+  for said in 'core.json is new, so nothing was started' 'database.password' \
+    'MS_DATABASE__PASSWORD__FROM_FILE' 'systemctl reset-failed ms-core ms-probe' \
+    'systemctl start ms-core ms-probe'; do
+    grep -qF -- "${said}" "${install_log}" || fail "the first install did not say '${said}'"
+  done
+  echo "    the message names database.password, the *__FROM_FILE route, reset-failed and start"
+  rm -f "${install_log}"
+
+  # --- ping, under the probe's own sandbox (H-31) ------------------------------------------
+  echo "==> asserting ping works as ms-probe under ms-probe.service's hardening"
+  local probe_gid range
+  probe_gid="$(${in} getent group ms-probe | cut -d: -f3)"
+  matches "^net.ipv4.ping_group_range = ${probe_gid} ${probe_gid}$" \
+    ${in} cat /etc/sysctl.d/60-ms-probe-ping.conf \
+    || fail "ms-setup did not open ping_group_range to ms-probe (gid ${probe_gid})"
+  range="$(${in} cat /proc/sys/net/ipv4/ping_group_range | tr -s '[:space:]' ' ' | sed 's/ $//')"
+  [ "${range}" = "${probe_gid} ${probe_gid}" ] || fail "ping_group_range is '${range}', not ${probe_gid} ${probe_gid}"
+  docker cp "${repo_root}/scripts/smoke/sandboxed-ping.sh" "${container}:/tmp/sandboxed-ping.sh"
+  local pinged
+  pinged="$(${in} bash /tmp/sandboxed-ping.sh 127.0.0.1 2>&1)" \
+    || fail "ping as ms-probe in the unit's sandbox failed: ${pinged}"
+  matches '1 received' printf '%s' "${pinged}" || fail "ping as ms-probe got no reply: ${pinged}"
+  echo "    ping -c1 127.0.0.1 as ms-probe, in the unit's sandbox: 1 received (ping_group_range ${range})"
+  # The control: at the kernel's default the same run must fail, or this proved nothing.
+  ${in} bash -c 'echo "1 0" > /proc/sys/net/ipv4/ping_group_range'
+  if pinged="$(${in} bash /tmp/sandboxed-ping.sh 127.0.0.1 2>&1)"; then
+    fail "ping worked in the unit's sandbox with ping_group_range '1 0' — the sandbox is not the unit's"
+  fi
+  echo "    and at '1 0', the kernel's default, it fails: $(printf '%s\n' "${pinged}" | grep -m1 -v 'socktype' || true)"
+  # What a boot does with the drop-in. EL9 ships systemd-sysctl.service in systemd-udev, which a
+  # host has and this image does not; procps' `sysctl --system` reads the same directories.
+  local applier='systemd-sysctl'
+  if ${in} systemctl cat systemd-sysctl.service >/dev/null 2>&1; then
+    ${in} systemctl restart systemd-sysctl.service || fail "systemd-sysctl would not run"
+  else
+    applier='sysctl --system (no systemd-sysctl in this image)'
+    ${in} sysctl --system >/dev/null 2>&1 || fail "sysctl --system would not run"
+  fi
+  range="$(${in} cat /proc/sys/net/ipv4/ping_group_range | tr -s '[:space:]' ' ' | sed 's/ $//')"
+  [ "${range}" = "${probe_gid} ${probe_gid}" ] \
+    || fail "${applier} left ping_group_range at '${range}': the drop-in would not survive a boot"
+  echo "    ${applier}, as at boot, applies the drop-in: ${range}"
 
   # --- what a fresh install must have produced --------------------------------------------
   echo "==> asserting the install did its work"

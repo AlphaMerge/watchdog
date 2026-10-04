@@ -55,6 +55,9 @@ case "${PREFIX}" in
 esac
 command -v systemctl >/dev/null 2>&1 || die "systemd is required (systemctl not found)"
 command -v node >/dev/null 2>&1 || die "Node.js is required on PATH"
+# The ICMP sensors run the system `ping` (ADR-001 Decision 6); the packages depend on it (`H-31`).
+command -v ping >/dev/null 2>&1 \
+  || die "ping is required by the probe's ICMP sensors (Debian, Ubuntu: iputils-ping; RHEL: iputils)"
 
 node_major="$(node -p 'process.versions.node.split(".")[0]')"
 [ "${node_major}" -ge 22 ] || die "Node.js 22 or newer is required (found $(node -v))"

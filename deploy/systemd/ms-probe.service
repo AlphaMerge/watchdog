@@ -72,7 +72,9 @@ TimeoutStopSec=45
 # --- Capabilities ------------------------------------------------------------------------
 # CAP_NET_BIND_SERVICE: syslog on 514 and SNMP traps on 162 are privileged ports. No CAP_NET_RAW:
 # ping is the system binary, and the raw-socket fast path was measured and not built (ADR-001
-# Decision 6, amended by P-07), so there is nothing here for it to enable.
+# Decision 6, amended by P-07), so there is nothing here for it to enable. That ping cannot use its
+# own cap_net_raw either, under NoNewPrivileges= and this bounding set: it opens an unprivileged
+# ICMP socket, which ms-setup allows for this group in net.ipv4.ping_group_range (H-31).
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 

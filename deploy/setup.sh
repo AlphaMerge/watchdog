@@ -223,6 +223,8 @@ f3dd9c699bc5268b6cdbded54f051447336e45b3337c79141028232c825becbd
 # the one in /usr/lib whole, so a kept one means this release's unit changes do not apply; that
 # is a fact to put in front of the operator, not a reason to throw their change away.
 kept_units=()
+# Set when this run created core.json from the example (`H-30`).
+first_install=0
 place_unit() {
   local svc="$1"
   local vendor="${UNIT_DIR}/ms-${svc}.service"
@@ -296,6 +298,8 @@ for svc in "${components[@]}"; do
   else
     echo "==> installing ${CONFDIR}/${svc}.json"
     install -m 0640 -o root -g "${user}" "${EXAMPLES}/${svc}.json" "${CONFDIR}/${svc}.json"
+    # The release's example, which has no database password: see "a first installation" below.
+    if [ "${svc}" = core ]; then first_install=1; fi
     if [ "${svc}" = probe ] && [ -n "${enrolment}" ]; then
       # A remote probe: the core, the key and the name all come from the bundle. The name is the
       # one an operator will see in the approval queue — "Local probe" from the shipped example
@@ -337,6 +341,61 @@ for svc in "${components[@]}"; do
 
   place_unit "${svc}"
 done
+
+# --- ICMP for the probe, without a capability (`H-31`) ---------------------------------------
+#
+# **The probe's `ping` cannot use the capability `ping` is installed with, and that is the unit's
+# design.** Debian and Ubuntu give `/usr/bin/ping` `cap_net_raw` as a file capability, and
+# ms-probe.service has `NoNewPrivileges=yes` and leaves `CAP_NET_RAW` out of its bounding set, so
+# a `ping` the probe runs gains nothing from it. Measured under the unit's own settings: *socket:
+# Operation not permitted*, and every ICMP sensor Down. What it can use is Linux's unprivileged
+# ICMP socket, which only a group inside `net.ipv4.ping_group_range` may open. The kernel's
+# default range is `1 0`, which is nobody, and Debian 12 and Ubuntu 24.04 ship nothing that
+# changes it (udev, systemd, procps and iputils-ping installed: no sysctl file names it). EL9 opens
+# it to every group in systemd-udev's 50-default.conf, and its `ping` has no capability at all,
+# which is the same answer reached from the other side. A container opens it too — Docker sets
+# it — which is why the dress rehearsal (`H-15`) pinged and a real Ubuntu host would not have.
+#
+# So, when the range is the kernel's empty default, it is opened to the probe's group and nobody
+# else — an ICMP socket sends echo requests and reads its own replies, and that is all. Not
+# `CAP_NET_RAW` in the unit: a raw socket would hand the probe, and every script sensor it runs,
+# a copy of the host's IP traffic, which this project does not take (CAPABILITIES §15). A range
+# somebody has set is theirs and is never narrowed or moved; one that leaves the probe out is
+# named instead. The variables exist for `deploy-scripts.test.ts`, as the unit directories do.
+PING_RANGE="${MS_SETUP_PING_RANGE:-/proc/sys/net/ipv4/ping_group_range}"
+SYSCTL_DIR="${MS_SETUP_SYSCTL_DIR:-/etc/sysctl.d}"
+if has_component probe; then
+  probe_gid="$(getent group ms-probe | cut -d: -f3 || true)"
+  range_lo=''
+  range_hi=''
+  read -r range_lo range_hi 2>/dev/null <"${PING_RANGE}" || true
+  ping_conf="${SYSCTL_DIR}/60-ms-probe-ping.conf"
+  if ! [[ "${probe_gid}" =~ ^[0-9]+$ && "${range_lo}" =~ ^[0-9]+$ && "${range_hi}" =~ ^[0-9]+$ ]]; then
+    echo "==> warning: could not read net.ipv4.ping_group_range, so ICMP sensors may not work" >&2
+  elif [ "${range_lo}" -le "${probe_gid}" ] && [ "${probe_gid}" -le "${range_hi}" ]; then
+    :
+  elif [ "${range_lo}" -gt "${range_hi}" ]; then
+    install -d -m 0755 "${SYSCTL_DIR}"
+    cat >"${ping_conf}" <<SYSCTL
+# Written by ms-setup (MonitoringSystem). Lets the ms-probe group, and only it, open the
+# unprivileged ICMP sockets its ping sensors use; ms-probe.service gives the probe no
+# CAP_NET_RAW. See "Before you start" in /opt/ms/docs/installation.md.
+net.ipv4.ping_group_range = ${probe_gid} ${probe_gid}
+SYSCTL
+    chmod 0644 "${ping_conf}"
+    if printf '%s\t%s\n' "${probe_gid}" "${probe_gid}" 2>/dev/null >"${PING_RANGE}"; then
+      echo "==> ICMP sockets allowed for group ms-probe (gid ${probe_gid}), in ${ping_conf}"
+    else
+      echo "==> warning: wrote ${ping_conf}, which applies at the next boot; 'sysctl --system' applies it now" >&2
+    fi
+  else
+    cat >&2 <<RANGE
+==> warning: net.ipv4.ping_group_range is ${range_lo}-${range_hi}, which leaves out group ms-probe
+    (gid ${probe_gid}), so every ICMP sensor this probe runs will be Down. It was set on this host
+    and is left as it is. Widen it to include ${probe_gid} in /etc/sysctl.d, then 'sysctl --system'.
+RANGE
+  fi
+fi
 
 # **Loaded before anything can refuse** (`H-21`). The check below exits without starting anything,
 # and what the operator does next is `systemctl start`; that has to start this release's units. A
@@ -380,6 +439,41 @@ for svc in "${components[@]}"; do
 SHORT
   fi
 done
+
+# --- a first installation starts nothing (`H-30`) --------------------------------------------
+#
+# **Decided by whether core.json was created in this run, not by what is in it.** It was just
+# copied from the example, which has no database password, so the core would refuse at once
+# (exit 78) — and that refusal used to come back as `postinst`'s exit 1, leaving a fresh `.deb`
+# half-configured on every installation there has ever been. Reading the password instead would
+# be wrong the other way: with `LoadCredentialEncrypted=` and `MS_DATABASE__PASSWORD__FROM_FILE`
+# core.json's password is empty on purpose, and the real one is somewhere only the unit can see.
+# Every other run — a re-run, an upgrade, a configuration that was already there — goes on below
+# exactly as before, refusal of a configuration that cannot load included.
+#
+# **The probe waits too.** Its configuration is complete, but all it could do alone is dial a
+# core that is not running, and log that every few seconds until somebody starts one. Both
+# services go together in the message, the way they will be started. A probe-only installation
+# has no core.json to create and starts as it always did.
+if [ "${start_services}" -eq 1 ] && [ "${first_install}" -eq 1 ]; then
+  start_services=0
+  cat <<FIRST
+
+==> ${CONFDIR}/core.json is new, so nothing was started.
+
+    It is the release's example, and it has no database password yet. Give the core one
+    (database.password, docs/installation.md §3), check it, then start:
+
+        ${PREFIX}/bin/ms-core config check
+        systemctl reset-failed $(printf 'ms-%s ' "${components[@]}")
+        systemctl start $(printf 'ms-%s ' "${components[@]}")
+
+    Or leave database.password empty and give the core the password as an encrypted
+    credential, MS_DATABASE__PASSWORD__FROM_FILE in a drop-in ('systemctl edit ms-core';
+    the lines are in the comments of ms-core.service).
+
+FIRST
+fi
 
 # --- will the configuration this installation already has load under the new build? ---------
 #

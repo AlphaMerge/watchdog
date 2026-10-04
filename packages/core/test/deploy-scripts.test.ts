@@ -1191,6 +1191,21 @@ describe(
       return { prefix, conf };
     }
 
+    /**
+     * Where setup reads and writes `net.ipv4.ping_group_range` (`H-31`), in the box: open to every
+     * group, as Docker leaves it, unless a test has written something else there first.
+     */
+    function hostDirs(box: Sandbox): NodeJS.ProcessEnv {
+      const range = join(box.dir, 'ping_group_range');
+      if (!existsSync(range)) writeFileSync(range, '0\t2147483647\n');
+      return {
+        MS_SETUP_UNIT_DIR: join(box.dir, 'usr-lib-units'),
+        MS_SETUP_LEGACY_UNIT_DIR: join(box.dir, 'etc-units'),
+        MS_SETUP_PING_RANGE: range,
+        MS_SETUP_SYSCTL_DIR: join(box.dir, 'sysctl.d'),
+      };
+    }
+
     function setup(
       box: Sandbox,
       prefix: string,
@@ -1199,15 +1214,18 @@ describe(
       extra: NodeJS.ProcessEnv = {},
     ): SpawnSyncReturns<string> {
       return box.run([script('setup.sh'), '--prefix', prefix, '--confdir', conf, ...args], {
-        MS_SETUP_UNIT_DIR: join(box.dir, 'usr-lib-units'),
-        MS_SETUP_LEGACY_UNIT_DIR: join(box.dir, 'etc-units'),
+        ...hostDirs(box),
         ...extra,
       });
     }
 
+    /** What an operator's core.json looks like to the stub launcher: one it accepts. */
+    const CONFIGURED = '{"api":{"port":8080}}';
+
     it('moves a stock unit out of /etc, keeps an edited one, and reloads before it enables', () => {
       const box = sandbox();
-      const { prefix, conf } = installation(box, null);
+      // An upgrade: an earlier release's units are here, and so is its configuration.
+      const { prefix, conf } = installation(box, CONFIGURED);
       const legacy = join(box.dir, 'etc-units');
       mkdirSync(legacy);
       const stock = readFileSync(
@@ -1284,7 +1302,7 @@ describe(
 
     it('starts every service even when the first will not', () => {
       const box = sandbox();
-      const { prefix, conf } = installation(box, null);
+      const { prefix, conf } = installation(box, CONFIGURED);
       const result = setup(box, prefix, conf, ['--components', 'core,probe'], {
         FAIL_RESTART: 'ms-core',
         STATE_ms_probe: 'active',
@@ -1435,8 +1453,7 @@ describe(
           'core,probe',
         ],
         {
-          MS_SETUP_UNIT_DIR: join(box.dir, 'usr-lib-units'),
-          MS_SETUP_LEGACY_UNIT_DIR: join(box.dir, 'etc-units'),
+          ...hostDirs(box),
           STATE_ms_core: 'active',
           STATE_ms_probe: 'active',
         },
@@ -1526,6 +1543,174 @@ describe(
       assert.equal(mode(join(conf, 'tls', 'probe.key')), 0o640);
       // A probe host has no use for the core's enrolment key, and must not grow one.
       assert.ok(!existsSync(join(conf, 'access-key')));
+    });
+
+    // --- a first installation (`H-30`) -------------------------------------------------------
+
+    it('starts nothing on a first install, exits 0, and says what to set (`H-30`)', () => {
+      // What a fresh `.deb`'s postinst, a fresh `.rpm`'s %post and a first `install.sh` run.
+      const box = sandbox();
+      const { prefix, conf } = installation(box, null);
+      const result = setup(box, prefix, conf, ['--components', 'core,probe']);
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+      assert.ok(existsSync(join(conf, 'core.json')), 'core.json was not created');
+
+      const log = box.logged();
+      assert.ok(!log.includes('restart'), `something was started:\n${log}`);
+      assert.ok(!log.includes('systemctl start'), `something was started:\n${log}`);
+      // The units are in place and enabled all the same: the operator's next step is a start.
+      assert.ok(log.includes('systemctl daemon-reload'), log);
+      assert.ok(log.includes('systemctl enable ms-core.service'), log);
+      assert.ok(log.includes('systemctl enable ms-probe.service'), log);
+
+      for (const said of [
+        'core.json is new, so nothing was started',
+        'database.password',
+        `${prefix}/bin/ms-core config check`,
+        'systemctl reset-failed ms-core ms-probe',
+        'systemctl start ms-core ms-probe',
+        'MS_DATABASE__PASSWORD__FROM_FILE',
+      ]) {
+        assert.ok(
+          result.stdout.includes(said),
+          `the message does not say '${said}':\n${result.stdout}`,
+        );
+      }
+      assert.doesNotMatch(result.stderr, /error|does not load/);
+    });
+
+    it('starts both on the run after, which is not a first install (`H-30`)', () => {
+      const box = sandbox();
+      const { prefix, conf } = installation(box, null);
+      const first = setup(box, prefix, conf, ['--components', 'core,probe']);
+      assert.equal(first.status, 0, `${first.stdout}${first.stderr}`);
+      // The operator sets the password; the stub launcher accepts the file either way.
+      const second = setup(box, prefix, conf, ['--components', 'core,probe'], {
+        STATE_ms_core: 'active',
+        STATE_ms_probe: 'active',
+      });
+      assert.equal(second.status, 0, `${second.stdout}${second.stderr}`);
+      assert.doesNotMatch(second.stdout, /is new, so nothing was started/);
+      const log = box.logged();
+      assert.ok(log.includes('systemctl restart ms-core.service'), log);
+      assert.ok(log.includes('systemctl restart ms-probe.service'), log);
+    });
+
+    it('judges a core.json that was already there by nothing in it, an empty password included', () => {
+      // `LoadCredentialEncrypted=` and `*__FROM_FILE`: an empty password on purpose, which only
+      // the unit can see past. So the shipped example, as an operator left it, is started.
+      const box = sandbox();
+      const example = readFileSync(join(repoRoot, 'deploy', 'examples', 'core.json'), 'utf8');
+      assert.match(example, /"password": ""/);
+      const { prefix, conf } = installation(box, example);
+      const result = setup(box, prefix, conf, ['--components', 'core,probe'], {
+        STATE_ms_core: 'active',
+        STATE_ms_probe: 'active',
+      });
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+      assert.doesNotMatch(result.stdout, /is new/);
+      assert.ok(box.logged().includes('systemctl restart ms-core.service'), box.logged());
+    });
+
+    it('still refuses a re-run onto a configuration that does not load (`H-30` changes no other run)', () => {
+      const box = sandbox();
+      const { prefix, conf } = installation(box, '{"api":{"port":"refused-port"}}');
+      const result = setup(box, prefix, conf, ['--components', 'core,probe']);
+      assert.equal(result.status, 1);
+      assert.doesNotMatch(result.stdout, /is new/);
+      assert.ok(!box.logged().includes('restart'), box.logged());
+    });
+
+    it('starts a probe-only first install as it always did: there is no core.json to create', () => {
+      const box = sandbox();
+      const { prefix, conf } = installation(box, null);
+      const result = setup(box, prefix, conf, ['--components', 'probe'], {
+        STATE_ms_probe: 'active',
+      });
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+      assert.doesNotMatch(result.stdout, /is new/);
+      assert.ok(!existsSync(join(conf, 'core.json')));
+      assert.ok(box.logged().includes('systemctl restart ms-probe.service'), box.logged());
+    });
+
+    // --- ICMP for the probe's group (`H-31`) -------------------------------------------------
+
+    /** ms-probe's gid, once setup has created the group. */
+    const probeGid = (): string =>
+      (
+        spawnSync('getent', ['group', 'ms-probe'], { encoding: 'utf8' }).stdout.split(':')[2] ?? ''
+      ).trim();
+
+    it('opens an empty ping_group_range to ms-probe’s group alone, now and at boot (`H-31`)', () => {
+      const box = sandbox();
+      const { prefix, conf } = installation(box, null);
+      const range = join(box.dir, 'ping_group_range');
+      writeFileSync(range, '1\t0\n');
+      const result = setup(box, prefix, conf, ['--components', 'core,probe', '--no-start']);
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+
+      const gid = probeGid();
+      assert.match(gid, /^\d+$/);
+      assert.equal(readFileSync(range, 'utf8'), `${gid}\t${gid}\n`, 'not applied now');
+      const dropIn = join(box.dir, 'sysctl.d', '60-ms-probe-ping.conf');
+      assert.match(
+        readFileSync(dropIn, 'utf8'),
+        new RegExp(`^net\\.ipv4\\.ping_group_range = ${gid} ${gid}$`, 'm'),
+      );
+      assert.equal(mode(dropIn), 0o644);
+      assert.match(
+        result.stdout,
+        new RegExp(`ICMP sockets allowed for group ms-probe \\(gid ${gid}\\)`),
+      );
+    });
+
+    it('leaves a range that already has the probe’s group, or one somebody set without it', () => {
+      for (const [set, warned] of [
+        ['0\t2147483647\n', false],
+        ['0\t0\n', true],
+      ] as const) {
+        const box = sandbox();
+        const { prefix, conf } = installation(box, null);
+        const range = join(box.dir, 'ping_group_range');
+        writeFileSync(range, set);
+        const result = setup(box, prefix, conf, ['--components', 'core,probe', '--no-start']);
+        assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+        assert.equal(readFileSync(range, 'utf8'), set, 'the range was changed');
+        assert.ok(!existsSync(join(box.dir, 'sysctl.d', '60-ms-probe-ping.conf')), set);
+        if (warned) {
+          assert.match(result.stderr, /ping_group_range is 0-0, which leaves out group ms-probe/);
+        } else {
+          assert.doesNotMatch(result.stderr, /ping_group_range/);
+        }
+      }
+    });
+
+    it('touches no ICMP setting on a host with no probe, and warns of one it cannot read', () => {
+      const coreOnly = sandbox();
+      const core = installation(coreOnly, null);
+      writeFileSync(join(coreOnly.dir, 'ping_group_range'), '1\t0\n');
+      const result = setup(coreOnly, core.prefix, core.conf, [
+        '--components',
+        'core',
+        '--no-start',
+      ]);
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+      assert.equal(readFileSync(join(coreOnly.dir, 'ping_group_range'), 'utf8'), '1\t0\n');
+      assert.ok(!existsSync(join(coreOnly.dir, 'sysctl.d')));
+
+      const unreadable = sandbox();
+      const probe = installation(unreadable, null);
+      const missing = setup(
+        unreadable,
+        probe.prefix,
+        probe.conf,
+        ['--components', 'probe', '--no-start'],
+        {
+          MS_SETUP_PING_RANGE: join(unreadable.dir, 'no-such-file'),
+        },
+      );
+      assert.equal(missing.status, 0, `${missing.stdout}${missing.stderr}`);
+      assert.match(missing.stderr, /could not read net\.ipv4\.ping_group_range/);
     });
   },
 );

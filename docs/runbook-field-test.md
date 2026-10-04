@@ -68,8 +68,11 @@ simulator does not, and a week of unattended running.
 Ubuntu core, from the package rather than the tarball — that is what an operator uses:
 
 ```bash
-sudo dpkg -i ms_<version>_amd64.deb
+sudo apt install ./ms_<version>_amd64.deb
 ```
+
+`apt` and not `dpkg -i`: the package depends on `iputils-ping` (`H-31`), and only `apt` fetches
+a dependency.
 
 A candidate's package spells its version with `~` where the tag has `-`: `v1.0.0-rc.1` is
 `ms_1.0.0~rc.1_amd64.deb` and `ms-1.0.0~rc.1-1.x86_64.rpm`, so that `1.0.0` sorts after it and
@@ -77,27 +80,27 @@ upgrades it. The tarball and `/opt/ms/VERSION` keep the tag's spelling. Check th
 SHA-256 against the candidate's record (`docs/findings/2026-10-04-v1-release-candidate-cut.md`)
 before installing it.
 
-**On a fresh install, `dpkg -i` ends in an error, and that is expected** (`H-30`). The package
-starts both services, the example `core.json` has no database password, and the core refuses to
-start (exit 78). `dpkg` then reports *post-installation script subprocess returned error exit
-status 1* and leaves the package half-configured: `dpkg -l ms` reads `iF`. Finish the install
-with [`installation.md`](installation.md) §3–§5, and then let `dpkg` finish too:
+**A fresh install starts nothing, and says so** (`H-30`). `dpkg -l ms` reads `ii`, both services
+are stopped, and the install's last lines say *`/etc/ms/core.json` is new, so nothing was
+started* and what to set. Finish it with [`installation.md`](installation.md) §3–§5:
 
 ```bash
 sudo nano /etc/ms/core.json                     # database.password, and the relay (step 3)
 sudo /opt/ms/bin/ms-core config check
 sudo systemctl reset-failed ms-core ms-probe
-sudo dpkg --configure -a                        # runs the setup again and starts both
-dpkg -l ms                                      # ii
+sudo systemctl start ms-core ms-probe
 ```
 
 **Then, before step 2, everything the week will read has to exist.** A fresh installation has
 the root object and nothing else, so none of this is optional:
 
 - **The local probe**, approved onto a probe object you create first (`installation.md` §5).
-- **`ping`.** The ICMP sensor runs the system binary, and the package does not depend on it
-  (`H-31`): if `command -v ping` finds nothing, `sudo apt install iputils-ping`. Otherwise every
-  ping sensor reads Down with *the "ping" binary is not available on this probe*.
+- **`ping`, and the probe's right to use it.** The package brings `iputils-ping` (`H-31`). The
+  probe's unit gives `ping` no raw socket, so it uses an unprivileged ICMP socket, which the
+  install allows for the `ms-probe` group: `cat /etc/sysctl.d/60-ms-probe-ping.conf` names that
+  group's id, and `sysctl net.ipv4.ping_group_range` includes it. If the install warned that
+  the range leaves `ms-probe` out, widen it first (`installation.md`, *Before you start*);
+  otherwise every ping sensor reads Down.
 - **The listeners**, in `/etc/ms/probe.json`, if your devices send syslog or traps:
   `syslogListener.enabled` (UDP and TCP 10514 by default) and `trapListener.enabled` (UDP 162).
   Restart the probe afterwards, after `reset-failed`.
@@ -130,9 +133,8 @@ sudo systemctl restart ms-core ms-probe
 **`reset-failed` first.** Each unit is allowed five starts in ten minutes, an operator's
 included, and the sixth is refused and leaves the unit `failed`. `reset-failed` clears that
 count and changes nothing else (`administration.md`, *Your own starts count too*, measured it).
-That is why every start in this runbook follows one: `installation.md` §3's restart, the
-restart here, and `dpkg --configure -a`, whose `ms-setup` runs its own before it restarts the
-services. A restart of the core also restarts the probe, so both counts move together.
+That is why every start in this runbook follows one: `installation.md` §3's start, and the
+restart here. A restart of the core also restarts the probe, so both counts move together.
 
 Then check `connected` on Probe Health, and that `scheduled` matches what the core assigned:
 every sensor under that probe **except Core Health and Probe Health**, which the core evaluates

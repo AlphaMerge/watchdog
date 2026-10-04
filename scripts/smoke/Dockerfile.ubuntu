@@ -17,9 +17,12 @@ ARG PG_MAJOR=17
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# `iputils-ping` because an Ubuntu host has it and the container image does not — which is how
+# the dress rehearsal found the packages never asked for it (H-15, H-31).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       systemd systemd-sysv dbus ca-certificates curl gnupg lsb-release xz-utils procps \
+      iputils-ping \
  && rm -rf /var/lib/apt/lists/*
 
 # PostgreSQL from PGDG, so this box and the Debian one are on the same major.

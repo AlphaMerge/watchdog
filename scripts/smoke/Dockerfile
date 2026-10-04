@@ -8,10 +8,13 @@ ARG NODE_VERSION=24.19.0
 
 # PostgreSQL is here because ms-core genuinely needs it from Phase 1 onward. An install test
 # against a box with no database would only prove that the service exits cleanly.
+# `iputils-ping` because every Debian host has it and the container image does not; the tarball
+# installers refuse without one (H-31). smoke-packages.sh removes it again, so that the .deb's
+# dependency is what brings it back.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       systemd systemd-sysv dbus ca-certificates curl gnupg lsb-release xz-utils procps \
-      postgresql postgresql-contrib \
+      iputils-ping postgresql postgresql-contrib \
  && rm -rf /var/lib/apt/lists/*
 
 # TimescaleDB, from Timescale's own repository — the same way an operator installs it. Without

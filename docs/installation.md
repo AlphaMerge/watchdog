@@ -20,9 +20,26 @@ procedure below is a tarball and a shell script.
 | PostgreSQL | with the TimescaleDB extension available — 17 is what everything here is measured and tested on |
 | TimescaleDB | **2.14.0 or newer.** `ms-core` refuses to start against an older one, names the version it found, and stops rather than restarting (exit 78). Tested on 2.29; see below for why 2.14 |
 | `openssl` | on `PATH` — the installer issues the probe-channel certificates with it |
+| `ping` | iputils' (`iputils-ping` on Debian and Ubuntu, `iputils` on RHEL), on every host that runs a probe — the ICMP sensors run it (`ADR-001` Decision 6). The packages depend on it, so `apt` and `dnf` install it for you |
 | Privileges | `root`, to create the service users and the units |
 
 The installer refuses rather than half-installing when any of those is missing, and says which.
+
+**`ping` is a dependency, not a suggestion** (`H-31`). ICMP is the default availability check, and
+without the binary every ping sensor reads Down with *the "ping" binary is not available on this
+probe*. Container images of Ubuntu and Debian ship without one; real installations of them do not.
+
+**The setup opens one kernel setting for it.** `ms-probe.service` runs with `NoNewPrivileges=`
+and without `CAP_NET_RAW`, so the capability `ping` is installed with does nothing inside it. What
+works is Linux's unprivileged ICMP socket, which only the groups in `net.ipv4.ping_group_range`
+may open. RHEL 9 and its rebuilds open it to every group already. Debian and Ubuntu leave the
+kernel's default, `1 0`: nobody — and a container does not show it, because Docker opens the range
+inside every container, which is how the dress rehearsal pinged (`H-15`). When the range is still that default,
+the setup sets it to the `ms-probe` group alone and writes the same to
+`/etc/sysctl.d/60-ms-probe-ping.conf`, so a boot keeps it. A range somebody has set is left as it
+is; if it leaves `ms-probe` out, the setup says so, and you widen it to include that group's id.
+Not `CAP_NET_RAW` in the unit instead: a raw socket would give the probe, and every script sensor
+it runs, a copy of the host's IP traffic.
 
 **Why 2.14.0.** That release limited how many rows one write may decompress, and made
 `compress_chunk` recompress a chunk that was written to after it was compressed (TimescaleDB
@@ -99,25 +116,39 @@ against a schema it does not recognise rather than running against one it might 
 Three ways in, and they do the same thing: the package or the tarball puts files on disk, and
 then all three run the same `ms-setup`, which creates the `ms-core` and `ms-probe` service users,
 lays out `/opt/ms`, `/etc/ms` and `/var/lib/ms-*`, issues the probe-channel CA and certificates,
-generates the probe access key, installs both systemd units, and enables and starts them.
+generates the probe access key, installs both systemd units, and enables them. On an upgrade it
+starts them too; on a first installation it does not (below).
 
 **Debian, Ubuntu:**
 
 ```bash
-sudo dpkg -i ms_0.1.0_amd64.deb
+sudo apt install ./ms_0.1.0_amd64.deb
 ```
 
-**On a fresh install this ends in an error, and that is expected for now** (`H-30`). The package
-starts both services before you can have set the database password, so the core refuses to
-start (exit 78). `dpkg` then reports *post-installation script subprocess returned error exit
-status 1* and leaves the package half-configured: `dpkg -l ms` reads `iF`, and every later `apt`
-operation complains about it until it is finished. Carry on with §3, which finishes it.
+`apt` rather than `dpkg -i`, because the package depends on `iputils-ping` and only `apt` fetches
+a dependency. `dpkg -i` works where `ping` is already installed; where it is not, it stops with
+*dependency problems*, and `sudo apt-get -f install` finishes it.
 
 **RHEL, Rocky, AlmaLinux, Fedora:**
 
 ```bash
-sudo rpm -i ms-0.1.0-1.x86_64.rpm
+sudo dnf install ./ms-0.1.0-1.x86_64.rpm
 ```
+
+**A first installation starts nothing** (`H-30`). `/etc/ms/core.json` has just been created from
+the release's example, which has no database password, so the setup leaves both services
+stopped, ends without an error — `dpkg -l ms` reads `ii` — and says what to set:
+
+```
+==> /etc/ms/core.json is new, so nothing was started.
+
+    It is the release's example, and it has no database password yet. Give the core one
+    (database.password, docs/installation.md §3), check it, then start:
+```
+
+That is §3. Every later run — an upgrade, a re-run, a reinstall over an existing `core.json` —
+starts the services as before, whatever the file's password says, since the password may be in
+a credential the setup cannot see (§3).
 
 **Anywhere else** — unpack the release and run the installer from inside it:
 
@@ -173,25 +204,21 @@ restart every time, because the alternative is finding out from `journalctl` wit
 already down.
 
 ```bash
-sudo systemctl reset-failed ms-core
-sudo systemctl restart ms-core
-```
-
-The install already started the core once, with the example's empty password, and PostgreSQL
-refused it. That refusal stops the core at once (exit 78) rather than restarting it, but every
-start counts toward the unit's limit of five in ten minutes, the install's own included, so
-`reset-failed` first makes sure this one is not refused (`P-222`;
-[what a start failure does](administration.md#what-a-start-failure-does)).
-
-**After a fresh `.deb` install, finish the package as well**, which §2's error left half-done.
-`dpkg --configure -a` runs the setup again: it resets each unit's start count itself and
-restarts both services.
-
-```bash
 sudo systemctl reset-failed ms-core ms-probe
-sudo dpkg --configure -a
-dpkg -l ms          # the first column reads ii, not iF
+sudo systemctl start ms-core ms-probe
 ```
+
+**`reset-failed` first, every time.** Each unit is allowed five starts in ten minutes, an
+operator's included, and the sixth is refused and leaves the unit `failed`; `reset-failed` clears
+that count and changes nothing else (`P-222`;
+[what a start failure does](administration.md#what-a-start-failure-does)). A first installation
+has not started either service, so here it clears nothing — and costs nothing.
+
+**The password as an encrypted credential instead.** Leave `database.password` empty, and give
+the core the password through `MS_DATABASE__PASSWORD__FROM_FILE` in a drop-in
+(`sudo systemctl edit ms-core`); the three lines are in the comments of `ms-core.service`. The
+setup cannot see a password delivered that way, which is why it never judges `core.json` by its
+password: only a `core.json` it has just created is a first installation.
 
 ## 4. The first administrator
 
@@ -286,8 +313,11 @@ and its core costs you the outage and not the data.
 
 ## Upgrading
 
-Install the new version the same way you installed the old one — `dpkg -i`, `rpm -U`, or unpack
-the new release and run `sudo ./install.sh` (`sudo ./install-probe.sh` on a remote probe host).
+Install the new version the same way you installed the old one — `apt install ./ms_….deb`,
+`dnf install ./ms-….rpm`, or unpack the new release and run `sudo ./install.sh`
+(`sudo ./install-probe.sh` on a remote probe host). `dpkg -i` and `rpm -U` work too, where every
+dependency is already installed. The packages depend on `ping` (`H-31`), which a release before
+that did not ask for, and on a host without it only `apt` and `dnf` fetch it.
 
 None of them **overwrite anything in `/etc/ms`**. Each configuration file is copied to a
 timestamped `.bak` beside it, and the version this release ships is written alongside as
@@ -388,7 +418,8 @@ sudo systemctl daemon-reload
 `/etc/ms`, `/var/lib/ms-*`, the database and your drop-ins under
 `/etc/systemd/system/ms-*.service.d` are left alone deliberately — they hold the
 configuration, the credential-vault key and every reading ever taken. Remove them when you mean
-to, not as a side effect of removing the application.
+to, not as a side effect of removing the application. The service users stay too, and so does
+`/etc/sysctl.d/60-ms-probe-ping.conf` if the setup wrote one (*Before you start*).
 
 ---
 

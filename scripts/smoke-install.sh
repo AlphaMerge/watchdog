@@ -185,7 +185,56 @@ docker exec "${container}" bash /tmp/provision-postgres.sh
 echo "==> installing $(basename "${tarball}")"
 docker cp "${tarball}" "${container}:/tmp/release.tar.gz"
 docker exec "${container}" bash -c 'mkdir -p /tmp/unpacked && tar -xzf /tmp/release.tar.gz -C /tmp/unpacked'
-docker exec "${container}" bash -c 'cd /tmp/unpacked/ms-* && ./install.sh --no-start'
+
+# **No `ping`, no install** (`H-31`): the probe's ICMP sensors run the system binary, and the
+# installer refuses the way it refuses without Node. The image has one, as a host does; it is
+# hidden for this one attempt.
+ping_path="$(docker exec "${container}" bash -c 'command -v ping')"
+docker exec "${container}" mv "${ping_path}" "${ping_path}.hidden"
+if docker exec "${container}" bash -c 'cd /tmp/unpacked/ms-* && ./install.sh' >/tmp/noping.log 2>&1; then
+  echo "    FAILED — install.sh installed onto a host with no ping" >&2
+  failed_early=1
+elif ! grep -q 'ping is required' /tmp/noping.log; then
+  echo "    FAILED — install.sh refused, but not for ping:" >&2
+  sed 's/^/      /' /tmp/noping.log >&2
+  failed_early=1
+else
+  echo "    no ping: refused — $(grep 'ping is required' /tmp/noping.log)"
+fi
+docker exec "${container}" mv "${ping_path}.hidden" "${ping_path}"
+docker exec "${container}" test ! -e /opt/ms/bin/ms-core || {
+  echo "    FAILED — the refused install left /opt/ms behind" >&2
+  failed_early=1
+}
+
+# **And a real host's ICMP setting, which a container does not have** (`H-31`). Docker opens
+# ping_group_range to every group; the kernel's own default, on every host the packages are for,
+# is `1 0`, nobody. The box's network namespace is its own, so this goes no further.
+docker exec "${container}" bash -c 'echo "1 0" > /proc/sys/net/ipv4/ping_group_range'
+
+# **A first install, as an operator runs it: no `--no-start`** (`H-30`). The core's file was just
+# created from the example, with no password, so nothing is started and the installer says what
+# to set — and exits 0, where it used to start the core onto the empty password and fail.
+if docker exec "${container}" bash -c 'cd /tmp/unpacked/ms-* && ./install.sh' >/tmp/first.log 2>&1; then
+  sed 's/^/    /' /tmp/first.log | tail -22
+else
+  echo "    FAILED — a first install exited non-zero:" >&2
+  sed 's/^/      /' /tmp/first.log >&2
+  failed_early=1
+fi
+echo "==> asserting a first install started nothing, and said what to configure"
+for svc in ms-core ms-probe; do
+  state="$(docker exec "${container}" systemctl is-active "${svc}" 2>/dev/null || true)"
+  printf '    %-9s %s\n' "${svc}:" "${state}"
+  [ "${state}" = "inactive" ] || { echo "    FAILED — ${svc} is ${state} after a first install" >&2; failed_early=1; }
+done
+for said in 'core.json is new, so nothing was started' 'database.password' \
+  'MS_DATABASE__PASSWORD__FROM_FILE' 'systemctl reset-failed ms-core ms-probe'; do
+  grep -qF -- "${said}" /tmp/first.log || {
+    echo "    FAILED — the first install did not say '${said}'" >&2
+    failed_early=1
+  }
+done
 
 docker cp "${repo_root}/scripts/smoke/configure-core.sh" "${container}:/tmp/configure-core.sh"
 docker exec "${container}" bash /tmp/configure-core.sh
@@ -203,7 +252,7 @@ if ! docker exec "${container}" systemctl start ms-core ms-probe; then
 fi
 
 echo "==> asserting both services are active"
-failed=0
+failed="${failed_early:-0}"
 for svc in ms-core ms-probe; do
   state="$(docker exec "${container}" systemctl is-active "${svc}" 2>/dev/null || true)"
   printf '    %-9s %s\n' "${svc}:" "${state}"
@@ -439,6 +488,55 @@ else
   echo "    check pool: FAILED — no worker pool in the journal" >&2
   docker exec "${container}" journalctl -u ms-probe --no-pager -n 40 || true
   failed=1
+fi
+
+echo "==> asserting an icmp.ping sensor on the installed probe reaches Up (H-31)"
+# **Through the running units, at a real host's ICMP setting** (`1 0`, set before the install).
+# The rehearsal's every ping sensor read Down for want of a binary; with one, a `ping` the probe
+# runs still could not use the capability it is installed with, under the unit's
+# `NoNewPrivileges=` and bounding set. `ms-setup` opens ping_group_range to the probe's group, and
+# this is the proof that it is enough: the real probe, its worker, its child process, its sandbox.
+api=http://127.0.0.1:8080/api/v1
+json() { docker exec -i "${container}" node -pe "JSON.parse(require('node:fs').readFileSync(0,'utf8'))$1"; }
+echo "    $(docker exec "${container}" grep -h ping_group_range /etc/sysctl.d/60-ms-probe-ping.conf 2>&1)"
+probe_gid=''
+for _ in $(seq 1 30); do
+  probe_gid="$(ms_docker_curl "${container}" -sf "${api}/probes?status=pending" 2>/dev/null \
+    | json ".items[0]?.gid ?? ''" 2>/dev/null || true)"
+  [ -n "${probe_gid}" ] && break
+  sleep 1
+done
+ping_state=''
+ping_said=''
+if [ -z "${probe_gid}" ]; then
+  echo "    FAILED — no probe is waiting for approval" >&2
+  failed=1
+else
+  root_id="$(ms_docker_curl "${container}" -sf "${api}/objects/root" | json '.id' || true)"
+  probe_object="$(ms_docker_curl "${container}" -sf -X POST "${api}/objects" -H 'content-type: application/json' \
+    -d "{\"kind\":\"probe\",\"parentId\":${root_id},\"name\":\"Local probe\"}" | json '.id' || true)"
+  ms_docker_curl "${container}" -sf -X POST "${api}/probes/${probe_gid}/approve" \
+    -H 'content-type: application/json' -d "{\"objectId\":${probe_object},\"local\":true}" >/dev/null || true
+  device_id="$(ms_docker_curl "${container}" -sf -X POST "${api}/objects" -H 'content-type: application/json' \
+    -d "{\"kind\":\"device\",\"parentId\":${probe_object},\"name\":\"This box\",\"host\":\"127.0.0.1\"}" \
+    | json '.id' || true)"
+  ping_sensor="$(ms_docker_curl "${container}" -sf -X POST "${api}/objects" -H 'content-type: application/json' \
+    -d "{\"kind\":\"sensor\",\"parentId\":${device_id},\"name\":\"Ping\",\"sensorType\":\"icmp.ping\"}" \
+    | json '.id' || true)"
+  for _ in $(seq 1 150); do
+    ping_said="$(ms_docker_curl "${container}" -sf "${api}/sensors/${ping_sensor}/state" 2>/dev/null || true)"
+    ping_state="$(printf '%s' "${ping_said}" | json '.state' 2>/dev/null || true)"
+    [ "${ping_state}" = up ] && break
+    [ "${ping_state}" = down ] && break
+    sleep 1
+  done
+  if [ "${ping_state}" = up ]; then
+    echo "    icmp.ping 127.0.0.1, sensor ${ping_sensor} on probe object ${probe_object}: up"
+  else
+    echo "    FAILED — the ping sensor is '${ping_state:-unknown}': ${ping_said}" >&2
+    docker exec "${container}" journalctl -u ms-probe --no-pager -n 30 || true
+    failed=1
+  fi
 fi
 
 # --- the upgrade path (H-03) ------------------------------------------------------------------
@@ -726,6 +824,63 @@ docker exec "${container}" systemctl daemon-reload
 docker exec "${container}" systemctl reset-failed ms-probe
 docker exec "${container}" systemctl start ms-probe
 wait_active 30 || { echo "    FAILED — ms-probe did not start again on its own configuration" >&2; failed=1; }
+
+echo "==> asserting a re-run starts a core whose password comes from MS_DATABASE__PASSWORD__FROM_FILE (H-30)"
+# core.json's password empty on purpose, the real one in a file named by a drop-in, which only the
+# unit's environment points at. `ms-setup` cannot see it either, which is why a first install
+# is decided by whether core.json was just created and never by what its password says. This is not
+# a first install, so it must start the core — and the core must come up on that password.
+#
+# **A root:ms-core 0640 file, not the `LoadCredentialEncrypted=` the unit's comments show**, and
+# only because these boxes cannot run that: under Docker, systemd 252 and 255 leave a unit's
+# credentials directory empty or missing, for `LoadCredential=` too and for root with no sandbox
+# (measured 2026-10-04). The core reads the variable the same way whichever path it names.
+docker exec "${container}" cp -p /etc/ms/core.json /tmp/core.json.with-password
+docker exec "${container}" node -e '
+  const fs = require("node:fs");
+  const file = "/etc/ms/core.json";
+  const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
+  cfg.database.password = "";
+  fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
+'
+docker exec "${container}" bash -c \
+  'install -m 0640 -o root -g ms-core /dev/null /etc/ms/db-password && printf %s monitoring > /etc/ms/db-password'
+docker exec "${container}" mkdir -p /etc/systemd/system/ms-core.service.d
+docker exec "${container}" bash -c 'printf "%s\n" "[Service]" \
+  "Environment=MS_DATABASE__PASSWORD__FROM_FILE=/etc/ms/db-password" \
+  > /etc/systemd/system/ms-core.service.d/h30-password-file.conf'
+docker exec "${container}" systemctl daemon-reload
+core_pid_before="$(docker exec "${container}" systemctl show ms-core -p MainPID --value)"
+if docker exec "${container}" /opt/ms/libexec/ms-setup --components core,probe >/tmp/credential.log 2>&1; then
+  state="$(docker exec "${container}" systemctl is-active ms-core 2>/dev/null || true)"
+  core_pid_after="$(docker exec "${container}" systemctl show ms-core -p MainPID --value)"
+  if [ "${state}" != active ]; then
+    echo "    FAILED — ms-core is ${state} on the password file" >&2
+    docker exec "${container}" journalctl -u ms-core --no-pager -n 30 || true
+    failed=1
+  elif [ "${core_pid_after}" = "${core_pid_before}" ]; then
+    echo "    FAILED — ms-setup did not restart the core (${core_pid_before})" >&2
+    failed=1
+  elif grep -q 'is new, so nothing was started' /tmp/credential.log; then
+    echo "    FAILED — a re-run was taken for a first install" >&2
+    failed=1
+  elif ! matches '"password": ""' docker exec "${container}" cat /etc/ms/core.json; then
+    echo "    FAILED — core.json's password was not empty, so this proved nothing" >&2
+    failed=1
+  else
+    echo "    ms-setup exited 0; ms-core active on the password file (pid ${core_pid_before} -> ${core_pid_after}), core.json's password empty"
+  fi
+else
+  echo "    FAILED — ms-setup refused with the password in a file:" >&2
+  sed 's/^/      /' /tmp/credential.log >&2
+  docker exec "${container}" journalctl -u ms-core --no-pager -n 30 || true
+  failed=1
+fi
+docker exec "${container}" cp -p /tmp/core.json.with-password /etc/ms/core.json
+docker exec "${container}" rm -rf /etc/systemd/system/ms-core.service.d /etc/ms/db-password
+docker exec "${container}" systemctl daemon-reload
+docker exec "${container}" systemctl reset-failed ms-core ms-probe
+docker exec "${container}" systemctl restart ms-core
 
 echo "==> asserting graceful stop"
 for svc in ms-core ms-probe; do

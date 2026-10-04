@@ -123,6 +123,16 @@ installed_kb="$(du -sk "${root}/opt" | cut -f1)"
 # distribution's package. A hard dependency would therefore make the .deb uninstallable on the
 # machines it is actually for. `ms-setup` checks the real thing at configure time and fails with
 # the version it found, which is a better error than apt refusing to consider the package.
+#
+# **`ping` is Depends, and the opposite judgement for the opposite reason** (`H-31`). ICMP is the
+# default availability check and it runs the system binary (ADR-001 Decision 6), so a probe
+# without one marks every ping sensor Down — and unlike Node, the distribution's own package is
+# the one that works: `iputils-ping` is in every Debian and Ubuntu archive. A Recommends would
+# not have caught the case that was actually met (`H-15`: Ubuntu's container image has no
+# `ping`), because `dpkg -i` ignores it. Not `| inetutils-ping`: every flag the probe passes and
+# every line it parses comes from iputils (`packages/sensors/src/support/ping.ts` and its
+# fixtures), none from GNU inetutils' ping, and the smoke tests prove iputils' under the unit's
+# sandbox. An alternative nobody has run would be first tried by an operator.
 cat > "${root}/DEBIAN/control" <<CONTROL
 Package: ${name}
 Version: ${pkg_version}
@@ -130,7 +140,7 @@ Section: net
 Priority: optional
 Architecture: ${arch}
 Maintainer: MonitoringSystem <noreply@example.invalid>
-Depends: openssl, systemd, adduser
+Depends: openssl, systemd, adduser, iputils-ping
 Recommends: nodejs (>= 22)
 Installed-Size: ${installed_kb}
 Description: ${description}

@@ -23103,7 +23103,7 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       packages on an x86_64 machine, or under QEMU emulation rather than Rosetta — or the field
       test's step 1, on the field host, is recorded as that proof.
 
-- [ ] **H-30 — a fresh `.deb` install ends in a dpkg error and a half-configured package** · S ·
+- [x] **H-30 — a fresh `.deb` install ends in a dpkg error and a half-configured package** · S ·
       H-05, P-222 · Found 2026-10-04 by `H-15`. On a fresh install, `postinst` starts both
       services. The example `core.json` has no database password, so the core refuses at once
       (exit 78, by design since `P-222`). `ms-setup` then exits 1, and `dpkg` reports
@@ -23127,8 +23127,37 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
           and asserts that the core still starts.
       - The `.rpm` gets the same question, and `installation.md` §2–§3 lose the expected-error
         text once it is gone.
+      - **Outcome (2026-10-04)**: decided by **a first install**, not by the password. When
+        `ms-setup` has created `core.json` from the example in the same run, it starts nothing,
+        prints what to set (`database.password`, or the `*__FROM_FILE` credential route, then
+        `reset-failed` and `start`) and exits 0. Every other run is as before, including the
+        refusal of a configuration that does not load. The `.deb`'s `postinst`, the `.rpm`'s
+        `%post` and `install.sh` all reach it, since all three run `ms-setup`; `install.sh`'s
+        summary says the same. **The probe is not started either** on a first install: alone it
+        can only dial a core that is not running and log that until one starts. A probe-only
+        installation has no `core.json` to create and starts as it always did.
+        - **Tests**: `deploy-scripts.test.ts` gains five `ms-setup` cases (first install starts
+          nothing and says what to set; the run after starts both; an existing `core.json` with an
+          empty password is started; a refusal is unchanged; a probe-only first install starts),
+          and two older cases now give the upgrade they describe a `core.json`. `smoke-packages`
+          installs the `.deb` (through `apt`) and the `.rpm` (through `dnf`) once without
+          `MS_SETUP_NO_START`: `dpkg` reads `ii`, both units inactive and not failed, and the
+          message is asserted. `smoke-install` runs the tarball's first install without
+          `--no-start` and asserts the same; then, on a later run, `core.json`'s password is
+          emptied, a drop-in sets `MS_DATABASE__PASSWORD__FROM_FILE` to a root:ms-core 0640 file,
+          and `ms-setup` restarts the core onto it, active.
+        - **Not proved: `LoadCredentialEncrypted=`, the route the unit's comments show.** In the
+          smoke boxes systemd 252 and 255 leave a unit's credentials directory empty or missing,
+          for plain `LoadCredential=` too and for root with no sandbox, so the core reads
+          *Cannot read secret file*. That looks like Docker rather than the product, and only a
+          real host can say.
+        - `installation.md` §2–§3 and the runbook's step 1 say what the operator now sees, with
+          `reset-failed` before every start; `apt install ./…deb` and `dnf install ./…rpm`
+          replace `dpkg -i` and `rpm -i`, for `H-31`'s dependency.
+        - Mutation: 11/11 single-line mutants of `setup.sh` (both tickets' logic) killed by the
+          unit tests.
 
-- [ ] **H-31 — the packages do not declare the `ping` the ICMP sensors run** · S · P-07 · Found
+- [x] **H-31 — the packages do not declare the `ping` the ICMP sensors run** · S · P-07 · Found
       2026-10-04 by `H-15`. ICMP runs the system `ping` (`ADR-001` Decision 6). The `.deb`
       declares `Depends: openssl, systemd, adduser` and `Recommends: nodejs`. Ubuntu 24.04's
       container image has no `ping`, and every `icmp.ping` sensor read Down with *the "ping"
@@ -23136,6 +23165,32 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       either. **Done when** the `.deb` and the `.rpm` (and `install.sh`'s check) declare
       `iputils-ping` / `iputils`, as a dependency or a recommendation with the reason written down,
       and `installation.md`'s requirements table lists it.
+      - **Outcome (2026-10-04)**: **a dependency.** `.deb` `Depends: iputils-ping` (not
+        `| inetutils-ping`: every flag and parse is iputils', and nothing has run GNU's), `.rpm`
+        `Requires: iputils`; the reasons are beside each. `install.sh` (with a probe) and
+        `install-probe.sh` refuse without `ping`, as they refuse without Node. `installation.md`
+        lists it, and the smoke images carry `iputils-ping`, as a real host does.
+      - **The binary was not enough, and that was the larger finding.** Under ms-probe.service's
+        `NoNewPrivileges=yes` and `CapabilityBoundingSet=CAP_NET_BIND_SERVICE`, `ping`'s file
+        capability does nothing, so it needs an unprivileged ICMP socket, which only groups in
+        `net.ipv4.ping_group_range` may open. Debian 12 and Ubuntu 24.04 leave that at the
+        kernel's `1 0`, nobody (checked with udev, systemd, procps and iputils-ping installed),
+        and measured under the unit's own settings, `ping -c1 127.0.0.1` as ms-probe fails:
+        *socket: Operation not permitted*. EL9 opens it to all (systemd-udev's
+        `50-default.conf`). The rehearsal pinged only because Docker opens it in every container.
+        **Fix**: `ms-setup` sets a still-default range to the ms-probe group alone, now and in
+        `/etc/sysctl.d/60-ms-probe-ping.conf`; a range somebody set is left, with a warning if it
+        leaves the probe out. Not `CAP_NET_RAW` in the unit: a raw socket would give the probe
+        and its script sensors the host's IP traffic.
+      - **Tests**: three `ms-setup` cases (an empty range opened to the group alone, now and in
+        the drop-in; an open or an operator's range left, warned of when it excludes the group;
+        no probe, nothing touched, and an unreadable range warned of). `smoke-packages` (deb,
+        rpm) removes or lacks `ping`, sets the box's range to `1 0`, asserts the dependency
+        brings `ping`, that `ping -c1 127.0.0.1` as ms-probe in a transient unit carrying every
+        sandbox line of the installed `ms-probe.service` succeeds, that the same fails at `1 0`,
+        and that `systemd-sysctl` reapplies the drop-in. `smoke-install` (Debian, Ubuntu) asserts
+        the refusal without `ping`, and at `1 0` approves the probe, creates an `icmp.ping`
+        sensor on 127.0.0.1 and waits for it to read Up.
 
 - [ ] **H-32 — every start reports the launcher's own `MS_BUILD_VERSION` as ignored** · S ·
       H-11 · Found 2026-10-04 by `H-15`. `/opt/ms/bin/ms-core` exports `MS_BUILD_VERSION`, and

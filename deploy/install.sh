@@ -7,7 +7,8 @@
 #     sudo ./install.sh --no-start      # install but do not start
 #
 # Creates the service users, lays out /opt/ms, /etc/ms and /var/lib, installs the units and
-# starts the services. Re-running upgrades in place: configuration under /etc/ms is never
+# starts the services — except on a first installation of a core, whose core.json has no database
+# password yet, which starts nothing and says what to set. Re-running upgrades in place: configuration under /etc/ms is never
 # overwritten, the new build is asked whether it can read that configuration before anything
 # running is stopped, and the release it replaces is kept at /opt/ms/previous.
 #
@@ -48,6 +49,12 @@ esac
 command -v systemctl >/dev/null 2>&1 || die "systemd is required (systemctl not found)"
 command -v node >/dev/null 2>&1 || die "Node.js is required on PATH"
 command -v openssl >/dev/null 2>&1 || die "openssl is required (used to issue the probe-channel certificates)"
+# The ICMP sensors run the system `ping` (ADR-001 Decision 6), and the packages depend on it for
+# the same reason (`H-31`). A host that runs no probe has no use for one.
+case " ${components[*]} " in
+  *" probe "*) command -v ping >/dev/null 2>&1 \
+    || die "ping is required by the probe's ICMP sensors (Debian, Ubuntu: iputils-ping; RHEL: iputils)" ;;
+esac
 [ -x "${here}/deploy/place-release.sh" ] || die "this does not look like an unpacked release (no deploy/place-release.sh)"
 
 node_major="$(node -p 'process.versions.node.split(".")[0]')"
@@ -100,7 +107,15 @@ MonitoringSystem ${version} installed.
   configuration   ${CONFDIR}/{$(IFS=,; echo "${components[*]}")}.json
   application     ${PREFIX}
   logs            journalctl -u ms-core -u ms-probe -f
-
-Next: set the database connection in ${CONFDIR}/core.json, then
-  systemctl restart ms-core
 SUMMARY
+# `ms-setup` starts nothing on a first installation of a core (`H-30`), and has said why above.
+case " ${components[*]} " in
+  *" core "*) cat <<NEXT
+
+On a first installation nothing was started: set the database connection in
+${CONFDIR}/core.json, then
+  systemctl reset-failed $(printf 'ms-%s ' "${components[@]}")
+  systemctl start $(printf 'ms-%s ' "${components[@]}")
+NEXT
+    ;;
+esac

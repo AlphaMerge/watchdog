@@ -132,7 +132,7 @@ License:        Proprietary
 URL:            https://example.invalid/monitoringsystem
 Source0:        ${name}-${pkg_version}.tar.gz
 BuildArch:      ${arch}
-Requires:       openssl, systemd, shadow-utils
+Requires:       openssl, systemd, shadow-utils, iputils
 ${conflicts}
 
 # The payload is already built; there is nothing here for rpm's debug machinery to strip, and
@@ -155,6 +155,10 @@ no enterprise release ships one that new, so the version that satisfies this
 normally comes from NodeSource or a tarball rather than from the distribution --
 a hard Requires would make this package uninstallable on the hosts it is for.
 The post-install checks for it and says what it found.
+
+iputils is required, unlike Node: the ICMP sensors run the system ping, ICMP is
+the default availability check, and the distribution's own package is the one
+they are written and tested against.
 
 %prep
 %setup -q
