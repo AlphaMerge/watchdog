@@ -157,13 +157,20 @@ describe('check pool', () => {
     await until(() => seen.length === 2, 'the refusal', 10_000);
     const refused = seen[1];
     assert.ok(refused !== undefined);
-    assert.equal(refused.meta.workerId, loaded.meta.workerId, 'in the worker that loaded it');
+    // The refusal first: a check the pool's timeout settled is emitted with worker 0, so asking
+    // for the worker first would hide the failure this test is for behind a worker mismatch.
     const result = refused.result;
     assert.equal(result.outcome, 'error');
     assert.equal(result.withheld, true, result.message);
     assert.match(result.message, /^Not scanned: switch\.invalid did not resolve within 3000 ms/);
     assert.doesNotMatch(result.message, /did not finish within/);
     assert.deepEqual(result.channels, []);
+    assert.equal(
+      refused.meta.workerId,
+      loaded.meta.workerId,
+      `ran in the worker that loaded the module; settled in phase ${refused.meta.phase}: ` +
+        result.message,
+    );
   });
 
   it('reports an unknown sensor type rather than hanging on it', async () => {
