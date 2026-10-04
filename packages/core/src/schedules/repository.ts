@@ -192,15 +192,19 @@ export class ScheduleRepository {
   async usedBy(
     q: Queryable,
     id: number,
+    visibility: Visibility,
     limit = 50,
   ): Promise<{ objectId: ObjectId; name: string }[]> {
+    // Among the objects the reader can see (`A-16`), as `usageCounts` counts them.
+    const values: unknown[] = [SCHEDULE_ID.key, id, limit];
+    const visible = visibility.where('s.object_id', (value) => `$${String(values.push(value))}`);
     const rows = await q.query<{ object_id: string; name: string }>(
       `SELECT s.object_id::text AS object_id, o.name
        FROM object_setting s JOIN object o ON o.id = s.object_id
-       WHERE s.key = $1 AND s.value = to_jsonb($2::bigint)
+       WHERE s.key = $1 AND s.value = to_jsonb($2::bigint) AND ${visible}
        ORDER BY o.name
        LIMIT $3`,
-      [SCHEDULE_ID.key, id, limit],
+      values,
     );
     return rows.map((row) => ({ objectId: Number(row.object_id), name: row.name }));
   }
@@ -232,11 +236,13 @@ export class ScheduleRepository {
    * a schedule assigned to two hundred objects told the operator it was assigned to fifty. They
    * clear fifty, try again, and are told fifty again.
    */
-  async usedByCount(q: Queryable, id: number): Promise<number> {
+  async usedByCount(q: Queryable, id: number, visibility: Visibility): Promise<number> {
+    const values: unknown[] = [SCHEDULE_ID.key, id];
+    const visible = visibility.where('object_id', (value) => `$${String(values.push(value))}`);
     const rows = await q.query<{ total: string }>(
       `SELECT count(*)::text AS total FROM object_setting
-       WHERE key = $1 AND value = to_jsonb($2::bigint)`,
-      [SCHEDULE_ID.key, id],
+       WHERE key = $1 AND value = to_jsonb($2::bigint) AND ${visible}`,
+      values,
     );
     return Number(rows[0]?.total ?? 0);
   }
@@ -252,12 +258,16 @@ export class ScheduleRepository {
   async rediscoveryUsing(
     q: Queryable,
     id: number,
+    visibility: Visibility,
     limit = 50,
   ): Promise<{ ruleId: number; name: string }[]> {
+    // A rule belongs to the group it sweeps, and is listed only to a reader of it (`A-16`).
+    const values: unknown[] = [id, limit];
+    const visible = visibility.where('group_id', (value) => `$${String(values.push(value))}`);
     const rows = await q.query<{ id: string; name: string }>(
       `SELECT id::text AS id, name FROM discovery_schedule
-       WHERE schedule_id = $1 ORDER BY name LIMIT $2`,
-      [id, limit],
+       WHERE schedule_id = $1 AND ${visible} ORDER BY name LIMIT $2`,
+      values,
     );
     return rows.map((row) => ({ ruleId: Number(row.id), name: row.name }));
   }
@@ -267,7 +277,8 @@ export class ScheduleRepository {
    *
    * **Among the objects the reader can see** (`A-12`): a schedule belongs to the installation,
    * but the objects using it belong to branches, and a count of them would say how busy a branch
-   * the reader was not given is. A delete still counts every use — see `usedByCount`.
+   * the reader was not given is. A delete is still refused by every use, and counts for its
+   * caller only the ones they can see (`A-16`).
    */
   async usageCounts(q: Queryable, visibility: Visibility): Promise<Map<number, number>> {
     const values: unknown[] = [SCHEDULE_ID.key];

@@ -331,7 +331,7 @@ describe(
         'testing',
       );
       await h.service.pause(testActor, sensorId, { kind: 'indefinite' }, 'maintenance');
-      await h.service.resume(testActor, sensorId);
+      await h.service.resume(testActor, sensorId, Visibility.EVERYTHING);
 
       const current = await runtimeOf(sensorId);
       assert.equal(current.state, 'down');

@@ -896,7 +896,9 @@ export async function objectRoutes(
         request.body.targetParentId,
         optionalIfMatch(request.headers['if-match']),
       );
-      await reply.header('ETag', etagFor(result.object.version)).send(result);
+      await reply
+        .header('ETag', etagFor(result.object.version))
+        .send(await service.moveSeenBy(result, await visibilityOf(request)));
     },
   );
 
@@ -1384,19 +1386,24 @@ export async function objectRoutes(
           'Resumes an object, or cancels a maintenance window it has not reached yet. Only the ' +
           'object that was directly paused can be resumed — a sensor paused because its device ' +
           'is paused has nothing of its own to clear, and the 409 names the object to resume ' +
-          'instead. A resumed sensor reads Unknown until its next scan, never the state it had ' +
-          'before the pause, which the system has not checked since.',
+          'instead. **By id alone when the caller cannot see it** (`A-16`): a pause inherited ' +
+          'from a container above the caller’s branch, or a master in another branch, is ' +
+          'named in the 409 as `GET` names it, with `pausedByName` or `masterName` null. A ' +
+          'resumed sensor reads Unknown until its next scan, never the state it had before the ' +
+          'pause, which the system has not checked since.',
         params: idParams,
         response: { 200: { $ref: 'ms:pauseView' } },
       },
     },
     async (request, reply) => {
+      const visibility = await visibilityOf(request);
       const view = await service.resume(
         actorFor(request),
         request.params.id,
+        visibility,
         optionalIfMatch(request.headers['if-match']),
       );
-      await reply.send(await service.pauseSeenBy(view, await visibilityOf(request)));
+      await reply.send(await service.pauseSeenBy(view, visibility));
     },
   );
 

@@ -966,7 +966,11 @@ describe('the access-control matrix', { skip: available ? false : 'no database' 
       try {
         const refused = await repoint(app, asRole('readwrite'), '203.0.113.9');
         assert.equal(refused.statusCode, 403);
-        assert.match(refused.body, /bringing the snmp credentials on probe /);
+        // By id alone: the probe above the device is outside the operator's view (`A-16`).
+        assert.match(
+          refused.body,
+          new RegExp(`bringing the snmp credentials on #${String(probeId)} to 203`),
+        );
         assert.ok(!refused.body.includes(PLANTED_SECRET));
 
         const open = await layerOff();

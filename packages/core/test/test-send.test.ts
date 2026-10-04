@@ -160,7 +160,11 @@ describe(
       // A test that stubbed the rendering or the transport would prove the stub works.
       const templateId = await template();
       const { seen, transport } = recorder();
-      const report = await testerWith(transport).send(testActor, { templateId, sensorId });
+      const report = await testerWith(transport).send(testActor, {
+        seenBy: Visibility.EVERYTHING,
+        templateId,
+        sensorId,
+      });
 
       assert.equal(report.delivered, true);
       assert.equal(report.detail, 'accepted by relay.example.test');
@@ -172,11 +176,43 @@ describe(
       assert.equal(seen[0]?.subject, report.subject);
     });
 
+    it('echoes the message as its sender may read it, and sends the real one (A-16)', async () => {
+      // A sender granted the device alone: the probe above it is outside their view, and the
+      // answer they are given leaves it unnamed, as a preview does. Whoever the template names
+      // gets the message a real alarm would carry.
+      const templateId = await template({ body: 'via %probe, %device at %host' });
+      const { seen, transport } = recorder();
+      const parent = await db.query<{ parent_id: string }>(
+        'SELECT parent_id::text AS parent_id FROM object WHERE id = $1',
+        [sensorId],
+      );
+      const deviceOnly = Visibility.of(
+        new Map([[Number(parent[0]?.parent_id), true]]),
+        false,
+        null,
+      );
+      const report = await testerWith(transport).send(testActor, {
+        seenBy: deviceOnly,
+        templateId,
+        sensorId,
+      });
+      assert.equal(report.body, 'via (outside your view), edge-router at 192.0.2.7');
+      assert.equal(seen[0]?.body, 'via Local probe, edge-router at 192.0.2.7');
+      assert.ok(
+        report.notes.some((note) => note.startsWith('Containers outside your view')),
+        report.notes.join(' | '),
+      );
+    });
+
     it('leaves nothing in the queue behind it', async () => {
       // No `notification_request` row, so nothing is retried, summarised or suppressed — each of
       // which would turn "did my relay work" into "wait fifteen minutes and find out".
       const templateId = await template();
-      await testerWith(recorder().transport).send(testActor, { templateId, sensorId });
+      await testerWith(recorder().transport).send(testActor, {
+        seenBy: Visibility.EVERYTHING,
+        templateId,
+        sensorId,
+      });
       const rows = await db.query<{ n: string }>(
         'SELECT count(*)::text AS n FROM notification_request',
       );
@@ -187,7 +223,10 @@ describe(
       // The first thing an operator does with a new installation is check the relay, and at that
       // point there may be no sensors at all.
       const templateId = await template();
-      const report = await testerWith(recorder().transport).send(testActor, { templateId });
+      const report = await testerWith(recorder().transport).send(testActor, {
+        seenBy: Visibility.EVERYTHING,
+        templateId,
+      });
       assert.equal(report.delivered, true);
       assert.equal(report.sensorId, null);
       assert.equal(report.sensorName, 'Example sensor');
@@ -203,7 +242,7 @@ describe(
       const templateId = await template();
       const report = await testerWith(
         recorder(() => ({ ok: false, retryable: false })).transport,
-      ).send(testActor, { templateId, sensorId });
+      ).send(testActor, { seenBy: Visibility.EVERYTHING, templateId, sensorId });
       assert.equal(report.delivered, false);
       assert.equal(report.error, 'the relay refused it');
       assert.equal(report.retryable, false);
@@ -221,12 +260,17 @@ describe(
         send: () => Promise.resolve({ ok: true, detail: 'accepted', skipped } as const),
       };
       const templateId = await template();
-      const counted = await testerWith(partly).send(testActor, { templateId, sensorId });
+      const counted = await testerWith(partly).send(testActor, {
+        seenBy: Visibility.EVERYTHING,
+        templateId,
+        sensorId,
+      });
       assert.equal(
         counted.detail,
         'accepted; not sent to 2 recipients (1 disabled, 1 may not see this sensor)',
       );
       const named = await testerWith(partly).send(testActor, {
+        seenBy: Visibility.EVERYTHING,
         templateId,
         sensorId,
         namesAccounts: true,
@@ -246,7 +290,11 @@ describe(
             skipped,
           } as const),
       };
-      const failed = await testerWith(nobody).send(testActor, { templateId, sensorId });
+      const failed = await testerWith(nobody).send(testActor, {
+        seenBy: Visibility.EVERYTHING,
+        templateId,
+        sensorId,
+      });
       assert.equal(
         failed.error,
         'nobody to send to: 2 recipients (1 disabled, 1 may not see this sensor)',
@@ -274,7 +322,11 @@ describe(
           settings: { path: 'refuse.sh', secretArgs: ['hunter2-%sensor'] },
           recipients: [],
         });
-        const report = await testerWith(program).send(testActor, { templateId, sensorId });
+        const report = await testerWith(program).send(testActor, {
+          seenBy: Visibility.EVERYTHING,
+          templateId,
+          sensorId,
+        });
         assert.equal(report.delivered, false);
         assert.equal(report.error, `refuse.sh exited 1 — token ${SCRUBBED} refused`);
         assert.ok(!JSON.stringify(report).includes('hunter2'), 'the report carried the secret');
@@ -291,7 +343,11 @@ describe(
         },
       };
       const templateId = await template();
-      const report = await testerWith(throwing).send(testActor, { templateId, sensorId });
+      const report = await testerWith(throwing).send(testActor, {
+        seenBy: Visibility.EVERYTHING,
+        templateId,
+        sensorId,
+      });
       assert.equal(report.delivered, false);
       assert.match(String(report.error), /DNS is on fire/);
     });
@@ -303,6 +359,7 @@ describe(
         recipients: [],
       });
       const report = await testerWith(recorder().transport).send(testActor, {
+        seenBy: Visibility.EVERYTHING,
         templateId,
         sensorId,
       });
@@ -313,6 +370,7 @@ describe(
     it('warns that a green test on a switched-off template is not a working alarm', async () => {
       const templateId = await template({ enabled: false });
       const report = await testerWith(recorder().transport).send(testActor, {
+        seenBy: Visibility.EVERYTHING,
         templateId,
         sensorId,
       });
@@ -326,6 +384,7 @@ describe(
         summaryWindowSeconds: 600,
       });
       const report = await testerWith(recorder().transport).send(testActor, {
+        seenBy: Visibility.EVERYTHING,
         templateId,
         sensorId,
       });
@@ -346,6 +405,7 @@ describe(
       });
       const templateId = await template({ scheduleId: schedule.id, whenInactive: 'discard' });
       const report = await testerWith(recorder().transport).send(testActor, {
+        seenBy: Visibility.EVERYTHING,
         templateId,
         sensorId,
       });
@@ -363,6 +423,7 @@ describe(
       // at three in the morning has paged whoever is on call.
       const templateId = await template();
       await testerWith(recorder(() => ({ ok: false })).transport).send(testActor, {
+        seenBy: Visibility.EVERYTHING,
         templateId,
         sensorId,
       });
@@ -377,7 +438,10 @@ describe(
 
     it('refuses a template that is not there', async () => {
       await assert.rejects(
-        testerWith(recorder().transport).send(testActor, { templateId: 999_999 }),
+        testerWith(recorder().transport).send(testActor, {
+          seenBy: Visibility.EVERYTHING,
+          templateId: 999_999,
+        }),
         (error: unknown) => /no template 999999/.test((error as Error).message),
       );
     });
@@ -540,7 +604,11 @@ describe(
           settings: { url: at('pager.example.test', '/hook') },
           summarisation: 'always-immediate',
         });
-        const report = await testerWith(webhook).send(editor, { templateId, sensorId });
+        const report = await testerWith(webhook).send(editor, {
+          seenBy: Visibility.EVERYTHING,
+          templateId,
+          sensorId,
+        });
         assert.equal(report.delivered, true, report.error ?? '');
         assert.deepEqual(arrived, [{ path: '/hook', authorization: 'Bearer set-by-an-admin' }]);
       });
@@ -553,7 +621,11 @@ describe(
           settings: { url: at('collector.attacker.test', '/steal') },
           summarisation: 'always-immediate',
         });
-        const report = await testerWith(webhook).send(editor, { templateId, sensorId });
+        const report = await testerWith(webhook).send(editor, {
+          seenBy: Visibility.EVERYTHING,
+          templateId,
+          sensorId,
+        });
         assert.equal(report.delivered, true, report.error ?? '');
         assert.deepEqual(arrived, [{ path: '/steal', authorization: undefined }]);
       });
@@ -572,7 +644,11 @@ describe(
           settings: { url: at('[fd00:ec2::254]', '/hook') },
           summarisation: 'always-immediate',
         });
-        const report = await testerWith(shipped).send(testActor, { templateId, sensorId });
+        const report = await testerWith(shipped).send(testActor, {
+          seenBy: Visibility.EVERYTHING,
+          templateId,
+          sensorId,
+        });
         assert.equal(report.delivered, false);
         assert.match(report.error ?? '', /fd00:ec2::254 refused by the target policy/);
         assert.deepEqual(arrived, []);

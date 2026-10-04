@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { IngestionConfig } from '@ms/shared';
+import { Visibility } from '../src/auth/access.js';
 import type { Database, Queryable } from '../src/db/pool.js';
 import { Ingestor, type IngestTarget, type SampleRow } from '../src/ingestion/ingestor.js';
 import {
@@ -194,7 +195,7 @@ describe(
         assert.equal(after.source, 'manual');
         assert.equal(after.message, 'before the restart');
 
-        await h.service.resume(testActor, sensorId);
+        await h.service.resume(testActor, sensorId, Visibility.EVERYTHING);
       });
     });
 

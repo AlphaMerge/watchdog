@@ -456,7 +456,7 @@ describe(
 
       await h.service.pause(testActor, sensorId, { kind: 'indefinite' }, 'maintenance');
       assert.equal((await runtimeOf(sensorId)).state, 'paused');
-      await h.service.resume(testActor, sensorId);
+      await h.service.resume(testActor, sensorId, Visibility.EVERYTHING);
 
       const current = await runtimeOf(sensorId);
       assert.equal(current.state, 'unknown', 'resumed sensors await their next scan');

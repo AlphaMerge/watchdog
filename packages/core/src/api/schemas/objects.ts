@@ -53,6 +53,18 @@ export const objectRefSchema = {
   },
 } as const;
 
+/** `ms:objectRef` in an answer about another object, its name null where unseen (`A-16`). */
+const seenObjectRefSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['id', 'kind', 'name'],
+  properties: {
+    id: { type: 'integer' },
+    kind: { enum: OBJECT_KINDS },
+    name: { type: ['string', 'null'] },
+  },
+} as const;
+
 export const resolvedSettingSchema = {
   $id: 'ms:resolvedSetting',
   type: 'object',
@@ -693,9 +705,10 @@ export const moveResultSchema = {
           type: 'object',
           additionalProperties: false,
           required: ['from', 'to'],
+          // A probe's name is null for a caller who cannot see it (`A-16`).
           properties: {
-            from: { oneOf: [{ type: 'null' }, { $ref: 'ms:objectRef' }] },
-            to: { oneOf: [{ type: 'null' }, { $ref: 'ms:objectRef' }] },
+            from: { oneOf: [{ type: 'null' }, seenObjectRefSchema] },
+            to: { oneOf: [{ type: 'null' }, seenObjectRefSchema] },
           },
         },
       ],

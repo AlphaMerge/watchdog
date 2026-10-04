@@ -18,6 +18,7 @@ import { MAX_WALK_DEPTH } from '../db/walk.js';
 import type { Actor, AuditSink, Mutation } from './audit.js';
 import {
   credentialVoucherOf,
+  voucherOf,
   type CredentialVoucher,
   type Writer,
   type Writes,
@@ -372,25 +373,57 @@ export async function routesAtOrUnder(
   return routes;
 }
 
+/** Which of a refused route's two objects its writer can see (`A-16`). */
+export interface RouteSeen {
+  readonly owner: boolean;
+  readonly sensor: boolean;
+}
+
+/** Both, for a writer who sees everything: the installation, or an administrator. */
+const ROUTE_SEEN_WHOLE: RouteSeen = { owner: true, sensor: true };
+
 /**
  * The refusal of a write that would bring a set somewhere new (`A-41`).
  *
  * **It names the kind, the owner and where the set would go, and never the secret.** The owner is
- * no news to the writer: the credentials view of anything they can read says where its sets are
- * inherited from.
+ * named by id alone, as the credentials view names where a set is inherited from — and by name
+ * and kind only to a writer who can see it, since it is often the group or probe above the branch
+ * the writer was given (`A-16`). A sensor the writer cannot see, a hole beneath the device being
+ * edited, is not named, and nor is where its set would go, which is its device's address and its
+ * own parameters.
  */
-export function credentialRefusal(route: CredentialRoute, sayWhich: boolean): AuthError {
+export function credentialRefusal(
+  route: CredentialRoute,
+  sayWhich: boolean,
+  seen: RouteSeen,
+): AuthError {
   const shown = (value: unknown): string =>
     typeof value === 'string' ? value : JSON.stringify(value);
   const fields = route.fields.map(([field, value]) => `${field} ${shown(value)}`).join(', ');
-  const where = route.fields.length === 0 ? route.host : `${route.host} (${fields})`;
+  const where = !seen.sensor
+    ? 'a sensor outside your view'
+    : route.fields.length === 0
+      ? route.host
+      : `${route.host} (${fields})`;
+  const owner = seen.owner
+    ? `${route.ownerKind} "${route.ownerName}" (#${String(route.ownerId)})`
+    : `#${String(route.ownerId)}`;
   return new AuthError(
     'AUTH_FORBIDDEN',
-    `${sayWhich ? `sensor "${route.sensorName}": ` : ''}bringing the ${route.kind} credentials ` +
-      `on ${route.ownerKind} "${route.ownerName}" (#${String(route.ownerId)}) to ${where} needs ` +
-      `write on that ${route.ownerKind}`,
+    `${sayWhich && seen.sensor ? `sensor "${route.sensorName}": ` : ''}bringing the ` +
+      `${route.kind} credentials on ${owner} to ${where} needs write on that ` +
+      (seen.owner ? route.ownerKind : 'object'),
     { kind: route.kind, ownerId: route.ownerId, needed: 'write' },
   );
+}
+
+/** What the writer of a refused route can see of it (`A-16`). */
+async function seenBy(q: Queryable, writer: Writer, route: CredentialRoute): Promise<RouteSeen> {
+  const voucher = voucherOf(writer);
+  if (voucher.kind !== 'account') return ROUTE_SEEN_WHOLE;
+  const sees = typeof voucher.sees === 'function' ? await voucher.sees(q) : voucher.sees;
+  const visible = await sees.visibleAmong(q, [route.ownerId, route.sensorId]);
+  return { owner: visible.has(route.ownerId), sensor: visible.has(route.sensorId) };
 }
 
 /**
@@ -432,7 +465,9 @@ export async function vouch(
   const vouched: CredentialRoute[] = [];
   for (const route of routes) {
     const verdict = verdictFor(route, writable.has(route.ownerId));
-    if (verdict === 'refuse') throw credentialRefusal(route, options.sayWhich);
+    if (verdict === 'refuse') {
+      throw credentialRefusal(route, options.sayWhich, await seenBy(q, writer, route));
+    }
     if (verdict === 'vouch') vouched.push(route);
   }
   await recordVouchers(q, vouched, voucher);

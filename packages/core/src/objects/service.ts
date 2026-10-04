@@ -73,6 +73,7 @@ import type {
   Page,
   PageRequest,
   Precondition,
+  SeenObjectRef,
   SettingChange,
   SettingView,
   SiblingMove,
@@ -617,10 +618,18 @@ export class ObjectService {
    * paused because its device is paused has nothing of its own to clear, and a resume that
    * quietly did nothing would leave an operator believing monitoring is back when it is not —
    * so it is refused, and the refusal names the object to resume instead.
+   *
+   * **Named only to a reader who can see it** (`A-16`). The container a pause comes from can be
+   * above the branch the caller was granted, and a master can be in another one. The refusal is
+   * built from the pause view as `seenBy` would be shown it, so it says what `GET` would say:
+   * the ids, which are references, and no name for what is outside the caller's view. An
+   * administrator sees everything and is told everything. A caller acting for nobody passes
+   * `Visibility.EVERYTHING` and says so.
    */
   async resume(
     actor: Actor,
     id: ObjectId,
+    seenBy: Visibility,
     pre: Precondition = { kind: 'none' },
   ): Promise<PauseView> {
     const now = new Date();
@@ -631,13 +640,12 @@ export class ObjectService {
         throw versionConflict(id, pre.expected, object.version);
       }
 
-      const effective = await this.#pauses.effective(q, id, now);
       // The refusal names whichever source is actually holding it, not just the ones that are
       // rows in `object_pause` — an object held by a schedule or a dependency told "this object
       // is not paused" is both wrong and the least useful thing to say (`M-12`).
-      const schedule = await this.#scheduleView(q, id, now);
-      const dependency = await this.#dependencyView(q, id, now);
-      const refusal = refuseResume(effective.own !== null, effective.inherited, {
+      const view = await this.#pauseSeenBy(q, await this.#pauseView(q, id, now), seenBy);
+      const { schedule, dependency } = view;
+      const refusal = refuseResume(view.resumable, view.inheritedFrom, {
         schedule:
           schedule === null || schedule.active
             ? null
@@ -1120,10 +1128,32 @@ export class ObjectService {
    * them; the ids stay, as references, and the names and the master's state go.
    */
   async pauseSeenBy(view: PauseView, visibility: Visibility): Promise<PauseView> {
+    return this.#pauseSeenBy(this.#db, view, visibility);
+  }
+
+  /**
+   * A move's answer with the names of the probes it left and joined taken out where the mover
+   * cannot see them (`A-16`). `write` on what moved and on where it went says nothing about the
+   * probe above either; the ids stay, as references, as a pause view's do.
+   */
+  async moveSeenBy(result: MoveResult, visibility: Visibility): Promise<MoveResult> {
+    const changed = result.probeChanged;
+    if (changed === null || visibility.everything) return result;
+    const visible = await visibility.visibleAmong(
+      this.#db,
+      [changed.from?.id, changed.to?.id].filter((one): one is ObjectId => one !== undefined),
+    );
+    const seen = (probe: SeenObjectRef | null): SeenObjectRef | null =>
+      probe === null || visible.has(probe.id) ? probe : { ...probe, name: null };
+    return { ...result, probeChanged: { from: seen(changed.from), to: seen(changed.to) } };
+  }
+
+  /** `pauseSeenBy` on a connection of the caller's, for a refusal built inside a write (`A-16`). */
+  async #pauseSeenBy(q: Queryable, view: PauseView, visibility: Visibility): Promise<PauseView> {
     const named = [view.inheritedFrom?.objectId, view.dependency?.masterId].filter(
       (one): one is ObjectId => one !== undefined,
     );
-    const visible = await visibility.visibleAmong(this.#db, named);
+    const visible = await visibility.visibleAmong(q, named);
     const { inheritedFrom, dependency } = view;
     return {
       ...view,

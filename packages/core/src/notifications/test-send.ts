@@ -10,7 +10,13 @@ import { notificationMethods } from './methods.js';
 import { render, type MessageContext } from './placeholders.js';
 import { describeCounts, describeSkipped, skippedCounts } from './recipients.js';
 import { summarises } from './summarisation.js';
-import { TemplateRepository, type Recipient, type StoredTemplate } from './templates.js';
+import {
+  contextSeenBy,
+  TemplateRepository,
+  type Recipient,
+  type StoredTemplate,
+} from './templates.js';
+import type { Visibility } from '../auth/access.js';
 
 export interface NotificationTesterOptions {
   db: Database;
@@ -64,6 +70,13 @@ export interface TestSendRequest {
    * writer could ask about any id they liked. Absent is false: a caller that forgets tells nobody.
    */
   readonly namesAccounts?: boolean;
+  /**
+   * Who the report's `subject` and `body` are rendered for (`A-16`). What is sent is the real
+   * message, to whoever the template names; what is echoed goes to the caller, and leaves unnamed
+   * the containers they cannot see, as a preview does. Required, as every `Visibility` is: an
+   * internal caller passes `Visibility.EVERYTHING` and says so.
+   */
+  readonly seenBy: Visibility;
 }
 
 /**
@@ -142,6 +155,17 @@ export class NotificationTester {
             context,
           });
     const durationMs = Number((process.hrtime.bigint() - started) / 1_000_000n);
+
+    // The echo, as the caller may read it (`A-16`). The example sensor names nothing real.
+    const shown =
+      request.sensorId === undefined
+        ? rendered
+        : render(template, await contextSeenBy(this.#db, context, request.seenBy), escaping);
+    if (shown.subject !== rendered.subject || shown.body !== rendered.body) {
+      notes.push(
+        'Containers outside your view read "(outside your view)" here. The message sent names them.',
+      );
+    }
     const skipped = result.skipped ?? [];
     const missed =
       request.namesAccounts === true
@@ -155,8 +179,8 @@ export class NotificationTester {
       methodName: notificationMethods.get(template.method).name,
       sensorId: request.sensorId ?? null,
       sensorName: context.sensorName,
-      subject: rendered.subject,
-      body: rendered.body,
+      subject: shown.subject,
+      body: shown.body,
       recipients: template.recipients,
       unknownPlaceholders: rendered.unknown,
       delivered: result.ok,

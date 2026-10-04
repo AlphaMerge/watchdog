@@ -1121,7 +1121,7 @@ describe(
       await h.service.setSetting(testActor, deviceId, SCHEDULE_ID.key, id);
 
       await assert.rejects(
-        () => schedules.delete(testActor, id),
+        () => schedules.delete(testActor, id, Visibility.EVERYTHING),
         (error: unknown) => {
           const err = error as { code?: string; details?: { usedBy?: { name: string }[] } };
           assert.equal(err.code, 'OBJECT_NOT_DELETABLE');
@@ -1131,7 +1131,7 @@ describe(
       );
 
       await h.service.clearSetting(testActor, deviceId, SCHEDULE_ID.key);
-      await schedules.delete(testActor, id);
+      await schedules.delete(testActor, id, Visibility.EVERYTHING);
       await assert.rejects(() => schedules.get(id, Visibility.EVERYTHING));
     });
 
@@ -1166,11 +1166,19 @@ describe(
         [assigned, SCHEDULE_ID.key, id],
       );
 
-      assert.equal((await repo.usedBy(db, id)).length, 50, 'the page stops at fifty');
-      assert.equal(await repo.usedByCount(db, id), 52, 'and the count is the truth');
+      assert.equal(
+        (await repo.usedBy(db, id, Visibility.EVERYTHING)).length,
+        50,
+        'the page stops at fifty',
+      );
+      assert.equal(
+        await repo.usedByCount(db, id, Visibility.EVERYTHING),
+        52,
+        'and the count is the truth',
+      );
 
       await assert.rejects(
-        () => schedules.delete(testActor, id),
+        () => schedules.delete(testActor, id, Visibility.EVERYTHING),
         (error: unknown) => {
           const err = error as { message: string; details?: { usedByTotal?: number } };
           assert.equal(err.details?.usedByTotal, 52);
@@ -1198,7 +1206,7 @@ describe(
       );
 
       await assert.rejects(
-        () => schedules.delete(testActor, id),
+        () => schedules.delete(testActor, id, Visibility.EVERYTHING),
         (error: unknown) => {
           const err = error as {
             code?: string;
@@ -1214,7 +1222,7 @@ describe(
     it('refuses to delete a built-in, because the manual points at it', async () => {
       const id = await officeHours();
       await assert.rejects(
-        () => schedules.delete(testActor, id),
+        () => schedules.delete(testActor, id, Visibility.EVERYTHING),
         (error: unknown) => {
           assert.equal((error as { code?: string }).code, 'OBJECT_NOT_DELETABLE');
           return true;

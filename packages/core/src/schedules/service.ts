@@ -1,6 +1,6 @@
 import type { Logger } from '@ms/shared';
 import type { Database } from '../db/pool.js';
-import type { Visibility } from '../auth/access.js';
+import { Visibility } from '../auth/access.js';
 import type { Actor, AuditSink, ScheduleAudit } from '../objects/audit.js';
 import { ObjectError } from '../objects/errors.js';
 import { builtInSchedules } from './built-in.js';
@@ -219,8 +219,13 @@ export class ScheduleService {
    * A built-in is never deletable. It costs nothing to keep, the documented set is what the
    * field reference points at, and an installation that has deleted "Weekdays" has a manual
    * that is wrong.
+   *
+   * **Every use refuses it, and the refusal names and counts only what `visibility` shows**
+   * (`A-16`). An object outside the caller's branch, or a rediscovery rule on one, is in the way
+   * as surely as one inside it, and `outsideView` says there are some; how many would say how
+   * busy a branch the caller was not given is. An administrator is told everything.
    */
-  async delete(actor: Actor, id: number, now = new Date()): Promise<void> {
+  async delete(actor: Actor, id: number, visibility: Visibility, now = new Date()): Promise<void> {
     await this.#db.tx(async (q) => {
       const before = await this.#repo.get(q, id);
       if (before === null) throw notFound(id);
@@ -233,19 +238,26 @@ export class ScheduleService {
         );
       }
 
-      const users = await this.#repo.usedBy(q, id);
-      if (users.length > 0) {
-        // **The count, not the page's length** (`P-129`). `usedBy` returns fifty rows, so a
-        // schedule assigned to two hundred objects said "assigned to 50 object(s)". The operator
-        // clears fifty, tries again, and is told fifty again.
-        const total = await this.#repo.usedByCount(q, id);
+      // **The count, not the page's length** (`P-129`). `usedBy` returns fifty rows, so a
+      // schedule assigned to two hundred objects said "assigned to 50 object(s)". The operator
+      // clears fifty, tries again, and is told fifty again.
+      const all = await this.#repo.usedByCount(q, id, Visibility.EVERYTHING);
+      if (all > 0) {
+        const users = await this.#repo.usedBy(q, id, visibility);
+        const total = visibility.everything ? all : await this.#repo.usedByCount(q, id, visibility);
+        const outsideView = total < all;
         throw new ObjectError(
           'OBJECT_NOT_DELETABLE',
-          `"${before.name}" is still assigned to ${String(total)} object(s); ` +
-            'clear the assignment first',
+          `"${before.name}" is still assigned to ` +
+            (!outsideView
+              ? `${String(total)} object(s)`
+              : total === 0
+                ? 'objects outside your view'
+                : `${String(total)} object(s) you can see, and to others outside your view`) +
+            '; clear the assignment first',
           {
             context: { phase: 'schedules' },
-            details: { scheduleId: id, usedBy: users, usedByTotal: total },
+            details: { scheduleId: id, usedBy: users, usedByTotal: total, outsideView },
           },
         );
       }
@@ -267,15 +279,24 @@ export class ScheduleService {
       // rediscovery rule's permitted window is a `RESTRICT` foreign key, so the delete reached
       // the database and came back as a constraint violation — a 500 with a constraint name in
       // it, for an operator doing something ordinary and correctable. Named, like the other two.
-      const rediscovery = await this.#repo.rediscoveryUsing(q, id);
+      const rediscovery = await this.#repo.rediscoveryUsing(q, id, Visibility.EVERYTHING);
       if (rediscovery.length > 0) {
+        const seen = visibility.everything
+          ? rediscovery
+          : await this.#repo.rediscoveryUsing(q, id, visibility);
+        const outsideView = seen.length < rediscovery.length;
         throw new ObjectError(
           'OBJECT_NOT_DELETABLE',
           `"${before.name}" is still the permitted window of ` +
-            `${String(rediscovery.length)} rediscovery rule(s)`,
+            (!outsideView
+              ? `${String(seen.length)} rediscovery rule(s)`
+              : seen.length === 0
+                ? 'rediscovery rules outside your view'
+                : `${String(seen.length)} rediscovery rule(s) you can see, and of others ` +
+                  'outside your view'),
           {
             context: { phase: 'schedules' },
-            details: { scheduleId: id, usedByRediscovery: rediscovery },
+            details: { scheduleId: id, usedByRediscovery: seen, outsideView },
           },
         );
       }

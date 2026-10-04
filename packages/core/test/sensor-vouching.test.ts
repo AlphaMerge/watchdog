@@ -3,7 +3,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import type { CheckResult } from '@ms/shared';
 import type { QueryResultRow } from 'pg';
 import { CompositeAuditSink, DatabaseAuditSink } from '../src/audit/store.js';
-import { AccessService, type AccessPrincipal, type Visibility } from '../src/auth/access.js';
+import { AccessService, Visibility, type AccessPrincipal } from '../src/auth/access.js';
 import { AccountService, type AccountRole } from '../src/auth/accounts.js';
 import { GroupService } from '../src/auth/groups.js';
 import type { Database, Queryable } from '../src/db/pool.js';
@@ -1016,7 +1016,7 @@ describe(
         await h.service.pause(testActor, reader, { kind: 'indefinite' }, 'maintenance');
         await factory.sweep();
         assert.equal(vouching?.withheld().has(reader), false);
-        await h.service.resume(testActor, reader);
+        await h.service.resume(testActor, reader, Visibility.EVERYTHING);
       } finally {
         await vouching?.settle('elsewhere', NONE_WITHHELD);
         await db.query(

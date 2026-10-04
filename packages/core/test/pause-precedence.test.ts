@@ -265,7 +265,7 @@ describe(
     async function turnOff(source: PauseSource): Promise<void> {
       switch (source) {
         case 'parent':
-          await h.service.resume(testActor, watchedGroupId);
+          await h.service.resume(testActor, watchedGroupId, Visibility.EVERYTHING);
           return;
         case 'dependency':
           await setMasterState('up');
@@ -277,7 +277,7 @@ describe(
           });
           return;
         case 'manual':
-          await h.service.resume(testActor, sensorId);
+          await h.service.resume(testActor, sensorId, Visibility.EVERYTHING);
           return;
       }
     }
@@ -442,7 +442,7 @@ describe(
       await turnOn('parent');
       await turnOn('manual');
       // The sensor owns a pause of its own, so this one is allowed — and it must not be enough.
-      await h.service.resume(testActor, sensorId);
+      await h.service.resume(testActor, sensorId, Visibility.EVERYTHING);
 
       const flags = await flagsOf(sensorId);
       assert.deepEqual(flags.active, ['parent']);

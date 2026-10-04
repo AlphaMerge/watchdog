@@ -636,7 +636,7 @@ describe(
       // back. What tells them apart is the alarm's start, which is not the episode's.
       const later = await mark();
       await h.service.pause(testActor, health, { kind: 'indefinite' }, 'maintenance');
-      await h.service.resume(testActor, health);
+      await h.service.resume(testActor, health, Visibility.EVERYTHING);
       await fire();
       await healthSweep();
       await fire();
@@ -768,7 +768,7 @@ describe(
       );
       assert.equal(Number(armed?.n), PINGS, 'one alarm waiting per sensor while nothing held them');
 
-      await h.service.resume(testActor, health);
+      await h.service.resume(testActor, health, Visibility.EVERYTHING);
       await healthSweep();
       await scheduler.sweep(new Date(Date.now() + 11 * MINUTE));
       assert.deepEqual(await queued(step, made.pings), {});

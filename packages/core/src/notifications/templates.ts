@@ -31,6 +31,54 @@ const DEFAULT_WINDOW_SECONDS = 900;
 /** What a preview says in place of a container its reader cannot see (`A-12`). */
 const HIDDEN_NAME = '(outside your view)';
 
+/**
+ * The facts about one sensor as a reader may be shown them: **the containers the reader cannot
+ * see left unnamed** (`A-12`), and a hidden device's address with its name (`A-49`).
+ *
+ * `%probe` is the probe above a customer's branch, and `%device` over a sensor re-granted inside
+ * a hole is a device they were refused. A real notification goes to whoever the template names and
+ * says it all; a preview, and the echo of a test send (`A-16`), go to whoever asked. The sensor
+ * itself is the reader's: every route that renders against one holds them to `read` on it.
+ */
+export async function contextSeenBy(
+  q: Queryable,
+  context: MessageContext,
+  visibility: Visibility,
+): Promise<MessageContext> {
+  if (visibility.everything) return context;
+
+  // The nearest of each kind, as the loader picks them, and which of those the reader cannot see.
+  const values: unknown[] = [context.sensorId];
+  const visible = visibility.where('nearest.id', (value) => `$${String(values.push(value))}`);
+  const hidden = await q.query<{ kind: string }>(
+    `WITH RECURSIVE chain AS (
+       SELECT o.id, o.parent_id, o.kind, 0 AS depth FROM object o WHERE o.id = $1
+       UNION ALL
+       SELECT p.id, p.parent_id, p.kind, chain.depth + 1
+       FROM object p JOIN chain ON p.id = chain.parent_id
+       WHERE chain.depth < ${String(MAX_WALK_DEPTH)}
+     )
+     SELECT nearest.kind::text AS kind
+     FROM (
+       SELECT DISTINCT ON (kind) id, kind FROM chain
+       WHERE kind IN ('device', 'group', 'probe')
+       ORDER BY kind, depth
+     ) AS nearest
+     WHERE NOT (${visible})`,
+    values,
+  );
+  const outside = new Set(hidden.map((row) => row.kind));
+  return {
+    ...context,
+    deviceName: outside.has('device') ? HIDDEN_NAME : context.deviceName,
+    // The device's own fact, as its name is (`A-49`): `%host` over a sensor re-granted inside a
+    // hole is the address of a device the reader was refused.
+    host: outside.has('device') ? HIDDEN_NAME : context.host,
+    groupName: outside.has('group') ? HIDDEN_NAME : context.groupName,
+    probeName: outside.has('probe') ? HIDDEN_NAME : context.probeName,
+  };
+}
+
 /** Who a message goes to. Only `address` resolves until `A-01` and `A-02` exist. */
 export interface Recipient {
   readonly kind: 'address' | 'user' | 'userGroup';
@@ -486,38 +534,7 @@ export class TemplateService {
         context: { objectId: sensorId, phase: 'templates' },
       });
     }
-    if (visibility.everything) return context;
-
-    // The nearest of each kind, as the loader picks them, and which of those the reader cannot see.
-    const values: unknown[] = [sensorId];
-    const visible = visibility.where('nearest.id', (value) => `$${String(values.push(value))}`);
-    const hidden = await this.#db.query<{ kind: string }>(
-      `WITH RECURSIVE chain AS (
-         SELECT o.id, o.parent_id, o.kind, 0 AS depth FROM object o WHERE o.id = $1
-         UNION ALL
-         SELECT p.id, p.parent_id, p.kind, chain.depth + 1
-         FROM object p JOIN chain ON p.id = chain.parent_id
-         WHERE chain.depth < ${String(MAX_WALK_DEPTH)}
-       )
-       SELECT nearest.kind::text AS kind
-       FROM (
-         SELECT DISTINCT ON (kind) id, kind FROM chain
-         WHERE kind IN ('device', 'group', 'probe')
-         ORDER BY kind, depth
-       ) AS nearest
-       WHERE NOT (${visible})`,
-      values,
-    );
-    const outside = new Set(hidden.map((row) => row.kind));
-    return {
-      ...context,
-      deviceName: outside.has('device') ? HIDDEN_NAME : context.deviceName,
-      // The device's own fact, as its name is (`A-49`): `%host` over a sensor re-granted inside a
-      // hole is the address of a device the reader was refused.
-      host: outside.has('device') ? HIDDEN_NAME : context.host,
-      groupName: outside.has('group') ? HIDDEN_NAME : context.groupName,
-      probeName: outside.has('probe') ? HIDDEN_NAME : context.probeName,
-    };
+    return contextSeenBy(this.#db, context, visibility);
   }
 
   async create(
@@ -616,8 +633,13 @@ export class TemplateService {
    * Refused rather than cascaded, and refused with the list: deleting a template out from under
    * a trigger would leave the trigger firing into nothing, which is the silent failure this
    * whole subsystem exists to prevent. The operator is told which triggers to fix.
+   *
+   * **Which triggers, among those `visibility` shows** (`A-16`). Every use refuses the delete,
+   * whoever asks, but a trigger on an object outside the caller's branch is not listed, and
+   * not counted: `outsideView` says that there are some, and never how many, since a number
+   * would say how busy a branch the caller was not given is. An administrator is told them all.
    */
-  async delete(actor: Actor, id: number): Promise<void> {
+  async delete(actor: Actor, id: number, visibility: Visibility): Promise<void> {
     const now = new Date();
     await this.#db.tx(async (q) => {
       const before = await this.#repo.get(q, id);
@@ -627,18 +649,26 @@ export class TemplateService {
       // trigger the caller happens not to be able to see.
       const uses = await this.#repo.usedBy(q, id, Visibility.EVERYTHING);
       if (uses.length > 0) {
+        const seen = visibility.everything ? uses : await this.#repo.usedBy(q, id, visibility);
+        const outsideView = seen.length < uses.length;
         throw new ObjectError(
           'OBJECT_NOT_DELETABLE',
-          `"${before.name}" is still used by ${String(uses.length)} trigger(s)`,
+          `"${before.name}" is still used by ` +
+            (!outsideView
+              ? `${String(seen.length)} trigger(s)`
+              : seen.length === 0
+                ? 'triggers outside your view'
+                : `${String(seen.length)} trigger(s) you can see, and by others outside your view`),
           {
             context: { templateId: id, phase: 'templates' },
             details: {
-              usedBy: uses.map((use) => ({
+              usedBy: seen.map((use) => ({
                 triggerId: use.triggerId,
                 objectId: use.objectId,
                 objectName: use.objectName,
                 summary: use.summary,
               })),
+              outsideView,
             },
           },
         );

@@ -15261,7 +15261,7 @@ because each is a decision rather than a defect:
       and a subtler leak marking only the hidden tile — each killed by the HTTP attack test and the
       resolver case.
 
-- [ ] **A-16 — Answers to writes still name objects the writer cannot see** · S · A-12 · Found
+- [x] **A-16 — Answers to writes still name objects the writer cannot see** · S · A-12 · Found
       2026-09-28 by `A-12`'s sweep, which covers every `GET` and the stream and so could not reach
       these. Each is an answer to a caller who holds `write` on the object in the request, which
       is why `A-12` left them: they are refusals and echoes, not listings. But each names, counts
@@ -15283,6 +15283,81 @@ because each is a decision rather than a defect:
       **Decided 2026-10-04 by WatchDog**, on Roman's "you decide". Yes: start it. The refusals keep
       telling an administrator everything and tell any other writer only that something
       outside their branch is in the way.
+
+      **A-16 outcome.** Every answer below is now built from what its caller can see, through
+      `Visibility` (`visibleAmong`, `where`), never a walk of its own. An administrator sees
+      everything and is told everything, as before.
+      - **Resume** (`DELETE /objects/:id/pause`, and bulk `resume`, whose outcome `problem` is
+        the same sentence). `ObjectService.resume` takes the caller's visibility as a required
+        argument and builds the refusal from the pause view as `pauseSeenBy` shows it. A
+        container above the branch and a master in another one are named by id, with
+        `pausedByName` or `masterName` null.
+      - **Test send** (`POST /templates/:id/test`). `subject` and `body` are rendered for the
+        caller through `contextSeenBy`, which is the preview's hiding, lifted out of
+        `TemplateService` so both use one function. `%probe`, `%group`, `%device` and `%host`
+        outside the view read `(outside your view)`, and a note says so. **What is sent is
+        still the real message.**
+      - **Template and schedule deletes.** Every use still refuses the delete. The refusal lists
+        and counts only the triggers, assignments and rediscovery rules on objects the caller
+        can see. `details.outsideView` says there are others, never how many. Proven by adding
+        a second hidden user and getting the same answer.
+      - **Two more of the same pattern, found by the sweep the ticket asked for, fixed here:**
+        - The `A-41` credential refusal named the set's owner by kind and name, often the
+          group or probe above the branch. With `sayWhich` it also named the sensor, and where
+          its set would go, for a sensor carved out beneath a device being edited. It now names
+          the owner by id alone, and the sensor as "a sensor outside your view", unless the
+          writer can see them. `access-matrix.test.ts`'s A-41 case was asserting the old
+          sentence and now asserts the id.
+        - A move's `probeChanged` named both probes. Their names are null where the mover cannot
+          see them (`moveSeenBy`). The schema's `name` there is nullable (`docs/api-reference.md`
+          regenerated).
+
+      Tests:
+      - A new describe in `object-visibility.test.ts`, 6 tests. Each runs as the branch operator
+        and as an administrator for the control, and each asserts the marker is absent from the
+        operator's answer.
+        - **Resume** (direct and bulk), over a hidden master and a paused probe.
+        - **Test send** against `a-ping` and `a-regranted`.
+        - **Template delete** and **schedule delete**, each with one and then two hidden users.
+          The schedule case also covers only-hidden users and a hidden rediscovery rule.
+        - **The credential refusal**, with the sensor then the owner granted `read` one at a
+          time.
+        - **A move across probes.**
+      - A new test in `test-send.test.ts`: the echo hides the probe while the recorded transport
+        receives the real message.
+      - Every existing caller of the four changed signatures passes `Visibility.EVERYTHING`.
+
+      Mutation 12/12, each caught by the test written for it:
+      - the resume refusal built from the unfiltered view;
+      - the template delete listing every use, or never saying there are others;
+      - the test send echoing the real subject, or the real body;
+      - the schedule refusal counting every use;
+      - its users or its rediscovery rules unfiltered;
+      - the credential refusal seeing every owner, or every sensor;
+      - `moveSeenBy` keeping names;
+      - the move route not calling it.
+
+      **Found by the sweep and not fixed here, each a different shape** (follow-ups):
+      - **`POST /discovery/:id/provision` reads the hidden part of the group.** `main.ts`
+        matches against `devicesInGroup`/`sensorsInGroup` with no visibility. A hidden device's
+        id lands in `devices[]`, and hidden devices and sensors are counted in `matched` and
+        `sensorsSkipped`. Sensors are created under a hidden device, because the writer is
+        `asInstallation`, and the credential refusals in `problems` name owners to whoever
+        provisions.
+      - **`PUT /objects/:id/settings/dependency.masterId` and bulk `setting` skip
+        `PUT /objects/:id/dependency`'s `read` bar on the master.** `#assertUsableMaster` then
+        answers "no object N" or "#N is a group" for any id, and accepts a hidden sensor as
+        master. The dependency route's `OBJECT_CYCLE` `details.path` can list hidden sensors'
+        ids.
+      - **Id-only oracles:**
+        - `requireGroupProbe` accepts only the group's own probe, so guessing `probeId` finds a
+          hidden probe's id.
+        - `POST /sensors/:id/check` puts the probe's id in `context.probeObjectId`.
+        - `A-29`'s read refusal on a move or clone can name the new nearest probe's id.
+      - **A notification sent to an address its writer chose renders the hidden containers.**
+        This covers a test send and a real alarm through a trigger the writer made. The echo is
+        fixed. The message itself is a recipient-side question: an address has no view to
+        render for.
 
 - [x] **A-17 — Grants, maps and reports change without an audit entry** · M · S-10, L-01 ·
       Found scoping `L-01`. `S-10` promised "every create/update/delete recorded with actor,

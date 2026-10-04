@@ -428,7 +428,7 @@ describe(
       // be reporting something the system has not checked since.
       await makeUp(sensorId);
       await h.service.pause(testActor, sensorId, { kind: 'indefinite' });
-      await h.service.resume(testActor, sensorId);
+      await h.service.resume(testActor, sensorId, Visibility.EVERYTHING);
 
       const current = await runtimeOf(sensorId);
       assert.equal(current.state, 'unknown');
@@ -448,7 +448,7 @@ describe(
     it('refuses to resume a sensor its device is holding, and names the device', async () => {
       await h.service.pause(testActor, deviceId, { kind: 'indefinite' });
       await assert.rejects(
-        () => h.service.resume(testActor, sensorId),
+        () => h.service.resume(testActor, sensorId, Visibility.EVERYTHING),
         (error: Error & { details?: Record<string, unknown> }) => {
           assert.ok(error.message.includes(`#${String(deviceId)}`));
           assert.equal(error.details?.['pausedBy'], deviceId);
@@ -465,20 +465,20 @@ describe(
       await h.service.pause(testActor, sensorId, { kind: 'indefinite' }, 'sensor');
       assert.deepEqual((await runtimeOf(sensorId)).flags, ['parent', 'manual']);
 
-      await h.service.resume(testActor, deviceId);
+      await h.service.resume(testActor, deviceId, Visibility.EVERYTHING);
       const current = await runtimeOf(sensorId);
       assert.equal(current.state, 'paused', 'its own pause still holds it');
       assert.equal(current.cause, 'user', 'and the reported cause moves to the one that does');
       assert.deepEqual(current.flags, ['manual']);
 
-      await h.service.resume(testActor, sensorId);
+      await h.service.resume(testActor, sensorId, Visibility.EVERYTHING);
       assert.equal((await runtimeOf(sensorId)).state, 'unknown', 'now the last source cleared');
     });
 
     it('leaves a sibling alone when one sensor is resumed', async () => {
       await h.service.pause(testActor, deviceId, { kind: 'indefinite' });
       await h.service.pause(testActor, sensorId, { kind: 'indefinite' });
-      await h.service.resume(testActor, sensorId);
+      await h.service.resume(testActor, sensorId, Visibility.EVERYTHING);
       assert.equal((await runtimeOf(siblingId)).state, 'paused', 'the device still holds it');
       assert.equal((await runtimeOf(sensorId)).state, 'paused', 'and so does it, still');
     });
@@ -567,7 +567,7 @@ describe(
       );
       assert.notEqual(during.version, before.version, 'so the probe is actually pushed the change');
 
-      await h.service.resume(testActor, sensorId);
+      await h.service.resume(testActor, sensorId, Visibility.EVERYTHING);
       const afterwards = await config.assignmentsFor(probeId);
       assert.equal(afterwards.sensors.length, 2);
       assert.equal(afterwards.version, before.version, 'and back to exactly what it was');
@@ -916,8 +916,8 @@ describe(
         } finally {
           // Both windows are still in force, and a pause this test opened would otherwise be a
           // window the *next* test's sweep opens for the first time.
-          await h.service.resume(testActor, older.id);
-          await h.service.resume(testActor, deviceId);
+          await h.service.resume(testActor, older.id, Visibility.EVERYTHING);
+          await h.service.resume(testActor, deviceId, Visibility.EVERYTHING);
         }
       });
 
@@ -931,7 +931,7 @@ describe(
         );
         // A resume on an object that is not paused *yet* would be refused if `own` meant "in
         // force"; an operator who booked the wrong weekend should not have to wait for it.
-        const view = await h.service.resume(testActor, deviceId);
+        const view = await h.service.resume(testActor, deviceId, Visibility.EVERYTHING);
         assert.equal(view.pending, false);
         assert.equal(view.startsAt, null);
 

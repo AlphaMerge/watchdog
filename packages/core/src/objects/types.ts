@@ -569,9 +569,24 @@ export interface MoveResult {
   readonly fromParentId: ObjectId;
   readonly toParentId: ObjectId;
   readonly movedCount: number;
-  readonly probeChanged: { from: ObjectRef | null; to: ObjectRef | null } | null;
+  /**
+   * The probes the object left and joined. A probe's `name` is null for a reader who cannot see
+   * it (`A-16`): the probe above a branch is outside it, and `write` on both ends of a move says
+   * nothing about the probe over either.
+   */
+  readonly probeChanged: {
+    from: SeenObjectRef | null;
+    to: SeenObjectRef | null;
+  } | null;
   readonly settingsChanged: readonly SettingChange[];
   readonly credentialsChanged: readonly CredentialChange[];
+}
+
+/** An `ObjectRef` in an answer about another object, with no name when its reader cannot see it. */
+export interface SeenObjectRef {
+  readonly id: ObjectId;
+  readonly kind: ObjectKind;
+  readonly name: string | null;
 }
 
 export interface CloneCounts {

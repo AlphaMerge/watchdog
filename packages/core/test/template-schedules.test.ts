@@ -6,6 +6,7 @@ import { NotificationDispatcher } from '../src/notifications/dispatcher.js';
 import { TemplateService } from '../src/notifications/templates.js';
 import { DatabaseAuditSink } from '../src/audit/store.js';
 import { ScheduleService } from '../src/schedules/service.js';
+import { Visibility } from '../src/auth/access.js';
 import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
 import type { SensorResult } from '../src/state/service.js';
 import type { Database } from '../src/db/pool.js';
@@ -315,8 +316,9 @@ describe(
       // This is the same refusal with the template's name in it.
       const scheduleId = await officeHours();
       await template({ scheduleId });
-      await assert.rejects(schedules.delete(testActor, scheduleId), (error: unknown) =>
-        /notification template/.test((error as Error).message),
+      await assert.rejects(
+        schedules.delete(testActor, scheduleId, Visibility.EVERYTHING),
+        (error: unknown) => /notification template/.test((error as Error).message),
       );
     });
 

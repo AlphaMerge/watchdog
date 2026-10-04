@@ -528,7 +528,11 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
             'Anybody the template names and the send missed is named in `detail` or `error` ' +
             'for an administrator, and counted by reason for anybody else — ' +
             '`not sent to 2 recipients (1 disabled, 1 no email address)` — because the names ' +
-            'are the account and group lists, which are an administrator’s (`A-44`).',
+            'are the account and group lists, which are an administrator’s (`A-44`). ' +
+            '**`subject` and `body` are the message as the caller may read it** (`A-16`): ' +
+            '`%probe`, `%group`, `%device` and `%host` for a container outside the caller’s ' +
+            'view read `(outside your view)`, as in a preview, and `notes` says so. What is sent ' +
+            'is the real message.',
           params: idParams,
           body: {
             type: 'object',
@@ -543,6 +547,8 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
           templateId: request.params.id,
           // Who the test missed, by name, only for whoever may list the accounts (`A-44`).
           namesAccounts: clears(request, 'admin'),
+          // And the message echoed as this caller may read it (`A-16`).
+          seenBy: await visibilityOf(request),
           ...(request.body.sensorId === undefined ? {} : { sensorId: request.body.sensorId }),
         }),
     );
@@ -604,7 +610,10 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
         summary: 'Remove a template',
         description:
           'Refused while a trigger still names it, with the list of triggers to fix: deleting ' +
-          'one out from under a trigger would leave that trigger firing into nothing.',
+          'one out from under a trigger would leave that trigger firing into nothing. **Only ' +
+          'triggers on objects the caller can see are listed or counted** (`A-16`); ' +
+          '`details.outsideView` is true when others outside the caller’s view use it too, and ' +
+          'says nothing of how many. An administrator is shown every one.',
         params: idParams,
         response: {
           200: {
@@ -617,7 +626,7 @@ export function templateRoutes(app: FastifyInstance, options: TemplateRouteOptio
       },
     },
     async (request) => {
-      await templates.delete(actorFor(request), request.params.id);
+      await templates.delete(actorFor(request), request.params.id, await visibilityOf(request));
       return { id: request.params.id, deleted: true };
     },
   );

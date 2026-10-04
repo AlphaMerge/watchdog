@@ -4,7 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { PROTOCOL_VERSION } from '@ms/shared';
 import type { WebSocket } from 'ws';
 import { ApiServer } from '../src/api/server.js';
-import { AccessService } from '../src/auth/access.js';
+import { AccessService, Visibility } from '../src/auth/access.js';
 import { AccountService } from '../src/auth/accounts.js';
 import { GroupService } from '../src/auth/groups.js';
 import { LoginThrottle } from '../src/auth/throttle.js';
@@ -693,7 +693,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
     });
 
     after(async () => {
-      await harness.service.resume(testActor, carvedDeviceId);
+      await harness.service.resume(testActor, carvedDeviceId, Visibility.EVERYTHING);
       for (const owner of [probeId, otherGroupId, branchId]) {
         await harness.service.clearCredential(testActor, owner, 'snmp');
       }
@@ -3062,6 +3062,400 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       } finally {
         await access.grant(regrantedId, teamId, 'read', actorNamed('visibility'));
       }
+    });
+  });
+
+  /**
+   * `A-16`: the answers to writes. Each is an answer to a caller holding `write` on what it names,
+   * which is why `A-12`'s sweep of reads did not reach them, and each named, counted or rendered
+   * something outside the caller's branch. The operator here is the fixture's: `write` on one
+   * device, `read` on the branch, and nothing above it.
+   */
+  describe('answers to writes name nothing outside the branch (A-16)', () => {
+    const create = async (input: Record<string, unknown>): Promise<number> =>
+      (await harness.service.create(testActor, input as never)).id;
+    const grant = (id: number, right: 'none' | 'read' | 'write'): Promise<unknown> =>
+      access.grant(id, teamId, right, actorNamed('visibility'));
+
+    interface Refusal {
+      readonly status: number;
+      readonly body: string;
+      readonly message: string;
+      readonly details: Record<string, unknown>;
+    }
+    const call = async (
+      login: string,
+      method: 'DELETE' | 'POST' | 'PATCH',
+      url: string,
+      payload?: object,
+    ): Promise<Refusal> => {
+      // An edit is made against what its caller last read.
+      const read =
+        method === 'PATCH'
+          ? await app.inject({ method: 'GET', url: `/api/v1/${url}`, headers: as(login) })
+          : undefined;
+      const response = await app.inject({
+        method,
+        url: `/api/v1/${url}`,
+        headers: {
+          ...as(login),
+          ...(read === undefined ? {} : { 'if-match': String(read.headers.etag) }),
+        },
+        ...(payload === undefined ? {} : { payload }),
+      });
+      const parsed = JSON.parse(response.body) as {
+        error?: { message?: string; details?: Record<string, unknown> };
+      };
+      return {
+        status: response.statusCode,
+        body: response.body,
+        message: parsed.error?.message ?? '',
+        details: parsed.error?.details ?? {},
+      };
+    };
+    /** What a refusal tells its caller, without the correlation id every answer has its own of. */
+    const told = (refusal: Refusal): string =>
+      JSON.stringify([refusal.status, refusal.message, refusal.details]);
+
+    it('names what holds a resume only where the resumer can see it', async () => {
+      // A master in the other branch, Down: `a-held` is held by it, and the operator may write it.
+      await scan([otherSensorId], false);
+      const dependencies = harness.dependencies;
+      assert.ok(dependencies !== undefined);
+      await db.tx((q) => dependencies.recompute(q, new Date()));
+
+      const held = await call('operator', 'DELETE', `objects/${String(heldId)}/pause`);
+      assert.equal(held.status, 409, held.body);
+      assert.ok(!held.body.includes(MARK), held.body);
+      assert.equal(held.details['masterId'], otherSensorId);
+      assert.equal(held.details['masterName'], null);
+      assert.match(held.message, new RegExp(`master #${String(otherSensorId)} is Down`));
+      // The control: an administrator is told what to fix.
+      const adminHeld = await call('admin', 'DELETE', `objects/${String(heldId)}/pause`);
+      assert.equal(adminHeld.status, 409, adminHeld.body);
+      assert.equal(adminHeld.details['masterName'], `${MARK}-b-sensor`);
+
+      // A pause on the probe above the branch, inherited by every sensor in it.
+      await harness.service.pause(testActor, probeId, { kind: 'indefinite' }, 'probe swap');
+      try {
+        const inherited = await call('operator', 'DELETE', `objects/${String(pingId)}/pause`);
+        assert.equal(inherited.status, 409, inherited.body);
+        assert.ok(!inherited.body.includes(MARK), inherited.body);
+        assert.deepEqual(
+          [inherited.details['pausedBy'], inherited.details['pausedByName']],
+          [probeId, null],
+        );
+        assert.equal(
+          inherited.message,
+          `this object is paused because #${String(probeId)} is paused; resume that instead`,
+        );
+        const named = await call('admin', 'DELETE', `objects/${String(pingId)}/pause`);
+        assert.equal(named.details['pausedByName'], `${MARK}-probe`, named.body);
+
+        // In bulk, where the refusal is the outcome's `problem`.
+        const bulk = await call('operator', 'POST', 'objects/bulk', {
+          ids: [pingId, heldId],
+          operation: 'resume',
+        });
+        assert.equal(bulk.status, 200, bulk.body);
+        assert.ok(!bulk.body.includes(MARK), bulk.body);
+        const problems = (
+          JSON.parse(bulk.body) as { outcomes: { problem?: string }[] }
+        ).outcomes.map((outcome) => outcome.problem ?? '');
+        assert.equal(problems.length, 2, bulk.body);
+        assert.ok(
+          problems.every((problem) => problem.includes(`#${String(probeId)}`)),
+          bulk.body,
+        );
+        const bulkAdmin = await call('admin', 'POST', 'objects/bulk', {
+          ids: [pingId],
+          operation: 'resume',
+        });
+        assert.ok(bulkAdmin.body.includes(`${MARK}-probe`), bulkAdmin.body);
+      } finally {
+        await harness.service.resume(testActor, probeId, Visibility.EVERYTHING);
+      }
+    });
+
+    it('echoes a test send as its sender may read it', async () => {
+      interface Report {
+        subject: string;
+        body: string;
+        notes: string[];
+      }
+      const test = async (login: string, sensorId: number): Promise<Report> => {
+        const response = await app.inject({
+          method: 'POST',
+          url: `/api/v1/templates/${String(templateId)}/test`,
+          headers: as(login),
+          payload: { sensorId },
+        });
+        assert.equal(response.statusCode, 200, `${login}: ${response.body}`);
+        return response.json<Report>();
+      };
+      const NOTE =
+        'Containers outside your view read "(outside your view)" here. The message sent names them.';
+
+      // `a-ping`: its device and group are the branch's, and `%probe` is above it.
+      const ping = await test('operator', pingId);
+      assert.ok(!JSON.stringify(ping).includes(MARK), JSON.stringify(ping));
+      assert.match(ping.subject, /^a-ping on a-web01 is /);
+      assert.match(ping.body, /via \(outside your view\) in Customer A$/);
+      assert.ok(ping.notes.includes(NOTE), ping.notes.join(' | '));
+      // `a-regranted`: re-granted inside a carved-out device, which `%device` would name.
+      const regranted = await test('operator', regrantedId);
+      assert.ok(!JSON.stringify(regranted).includes(MARK), JSON.stringify(regranted));
+      assert.match(regranted.subject, /^a-regranted on \(outside your view\) is /);
+
+      // The control: an administrator sees what was rendered, and is told nothing was hidden.
+      const whole = await test('admin', pingId);
+      assert.match(whole.body, new RegExp(`via ${MARK}-probe in Customer A$`));
+      assert.ok(!whole.notes.includes(NOTE), whole.notes.join(' | '));
+    });
+
+    it('refuses a template’s delete with the triggers its caller can see, and says if there are others', async () => {
+      const refused = await call('operator', 'DELETE', `templates/${String(templateId)}`);
+      assert.equal(refused.status, 409, refused.body);
+      assert.ok(!refused.body.includes(MARK), refused.body);
+      // The trigger on the device, and on any copy of it an earlier test made in the branch; not
+      // the one on the probe.
+      const listed = (refused.details['usedBy'] as { objectId: number }[]).map((u) => u.objectId);
+      assert.ok(listed.includes(deviceId), refused.body);
+      assert.ok(!listed.includes(probeId), refused.body);
+      assert.equal(refused.details['outsideView'], true);
+      assert.equal(
+        refused.message,
+        `"On-call" is still used by ${String(listed.length)} trigger(s) you can see, and by ` +
+          'others outside your view',
+      );
+
+      // **Some, not how many.** A second hidden trigger changes nothing the operator is told.
+      const added = await app.inject({
+        method: 'POST',
+        url: `/api/v1/objects/${String(otherGroupId)}/triggers`,
+        headers: as('admin'),
+        payload: {
+          kind: 'state',
+          settings: { state: 'down', initialTemplateId: templateId },
+          enabled: true,
+        },
+      });
+      assert.equal(added.statusCode, 201, added.body);
+      try {
+        const again = await call('operator', 'DELETE', `templates/${String(templateId)}`);
+        assert.equal(told(again), told(refused));
+
+        // The control: an administrator is shown every one, the two hidden ones by name.
+        const all = listed.length + 2;
+        const whole = await call('admin', 'DELETE', `templates/${String(templateId)}`);
+        assert.equal(whole.status, 409, whole.body);
+        assert.equal((whole.details['usedBy'] as unknown[]).length, all, whole.body);
+        assert.equal(whole.details['outsideView'], false);
+        assert.ok(whole.body.includes(`${MARK}-probe`), whole.body);
+        assert.equal(whole.message, `"On-call" is still used by ${String(all)} trigger(s)`);
+      } finally {
+        const removed = await app.inject({
+          method: 'DELETE',
+          url: `/api/v1/triggers/${String(added.json<{ id: number }>().id)}`,
+          headers: as('admin'),
+        });
+        assert.equal(removed.statusCode, 200, removed.body);
+      }
+    });
+
+    it('refuses a schedule’s delete with the users its caller can see, and says if there are others', async () => {
+      const created = await app.inject({
+        method: 'POST',
+        url: '/api/v1/schedules',
+        headers: as('operator'),
+        payload: {
+          name: 'a-doomed schedule',
+          grid: Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => true)),
+        },
+      });
+      assert.equal(created.statusCode, 201, created.body);
+      const scheduleId = created.json<{ id: number }>().id;
+      const assign = (ids: number[]) =>
+        db.query(
+          `INSERT INTO object_setting (object_id, key, value)
+           SELECT unnest($1::bigint[]), 'schedule.id', to_jsonb($2::bigint)`,
+          [ids, scheduleId],
+        );
+      const unassign = () =>
+        db.query(
+          `DELETE FROM object_setting WHERE key = 'schedule.id' AND value = to_jsonb($1::bigint)`,
+          [scheduleId],
+        );
+      const url = `schedules/${String(scheduleId)}`;
+      const rule = await db.query<{ schedule_id: string | null }>(
+        'SELECT schedule_id::text AS schedule_id FROM discovery_schedule WHERE id = $1',
+        [hiddenRuleId],
+      );
+      try {
+        await assign([pingId, otherSensorId]);
+        const refused = await call('operator', 'DELETE', url);
+        assert.equal(refused.status, 409, refused.body);
+        assert.ok(!refused.body.includes(MARK), refused.body);
+        assert.deepEqual(refused.details['usedBy'], [{ objectId: pingId, name: 'a-ping' }]);
+        assert.equal(refused.details['usedByTotal'], 1);
+        assert.equal(refused.details['outsideView'], true);
+        assert.equal(
+          refused.message,
+          '"a-doomed schedule" is still assigned to 1 object(s) you can see, and to others ' +
+            'outside your view; clear the assignment first',
+        );
+        // Some, not how many.
+        await assign([otherDeviceId]);
+        assert.equal(told(await call('operator', 'DELETE', url)), told(refused));
+        const whole = await call('admin', 'DELETE', url);
+        assert.equal(whole.details['usedByTotal'], 3, whole.body);
+        assert.equal(whole.details['outsideView'], false);
+        assert.ok(whole.body.includes(`${MARK}-b-sensor`), whole.body);
+
+        // Only hidden users: nothing to name, and still refused.
+        await unassign();
+        await assign([otherSensorId]);
+        const hidden = await call('operator', 'DELETE', url);
+        assert.equal(hidden.status, 409, hidden.body);
+        assert.deepEqual([hidden.details['usedBy'], hidden.details['usedByTotal']], [[], 0]);
+        assert.equal(
+          hidden.message,
+          '"a-doomed schedule" is still assigned to objects outside your view; clear the ' +
+            'assignment first',
+        );
+
+        // A rediscovery rule in the other branch whose window it is.
+        await unassign();
+        await db.query('UPDATE discovery_schedule SET schedule_id = $2 WHERE id = $1', [
+          hiddenRuleId,
+          scheduleId,
+        ]);
+        const ruled = await call('operator', 'DELETE', url);
+        assert.equal(ruled.status, 409, ruled.body);
+        assert.ok(!ruled.body.includes(MARK), ruled.body);
+        assert.deepEqual(
+          [ruled.details['usedByRediscovery'], ruled.details['outsideView']],
+          [[], true],
+        );
+        const ruledWhole = await call('admin', 'DELETE', url);
+        assert.ok(ruledWhole.body.includes(`${MARK}-rediscovery`), ruledWhole.body);
+      } finally {
+        await unassign();
+        await db.query('UPDATE discovery_schedule SET schedule_id = $2 WHERE id = $1', [
+          hiddenRuleId,
+          rule[0]?.schedule_id ?? null,
+        ]);
+      }
+      // With nothing in the way, the operator deletes it.
+      assert.equal((await call('operator', 'DELETE', url)).status, 200);
+    });
+
+    it('names a credential set’s owner, and a sensor it would reach, only to a writer who sees them', async () => {
+      // The probe above the branch holds an SNMP set every sensor in the branch inherits. The
+      // operator may write a device whose first sensor is carved out of their view; a new address
+      // for the device would take the set somewhere new, which needs `write` on the probe.
+      const room = await create({ kind: 'group', parentId: branchId, name: 'a-cred-room' });
+      const device = await create({
+        kind: 'device',
+        parentId: room,
+        name: 'a-cred-device',
+        host: '10.0.5.1',
+      });
+      const hiddenSensor = await create({
+        kind: 'sensor',
+        parentId: device,
+        name: `${MARK}-cred-sensor`,
+        sensorType: 'snmp.traffic',
+        params: {},
+      });
+      await create({
+        kind: 'sensor',
+        parentId: device,
+        name: 'a-cred-sensor',
+        sensorType: 'snmp.traffic',
+        params: {},
+      });
+      await grant(room, 'write');
+      await grant(hiddenSensor, 'none');
+      await harness.service.setCredential(testActor, probeId, 'snmp', { community: 'cred-test' });
+      try {
+        const patch = { kind: 'device', host: '10.0.5.2' };
+        const refused = await call('operator', 'PATCH', `objects/${String(device)}`, patch);
+        assert.equal(refused.status, 403, refused.body);
+        assert.ok(!refused.body.includes(MARK), refused.body);
+        assert.equal(
+          refused.message,
+          `bringing the snmp credentials on #${String(probeId)} to a sensor outside your view ` +
+            'needs write on that object',
+        );
+
+        // The control, one fact at a time: each is named once the operator can see it.
+        await grant(hiddenSensor, 'read');
+        const sensorSeen = await call('operator', 'PATCH', `objects/${String(device)}`, patch);
+        assert.equal(sensorSeen.status, 403, sensorSeen.body);
+        assert.match(
+          sensorSeen.message,
+          new RegExp(
+            `^sensor "${MARK}-cred-sensor": bringing the snmp credentials on #${String(probeId)} ` +
+              'to 10\\.0\\.5\\.2 \\(port \\w+\\) needs write on that object$',
+          ),
+        );
+        await grant(probeId, 'read');
+        const ownerSeen = await call('operator', 'PATCH', `objects/${String(device)}`, patch);
+        assert.equal(ownerSeen.status, 403, ownerSeen.body);
+        assert.match(
+          ownerSeen.message,
+          new RegExp(
+            `on probe "${MARK}-probe" \\(#${String(probeId)}\\) to 10\\.0\\.5\\.2 \\(port \\w+\\) ` +
+              'needs write on that probe$',
+          ),
+        );
+      } finally {
+        await harness.service.clearCredential(testActor, probeId, 'snmp');
+      }
+    });
+
+    it('names the probes a move changed only to a mover who sees them', async () => {
+      // `write` on a group under each probe: the device goes from one to the other.
+      const from = await create({ kind: 'group', parentId: branchId, name: 'a-move-from' });
+      const to = await create({ kind: 'group', parentId: secondProbeId, name: 'a-move-to' });
+      const mover = await create({
+        kind: 'device',
+        parentId: from,
+        name: 'a-mover',
+        host: '10.0.6.1',
+      });
+      await grant(from, 'write');
+      await grant(to, 'write');
+
+      interface Moved {
+        probeChanged: {
+          from: { id: number; name: string | null };
+          to: { id: number; name: string | null };
+        };
+      }
+      const move = async (login: string, targetParentId: number): Promise<Moved> => {
+        const response = await app.inject({
+          method: 'POST',
+          url: `/api/v1/objects/${String(mover)}/move`,
+          headers: as(login),
+          payload: { targetParentId },
+        });
+        assert.equal(response.statusCode, 200, `${login}: ${response.body}`);
+        assert.equal(response.body.includes(MARK), login === 'admin', response.body);
+        return response.json<Moved>();
+      };
+      const there = await move('operator', to);
+      assert.deepEqual(there.probeChanged, {
+        from: { id: probeId, kind: 'probe', name: null },
+        to: { id: secondProbeId, kind: 'probe', name: null },
+      });
+      // The control: an administrator moving it back is told both.
+      const back = await move('admin', from);
+      assert.deepEqual(
+        [back.probeChanged.from.name, back.probeChanged.to.name],
+        [`${MARK}-second-probe`, `${MARK}-probe`],
+      );
     });
   });
 

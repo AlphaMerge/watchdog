@@ -108,8 +108,10 @@ export class BulkService {
   }
 
   /**
-   * `visibility` is the caller's, for the one operation that reads beneath what it names: a
-   * clone copies only what its caller can see (`A-35`). Required for the reason `list`'s is.
+   * `visibility` is the caller's, for the operation that reads beneath what it names — a clone
+   * copies only what its caller can see (`A-35`) — and for a resume's refusal, which names what
+   * holds the object only where the caller can see it (`A-16`). Required for the reason `list`'s
+   * is.
    */
   async apply(
     writer: Writer,
@@ -189,7 +191,8 @@ export class BulkService {
         await this.#objects.pause(actor, id, operation.request, operation.message);
         return {};
       case 'resume':
-        await this.#objects.resume(actor, id);
+        // The refusal names the caller's view of what holds it, as the single route's does (`A-16`).
+        await this.#objects.resume(actor, id, visibility);
         return {};
       case 'move':
         await this.#objects.move(writer, id, operation.targetParentId, { kind: 'none' });

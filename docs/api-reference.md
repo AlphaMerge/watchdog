@@ -1763,7 +1763,7 @@ Whole-document: a partial update of a period list is a merge nobody can define. 
 
 Delete a schedule
 
-Refused while any object still assigns it — the refusal names them — and refused outright for the schedules this build ships.
+Refused while any object still assigns it — the refusal names them — and refused outright for the schedules this build ships. **The refusal names and counts only the objects, and the rediscovery rules, the caller can see** (`A-16`); `details.outsideView` is true when others outside the caller’s view are in the way too, and says nothing of how many. An administrator is shown every one.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -1928,7 +1928,7 @@ Pauses an object and every sensor beneath it. Give `minutes` for a duration, `un
 
 ### `DELETE /api/v1/objects/{id}/pause`
 
-Resumes an object, or cancels a maintenance window it has not reached yet. Only the object that was directly paused can be resumed — a sensor paused because its device is paused has nothing of its own to clear, and the 409 names the object to resume instead. A resumed sensor reads Unknown until its next scan, never the state it had before the pause, which the system has not checked since.
+Resumes an object, or cancels a maintenance window it has not reached yet. Only the object that was directly paused can be resumed — a sensor paused because its device is paused has nothing of its own to clear, and the 409 names the object to resume instead. **By id alone when the caller cannot see it** (`A-16`): a pause inherited from a container above the caller’s branch, or a master in another branch, is named in the 409 as `GET` names it, with `pausedByName` or `masterName` null. A resumed sensor reads Unknown until its next scan, never the state it had before the pause, which the system has not checked since.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -2135,7 +2135,7 @@ Whole-document, with one exception: a secret the request does not carry is **kep
 
 Remove a template
 
-Refused while a trigger still names it, with the list of triggers to fix: deleting one out from under a trigger would leave that trigger firing into nothing.
+Refused while a trigger still names it, with the list of triggers to fix: deleting one out from under a trigger would leave that trigger firing into nothing. **Only triggers on objects the caller can see are listed or counted** (`A-16`); `details.outsideView` is true when others outside the caller’s view use it too, and says nothing of how many. An administrator is shown every one.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -2187,7 +2187,7 @@ The same rendering as the saved preview, against a template that does not exist 
 
 Send a test notification through this template
 
-**This really sends.** The same rendering, the same transport, the same settings and the same recipients — testing an on-call template at three in the morning pages whoever is on call, which is why it is written to the audit log. What it skips is the queue: nothing is retried, summarised or suppressed by an activation schedule, because those would each turn "did my relay work" into "wait fifteen minutes and find out". `notes` reports what a real notification would have run into instead, so a green test on a template that is switched off cannot be mistaken for a working alarm. Without `sensorId` the message is rendered against an example sensor, which is what an installation with no sensors yet needs. Anybody the template names and the send missed is named in `detail` or `error` for an administrator, and counted by reason for anybody else — `not sent to 2 recipients (1 disabled, 1 no email address)` — because the names are the account and group lists, which are an administrator’s (`A-44`).
+**This really sends.** The same rendering, the same transport, the same settings and the same recipients — testing an on-call template at three in the morning pages whoever is on call, which is why it is written to the audit log. What it skips is the queue: nothing is retried, summarised or suppressed by an activation schedule, because those would each turn "did my relay work" into "wait fifteen minutes and find out". `notes` reports what a real notification would have run into instead, so a green test on a template that is switched off cannot be mistaken for a working alarm. Without `sensorId` the message is rendered against an example sensor, which is what an installation with no sensors yet needs. Anybody the template names and the send missed is named in `detail` or `error` for an administrator, and counted by reason for anybody else — `not sent to 2 recipients (1 disabled, 1 no email address)` — because the names are the account and group lists, which are an administrator’s (`A-44`). **`subject` and `body` are the message as the caller may read it** (`A-16`): `%probe`, `%group`, `%device` and `%host` for a container outside the caller’s view read `(outside your view)`, as in a preview, and `notes` says so. What is sent is the real message.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |

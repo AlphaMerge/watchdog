@@ -712,7 +712,7 @@ describe('templates', { skip: available ? false : 'no database' }, () => {
     });
 
     await assert.rejects(
-      () => templates.delete(testActor, id),
+      () => templates.delete(testActor, id, Visibility.EVERYTHING),
       (error: unknown) => {
         assert.ok(error instanceof Error);
         const details = (error as { details?: { usedBy?: unknown[] } }).details;
@@ -725,7 +725,7 @@ describe('templates', { skip: available ? false : 'no database' }, () => {
 
   it('deletes a template nothing names', async () => {
     const id = await slackTemplate();
-    await templates.delete(testActor, id);
+    await templates.delete(testActor, id, Visibility.EVERYTHING);
     assert.deepEqual(await templates.list(), []);
   });
 
@@ -736,7 +736,7 @@ describe('templates', { skip: available ? false : 'no database' }, () => {
       method: 'slack',
       settings: {},
     });
-    await templates.delete(testActor, id);
+    await templates.delete(testActor, id, Visibility.EVERYTHING);
 
     assert.deepEqual(
       audited.map((mutation) => mutation.action),
