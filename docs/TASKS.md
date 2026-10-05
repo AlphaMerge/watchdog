@@ -8012,6 +8012,25 @@ because each is a decision rather than a defect:
       test `M-17` asks for: a probe whose child starts all time out raises one alarm, on Probe
       Health, not one per sensor.
 
+- [ ] **P-266 — a check process that dies outright leaves its script running** · S · P-262 ·
+      Found 2026-10-05 in `P-262`. A script runs in a process group of its own, so the runner's
+      kill of the check process's group does not reach it. Since `P-262` the check process ends
+      its script when it is sent SIGTERM, but a check process that dies without that — the
+      runner's SIGKILL after its 5 s grace, out of heap, a crash — leaves the script and what it
+      started running, with nothing left to end them or to count them. **Done when** the script's
+      life is tied to the check process's (the runner tracks the script's group and ends it when
+      the check process goes, or the script is started so that it dies with its parent), and a
+      test that SIGKILLs a check process mid-script asserts the script's pids are gone.
+
+- [ ] **P-267 — `checkAbortGraceMs` below 1 s outruns PowerShell's kill** · S · P-262 · Found
+      2026-10-05 in `P-262`. A pool worker running a Windows sensor ends PowerShell on the
+      check's abort, with SIGKILL 1 s after SIGTERM (`POWERSHELL_GRACE_MS`), inside the pool's
+      default 2 s `checkAbortGraceMs`. An operator who sets `checkAbortGraceMs` below 1 s gets
+      the worker terminated first, and the SIGKILL timer dies with it, leaving a PowerShell that
+      ignored SIGTERM running. **Done when** the setting refuses a value below the program grace
+      it must contain (with `config check` saying why), or the worker is told the setting and
+      fits its grace inside it; with a test.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -23927,6 +23946,18 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       `install-probe.ps1`, the probe crossed the network and arrived pending under the name it was
       enrolled with, was approved and scanned; and a second bundle kept `probe.json` while
       updating the endpoint and key, as the script claims to.
+
+- [ ] **H-38 — on Windows, ending a script ends the script alone** · S · P-262 · Found
+      2026-10-05 in `P-262`. `runProgram`'s first step on win32 is `child.kill()`, which is
+      TerminateProcess on that one process; `taskkill /T` runs only on the SIGKILL path, which
+      `close` cancels. So on a Windows probe what a script or PowerShell started is left running
+      when its limit comes, and on a probe stop the check process is ended outright, its
+      SIGTERM-as-cancel never runs, and the script itself is left running too.
+      `administration.md` and the Timeout text say so since `P-262`. **Done when** a Windows
+      probe ends a script's whole tree on its own timeout, the check's and a probe stop — a
+      first step with `taskkill /T` (or a job object), or the cancel sent to the check process
+      over its pipe — with a test on a Windows runner, and the documentation's Windows paragraph
+      is removed.
 
 ---
 
