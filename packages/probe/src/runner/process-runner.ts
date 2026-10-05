@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { runProgram, type CheckResult, type Logger } from '@ms/shared';
 // From `types.js`, never from `check-child.js`: that module is an entry point with top-level
 // `await` on stdin, and importing it here once made the probe sit waiting for its own stdin.
-import { RESULT_MARKER } from './types.js';
+import { READY_MARKER, RESULT_MARKER } from './types.js';
 import { RefusalLog } from './refusal-log.js';
 import type { CheckPhase, CheckRequest, ResultMeta, SubmitOutcome } from './index.js';
 
@@ -34,7 +34,8 @@ import type { CheckPhase, CheckRequest, ResultMeta, SubmitOutcome } from './inde
  * awaiting packets cost slots and no CPU, where 48 Node processes cost 48 × ~40 MB of resident
  * memory and 48 start-ups at once. Checks that are queued here are queued behind a handful.
  *
- * **What is bounded, and what is not.** Bounded: wall-clock time (`SIGTERM` then `SIGKILL`,
+ * **What is bounded, and what is not.** Bounded: wall-clock time (a start-up bound and then the
+ * check's own timeout, `P-260`; `SIGTERM` then `SIGKILL`,
  * against the whole process group so a script that backgrounds something does not outlive its own
  * kill), heap size, captured output, and the environment the child is given — built, never
  * inherited, so an `MS_*` override holding a database URL does not reach a user's script. Not
@@ -61,8 +62,27 @@ export interface ProcessRunnerStats {
   refused: number;
   /** Children that produced no parseable result — a crash, or a `SIGKILL` before they answered. */
   crashed: number;
-  waitMs: { p50: number; p95: number; p99: number; max: number };
-  runMs: { p50: number; p95: number; p99: number; max: number };
+  /**
+   * Checks that never ran because their process did not get as far as running them (`P-260`):
+   * it was still loading the probe's sensor types at the start-up bound and was ended, or the
+   * load failed. Counted in `failed` as well, and in neither `timedOut` nor `crashed`.
+   */
+  startupFailed: number;
+  waitMs: Percentiles;
+  runMs: Percentiles;
+  /**
+   * From spawning a check's process to its saying it is ready to run the check (`P-260`),
+   * including the ones ended at the start-up bound. Null until a process has got that far or
+   * been given up, because no start-up measured is not a start-up that took no time.
+   */
+  startupMs: Percentiles | null;
+}
+
+interface Percentiles {
+  p50: number;
+  p95: number;
+  p99: number;
+  max: number;
 }
 
 export interface ProcessRunnerOptions {
@@ -81,6 +101,11 @@ export interface ProcessRunnerOptions {
   registryModule?: string;
   /** Overridable so tests can drive a child that misbehaves on purpose. */
   childModule?: string;
+  /**
+   * How long a check's process may take to load the probe's sensor types before it is ended and
+   * the check reported as never started (`P-260`). `STARTUP_TIMEOUT_MS` unless a test sets it.
+   */
+  startupTimeoutMs?: number;
   /** How much of a child's own stdout/stderr is kept for a diagnosis. */
   maxOutputBytes?: number;
   /**
@@ -112,6 +137,8 @@ interface ChildAnswer {
   aborted?: boolean;
   unknownType?: boolean;
   withheld?: boolean;
+  /** The child could not load the probe's sensor types, so no check ran (`P-260`). */
+  startup?: boolean;
 }
 
 const DEFAULT_MAX_CONCURRENT = 4;
@@ -128,6 +155,26 @@ const DEFAULT_MAX_OUTPUT = 64 * 1024;
  */
 const KILL_MARGIN_MS = 2_000;
 
+/**
+ * How long a check's process is given to start: from its spawn to its saying it has loaded the
+ * probe's sensor types and is about to run the check (`P-260`).
+ *
+ * **The check's own timeout starts after this, on both sides.** The child arms its abort once it
+ * is ready, and the runner replaces this bound with the timeout plus `KILL_MARGIN_MS` when it reads
+ * the ready line. So a slow start costs the check nothing, and the most a runner can spend on one
+ * child is this, plus the timeout, plus the margin, plus `runProgram`'s grace between `SIGTERM`
+ * and `SIGKILL`.
+ *
+ * **Thirty seconds, from `P-258`'s measurements.** A start takes about 21 ms on a quiet machine
+ * (`docs/findings/2026-08-27-process-runner-startup.md`). Beside two probe suites, at load 6.5–29
+ * on a VM whose host was itself at 20 on 8 CPUs, importing the catalogue took 0.45–14.8 s. That is
+ * far past anything a probe in service should see, so twice it is a bound that a starved probe
+ * still runs its scripts under, while a child that hangs while loading holds one of a handful of
+ * slots for half a minute rather than for ever. A start that passes it is the machine's to
+ * explain, and Probe Health's `childStartup` and `childStartupFailed` are where it shows.
+ */
+export const STARTUP_TIMEOUT_MS = 30_000;
+
 export class ProcessRunner {
   readonly #logger: Logger;
   readonly #maxConcurrent: number;
@@ -139,6 +186,7 @@ export class ProcessRunner {
   readonly #childEnv: Readonly<Record<string, string>>;
   readonly #registryModule: string;
   readonly #childModule: string;
+  readonly #startupTimeoutMs: number;
   readonly #onResult: (result: CheckResult, meta: ResultMeta) => void;
 
   readonly #queue: Job[] = [];
@@ -157,8 +205,10 @@ export class ProcessRunner {
   /** Refusals logged once per episode, with a count every thirty seconds (`P-216` part 3). */
   readonly #refusals: RefusalLog;
   #crashed = 0;
+  #startupFailed = 0;
   readonly #waits: number[] = [];
   readonly #runs: number[] = [];
+  readonly #startups: number[] = [];
 
   constructor(options: ProcessRunnerOptions) {
     this.#logger = options.logger;
@@ -172,6 +222,7 @@ export class ProcessRunner {
     this.#registryModule =
       options.registryModule ?? join(import.meta.dirname, 'catalogue-registry.js');
     this.#childModule = options.childModule ?? join(import.meta.dirname, 'check-child.js');
+    this.#startupTimeoutMs = Math.max(1, options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS);
     this.#onResult = options.onResult;
     this.#refusals = new RefusalLog(
       this.#logger,
@@ -272,6 +323,39 @@ export class ProcessRunner {
       timeoutMs: job.request.timeoutMs,
     });
 
+    // **Two clocks, one after the other** (`P-260`). From the spawn, the start-up bound; from the
+    // child's ready line, the check's timeout plus the margin its own abort is given. Before this
+    // one deadline ran from the spawn, so a slow start ate into the check and a child that never
+    // began it was killed and reported as a check that ran too long.
+    const spawnedAt = process.hrtime.bigint();
+    const deadline = new AbortController();
+    const ready = new ReadyLine();
+    let readyAt: bigint | undefined;
+    let gaveUpAfterMs: number | undefined;
+    const giveUp = (): void => {
+      const sinceSpawn = msSince(spawnedAt);
+      const left = leftOf(this.#startupTimeoutMs, sinceSpawn);
+      if (left !== null) {
+        clock = setTimeout(giveUp, left);
+        return;
+      }
+      gaveUpAfterMs = sinceSpawn;
+      deadline.abort();
+    };
+    let clock = setTimeout(giveUp, this.#startupTimeoutMs);
+    const onStdout = (chunk: Buffer): void => {
+      if (readyAt !== undefined || gaveUpAfterMs !== undefined) return;
+      // latin1 maps each byte to one character, so a marker split across two chunks, or a
+      // multi-byte character a library printed before it, cannot hide it.
+      if (!ready.push(chunk.toString('latin1'))) return;
+      readyAt = process.hrtime.bigint();
+      record(this.#startups, Number(readyAt - spawnedAt) / 1e6);
+      clearTimeout(clock);
+      clock = setTimeout(() => {
+        deadline.abort();
+      }, job.request.timeoutMs + KILL_MARGIN_MS);
+    };
+
     const run = await runProgram({
       file: process.execPath,
       args: [`--max-old-space-size=${String(this.#memoryLimitMb)}`, this.#childModule],
@@ -290,17 +374,35 @@ export class ProcessRunner {
           : {}),
         ...this.#childEnv,
       },
-      timeoutMs: job.request.timeoutMs + KILL_MARGIN_MS,
-      signal: job.abort.signal,
+      // The backstop, never the mechanism: the two clocks above end the child first. It is the
+      // most a child can be given, which keeps a runner's slot bounded whatever happens to them.
+      timeoutMs: this.#startupTimeoutMs + job.request.timeoutMs + KILL_MARGIN_MS,
+      signal: AbortSignal.any([job.abort.signal, deadline.signal]),
+      onStdout,
       maxOutputBytes: this.#maxOutputBytes,
       stdin: payload,
       ...(this.#uid === undefined ? {} : { uid: this.#uid }),
       ...(this.#gid === undefined ? {} : { gid: this.#gid }),
     });
+    clearTimeout(clock);
+    if (gaveUpAfterMs !== undefined) record(this.#startups, gaveUpAfterMs);
 
     // Abandoned by `stop` while it ran, and answered there.
     if (job.settled) return;
     const answer = parseAnswer(run.stdout);
+
+    if (answer?.startup === true) {
+      // The catalogue would not load. Every check in a process fails the same way until the
+      // probe is mended, and none of them is the check's doing.
+      this.#startupFailed += 1;
+      this.#failed += 1;
+      this.#emit(job, waitMs, 'startup', {
+        outcome: 'error',
+        message: answer.message ?? 'this probe could not load its sensor types to run the check',
+        durationMs: answer.durationMs,
+      });
+      return;
+    }
 
     if (answer !== null) {
       record(this.#runs, answer.durationMs);
@@ -335,6 +437,22 @@ export class ProcessRunner {
     // Nothing parseable came back. Which of the three reasons decides the phase, and they are not
     // interchangeable: a crash is a fault of the check, a timeout is ours, and a spawn failure
     // means the probe is misinstalled and no amount of retrying will help.
+    if (run.outcome === 'timeout' && gaveUpAfterMs !== undefined) {
+      // Ended while it was still loading: the check never ran, so it neither timed out nor
+      // crashed, and its message says whose time it was.
+      this.#startupFailed += 1;
+      this.#failed += 1;
+      this.#emit(job, waitMs, 'startup', {
+        outcome: 'error',
+        durationMs: run.durationMs,
+        message:
+          `the probe took ${String(Math.round(gaveUpAfterMs))} ms to start the check and gave ` +
+          `up: its process had not loaded the probe's sensor types within the ` +
+          `${String(this.#startupTimeoutMs)} ms it is allowed, so the check never ran` +
+          tail(run.stderr),
+      });
+      return;
+    }
     record(this.#runs, run.durationMs);
     if (run.outcome === 'timeout') {
       this.#timedOut += 1;
@@ -432,8 +550,10 @@ export class ProcessRunner {
       deferred: this.#deferred,
       refused: this.#refused,
       crashed: this.#crashed,
+      startupFailed: this.#startupFailed,
       waitMs: percentiles(this.#waits),
       runMs: percentiles(this.#runs),
+      startupMs: this.#startups.length === 0 ? null : percentiles(this.#startups),
     };
   }
 
@@ -515,6 +635,55 @@ function parseAnswer(stdout: string): ChildAnswer | null {
   return null;
 }
 
+/**
+ * Watches a child's stdout for its ready line (`P-260`): a whole line reading `READY_MARKER`.
+ *
+ * **A whole line, and only from the start of one**, so a library that prints the marker inside
+ * a sentence while the catalogue loads does not start the check's clock. Holds at most the
+ * marker's length of one line, however much the child writes, because this runs on every chunk
+ * and keeps nothing it does not need. A library that printed exactly the marker on a line of its
+ * own would start the runner's clock early by the rest of the load; the child's own abort is
+ * still armed only once it has loaded, so the check would lose nothing it had before `P-260`.
+ */
+export class ReadyLine {
+  #line = '';
+  #overlong = false;
+
+  /** True once a ready line has arrived, counting what earlier calls were handed. */
+  push(text: string): boolean {
+    let rest = text;
+    for (;;) {
+      const end = rest.indexOf('\n');
+      if (!this.#overlong) {
+        this.#line += end === -1 ? rest : rest.slice(0, end);
+        if (this.#line.length > READY_MARKER.length) {
+          this.#overlong = true;
+          this.#line = '';
+        }
+      }
+      if (end === -1) return false;
+      if (!this.#overlong && this.#line === READY_MARKER) return true;
+      this.#line = '';
+      this.#overlong = false;
+      rest = rest.slice(end + 1);
+    }
+  }
+}
+
+/**
+ * What is left of a bound on the monotonic clock, in whole milliseconds, or null once it has
+ * passed (`P-260`).
+ *
+ * A timer counts whole milliseconds of the event loop's clock, so it can fire up to one before the
+ * bound has passed on `process.hrtime`, which is the clock the start-up message reports. Before
+ * this, a test asserting that a start given up at a 1,500 ms bound had taken at least that long
+ * failed once in five runs. The runner waits out the remainder rather than report a start shorter
+ * than the bound it gave up at.
+ */
+export function leftOf(boundMs: number, elapsedMs: number): number | null {
+  return elapsedMs < boundMs ? Math.ceil(boundMs - elapsedMs) : null;
+}
+
 /** The last of stderr, for a diagnosis. Bounded, because this ends up in a sensor's message. */
 function tail(stderr: string): string {
   const trimmed = stderr.trim();
@@ -532,12 +701,7 @@ function record(window: number[], value: number): void {
   if (window.length > LATENCY_WINDOW) window.shift();
 }
 
-function percentiles(values: readonly number[]): {
-  p50: number;
-  p95: number;
-  p99: number;
-  max: number;
-} {
+function percentiles(values: readonly number[]): Percentiles {
   if (values.length === 0) return { p50: 0, p95: 0, p99: 0, max: 0 };
   const sorted = [...values].sort((a, b) => a - b);
   const at = (fraction: number): number =>

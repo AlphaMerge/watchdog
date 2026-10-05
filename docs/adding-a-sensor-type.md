@@ -111,6 +111,11 @@ So: set it when your type executes code somebody else wrote. `exe.script` and
 `df` and three to twenty times the cost of an ICMP check — hence opt-in per type rather than a
 setting.
 
+That start-up is not your check's time (`P-260`). The process loads the probe's catalogue first
+and says when it is ready, and only then does `ctx.signal`'s timeout start, so `execute` gets the
+whole of `ctx.timeoutMs` however slowly the probe started it. A process that has not loaded in
+30 s is ended and reported as never started, not as your check timing out.
+
 ### `evaluatedBy` (optional)
 
 `'core'` means the **core** computes this sensor's readings and no probe ever receives it

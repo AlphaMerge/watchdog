@@ -7775,7 +7775,7 @@ because each is a decision rather than a defect:
       the simulator reset the connection mid-command, asserts the check fails (not succeeds
       on an empty result) with a message naming the phase, and the probe stays healthy.
 
-- [ ] **P-260 — a check in a child process spends its timeout loading the catalogue** · S ·
+- [x] **P-260 — a check in a child process spends its timeout loading the catalogue** · S ·
       P-36 · Found 2026-10-05 in `P-258`. `check-child.ts` arms the check's abort timer, and
       only then imports the registry module, so the catalogue's load counts against the
       check's own timeout. Measured at load 6.5–29: the import took 0.45–14.8 s. An EXE/Script
@@ -7786,6 +7786,84 @@ because each is a decision rather than a defect:
       before the timer is armed, and the runner's margin covering the child's start — or a
       timeout that fired during the load says so (*the probe took N ms to start the check*)
       and Probe Health counts it; with a test that stalls the import and asserts which.
+
+      **P-260 outcome. Both: the check's clocks start when the check does, and a start that
+      does not finish is bounded, named and counted.**
+      - **The child** imports the registry, writes a ready line (`READY_MARKER`, beside
+        `RESULT_MARKER` in `types.ts`) on stdout, and only then arms its abort and starts the
+        check's `durationMs`. A registry that fails to load answers `startup: true` and the
+        message *this probe could not load its sensor types to run the check: …*.
+      - **The runner** arms a start-up bound at spawn (`STARTUP_TIMEOUT_MS`, 30 s). On the ready
+        line (`ReadyLine`: a whole line, from its start, however the chunks fall, holding at
+        most the marker's length) it swaps that for the check's timeout + `KILL_MARGIN_MS`. If
+        the bound fires first it ends the process group and reports phase `startup`: *the probe
+        took N ms to start the check and gave up: its process had not loaded the probe's sensor
+        types within the 30000 ms it is allowed, so the check never ran*. It does not count that
+        in `timedOut` or `crashed`. `runProgram` gained `onStdout`. Its own `timeoutMs` is now
+        the backstop, at bound + timeout + margin, so one child can hold a slot for at most that
+        plus the 5 s grace. The slot and `#active` are released as before, when `#run`
+        settles (`#pump`'s `finally`), and nothing else in scheduling reads a child's duration.
+      - **The bound, from `P-258`:** 21 ms quiet, 0.45–14.8 s beside two probe suites at load
+        6.5–29. Thirty seconds is twice the worst, so a starved probe still runs its scripts,
+        and a child that hangs while loading holds one of four slots for 30 s, not for ever.
+      - **Visible:** `ProcessRunnerStats.startupFailed` and `startupMs` (p50/p95/p99/max over the
+        last 256 starts, null until one) go out on the heartbeat as `childStartupFailed` and
+        `childStartupMs`. On Probe Health they are `childStartupFailed` (counter) and
+        `childStartup` (p95, ms), with no limits: the sensor whose check never started already
+        fails saying so. On `/metrics` they are `ms_probe_child_checks_not_started_total` and
+        `ms_probe_child_startup_p95_seconds`. **Protocol 29**, capability `childStartup`,
+        because the health schema is `additionalProperties: false`. Both are stripped for a
+        core below 29, and gap for a probe below it.
+      - **The worker pool has no such flaw.** `check-worker.ts` imports its registry before it
+        posts `ready`, and the pool dispatches only to ready workers and arms the timeout at
+        dispatch.
+      - **Tests** (`process-runner.test.ts`, with `support/stalled-registry.ts`, an import slowed,
+        hung or broken through `childEnv`):
+        - A 1.5 s check with a 5 s timeout after a 4 s load (the child's clock) and after a
+          6.5 s load (the runner's) both succeed, with `durationMs` the check's own. Each fails
+          with the fix undone: the first as *exceeded its timeout*, the second killed as *did
+          not finish within 5000 ms*. The check is 0.3 × its timeout, not 0.8: at 1.6 s of 2 s
+          the runner's kill came 2.4 s after the check ended, and once, in a probe suite run beside
+          check-pool on loop at load 6.5–28, a child that had said it was ready did not answer within that. Now the
+          kill comes 5.5 s after.
+        - A hung load at a 1.5 s bound fails between 1.5 s and 11.5 s with phase `startup`, is
+          counted, and its pid is gone (ESRCH).
+        - A load that throws is a start-up failure, not a crash.
+        - After a slow load, a check that ignores its signal still reads *did not finish within*
+          and one that honours it *exceeded its timeout*.
+        - A started check runs past the bound.
+        - `ReadyLine` and `leftOf` (the runner waits out a timer that fires up to 1 ms early, so
+          it never reports a start shorter than the bound) have unit tests.
+        - The `P-258` test keeps its minute, with its comment updated: the child's start no
+          longer counts against the kill or the abort, but the `pinTarget` import inside the
+          check still does.
+      - **Also tested:** `healthForPeer` at 26–29, the schema accepting both fields, the core's
+        reading and `/metrics`, the sensor's channels, and `runProgram`'s `onStdout`.
+      - **Mutation: 15/15 killed.** The ready line before the load; the child's abort counted
+        from process start; the start-up clock not cleared at ready; the check's clock set to
+        the start-up bound; the gave-up branch inverted; the count dropped; the start time not
+        recorded; a failed load read as a check; the ready line's length test off by one; a long
+        line's state carried over; the backstop counted from spawn; an empty window reported as
+        zero; the report sending `failed`; the capability at 28; `leftOf` never waiting.
+      - **Runs, with the final tests:** every touched test file whole, with `build-hygiene`,
+        417/417. process-runner 20/20 and check-pool 20/20, run in turn
+        while the probe suite ran on loop beside them (29 suite runs, all 500/500, load
+        3.5–14.6).
+      - **Runs before the test's numbers changed:**
+        - The first loop: process-runner 20/20 and check-pool 19/20, at load 2.9–22. The
+          check-pool failure was file-level, with no test named, and its output was not kept.
+          Of 29 suite runs, one had a failure whose output was not kept.
+        - A second loop, check-pool only, with outputs kept: 20/20, at load 6.5–28. Of its
+          suite runs, one failed 3 tests: this ticket's 0.8 × timeout case (above), `P-34`'s
+          *raises its ceiling … before the backlog grows* (*4 -> 4*), and `B-09`'s probe-flow
+          test (*timed out after 20000 ms waiting for the probe to stop*).
+        - The last two are untouched by this change and are load-sensitive tests.
+      - **Found, not fixed:** `exe-script-shared.ts` `runScript` never passes `ctx.signal` to
+        `runProgram`, so an EXE/Script check ignores the child's abort and runs to its own
+        `params.timeoutMs`. Only the runner's kill at the scan timeout + 2 s stops it, with
+        *did not finish within* rather than the script's own diagnosis. A worker that hangs
+        while loading its registry has no start-up bound either: no check's time is spent, but
+        it holds one of `SPAWN_CONCURRENCY`'s loading turns.
 
 - [ ] **P-261 — `pinned-target.test.ts` leaves 190 ms for a timer to be late** · S · P-258 ·
       Found 2026-10-05 in `P-258`. The test at ~383 asserts a 200 ms resolution bound finished

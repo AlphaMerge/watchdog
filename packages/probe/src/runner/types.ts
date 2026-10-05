@@ -51,7 +51,11 @@ export type CheckPhase =
   // Distinct from `pool-stopped`, which is an orderly shutdown: this one is a fault, and the
   // difference is what an operator reads in the result's message.
   | 'pool-disabled'
-  | 'unknown-type';
+  | 'unknown-type'
+  // A check process that did not get as far as running its check (`P-260`): it took longer to
+  // load the probe's catalogue than the start-up bound, or the load failed. The probe's fault or
+  // the machine's, never the check's, and its message says which.
+  | 'startup';
 
 export interface ResultMeta {
   phase: CheckPhase;
@@ -126,5 +130,17 @@ export const CREDENTIALS_WITHHELD = 'CREDENTIALS_WITHHELD';
  * and its launcher belongs in neither of them.
  */
 export const RESULT_MARKER = 'ms-check-result:';
+
+/**
+ * How a check process says it has loaded the probe's catalogue and is about to run its check
+ * (`P-260`), on a line of stdout of its own. Here for the reason `RESULT_MARKER` is.
+ *
+ * **The check's clocks start at this line, on both sides.** The child arms the check's abort
+ * after it, and the runner swaps its start-up bound for the check's timeout plus its margin when
+ * it reads it. Before this the child armed its abort first and then imported the catalogue, which
+ * `P-258` measured at 0.45–14.8 s on a loaded machine, so a script given 10 s could be left 2 s
+ * of its own and then reported as having exceeded its timeout.
+ */
+export const READY_MARKER = 'ms-check-ready';
 
 export type { CheckResult };

@@ -56,6 +56,7 @@ describe('what a protocol version can do', () => {
       listenerOverwritten: false,
       databaseAddressPinning: false,
       targetPolicyException: false,
+      childStartup: false,
     });
   });
 
@@ -231,9 +232,17 @@ describe('the health a peer can be sent', () => {
     flowOverwritten: 250,
     trapOverwritten: 1_300,
     syslogOverwritten: 75,
+    childStartupFailed: 3,
+    childStartupMs: { p50: 40, p95: 9_500, p99: 14_800, max: 30_000 },
   };
-  /** `health` as a core at 25 is sent it: everything but 26's two fields (`B-14`). */
-  const { trapOverwritten: _traps, syslogOverwritten: _syslog, ...withoutListeners } = health;
+  /** `health` as a core at 26 to 28 is sent it: everything but 29's two fields (`P-260`). */
+  const { childStartupFailed: _failed, childStartupMs: _startup, ...withoutStartup } = health;
+  /** `health` as a core at 25 is sent it: that, less 26's two fields (`B-14`). */
+  const {
+    trapOverwritten: _traps,
+    syslogOverwritten: _syslog,
+    ...withoutListeners
+  } = withoutStartup;
   /** `health` as a core at 23 or 24 is sent it: that, less 25's one field (`B-11`). */
   const { flowOverwritten: _overwritten, ...withoutOverwritten } = withoutListeners;
   /** `health` as a core at 21 or 22 is sent it: that, less 23's flow counters (`B-07`). */
@@ -402,10 +411,54 @@ describe('the health a peer can be sent', () => {
     }
   });
 
+  it('leaves the child start-up fields out for a core at 28, and keeps 26’s', () => {
+    // `P-260`, stripped together and on their own: a core at 26 to 28 knows everything else.
+    for (const version of [16, 25, 26, 27, 28]) {
+      const sent = healthForPeer(health, version);
+      for (const field of ['childStartupFailed', 'childStartupMs']) {
+        assert.equal(field in sent, false, `${field} sent to a core at ${String(version)}`);
+      }
+    }
+    for (const version of [26, 27, 28]) {
+      assert.deepEqual(healthForPeer(health, version), withoutStartup, String(version));
+    }
+    assert.equal(healthForPeer(health, 28).trapOverwritten, 1_300);
+    assert.deepEqual(healthForPeer({ memoryMb: 1, childStartupFailed: 2 }, 28), { memoryMb: 1 });
+    assert.deepEqual(
+      healthForPeer({ memoryMb: 1, childStartupMs: { p50: 1, p95: 2, p99: 3, max: 4 } }, 28),
+      { memoryMb: 1 },
+    );
+    assert.equal(healthForPeer(health, 29).childStartupFailed, 3);
+    assert.deepEqual(healthForPeer(health, 29).childStartupMs, health.childStartupMs);
+  });
+
+  it('knows both child start-up fields in this build’s health schema', () => {
+    // The other end of the gate: a core at 29 is sent them, so its schema must take them.
+    const read = (field: 'childStartupFailed' | 'childStartupMs', sent: unknown): unknown => {
+      const parsed = parseProbeToCore({
+        type: 'heartbeat',
+        seq: 1,
+        sentAt: 'now',
+        health: { memoryMb: 12, [field]: sent },
+      });
+      if (parsed.type !== 'heartbeat') return 'not a heartbeat';
+      assert.equal(parsed.health?.memoryMb, 12, `${field} cost the heartbeat its health`);
+      return parsed.health[field];
+    };
+    assert.equal(read('childStartupFailed', 4), 4);
+    assert.equal(read('childStartupFailed', 0), 0);
+    assert.equal(read('childStartupFailed', -1), undefined);
+    assert.equal(read('childStartupFailed', 1.5), undefined);
+    const times = { p50: 21, p95: 450, p99: 14_800, max: 30_000 };
+    assert.deepEqual(read('childStartupMs', times), times);
+    // A bundle with a part missing, or a negative time, is a gap and the heartbeat is kept.
+    assert.equal(read('childStartupMs', { p50: 21, p95: 450, p99: 900 }), undefined);
+    assert.equal(read('childStartupMs', { ...times, max: -1 }), undefined);
+  });
+
   it('sends everything to a core that knows it', () => {
-    assert.equal(PROTOCOL_VERSION, 28);
-    assert.deepEqual(healthForPeer(health, 26), health);
-    assert.deepEqual(healthForPeer(health, 27), health);
+    assert.equal(PROTOCOL_VERSION, 29);
+    assert.deepEqual(healthForPeer(health, 29), health);
     assert.deepEqual(healthForPeer(health, PROTOCOL_VERSION), health);
   });
 
@@ -437,6 +490,9 @@ describe('the health a peer can be sent', () => {
       // `B-14`: two new fields, at the version that adds them.
       trapOverwritten: 26,
       syslogOverwritten: 26,
+      // `P-260`: two new fields, at the version that adds them.
+      childStartupFailed: 29,
+      childStartupMs: 29,
     };
     // The rest predate `P-178`, and a core older than that refuses a newer probe at the handshake,
     // in words, so it is never sent a heartbeat at all. Pinned by count, so that a new field is
@@ -530,6 +586,7 @@ describe('the health a peer can be sent', () => {
     );
     assert.deepEqual(missingCapabilities(27), [
       'connect to an address one device is excepted for, although its target policy refuses it',
+      'report the script checks it could not start, and how long one takes to start',
     ]);
     // Stripping what a peer does not know is by capability: 27 has no health field, so a core
     // at 26 is sent what a core at 27 is.
@@ -538,13 +595,29 @@ describe('the health a peer can be sent', () => {
   });
 });
 
+const DESCRIBED_EXCEPTION =
+  'connect to an address one device is excepted for, although its target policy refuses it';
+
 describe('one device’s exception to the target policy (`A-64`)', () => {
   it('is understood from 28, and by nothing older', () => {
     // A field in `target`, which is a closed schema on the probe: below 28 it is not sent at all.
     assert.equal(versionFor('targetPolicyException'), 28);
     assert.equal(capabilitiesFor(27).targetPolicyException, false);
     assert.equal(capabilitiesFor(28).targetPolicyException, true);
-    assert.deepEqual(missingCapabilities(28), []);
+    assert.equal(missingCapabilities(28).includes(DESCRIBED_EXCEPTION), false);
+  });
+});
+
+describe('the child start-up counters (`P-260`)', () => {
+  it('are reported from 29, and by nothing older', () => {
+    // Two health fields under one capability, stripped below 29.
+    assert.equal(versionFor('childStartup'), 29);
+    assert.equal(capabilitiesFor(28).childStartup, false);
+    assert.equal(capabilitiesFor(29).childStartup, true);
+    assert.deepEqual(missingCapabilities(28), [
+      'report the script checks it could not start, and how long one takes to start',
+    ]);
+    assert.deepEqual(missingCapabilities(29), []);
   });
 });
 

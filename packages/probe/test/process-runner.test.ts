@@ -1,10 +1,17 @@
 import { strict as assert } from 'node:assert';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { pino } from 'pino';
 import type { CheckResult } from '@ms/shared';
-import { ProcessRunner } from '../src/runner/process-runner.js';
-import type { ResultMeta } from '../src/runner/types.js';
+import {
+  leftOf,
+  ProcessRunner,
+  ReadyLine,
+  STARTUP_TIMEOUT_MS,
+} from '../src/runner/process-runner.js';
+import { READY_MARKER, type ResultMeta } from '../src/runner/types.js';
 
 /**
  * The child-process runner (`P-03`), against checks that misbehave on purpose.
@@ -18,6 +25,8 @@ const silent = pino({ level: 'silent' });
 
 /** At runtime this file is dist/test/process-runner.test.js, beside the compiled fixtures. */
 const FIXTURES = join(import.meta.dirname, 'support', 'check-fixtures.js');
+/** The same checks, behind an import that is slow, hangs or fails as `childEnv` says (`P-260`). */
+const STALLED = join(import.meta.dirname, 'support', 'stalled-registry.js');
 
 interface Seen {
   result: CheckResult;
@@ -26,16 +35,28 @@ interface Seen {
 
 const runners: ProcessRunner[] = [];
 
-function runnerOf(options: { maxConcurrent?: number; queueMaxLength?: number } = {}): {
+function runnerOf(
+  options: {
+    maxConcurrent?: number;
+    queueMaxLength?: number;
+    registryModule?: string;
+    startupTimeoutMs?: number;
+    childEnv?: Record<string, string>;
+  } = {},
+): {
   runner: ProcessRunner;
   seen: Seen[];
 } {
   const seen: Seen[] = [];
   const runner = new ProcessRunner({
     logger: silent,
-    registryModule: FIXTURES,
+    registryModule: options.registryModule ?? FIXTURES,
     ...(options.maxConcurrent === undefined ? {} : { maxConcurrent: options.maxConcurrent }),
     ...(options.queueMaxLength === undefined ? {} : { queueMaxLength: options.queueMaxLength }),
+    ...(options.startupTimeoutMs === undefined
+      ? {}
+      : { startupTimeoutMs: options.startupTimeoutMs }),
+    ...(options.childEnv === undefined ? {} : { childEnv: options.childEnv }),
     onResult: (result, meta) => seen.push({ result, meta }),
   });
   runners.push(runner);
@@ -173,14 +194,14 @@ describe('process runner', () => {
     // most it gets, where a child not told would give it five.
     //
     // **A minute, so that no load can put the check's own clocks ahead of the resolution's**
-    // (`P-258`). Three clocks race here, each started at a different moment: the runner's kill,
-    // when it spawns the child (the timeout plus 2 s); the child's abort, when it has read its
-    // request (the timeout); and the resolution's bound, when the check reaches `pinTarget`,
-    // after the child has started and the fixture has imported it. At 8 s the resolution's 4 s
-    // lost: the import took 4.7 s at load 6. With the module loaded before the child read its
-    // request, the child's start then took more than 6 s at load 18 to 50, and the runner killed
-    // it. A minute leaves 50 s for starting, importing and late timers, where the most seen was
-    // 6.4 s.
+    // (`P-258`). Three clocks race here. Since `P-260` the runner's kill (the timeout plus 2 s)
+    // and the child's abort (the timeout) both start when the child has loaded its registry and
+    // says it is ready, so the child's start no longer counts against either. The resolution's
+    // bound starts later still, when the check reaches `pinTarget`, after the fixture has
+    // imported it inside the check: 4.7 s at load 6, which at 8 s lost the resolution its 4 s.
+    // That import is the check's own time and still counts, so a minute still leaves 50 s for it
+    // and late timers, where the most seen was 6.4 s. Before `P-260` the 50 s had to cover the
+    // child's start as well, which once took more than 6 s at load 18 to 50.
     const { runner, seen } = runnerOf();
     runner.submit(request(23, 'test.resolve-hangs', { timeoutMs: 60_000 }));
     // Past the runner's kill at 62 s, so that a check that loses says how it lost.
@@ -190,6 +211,208 @@ describe('process runner', () => {
     assert.equal(result.withheld, true, result.message);
     assert.match(result.message, /^Not scanned: switch\.invalid did not resolve within 10000 ms/);
     assert.doesNotMatch(result.message, /did not finish within/);
+  });
+
+  describe('a check process that is slow to start (`P-260`)', () => {
+    it('gives the check its whole timeout however long its process took to load', async () => {
+      // Two loads, each of which cost the check its result before `P-260`, and each through a
+      // different clock. A check of 1.5 s with a timeout of 5 s:
+      // - **after a 4 s load**, the child's own abort, armed before the load, fired 1 s into the
+      //   check, which reported that it exceeded its timeout;
+      // - **after a 6.5 s load**, the runner's kill, counted from the spawn at 5 s + 2 s, fired
+      //   0.5 s into the check, which was killed and reported as not finishing within 5 s.
+      // Now both clocks start at the ready line, and the check has its 5 s.
+      //
+      // **A check of 0.3 × its timeout, not 0.8**, so that load cannot fail it. With 1.6 s of 2 s
+      // the runner's kill came 2.4 s after the check's end, and once, beside a probe suite at
+      // load 10–27, a child that had said ready did not answer within it. Here it has 5.5 s.
+      const loads = [4_000, 6_500];
+      const runs = loads.map((delayMs) =>
+        runnerOf({
+          registryModule: STALLED,
+          childEnv: { MS_TEST_REGISTRY_DELAY_MS: String(delayMs) },
+        }),
+      );
+      runs.forEach(({ runner }, at) => {
+        runner.submit(request(100 + at, 'test.slow', { delayMs: 1_500, timeoutMs: 5_000 }));
+      });
+      await until(() => runs.every(({ seen }) => seen.length === 1), 'both checks', 40_000);
+
+      runs.forEach(({ runner, seen }, at) => {
+        const loadMs = loads[at] ?? 0;
+        const { result, meta } = seen[0] ?? {};
+        assert.equal(
+          result?.outcome,
+          'ok',
+          `after a ${String(loadMs)} ms load: ${result?.message ?? ''}`,
+        );
+        assert.equal(result.message, 'eventually');
+        assert.equal(meta?.phase, 'execute');
+        // The check's own time, not the load's: measured from the spawn, it would be at least the
+        // load plus 1.5 s. (A timer may fire a millisecond early against the monotonic clock.)
+        assert.ok(
+          result.durationMs >= 1_400 && result.durationMs < loadMs + 1_500,
+          `a ${String(result.durationMs)} ms check after a ${String(loadMs)} ms load`,
+        );
+        const stats = runner.stats();
+        assert.ok(
+          (stats.startupMs?.max ?? 0) >= loadMs,
+          `a start of ${String(stats.startupMs?.max)} ms with a ${String(loadMs)} ms load`,
+        );
+        assert.equal(stats.timedOut, 0);
+        assert.equal(stats.startupFailed, 0);
+      });
+    });
+
+    it('gives up on a process still loading at the start-up bound, ends it, and counts it', async () => {
+      // A load that never finishes, with a check timeout of a minute: before `P-260` this waited
+      // for the runner's kill at 62 s, and then reported a check that did not finish in time.
+      const dir = await mkdtemp(join(tmpdir(), 'ms-p260-'));
+      try {
+        const pidFile = join(dir, 'child.pid');
+        const { runner, seen } = runnerOf({
+          registryModule: STALLED,
+          startupTimeoutMs: 1_500,
+          childEnv: { MS_TEST_REGISTRY_DELAY_MS: 'forever', MS_TEST_REGISTRY_PID_FILE: pidFile },
+        });
+        const submittedAt = performance.now();
+        runner.submit(request(110, 'test.ok', { timeoutMs: 60_000 }));
+        await until(() => seen.length === 1, 'the start-up to be given up', 20_000);
+        const tookMs = performance.now() - submittedAt;
+
+        const { result, meta } = seen[0] ?? {};
+        assert.equal(result?.outcome, 'error');
+        assert.equal(meta?.phase, 'startup');
+        assert.match(result.message, /^the probe took \d+ ms to start the check and gave up/);
+        assert.match(result.message, /within the 1500 ms it is allowed, so the check never ran/);
+        assert.doesNotMatch(result.message, /exceeded its timeout|did not finish within/);
+        assert.deepEqual(result.channels, []);
+        // Within the bound and the time it takes to end a process, and not before the bound.
+        assert.ok(tookMs >= 1_500, `given up after ${String(Math.round(tookMs))} ms`);
+        assert.ok(tookMs < 1_500 + 10_000, `given up after ${String(Math.round(tookMs))} ms`);
+
+        const stats = runner.stats();
+        assert.equal(stats.startupFailed, 1);
+        assert.equal(stats.failed, 1);
+        assert.equal(stats.timedOut, 0, 'no check ran, so none timed out');
+        assert.equal(stats.crashed, 0);
+        assert.ok(
+          (stats.startupMs?.max ?? 0) >= 1_500,
+          `the given-up start is a start time too: ${String(stats.startupMs?.max)} ms`,
+        );
+        assert.equal(stats.running, 0);
+
+        // And the process is gone, not left loading for ever.
+        const pid = Number(await readFile(pidFile, 'utf8'));
+        assert.ok(pid > 0, 'the child wrote its id');
+        assert.throws(
+          () => process.kill(pid, 0),
+          (error: NodeJS.ErrnoException) => error.code === 'ESRCH',
+          `process ${String(pid)} is still there`,
+        );
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('lets a started check run past the start-up bound, which ends at the ready line', async () => {
+      // The bound is on starting, not on the check: one that has started is on its own clock.
+      // Five seconds, so that a loaded machine starts the fixture inside it (0.03–0.27 s measured,
+      // `P-258`), and a check that runs past it by three.
+      const { runner, seen } = runnerOf({ startupTimeoutMs: 5_000 });
+      runner.submit(request(114, 'test.slow', { delayMs: 8_000, timeoutMs: 20_000 }));
+      await until(() => seen.length === 1, 'the check', 30_000);
+      assert.equal(seen[0]?.result.outcome, 'ok', seen[0]?.result.message);
+      assert.equal(runner.stats().startupFailed, 0);
+    });
+
+    it('reports a registry that will not load as a start-up failure, not a failing check', async () => {
+      const { runner, seen } = runnerOf({
+        registryModule: STALLED,
+        childEnv: { MS_TEST_REGISTRY_THROW: 'the catalogue is half-copied' },
+      });
+      runner.submit(request(111, 'test.ok'));
+      await until(() => seen.length === 1, 'the load to fail');
+      const { result, meta } = seen[0] ?? {};
+      assert.equal(result?.outcome, 'error');
+      assert.equal(meta?.phase, 'startup');
+      assert.equal(
+        result.message,
+        'this probe could not load its sensor types to run the check: the catalogue is half-copied',
+      );
+      const stats = runner.stats();
+      assert.equal(stats.startupFailed, 1);
+      assert.equal(stats.failed, 1);
+      assert.equal(stats.crashed, 0);
+    });
+
+    it('still says a check exceeded its timeout when, after a slow start, it did', async () => {
+      // Both ways a check runs out of time, each after a 1.5 s load: one that honours its signal
+      // and says so, and one that ignores it and is killed.
+      const env = { MS_TEST_REGISTRY_DELAY_MS: '1500' };
+      const honours = runnerOf({ registryModule: STALLED, childEnv: env });
+      const ignores = runnerOf({ registryModule: STALLED, childEnv: env });
+      honours.runner.submit(request(112, 'test.slow', { delayMs: 30_000, timeoutMs: 800 }));
+      ignores.runner.submit(request(113, 'test.stuck', { timeoutMs: 500 }));
+      await until(
+        () => honours.seen.length === 1 && ignores.seen.length === 1,
+        'both timeouts',
+        30_000,
+      );
+
+      assert.equal(honours.seen[0]?.meta.phase, 'aborted');
+      assert.match(honours.seen[0].result.message, /exceeded its timeout/);
+      assert.equal(ignores.seen[0]?.meta.phase, 'timeout');
+      assert.match(ignores.seen[0].result.message, /did not finish within 500 ms/);
+      for (const { runner } of [honours, ignores]) {
+        assert.equal(runner.stats().timedOut, 1);
+        assert.equal(runner.stats().startupFailed, 0);
+      }
+    });
+
+    it('gives up only once the bound has passed on the clock it reports', () => {
+      // A timer may fire up to a millisecond early against `process.hrtime`; the runner waits
+      // out what is left rather than report a start shorter than its bound.
+      assert.equal(leftOf(1_500, 1_499.4), 1);
+      assert.equal(leftOf(1_500, 0.2), 1_500);
+      assert.equal(leftOf(1_500, 1_500), null);
+      assert.equal(leftOf(1_500, 1_620), null);
+    });
+
+    it('gives a start thirty seconds, twice the slowest load measured under contention', () => {
+      // `P-258`: 0.45–14.8 s to import the catalogue at load 6.5–29. See `STARTUP_TIMEOUT_MS`.
+      assert.equal(STARTUP_TIMEOUT_MS, 30_000);
+      assert.equal(runnerOf().runner.stats().startupMs, null, 'no start measured is not zero');
+    });
+  });
+
+  describe('the ready line (`P-260`)', () => {
+    it('is a whole line reading the marker, however the chunks fall', () => {
+      assert.equal(new ReadyLine().push(`${READY_MARKER}\n`), true);
+      const split = new ReadyLine();
+      assert.equal(split.push('ms-check-'), false);
+      assert.equal(split.push('rea'), false);
+      assert.equal(split.push('dy'), false, 'not before its line ends');
+      assert.equal(split.push('\n'), true);
+    });
+
+    it('is found after whatever a library printed before it', () => {
+      const line = new ReadyLine();
+      assert.equal(line.push('a banner\nanother line, longer than the marker by far\n'), false);
+      assert.equal(line.push(`${READY_MARKER}\n`), true);
+      assert.equal(new ReadyLine().push(`banner\n${READY_MARKER}\nmore`), true);
+    });
+
+    it('is not the marker inside a line, or the marker with more after it', () => {
+      assert.equal(new ReadyLine().push(`said ${READY_MARKER}\n`), false);
+      assert.equal(new ReadyLine().push(`${READY_MARKER}!\n`), false);
+      assert.equal(new ReadyLine().push(`${READY_MARKER.slice(0, -1)}\n`), false);
+      // A long line that ends in the marker is still the end of a long line.
+      const long = new ReadyLine();
+      assert.equal(long.push('x'.repeat(40)), false);
+      assert.equal(long.push(`${READY_MARKER}\n`), false);
+      assert.equal(long.push(`${READY_MARKER}\n`), true, 'the next line starts afresh');
+    });
   });
 
   it('finds its result past whatever a library printed', async () => {

@@ -29,6 +29,14 @@ export interface ProgramRunOptions {
    * (`P-227`). The caller that aborted knows why. What the program started goes with it.
    */
   readonly signal?: AbortSignal;
+  /**
+   * Each chunk of stdout as it arrives, whether or not it is kept (`P-260`).
+   *
+   * For a caller that has to act on what a program says before it ends: the probe's check
+   * process says when it is ready to run its check, and the probe's clock for that check starts
+   * there. Called past `maxOutputBytes` as well, because the bound is on keeping, not reading.
+   */
+  readonly onStdout?: (chunk: Buffer) => void;
 }
 
 interface ProgramOutput {
@@ -106,6 +114,7 @@ export async function runProgram(options: ProgramRunOptions): Promise<ProgramRun
   const stderr = new BoundedSink(options.maxOutputBytes);
   child.stdout?.on('data', (chunk: Buffer) => {
     stdout.push(chunk);
+    options.onStdout?.(chunk);
   });
   child.stderr?.on('data', (chunk: Buffer) => {
     stderr.push(chunk);

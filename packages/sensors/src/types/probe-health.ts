@@ -324,6 +324,19 @@ const CHANNELS: readonly ChannelDef[] = [
   { key: 'childRefused', name: 'Child checks refused', unit: 'checks', counter: { bits: 64 } },
   { key: 'childTimedOut', name: 'Child checks timed out', unit: 'checks', counter: { bits: 64 } },
   { key: 'childCrashes', name: 'Child process crashes', unit: 'processes', counter: { bits: 64 } },
+  // **Checks whose process never got as far as running them (`P-260`), and no limit on either.**
+  // A check's timeout runs from the moment its process has loaded the probe's sensor types, so a
+  // slow start no longer reads as a script that ran too long; it reads here. The sensors those
+  // checks belonged to already fail with a message naming the start-up, so a limit would be a
+  // second alarm for the one event. `childStartup` is the p95 of a start, which on a probe short
+  // of CPU climbs from tens of milliseconds to seconds before anything fails.
+  {
+    key: 'childStartupFailed',
+    name: 'Child checks not started',
+    unit: 'checks',
+    counter: { bits: 64 },
+  },
+  { key: 'childStartup', name: 'Child process start-up (p95)', unit: 'ms' },
   // Results written to disk and not yet acknowledged. Non-zero is not a fault — it is what a
   // probe does while the core is unreachable — but a number that climbs and never falls is.
   { key: 'spoolDepth', name: 'Results spooled', unit: 'results' },

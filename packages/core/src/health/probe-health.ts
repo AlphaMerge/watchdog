@@ -421,6 +421,10 @@ export class ProbeHealthService {
       childRefused: health?.childRefused ?? null,
       childTimedOut: health?.childTimedOut ?? null,
       childCrashes: health?.childCrashes ?? null,
+      // `P-260`. A gap for no child runner and for either end below protocol 29, and the time
+      // also until a child has started: no start measured is not a start that took no time.
+      childStartupFailed: health?.childStartupFailed ?? null,
+      childStartup: health?.childStartupMs?.p95 ?? null,
       // `?? null` throughout, so a probe whose registry keeps no session pools gaps these rather
       // than reading zero — a probe with nothing to report is not a probe with nothing open
       // (`P-36`, and `R-06` again).

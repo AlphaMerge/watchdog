@@ -67,8 +67,10 @@ const CHILDREN: ProcessRunnerStats = {
   deferred: 11,
   refused: 5,
   crashed: 1,
+  startupFailed: 4,
   waitMs: { p50: 30, p95: 400, p99: 900, max: 3_000 },
   runMs: { p50: 200, p95: 2_000, p99: 4_000, max: 9_000 },
+  startupMs: { p50: 25, p95: 9_400, p99: 14_800, max: 30_000 },
 };
 
 const SPOOL: SpoolStats = {
@@ -91,6 +93,8 @@ const DRAIN: DrainStats = {
 
 function reporter(options: {
   children?: boolean;
+  /** The child runner's numbers, when a test needs other than `CHILDREN`. */
+  childStats?: ProcessRunnerStats;
   spool?: boolean;
   drain?: boolean;
   stalledForMs?: number;
@@ -112,7 +116,7 @@ function reporter(options: {
   return new ProbeHealthReporter({
     scheduler: () => WHEEL,
     pool: () => POOL,
-    ...(options.children === false ? {} : { children: () => CHILDREN }),
+    ...(options.children === false ? {} : { children: () => options.childStats ?? CHILDREN }),
     ...(options.spool === false ? {} : { spool: () => SPOOL }),
     ...(options.drain === false
       ? {}
@@ -167,6 +171,21 @@ describe('the probe’s own health report', () => {
     assert.equal(report.childRefused, 5);
     assert.equal(report.childTimedOut, 2);
     assert.equal(report.childCrashes, 1);
+  });
+
+  it('reports the child checks that never started, and how long a start takes (`P-260`)', () => {
+    const report = reporter({}).report();
+    assert.equal(report.childStartupFailed, 4);
+    assert.deepEqual(report.childStartupMs, { p50: 25, p95: 9_400, p99: 14_800, max: 30_000 });
+  });
+
+  it('says nothing of a start-up time before any child has started, rather than zero', () => {
+    // No start measured is not a start that took no time. The count is a count, and is zero.
+    const report = reporter({
+      childStats: { ...CHILDREN, startupFailed: 0, startupMs: null },
+    }).report();
+    assert.equal(report.childStartupFailed, 0);
+    assert.equal('childStartupMs' in report, false);
   });
 
   it('says nothing about a child runner it does not have, rather than zero', () => {

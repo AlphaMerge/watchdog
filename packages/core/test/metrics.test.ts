@@ -411,6 +411,26 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       assert.equal(without.has(`ms_probe_syslog_overwritten_total${label}`), false);
     });
 
+    it('exports the child checks that never started, and the p95 of a start in seconds', async () => {
+      // `P-260`. Beside the other child-process series; a probe that sent neither has neither.
+      const label = `{probe="${String(probeId)}"}`;
+      const starved = (): ProbeLink => ({
+        ...connected,
+        health: {
+          ...connected.health,
+          childStartupFailed: 6,
+          childStartupMs: { p50: 25, p95: 9_400, p99: 14_800, max: 30_000 },
+        },
+      });
+      const metrics = parse((await varying(starved).scrape()).body);
+      assert.equal(metrics.get(`ms_probe_child_checks_not_started_total${label}`), 6);
+      assert.equal(metrics.get(`ms_probe_child_startup_p95_seconds${label}`), 9.4);
+
+      const without = parse((await varying(() => connected).scrape()).body);
+      assert.equal(without.has(`ms_probe_child_checks_not_started_total${label}`), false);
+      assert.equal(without.has(`ms_probe_child_startup_p95_seconds${label}`), false);
+    });
+
     it('exports each listener’s malformed count beside its received count (`B-16`)', async () => {
       const label = `{probe="${String(probeId)}"}`;
       // Distinct values, so a series reading its neighbour's channel is seen.

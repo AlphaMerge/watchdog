@@ -578,6 +578,18 @@ const PROBE_METRICS: readonly Metric[] = [
     counter: true,
   },
   {
+    key: 'childStartupFailed',
+    name: 'ms_probe_child_checks_not_started_total',
+    help: "Child-process checks that never ran: their process had not loaded the probe's sensor types within the start-up bound, or could not load them.",
+    counter: true,
+  },
+  {
+    key: 'childStartup',
+    name: 'ms_probe_child_startup_p95_seconds',
+    help: 'How long a check child process took to be ready to run its check, 95th percentile.',
+    scale: MS,
+  },
+  {
     key: 'spoolDepth',
     name: 'ms_probe_spool_results',
     help: 'Results written to disk and not yet acknowledged by the core.',

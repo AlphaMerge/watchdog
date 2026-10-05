@@ -232,6 +232,11 @@ export class ProbeHealthReporter {
             childRefused: children.refused,
             childTimedOut: children.timedOut,
             childCrashes: children.crashed,
+            // `P-260`: checks whose process never got as far as running them, and how long a
+            // start takes. Sent only to a core at protocol 29. The time is absent until a process
+            // has started or been given up, rather than a start that took no time.
+            childStartupFailed: children.startupFailed,
+            ...(children.startupMs === null ? {} : { childStartupMs: children.startupMs }),
           }),
       ...(flow === undefined
         ? {}

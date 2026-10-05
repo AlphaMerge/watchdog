@@ -42,6 +42,13 @@ import { MAX_EXCEPTION_ADDRESSES } from '../net/target-policy.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
+ * Version 29 adds `childStartupFailed` and `childStartupMs` (`P-260`): checks whose child process
+ * never got as far as running them — still loading the probe's sensor types at the start-up bound,
+ * or unable to load them — and how long a child takes to start. The check's own timeout now runs
+ * from the moment its process is ready, so the start-up is reported here rather than spent out of
+ * the check. Two new fields in a closed schema under one capability, `childStartup`: a core below
+ * 29 is sent neither, and a probe below 29 sends neither and both channels gap.
+ *
  * Version 28 adds `targetPolicyException` (`A-64`): an assignment's `target` may carry
  * `policyException`, the addresses of that one device its probe may connect to although the
  * probe's target policy refuses them, set by an administrator on the device and never inherited.
@@ -140,7 +147,7 @@ import { MAX_EXCEPTION_ADDRESSES } from '../net/target-policy.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 28;
+export const PROTOCOL_VERSION = 29;
 
 /**
  * The oldest peer version this build still understands.
@@ -528,6 +535,21 @@ export interface ProbeHealthReport {
   childRefused?: number;
   childTimedOut?: number;
   childCrashes?: number;
+  /**
+   * Checks whose child process never got as far as running them (`P-260`): still loading the
+   * probe's sensor types when the start-up bound passed, or unable to load them. A running total.
+   * Sent only to a core at protocol 29, and absent with the rest of the child block.
+   *
+   * **Not `childTimedOut`**, which counts checks that ran and ran out of time. A probe starved of
+   * CPU fails its scripts here, and an operator reading `childTimedOut` would go to the scripts.
+   */
+  childStartupFailed?: number;
+  /**
+   * How long a child process takes from its spawn to being ready to run its check, in
+   * milliseconds, over its last 256 starts (`P-260`). Absent until one has started or been given
+   * up. Sent only to a core at protocol 29.
+   */
+  childStartupMs?: { p50: number; p95: number; p99: number; max: number };
   /**
    * The SNMP-trap and syslog listeners (`P-64`), each absent unless this probe runs that one.
    *
@@ -928,7 +950,7 @@ export class ProtocolError extends AppError {
 // and probe messages. A peer is a boundary even when it is our own code on the other end.
 
 /**
- * The percentile bundle three of the health fields share.
+ * The percentile bundle the health fields that are timings share.
  *
  * Bounded rather than open: these arrive on every heartbeat from a peer that is, by definition,
  * not fully trusted, and an unbounded number is a chart axis somebody else controls.
@@ -984,6 +1006,8 @@ const PROBE_HEALTH_SCHEMA = {
     childRefused: { type: 'integer', minimum: 0 },
     childTimedOut: { type: 'integer', minimum: 0 },
     childCrashes: { type: 'integer', minimum: 0 },
+    childStartupFailed: { type: 'integer', minimum: 0 },
+    childStartupMs: PERCENTILES_SCHEMA,
     trapReceived: { type: 'integer', minimum: 0 },
     trapRejected: { type: 'integer', minimum: 0 },
     trapMalformed: { type: 'integer', minimum: 0 },

@@ -1091,6 +1091,8 @@ cost: **light** · evaluated by the core, never by a probe
 | `childRefused` | Child checks refused | checks | 64-bit counter → rate |
 | `childTimedOut` | Child checks timed out | checks | 64-bit counter → rate |
 | `childCrashes` | Child process crashes | processes | 64-bit counter → rate |
+| `childStartupFailed` | Child checks not started | checks | 64-bit counter → rate |
+| `childStartup` | Child process start-up (p95) | ms | — |
 | `spoolDepth` | Results spooled | results | — |
 | `spoolBytes` | Spool on disk | MB | — |
 | `spoolDropped` | Results dropped | results | 64-bit counter → rate; default limits: error above 0.00001 |

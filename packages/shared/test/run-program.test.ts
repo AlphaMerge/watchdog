@@ -109,6 +109,26 @@ describe('running a program', { skip: posix ? false : 'POSIX only' }, () => {
     assert.equal(result.truncated, true);
   });
 
+  it('hands stdout over as it arrives, past what it keeps (`P-260`)', async () => {
+    // The probe acts on a line its check process writes before the process ends, and the line may
+    // follow more output than is kept: the bound is on keeping, not on reading.
+    const file = await script('ready.sh', 'echo 0123456789; echo ready; sleep 30');
+    const seen: string[] = [];
+    const ready = new AbortController();
+    const result = await run(file, {
+      maxOutputBytes: 4,
+      signal: ready.signal,
+      onStdout: (chunk) => {
+        seen.push(chunk.toString('latin1'));
+        if (seen.join('').includes('ready\n')) ready.abort();
+      },
+    });
+    // Ended by the caller on what it read, long before the script's own sleep.
+    assert.equal(result.outcome, 'timeout');
+    assert.equal(seen.join(''), '0123456789\nready\n');
+    assert.equal(result.stdout, '0123');
+  });
+
   it('stops a program that runs too long, and says so', async () => {
     const file = await script('slow.sh', 'sleep 30');
     const result = await run(file, { timeoutMs: 300 });

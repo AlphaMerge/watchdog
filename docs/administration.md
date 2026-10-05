@@ -646,6 +646,14 @@ arguments and the variables — so treat both as untrusted input in every script
 - **Scripts run as the probe's account**, which holds the probe's identity and the credentials the
   core sends it. `probe.processUid`/`processGid` run them as another account instead, but need the
   probe to have `CAP_SETUID`, which the shipped unit does not grant.
+- **A check's timeout is the check's own** (`P-260`). Each check runs in a process of its own,
+  which first loads the probe's sensor types: about 21 ms on a quiet machine, and measured at up
+  to 15 s on a badly overloaded one. The timeout starts once that is done, and the process is
+  killed 2 s after it if the check has not answered. A process still loading after **30 s** is
+  ended and the sensor fails with *the probe took N ms to start the check and gave up*, which
+  is the probe's machine to look at and not the script; Probe Health counts it in
+  `childStartupFailed`. So the most one check can hold a slot is 30 s, its timeout and 2 s, and
+  5 s more for a process that ignores `SIGTERM`.
 
 **On upgrade**, a script sensor that already sets a variable outside `MS_VAR_` is not rewritten —
 renaming a variable changes what its script sees. It goes **Down** with a message naming the
@@ -1153,6 +1161,7 @@ alarm.
 | `poolUsage` | Worker pool saturation, sampled at the heartbeat rather than averaged — on a bursty workload it under-reads badly (4.7% measured while every worker was saturated once a second, `findings/2026-09-04-live-probe-check.md`), so do not size down from a low reading. Warns at 80%. Since `P-34` the probe raises its own ceiling from the checks it was assigned, so sustained saturation means either `workerPoolSize` is pinned or the workload outgrew what a probe derives for itself — see the troubleshooting runbook, and note that a pool below its floor accumulates rather than refusing |
 | `poolCeiling`, `poolMemoryCap`, `poolHeldBack` | How far the worker pool may grow, and whether memory is what stops it (`P-236`). `poolCeiling` is the ceiling in force; `poolMemoryCap` is how many workers the memory the probe may use can hold; `poolHeldBack` is how many the ceiling would allow and memory does not. No limits: memory holding the pool back is not an outage by itself, and when it costs checks, `poolUsage` and `refused` are the alarm. Read these to see that the remedy is memory rather than `workerPoolSize` — see [a probe held back by memory](#a-probe-held-back-by-memory). A gap for a probe older than protocol 19, and `poolMemoryCap` also where memory cannot be read |
 | `deferred` | Checks the pool could not start. **Backpressure is counted, never silent** |
+| `childStartupFailed`, `childStartup` | The EXE/Script checks whose own process never got as far as running them, and the p95 of how long such a process takes to start: from its spawn to having loaded the probe's sensor types (`P-260`). A check's timeout starts once its process has started, so a probe short of CPU no longer reports its scripts as having exceeded their timeouts; a process still loading after 30 s is ended, and its sensor fails with *the probe took N ms to start the check and gave up*. Counted here, not in `childTimedOut`. A start takes tens of milliseconds on a quiet machine; seconds here is a probe that needs CPU or fewer neighbours. No limits, since the sensor whose check never started already fails with that message. A gap for a probe or a core older than protocol 29, and `childStartup` also until a check has run in a process |
 | `sessionOverflows` | **Any value above zero is an error.** SNMP or SSH sessions were opened past the pool's bound because every existing one was in use — the pools do that rather than fail a check, and sustained overflow is a probe heading for `EMFILE`. Lengthen `idleMs`, move devices to another probe, or raise the bound |
 | `sessionsOpen` | Device sessions held right now. No threshold — how many is a property of your catalogue, not of health |
 | `sessionsEvicted` | Sessions closed for being idle. Climbing in step with the sessions opened means `idleMs` is shorter than your scan interval, so every check pays a handshake it need not — expensive on SSH |

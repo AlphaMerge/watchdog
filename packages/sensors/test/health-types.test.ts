@@ -80,6 +80,25 @@ describe('the self-monitoring sensor types', () => {
     );
   });
 
+  it('carries the child checks that never started, and how long a start takes, without limits', () => {
+    // `P-260`. The sensor whose check never started already fails with a message naming the
+    // start-up, so a limit here would turn Probe Health as well: two alarms for one slow start.
+    const channels = probeHealth.channels({});
+    assert.deepEqual(
+      channels.find((one) => one.key === 'childStartupFailed'),
+      {
+        key: 'childStartupFailed',
+        name: 'Child checks not started',
+        unit: 'checks',
+        counter: { bits: 64 },
+      },
+    );
+    assert.deepEqual(
+      channels.find((one) => one.key === 'childStartup'),
+      { key: 'childStartup', name: 'Child process start-up (p95)', unit: 'ms' },
+    );
+  });
+
   it('carries a probe’s late refusals as a number of their own and not an alarm', () => {
     // `A-56`. A refusal that arrived after the probe's configuration moved on is dropped and
     // nothing is wrong: a limit or a lookup would be an alarm for a change somebody made on

@@ -1,4 +1,5 @@
 import {
+  READY_MARKER,
   RESULT_MARKER,
   CREDENTIALS_WITHHELD,
   UNKNOWN_SENSOR_TYPE,
@@ -34,6 +35,27 @@ interface ChildRequest {
 
 async function main(): Promise<void> {
   const request = JSON.parse(await readStdin()) as ChildRequest;
+
+  // **The catalogue first, and only then the check's clock** (`P-260`). The import is the probe's
+  // start-up, not the check: 21 ms on a quiet machine, and 0.45–14.8 s measured on a loaded one
+  // (`P-258`). Armed before it, the abort below spent that on loading and blamed the check. The
+  // parent bounds this part on its own clock, and is told on stdout when it is over.
+  let registry: CheckRegistry;
+  try {
+    registry = ((await import(request.registryModule)) as { default: CheckRegistry }).default;
+  } catch (error: unknown) {
+    // No check ran, so it took no time: what the start-up took is the parent's to measure.
+    emit({
+      ok: false,
+      durationMs: 0,
+      startup: true,
+      message:
+        'this probe could not load its sensor types to run the check: ' +
+        (error instanceof Error ? error.message : String(error)),
+    });
+    return;
+  }
+  process.stdout.write(READY_MARKER + '\n');
   const startedAt = process.hrtime.bigint();
 
   // The parent kills this process when the deadline passes, and that is the backstop rather than
@@ -47,7 +69,6 @@ async function main(): Promise<void> {
   timer.unref();
 
   try {
-    const registry = ((await import(request.registryModule)) as { default: CheckRegistry }).default;
     const execution = await registry.execute(request.sensorType, {
       sensorId: request.sensorId,
       target: request.target,

@@ -686,6 +686,26 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(reading['childRefused'], null);
     });
 
+    it('carries the child checks that never started, and the p95 of a start', () => {
+      // `P-260`: a check's timeout runs from its process being ready, so a probe too starved to
+      // start one is counted here rather than blamed on the script.
+      const { reading } = build(() =>
+        connected({
+          health: {
+            ...FULL,
+            childStartupFailed: 6,
+            childStartupMs: { p50: 25, p95: 9_400, p99: 14_800, max: 30_000 },
+          },
+        }),
+      ).read(probeId);
+      assert.equal(reading['childStartupFailed'], 6);
+      assert.equal(reading['childStartup'], 9_400);
+      // A probe or a core below 29 sends neither, and both gap rather than read zero.
+      const { reading: older } = build(() => connected()).read(probeId);
+      assert.equal(older['childStartupFailed'], null);
+      assert.equal(older['childStartup'], null);
+    });
+
     /**
      * The stall the probe reports, as a channel an operator can alarm on (`H-01`).
      *
