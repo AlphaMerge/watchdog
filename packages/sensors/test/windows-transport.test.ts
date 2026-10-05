@@ -250,8 +250,30 @@ describe('running it', () => {
 
   it('kills a script that will not finish', async () => {
     const startedAt = Date.now();
-    await assert.rejects(() => run('#FAKE:hang', { timeoutMs: 700 }), /still running after 700 ms/);
+    await assert.rejects(
+      () => run('#FAKE:hang', { timeoutMs: 700 }),
+      /still running after 700 ms and was stopped/,
+    );
     assert.ok(Date.now() - startedAt < 15_000, 'and did not wait for the grace period twice');
+  });
+
+  it('ends PowerShell on the check’s cancel, and says that was why (`P-262`)', async () => {
+    // A pool worker's abort reached nothing before: PowerShell ran to its own timeout, and a
+    // worker terminated meanwhile left it running in a process group of its own.
+    const controller = new AbortController();
+    const early = setTimeout(() => {
+      controller.abort(new Error('the check exceeded its timeout'));
+    }, 300);
+    const startedAt = Date.now();
+    try {
+      await assert.rejects(
+        () => run('#FAKE:hang', { timeoutMs: 60_000, signal: controller.signal }),
+        /^WindowsError: PowerShell was still running after \d+ ms when the check was ended \(the check exceeded its timeout\), and was stopped$/,
+      );
+    } finally {
+      clearTimeout(early);
+    }
+    assert.ok(Date.now() - startedAt < 15_000, 'ended on the abort, not its own minute');
   });
 
   it('reports the interpreter’s own failure with its stderr', async () => {
@@ -404,6 +426,11 @@ describe('which machine, and as whom', () => {
       windowsOptions(context({}, { windows: { username: 'svc', password: 'x' } })).host,
       'server01',
     );
+  });
+
+  it('hands the transport the check’s signal (`P-262`)', () => {
+    const one = context({});
+    assert.equal(windowsOptions(one).signal, one.signal);
   });
 
   it('sends no credential when there is none, because the probe’s own token is one', () => {

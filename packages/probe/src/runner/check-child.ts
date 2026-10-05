@@ -67,6 +67,19 @@ async function main(): Promise<void> {
     controller.abort(new Error('the check exceeded its timeout'));
   }, request.timeoutMs);
   timer.unref();
+  // **The probe's `SIGTERM` is a cancel, not a death** (`P-262`). The runner sends it when the
+  // probe stops and abandons a running check, and when the check outruns its timeout and margin.
+  // A check that shells out puts its program in a process group of its own, which the runner's
+  // kill of *this* group does not reach, so dying here at once would leave a script running with
+  // nobody to end it. Aborted instead, the check ends what it started and answers; the runner's
+  // `SIGKILL`, its grace later, is still there for a check that does not listen. Installed after
+  // the ready line: a process still loading has started nothing, and dies as it always did.
+  // `on`, not `once`: a second `SIGTERM` (a service manager signalling the whole group as well)
+  // must not undo the first. The reason is the runner's two cases in one, since a signal cannot
+  // say which; after the check's own timeout the controller has already aborted with that.
+  process.on('SIGTERM', () => {
+    controller.abort(new Error('the probe ended the check’s process'));
+  });
 
   try {
     const execution = await registry.execute(request.sensorType, {

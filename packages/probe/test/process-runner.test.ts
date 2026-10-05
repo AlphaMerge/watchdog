@@ -1,11 +1,12 @@
 import { strict as assert } from 'node:assert';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { after, describe, it } from 'node:test';
+import { after, before, describe, it } from 'node:test';
 import { pino } from 'pino';
 import type { CheckResult } from '@ms/shared';
+import { SCRIPT_DIR_ENV } from '@ms/sensors/script';
 import {
   leftOf,
   ProcessRunner,
@@ -28,6 +29,8 @@ const silent = pino({ level: 'silent' });
 const FIXTURES = join(import.meta.dirname, 'support', 'check-fixtures.js');
 /** The same checks, behind an import that is slow, hangs or fails as `childEnv` says (`P-260`). */
 const STALLED = join(import.meta.dirname, 'support', 'stalled-registry.js');
+/** The probe's own registry, as a probe loads it: the real `exe.script`, not a fixture (`P-262`). */
+const CATALOGUE = join(import.meta.dirname, '..', 'src', 'runner', 'catalogue-registry.js');
 
 interface Seen {
   result: CheckResult;
@@ -590,5 +593,146 @@ describe('process runner', () => {
     const { runner } = runnerOf();
     await runner.stop();
     assert.equal(runner.submit(request(50, 'test.ok')), 'stopped');
+  });
+});
+
+describe('a script check in a process of its own (`P-262`)', () => {
+  // The real `exe.script`, through the probe's real catalogue, in a check process the runner
+  // started: the path a script sensor takes in service. The check's process aborts the check at
+  // its timeout; the runner kills that process 2 s later if it has not answered. A script that
+  // heard nothing of the abort ran to its own timeout and was cut off by the runner's kill, and
+  // the sensor read *did not finish within* where the script had something to say.
+  let dir = '';
+  let serial = 0;
+
+  async function script(name: string, body: string): Promise<void> {
+    const file = join(dir, name);
+    await writeFile(file, `#!/bin/sh\n${body}\n`, 'utf8');
+    await chmod(file, 0o755);
+  }
+
+  const gone = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ESRCH';
+    }
+  };
+
+  /** A script check, its own timeout a minute unless said, writing to a file of its own. */
+  function scriptCheck(
+    sensorId: number,
+    program: string,
+    timeoutMs: number,
+    ownTimeoutMs = 60_000,
+  ): { request: Parameters<ProcessRunner['submit']>[0]; file: string } {
+    const file = join(dir, `witness-${String((serial += 1))}`);
+    return {
+      file,
+      request: {
+        sensorId,
+        sensorType: 'exe.script',
+        target: { host: '192.0.2.1', ipVersion: 'auto' as const },
+        params: {
+          program,
+          timeoutMs: ownTimeoutMs,
+          env: [{ name: 'MS_VAR_PIDS', value: file }],
+        },
+        timeoutMs,
+      },
+    };
+  }
+
+  async function pidsIn(file: string): Promise<number[]> {
+    const pids = (await readFile(file, 'utf8')).trim().split(/\s+/).map(Number);
+    assert.equal(pids.length, 2, `the script wrote two pids: ${pids.join(' ')}`);
+    for (const pid of pids) assert.ok(Number.isInteger(pid) && pid > 1, `a pid: ${String(pid)}`);
+    return pids;
+  }
+
+  before(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'ms-p262-'));
+    await script('halfway.sh', 'echo "fetched 3 of 5 pages"\nsleep 60');
+    // Ignores SIGTERM, as its helper then does too, and waits for the helper.
+    await script(
+      'stubborn.sh',
+      'trap \'\' TERM\nsleep 60 &\necho "$$ $!" > "$MS_VAR_PIDS"\necho \'holding on\' >&2\nwait',
+    );
+  });
+
+  after(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const scripts = (): { runner: ProcessRunner; seen: Seen[] } =>
+    runnerOf({ registryModule: CATALOGUE, childEnv: { [SCRIPT_DIR_ENV]: dir } });
+
+  it('reports the script’s own diagnosis at the check’s timeout, not the runner’s kill', async () => {
+    const { runner, seen } = scripts();
+    runner.submit(scriptCheck(120, 'halfway.sh', 1_500).request);
+    await until(() => seen.length === 1, 'the check to answer', 40_000);
+
+    const { result, meta } = seen[0] ?? {};
+    assert.equal(result?.outcome, 'error');
+    assert.equal(meta?.phase, 'aborted');
+    assert.match(
+      result.message,
+      /^halfway\.sh was still running after \d+ ms when the check was ended \(the check exceeded its timeout\), and was stopped with SIGTERM: fetched 3 of 5 pages$/,
+    );
+    assert.doesNotMatch(result.message, /did not finish within/);
+    assert.deepEqual(result.channels, []);
+    assert.equal(runner.stats().timedOut, 1);
+    assert.equal(runner.stats().crashed, 0);
+  });
+
+  it('kills a script that ignores SIGTERM, and its helper, before the runner’s kill', async () => {
+    // The script's grace (1 s) inside the runner's margin (2 s), so the answer comes first.
+    const { runner, seen } = scripts();
+    const { request: check, file } = scriptCheck(121, 'stubborn.sh', 1_500);
+    runner.submit(check);
+    await until(() => seen.length === 1, 'the check to answer', 40_000);
+
+    const { result, meta } = seen[0] ?? {};
+    assert.equal(meta?.phase, 'aborted');
+    assert.match(
+      result?.message ?? '',
+      /^stubborn\.sh was still running after \d+ ms when the check was ended \(the check exceeded its timeout\), and was killed with SIGKILL, having ignored SIGTERM for 1000 ms: holding on$/,
+    );
+    assert.ok(existsSync(file), 'the script wrote its pids');
+    const pids = await pidsIn(file);
+    await until(() => pids.every(gone), `${pids.join(' and ')} to be gone`, 5_000);
+  });
+
+  it('says its own timeout when that comes first', async () => {
+    const { runner, seen } = scripts();
+    runner.submit(scriptCheck(122, 'halfway.sh', 20_000, 1_000).request);
+    await until(() => seen.length === 1, 'the check to answer', 40_000);
+    assert.equal(seen[0]?.meta.phase, 'execute');
+    assert.match(
+      seen[0].result.message,
+      /^halfway\.sh was still running after 1000 ms, its own timeout, and was stopped with SIGTERM: fetched 3 of 5 pages$/,
+    );
+  });
+
+  it('ends the script and its helper when the probe stops and abandons the check', async () => {
+    // The runner ends an abandoned check's process group, and the script's is another: the check
+    // process hears the runner's SIGTERM as a cancel and ends its script before it goes.
+    const { runner, seen } = scripts();
+    const { request: check, file } = scriptCheck(123, 'stubborn.sh', 60_000);
+    runner.submit(check);
+    await until(() => existsSync(file), 'the script to start its helper', 40_000);
+    const pids = await pidsIn(file);
+    for (const pid of pids)
+      assert.equal(gone(pid), false, `${String(pid)} is running to begin with`);
+
+    await runner.stop({ drainMs: 100 });
+    assert.deepEqual(
+      seen.map((one) => [one.result.sensorId, one.meta.phase]),
+      [[123, 'pool-stopped']],
+    );
+    await until(() => pids.every(gone), `${pids.join(' and ')} to be gone`, 10_000);
+    await until(() => runner.stats().running === 0, 'its process to be ended', 10_000);
+    assert.equal(seen.length, 1, 'and the ended process reports nothing more');
   });
 });

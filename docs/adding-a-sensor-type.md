@@ -246,7 +246,12 @@ channel the sensor is judged by.
 
 - **Honour `context.signal`.** Not advisory: a check that ignores it has its worker terminated,
   which costs strictly more than returning. If your work is a promise, race it against the
-  signal; if it is a socket, close it on abort.
+  signal; if it is a socket, close it on abort. If it is a program, pass the signal to
+  `runProgram` (`@ms/shared`) as `signal`: it ends the program's whole process group, which
+  nothing else will — a terminated worker or a killed check process leaves a program in a group
+  of its own running. The run then reads `outcome: 'timeout'` with `endedBy: 'signal'`, and
+  `abortReason(context.signal)` (`support/abort-reason.ts`) says why, so the message can say
+  which limit the program ran into (`P-262`; `exe-script-shared.ts` is the example).
 - **`await import()` anything heavy.** The core loads this catalogue for schemas and channel
   declarations and never calls `execute`. A top-level `import snmp from 'net-snmp'` would drag a
   native module into a process that has no use for it.

@@ -7896,7 +7896,7 @@ because each is a decision rather than a defect:
       ceiling with a margin argued from a measurement), and twenty runs pass beside a running
       sensors suite.
 
-- [ ] **P-262 — an EXE/Script check does not hear its own cancel** · S · P-260 · Found
+- [x] **P-262 — an EXE/Script check does not hear its own cancel** · S · P-260 · Found
       2026-10-05 in `P-260`. `runScript` in `packages/sensors/src/types/exe-script-shared.ts`
       never passes `ctx.signal` to `runProgram`, so a script check ignores the child's abort and
       runs to its own `params.timeoutMs`. Only the runner's kill at the scan timeout + 2 s stops
@@ -7904,6 +7904,64 @@ because each is a decision rather than a defect:
       (which phase, what it printed). **Done when** the script is ended on the check's signal
       with a message naming the script and its phase, and a test with a script that sleeps past
       the timeout asserts that message, not the runner's.
+
+      **P-262 outcome. A script ends at whichever limit comes first, and says which.**
+      - **`runScript`** passes `ctx.signal` to `runProgram`, which ends the script's whole process
+        group on it, as on the script's own `timeoutMs`. `runProgram`'s `timeout` outcome now
+        carries `endedBy: 'deadline' | 'signal'`, the first of the two only. The messages:
+        *check.sh was still running after 30000 ms, its own timeout, and was stopped with
+        SIGTERM: …* and *check.sh was still running after N ms when the check was ended (the
+        check exceeded its timeout), and was killed with SIGKILL, having ignored SIGTERM for
+        1000 ms: …*, ending with the last of stderr, or of stdout when stderr is empty, scrubbed
+        and cut as before. A check already ended is not started (*check.sh was not started: …*).
+        `support/abort-reason.ts` turns the signal's reason into words, and an abort with none
+        into *the check was cancelled*.
+      - **The grace is 1 s for a script** (`SCRIPT_GRACE_MS`), not `runProgram`'s 5 s. With 5 s a
+        script that ignores `SIGTERM` outlived the runner's kill at the timeout + 2 s, and the
+        sensor read *did not finish within*. One second ends it inside the margin, whichever
+        limit it ran into. The schema's Timeout text said *killed shortly after*; it now says one
+        second, and that the scan timeout ends the script too if it comes first.
+      - **The check process hears the runner's `SIGTERM` as a cancel** (`check-child.ts`), after
+        its ready line. Found while checking isolation: the runner ends the check process's group,
+        and a script started with `detached` is in a group of its own, so a probe that stopped
+        and abandoned a running script check left the script, and what it started, running. Now
+        the check aborts (*the probe ended the check’s process*), ends its script and exits; the
+        runner's `SIGKILL` 5 s later is still there for a check that does not listen, so the
+        most a child holds a slot is unchanged.
+      - **Isolation, with the 5 s grace in mind:** the child aborts at the timeout, the script
+        gets `SIGTERM` then and `SIGKILL` 1 s later, and the runner's kill comes at the timeout +
+        2 s from its own reading of the ready line, which is later than the child's. The runner's
+        test path asserts the script's message, not the runner's, for a script that ignores
+        `SIGTERM`.
+      - **Other shell-outs checked:** `support/ping.ts` (`icmp.ping`, `icmp.jitter`) already
+        spawns with `{ signal }`. `support/windows/powershell.ts` (the Windows types) did not
+        pass it either, so a pool worker's abort reached nothing and a terminated worker left
+        PowerShell running; `windowsOptions` now carries `ctx.signal` and the message names the
+        cancel. Nothing else in `packages/sensors/src` calls `runProgram`, `spawn`, `execFile` or
+        `child_process`.
+      - **Tests.** `exe-script.test.ts`: a script ended at the check's abort with that reason and
+        its stdout; its helper gone by pid; a script and its helper ignoring `SIGTERM` killed in
+        1–4 s with that said; its own 1 s timeout first, with the check's still to come; a check
+        already ended not started; an abort after the answer changes nothing and leaves no
+        listener; `abortReason`. `process-runner.test.ts`, through the probe's real catalogue
+        registry: the same at a 1.5 s check timeout, phase `aborted` and not *did not finish
+        within*; the `SIGTERM`-ignoring script killed before the runner's kill, its pids gone;
+        the script's own timeout first; and a stop that abandons a running script check leaves
+        neither the script nor its helper running. `run-program.test.ts`: `endedBy` for each, and
+        an abort during the deadline's grace leaves it `deadline`. `windows-transport.test.ts`:
+        PowerShell ended on the cancel, and `windowsOptions` hands over the signal.
+      - **Mutation: 15/15 killed.** The signal not passed; the grace dropped; which-limit
+        inverted; stdout not quoted; killed and stopped swapped; the started-after-abort guard
+        dropped; `AbortError` read as a reason; a string reason dropped; `endedBy` swapped; the
+        listener not removed; an aborted-before-start read as the deadline; the check process's
+        `SIGTERM` cancel removed (the script and its helper survived the stop); PowerShell's
+        signal not passed; its which-limit inverted; `windowsOptions` without the signal.
+      - **Runs:** run-program, exe-script, windows-transport, catalogue and `build-hygiene`
+        whole, 185/185. process-runner 20/20 (36/36 each) beside the probe suite on loop, in one
+        `dev.sh` started at VM count 0: 20 suite runs, all 505/505, load 1.6–6.2.
+      - **Not fixed:** a check process that dies outright (its own `SIGKILL`, or a heap
+        exhaustion) still leaves a script in its own process group running; and PowerShell keeps
+        `runProgram`'s 5 s grace inside the pool's 2 s abort grace.
 
 - [ ] **P-263 — a pool worker that hangs while loading has no start-up bound** · S · P-260 ·
       Found 2026-10-05 in `P-260`. `pool.ts` `#start` waits for a new worker's `ready`, `error`

@@ -26,7 +26,8 @@ export interface ProgramRunOptions {
   readonly graceMs?: number;
   /**
    * Ends the program early, the way its deadline would, and it is reported as a `timeout`
-   * (`P-227`). The caller that aborted knows why. What the program started goes with it.
+   * (`P-227`) with `endedBy: 'signal'`. The caller that aborted knows why. What the program
+   * started goes with it.
    */
   readonly signal?: AbortSignal;
   /**
@@ -57,7 +58,16 @@ interface ProgramOutput {
 export type ProgramRun =
   | ({ readonly outcome: 'exited'; readonly code: number } & ProgramOutput)
   | ({ readonly outcome: 'signalled'; readonly signal: string } & ProgramOutput)
-  | ({ readonly outcome: 'timeout'; readonly hardKilled: boolean } & ProgramOutput)
+  | ({
+      readonly outcome: 'timeout';
+      readonly hardKilled: boolean;
+      /**
+       * Which of the two ended it (`P-262`): `timeoutMs`, or the caller's `signal`. Whichever came
+       * first, and only that one: the other arriving while the program is being stopped does not
+       * change the answer, so a caller can say which limit the program ran into.
+       */
+      readonly endedBy: 'deadline' | 'signal';
+    } & ProgramOutput)
   | ({
       readonly outcome: 'failed';
       readonly code: string;
@@ -131,12 +141,14 @@ export async function runProgram(options: ProgramRunOptions): Promise<ProgramRun
     let settled = false;
     let timedOut = false;
     let hardKilled = false;
+    let endedBy: 'deadline' | 'signal' = 'deadline';
 
     const grace = options.graceMs ?? DEFAULT_GRACE_MS;
     let hardTimer: NodeJS.Timeout | undefined;
-    const end = (): void => {
+    const end = (by: 'deadline' | 'signal'): void => {
       if (timedOut || settled) return;
       timedOut = true;
+      endedBy = by;
       terminate(child, 'SIGTERM');
       // Asked to stop, then made to. A program that ignores SIGTERM is exactly the one a hard
       // timeout exists for.
@@ -145,16 +157,21 @@ export async function runProgram(options: ProgramRunOptions): Promise<ProgramRun
         terminate(child, 'SIGKILL');
       }, grace);
     };
-    const deadline = setTimeout(end, options.timeoutMs);
-    options.signal?.addEventListener('abort', end, { once: true });
-    if (options.signal?.aborted === true) end();
+    const deadline = setTimeout(() => {
+      end('deadline');
+    }, options.timeoutMs);
+    const aborted = (): void => {
+      end('signal');
+    };
+    options.signal?.addEventListener('abort', aborted, { once: true });
+    if (options.signal?.aborted === true) end('signal');
 
     const finish = (run: ProgramRun): void => {
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
       if (hardTimer !== undefined) clearTimeout(hardTimer);
-      options.signal?.removeEventListener('abort', end);
+      options.signal?.removeEventListener('abort', aborted);
       resolve(run);
     };
 
@@ -174,7 +191,7 @@ export async function runProgram(options: ProgramRunOptions): Promise<ProgramRun
     // is usually the line explaining why it failed.
     child.on('close', (code: number | null, signal: string | null) => {
       if (timedOut) {
-        finish({ outcome: 'timeout', hardKilled, ...output() });
+        finish({ outcome: 'timeout', hardKilled, endedBy, ...output() });
         return;
       }
       if (signal !== null) {

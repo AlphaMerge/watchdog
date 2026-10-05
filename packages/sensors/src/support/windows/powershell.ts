@@ -1,4 +1,5 @@
 import { platform } from 'node:os';
+import { abortReason } from '../abort-reason.js';
 import {
   ENV_AUTH,
   ENV_HOST,
@@ -89,6 +90,12 @@ export interface PowerShellOptions {
   readonly match?: string;
   /** The check's scrub, applied to what PowerShell printed before it is cut (`S-21`). */
   readonly scrub?: (text: string) => string;
+  /**
+   * The check's `ctx.signal` (`P-262`). PowerShell is ended on it as on `timeoutMs`, whichever
+   * comes first: a pool worker's abort would otherwise leave it running to its own timeout, and a
+   * terminated worker would leave it running in a process group of its own.
+   */
+  readonly signal?: AbortSignal;
 }
 
 export interface PowerShellRun {
@@ -146,6 +153,7 @@ export async function runPowerShell(
     cwd: process.cwd(),
     env: environment,
     timeoutMs: options.timeoutMs,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
     maxOutputBytes: MAX_OUTPUT_BYTES,
   });
 
@@ -157,9 +165,13 @@ export async function runPowerShell(
     );
   }
   if (run.outcome === 'timeout') {
+    const how = run.hardKilled ? 'killed' : 'stopped';
     throw new WindowsError(
-      `PowerShell was still running after ${String(options.timeoutMs)} ms and was ` +
-        `${run.hardKilled ? 'killed' : 'stopped'}${tail(scrub(run.stderr))}`,
+      run.endedBy === 'signal' && options.signal !== undefined
+        ? `PowerShell was still running after ${String(run.durationMs)} ms when the check was ` +
+            `ended (${abortReason(options.signal)}), and was ${how}${tail(scrub(run.stderr))}`
+        : `PowerShell was still running after ${String(options.timeoutMs)} ms and was ` +
+            `${how}${tail(scrub(run.stderr))}`,
     );
   }
   if (run.outcome === 'signalled') {

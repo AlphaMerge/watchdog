@@ -9,7 +9,8 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { realpath } from 'node:fs/promises';
+import { getEventListeners } from 'node:events';
+import { readFile, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SensorCatalogue } from '../src/catalogue.js';
@@ -18,6 +19,8 @@ import { exeScript } from '../src/types/exe-script.js';
 import { exeScriptAdvanced } from '../src/types/exe-script-advanced.js';
 import { keyOf, parseAdvanced, parseSimple } from '../src/support/script/parse.js';
 import { resolveProgram, SCRIPT_DIR_ENV } from '../src/support/script/resolve.js';
+import { abortReason } from '../src/support/abort-reason.js';
+import { SCRIPT_GRACE_MS } from '../src/types/exe-script-shared.js';
 import type { CheckContext, CheckExecution } from '../src/contract.js';
 
 /**
@@ -83,6 +86,19 @@ before(() => {
   );
   script('prtg-error.sh', 'echo \'{"prtg":{"error":1,"text":"the API said no"}}\'');
   script('noisy.sh', 'head -c 1000000 /dev/zero | tr "\\0" "x"');
+  // `P-262`: a script that says where it got to and sleeps; one that starts a helper and waits
+  // for it; and one that does the same while ignoring SIGTERM, as its helper then does too. The
+  // two that start a helper write their own pid and the helper's to `MS_VAR_PIDS`.
+  script('halfway.sh', 'echo "fetched 3 of 5 pages"\ntouch "$MS_VAR_PIDS"\nsleep 30');
+  script(
+    'helper.sh',
+    'sleep 30 &\necho "$$ $!" > "$MS_VAR_PIDS"\necho "waiting on the helper"\nwait',
+  );
+  script(
+    'stubborn.sh',
+    'trap \'\' TERM\nsleep 30 &\necho "$$ $!" > "$MS_VAR_PIDS"\necho \'holding on\' >&2\nwait',
+  );
+  script('witness.sh', 'touch "$MS_VAR_PIDS"\necho "0:1:ran"');
 
   mkdirSync(join(dir, 'sub'), { recursive: true });
   script('sub/nested.sh', 'echo "0:5:from a subdirectory"');
@@ -405,7 +421,7 @@ describe('exe.script', () => {
   it('kills a program that runs past its timeout', async () => {
     await assert.rejects(
       () => run(exeScript, { program: 'slow.sh', timeoutMs: 1_000 }),
-      /still running after 1000 ms and was (killed|stopped)/,
+      /^ScriptError: slow\.sh was still running after 1000 ms, its own timeout, and was stopped with SIGTERM$/,
     );
   });
 
@@ -433,6 +449,174 @@ describe('exe.script', () => {
   it('runs in a process of its own, which is why P-03 came first', () => {
     assert.equal(exeScript.isolation, 'process');
     assert.equal(exeScriptAdvanced.isolation, 'process');
+  });
+});
+
+describe('the check’s own cancel (P-262)', () => {
+  /** A file the script writes once it has got going, and a fresh name for each test. */
+  let serial = 0;
+  const witness = (): string => join(dir, `p262-${String(process.pid)}-${String((serial += 1))}`);
+
+  /** Polls for `what`, failing after `ms`: every wait here is on another process. */
+  async function until(predicate: () => boolean, what: string, ms = 10_000): Promise<void> {
+    const deadline = Date.now() + ms;
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error(`timed out after ${String(ms)} ms: ${what}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  const gone = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ESRCH';
+    }
+  };
+
+  /** The script's pid and its helper's, which it wrote, both of them real. */
+  async function pidsIn(file: string): Promise<number[]> {
+    const pids = (await readFile(file, 'utf8')).trim().split(/\s+/).map(Number);
+    assert.equal(pids.length, 2, `the script wrote two pids: ${pids.join(' ')}`);
+    for (const pid of pids) assert.ok(Number.isInteger(pid) && pid > 1, `a pid: ${String(pid)}`);
+    return pids;
+  }
+
+  /** The check, with `MS_VAR_PIDS` set and a signal this test aborts. */
+  function check(
+    program: string,
+    file: string,
+    controller: AbortController,
+    timeoutMs = 10_000,
+  ): Promise<CheckExecution> {
+    return run(
+      exeScript,
+      { program, timeoutMs, env: [{ name: 'MS_VAR_PIDS', value: file }] },
+      { signal: controller.signal },
+    );
+  }
+
+  it('ends a script at the check’s timeout, naming the script, why, and what it printed', async () => {
+    // The reason the probe's check process aborts its check, word for word (`check-child.ts`).
+    const file = witness();
+    const controller = new AbortController();
+    const startedAt = performance.now();
+    const running = check('halfway.sh', file, controller, 30_000);
+    await until(() => existsSync(file), 'the script to get going');
+    controller.abort(new Error('the check exceeded its timeout'));
+    await assert.rejects(
+      running,
+      /^ScriptError: halfway\.sh was still running after \d+ ms when the check was ended \(the check exceeded its timeout\), and was stopped with SIGTERM: fetched 3 of 5 pages$/,
+    );
+    // Its own 30 s never came into it.
+    const tookMs = performance.now() - startedAt;
+    assert.ok(tookMs < 10_000, `ended after ${String(Math.round(tookMs))} ms`);
+  });
+
+  it('takes the script’s helper with it, by pid', async () => {
+    const file = witness();
+    const controller = new AbortController();
+    const running = check('helper.sh', file, controller);
+    await until(() => existsSync(file), 'the script to start its helper');
+    const pids = await pidsIn(file);
+    for (const pid of pids)
+      assert.equal(gone(pid), false, `${String(pid)} is running to begin with`);
+
+    controller.abort(new Error('the check exceeded its timeout'));
+    await assert.rejects(
+      running,
+      /helper\.sh was still running .* stopped with SIGTERM: waiting on the helper$/,
+    );
+    await until(() => pids.every(gone), `${pids.join(' and ')} to be gone`, 5_000);
+  });
+
+  it('kills a script that ignores SIGTERM within its grace, and says so', async () => {
+    const file = witness();
+    const controller = new AbortController();
+    const running = check('stubborn.sh', file, controller);
+    await until(() => existsSync(file), 'the script to start its helper');
+    const pids = await pidsIn(file);
+
+    const abortedAt = performance.now();
+    controller.abort(new Error('the check exceeded its timeout'));
+    await assert.rejects(
+      running,
+      new RegExp(
+        '^ScriptError: stubborn\\.sh was still running after \\d+ ms when the check was ended ' +
+          '\\(the check exceeded its timeout\\), and was killed with SIGKILL, having ignored ' +
+          `SIGTERM for ${String(SCRIPT_GRACE_MS)} ms: holding on$`,
+      ),
+    );
+    const tookMs = performance.now() - abortedAt;
+    // The grace and no less, and well inside the 2 s the probe's runner gives a check to answer
+    // after its abort: past that the runner kills the check's process, with nothing to say.
+    assert.ok(tookMs >= SCRIPT_GRACE_MS - 5, `killed ${String(Math.round(tookMs))} ms after`);
+    // Not `runProgram`'s default of 5 s, which would outlast the runner's margin.
+    assert.ok(tookMs < 4_000, `killed ${String(Math.round(tookMs))} ms after`);
+    await until(() => pids.every(gone), `${pids.join(' and ')} to be gone`, 5_000);
+  });
+
+  it('says its own timeout when that comes first, with the check’s still to come', async () => {
+    const file = witness();
+    const controller = new AbortController();
+    const late = setTimeout(() => {
+      controller.abort(new Error('the check exceeded its timeout'));
+    }, 20_000);
+    try {
+      await assert.rejects(
+        check('halfway.sh', file, controller, 1_000),
+        /^ScriptError: halfway\.sh was still running after 1000 ms, its own timeout, and was stopped with SIGTERM: fetched 3 of 5 pages$/,
+      );
+      assert.equal(controller.signal.aborted, false);
+    } finally {
+      clearTimeout(late);
+    }
+  });
+
+  it('does not start a script for a check already ended', async () => {
+    const file = witness();
+    const controller = new AbortController();
+    controller.abort('the probe is stopping');
+    await assert.rejects(
+      () =>
+        run(
+          exeScript,
+          { program: 'witness.sh', env: [{ name: 'MS_VAR_PIDS', value: file }] },
+          { signal: controller.signal },
+        ),
+      /^ScriptError: witness\.sh was not started: the probe is stopping$/,
+    );
+    assert.equal(existsSync(file), false, 'the script ran');
+  });
+
+  it('is not failed by an abort that comes after its answer', async () => {
+    const file = witness();
+    const controller = new AbortController();
+    const execution = await run(
+      exeScript,
+      { program: 'witness.sh', env: [{ name: 'MS_VAR_PIDS', value: file }] },
+      { signal: controller.signal },
+    );
+    assert.equal(execution.message, 'ran');
+    // Nothing of the run is left listening, so the abort that ends the check later reaches no
+    // process of this one's — however many checks share a long-lived signal.
+    assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+    controller.abort(new Error('the check exceeded its timeout'));
+    assert.equal(valueOf(execution, 'value'), 1);
+  });
+
+  it('says why in the words of whoever ended it, and a cancel with none as a cancel', () => {
+    const of = (reason?: unknown): string => {
+      const controller = new AbortController();
+      controller.abort(reason);
+      return abortReason(controller.signal);
+    };
+    assert.equal(of(new Error('the check exceeded its timeout')), 'the check exceeded its timeout');
+    assert.equal(of('the probe is stopping'), 'the probe is stopping');
+    assert.equal(of(), 'the check was cancelled');
+    assert.equal(of(''), 'the check was cancelled');
+    assert.equal(of(new Error('')), 'the check was cancelled');
   });
 });
 

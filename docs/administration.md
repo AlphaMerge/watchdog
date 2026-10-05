@@ -654,6 +654,18 @@ arguments and the variables — so treat both as untrusted input in every script
   is the probe's machine to look at and not the script; Probe Health counts it in
   `childStartupFailed`. So the most one check can hold a slot is 30 s, its timeout and 2 s, and
   5 s more for a process that ignores `SIGTERM`.
+- **A script has two limits, and whichever comes first ends it** (`P-262`): the sensor's own
+  **Timeout** parameter, and the check's scan timeout. Either way the script and everything it
+  started — its whole process group — is sent `SIGTERM`, then `SIGKILL` one second later, which
+  is inside the 2 s the probe waits before killing the check's process, so the sensor reads the
+  script's diagnosis and not the probe's. The message names the script, says which limit it ran
+  into and what it printed last: *check.sh was still running after 30000 ms, its own timeout,
+  and was stopped with SIGTERM: …*, or *check.sh was still running after 10003 ms when the check
+  was ended (the check exceeded its timeout), and was killed with SIGKILL, having ignored SIGTERM
+  for 1000 ms: …*. Set the Timeout parameter below the scan timeout to have the script's own
+  message; at the defaults (both 30 s) the scan timeout comes first. A script that cleans up on
+  `SIGTERM` has one second to do it. When the probe stops while a script runs, the script and
+  what it started are ended the same way.
 
 **On upgrade**, a script sensor that already sets a variable outside `MS_VAR_` is not rewritten —
 renaming a variable changes what its script sees. It goes **Down** with a message naming the

@@ -137,7 +137,41 @@ describe('running a program', { skip: posix ? false : 'POSIX only' }, () => {
     const file = await script('slow.sh', 'sleep 30');
     const result = await run(file, { timeoutMs: 300 });
     assert.equal(result.outcome, 'timeout');
+    assert.equal(result.endedBy, 'deadline');
     assert.ok(result.durationMs < 5_000);
+  });
+
+  it('says which ended it, the deadline or the caller, and only the first (`P-262`)', async () => {
+    const file = await script('stubborn-p262.sh', "trap '' TERM; sleep 30");
+
+    const caller = new AbortController();
+    const early = setTimeout(() => {
+      caller.abort();
+    }, 200);
+    const aborted = await run(file, { timeoutMs: 60_000, signal: caller.signal, graceMs: 200 });
+    clearTimeout(early);
+    assert.ok(aborted.outcome === 'timeout');
+    assert.equal(aborted.endedBy, 'signal');
+
+    // The caller's abort arriving while the deadline's SIGTERM is being ignored changes nothing:
+    // the program ran into the deadline first.
+    const late = new AbortController();
+    const during = setTimeout(() => {
+      late.abort();
+    }, 400);
+    const timed = await run(file, { timeoutMs: 200, signal: late.signal, graceMs: 600 });
+    clearTimeout(during);
+    assert.equal(late.signal.aborted, true, 'the caller aborted during the grace');
+    assert.ok(timed.outcome === 'timeout');
+    assert.equal(timed.endedBy, 'deadline');
+    assert.equal(timed.hardKilled, true);
+
+    // And a signal aborted before the start is the caller's too.
+    const before = new AbortController();
+    before.abort();
+    const never = await run(file, { signal: before.signal, graceMs: 200 });
+    assert.ok(never.outcome === 'timeout');
+    assert.equal(never.endedBy, 'signal');
   });
 
   it('kills a program that ignores being asked to stop', async () => {

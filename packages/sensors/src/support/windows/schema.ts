@@ -90,6 +90,8 @@ export function windowsOptions(context: CheckContext): PowerShellOptions {
     timeoutMs: Number(context.params['timeoutMs'] ?? 30_000),
     // What PowerShell printed is scrubbed before it is cut into a message (`S-21`).
     scrub: scrubberOf(context),
+    // Ended on the check's cancel as on its own timeout (`P-262`).
+    signal: context.signal,
     ...(username === ''
       ? {}
       : {
