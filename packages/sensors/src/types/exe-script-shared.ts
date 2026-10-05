@@ -1,5 +1,6 @@
 import type { CheckContext, JsonSchema } from '../contract.js';
-import { abortReason } from '../support/abort-reason.js';
+import { abortReason, endedHow } from '../support/program-ended.js';
+import { SCRIPT_GRACE_MS } from '../support/script/grace.js';
 import { scrubberOf } from '../support/secrets.js';
 import { ScriptError } from '../support/script/resolve.js';
 
@@ -14,19 +15,7 @@ import { ScriptError } from '../support/script/resolve.js';
 /** Enough output for any sensible script, and bounded so a chatty one cannot fill memory. */
 const MAX_OUTPUT_BYTES = 512 * 1024;
 
-/**
- * How long a script is given to end on `SIGTERM` before its process group is sent `SIGKILL`
- * (`P-262`), whichever limit it ran into.
- *
- * **Under the probe runner's kill margin, deliberately.** A script check runs in a process of its
- * own, whose `ctx.signal` aborts at the check's timeout; the runner kills that process 2 s later
- * (`KILL_MARGIN_MS`) if it has not answered. `runProgram`'s default of 5 s would let a script
- * that ignores `SIGTERM` outlive that, and the sensor would read the runner's *did not finish
- * within* instead of what the script was doing. One second ends the script and leaves the other
- * for the answer. The same for the script's own `timeoutMs`, which can sit just below the
- * check's and would otherwise run its grace past the same kill.
- */
-export const SCRIPT_GRACE_MS = 1_000;
+export { SCRIPT_GRACE_MS };
 
 /**
  * The only variables a sensor may set (`S-19`): its own namespace, and nothing an interpreter,
@@ -145,10 +134,11 @@ export const SCRIPT_SCHEMA: Readonly<Record<string, JsonSchema>> = {
     default: 30_000,
     title: 'Timeout',
     description:
-      'The program is sent SIGTERM at this point and SIGKILL one second later — and the whole ' +
-      'process *group* is, so a script that backgrounds something does not outlive its own kill. ' +
-      'The sensor’s scan timeout ends it the same way, if that comes first; the message says ' +
-      'which of the two it ran into.',
+      'On Linux the program is sent SIGTERM at this point and SIGKILL one second later — and ' +
+      'the whole process *group* is, so a script that backgrounds something does not outlive ' +
+      'its own kill. The sensor’s scan timeout ends it the same way, if that comes first; the ' +
+      'message says which of the two it ran into. On Windows the program itself is ended at ' +
+      'once, and what it started is not.',
   },
 };
 
@@ -214,14 +204,12 @@ export async function runScript(context: CheckContext): Promise<ScriptRun> {
   if (run.outcome === 'timeout') {
     // What it printed before it was stopped is where it got to: stderr first, as for an exit.
     const said = tail(scrub(run.stderr)) || tail(scrub(run.stdout));
-    const how = run.hardKilled
-      ? `killed with SIGKILL, having ignored SIGTERM for ${String(SCRIPT_GRACE_MS)} ms`
-      : 'stopped with SIGTERM';
+    const how = endedHow(run.hardKilled, SCRIPT_GRACE_MS);
     throw new ScriptError(
       run.endedBy === 'deadline'
         ? `${program} was still running after ${String(timeoutMs)} ms, its own timeout, and ` +
             `was ${how}${said}`
-        : `${program} was still running after ${String(run.durationMs)} ms when the check was ` +
+        : `${program} was still running after ${String(run.endedAfterMs)} ms when the check was ` +
             `ended (${abortReason(context.signal)}), and was ${how}${said}`,
     );
   }

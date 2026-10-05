@@ -130,6 +130,14 @@ function run(text) {
     case 'hang':
       setInterval(() => undefined, 1_000);
       return;
+    case 'stubborn':
+      // Hangs and ignores SIGTERM, which only SIGKILL ends (\`P-262\`). Says so by creating the
+      // file the directive names once the handler is in place, so a test can abort knowing the
+      // SIGTERM will be ignored rather than end a process still starting.
+      process.on('SIGTERM', () => undefined);
+      if (rest !== '') require('node:fs').writeFileSync(rest, '');
+      setInterval(() => undefined, 1_000);
+      return;
     default:
       say({ ok: false, error: \`the fake does not know "\${what}"\`, category: 'NotSpecified' });
   }

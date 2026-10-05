@@ -1,5 +1,5 @@
 import { platform } from 'node:os';
-import { abortReason } from '../abort-reason.js';
+import { abortReason, endedHow } from '../program-ended.js';
 import {
   ENV_AUTH,
   ENV_HOST,
@@ -75,6 +75,20 @@ const MAX_ENCODED_LENGTH = 32_000;
  */
 export const AUTHENTICATIONS = ['Default', 'Negotiate', 'Kerberos', 'Basic'] as const;
 export type Authentication = (typeof AUTHENTICATIONS)[number];
+
+/**
+ * How long PowerShell is given to end on `SIGTERM` before `SIGKILL` (`P-262`).
+ *
+ * **Under the pool's abort grace.** A Windows check runs in a pool worker. At its timeout the
+ * pool aborts it and, `probe.checkAbortGraceMs` later (2 s by default), terminates the worker if
+ * it has not answered — and `runProgram`'s `SIGKILL` timer lives in that worker, so with its
+ * default 5 s a PowerShell that ignored `SIGTERM` was left running in a process group nobody
+ * would end. One second is half the default, as `SCRIPT_GRACE_MS` is of the process runner's
+ * margin. Not read from the setting: the worker is not told it, and a probe whose operator set
+ * it below a second terminates a worker that is still waiting out this, as it terminates any
+ * other check that has not answered.
+ */
+export const POWERSHELL_GRACE_MS = 1_000;
 
 export interface PowerShellOptions {
   /** Empty runs on this machine — a Windows probe measuring itself. */
@@ -154,6 +168,7 @@ export async function runPowerShell(
     env: environment,
     timeoutMs: options.timeoutMs,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
+    graceMs: POWERSHELL_GRACE_MS,
     maxOutputBytes: MAX_OUTPUT_BYTES,
   });
 
@@ -165,10 +180,10 @@ export async function runPowerShell(
     );
   }
   if (run.outcome === 'timeout') {
-    const how = run.hardKilled ? 'killed' : 'stopped';
+    const how = endedHow(run.hardKilled, POWERSHELL_GRACE_MS);
     throw new WindowsError(
       run.endedBy === 'signal' && options.signal !== undefined
-        ? `PowerShell was still running after ${String(run.durationMs)} ms when the check was ` +
+        ? `PowerShell was still running after ${String(run.endedAfterMs)} ms when the check was ` +
             `ended (${abortReason(options.signal)}), and was ${how}${tail(scrub(run.stderr))}`
         : `PowerShell was still running after ${String(options.timeoutMs)} ms and was ` +
             `${how}${tail(scrub(run.stderr))}`,

@@ -19,7 +19,7 @@ import { exeScript } from '../src/types/exe-script.js';
 import { exeScriptAdvanced } from '../src/types/exe-script-advanced.js';
 import { keyOf, parseAdvanced, parseSimple } from '../src/support/script/parse.js';
 import { resolveProgram, SCRIPT_DIR_ENV } from '../src/support/script/resolve.js';
-import { abortReason } from '../src/support/abort-reason.js';
+import { abortReason, endedHow } from '../src/support/program-ended.js';
 import { SCRIPT_GRACE_MS } from '../src/types/exe-script-shared.js';
 import type { CheckContext, CheckExecution } from '../src/contract.js';
 
@@ -87,16 +87,20 @@ before(() => {
   script('prtg-error.sh', 'echo \'{"prtg":{"error":1,"text":"the API said no"}}\'');
   script('noisy.sh', 'head -c 1000000 /dev/zero | tr "\\0" "x"');
   // `P-262`: a script that says where it got to and sleeps; one that starts a helper and waits
-  // for it; and one that does the same while ignoring SIGTERM, as its helper then does too. The
-  // two that start a helper write their own pid and the helper's to `MS_VAR_PIDS`.
+  // for it; and one that does the same while ignoring SIGTERM, as its helper then does too. Each
+  // prints first and only then leaves its witness at `MS_VAR_PIDS`, so a test that sees the
+  // witness may assert the output. The two that start a helper write their own pid and the
+  // helper's, by rename, so the file is never seen half-written.
   script('halfway.sh', 'echo "fetched 3 of 5 pages"\ntouch "$MS_VAR_PIDS"\nsleep 30');
   script(
     'helper.sh',
-    'sleep 30 &\necho "$$ $!" > "$MS_VAR_PIDS"\necho "waiting on the helper"\nwait',
+    'sleep 30 &\necho "waiting on the helper"\n' +
+      'echo "$$ $!" > "$MS_VAR_PIDS.tmp" && mv "$MS_VAR_PIDS.tmp" "$MS_VAR_PIDS"\nwait',
   );
   script(
     'stubborn.sh',
-    'trap \'\' TERM\nsleep 30 &\necho "$$ $!" > "$MS_VAR_PIDS"\necho \'holding on\' >&2\nwait',
+    "trap '' TERM\nsleep 30 &\necho 'holding on' >&2\n" +
+      'echo "$$ $!" > "$MS_VAR_PIDS.tmp" && mv "$MS_VAR_PIDS.tmp" "$MS_VAR_PIDS"\nwait',
   );
   script('witness.sh', 'touch "$MS_VAR_PIDS"\necho "0:1:ran"');
 
@@ -534,21 +538,36 @@ describe('the check’s own cancel (P-262)', () => {
   it('kills a script that ignores SIGTERM within its grace, and says so', async () => {
     const file = witness();
     const controller = new AbortController();
+    const calledAt = performance.now();
     const running = check('stubborn.sh', file, controller);
     await until(() => existsSync(file), 'the script to start its helper');
     const pids = await pidsIn(file);
 
     const abortedAt = performance.now();
     controller.abort(new Error('the check exceeded its timeout'));
-    await assert.rejects(
-      running,
+    const error = await running.then(
+      () => assert.fail('the script was not ended'),
+      (failure: unknown) => failure,
+    );
+    const tookMs = performance.now() - abortedAt;
+    const message = String(error);
+    assert.match(
+      message,
       new RegExp(
         '^ScriptError: stubborn\\.sh was still running after \\d+ ms when the check was ended ' +
           '\\(the check exceeded its timeout\\), and was killed with SIGKILL, having ignored ' +
           `SIGTERM for ${String(SCRIPT_GRACE_MS)} ms: holding on$`,
       ),
     );
-    const tookMs = performance.now() - abortedAt;
+    // The time it had run when the abort came, not when it was finally gone: the program started
+    // after the call, and the abort ends it in the same turn, so no load can put the number past
+    // the abort. Ended a second later, it would read a second more.
+    const said = Number(/after (\d+) ms/.exec(message)?.[1]);
+    const abortedAfterMs = abortedAt - calledAt;
+    assert.ok(
+      said <= abortedAfterMs + 50,
+      `said ${String(said)} ms for an abort ${String(Math.round(abortedAfterMs))} ms after the call`,
+    );
     // The grace and no less, and well inside the 2 s the probe's runner gives a check to answer
     // after its abort: past that the runner kills the check's process, with nothing to say.
     assert.ok(tookMs >= SCRIPT_GRACE_MS - 5, `killed ${String(Math.round(tookMs))} ms after`);
@@ -604,6 +623,20 @@ describe('the check’s own cancel (P-262)', () => {
     assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
     controller.abort(new Error('the check exceeded its timeout'));
     assert.equal(valueOf(execution, 'value'), 1);
+  });
+
+  it('says how the program was ended, and on Windows no more than Windows did', () => {
+    assert.equal(endedHow(false, 1_000, 'linux'), 'stopped with SIGTERM');
+    assert.equal(
+      endedHow(true, 1_000, 'linux'),
+      'killed with SIGKILL, having ignored SIGTERM for 1000 ms',
+    );
+    // `TerminateProcess` on the program alone: nothing was ignored, and its children live on.
+    assert.equal(
+      endedHow(false, 1_000, 'win32'),
+      'ended (on Windows, the program itself: what it started is not ended)',
+    );
+    assert.doesNotMatch(endedHow(true, 1_000, 'win32'), /SIGTERM|SIGKILL/);
   });
 
   it('says why in the words of whoever ended it, and a cancel with none as a cancel', () => {

@@ -7914,7 +7914,7 @@ because each is a decision rather than a defect:
         check exceeded its timeout), and was killed with SIGKILL, having ignored SIGTERM for
         1000 ms: …*, ending with the last of stderr, or of stdout when stderr is empty, scrubbed
         and cut as before. A check already ended is not started (*check.sh was not started: …*).
-        `support/abort-reason.ts` turns the signal's reason into words, and an abort with none
+        `support/program-ended.ts` turns the signal's reason into words, and an abort with none
         into *the check was cancelled*.
       - **The grace is 1 s for a script** (`SCRIPT_GRACE_MS`), not `runProgram`'s 5 s. With 5 s a
         script that ignores `SIGTERM` outlived the runner's kill at the timeout + 2 s, and the
@@ -7960,8 +7960,31 @@ because each is a decision rather than a defect:
         whole, 185/185. process-runner 20/20 (36/36 each) beside the probe suite on loop, in one
         `dev.sh` started at VM count 0: 20 suite runs, all 505/505, load 1.6–6.2.
       - **Not fixed:** a check process that dies outright (its own `SIGKILL`, or a heap
-        exhaustion) still leaves a script in its own process group running; and PowerShell keeps
-        `runProgram`'s 5 s grace inside the pool's 2 s abort grace.
+        exhaustion) still leaves a script in its own process group running.
+      - **Amended on review** (a second commit):
+        - **Linux only, said so.** On Windows `runProgram`'s `SIGTERM` is `TerminateProcess` on
+          the program alone, so neither the check process's cancel nor the tree kill happens.
+          The kill path is unchanged (1.0 is Linux-only); the schema, the sensor reference and
+          administration.md say what Windows does today, and `endedHow` (`program-ended.ts`)
+          words the message per platform, never *ignored SIGTERM* on Windows.
+        - **PowerShell's grace is 1 s** (`POWERSHELL_GRACE_MS`), under the pool's
+          `checkAbortGraceMs` (2 s by default), which terminates the worker that holds the
+          `SIGKILL` timer. A fake PowerShell that ignores `SIGTERM` is killed inside 2 s.
+        - **The number in the message is when the limit came.** `runProgram`'s timeout carries
+          `endedAfterMs`, taken when it ends the program; `durationMs` held the grace as well.
+          Tests hold it at or before the abort, which no load can move.
+        - **The tests' scripts print, then leave their witness**, the pids by rename, and the
+          runner-path tests give the script 10 s to start (`P-258`'s worst Node start was above
+          6 s once), assert the witness, and assert the answer came inside the timeout plus
+          `KILL_MARGIN_MS` and after the grace (`SCRIPT_GRACE_MS`, now importable from
+          `@ms/sensors/script`).
+        - **Mutation 6/6** on the fixes: `endedAfterMs` never set; the script's and PowerShell's
+          messages reading `durationMs`; PowerShell's grace dropped; the Windows wording
+          inverted; the script grace at 3 s (only the runner-path test sees it).
+        - **Runs:** run-program, exe-script, windows-transport, process-runner, catalogue and
+          `build-hygiene` whole, 223/223. process-runner 20/20 (36/36) and exe-script 20/20
+          (61/61), in turn, beside the probe suite on loop in one `dev.sh` started at VM count 0:
+          21 suite runs, all 505/505, load 1.4–19.1.
 
 - [ ] **P-263 — a pool worker that hangs while loading has no start-up bound** · S · P-260 ·
       Found 2026-10-05 in `P-260`. `pool.ts` `#start` waits for a new worker's `ready`, `error`

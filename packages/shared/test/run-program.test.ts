@@ -145,13 +145,25 @@ describe('running a program', { skip: posix ? false : 'POSIX only' }, () => {
     const file = await script('stubborn-p262.sh', "trap '' TERM; sleep 30");
 
     const caller = new AbortController();
+    const calledAt = performance.now();
+    let abortedAfterMs = Infinity;
     const early = setTimeout(() => {
+      abortedAfterMs = performance.now() - calledAt;
       caller.abort();
     }, 200);
     const aborted = await run(file, { timeoutMs: 60_000, signal: caller.signal, graceMs: 200 });
     clearTimeout(early);
     assert.ok(aborted.outcome === 'timeout');
     assert.equal(aborted.endedBy, 'signal');
+    // When the limit came, not when the program was finally gone: it ignored SIGTERM for the
+    // grace, which `durationMs` holds and `endedAfterMs` does not. The program started after the
+    // call and the abort ends it in the same turn, so no load puts the number past the abort.
+    assert.equal(aborted.hardKilled, true);
+    assert.ok(
+      aborted.endedAfterMs <= abortedAfterMs + 50,
+      `ended after ${String(aborted.endedAfterMs)} ms for an abort at ${String(abortedAfterMs)}`,
+    );
+    assert.ok(aborted.durationMs >= aborted.endedAfterMs + 200 - 5, 'and then the grace');
 
     // The caller's abort arriving while the deadline's SIGTERM is being ignored changes nothing:
     // the program ran into the deadline first.
@@ -165,6 +177,8 @@ describe('running a program', { skip: posix ? false : 'POSIX only' }, () => {
     assert.ok(timed.outcome === 'timeout');
     assert.equal(timed.endedBy, 'deadline');
     assert.equal(timed.hardKilled, true);
+    assert.ok(timed.endedAfterMs >= 195, `the deadline at ${String(timed.endedAfterMs)} ms`);
+    assert.ok(timed.endedAfterMs < timed.durationMs, 'before the program was gone');
 
     // And a signal aborted before the start is the caller's too.
     const before = new AbortController();

@@ -1,13 +1,15 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { rmSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { SensorCatalogue } from '../src/catalogue.js';
 import type { CheckContext } from '../src/contract.js';
 import { SCRUBBED } from '../src/support/secrets.js';
 import {
   POWERSHELL_ENV,
+  POWERSHELL_GRACE_MS,
   RESULT_MARKER,
   WindowsError,
   asRows,
@@ -252,7 +254,7 @@ describe('running it', () => {
     const startedAt = Date.now();
     await assert.rejects(
       () => run('#FAKE:hang', { timeoutMs: 700 }),
-      /still running after 700 ms and was stopped/,
+      /still running after 700 ms and was stopped with SIGTERM/,
     );
     assert.ok(Date.now() - startedAt < 15_000, 'and did not wait for the grace period twice');
   });
@@ -268,12 +270,55 @@ describe('running it', () => {
     try {
       await assert.rejects(
         () => run('#FAKE:hang', { timeoutMs: 60_000, signal: controller.signal }),
-        /^WindowsError: PowerShell was still running after \d+ ms when the check was ended \(the check exceeded its timeout\), and was stopped$/,
+        /^WindowsError: PowerShell was still running after \d+ ms when the check was ended \(the check exceeded its timeout\), and was stopped with SIGTERM$/,
       );
     } finally {
       clearTimeout(early);
     }
     assert.ok(Date.now() - startedAt < 15_000, 'ended on the abort, not its own minute');
+  });
+
+  it('kills a PowerShell that ignores SIGTERM inside the pool’s abort grace (`P-262`)', async () => {
+    // The pool terminates a worker `checkAbortGraceMs` (2 s) after the abort, and the SIGKILL
+    // timer lives in the worker: it has to fire first, or PowerShell outlives it.
+    const ready = join(mkdtempSync(join(tmpdir(), 'ms-p262-ps-')), 'ignoring');
+    const controller = new AbortController();
+    const calledAt = performance.now();
+    const running = run(`#FAKE:stubborn ${ready}`, {
+      timeoutMs: 60_000,
+      signal: controller.signal,
+    });
+    const deadline = Date.now() + 20_000;
+    while (!existsSync(ready)) {
+      if (Date.now() > deadline) throw new Error('the fake never said it ignores SIGTERM');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const abortedAt = performance.now();
+    controller.abort(new Error('the check exceeded its timeout'));
+    const error = await running.then(
+      () => assert.fail('PowerShell was not ended'),
+      (failure: unknown) => failure,
+    );
+    const tookMs = performance.now() - abortedAt;
+    rmSync(dirname(ready), { recursive: true, force: true });
+    const message = String(error);
+    assert.match(
+      message,
+      new RegExp(
+        '^WindowsError: PowerShell was still running after \\d+ ms when the check was ended ' +
+          '\\(the check exceeded its timeout\\), and was killed with SIGKILL, having ignored ' +
+          `SIGTERM for ${String(POWERSHELL_GRACE_MS)} ms$`,
+      ),
+    );
+    // How long it had run when the abort came, which no load can put past the abort; not when
+    // it was gone, a grace later.
+    const said = Number(/after (\d+) ms/.exec(message)?.[1]);
+    assert.ok(
+      said <= abortedAt - calledAt + 50,
+      `said ${String(said)} ms for an abort ${String(Math.round(abortedAt - calledAt))} ms in`,
+    );
+    assert.ok(tookMs >= POWERSHELL_GRACE_MS - 5, `killed ${String(Math.round(tookMs))} ms after`);
+    assert.ok(tookMs < 2_000, `killed ${String(Math.round(tookMs))} ms after, past the pool's 2 s`);
   });
 
   it('reports the interpreter’s own failure with its stderr', async () => {

@@ -6,3 +6,4 @@
  * own thread. One name, exported on its own.
  */
 export { SCRIPT_DIR_ENV } from './resolve.js';
+export { SCRIPT_GRACE_MS } from './grace.js';

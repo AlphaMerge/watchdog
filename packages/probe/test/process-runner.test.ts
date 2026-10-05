@@ -6,8 +6,9 @@ import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { pino } from 'pino';
 import type { CheckResult } from '@ms/shared';
-import { SCRIPT_DIR_ENV } from '@ms/sensors/script';
+import { SCRIPT_DIR_ENV, SCRIPT_GRACE_MS } from '@ms/sensors/script';
 import {
+  KILL_MARGIN_MS,
   leftOf,
   ProcessRunner,
   ReadyLine,
@@ -653,13 +654,27 @@ describe('a script check in a process of its own (`P-262`)', () => {
 
   before(async () => {
     dir = await mkdtemp(join(tmpdir(), 'ms-p262-'));
-    await script('halfway.sh', 'echo "fetched 3 of 5 pages"\nsleep 60');
+    // Each prints first and then leaves its witness, so a test that finds the witness knows the
+    // script got as far as its output (and, for the second, its trap). The pids go by rename, so
+    // the file is never read half-written.
+    await script('halfway.sh', 'echo "fetched 3 of 5 pages"\ntouch "$MS_VAR_PIDS"\nsleep 60');
     // Ignores SIGTERM, as its helper then does too, and waits for the helper.
     await script(
       'stubborn.sh',
-      'trap \'\' TERM\nsleep 60 &\necho "$$ $!" > "$MS_VAR_PIDS"\necho \'holding on\' >&2\nwait',
+      "trap '' TERM\nsleep 60 &\necho 'holding on' >&2\n" +
+        'echo "$$ $!" > "$MS_VAR_PIDS.tmp" && mv "$MS_VAR_PIDS.tmp" "$MS_VAR_PIDS"\nwait',
     );
   });
+
+  /**
+   * The check's timeout, from its ready line, for a script that must have started and printed
+   * before it: **10 s**. In that time the check runs the catalogue's preamble, resolves the
+   * program and spawns `sh`, which prints at once. `P-258` measured a whole Node process's start
+   * — heavier than all of that — at 0.03–0.27 s at load 4.6–18 and above 6 s once at load 18–50;
+   * ten seconds is past the worst of those. Each test then asserts the witness the script left
+   * after printing, so a start slower still fails saying so rather than matching by luck.
+   */
+  const STARTED_WITHIN_MS = 10_000;
 
   after(async () => {
     await rm(dir, { recursive: true, force: true });
@@ -670,8 +685,10 @@ describe('a script check in a process of its own (`P-262`)', () => {
 
   it('reports the script’s own diagnosis at the check’s timeout, not the runner’s kill', async () => {
     const { runner, seen } = scripts();
-    runner.submit(scriptCheck(120, 'halfway.sh', 1_500).request);
-    await until(() => seen.length === 1, 'the check to answer', 40_000);
+    const { request: check, file } = scriptCheck(120, 'halfway.sh', STARTED_WITHIN_MS);
+    runner.submit(check);
+    await until(() => seen.length === 1, 'the check to answer', 60_000);
+    assert.ok(existsSync(file), 'the script printed and left its witness before the abort');
 
     const { result, meta } = seen[0] ?? {};
     assert.equal(result?.outcome, 'error');
@@ -687,19 +704,37 @@ describe('a script check in a process of its own (`P-262`)', () => {
   });
 
   it('kills a script that ignores SIGTERM, and its helper, before the runner’s kill', async () => {
-    // The script's grace (1 s) inside the runner's margin (2 s), so the answer comes first.
+    // The script's grace inside the runner's margin, so the answer comes first.
     const { runner, seen } = scripts();
-    const { request: check, file } = scriptCheck(121, 'stubborn.sh', 1_500);
+    const { request: check, file } = scriptCheck(121, 'stubborn.sh', STARTED_WITHIN_MS);
     runner.submit(check);
-    await until(() => seen.length === 1, 'the check to answer', 40_000);
+    await until(() => seen.length === 1, 'the check to answer', 60_000);
+    assert.ok(existsSync(file), 'the script trapped, printed and wrote its pids before the abort');
 
     const { result, meta } = seen[0] ?? {};
     assert.equal(meta?.phase, 'aborted');
     assert.match(
       result?.message ?? '',
-      /^stubborn\.sh was still running after \d+ ms when the check was ended \(the check exceeded its timeout\), and was killed with SIGKILL, having ignored SIGTERM for 1000 ms: holding on$/,
+      new RegExp(
+        '^stubborn\\.sh was still running after \\d+ ms when the check was ended \\(the check ' +
+          'exceeded its timeout\\), and was killed with SIGKILL, having ignored SIGTERM for ' +
+          `${String(SCRIPT_GRACE_MS)} ms: holding on$`,
+      ),
     );
-    assert.ok(existsSync(file), 'the script wrote its pids');
+    // **Before the runner's kill, measured.** The check's own time, from its ready line to its
+    // answer, is under the timeout and the margin the runner counts from its later reading of
+    // the same line — so the answer was written before the runner would have killed it. And it
+    // waited out the grace: the SIGKILL, not the SIGTERM, ended the script.
+    const tookMs = result?.durationMs ?? Infinity;
+    assert.ok(
+      tookMs < STARTED_WITHIN_MS + KILL_MARGIN_MS,
+      `answered ${String(Math.round(tookMs))} ms after it started, past the runner's kill`,
+    );
+    assert.ok(
+      tookMs >= STARTED_WITHIN_MS + SCRIPT_GRACE_MS - 5,
+      `answered ${String(Math.round(tookMs))} ms after it started, inside the grace`,
+    );
+    assert.equal(runner.stats().timedOut, 1);
     const pids = await pidsIn(file);
     await until(() => pids.every(gone), `${pids.join(' and ')} to be gone`, 5_000);
   });

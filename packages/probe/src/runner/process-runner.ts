@@ -154,7 +154,7 @@ const DEFAULT_MAX_OUTPUT = 64 * 1024;
  * diagnosis; this is the margin in which it may do so. Past it the process group goes, which is
  * a result with nothing to say about where the check got to.
  */
-const KILL_MARGIN_MS = 2_000;
+export const KILL_MARGIN_MS = 2_000;
 
 /**
  * How long a check's process is given to start: from its spawn to its saying it has loaded the

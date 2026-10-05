@@ -12,6 +12,7 @@ export {
 export {
   AUTHENTICATIONS,
   POWERSHELL_ENV,
+  POWERSHELL_GRACE_MS,
   runPowerShell,
   type Authentication,
   type PowerShellOptions,

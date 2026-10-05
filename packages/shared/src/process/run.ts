@@ -67,6 +67,12 @@ export type ProgramRun =
        * change the answer, so a caller can say which limit the program ran into.
        */
       readonly endedBy: 'deadline' | 'signal';
+      /**
+       * How long the program had run when that limit came, in ms. Not `durationMs`, which is
+       * taken once it has ended and so holds the grace and the stopping as well: a program asked
+       * to stop at 10 s that ignores `SIGTERM` for 5 s has a `durationMs` of 15 s.
+       */
+      readonly endedAfterMs: number;
     } & ProgramOutput)
   | ({
       readonly outcome: 'failed';
@@ -142,6 +148,7 @@ export async function runProgram(options: ProgramRunOptions): Promise<ProgramRun
     let timedOut = false;
     let hardKilled = false;
     let endedBy: 'deadline' | 'signal' = 'deadline';
+    let endedAfterMs = 0;
 
     const grace = options.graceMs ?? DEFAULT_GRACE_MS;
     let hardTimer: NodeJS.Timeout | undefined;
@@ -149,6 +156,7 @@ export async function runProgram(options: ProgramRunOptions): Promise<ProgramRun
       if (timedOut || settled) return;
       timedOut = true;
       endedBy = by;
+      endedAfterMs = elapsed();
       terminate(child, 'SIGTERM');
       // Asked to stop, then made to. A program that ignores SIGTERM is exactly the one a hard
       // timeout exists for.
@@ -191,7 +199,7 @@ export async function runProgram(options: ProgramRunOptions): Promise<ProgramRun
     // is usually the line explaining why it failed.
     child.on('close', (code: number | null, signal: string | null) => {
       if (timedOut) {
-        finish({ outcome: 'timeout', hardKilled, endedBy, ...output() });
+        finish({ outcome: 'timeout', hardKilled, endedBy, endedAfterMs, ...output() });
         return;
       }
       if (signal !== null) {
