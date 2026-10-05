@@ -7798,8 +7798,11 @@ because each is a decision rather than a defect:
         most the marker's length) it swaps that for the check's timeout + `KILL_MARGIN_MS`. If
         the bound fires first it ends the process group and reports phase `startup`: *the probe
         took N ms to start the check and gave up: its process had not loaded the probe's sensor
-        types within the 30000 ms it is allowed, so the check never ran*. It does not count that
-        in `timedOut` or `crashed`. `runProgram` gained `onStdout`. Its own `timeoutMs` is now
+        types within the 30000 ms it is allowed, so the check never ran*. A process that exits
+        or is killed before its ready line, with no answer, is phase `startup` as well: *the
+        check process ended while it was loading the probe's sensor types, so the check never
+        ran — it exited with code N* (or *was killed by SIGNAL*). One that ends after the line
+        is still a crash. None of these is counted in `timedOut` or `crashed`. `runProgram` gained `onStdout`. Its own `timeoutMs` is now
         the backstop, at bound + timeout + margin, so one child can hold a slot for at most that
         plus the 5 s grace. The slot and `#active` are released as before, when `#run`
         settles (`#pump`'s `finally`), and nothing else in scheduling reads a child's duration.
@@ -7823,22 +7826,42 @@ because each is a decision rather than a defect:
           6.5 s load (the runner's) both succeed, with `durationMs` the check's own. Each fails
           with the fix undone: the first as *exceeded its timeout*, the second killed as *did
           not finish within 5000 ms*. The check is 0.3 × its timeout, not 0.8: at 1.6 s of 2 s
-          the runner's kill came 2.4 s after the check ended, and once, in a probe suite run beside
-          check-pool on loop at load 6.5–28, a child that had said it was ready did not answer within that. Now the
-          kill comes 5.5 s after.
-        - A hung load at a 1.5 s bound fails between 1.5 s and 11.5 s with phase `startup`, is
-          counted, and its pid is gone (ESRCH).
-        - A load that throws is a start-up failure, not a crash.
+          the runner's kill came 2.4 s after the check ended. Once, in a probe suite run beside
+          check-pool on loop at load 6.5–28, a child that had said it was ready did not answer
+          within that. Now the kill comes 5.5 s after.
+        - A hung load at a 10 s bound fails between 10 s and 20 s with phase `startup` and is
+          counted. The test asserts the pid file exists and that its pid is gone (ESRCH).
+          `support/pid-first.ts` writes the pid, by rename, before the registry loads anything
+          else. The bound is 10 s, not 1.5 s, because it runs from the spawn, and the pid can be
+          written only after Node has booted and read the request. `P-258` measured that start
+          at 0.03–0.27 s, and above 6 s once at load 18–50.
+        - A load that throws is a start-up failure, not a crash. So are a process that exits
+          (code 9) and one killed (`SIGKILL`) while loading, each with its code or signal named.
+          The existing `test.abort` and `test.crash` cases, which end after the ready line, stay
+          crashes.
         - After a slow load, a check that ignores its signal still reads *did not finish within*
           and one that honours it *exceeded its timeout*.
-        - A started check runs past the bound.
+        - A started check runs past the bound: 12 s against a 10 s bound, for the same boot
+          time.
         - `ReadyLine` and `leftOf` (the runner waits out a timer that fires up to 1 ms early, so
           it never reports a start shorter than the bound) have unit tests.
         - The `P-258` test keeps its minute, with its comment updated: the child's start no
           longer counts against the kill or the abort, but the `pinTarget` import inside the
           check still does.
       - **Also tested:** `healthForPeer` at 26–29, the schema accepting both fields, the core's
-        reading and `/metrics`, the sensor's channels, and `runProgram`'s `onStdout`.
+        reading and `/metrics`, the sensor's channels, and `runProgram`'s `onStdout`. The
+        `onStdout` test is given a minute's deadline and asserts that the caller aborted and
+        that the run ended inside 20 s, so only the abort can pass it.
+      - **Amended on review** (a second commit):
+        - The pid is written first, and the hung-load and started-check bounds are 10 s.
+        - The `onStdout` test now tests the abort.
+        - A process that ends before its ready line is a start-up failure.
+        - **Mutation 3/3** on the new branch: the ready test inverted (`readyAt !== undefined`),
+          its count dropped, and the code and signal swapped in its message. The last is also a
+          type error.
+        - **Runs:** process-runner, run-program, probe-health-report and capabilities whole,
+          126/126. process-runner 20/20 beside the probe suite on loop (19 suite runs, all
+          501/501, load 2.4–5.3).
       - **Mutation: 15/15 killed.** The ready line before the load; the child's abort counted
         from process start; the start-up clock not cleared at ready; the check's clock set to
         the start-up bound; the gave-up branch inverted; the count dropped; the start time not

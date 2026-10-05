@@ -44,7 +44,7 @@ import { MAX_EXCEPTION_ADDRESSES } from '../net/target-policy.js';
  *
  * Version 29 adds `childStartupFailed` and `childStartupMs` (`P-260`): checks whose child process
  * never got as far as running them — still loading the probe's sensor types at the start-up bound,
- * or unable to load them — and how long a child takes to start. The check's own timeout now runs
+ * unable to load them, or ended before it was ready — and how long a child takes to start. The check's own timeout now runs
  * from the moment its process is ready, so the start-up is reported here rather than spent out of
  * the check. Two new fields in a closed schema under one capability, `childStartup`: a core below
  * 29 is sent neither, and a probe below 29 sends neither and both channels gap.
@@ -537,7 +537,8 @@ export interface ProbeHealthReport {
   childCrashes?: number;
   /**
    * Checks whose child process never got as far as running them (`P-260`): still loading the
-   * probe's sensor types when the start-up bound passed, or unable to load them. A running total.
+   * probe's sensor types when the start-up bound passed, unable to load them, or exited or was
+   * killed while loading them. A running total.
    * Sent only to a core at protocol 29, and absent with the rest of the child block.
    *
    * **Not `childTimedOut`**, which counts checks that ran and ran out of time. A probe starved of

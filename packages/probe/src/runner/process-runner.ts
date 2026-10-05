@@ -64,8 +64,9 @@ export interface ProcessRunnerStats {
   crashed: number;
   /**
    * Checks that never ran because their process did not get as far as running them (`P-260`):
-   * it was still loading the probe's sensor types at the start-up bound and was ended, or the
-   * load failed. Counted in `failed` as well, and in neither `timedOut` nor `crashed`.
+   * it was still loading the probe's sensor types at the start-up bound and was ended, the load
+   * failed, or the process exited or was killed before it said it was ready. Counted in `failed`
+   * as well, and in neither `timedOut` nor `crashed`.
    */
   startupFailed: number;
   waitMs: Percentiles;
@@ -477,6 +478,35 @@ export class ProcessRunner {
       return;
     }
 
+    const ended =
+      run.outcome === 'signalled'
+        ? `it was killed by ${run.signal}`
+        : `it exited with code ${String(run.code)}`;
+    if (readyAt === undefined) {
+      // Ended before its ready line: the check never ran, so whatever ended it, it was the
+      // probe's start-up and not the check (`P-260`). A crash after the line is the check's.
+      this.#startupFailed += 1;
+      this.#failed += 1;
+      this.#logger.error(
+        {
+          sensorId: job.request.sensorId,
+          sensorType: job.request.sensorType,
+          outcome: run.outcome,
+          ...(run.outcome === 'exited' ? { code: run.code } : { signal: run.signal }),
+        },
+        'a check process ended while loading its sensor types',
+      );
+      this.#emit(job, waitMs, 'startup', {
+        outcome: 'error',
+        durationMs: run.durationMs,
+        message:
+          "the check process ended while it was loading the probe's sensor types, so the " +
+          `check never ran — ${ended}` +
+          tail(run.stderr),
+      });
+      return;
+    }
+
     this.#crashed += 1;
     this.#failed += 1;
     this.#logger.error(
@@ -494,9 +524,8 @@ export class ProcessRunner {
       durationMs: run.durationMs,
       message:
         'the check process ended without answering' +
-        (run.outcome === 'signalled'
-          ? ` — it was killed by ${run.signal}, which is what a native crash looks like`
-          : ` — it exited with code ${String(run.code)}`) +
+        ` — ${ended}` +
+        (run.outcome === 'signalled' ? ', which is what a native crash looks like' : '') +
         tail(run.stderr),
     });
   }

@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -267,29 +268,36 @@ describe('process runner', () => {
     it('gives up on a process still loading at the start-up bound, ends it, and counts it', async () => {
       // A load that never finishes, with a check timeout of a minute: before `P-260` this waited
       // for the runner's kill at 62 s, and then reported a check that did not finish in time.
+      //
+      // **Ten seconds, so that the child has written its pid before it is given up.** The bound
+      // runs from the spawn, and the pid is written once Node has booted, the child has read its
+      // request and begun importing the registry (`pid-first.ts`, before anything else it loads).
+      // That start was 0.03–0.27 s at load 4.6–18 and more than 6 s once at load 18–50 (`P-258`);
+      // at 1.5 s a loaded machine could end the child before it wrote anything.
+      const boundMs = 10_000;
       const dir = await mkdtemp(join(tmpdir(), 'ms-p260-'));
       try {
         const pidFile = join(dir, 'child.pid');
         const { runner, seen } = runnerOf({
           registryModule: STALLED,
-          startupTimeoutMs: 1_500,
+          startupTimeoutMs: boundMs,
           childEnv: { MS_TEST_REGISTRY_DELAY_MS: 'forever', MS_TEST_REGISTRY_PID_FILE: pidFile },
         });
         const submittedAt = performance.now();
         runner.submit(request(110, 'test.ok', { timeoutMs: 60_000 }));
-        await until(() => seen.length === 1, 'the start-up to be given up', 20_000);
+        await until(() => seen.length === 1, 'the start-up to be given up', 40_000);
         const tookMs = performance.now() - submittedAt;
 
         const { result, meta } = seen[0] ?? {};
         assert.equal(result?.outcome, 'error');
         assert.equal(meta?.phase, 'startup');
         assert.match(result.message, /^the probe took \d+ ms to start the check and gave up/);
-        assert.match(result.message, /within the 1500 ms it is allowed, so the check never ran/);
+        assert.match(result.message, /within the 10000 ms it is allowed, so the check never ran/);
         assert.doesNotMatch(result.message, /exceeded its timeout|did not finish within/);
         assert.deepEqual(result.channels, []);
         // Within the bound and the time it takes to end a process, and not before the bound.
-        assert.ok(tookMs >= 1_500, `given up after ${String(Math.round(tookMs))} ms`);
-        assert.ok(tookMs < 1_500 + 10_000, `given up after ${String(Math.round(tookMs))} ms`);
+        assert.ok(tookMs >= boundMs, `given up after ${String(Math.round(tookMs))} ms`);
+        assert.ok(tookMs < boundMs + 10_000, `given up after ${String(Math.round(tookMs))} ms`);
 
         const stats = runner.stats();
         assert.equal(stats.startupFailed, 1);
@@ -297,14 +305,16 @@ describe('process runner', () => {
         assert.equal(stats.timedOut, 0, 'no check ran, so none timed out');
         assert.equal(stats.crashed, 0);
         assert.ok(
-          (stats.startupMs?.max ?? 0) >= 1_500,
+          (stats.startupMs?.max ?? 0) >= boundMs,
           `the given-up start is a start time too: ${String(stats.startupMs?.max)} ms`,
         );
         assert.equal(stats.running, 0);
 
-        // And the process is gone, not left loading for ever.
+        // And the process is gone, not left loading for ever. A missing file is a failure, not
+        // a pass: without a pid there is nothing to say the process ended.
+        assert.ok(existsSync(pidFile), 'the child wrote its id before it was given up');
         const pid = Number(await readFile(pidFile, 'utf8'));
-        assert.ok(pid > 0, 'the child wrote its id');
+        assert.ok(Number.isInteger(pid) && pid > 0, `the child wrote its id: ${String(pid)}`);
         assert.throws(
           () => process.kill(pid, 0),
           (error: NodeJS.ErrnoException) => error.code === 'ESRCH',
@@ -317,13 +327,43 @@ describe('process runner', () => {
 
     it('lets a started check run past the start-up bound, which ends at the ready line', async () => {
       // The bound is on starting, not on the check: one that has started is on its own clock.
-      // Five seconds, so that a loaded machine starts the fixture inside it (0.03–0.27 s measured,
-      // `P-258`), and a check that runs past it by three.
-      const { runner, seen } = runnerOf({ startupTimeoutMs: 5_000 });
-      runner.submit(request(114, 'test.slow', { delayMs: 8_000, timeoutMs: 20_000 }));
-      await until(() => seen.length === 1, 'the check', 30_000);
+      // Ten seconds, so that a loaded machine starts the fixture inside it (0.03–0.27 s at load
+      // 4.6–18, more than 6 s once at load 18–50, `P-258`), and a check that runs past it by two.
+      const { runner, seen } = runnerOf({ startupTimeoutMs: 10_000 });
+      runner.submit(request(114, 'test.slow', { delayMs: 12_000, timeoutMs: 30_000 }));
+      await until(() => seen.length === 1, 'the check', 45_000);
       assert.equal(seen[0]?.result.outcome, 'ok', seen[0]?.result.message);
       assert.equal(runner.stats().startupFailed, 0);
+    });
+
+    it('reports a process that ended while loading as a start-up failure, not a crash', async () => {
+      // Its check never ran, so whatever ended it was the probe's start-up. An exit and a signal,
+      // each named; a crash after the ready line stays a crash (`test.abort` and `test.crash`).
+      const exits = runnerOf({
+        registryModule: STALLED,
+        childEnv: { MS_TEST_REGISTRY_EXIT: '9' },
+      });
+      const killed = runnerOf({
+        registryModule: STALLED,
+        childEnv: { MS_TEST_REGISTRY_SIGNAL: 'SIGKILL' },
+      });
+      exits.runner.submit(request(115, 'test.ok'));
+      killed.runner.submit(request(116, 'test.ok'));
+      await until(() => exits.seen.length === 1 && killed.seen.length === 1, 'both ends');
+
+      const prefix =
+        "the check process ended while it was loading the probe's sensor types, so the check " +
+        'never ran — ';
+      assert.equal(exits.seen[0]?.meta.phase, 'startup');
+      assert.equal(exits.seen[0].result.message, `${prefix}it exited with code 9`);
+      assert.equal(killed.seen[0]?.meta.phase, 'startup');
+      assert.equal(killed.seen[0].result.message, `${prefix}it was killed by SIGKILL`);
+      for (const { runner } of [exits, killed]) {
+        const stats = runner.stats();
+        assert.equal(stats.startupFailed, 1);
+        assert.equal(stats.failed, 1);
+        assert.equal(stats.crashed, 0);
+      }
     });
 
     it('reports a registry that will not load as a start-up failure, not a failing check', async () => {

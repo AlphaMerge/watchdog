@@ -580,7 +580,7 @@ const PROBE_METRICS: readonly Metric[] = [
   {
     key: 'childStartupFailed',
     name: 'ms_probe_child_checks_not_started_total',
-    help: "Child-process checks that never ran: their process had not loaded the probe's sensor types within the start-up bound, or could not load them.",
+    help: "Child-process checks that never ran: their process had not loaded the probe's sensor types within the start-up bound, could not load them, or ended while loading them.",
     counter: true,
   },
   {

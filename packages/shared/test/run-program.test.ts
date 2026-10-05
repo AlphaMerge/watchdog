@@ -117,14 +117,18 @@ describe('running a program', { skip: posix ? false : 'POSIX only' }, () => {
     const ready = new AbortController();
     const result = await run(file, {
       maxOutputBytes: 4,
+      // A minute, so that only the caller's abort can have ended it in the time asserted below.
+      timeoutMs: 60_000,
       signal: ready.signal,
       onStdout: (chunk) => {
         seen.push(chunk.toString('latin1'));
         if (seen.join('').includes('ready\n')) ready.abort();
       },
     });
-    // Ended by the caller on what it read, long before the script's own sleep.
+    // Ended by the caller on what it read, long before the script's sleep or the deadline.
+    assert.equal(ready.signal.aborted, true, 'the caller aborted on the line it read');
     assert.equal(result.outcome, 'timeout');
+    assert.ok(result.durationMs < 20_000, `ran for ${String(result.durationMs)} ms`);
     assert.equal(seen.join(''), '0123456789\nready\n');
     assert.equal(result.stdout, '0123');
   });
