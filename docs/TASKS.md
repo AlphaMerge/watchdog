@@ -7896,6 +7896,41 @@ because each is a decision rather than a defect:
       ceiling with a margin argued from a measurement), and twenty runs pass beside a running
       sensors suite.
 
+- [ ] **P-262 — an EXE/Script check does not hear its own cancel** · S · P-260 · Found
+      2026-10-05 in `P-260`. `runScript` in `packages/sensors/src/types/exe-script-shared.ts`
+      never passes `ctx.signal` to `runProgram`, so a script check ignores the child's abort and
+      runs to its own `params.timeoutMs`. Only the runner's kill at the scan timeout + 2 s stops
+      it, and the sensor reads *did not finish within* instead of the script's own diagnosis
+      (which phase, what it printed). **Done when** the script is ended on the check's signal
+      with a message naming the script and its phase, and a test with a script that sleeps past
+      the timeout asserts that message, not the runner's.
+
+- [ ] **P-263 — a pool worker that hangs while loading has no start-up bound** · S · P-260 ·
+      Found 2026-10-05 in `P-260`. `pool.ts` `#start` waits for a new worker's `ready`, `error`
+      or `exit` with no timer. No check's time is spent on it, since checks go only to ready
+      workers, but a worker whose registry import hangs holds one of `SPAWN_CONCURRENCY`'s
+      loading turns for ever, and nothing says so. **Done when** a worker's start is bounded as
+      a child's is since `P-260`, a worker that misses it is terminated and replaced, and Probe
+      Health counts it; with a test whose worker registry hangs.
+
+- [ ] **P-264 — two more tests read red on a loaded machine** · S · P-258 · Found 2026-10-05
+      in `P-260`, each once while a probe suite ran on loop beside it at load up to 28:
+      `check-pool.test.ts` `P-34` "raises its ceiling from what it measured …" (*4 -> 4*) and
+      `probe-flow.test.ts` `B-09` (*timed out after 20000 ms waiting for the probe to stop*).
+      One more file-level `check-pool` failure at load ~22 left no output. **Done when** each is
+      explained as `P-258` explained its two — where the time goes, measured — and asserts
+      without depending on how loaded the machine is, with twenty runs beside a running probe
+      suite.
+
+- [ ] **P-265 — should a check the probe could not start read Down?** · S · P-260 · Found
+      2026-10-05 in `P-260`. A start-up failure is an error result, so the sensor goes Down, as
+      the timeout it replaces did. But the device was never asked: the fault is the probe's,
+      which Probe Health now counts, and a starved probe could turn every script sensor Down at
+      once — the alarm storm `CLAUDE.md`'s one-outage-one-alarm rule is about. **Decide** whether
+      it should read Unknown (as a probe-side failure), and if so, change it with the scenario
+      test `M-17` asks for: a probe whose child starts all time out raises one alarm, on Probe
+      Health, not one per sensor.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
