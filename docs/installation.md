@@ -374,8 +374,9 @@ default has always been 2000. Look in two places:
   leaves the probe stopped, as above, and on a remote host that probe's sites are unmonitored
   until you fix the file and start it.
 - **`MS_PROBE__CHECK_ABORT_GRACE_MS` in a systemd drop-in** (`systemctl cat ms-probe` shows
-  it). The installer's check does not run with the service's environment, so it passes, and the
-  new probe then refuses to start and restarts over and over.
+  it). The installer's check does not run with the service's environment, so it passes. The new
+  probe then refuses the setting when it starts and exits 78, which the unit does not restart, so
+  it stays stopped, and that site goes unmonitored until you fix the drop-in and start it.
 
 Set it to 1500 or more, or remove it to take the default, before you upgrade. The refusal names
 the setting and says why, in the installer's output for the file and in `journalctl -u ms-probe`
