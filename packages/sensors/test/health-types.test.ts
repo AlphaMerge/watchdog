@@ -131,10 +131,12 @@ describe('the self-monitoring sensor types', () => {
     }
   });
 
-  it('warns on a refused script group, and on nothing else a dead check process left (`P-275`)', () => {
+  it('warns on a refused script group over five minutes, and on nothing else a dead check process left (`P-275`, `P-284`)', () => {
     // A refused group is a check process naming one that is not its own child: a forged line, in
-    // all but a rare race. A warning on its rate, below the smallest rate one refusal makes. An
-    // ended group is already the failed sensor's news, and one left alone is mostly a reused pid.
+    // all but a rare race. The counter has no limit since `P-284`, because its rate gaps on the
+    // first record after a restart or a long link gap; the warning is the core's five-minute count
+    // beside it, which sees that record. An ended group is already the failed sensor's news, and
+    // one left alone is mostly a reused pid.
     const channels = probeHealth.channels({});
     const counter = { bits: 64 } as const;
     assert.deepEqual(
@@ -142,28 +144,81 @@ describe('the self-monitoring sensor types', () => {
       { key: 'scriptGroupsEnded', name: 'Script groups ended', unit: 'groups', counter },
     );
     assert.deepEqual(
+      channels.find((one) => one.key === 'scriptGroupsRefused'),
+      { key: 'scriptGroupsRefused', name: 'Script groups refused', unit: 'groups', counter },
+    );
+    assert.deepEqual(
       channels.find((one) => one.key === 'scriptGroupsRecycled'),
       { key: 'scriptGroupsRecycled', name: 'Script groups left alone', unit: 'groups', counter },
     );
-    const refused = channels.find((one) => one.key === 'scriptGroupsRefused');
-    assert.deepEqual(refused, {
-      key: 'scriptGroupsRefused',
-      name: 'Script groups refused',
-      unit: 'groups',
-      counter,
-      limits: {
-        // Below 1/3600, the rate one refusal makes across an hour between two records.
-        upperWarning: 0.000_01,
-        warningMessage:
-          'a check process named process groups that are not its own, and this probe left them alone',
+    assert.deepEqual(
+      channels.find((one) => one.key === 'scriptGroupsRefusedRecently'),
+      {
+        key: 'scriptGroupsRefusedRecently',
+        name: 'Script groups refused (5 min)',
+        unit: 'groups',
+        // A count, not a counter: one refusal is 1, and nothing is 0 once the window has passed.
+        limits: {
+          upperWarning: 0.5,
+          warningMessage:
+            'a check process named process groups that are not its own, and this probe left them alone',
+        },
       },
-    });
+    );
     const keys = channels.map((one) => one.key);
     const from = keys.indexOf('childStartup');
-    assert.deepEqual(keys.slice(from + 1, from + 4), [
+    assert.deepEqual(keys.slice(from + 1, from + 5), [
       'scriptGroupsEnded',
       'scriptGroupsRefused',
+      'scriptGroupsRefusedRecently',
       'scriptGroupsRecycled',
+    ]);
+  });
+
+  it('counts the readings a probe could not send, and is Down only on whole results lost (`P-283`)', () => {
+    // Channels taken out of results are one sensor's own output, so no limit: a warning would hold
+    // the whole probe for one script's bug. Whole results the drain discarded are readings that
+    // exist nowhere, as `spoolDropped`'s are: an error, on the core's five-minute count of both.
+    const channels = probeHealth.channels({});
+    const counter = { bits: 64 } as const;
+    assert.deepEqual(
+      channels.find((one) => one.key === 'resultChannelsDropped'),
+      {
+        key: 'resultChannelsDropped',
+        name: 'Readings dropped as unsendable',
+        unit: 'readings',
+        counter,
+      },
+    );
+    assert.deepEqual(
+      channels.find((one) => one.key === 'spoolRejected'),
+      { key: 'spoolRejected', name: 'Results refused as invalid', unit: 'results', counter },
+    );
+    assert.deepEqual(
+      channels.find((one) => one.key === 'spoolOversized'),
+      { key: 'spoolOversized', name: 'Results too large to send', unit: 'results', counter },
+    );
+    assert.deepEqual(
+      channels.find((one) => one.key === 'resultsDiscarded'),
+      {
+        key: 'resultsDiscarded',
+        name: 'Results discarded unsent (5 min)',
+        unit: 'results',
+        limits: {
+          upperError: 0.5,
+          errorMessage:
+            'the spool discarded results it could not send, and those readings are lost',
+        },
+      },
+    );
+    const keys = channels.map((one) => one.key);
+    assert.equal(keys.indexOf('resultChannelsDropped'), keys.indexOf('scriptGroupsRecycled') + 1);
+    const from = keys.indexOf('spoolCorrupt');
+    assert.ok(from >= 0, 'spoolCorrupt is declared');
+    assert.deepEqual(keys.slice(from + 1, from + 4), [
+      'spoolRejected',
+      'spoolOversized',
+      'resultsDiscarded',
     ]);
   });
 

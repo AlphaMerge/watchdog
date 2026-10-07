@@ -375,21 +375,31 @@ const CHANNELS: readonly ChannelDef[] = [
     unit: 'groups',
     counter: { bits: 64 },
   },
-  // **Refused: a warning, and the one channel here a correct probe never moves.** A check process
-  // named a process group on its output that `/proc` did not show to be its own child: a forged
-  // line — something running as the scripts' user trying to have the probe kill a process it may
-  // not — or, rarely, a check process that died between starting its script and the runner
-  // reading the line. The probe signalled nothing, so a warning rather than an error, and nothing
-  // else alarms on it: the check that wrote the line may well pass, and no device outage makes
-  // one, so it cannot multiply an alarm. A rate like `spoolDropped`'s, bounded below the smallest
-  // rate one refusal makes, so the record a refusal falls in warns and the next one clears.
+  // **Refused: the one channel here a correct probe never moves.** A check process named a process
+  // group on its output that `/proc` did not show to be its own child: a forged line — something
+  // running as the scripts' user trying to have the probe kill a process it may not — or, rarely,
+  // a check process that died between starting its script and the runner reading the line. The
+  // counter, with no limit since `P-284`: its rate gaps on the first record after a probe restart
+  // or a long link gap, so a warning on it missed a refusal in exactly that record.
   {
     key: 'scriptGroupsRefused',
     name: 'Script groups refused',
     unit: 'groups',
     counter: { bits: 64 },
+  },
+  // **The warning, as a count over the last five minutes** (`P-284`), which the core takes from
+  // the running total above, as `reportsForeign` is taken: a total that fell, or a probe whose
+  // uptime did, is a restart and all of it is new, and one that grew across a link gap grew by
+  // that much. So a refusal warns however it falls, and the warning clears five minutes after the
+  // last. A warning rather than an error: the probe signalled nothing. Nothing else alarms on it
+  // — the check that wrote the line may well pass, and no device outage makes one — so it cannot
+  // multiply an alarm. A gap for a probe that sends no total.
+  {
+    key: 'scriptGroupsRefusedRecently',
+    name: 'Script groups refused (5 min)',
+    unit: 'groups',
     limits: {
-      upperWarning: 0.000_01,
+      upperWarning: 0.5,
       warningMessage:
         'a check process named process groups that are not its own, and this probe left them alone',
     },
@@ -403,6 +413,19 @@ const CHANNELS: readonly ChannelDef[] = [
     key: 'scriptGroupsRecycled',
     name: 'Script groups left alone',
     unit: 'groups',
+    counter: { bits: 64 },
+  },
+  // **Readings the wire could not carry (`P-283`), and no limit.** `fitResult` takes a channel
+  // out of a result when its key or value cannot be sent, or when it is past the 500th: in either
+  // runner, or in the drain refitting a record an earlier build spooled. Each is a reading that
+  // exists nowhere, so it is counted here. But its cause is one sensor's own output — mostly a
+  // script naming its own channels — and that sensor's bug would hold this whole probe in Warning
+  // for as long as it lasted, where every later warning on the probe would go unannounced. So
+  // this says how often and the probe's log says which sensor.
+  {
+    key: 'resultChannelsDropped',
+    name: 'Readings dropped as unsendable',
+    unit: 'readings',
     counter: { bits: 64 },
   },
   // Results written to disk and not yet acknowledged. Non-zero is not a fault — it is what a
@@ -450,6 +473,38 @@ const CHANNELS: readonly ChannelDef[] = [
   // power cut is worse than not knowing, and a rate that climbs while the probe is *not* crashing
   // is what an operator should be looking at, which is a graph and not a threshold.
   { key: 'spoolCorrupt', name: 'Results unreadable', unit: 'results', counter: { bits: 64 } },
+  // **Two more ways a reading stops existing, at the other end of the spool** (`P-277`, `P-283`):
+  // results the drain discarded because the core refused their batch as invalid — which it says
+  // only to a probe it has not approved — or because one alone was larger than a frame, which a
+  // result this build fitted never is. Counters, with no limit of their own: the error is
+  // `resultsDiscarded` below.
+  {
+    key: 'spoolRejected',
+    name: 'Results refused as invalid',
+    unit: 'results',
+    counter: { bits: 64 },
+  },
+  {
+    key: 'spoolOversized',
+    name: 'Results too large to send',
+    unit: 'results',
+    counter: { bits: 64 },
+  },
+  // **Both, as a count over the last five minutes, and an error** (`P-283`). Not a matter of
+  // degree, for `spoolDropped`'s reason: each is a measurement that no longer exists anywhere.
+  // Counted by the core from the two running totals, as `scriptGroupsRefusedRecently` is, rather
+  // than as a rate: a drain discards most likely while it replays a spool after a restart or a
+  // long outage, which is exactly the record whose rate gaps. No device outage makes one, so it
+  // cannot multiply an alarm, and it clears five minutes after the last.
+  {
+    key: 'resultsDiscarded',
+    name: 'Results discarded unsent (5 min)',
+    unit: 'results',
+    limits: {
+      upperError: 0.5,
+      errorMessage: 'the spool discarded results it could not send, and those readings are lost',
+    },
+  },
   // **Depth cannot tell a stall from a catch-up, which is why this is a separate channel.** A
   // spool with thousands of results in it is a probe replaying an outage, and a threshold on
   // `spoolDepth` would alarm on exactly that — which is why it has none. What is never healthy is

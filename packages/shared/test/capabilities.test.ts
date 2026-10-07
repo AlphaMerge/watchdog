@@ -61,6 +61,7 @@ describe('what a protocol version can do', () => {
       workerStartup: false,
       listenerEarlier: false,
       scriptGroups: false,
+      unsendableReadings: false,
     });
   });
 
@@ -245,8 +246,18 @@ describe('the health a peer can be sent', () => {
     scriptGroupsEnded: 2,
     scriptGroupsRefused: 1,
     scriptGroupsRecycled: 3,
+    resultChannelsDropped: 17,
+    spoolRejected: 40,
+    spoolOversized: 2,
   };
-  /** `health` as a core at 30 is sent it: everything but 31's six fields (`P-270`, `P-275`). */
+  /** `health` as a core at 31 is sent it: everything but 32's three fields (`P-283`). */
+  const {
+    resultChannelsDropped: _unsendableChannels,
+    spoolRejected: _spoolRejected,
+    spoolOversized: _spoolOversized,
+    ...withoutUnsendable
+  } = health;
+  /** `health` as a core at 30 is sent it: that, less 31's six fields (`P-270`, `P-275`). */
   const {
     trapEarlier: _trapEarlier,
     syslogEarlier: _syslogEarlier,
@@ -255,7 +266,7 @@ describe('the health a peer can be sent', () => {
     scriptGroupsRefused: _refused,
     scriptGroupsRecycled: _recycled,
     ...withoutEarlierAndGroups
-  } = health;
+  } = withoutUnsendable;
   /** `health` as a core at 29 is sent it: that, less 30's one field (`P-263`). */
   const { workerStartupFailed: _workers, ...withoutWorkerStartup } = withoutEarlierAndGroups;
   /** `health` as a core at 26 to 28 is sent it: that, less 29's two fields (`P-260`). */
@@ -497,6 +508,7 @@ describe('the health a peer can be sent', () => {
     assert.deepEqual(healthForPeer(health, 30), withoutEarlierAndGroups);
     assert.equal(healthForPeer(health, 30).workerStartupFailed, 4);
     assert.equal(healthForPeer(health, 30).trapOverwritten, 1_300);
+    assert.deepEqual(healthForPeer(health, 31), withoutUnsendable);
     const sent = healthForPeer(health, 31);
     for (const field of fields) {
       assert.equal(sent[field as keyof typeof sent], health[field as keyof typeof health], field);
@@ -509,6 +521,32 @@ describe('the health a peer can be sent', () => {
       flowEarlier: 2,
       scriptGroupsEnded: 1,
     });
+  });
+
+  it('leaves 32’s unsendable readings out for a core at 31, and keeps 31’s', () => {
+    // `P-283`: one capability, three fields, stripped together.
+    const fields = ['resultChannelsDropped', 'spoolRejected', 'spoolOversized'];
+    for (const version of [16, 26, 29, 30, 31]) {
+      const sent = healthForPeer(health, version);
+      for (const field of fields) {
+        assert.equal(field in sent, false, `${field} sent to a core at ${String(version)}`);
+      }
+    }
+    assert.equal(healthForPeer(health, 31).scriptGroupsRefused, 1);
+    assert.equal(healthForPeer(health, 31).trapEarlier, 357);
+    const sent = healthForPeer(health, 32);
+    assert.equal(sent.resultChannelsDropped, 17);
+    assert.equal(sent.spoolRejected, 40);
+    assert.equal(sent.spoolOversized, 2);
+    // Alone, each is stripped below 32 and kept at it.
+    for (const field of fields) {
+      assert.deepEqual(healthForPeer({ memoryMb: 1, [field]: 3 }, 31), { memoryMb: 1 }, field);
+      assert.deepEqual(
+        healthForPeer({ memoryMb: 1, [field]: 3 }, 32),
+        { memoryMb: 1, [field]: 3 },
+        field,
+      );
+    }
   });
 
   it('knows 31’s six counts in this build’s health schema, as counts', () => {
@@ -531,6 +569,10 @@ describe('the health a peer can be sent', () => {
       'scriptGroupsEnded',
       'scriptGroupsRefused',
       'scriptGroupsRecycled',
+      // `P-283`, at 32, the same way.
+      'resultChannelsDropped',
+      'spoolRejected',
+      'spoolOversized',
     ]) {
       assert.equal(read(field, 7), 7, field);
       assert.equal(read(field, 0), 0, field);
@@ -585,8 +627,8 @@ describe('the health a peer can be sent', () => {
   });
 
   it('sends everything to a core that knows it', () => {
-    assert.equal(PROTOCOL_VERSION, 31);
-    assert.deepEqual(healthForPeer(health, 31), health);
+    assert.equal(PROTOCOL_VERSION, 32);
+    assert.deepEqual(healthForPeer(health, 32), health);
     assert.deepEqual(healthForPeer(health, PROTOCOL_VERSION), health);
   });
 
@@ -630,6 +672,10 @@ describe('the health a peer can be sent', () => {
       scriptGroupsEnded: 31,
       scriptGroupsRefused: 31,
       scriptGroupsRecycled: 31,
+      // `P-283`: three new fields under one capability, at the version that adds them.
+      resultChannelsDropped: 32,
+      spoolRejected: 32,
+      spoolOversized: 32,
     };
     // The rest predate `P-178`, and a core older than that refuses a newer probe at the handshake,
     // in words, so it is never sent a heartbeat at all. Pinned by count, so that a new field is
@@ -727,6 +773,7 @@ describe('the health a peer can be sent', () => {
       'report the check workers it could not start',
       'report what its listeners heard that a restart or a cut push kept out of a first scan',
       'report the script process groups it ended, or refused to end, after a check process died',
+      'report the readings it dropped because they could not be sent, and the results its spool discarded',
     ]);
     // Stripping what a peer does not know is by capability: 27 has no health field, so a core
     // at 26 is sent what a core at 27 is.
@@ -759,6 +806,7 @@ describe('the child start-up counters (`P-260`)', () => {
       'report the check workers it could not start',
       'report what its listeners heard that a restart or a cut push kept out of a first scan',
       'report the script process groups it ended, or refused to end, after a check process died',
+      'report the readings it dropped because they could not be sent, and the results its spool discarded',
     ]);
   });
 });
@@ -773,6 +821,7 @@ describe('the check workers not started (`P-263`)', () => {
       'report the check workers it could not start',
       'report what its listeners heard that a restart or a cut push kept out of a first scan',
       'report the script process groups it ended, or refused to end, after a check process died',
+      'report the readings it dropped because they could not be sent, and the results its spool discarded',
     ]);
   });
 });
@@ -789,8 +838,21 @@ describe('the listener and script-group counts (`P-270`, `P-275`)', () => {
     assert.deepEqual(missingCapabilities(30), [
       'report what its listeners heard that a restart or a cut push kept out of a first scan',
       'report the script process groups it ended, or refused to end, after a check process died',
+      'report the readings it dropped because they could not be sent, and the results its spool discarded',
     ]);
-    assert.deepEqual(missingCapabilities(31), []);
+    assert.deepEqual(missingCapabilities(31), [
+      'report the readings it dropped because they could not be sent, and the results its spool discarded',
+    ]);
+  });
+});
+
+describe('the readings a probe could not send (`P-283`)', () => {
+  it('are reported from 32, and by nothing older', () => {
+    // One capability, three health fields, stripped below 32.
+    assert.equal(versionFor('unsendableReadings'), 32);
+    assert.equal(capabilitiesFor(31).unsendableReadings, false);
+    assert.equal(capabilitiesFor(32).unsendableReadings, true);
+    assert.deepEqual(missingCapabilities(32), []);
   });
 });
 

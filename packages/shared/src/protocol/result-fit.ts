@@ -30,6 +30,13 @@ export interface FittedResult {
    * listed: the message says the first itself, with its ellipsis, and the second loses nothing.
    */
   readonly problems: readonly string[];
+  /**
+   * How many of the given channels were dropped: not an object, a key or a value that cannot be
+   * sent, or past `RESULT_LIMITS.channels` (`P-283`). Each is a reading that exists nowhere, and
+   * this is what Probe Health counts. A counter or a width left off is not among them: the value
+   * was sent.
+   */
+  readonly dropped: number;
 }
 
 /**
@@ -64,13 +71,14 @@ export function fitResult(result: CheckResult): FittedResult {
   const problems: string[] = [];
   const channels: ChannelReading[] = [];
   const given: readonly unknown[] = Array.isArray(result.channels) ? result.channels : [];
+  const kept = given.slice(0, RESULT_LIMITS.channels);
   if (given.length > RESULT_LIMITS.channels) {
     problems.push(
       `${String(given.length - RESULT_LIMITS.channels)} channels past the first ` +
         `${String(RESULT_LIMITS.channels)} were dropped`,
     );
   }
-  for (const [at, raw] of given.slice(0, RESULT_LIMITS.channels).entries()) {
+  for (const [at, raw] of kept.entries()) {
     const fitted = fitChannel(raw, at, problems);
     if (fitted !== null) channels.push(fitted);
   }
@@ -88,6 +96,7 @@ export function fitResult(result: CheckResult): FittedResult {
       ...(result.withheld === true ? { withheld: true as const } : {}),
     },
     problems,
+    dropped: given.length - channels.length,
   };
 }
 

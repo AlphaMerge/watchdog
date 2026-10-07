@@ -1098,13 +1098,18 @@ cost: **light** · evaluated by the core, never by a probe
 | `childStartupFailed` | Child checks not started | checks | 64-bit counter → rate |
 | `childStartup` | Child process start-up (p95) | ms | — |
 | `scriptGroupsEnded` | Script groups ended | groups | 64-bit counter → rate |
-| `scriptGroupsRefused` | Script groups refused | groups | 64-bit counter → rate; default limits: warn above 0.00001 |
+| `scriptGroupsRefused` | Script groups refused | groups | 64-bit counter → rate |
+| `scriptGroupsRefusedRecently` | Script groups refused (5 min) | groups | default limits: warn above 0.5 |
 | `scriptGroupsRecycled` | Script groups left alone | groups | 64-bit counter → rate |
+| `resultChannelsDropped` | Readings dropped as unsendable | readings | 64-bit counter → rate |
 | `spoolDepth` | Results spooled | results | — |
 | `spoolBytes` | Spool on disk | MB | — |
 | `spoolDropped` | Results dropped | results | 64-bit counter → rate; default limits: error above 0.00001 |
 | `spoolUnwritten` | Results not written | results | 64-bit counter → rate; default limits: error above 0.00001 |
 | `spoolCorrupt` | Results unreadable | results | 64-bit counter → rate |
+| `spoolRejected` | Results refused as invalid | results | 64-bit counter → rate |
+| `spoolOversized` | Results too large to send | results | 64-bit counter → rate |
+| `resultsDiscarded` | Results discarded unsent (5 min) | results | default limits: error above 0.5 |
 | `spoolStalled` | Spool stalled for | s | default limits: error above 0.5 |
 | `clockJumps` | Clock jumps | jumps | 64-bit counter → rate |
 | `resultsFutureDated` | Results refused as future-dated (5 min) | results | default limits: warn above 0.5 |

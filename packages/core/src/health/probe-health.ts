@@ -9,6 +9,7 @@ import {
   type ChannelReading,
   type CheckResult,
   type Logger,
+  type ProbeHealthReport,
 } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
 import type { ProtocolFlap } from '../objects/credential-vouching.js';
@@ -18,6 +19,7 @@ import type { DeliveryVerdict } from '../probes/delivery.js';
 import type { MemoryFold, ProbeLink } from '../transport/probe-endpoint.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 import { judgeCoreClock, remoteClockOffsets } from './core-clock.js';
+import { RecentCount } from './recent-count.js';
 
 /**
  * Probe Health, evaluated by the core (`P-13`, and `P-04`'s remaining half).
@@ -154,6 +156,11 @@ export interface ProbeHealthServiceOptions {
   readonly now?: () => Date;
   /** How long this core has been running, in seconds. Injectable so a test can start it late. */
   readonly uptime?: () => number;
+  /**
+   * Milliseconds on a monotonic clock, for the five-minute counts taken from a probe's running
+   * totals (`P-283`, `P-284`). Injectable so a test can move it.
+   */
+  readonly monotonicMs?: () => number;
 }
 
 export interface ProbeHealthStats {
@@ -169,6 +176,35 @@ export interface ProbeHealthStats {
 export type ProbeHealthReading = Readonly<Record<string, number | null>>;
 
 const HEALTH_TYPE = 'ms.probe.health';
+
+/**
+ * How far back the counts taken from a probe's running totals look (`P-283`, `P-284`):
+ * `reportsForeign`'s five minutes, long enough to span ten sweeps and short enough to clear.
+ */
+const RECENT_WINDOW_MS = 5 * 60_000;
+
+/**
+ * The channels the core counts over the last five minutes from a probe's running totals, and the
+ * total each is taken from: `undefined` when the probe sends none of it, which gaps the channel.
+ *
+ * **A count over a window, not a counter's rate** (`P-284`), because a rate gaps on the first
+ * record after the total restarts and after a gap longer than the rate allows — a probe restart,
+ * a long link outage — and a warning on a rate missed what fell in that record. The window is
+ * fed by a `DeltaMeter`, which takes a total that fell, or an uptime that did, as a new process
+ * counting from zero, and growth across a link gap as growth.
+ */
+const RECENT_TOTALS = {
+  /** `P-284`: the refused script groups' running total, since protocol 31. */
+  scriptGroupsRefusedRecently: (health: ProbeHealthReport): number | undefined =>
+    health.scriptGroupsRefused,
+  /** `P-283`: the spooled results the drain discarded, either way, since protocol 32. */
+  resultsDiscarded: (health: ProbeHealthReport): number | undefined =>
+    health.spoolRejected === undefined && health.spoolOversized === undefined
+      ? undefined
+      : (health.spoolRejected ?? 0) + (health.spoolOversized ?? 0),
+} as const;
+
+type RecentKey = keyof typeof RECENT_TOTALS;
 
 const MB = 1024 * 1024;
 
@@ -283,6 +319,14 @@ export class ProbeHealthService {
    * a new session starts a new baseline (`P-250`).
    */
   readonly #logMeters = new Map<number, { meter: DeltaMeter; session: number }>();
+  /**
+   * Per probe, the five-minute counts taken from its running totals (`P-283`, `P-284`), each with
+   * the baseline it is taken against. Unlike the log's, a baseline outlives its session: what a
+   * probe refused while its link was down is still a refusal, and the first record after the
+   * link returns is the one that has to say so.
+   */
+  readonly #recent = new Map<number, Map<RecentKey, { meter: DeltaMeter; count: RecentCount }>>();
+  readonly #monotonicMs: (() => number) | undefined;
 
   #sweeps = 0;
   #evaluated = 0;
@@ -304,6 +348,7 @@ export class ProbeHealthService {
     this.#onReportersLost = options.onReportersLost;
     this.#now = options.now ?? ((): Date => new Date());
     this.#uptime = options.uptime ?? ((): number => process.uptime());
+    this.#monotonicMs = options.monotonicMs;
   }
 
   /** Which probe each of these sensors reported on at the last sweep (`M-22`). */
@@ -475,7 +520,17 @@ export class ProbeHealthService {
       // for either end below protocol 31, never a zero that says none was refused.
       scriptGroupsEnded: health?.scriptGroupsEnded ?? null,
       scriptGroupsRefused: health?.scriptGroupsRefused ?? null,
+      // `P-284`. The refusals of the last five minutes, which carries the warning: counted however
+      // they fell, across a probe restart or a link gap, which the counter's rate is not.
+      scriptGroupsRefusedRecently: this.#recentCount(
+        probeObjectId,
+        health,
+        'scriptGroupsRefusedRecently',
+      ),
       scriptGroupsRecycled: health?.scriptGroupsRecycled ?? null,
+      // `P-283`. Readings the wire could not carry, taken out of results: a gap for either end
+      // below protocol 32.
+      resultChannelsDropped: health?.resultChannelsDropped ?? null,
       // `?? null` throughout, so a probe whose registry keeps no session pools gaps these rather
       // than reading zero — a probe with nothing to report is not a probe with nothing open
       // (`P-36`, and `R-06` again).
@@ -490,6 +545,12 @@ export class ProbeHealthService {
       spoolDropped: health?.spoolDropped ?? null,
       spoolUnwritten: health?.spoolUnwritten ?? null,
       spoolCorrupt: health?.spoolCorrupt ?? null,
+      // `P-283`. What the drain discarded, refused as invalid or larger than a frame, as totals,
+      // and both over the last five minutes, which carries the error. Gaps with no drain and for
+      // either end below protocol 32.
+      spoolRejected: health?.spoolRejected ?? null,
+      spoolOversized: health?.spoolOversized ?? null,
+      resultsDiscarded: this.#recentCount(probeObjectId, health, 'resultsDiscarded'),
       // Milliseconds on the wire, seconds on the channel: every other duration an operator reads
       // here is in seconds, and a threshold written in milliseconds beside them would be read
       // wrong exactly once.
@@ -571,6 +632,9 @@ export class ProbeHealthService {
     // added on Thursday a count of Monday's lines, stamped Thursday: a warning for a stall three
     // days over. Now what no record takes is let go, and is a gap, on every path that skips one.
     const logs = this.#advanceLogs();
+    // **And every probe's five-minute counts** (`P-283`, `P-284`), recorded or not, so that a
+    // count is dated by the sweep that first saw it whichever sensor reads it.
+    this.#advanceRecent();
     const sensors = await readHealthSensors(this.#db);
     // Settled even when there are none, so a sensor withheld last sweep and deleted since is let
     // go rather than held Unknown for ever.
@@ -761,6 +825,62 @@ export class ProbeHealthService {
       memoryLimitUsage: fold?.memoryLimitUsagePercent ?? null,
       memoryLimit: fold?.memoryLimitMb ?? null,
     };
+  }
+
+  /**
+   * One of the five-minute counts for a probe, or `null` when it sends no total to count from or
+   * no sweep has taken one yet (`P-283`, `P-284`). Read, never advanced: the sweep advances them.
+   */
+  #recentCount(
+    probeObjectId: number,
+    health: ProbeHealthReport | undefined,
+    key: RecentKey,
+  ): number | null {
+    if (health === undefined || RECENT_TOTALS[key](health) === undefined) return null;
+    return this.#recent.get(probeObjectId)?.get(key)?.count.count() ?? null;
+  }
+
+  /**
+   * Adds what each connected probe's running totals grew by since the last sweep to its
+   * five-minute counts (`P-283`, `P-284`).
+   *
+   * **A probe met for the first time counts in full only if it started after this core did**, as
+   * the log's does: otherwise the core before this one may already have warned on what it holds,
+   * and a core restart would warn again for something long over. That is the one case a refusal
+   * can go uncounted — made while no core was running, by a probe that started before this one.
+   * Everything else counts: a total that fell or an uptime that did is a restarted probe, and all
+   * of it is new; a total that grew across a link gap grew by that much.
+   */
+  #advanceRecent(): void {
+    for (const probeId of this.#sources.connectedProbeIds?.() ?? []) {
+      const link = this.#sources.link(probeId);
+      if (!link.connected) continue;
+      const health = link.health;
+      const uptime = health?.uptimeSeconds;
+      if (health === undefined || uptime === undefined) continue;
+      let held = this.#recent.get(probeId);
+      for (const key of Object.keys(RECENT_TOTALS) as RecentKey[]) {
+        const total = RECENT_TOTALS[key](health);
+        if (total === undefined) continue;
+        if (held === undefined) {
+          held = new Map();
+          this.#recent.set(probeId, held);
+        }
+        let entry = held.get(key);
+        const fresh = entry === undefined && uptime < this.#uptime();
+        if (entry === undefined) {
+          entry = {
+            meter: new DeltaMeter(),
+            count: new RecentCount(
+              RECENT_WINDOW_MS,
+              this.#monotonicMs === undefined ? {} : { monotonicMs: this.#monotonicMs },
+            ),
+          };
+          held.set(key, entry);
+        }
+        entry.count.add(entry.meter.take(total, uptime, fresh) ?? 0);
+      }
+    }
   }
 
   /**
@@ -994,6 +1114,23 @@ function describe(
   const spool = reading['spoolDepth'];
   if (spool !== null && spool !== undefined && spool > 0) {
     parts.push(`${String(spool)} results spooled`);
+  }
+  // Named, because each is the cause of its own limit and the channel name alone says less than
+  // the sentence (`P-283`, `P-284`).
+  const discarded = reading['resultsDiscarded'];
+  if (discarded !== null && discarded !== undefined && discarded > 0) {
+    parts.push(
+      `${String(discarded)} result${discarded === 1 ? '' : 's'} discarded unsent in the last ` +
+        '5 minutes',
+    );
+  }
+  const refusedGroups = reading['scriptGroupsRefusedRecently'];
+  if (refusedGroups !== null && refusedGroups !== undefined && refusedGroups > 0) {
+    parts.push(
+      `${String(refusedGroups)} process group${refusedGroups === 1 ? '' : 's'} a check process ` +
+        `named as its own and ${refusedGroups === 1 ? 'was' : 'were'} not, left alone, in the ` +
+        'last 5 minutes',
+    );
   }
   // Both mean the pair is speaking an older protocol than one end knows, and both are worth a
   // sentence: `outdated` says upgrade the probe, `ahead` says upgrade this core (`P-178`).

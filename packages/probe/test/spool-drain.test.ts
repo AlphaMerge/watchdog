@@ -445,6 +445,38 @@ describe('what leaves the spool (`P-277` review)', () => {
     assertCoreTakesAsSent(sent);
   });
 
+  it('counts the channels it took out once the core has them, however often it was asked to retry (`P-283`)', async () => {
+    // A batch the core asks to retry is fitted again on the next pass. Counted at the fit, two
+    // retries made two dropped channels six.
+    const { spool, core, drain } = await harness();
+    await spool.append([
+      {
+        ...result(1),
+        channels: [
+          { key: 'rtt', value: Number.NaN },
+          { key: 'lone\uD800', value: 2 },
+          { key: 'kept', value: 3 },
+        ],
+      },
+    ]);
+    let asked = 0;
+    core.answer = () => {
+      asked += 1;
+      return asked <= 2
+        ? { kind: 'nack', reason: 'storage-error', retryAfterMs: 0 }
+        : { kind: 'ack', storedSamples: 1, retryAfterMs: 0 };
+    };
+
+    drain.start();
+    try {
+      await until(() => spool.stats().pending === 0, 'the record to be sent');
+    } finally {
+      await drain.stop();
+    }
+    assert.equal(core.offered.length, 3, 'offered twice before the core took it');
+    assert.equal(drain.stats().channelsDropped, 2);
+  });
+
   it('splits a backlog of large results into batches that each fit a frame', async () => {
     // 2,000 results, each within the schema's bounds with a 2,000-character message, come to
     // more than the 4 MiB a frame may carry. Bounded by rows alone, `encodeFrame` threw, the

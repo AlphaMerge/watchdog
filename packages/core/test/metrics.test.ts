@@ -445,6 +445,33 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       assert.equal(without.has(`ms_probe_workers_not_started_total${label}`), false);
     });
 
+    it('exports the readings a probe could not send, and nothing for a probe that sent none', async () => {
+      // `P-283`. Distinct values, so a series reading its neighbour's field is seen.
+      const label = `{probe="${String(probeId)}"}`;
+      const lost = (): ProbeLink => ({
+        ...connected,
+        health: {
+          ...connected.health,
+          resultChannelsDropped: 17,
+          spoolRejected: 40,
+          spoolOversized: 2,
+        },
+      });
+      const metrics = parse((await varying(lost).scrape()).body);
+      assert.equal(metrics.get(`ms_probe_readings_unsendable_total${label}`), 17);
+      assert.equal(metrics.get(`ms_probe_spool_rejected_total${label}`), 40);
+      assert.equal(metrics.get(`ms_probe_spool_oversized_total${label}`), 2);
+
+      const without = parse((await varying(() => connected).scrape()).body);
+      for (const name of [
+        'ms_probe_readings_unsendable_total',
+        'ms_probe_spool_rejected_total',
+        'ms_probe_spool_oversized_total',
+      ]) {
+        assert.equal(without.has(`${name}${label}`), false, name);
+      }
+    });
+
     it('exports the script groups a dead check process left open, and nothing for a probe that sent none', async () => {
       // `P-275`. Distinct values, so a series reading its neighbour's field is seen.
       const label = `{probe="${String(probeId)}"}`;

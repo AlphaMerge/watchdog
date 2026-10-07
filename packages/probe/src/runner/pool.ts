@@ -196,6 +196,12 @@ export interface PoolStats {
    * to other workers, so no sensor reads anything for it; this is where it shows.
    */
   startupFailed: number;
+  /**
+   * Channel readings `fitResult` took out of this pool's results because they could not be sent
+   * (`P-283`): a key or a value the wire cannot carry, or channels past the limit. A running
+   * total; each is logged with its sensor.
+   */
+  channelsDropped: number;
   waitMs: { p50: number; p95: number; p99: number; max: number };
   runMs: { p50: number; p95: number; p99: number; max: number };
 }
@@ -536,6 +542,7 @@ export class CheckPool {
   #discarded = 0;
   #crashes = 0;
   #startupFailed = 0;
+  #channelsDropped = 0;
 
   constructor(options: CheckPoolOptions) {
     this.#logger = options.logger.child({ component: 'check-pool' });
@@ -872,6 +879,7 @@ export class CheckPool {
       disabled: this.#disabled,
       workerCrashes: this.#crashes,
       startupFailed: this.#startupFailed,
+      channelsDropped: this.#channelsDropped,
       waitMs: percentiles(this.#wait),
       runMs: percentiles(this.#run),
     };
@@ -1603,7 +1611,7 @@ export class CheckPool {
     // code, but what a check returns is a device's words and a script's numbers, and one result
     // the core's schema refuses closes the connection on every resend of its batch, for every
     // sensor on this probe.
-    const { result, problems } = fitResult({
+    const { result, problems, dropped } = fitResult({
       sensorId: job.request.sensorId,
       at: new Date().toISOString(),
       outcome: parts.outcome,
@@ -1614,6 +1622,8 @@ export class CheckPool {
       ...(parts.outcome === 'error' && parts.withheld === true ? { withheld: true as const } : {}),
     } satisfies CheckResult);
     if (problems.length > 0) unfit(this.#logger, job.request, problems);
+    // Counted for Probe Health (`P-283`): the log names the sensor, and this says how often.
+    this.#channelsDropped += dropped;
     this.#onResult(result, { phase, waitMs: job.waitMs, workerId: slot?.id ?? 0 });
     if (this.#onDrained !== undefined && this.#inFlight() === 0) this.#onDrained();
   }

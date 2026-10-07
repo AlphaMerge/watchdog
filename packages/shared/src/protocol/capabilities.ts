@@ -188,6 +188,11 @@ export interface ProbeCapabilities {
    * `scriptGroupsRecycled`, stripped below this together.
    */
   scriptGroups: boolean;
+  /**
+   * Reports the readings it could not send (`P-283`): three fields, `resultChannelsDropped`,
+   * `spoolRejected` and `spoolOversized`, stripped below this together.
+   */
+  unsendableReadings: boolean;
 }
 
 /**
@@ -222,6 +227,7 @@ const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
   ['workerStartup', 30],
   ['listenerEarlier', 31],
   ['scriptGroups', 31],
+  ['unsendableReadings', 32],
 ];
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -258,6 +264,8 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
     'report what its listeners heard that a restart or a cut push kept out of a first scan',
   scriptGroups:
     'report the script process groups it ended, or refused to end, after a check process died',
+  unsendableReadings:
+    'report the readings it dropped because they could not be sent, and the results its spool discarded',
 };
 
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
@@ -287,6 +295,7 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     workerStartup: has(30),
     listenerEarlier: has(31),
     scriptGroups: has(31),
+    unsendableReadings: has(32),
   };
 }
 
@@ -319,6 +328,15 @@ export function healthForPeer(health: ProbeHealthReport, peerVersion: number): P
   let sent = health;
   // Newest first; each capability's fields are stripped on their own, so a peer one version
   // behind loses only that version's.
+  if (!capabilities.unsendableReadings) {
+    const {
+      resultChannelsDropped: _channels,
+      spoolRejected: _rejected,
+      spoolOversized: _oversized,
+      ...older
+    } = sent;
+    sent = older;
+  }
   if (!capabilities.scriptGroups) {
     const {
       scriptGroupsEnded: _ended,

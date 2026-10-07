@@ -47,15 +47,26 @@ export interface DrainStats {
   backlog: number;
   /** Longest delay the core has asked this probe to wait between batches. */
   maxRetryAfterMs: number;
-  /** Results the core refused as unparseable. Discarded, because they can never succeed. */
+  /**
+   * Results whose batch the core refused as `invalid`, discarded because sending them again can
+   * never succeed. Today the core answers that only to a probe it has not approved. On Probe
+   * Health from protocol 32 (`P-283`).
+   */
   rejected: number;
   /** Batches the core asked us to retry. */
   retried: number;
   /**
    * Results discarded because one alone is larger than a frame may carry (`P-277` review).
-   * Sending it could never succeed, and keeping it would hold every result behind it.
+   * Sending it could never succeed, and keeping it would hold every result behind it. On Probe
+   * Health from protocol 32 (`P-283`).
    */
   oversized: number;
+  /**
+   * Channel readings taken out of spooled results on their way to the core because they could
+   * not be sent (`P-283`). Only a record an earlier build spooled unfitted can have any: a runner
+   * fits every result before it is spooled, so this never counts what a runner already did.
+   */
+  channelsDropped: number;
   /**
    * Milliseconds the spool has held results with the link up and nothing moving. Zero when it is
    * making progress or has nothing to make progress on.
@@ -130,6 +141,7 @@ export class SpoolDrain {
     rejected: 0,
     retried: 0,
     oversized: 0,
+    channelsDropped: 0,
     stalledForMs: 0,
   };
 
@@ -236,12 +248,19 @@ export class SpoolDrain {
    * What the spool hands back, made to fit the wire (`P-277` review). A runner fits each result
    * before it is spooled, but a record written by an earlier build was not, and one that does
    * not fit would wedge the probe this was meant to free. Logged once a batch.
+   *
+   * `dropped` is the channels taken out, for `channelsDropped` (`P-283`), which counts them only
+   * once the core has the batch: a batch the core asks to retry is fitted again on the next pass,
+   * and counted then would be counted once a retry.
    */
-  #fit(records: readonly CheckResult[]): CheckResult[] {
+  #fit(records: readonly CheckResult[]): { results: CheckResult[]; dropped: number } {
     let unfit = 0;
+    let dropped = 0;
     const examples: string[] = [];
     const fitted = records.map((record) => {
-      const { result, problems } = fitResult(record);
+      const fit = fitResult(record);
+      const { result, problems } = fit;
+      dropped += fit.dropped;
       if (problems.length > 0) {
         unfit += 1;
         if (examples.length < 4)
@@ -255,7 +274,7 @@ export class SpoolDrain {
         'spooled results held readings that cannot be sent as they are; sending the rest',
       );
     }
-    return fitted;
+    return { results: fitted, dropped };
   }
 
   /** One pass. Returns how long to wait before the next one; zero means "immediately". */
@@ -272,7 +291,7 @@ export class SpoolDrain {
     const pending = this.#spool.stats().pending;
     const take = pending > this.#batchMaxRows ? this.#catchUpMaxRows : this.#batchMaxRows;
 
-    const batch = this.#fit(
+    const { results: batch, dropped } = this.#fit(
       await this.#spool.peek(take, Math.floor(this.#maxBatchBytes * PEEK_SHARE)),
     );
     if (batch.length === 0) {
@@ -312,6 +331,7 @@ export class SpoolDrain {
       // already true — and an observer that sees the spool empty must not see the counters
       // still behind, because clearing the spool is what tells everyone the batch is done.
       this.#stats.sent += 1;
+      this.#stats.channelsDropped += dropped;
       this.#stats.maxRetryAfterMs = Math.max(this.#stats.maxRetryAfterMs, outcome.retryAfterMs);
       this.#logger.debug(
         {

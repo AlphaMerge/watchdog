@@ -663,6 +663,25 @@ const PROBE_METRICS: readonly Metric[] = [
     help: 'Results the spool could not write. Each one was lost before it reached disk.',
     counter: true,
   },
+  // `P-283`. Two more ways a result is lost on its way out, and readings taken out of results.
+  {
+    key: 'spoolRejected',
+    name: 'ms_probe_spool_rejected_total',
+    help: 'Spooled results discarded because the core refused their batch as invalid, which it does only to a probe it has not approved.',
+    counter: true,
+  },
+  {
+    key: 'spoolOversized',
+    name: 'ms_probe_spool_oversized_total',
+    help: 'Spooled results discarded because one alone was larger than a frame can carry.',
+    counter: true,
+  },
+  {
+    key: 'resultChannelsDropped',
+    name: 'ms_probe_readings_unsendable_total',
+    help: 'Channel readings taken out of check results because the wire could not carry them: a key or value that cannot be sent, or channels past the limit.',
+    counter: true,
+  },
   {
     key: 'skippedTicks',
     name: 'ms_probe_scheduler_skipped_ticks_total',

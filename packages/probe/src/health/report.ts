@@ -213,6 +213,12 @@ export class ProbeHealthReporter {
       // `P-263`: workers that never said ready, a hang the pool ended among them. Sent only to a
       // core at protocol 30.
       workerStartupFailed: pool.startupFailed,
+      // `P-283`: channel readings taken out of results because the wire could not carry them, by
+      // either runner or by the drain refitting a record an earlier build spooled. One total,
+      // since the reading is lost the same way wherever it was taken out, and the probe's log
+      // names the sensor. Sent only to a core at protocol 32.
+      resultChannelsDropped:
+        pool.channelsDropped + (children?.channelsDropped ?? 0) + (drain?.channelsDropped ?? 0),
       // Absent when no registry keeps session pools (`P-36`), so the channels gap rather than
       // reading a confident zero on a build that has nothing to report.
       ...(pool.sessions === undefined
@@ -304,7 +310,15 @@ export class ProbeHealthReporter {
           }),
       // Separate from the spool block above, so a build with a drain and no spool — or the
       // reverse — reports what it has rather than nothing. Absent is absent.
-      ...(drain === undefined ? {} : { spoolStalledMs: drain.stalledForMs }),
+      ...(drain === undefined
+        ? {}
+        : {
+            spoolStalledMs: drain.stalledForMs,
+            // `P-283`: spooled results the drain discarded, refused by the core as invalid or each
+            // larger than a frame. Sent only to a core at protocol 32.
+            spoolRejected: drain.rejected,
+            spoolOversized: drain.oversized,
+          }),
       // The first heartbeat after a start carries no CPU: a rate needs two samples, and 0% would
       // say the probe is idle rather than that nothing has been measured yet.
       ...(cpu === null ? {} : { cpuPercent: cpu }),

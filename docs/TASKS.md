@@ -9760,18 +9760,87 @@ because each is a decision rather than a defect:
         test fails. With no marker rule, the BusyBox test fails. A `duplicatesNote` that never
         speaks fails its own test.
 
-- [ ] **P-283 — readings the probe dropped or the drain discarded are not on Probe Health** · S ·
+- [x] **P-283 — readings the probe dropped or the drain discarded are not on Probe Health** · S ·
       P-277 · Found 2026-10-07 in `P-277`. `fitResult` drops channels that cannot be sent and the
       drain discards a result larger than a frame (`DrainStats.oversized`, like `rejected`); both
       are logged, neither is counted where an operator looks. **Done when** both are heartbeat
       fields and Probe Health channels (a protocol number after 31, behind a capability, as
       `P-275` did), with tests.
 
-- [ ] **P-284 — a refused script group warns only while its rate can be computed** · S · P-275 ·
+      **P-283 outcome. Three heartbeat counters at protocol 32, and an error on whole results lost,
+      counted over five minutes on the core.**
+      - **On the wire:** `resultChannelsDropped`, `spoolRejected`, `spoolOversized`, capability
+        `unsendableReadings` at **32**. A core below 32 is sent none (`healthForPeer`); a probe
+        below 32 sends none and the channels gap.
+      - **What is counted.** `fitResult` now returns `dropped`: channels not sent (not an object,
+        a key or value that cannot be sent, past the 500th); a counter or width left off is not
+        one, the value was sent. The pool, the child runner and the drain each keep a total and the
+        report sends their sum, since a reading is lost the same way wherever it was taken out.
+        **The drain counts only once the core acks the batch**: it refits a batch on every retry,
+        and counted at the fit two retries made two dropped channels six. `spoolRejected` and
+        `spoolOversized` are `DrainStats.rejected` and `.oversized`. Reading the code showed the
+        core answers `invalid` only to a probe it has not approved, so `rejected` is that case
+        (the `DrainStats` comment said "unparseable" and now says so).
+      - **Probe Health and the limits.** Counters `resultChannelsDropped` (*Readings dropped as
+        unsendable*), `spoolRejected`, `spoolOversized`, no limits. **`resultsDiscarded`** (*Results
+        discarded unsent (5 min)*) is the two drain totals' growth over five minutes, counted by the
+        core as `P-284` below, **error above 0.5**: each is a reading that exists nowhere, as
+        `spoolDropped`'s are, and a rate would gap on the first record after a restart or a long
+        outage, when a replaying drain is likeliest to discard. No device outage makes one, so it
+        cannot multiply an alarm. **No limit on `resultChannelsDropped`**: its cause is one
+        sensor's own output (mostly a script's JSON), and a warning would hold the whole probe in
+        Warning while that script stays unfixed, so that every later warning on the probe raised
+        nothing; the log names the sensor. The message names a discard in words.
+      - **`/metrics`:** `ms_probe_readings_unsendable_total`, `ms_probe_spool_rejected_total`,
+        `ms_probe_spool_oversized_total`. `administration.md` has two rows; the sensor reference
+        is regenerated.
+      - **Tests.** `result-fit.test.ts` (`dropped` per case, and a property that every channel
+        given is sent or counted); `check-pool`/`process-runner` (`test.unfit`'s four counted);
+        `spool-drain` (two dropped channels counted once across two retries); `probe-health-report`
+        (the sum from each source, distinct values; each drain field, absent without a drain);
+        `capabilities.test.ts` (at 32 and not 31, stripped at 16–31 alone and together, the
+        schema taking them as counts, `SINCE`, every `missingCapabilities` list,
+        `PROTOCOL_VERSION` 32); `health-types` (declarations, positions, the error); core
+        `probe-health` (read, gaps for an older probe, the window counts, and the whole path Down
+        for five minutes from a restarted probe's first record); `metrics` (each series, none for
+        a probe that sent none).
+      - **Not done.** A sensor whose channel was dropped says nothing of it in its own result:
+        the message is the check's, and the count is only here and in the log.
+
+- [x] **P-284 — a refused script group warns only while its rate can be computed** · S · P-275 ·
       Found 2026-10-07 in `P-275`. The refused-group warning is a rate limit, so a refusal in the
       first record after a probe restart or a long link gap has no rate: it is counted and logged
       but does not warn. **Done when** a refusal warns however it falls (for example a five-minute
       count on the core, as `reportsForeign` does), with a test across a counter reset.
+
+      **P-284 outcome. The warning is a five-minute count on the core, beside the counter.**
+      - **How.** `scriptGroupsRefused` stays a counter, now with **no limit**; a new core-computed
+        channel `scriptGroupsRefusedRecently` (*Script groups refused (5 min)*) **warns above 0.5**.
+        Each sweep, for every connected probe, `ProbeHealthService` feeds the growth of the running
+        total into a `RecentCount` through a `DeltaMeter`: a total that fell or an uptime that fell
+        is a restart and all of it is new; growth across a link gap is growth (the baseline
+        outlives the session, unlike `logDropped`'s, because a refusal made while the link was down
+        is still one). `RECENT_TOTALS` holds both such counts (`P-283`'s `resultsDiscarded` is the
+        other), on an injectable monotonic clock. No protocol change: the total is 31's.
+      - **Why a second channel, not the counter turned into a count:** an existing channel's
+        counter shape is stored on its row, and a channel is not removed.
+      - **What it does not see:** a refusal made while no core was running, by a probe already
+        running when this core started — the core before may have warned on it, and warning again
+        after every core restart would be the second alarm, so a probe met first is a baseline
+        unless it started after this core, as the log's rule is.
+      - **One outage, one alarm:** a burst holds one warning (a rate warned, cleared and warned
+        again between refusals a minute apart); the warning clears five minutes after the last.
+      - **Tests (core `probe-health`):** across a counter reset (4 to 1 after a restart counts 1,
+        and a restart whose total does not fall, by its uptime); a refusal during a 2- and a
+        10-minute link gap counted on the first record back; the window kept at 270 s and gone at
+        300 s; a probe started after the core counted in full, one already running not at all;
+        gaps for no total and no link; and the whole path — sweep, ingestion, limit, state — Warning
+        on a restarted probe's first record, held through a burst, Up five minutes after the last.
+        `health-types` pins the declaration and position.
+      - **Known leftover:** an install that already ran protocol 31 keeps the declared rate limit
+        on its existing `scriptGroupsRefused` channels: `applyDeclaredLimits` writes declared
+        limits but never takes one away that a type stopped declaring. Harmless (it warns in a
+        record the window also warns in); listed as a follow-up.
 
 - [ ] **P-285 — a check's failure phase reaches the stored result only as prose** · S · P-279 ·
       Found 2026-10-07 in `P-279`. `check-worker.ts` passes on only an error's message, so its

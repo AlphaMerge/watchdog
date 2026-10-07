@@ -90,6 +90,12 @@ export interface ProcessRunnerStats {
    * script's session or of another uid. Never killed. Logged with the sensor and the pgids.
    */
   scriptGroupsRecycled: number;
+  /**
+   * Channel readings `fitResult` took out of this runner's results because they could not be
+   * sent (`P-283`) — a script's JSON names its own channels, so most of them come from here. A
+   * running total; each is logged with its sensor.
+   */
+  channelsDropped: number;
   waitMs: Percentiles;
   runMs: Percentiles;
   /**
@@ -237,6 +243,7 @@ export class ProcessRunner {
   #scriptGroupsEnded = 0;
   #scriptGroupsRefused = 0;
   #scriptGroupsRecycled = 0;
+  #channelsDropped = 0;
   readonly #waits: number[] = [];
   readonly #runs: number[] = [];
   readonly #startups: number[] = [];
@@ -690,7 +697,7 @@ export class ProcessRunner {
     job.settled = true;
     // Made to fit the wire before it is spooled (`P-277`): one result the core's schema refuses
     // closes the connection on every resend of its batch, for every sensor on this probe.
-    const { result, problems } = fitResult({
+    const { result, problems, dropped } = fitResult({
       sensorId: job.request.sensorId,
       at: new Date().toISOString(),
       outcome: parts.outcome,
@@ -700,6 +707,8 @@ export class ProcessRunner {
       ...(parts.outcome === 'error' && parts.withheld === true ? { withheld: true as const } : {}),
     } satisfies CheckResult);
     if (problems.length > 0) unfit(this.#logger, job.request, problems);
+    // Counted for Probe Health (`P-283`): the log names the sensor, and this says how often.
+    this.#channelsDropped += dropped;
     // `workerId` is -1 rather than absent: Probe Health reads one shape for both runners, and a
     // check that ran in a process of its own genuinely has no worker.
     this.#onResult(result, { phase, waitMs, workerId: -1 });
@@ -721,6 +730,7 @@ export class ProcessRunner {
       scriptGroupsEnded: this.#scriptGroupsEnded,
       scriptGroupsRefused: this.#scriptGroupsRefused,
       scriptGroupsRecycled: this.#scriptGroupsRecycled,
+      channelsDropped: this.#channelsDropped,
       waitMs: percentiles(this.#waits),
       runMs: percentiles(this.#runs),
       startupMs: this.#startups.length === 0 ? null : percentiles(this.#startups),

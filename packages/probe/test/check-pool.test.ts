@@ -142,9 +142,12 @@ describe('check pool', () => {
     // script's numbers. One result the core's schema refuses used to close the connection on
     // every resend of its batch, for every sensor on the probe.
     const { pool, seen } = await poolOf();
+    assert.equal(pool.stats().channelsDropped, 0, 'nothing dropped before');
     pool.submit(request(5, 'test.unfit'));
     await until(() => seen.length === 1, 'the check');
     assertFits(seen[0]?.result);
+    // `P-283`: the four channels that could not be sent are counted for Probe Health.
+    assert.equal(pool.stats().channelsDropped, 4);
   });
 
   it('reports a resolver that hangs as a refusal, not as the check timing out', async () => {

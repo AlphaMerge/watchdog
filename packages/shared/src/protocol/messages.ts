@@ -43,6 +43,14 @@ import { fitResult, RESULT_LIMITS } from './result-fit.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
+ * Version 32 adds three counters under one capability, `unsendableReadings` (`P-283`):
+ * `resultChannelsDropped`, the channel readings `fitResult` took out of this probe's results
+ * because the wire could not carry them, and `spoolRejected` and `spoolOversized`, the spooled
+ * results the drain discarded because the core refused their batch as invalid or because one was
+ * larger than a frame. A core below 32 is sent none of them, and a probe below 32 sends none and
+ * their channels gap. (`P-284` changed nothing on the wire: the core counts a probe's refused
+ * script groups over five minutes from the running total protocol 31 already carries.)
+ *
  * Version 31 adds six counters under two capabilities. `listenerEarlier` (`P-270`):
  * `trapEarlier`, `syslogEarlier` and `flowEarlier`, what each listener received that a sensor's
  * first scan after a probe restart or a cut configuration push named as `earlier` — before its
@@ -163,7 +171,7 @@ import { fitResult, RESULT_LIMITS } from './result-fit.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 31;
+export const PROTOCOL_VERSION = 32;
 
 /**
  * The oldest peer version this build still understands.
@@ -715,6 +723,24 @@ export interface ProbeHealthReport {
    * signal saying so — depth alone cannot tell a stall from a legitimate catch-up.
    */
   spoolStalledMs?: number;
+  /**
+   * Channel readings taken out of this probe's results because the wire could not carry them
+   * (`P-277`, `P-283`): a key or a value `fitResult` cannot send, or channels past the limit. Each
+   * is a reading that exists nowhere; the probe's log names the sensor. A running total of both
+   * runners and the drain's refit, so always present at protocol 32. Sent only to a core there.
+   */
+  resultChannelsDropped?: number;
+  /**
+   * Spooled results the drain discarded because the core refused their batch as `invalid` — today
+   * only a probe the core has not approved (`P-283`). A running total, absent with the drain.
+   * Sent only to a core at protocol 32.
+   */
+  spoolRejected?: number;
+  /**
+   * Spooled results the drain discarded because one alone was larger than a frame (`P-277`,
+   * `P-283`). A running total, absent with the drain. Sent only to a core at protocol 32.
+   */
+  spoolOversized?: number;
   /** The probe process itself: percentage of one core, resident megabytes, seconds since start. */
   cpuPercent?: number;
   memoryMb?: number;
@@ -1103,6 +1129,9 @@ const PROBE_HEALTH_SCHEMA = {
     spoolCorrupt: { type: 'integer', minimum: 0 },
     spoolUnwritten: { type: 'integer', minimum: 0 },
     spoolStalledMs: { type: 'integer', minimum: 0 },
+    resultChannelsDropped: { type: 'integer', minimum: 0 },
+    spoolRejected: { type: 'integer', minimum: 0 },
+    spoolOversized: { type: 'integer', minimum: 0 },
     cpuPercent: { type: 'number', minimum: 0 },
     memoryMb: { type: 'number', minimum: 0 },
     uptimeSeconds: { type: 'number', minimum: 0 },

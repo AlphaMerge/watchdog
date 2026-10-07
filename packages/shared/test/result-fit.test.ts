@@ -53,6 +53,7 @@ describe('fitResult', () => {
       ],
     });
     assert.deepEqual(fitted.problems, []);
+    assert.equal(fitted.dropped, 0);
   });
 
   it('keeps a refusal’s mark, and only on what had it', () => {
@@ -107,7 +108,7 @@ describe('fitResult', () => {
   });
 
   it('drops a channel whose key cannot be sent, and never clips a key into another one', () => {
-    const { result, problems } = fitResult({
+    const { result, problems, dropped } = fitResult({
       ...base,
       channels: [
         { key: 'k'.repeat(RESULT_LIMITS.key), value: 1 },
@@ -124,12 +125,14 @@ describe('fitResult', () => {
       [1, 6],
     );
     assert.equal(problems.length, 4);
+    // `P-283`: what Probe Health counts, one for each channel that is not sent.
+    assert.equal(dropped, 4);
     assert.match(problems[0] ?? '', /channel 1's key is not 1 to 100 characters/);
     coreTakes(result);
   });
 
   it('drops a channel with no finite number, which leaves a gap and never a made-up value', () => {
-    const { result, problems } = fitResult({
+    const { result, problems, dropped } = fitResult({
       ...base,
       channels: [
         { key: 'nan', value: Number.NaN },
@@ -141,11 +144,12 @@ describe('fitResult', () => {
     });
     assert.deepEqual(result.channels, [{ key: 'value', value: 0 }]);
     assert.equal(problems.length, 4);
+    assert.equal(dropped, 4);
     assert.match(problems[0] ?? '', /"nan" has no finite number/);
   });
 
   it('leaves off a counter or a width the schema refuses, and keeps the value', () => {
-    const { result, problems } = fitResult({
+    const { result, problems, dropped } = fitResult({
       ...base,
       channels: [
         { key: 'a', value: 1, counter: '-1' },
@@ -161,6 +165,8 @@ describe('fitResult', () => {
       { key: 'd', value: 4, counter: '9', counterBits: 32 },
     ]);
     assert.equal(problems.length, 3);
+    // Each value was sent, so no reading was dropped (`P-283`).
+    assert.equal(dropped, 0);
   });
 
   it('clips a name and a unit, and leaves off a name left empty', () => {
@@ -183,8 +189,9 @@ describe('fitResult', () => {
       key: `c${String(at)}`,
       value: at,
     }));
-    const { result, problems } = fitResult({ ...base, channels });
+    const { result, problems, dropped } = fitResult({ ...base, channels });
     assert.equal(result.channels.length, RESULT_LIMITS.channels);
+    assert.equal(dropped, 3);
     assert.equal(result.channels.at(-1)?.key, `c${String(RESULT_LIMITS.channels - 1)}`);
     assert.deepEqual(problems, ['3 channels past the first 500 were dropped']);
     coreTakes(result);
@@ -232,13 +239,15 @@ describe('fitResult', () => {
         fc.oneof(fc.double(), fc.integer()),
         fc.array(channel, { maxLength: 520 }),
         (message, durationMs, channels) => {
-          const { result } = fitResult({
+          const { result, dropped } = fitResult({
             ...base,
             message,
             durationMs,
             channels: channels as CheckResult['channels'],
           });
           coreTakes(result);
+          // `P-283`: every channel given is sent or counted as dropped, never both or neither.
+          assert.equal(result.channels.length + dropped, channels.length);
           assert.ok(!JSON.stringify(result).includes('\\u0000'));
           // Node's own `isWellFormed`, which the ES2023 lib this build targets does not type.
           const texts = [

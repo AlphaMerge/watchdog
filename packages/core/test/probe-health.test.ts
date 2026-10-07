@@ -770,6 +770,32 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       }
     });
 
+    it('carries the readings a probe could not send, and gaps for a probe that cannot say (`P-283`)', () => {
+      // Three totals, each from its own field. Distinct values, so two swapped is a failure.
+      const { reading } = build(() =>
+        connected({
+          health: { ...FULL, resultChannelsDropped: 17, spoolRejected: 40, spoolOversized: 2 },
+        }),
+      ).read(probeId);
+      assert.equal(reading['resultChannelsDropped'], 17);
+      assert.equal(reading['spoolRejected'], 40);
+      assert.equal(reading['spoolOversized'], 2);
+      assert.equal(reading['spoolDropped'], 4, 'and the spool’s own evictions are their own');
+      // No sweep has taken a five-minute count yet, so that channel is a gap, not a zero.
+      assert.equal(reading['resultsDiscarded'], null);
+      // A probe or a core below 32 does not send them: gaps, never a zero that says none was lost.
+      const { reading: older } = build(() => connected()).read(probeId);
+      for (const key of [
+        'resultChannelsDropped',
+        'spoolRejected',
+        'spoolOversized',
+        'resultsDiscarded',
+        'scriptGroupsRefusedRecently',
+      ]) {
+        assert.equal(older[key], null, key);
+      }
+    });
+
     it('carries the workers the pool could not start, and gaps for a probe that cannot say', () => {
       // `P-263`: a worker still loading at its start-up bound is terminated and replaced.
       const { reading } = build(() =>
@@ -1197,6 +1223,151 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       } finally {
         await db.query('UPDATE probe_config SET is_local = false WHERE object_id = $1', [probeId]);
       }
+    });
+  });
+
+  describe('the five-minute counts a sweep takes from running totals (`P-283`, `P-284`)', () => {
+    /**
+     * One service across sweeps thirty seconds apart on its own monotonic clock, so each count is
+     * against the totals before it and the window can be walked out.
+     */
+    function counter(coreUptime = 1_000): {
+      link: { current: ProbeLink };
+      sweep: () => Promise<Record<string, number>>;
+      /** The sentence the last sweep gave the sensor. */
+      message: () => string;
+    } {
+      const link = { current: connected() };
+      const clock = { ms: 0 };
+      const results: CheckResult[] = [];
+      const service = new ProbeHealthService({
+        vouching: everyVoucherHolds,
+        db,
+        logger: silent,
+        sources: {
+          link: () => link.current,
+          connectedProbeIds: () => (link.current.connected ? [probeId] : []),
+        },
+        ingest: (batch) => {
+          results.push(...batch);
+          return Promise.resolve();
+        },
+        now: () => new Date('2026-08-28T00:00:25Z'),
+        uptime: () => coreUptime,
+        monotonicMs: () => clock.ms,
+      });
+      let said = '';
+      return {
+        link,
+        message: () => said,
+        sweep: async () => {
+          results.length = 0;
+          await service.sweep();
+          clock.ms += 30_000;
+          said = results.find((result) => result.sensorId === sensorId)?.message ?? '';
+          const mine = results.find((result) => result.sensorId === sensorId);
+          return Object.fromEntries(
+            (mine?.channels ?? [])
+              .filter((one) =>
+                ['scriptGroupsRefusedRecently', 'resultsDiscarded'].includes(one.key),
+              )
+              .map((one) => [one.key, one.value]),
+          );
+        },
+      };
+    }
+
+    const refusing = (
+      scriptGroupsRefused: number,
+      uptimeSeconds: number,
+      more: Partial<ProbeHealthReport> = {},
+    ): ProbeLink => connected({ health: { ...FULL, scriptGroupsRefused, uptimeSeconds, ...more } });
+    const refused = async (c: ReturnType<typeof counter>): Promise<number | undefined> =>
+      (await c.sweep())['scriptGroupsRefusedRecently'];
+
+    it('counts a refusal in the first record after a probe restart, which a rate cannot', async () => {
+      // A probe running from before this core: its total may already have warned under the core
+      // before, so it is the baseline and counts nothing.
+      const c = counter(1_000);
+      c.link.current = refusing(3, 5_000);
+      assert.equal(await refused(c), 0, 'a baseline is a reading, not a gap');
+      c.link.current = refusing(4, 5_030);
+      assert.equal(await refused(c), 1);
+      assert.match(c.message(), /1 process group a check process named as its own and was not/u);
+      // **The counter reset.** The probe restarted and refused once in its first seconds: its
+      // total fell from 4 to 1, and a counter's rate gaps on exactly this record.
+      c.link.current = refusing(1, 12);
+      assert.equal(await refused(c), 2, 'the one before, and the restarted probe’s whole total');
+      // A restart whose new total is no lower than the old: the uptime says it restarted.
+      c.link.current = refusing(2, 4);
+      assert.equal(await refused(c), 4);
+      c.link.current = refusing(2, 34);
+      assert.equal(await refused(c), 4, 'nothing new, and nothing counted twice');
+    });
+
+    it('counts one made while the link was down on the first record back, however long the gap', async () => {
+      const c = counter(1_000);
+      c.link.current = refusing(0, 5_000);
+      assert.equal(await refused(c), 0);
+      c.link.current = { connected: false };
+      for (let at = 0; at < 4; at += 1) await c.sweep();
+      c.link.current = refusing(1, 5_150);
+      assert.equal(await refused(c), 1, 'two minutes down');
+      // Ten minutes down, longer than the window and than a counter's gap: the one before has
+      // gone from the window, and the one made while down is counted on the first record back.
+      c.link.current = { connected: false };
+      for (let at = 0; at < 20; at += 1) await c.sweep();
+      c.link.current = refusing(2, 5_800);
+      assert.equal(await refused(c), 1);
+    });
+
+    it('lets a refusal go five minutes after the sweep that saw it, and not before', async () => {
+      const c = counter(1_000);
+      c.link.current = refusing(0, 5_000);
+      await c.sweep();
+      c.link.current = refusing(1, 5_030);
+      assert.equal(await refused(c), 1);
+      for (let sweep = 1; sweep <= 9; sweep += 1) {
+        c.link.current = refusing(1, 5_030 + 30 * sweep);
+        assert.equal(await refused(c), 1, `${String(30 * sweep)} s later`);
+      }
+      c.link.current = refusing(1, 5_330);
+      assert.equal(await refused(c), 0, 'five minutes later');
+    });
+
+    it('counts a probe that started after this core did in full, and one already running not at all', async () => {
+      const late = counter(10_000);
+      late.link.current = refusing(2, 40);
+      assert.equal(await refused(late), 2);
+      const early = counter(1_000);
+      early.link.current = refusing(2, 5_000);
+      assert.equal(await refused(early), 0);
+    });
+
+    it('counts what the drain discarded, either way, as one count (`P-283`)', async () => {
+      const c = counter(1_000);
+      const discarding = (rejected: number, oversized: number, uptime: number): ProbeLink =>
+        refusing(0, uptime, { spoolRejected: rejected, spoolOversized: oversized });
+      c.link.current = discarding(0, 0, 5_000);
+      assert.equal((await c.sweep())['resultsDiscarded'], 0);
+      c.link.current = discarding(40, 0, 5_030);
+      assert.equal((await c.sweep())['resultsDiscarded'], 40);
+      assert.match(c.message(), /40 results discarded unsent in the last 5 minutes/u);
+      c.link.current = discarding(0, 1, 9);
+      const restarted = await c.sweep();
+      assert.equal(restarted['resultsDiscarded'], 41, 'a restart, and one too large');
+      // Not the refused groups' count, and not theirs in it.
+      assert.equal(restarted['scriptGroupsRefusedRecently'], 0);
+    });
+
+    it('gaps each for a probe that sends no total, and for one that is gone', async () => {
+      const c = counter(1_000);
+      c.link.current = connected();
+      assert.deepEqual(await c.sweep(), {}, 'a probe below 31 sends neither total');
+      c.link.current = refusing(1, 5_000);
+      assert.deepEqual(await c.sweep(), { scriptGroupsRefusedRecently: 0 }, 'below 32, one');
+      c.link.current = { connected: false };
+      assert.deepEqual(await c.sweep(), {});
     });
   });
 
@@ -1671,6 +1842,128 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       future = 1;
       const again = await sweep();
       assert.equal(again.state, 'warning', 'one refused result is enough');
+    });
+
+    /**
+     * A Probe Health service that goes the whole way, as `sweeper` does, but one service across
+     * every sweep: the five-minute counts are the service's (`P-283`, `P-284`).
+     */
+    const lasting = async (
+      link: () => ProbeLink,
+    ): Promise<() => Promise<{ state: string; message: string }>> => {
+      const lookups = await loadLookups({ logger: silent });
+      const states = new SensorStateService({
+        db,
+        logger: silent,
+        settings: harness.resolver,
+        pauses: new PauseRepository(),
+      });
+      const channels = new ChannelResolver({ logger: silent, lookups });
+      const service = new ProbeHealthService({
+        db,
+        logger: silent,
+        vouching: everyVoucherHolds,
+        sources: {
+          link,
+          timeRefusals: () => ({ past: 0, future: 0 }),
+          connectedProbeIds: () => (link().connected ? [probeId] : []),
+        },
+        ingest: async (results) => {
+          const ingestor = new Ingestor({ db, logger: silent, config: CONFIG });
+          const ingestion = new IngestionService({
+            db,
+            logger: silent,
+            ingestor,
+            states,
+            resolver: channels,
+          });
+          await ingestion.acceptResults('probe-health', {
+            type: 'results',
+            batchId: `probe-health-${now.toISOString()}`,
+            results: [...results],
+          });
+          await ingestor.stop();
+        },
+        now: () => now,
+        // A probe at an uptime above this met the core already running: a baseline.
+        uptime: () => 1_000,
+        monotonicMs: () => now.getTime(),
+      });
+      return async () => {
+        await service.sweep();
+        now = new Date(now.getTime() + 30_000);
+        const rows = await db.query<{ state: string; message: string }>(
+          'SELECT state, message FROM sensor_runtime WHERE object_id = $1',
+          [sensorId],
+        );
+        assert.ok(rows[0]);
+        return rows[0];
+      };
+    };
+
+    it('warns on a refused script group however it falls, once a burst, and clears (`P-284`)', async () => {
+      // `scriptGroupsRefused` is a counter with no limit now; the warning is the five-minute
+      // count, which sees the first record after a restart and holds through a burst.
+      let current: ProbeLink = { connected: false };
+      let uptime = 5_000;
+      const sweepWith = await lasting(() => current);
+      const sweep = async (
+        total: number,
+        restarted = false,
+      ): Promise<{ state: string; message: string }> => {
+        uptime = restarted ? 3 : uptime + 30;
+        current = connected({
+          lastHeartbeatAt: now,
+          health: { ...quiet, scriptGroupsRefused: total, uptimeSeconds: uptime },
+        });
+        return sweepWith();
+      };
+
+      assert.equal((await sweep(0)).state, 'up', 'the baseline');
+      // **Across a counter reset**: the probe restarts and refuses in its first record.
+      const restarted = await sweep(1, true);
+      assert.equal(restarted.state, 'warning', `after a restart: ${restarted.message}`);
+      assert.match(restarted.message, /Script groups refused \(5 min\) is 1 groups/u);
+      // **One burst, one alarm**: more refusals a minute apart hold the one warning rather than
+      // clearing and raising it again, as a rate did between them.
+      for (const total of [1, 2, 2, 3]) {
+        assert.equal((await sweep(total)).state, 'warning', `at a total of ${String(total)}`);
+      }
+      // Five minutes after the last refusal it clears, and not before.
+      for (let quietSweeps = 1; quietSweeps <= 9; quietSweeps += 1) {
+        assert.equal((await sweep(3)).state, 'warning', `${String(30 * quietSweeps)} s on`);
+      }
+      assert.equal((await sweep(3)).state, 'up', 'five minutes after the last');
+      // Across a link gap the count is the same (the counts above); the whole path is not, since
+      // a probe that returns is held Down for its recovery hold (`M-18`) whatever it reports.
+    });
+
+    it('is Down for five minutes on results the drain discarded, from the first record (`P-283`)', async () => {
+      // Readings that exist nowhere, as `spoolDropped`'s are, and seen on the record after a
+      // restart, when a replaying drain is likeliest to discard.
+      let current: ProbeLink = { connected: false };
+      const sweepWith = await lasting(() => current);
+      const sweep = async (
+        oversized: number,
+        uptimeSeconds: number,
+      ): Promise<{ state: string; message: string }> => {
+        current = connected({
+          lastHeartbeatAt: now,
+          health: { ...quiet, spoolRejected: 0, spoolOversized: oversized, uptimeSeconds },
+        });
+        return sweepWith();
+      };
+      assert.equal((await sweep(0, 5_000)).state, 'up');
+      const lost = await sweep(2, 4);
+      assert.equal(lost.state, 'down', `a restarted probe discarding: ${lost.message}`);
+      assert.match(
+        lost.message,
+        /Results discarded unsent \(5 min\) is 2 results, above the error limit/u,
+      );
+      for (let later = 1; later <= 9; later += 1) {
+        assert.equal((await sweep(2, 4 + 30 * later)).state, 'down', `${String(30 * later)} s on`);
+      }
+      assert.equal((await sweep(2, 304)).state, 'up', 'five minutes after');
     });
 
     it('warns on a clock a minute out either way, and is Down on any sensor it froze (`P-232`)', async () => {

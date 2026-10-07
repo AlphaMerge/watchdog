@@ -53,6 +53,7 @@ const POOL: PoolStats = {
   disabled: false,
   workerCrashes: 0,
   startupFailed: 6,
+  channelsDropped: 100,
   waitMs: { p50: 1, p95: 40, p99: 90, max: 500 },
   runMs: { p50: 30, p95: 200, p99: 900, max: 3_000 },
 };
@@ -72,6 +73,7 @@ const CHILDREN: ProcessRunnerStats = {
   scriptGroupsEnded: 8,
   scriptGroupsRefused: 1,
   scriptGroupsRecycled: 3,
+  channelsDropped: 20,
   waitMs: { p50: 30, p95: 400, p99: 900, max: 3_000 },
   runMs: { p50: 200, p95: 2_000, p99: 4_000, max: 9_000 },
   startupMs: { p50: 25, p95: 9_400, p99: 14_800, max: 30_000 },
@@ -93,6 +95,7 @@ const DRAIN: DrainStats = {
   rejected: 0,
   retried: 1,
   oversized: 0,
+  channelsDropped: 3,
   stalledForMs: 0,
 };
 
@@ -208,6 +211,42 @@ describe('the probe’s own health report', () => {
     for (const field of ['scriptGroupsEnded', 'scriptGroupsRefused', 'scriptGroupsRecycled']) {
       assert.equal(field in without, false, `${field} reported with no child runner`);
     }
+  });
+
+  it('reports the readings it could not send, from every place one is taken out (`P-283`)', () => {
+    // Distinct values in each source, so one left out of the sum, or counted twice, is seen.
+    const report = reporter({}).report();
+    assert.equal(
+      report.resultChannelsDropped,
+      123,
+      'the pool’s, the child runner’s and the drain’s',
+    );
+    assert.equal(reporter({ children: false }).report().resultChannelsDropped, 103);
+    assert.equal(reporter({ drain: false }).report().resultChannelsDropped, 120);
+    // The pool is always there, so the count always is: none dropped is a reading.
+    assert.equal(
+      new ProbeHealthReporter({
+        scheduler: () => WHEEL,
+        pool: () => ({ ...POOL, channelsDropped: 0 }),
+      }).report().resultChannelsDropped,
+      0,
+    );
+  });
+
+  it('reports what the drain discarded, each its own count, and nothing with no drain (`P-283`)', () => {
+    const report = new ProbeHealthReporter({
+      scheduler: () => WHEEL,
+      pool: () => POOL,
+      drain: () => ({ ...DRAIN, rejected: 40, oversized: 2 }),
+    }).report();
+    assert.equal(report.spoolRejected, 40);
+    assert.equal(report.spoolOversized, 2);
+    const healthy = reporter({}).report();
+    assert.equal(healthy.spoolRejected, 0, 'none discarded is a reading');
+    assert.equal(healthy.spoolOversized, 0);
+    const without = reporter({ drain: false }).report();
+    assert.equal('spoolRejected' in without, false);
+    assert.equal('spoolOversized' in without, false);
   });
 
   it('says nothing of a start-up time before any child has started, rather than zero', () => {

@@ -577,9 +577,12 @@ describe('process runner', () => {
 
     it('sends what can be sent of readings no core would take', async () => {
       const { runner, seen } = runnerOf();
+      assert.equal(runner.stats().channelsDropped, 0, 'nothing dropped before');
       runner.submit(request(320, 'test.unfit'));
       await until(() => seen.length === 1, 'the check');
       assertFits(seen[0]?.result);
+      // `P-283`: the four channels that could not be sent are counted for Probe Health.
+      assert.equal(runner.stats().channelsDropped, 4);
     });
   });
 
