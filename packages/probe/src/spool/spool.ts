@@ -309,12 +309,18 @@ export class ResultSpool {
    *
    * Nothing leaves the spool until the core has said it stored the batch: a lost acknowledgement
    * costs a duplicate write, which is free, while an optimistic delete costs the reading.
+   *
+   * **At most `maxBytes` of records, and never none** (`P-277` review): a batch is one frame,
+   * and the frame has a size as well as the rows a caller asks for. A record is counted at its
+   * size on disk, which is its size as JSON. The first record is returned whatever its size, so
+   * a caller always has one to send or to discard; one that alone passes the bound is the
+   * caller's to deal with.
    */
-  peek(max: number): Promise<CheckResult[]> {
-    return this.#serially(() => this.#peekNow(max));
+  peek(max: number, maxBytes = Number.POSITIVE_INFINITY): Promise<CheckResult[]> {
+    return this.#serially(() => this.#peekNow(max, maxBytes));
   }
 
-  async #peekNow(max: number): Promise<CheckResult[]> {
+  async #peekNow(max: number, maxBytes: number): Promise<CheckResult[]> {
     // A batch that was never confirmed, replaced by this one. Whatever eviction took from it is
     // on no disk and was not acknowledged, so it is gone now and is counted as gone.
     this.#settleUnconfirmed();
@@ -336,6 +342,8 @@ export class ResultSpool {
     }
 
     const results: CheckResult[] = [];
+    /** Bytes of the records in `results`, as they are on disk. */
+    let bytes = 0;
     // Consumed but unusable, and the unparseable subset of it. Across segments, because one peek
     // may span a boundary.
     let skipped = 0;
@@ -362,7 +370,7 @@ export class ResultSpool {
       let full = false;
 
       for (const line of splitLines(slice)) {
-        if (results.length >= max) {
+        if (results.length >= max || (results.length > 0 && bytes + line.length > maxBytes)) {
           full = true;
           break;
         }
@@ -375,6 +383,7 @@ export class ResultSpool {
         }
         try {
           results.push(JSON.parse(text) as CheckResult);
+          bytes += line.length;
         } catch {
           // A torn line from a crash boundary. Skipped rather than allowed to stop the spool
           // draining, and carried to `commit` rather than counted here — see `#peeked`.
@@ -405,6 +414,8 @@ export class ResultSpool {
       // drain reads as "no work": link up, nothing logged, results piling up until the spool hits
       // its size cap and begins dropping them.
       if (consumed === 0 && position.segment === current) break;
+      // Full by bytes with rows to spare: the next record is the next batch's.
+      if (full) break;
     }
 
     this.#peeked =

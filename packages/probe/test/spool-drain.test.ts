@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { pino, type Logger } from 'pino';
-import type { CheckResult } from '@ms/shared';
+import { encodeFrame, parseProbeToCore, type CheckResult } from '@ms/shared';
 import { SpoolDrain, type ResultSender } from '../src/spool/drain.js';
 import { ResultSpool } from '../src/spool/spool.js';
 import type { ResultsOutcome } from '../src/transport/core-client.js';
@@ -51,11 +51,17 @@ async function harness(
     stallAfterMs?: number;
     now?: () => number;
     logger?: Logger;
+    maxBatchBytes?: number;
+    spoolBytes?: number;
   } = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'ms-drain-'));
   dirs.push(dir);
-  const spool = await ResultSpool.open({ dir, maxBytes: 1_000_000, logger: silent });
+  const spool = await ResultSpool.open({
+    dir,
+    maxBytes: over.spoolBytes ?? 1_000_000,
+    logger: silent,
+  });
   const core = new StubCore();
   const drain = new SpoolDrain({
     spool,
@@ -65,6 +71,7 @@ async function harness(
     ...(over.catchUpMaxRows === undefined ? {} : { catchUpMaxRows: over.catchUpMaxRows }),
     ...(over.stallAfterMs === undefined ? {} : { stallAfterMs: over.stallAfterMs }),
     ...(over.now === undefined ? {} : { now: over.now }),
+    ...(over.maxBatchBytes === undefined ? {} : { maxBatchBytes: over.maxBatchBytes }),
     idleMs: 5,
   });
   return { spool, core, drain };
@@ -403,5 +410,93 @@ describe('catch-up', () => {
     } finally {
       await drain.stop();
     }
+  });
+});
+
+describe('what leaves the spool (`P-277` review)', () => {
+  it('fits a record an earlier build spooled before it is sent', async () => {
+    // Written as a build before `P-277` wrote it: a NUL in the message, a NaN that JSON turned
+    // into null, and a key with a lone surrogate. Sent as it was, it would wedge the probe that
+    // the upgrade was meant to free.
+    const { spool, core, drain } = await harness();
+    await spool.append([
+      {
+        ...result(1),
+        message: 'said\u0000 so',
+        channels: [
+          { key: 'rtt', value: Number.NaN },
+          { key: 'lone\uD800', value: 2 },
+          { key: 'kept', value: 3, name: 'half \uDC00 a pair' },
+        ],
+      },
+    ]);
+
+    drain.start();
+    try {
+      await until(() => spool.stats().pending === 0, 'the record to be sent');
+    } finally {
+      await drain.stop();
+    }
+    const sent = core.offered[0]?.[0];
+    assert.ok(sent !== undefined);
+    assert.equal(sent.message, 'said so');
+    assert.deepEqual(sent.channels, [{ key: 'kept', value: 3, name: 'half \uFFFD a pair' }]);
+    assert.doesNotThrow(() => parseProbeToCore({ type: 'results', batchId: 'b', results: [sent] }));
+  });
+
+  it('splits a backlog of large results into batches that each fit a frame', async () => {
+    // 2,000 results, each within the schema's bounds with a 2,000-character message, come to
+    // more than the 4 MiB a frame may carry. Bounded by rows alone, `encodeFrame` threw, the
+    // link closed, and the same batch was offered again for ever.
+    const { spool, core, drain } = await harness({
+      batchMaxRows: 2_000,
+      spoolBytes: 64 * 1024 * 1024,
+    });
+    const rows = Array.from({ length: 2_000 }, (_, at) => ({
+      ...result(at + 1),
+      message: 'x'.repeat(2_000),
+    }));
+    await spool.append(rows);
+
+    drain.start();
+    try {
+      await until(() => spool.stats().pending === 0, 'the backlog to be sent', 30_000);
+    } finally {
+      await drain.stop();
+    }
+    assert.ok(core.offered.length > 1, `${String(core.offered.length)} batch(es)`);
+    for (const batch of core.offered) {
+      assert.doesNotThrow(() =>
+        encodeFrame({
+          type: 'results',
+          batchId: 'probe-1-1',
+          results: batch,
+          backlog: 2_000,
+          sentAt: new Date().toISOString(),
+        }),
+      );
+    }
+    assert.deepEqual(
+      core.offered.flat().map((one) => one.sensorId),
+      rows.map((one) => one.sensorId),
+    );
+    assert.equal(drain.stats().oversized, 0);
+  });
+
+  it('discards and counts a result that alone is larger than a frame, and sends the rest', async () => {
+    const { spool, core, drain } = await harness({ maxBatchBytes: 1_000 });
+    await spool.append([{ ...result(1), message: 'x'.repeat(1_500) }, result(2)]);
+
+    drain.start();
+    try {
+      await until(() => spool.stats().pending === 0, 'the spool to clear');
+    } finally {
+      await drain.stop();
+    }
+    assert.equal(drain.stats().oversized, 1);
+    assert.deepEqual(
+      core.offered.flat().map((one) => one.sensorId),
+      [2],
+    );
   });
 });

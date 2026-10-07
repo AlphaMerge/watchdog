@@ -9403,6 +9403,46 @@ because each is a decision rather than a defect:
         sensors `ping`, `icmp-ping`, 36/36; probe `process-runner`, `check-pool`,
         `script-groups`, `query-runner`, `result-sink`, 153/153; core `program-delivery`,
         `email-delivery` (database), 61/61. None skipped.
+      - **Amended on review** (a second commit). Three findings, each a way the guarantee above
+        did not hold:
+        - **What was spooled before the upgrade was replayed unfitted.** `fitResult` ran before
+          `spool.append` only, so a record an earlier build wrote (a NUL in a message, a NaN
+          that JSON made `null`) went out as it was and kept wedged the probe the upgrade was
+          meant to free. Now `SpoolDrain` fits every record it takes from the spool, and logs
+          once a batch what it had to drop.
+        - **A lone surrogate in a channel key lost the channel for good.** It survives JSON and
+          `pg` stores it as U+FFFD, so the channel was created under one key and looked up under
+          another: every reading dropped as a sensor that no longer exists, and the channel
+          created again every batch. Now a key with a lone surrogate is dropped with a problem
+          logged, and the message, a name and a unit have each one replaced by U+FFFD, which is
+          what would have been stored (by pattern: the `ES2023` lib does not type
+          `toWellFormed`).
+        - **A batch was bounded by rows, not bytes.** 2,000 results within the schema's bounds
+          can pass the 4 MiB frame; `encodeFrame` threw, the link closed, and the same batch went
+          again for ever. Now `spool.peek(max, maxBytes)` stops before the record that would
+          pass `maxBytes`, counted at its size on disk, and always returns at least one. The
+          drain asks for 99% of `MAX_BATCH_BYTES` (a frame less 64 KiB): fitting only shortens a
+          record, except that clipping a string of 201 or more characters can add one byte. A
+          single result that alone passes `MAX_BATCH_BYTES` is discarded, counted in the drain's
+          new `oversized` and logged, as an `invalid` refusal is. A fitted result comes to about
+          1.2 MB at most, so with the default frame this is a guard rather than a path; it is
+          not on the heartbeat, like `rejected`.
+        - **Tests.** `result-fit.test.ts`: lone surrogates in two keys dropped, and replaced in
+          the message, a name and a unit, a pair kept; the property now asserts every string is
+          well formed by Node's own `isWellFormed`. `spool-drain.test.ts`: a record appended as
+          an earlier build wrote it is sent fitted, and the core's parser takes it; 2,000
+          results with 2,000-character messages go in more than one batch, each of which
+          `encodeFrame` takes as a whole `results` message, all in order, none `oversized`; a
+          1,500-byte result under a 1,000-byte bound is discarded and counted and the next one
+          sent.
+        - **Mutation 7/7:** the key's surrogate check, the text's replacement, the drain not
+          fitting, `peek`'s byte bound and its byte count, the oversized result sent, and not
+          counted.
+        - **Runs:** shared `result-fit`, `messages`, `run-program`, 126/126; sensors `ping`,
+          `icmp-ping`, 36/36; probe `process-runner`, `check-pool`, `script-groups`,
+          `query-runner`, `result-sink`, `spool`, `spool-drain`, `core-client`,
+          `probe-health-report`, 246/246; core `program-delivery`, `email-delivery`, 61/61. None
+          skipped.
 
 - [ ] **P-278 — a script leader that exits before the runner reads its line is never recorded**
       · S · P-266 · Found 2026-10-07 in `P-266`. A script whose leader exits before the runner

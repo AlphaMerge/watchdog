@@ -45,10 +45,12 @@ export interface FittedResult {
  * and a script's — a script's JSON names its own channels and writes its own message — so none
  * of it is assumed to fit.
  *
- * **What is changed, and why that much and no more.** The message loses its NULs and is clipped
- * to `RESULT_LIMITS.message`, ending in an ellipsis. A channel whose key or value cannot be sent
- * is dropped, which leaves a gap and never a made-up number, and a key is never clipped, since a
- * clipped key would be another channel. A counter or a width the schema refuses is left off,
+ * **What is changed, and why that much and no more.** The message, a name and a unit lose their
+ * NULs and have each lone surrogate replaced by U+FFFD, as PostgreSQL would store it; the message
+ * is clipped to `RESULT_LIMITS.message`, ending in an ellipsis. A channel whose key or value
+ * cannot be sent is dropped, which leaves a gap and never a made-up number, and a key is never
+ * clipped or replaced, since either would make it another channel; a key with a NUL or a lone
+ * surrogate is dropped. A counter or a width the schema refuses is left off,
  * which leaves the value. A name or unit is clipped, and a name left empty is left off. The
  * channels past `RESULT_LIMITS.channels` are dropped. A `durationMs` that is not a finite number
  * of zero or more is 0. Fields the schema does not know are not copied.
@@ -74,7 +76,7 @@ export function fitResult(result: CheckResult): FittedResult {
       sensorId: result.sensorId,
       at: result.at,
       outcome: result.outcome,
-      message: typeof message === 'string' ? clip(withoutNul(message), RESULT_LIMITS.message) : '',
+      message: typeof message === 'string' ? clip(textOf(message), RESULT_LIMITS.message) : '',
       durationMs:
         typeof duration === 'number' && Number.isFinite(duration) && duration >= 0 ? duration : 0,
       channels,
@@ -94,7 +96,7 @@ function fitChannel(raw: unknown, at: number, problems: string[]): ChannelReadin
   if (typeof key !== 'string' || !fitsKey(key)) {
     problems.push(
       `channel ${String(at)}'s key is not 1 to ${String(RESULT_LIMITS.key)} characters ` +
-        'without a NUL, and the channel was dropped',
+        'of well-formed text without a NUL, and the channel was dropped',
     );
     return null;
   }
@@ -116,23 +118,40 @@ function fitChannel(raw: unknown, at: number, problems: string[]): ChannelReadin
   }
   const name = channel['name'];
   if (typeof name === 'string') {
-    const clipped = clip(withoutNul(name), RESULT_LIMITS.name);
+    const clipped = clip(textOf(name), RESULT_LIMITS.name);
     if (clipped !== '') fitted.name = clipped;
   }
   const unit = channel['unit'];
-  if (typeof unit === 'string') fitted.unit = clip(withoutNul(unit), RESULT_LIMITS.unit);
+  if (typeof unit === 'string') fitted.unit = clip(textOf(unit), RESULT_LIMITS.unit);
   return fitted;
 }
 
 /** A key the schema takes: 1 to `RESULT_LIMITS.key` characters, counted as Ajv counts them. */
 function fitsKey(key: string): boolean {
   if (key === '' || key.includes('\u0000')) return false;
+  // **Well formed, or dropped** (`P-277` review). A lone surrogate survives JSON, and `pg` then
+  // encodes it as U+FFFD: the channel was created under the replaced key and looked up under
+  // the sent one, which never matched, so every reading was dropped as a sensor that no longer
+  // exists and the channel was created again on every batch.
+  if (LONE_SURROGATE.test(key)) return false;
   // Ajv counts code points; a key no longer than the limit in UTF-16 units is short enough.
   return key.length <= RESULT_LIMITS.key || Array.from(key).length <= RESULT_LIMITS.key;
 }
 
-function withoutNul(text: string): string {
-  return text.includes('\u0000') ? text.replaceAll('\u0000', '') : text;
+/** A surrogate half without its other half. Code units, so no `u` flag. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/**
+ * Text as PostgreSQL will store it and give it back: no NUL, which it refuses, and every lone
+ * surrogate replaced by U+FFFD, which is what `pg`'s encoding would have made of it anyway, so
+ * what is sent is what is stored. `String.prototype.toWellFormed`, which the `ES2023` lib this
+ * build targets does not type.
+ */
+function textOf(text: string): string {
+  const withoutNul = text.includes('\u0000') ? text.replaceAll('\u0000', '') : text;
+  return LONE_SURROGATE.test(withoutNul)
+    ? withoutNul.replace(new RegExp(LONE_SURROGATE.source, 'g'), '\uFFFD')
+    : withoutNul;
 }
 
 /**

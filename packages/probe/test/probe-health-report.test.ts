@@ -92,6 +92,7 @@ const DRAIN: DrainStats = {
   maxRetryAfterMs: 0,
   rejected: 0,
   retried: 1,
+  oversized: 0,
   stalledForMs: 0,
 };
 

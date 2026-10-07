@@ -1,4 +1,4 @@
-import type { CheckResult, Logger } from '@ms/shared';
+import { DEFAULT_MAX_FRAME_BYTES, fitResult, type CheckResult, type Logger } from '@ms/shared';
 import type { ResultsOutcome } from '../transport/core-client.js';
 import type { ResultSpool } from './spool.js';
 
@@ -33,6 +33,11 @@ export interface SpoolDrainOptions {
    */
   stallAfterMs?: number;
   now?: () => number;
+  /**
+   * The most a batch's results may come to as JSON (`P-277` review). `MAX_BATCH_BYTES` unless a
+   * test sets it.
+   */
+  maxBatchBytes?: number;
 }
 
 export interface DrainStats {
@@ -46,6 +51,11 @@ export interface DrainStats {
   rejected: number;
   /** Batches the core asked us to retry. */
   retried: number;
+  /**
+   * Results discarded because one alone is larger than a frame may carry (`P-277` review).
+   * Sending it could never succeed, and keeping it would hold every result behind it.
+   */
+  oversized: number;
   /**
    * Milliseconds the spool has held results with the link up and nothing moving. Zero when it is
    * making progress or has nothing to make progress on.
@@ -62,6 +72,24 @@ const DEFAULT_IDLE_MS = 1_000;
  * week later.
  */
 const DEFAULT_STALL_AFTER_MS = 300_000;
+
+/**
+ * The most one batch's results may come to as JSON (`P-277` review): a frame, less 64 KiB for
+ * the rest of the message.
+ *
+ * **Rows alone did not bound a frame.** 500 to 2,000 results each within the schema's bounds can
+ * pass 4 MiB, and then `encodeFrame` threw, the link closed, and the same batch was offered again
+ * on the next one, for ever.
+ */
+export const MAX_BATCH_BYTES = DEFAULT_MAX_FRAME_BYTES - 64 * 1024;
+
+/**
+ * The share of `MAX_BATCH_BYTES` the spool is asked for, measured at each record's size on disk.
+ * Fitting a record only shortens it, except that clipping a string of at least 201 characters
+ * can lengthen it by one byte (an ellipsis for two ASCII characters), so 1% is more than fitting
+ * can add, and the commas between results besides.
+ */
+const PEEK_SHARE = 0.99;
 
 /**
  * Moves spooled results to the core, oldest first (R-02).
@@ -87,6 +115,7 @@ export class SpoolDrain {
   readonly #sleep: (ms: number) => Promise<void>;
   readonly #stallAfterMs: number;
   readonly #now: () => number;
+  readonly #maxBatchBytes: number;
 
   #running = false;
   #loop: Promise<void> | undefined;
@@ -100,6 +129,7 @@ export class SpoolDrain {
     maxRetryAfterMs: 0,
     rejected: 0,
     retried: 0,
+    oversized: 0,
     stalledForMs: 0,
   };
 
@@ -115,6 +145,7 @@ export class SpoolDrain {
     this.#idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
     this.#stallAfterMs = options.stallAfterMs ?? DEFAULT_STALL_AFTER_MS;
     this.#now = options.now ?? Date.now;
+    this.#maxBatchBytes = options.maxBatchBytes ?? MAX_BATCH_BYTES;
     this.#lastProgressAt = this.#now();
     this.#sleep =
       options.sleep ??
@@ -201,6 +232,32 @@ export class SpoolDrain {
     );
   }
 
+  /**
+   * What the spool hands back, made to fit the wire (`P-277` review). A runner fits each result
+   * before it is spooled, but a record written by an earlier build was not, and one that does
+   * not fit would wedge the probe this was meant to free. Logged once a batch.
+   */
+  #fit(records: readonly CheckResult[]): CheckResult[] {
+    let unfit = 0;
+    const examples: string[] = [];
+    const fitted = records.map((record) => {
+      const { result, problems } = fitResult(record);
+      if (problems.length > 0) {
+        unfit += 1;
+        if (examples.length < 4)
+          examples.push(`sensor ${String(record.sensorId)}: ${problems[0] ?? ''}`);
+      }
+      return result;
+    });
+    if (unfit > 0) {
+      this.#logger.warn(
+        { unfit, examples },
+        'spooled results held readings that cannot be sent as they are; sending the rest',
+      );
+    }
+    return fitted;
+  }
+
   /** One pass. Returns how long to wait before the next one; zero means "immediately". */
   async #step(): Promise<number> {
     // A link that is down is not a stall: the spool is doing its job, and R-02 is the whole
@@ -215,7 +272,9 @@ export class SpoolDrain {
     const pending = this.#spool.stats().pending;
     const take = pending > this.#batchMaxRows ? this.#catchUpMaxRows : this.#batchMaxRows;
 
-    const batch = await this.#spool.peek(take);
+    const batch = this.#fit(
+      await this.#spool.peek(take, Math.floor(this.#maxBatchBytes * PEEK_SHARE)),
+    );
     if (batch.length === 0) {
       this.#stats.backlog = 0;
       // **An empty batch with results still on disk is the shape of the bug this exists for.**
@@ -224,6 +283,24 @@ export class SpoolDrain {
       if (pending > 0) this.#noteStalled(pending);
       else this.#progress();
       return this.#idleMs;
+    }
+
+    // **One result larger than a frame** (`P-277` review). The spool hands back its first record
+    // whatever its size, and one that alone passes the bound can never be sent: kept, it would
+    // hold every result behind it for ever. Discarded, counted and said, as a refusal is.
+    const [only] = batch;
+    if (batch.length === 1 && only !== undefined) {
+      const bytes = Buffer.byteLength(JSON.stringify(only));
+      if (bytes > this.#maxBatchBytes) {
+        this.#stats.oversized += 1;
+        this.#logger.error(
+          { sensorId: only.sensorId, bytes, maxBatchBytes: this.#maxBatchBytes },
+          'a spooled result is larger than a frame can carry; discarding it rather than blocking the spool',
+        );
+        await this.#spool.commit();
+        this.#progress();
+        return 0;
+      }
     }
 
     const backlog = Math.max(0, pending - batch.length);

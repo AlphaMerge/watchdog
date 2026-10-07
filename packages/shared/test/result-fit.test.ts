@@ -76,6 +76,26 @@ describe('fitResult', () => {
     assert.deepEqual(result.channels, [{ key: 'value', value: 1, name: 'Name', unit: 'ms' }]);
   });
 
+  it('drops a key with a lone surrogate, and makes other text what PostgreSQL will store', () => {
+    // `pg` encodes a lone surrogate as U+FFFD. A key so stored never matched the key sent, so
+    // every reading of the channel was dropped and the channel created again every batch.
+    const { result, problems } = fitResult({
+      ...base,
+      message: 'high \uD800 and low \uDC00, a pair 😀',
+      channels: [
+        { key: 'lone\uD800', value: 1 },
+        { key: '\uDC00lone', value: 2 },
+        { key: 'pair😀', value: 3, name: 'n\uD83D', unit: '\uDE00u' },
+      ],
+    });
+    assert.equal(result.message, 'high \uFFFD and low \uFFFD, a pair 😀');
+    assert.deepEqual(result.channels, [
+      { key: 'pair😀', value: 3, name: 'n\uFFFD', unit: '\uFFFDu' },
+    ]);
+    assert.equal(problems.length, 2);
+    assert.match(problems[0] ?? '', /well-formed/);
+  });
+
   it('drops a channel whose key cannot be sent, and never clips a key into another one', () => {
     const { result, problems } = fitResult({
       ...base,
@@ -210,6 +230,14 @@ describe('fitResult', () => {
           });
           coreTakes(result);
           assert.ok(!JSON.stringify(result).includes('\\u0000'));
+          // Node's own `isWellFormed`, which the ES2023 lib this build targets does not type.
+          const texts = [
+            result.message,
+            ...result.channels.flatMap((one) => [one.key, one.name ?? '', one.unit ?? '']),
+          ];
+          for (const one of texts) {
+            assert.ok((one as unknown as { isWellFormed(): boolean }).isWellFormed(), one);
+          }
         },
       ),
       { numRuns: 300 },
