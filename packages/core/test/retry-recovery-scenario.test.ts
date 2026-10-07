@@ -68,6 +68,8 @@ describe(
     let attempts: string[];
     /** What reached the recipient, in the order it arrived. */
     let inbox: string[];
+    /** The body of each message in `inbox`, at the same index: a digest lists its lines here. */
+    let bodies: string[];
     /**
      * Whether to refuse this attempt, and how. Null delivers it. `attempt` counts the attempts
      * at this subject so far, this one included.
@@ -90,6 +92,7 @@ describe(
               const refused = refuse(message.subject, tries, message.requestId);
               if (refused !== null) return Promise.resolve(refused);
               inbox.push(message.subject);
+              bodies.push(message.body);
               return Promise.resolve({ ok: true, detail: 'recorded' } as const);
             },
           },
@@ -139,6 +142,7 @@ describe(
       await db.query(`DELETE FROM object WHERE kind = 'probe'`);
       attempts = [];
       inbox = [];
+      bodies = [];
       refuse = () => null;
       dispatcher = freshDispatcher();
 
@@ -165,11 +169,13 @@ describe(
 
     /**
      * A template in the default mode, so the first Down and the first Up go at once — or in
-     * `always-immediate`, which is what a method that is never summarised behaves as.
+     * `always-immediate`, which is what a method that is never summarised behaves as, or
+     * `downs-immediate`, which holds every Up for the digest.
      */
     async function template(
       subject = '%sensor is %status',
-      summarisation?: 'always-immediate',
+      summarisation?: 'always-immediate' | 'downs-immediate',
+      summaryWindowSeconds?: number,
     ): Promise<number> {
       const created = await templates.create(testActor, {
         name: `On-call ${String(process.hrtime.bigint())}`,
@@ -179,6 +185,7 @@ describe(
         body: subject,
         recipients: [{ kind: 'address', value: 'ops@example.test' }],
         ...(summarisation === undefined ? {} : { summarisation }),
+        ...(summaryWindowSeconds === undefined ? {} : { summaryWindowSeconds }),
       });
       assert.equal(created.summarisation, summarisation ?? 'first-down-and-up');
       return created.id;
@@ -429,6 +436,107 @@ describe(
         'recovery/immediate/sent',
         'initial/immediate/sent',
       ]);
+    });
+
+    // -----------------------------------------------------------------------------------------
+    // Ordering never makes a Down late (`N-21`, review round 2).
+    // -----------------------------------------------------------------------------------------
+
+    it('does not hold a Down for a day behind its recovery’s digest', async () => {
+      // `downs-immediate` with a day's window: every Down goes at once, every Up waits for the
+      // digest. The second Down must not wait a day behind the Up ahead of it.
+      const templateId = await template('%sensor is %status', 'downs-immediate', 86_400);
+      await trigger({
+        state: 'down',
+        initialLatencySeconds: 0,
+        initialTemplateId: templateId,
+        recoveryTemplateId: templateId,
+      });
+
+      await scan(false, 0);
+      await scan(false, 60);
+      await tick(61);
+      await scan(true, 90);
+      await tick(91);
+      assert.deepEqual(inbox, ['ping is down'], 'the Up is held for the digest, as the mode says');
+
+      await scan(false, 100);
+      await scan(false, 110);
+      await tick(111);
+      // Presence first: the second Down arrived, and on this pass, not a day later.
+      assert.equal(inbox.length, 2, 'the Down went on the pass it was queued');
+      const lines = (bodies[1] ?? '').split('\n');
+      assert.ok(lines.includes('ping is up'), 'with the Up ahead of it');
+      assert.deepEqual(lines, ['ping is up', 'ping is down'], 'the Up, then the Down');
+      assert.deepEqual(await requests(), [
+        'initial/immediate/sent',
+        'recovery/held/sent',
+        'initial/held/sent',
+      ]);
+
+      // And nothing more for the rest of the day: one outage, one Down, one digest.
+      await tick(86_500);
+      assert.equal(inbox.length, 2);
+    });
+
+    it('does not delay a Down for another template’s held or retrying recovery', async () => {
+      // The Down goes to A, sent at once; the recovery to B, which holds every Up for a day.
+      const pages = await template('%sensor is %status', 'always-immediate');
+      const recoveries = await template('Recovered: %sensor is %status', 'downs-immediate', 86_400);
+      await trigger({
+        state: 'down',
+        initialLatencySeconds: 0,
+        initialTemplateId: pages,
+        recoveryTemplateId: recoveries,
+      });
+
+      await scan(false, 0);
+      await scan(false, 60);
+      await tick(61);
+      await scan(true, 90);
+      await tick(91);
+      assert.deepEqual(await requests(), ['initial/immediate/sent', 'recovery/held/pending']);
+
+      await scan(false, 100);
+      await scan(false, 110);
+      await tick(111);
+      assert.equal(inbox.length, 2, 'the second Down went on the pass it was queued');
+      assert.deepEqual(inbox, ['ping is down', 'ping is down']);
+    });
+
+    it('sends a flapping sensor’s Downs on time while its recoveries’ transport fails', async () => {
+      // A's Downs, B's recoveries, and B refuses everything. Each Down must go on its own pass,
+      // not behind the recovery before it, which waits behind its own retries.
+      const pages = await template('%sensor is %status', 'always-immediate');
+      const recoveries = await template('Recovered: %sensor is %status', 'always-immediate');
+      await trigger({
+        state: 'down',
+        initialLatencySeconds: 0,
+        initialTemplateId: pages,
+        recoveryTemplateId: recoveries,
+      });
+      refuse = (subject) =>
+        subject.startsWith('Recovered')
+          ? { ok: false, retryable: true, error: '503 service unavailable' }
+          : null;
+
+      await scan(false, 0);
+      await scan(false, 60);
+      await tick(61);
+      assert.deepEqual(inbox, ['ping is down']);
+      for (const [index, base] of [90, 140, 190].entries()) {
+        await scan(true, base); // back: its recovery is refused
+        await tick(base + 1);
+        await scan(false, base + 10);
+        await scan(false, base + 20); // Down again
+        await tick(base + 21);
+        assert.equal(inbox.length, index + 2, `Down ${String(index + 2)} went on its own pass`);
+      }
+      assert.deepEqual(inbox, ['ping is down', 'ping is down', 'ping is down', 'ping is down']);
+      assert.ok(
+        attempts.filter((subject) => subject.startsWith('Recovered')).length >= 3,
+        'every recovery was tried, and refused',
+      );
     });
   },
 );

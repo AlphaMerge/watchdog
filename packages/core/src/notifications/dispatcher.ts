@@ -394,18 +394,6 @@ export class NotificationDispatcher {
       );
       let held = 0;
       for (const request of pending) {
-        // A recovery whose alarm is still in a digest goes in the same digest, after it
-        // (`N-20`), whatever the mode would say about an Up. Sent at once, it told a recipient
-        // the probe was back eight minutes before telling them anything was wrong. An alarm
-        // whose previous outage's recovery is still in a digest joins it the same way (`N-21`).
-        // One whose request ahead is owed any other way — waiting out a retry, say — is not in
-        // `pending` at all, and is decided on the pass after that one is delivered or given up on.
-        if (request.heldBehind !== null) {
-          await this.#summaries.holdBeside(q, request.id, request.heldBehind);
-          held += 1;
-          continue;
-        }
-
         const mode = isSummarisationMode(request.summarisation)
           ? request.summarisation
           : DEFAULT_SUMMARISATION;
@@ -416,6 +404,34 @@ export class NotificationDispatcher {
           request.method !== null &&
           notificationMethods.ids.includes(request.method) &&
           notificationMethods.get(request.method).summarisable;
+
+        // A recovery whose alarm is still in a digest goes in the same digest, after it
+        // (`N-20`), whatever the mode would say about an Up. Sent at once, it told a recipient
+        // the probe was back eight minutes before telling them anything was wrong. An alarm
+        // whose previous outage's recovery is still in its own template's digest joins it the
+        // same way (`N-21`) — and if the mode would send that alarm at once, the digest goes
+        // now rather than holding a Down for the window: it ends on the Down, which is the
+        // order, and arrives when the Down would have. One whose request ahead is owed any
+        // other way — waiting out a retry, say — is not in `pending` at all, and is decided on
+        // the pass after that one is delivered or given up on.
+        const behind = request.heldBehind;
+        if (behind !== null) {
+          if (request.reason !== 'recovery' && request.reason !== 'clear') {
+            const released = await this.#summaries.releasedIfOpen(q, behind.windowId);
+            const kind = kindOf(request);
+            if (
+              released !== null &&
+              (!summarisable ||
+                !summarises(mode) ||
+                disposition(mode, kind, released) === 'immediate')
+            ) {
+              await this.#summaries.flush(q, behind.windowId, now, kind);
+            }
+          }
+          await this.#summaries.holdBeside(q, request.id, behind);
+          held += 1;
+          continue;
+        }
 
         if (!summarisable || !summarises(mode) || request.templateId === null) {
           await this.#summaries.decide(q, request.id, 'immediate', null);

@@ -631,11 +631,20 @@ describe(
           waits: false,
         },
         {
+          // Never across templates in this direction: a late page is worse than one out of order.
           name: 'an alarm behind another template’s recovery, awaiting a retry',
           kinds: ['recovery', 'alarm'],
           own: false,
           ...owed,
-          waits: true,
+          waits: false,
+        },
+        {
+          name: 'an alarm behind another template’s recovery, held for a digest',
+          kinds: ['recovery', 'alarm'],
+          own: false,
+          ...owed,
+          disposition: 'held',
+          waits: false,
         },
         {
           name: 'an alarm behind another template’s recovery, disabled',
@@ -693,10 +702,11 @@ describe(
       }
     });
 
-    it('holds a Down beside the recovery ahead of it, so the digest ends on the Down', async () => {
+    it('sends the digest now for a Down the mode sends at once, ending on the Down', async () => {
       // The Warning is held for the digest and its recovery joins it (`N-20`). The sensor then
-      // goes Down: the window's first Down, which the mode would send at once — ahead of a digest
-      // that ends *up*. It joins the digest instead, after the recovery.
+      // goes Down: the window's first Down, which the mode sends at once. Sent alone it would go
+      // ahead of a digest that ends *up*; held, it would wait for the window. So the digest goes
+      // now, with the Down after the recovery.
       const templateId = await template();
       const { seen, transport } = recorder();
       const dispatcher = dispatcherWith(transport);
@@ -705,17 +715,12 @@ describe(
       await dispatcher.dispatch();
       await queue(templateId, { sensor: sensorAt(0), reason: 'recovery', state: 'up' });
       await dispatcher.dispatch();
+      const [window] = await openWindows();
+      assert.ok(window !== undefined, 'the window the Warning and its recovery are held in');
+
       await queue(templateId, { sensor: sensorAt(0), state: 'down' });
       await dispatcher.dispatch();
-      assert.equal(seen.length, 0, 'the Down is not sent ahead of the digest');
-      assert.deepEqual(
-        (await dispositions()).map((row) => `${row.disposition}/${row.status}`),
-        ['held/pending', 'held/pending', 'held/pending'],
-      );
-
-      await elapse();
-      await dispatcher.dispatch();
-      assert.equal(seen.length, 1);
+      assert.equal(seen.length, 1, 'the digest went on the Down’s pass');
       const lines = seen[0]?.body.split('\n') ?? [];
       assert.equal(lines.length, 3);
       assert.ok(lines.includes('Ping on edge-router is up'), 'the recovery is in it');
@@ -724,6 +729,90 @@ describe(
         'Ping on edge-router is up',
         'Ping on edge-router is down',
       ]);
+
+      // The rest of the window carries on, with the Down counted as released: another sensor's
+      // Down is not a second "first Down", and the window still closes when it was due to.
+      const [successor] = await openWindows();
+      assert.ok(successor !== undefined, 'a window is still open');
+      assert.notEqual(successor.id, window.id);
+      assert.equal(successor.dueAt.getTime(), window.dueAt.getTime());
+      await queue(templateId, { sensor: sensorAt(1), state: 'down' });
+      await dispatcher.dispatch();
+      assert.equal(seen.length, 1, 'the next Down is held, as the mode says');
+      assert.equal((await dispositions()).at(-1)?.disposition, 'held');
+    });
+
+    it('holds a Down the mode would hold beside the recovery ahead of it', async () => {
+      // The window has already sent its first Down, another sensor's, so this Down is held by
+      // the mode anyway: it joins the recovery's digest, after it, and nothing goes early.
+      const templateId = await template();
+      const { seen, transport } = recorder();
+      const dispatcher = dispatcherWith(transport);
+
+      await queue(templateId, { sensor: sensorAt(1), state: 'down' });
+      await queue(templateId, { sensor: sensorAt(0), state: 'warning' });
+      await dispatcher.dispatch();
+      await queue(templateId, { sensor: sensorAt(0), reason: 'recovery', state: 'up' });
+      await dispatcher.dispatch();
+      await queue(templateId, { sensor: sensorAt(0), state: 'down' });
+      await dispatcher.dispatch();
+      assert.deepEqual(
+        seen.map((message) => message.subject),
+        ['HTTP on edge-router is down'],
+        'only the window’s first Down',
+      );
+      assert.equal((await openWindows()).length, 1, 'the window was not cut short');
+
+      await elapse();
+      await dispatcher.dispatch();
+      assert.equal(seen.length, 2);
+      assert.deepEqual(seen[1]?.body.split('\n'), [
+        'Ping on edge-router is warning',
+        'Ping on edge-router is up',
+        'Ping on edge-router is down',
+      ]);
+    });
+
+    it('does not keep an alarm behind a recovery that waits for another template', async () => {
+      // An escalation on another template is refused; the recovery waits for it. The next Down
+      // on the recovery's own template would wait for that other template's retries, one step
+      // removed, so it does not.
+      const onCall = await template();
+      const escalations = await template();
+      const summaries = new SummaryRepository();
+      await queue(onCall, { sensor: sensorAt(0) });
+      const escalation = await queue(escalations, { sensor: sensorAt(0), reason: 'escalation' });
+      await db.query(
+        `UPDATE notification_request
+         SET disposition = 'immediate', status = 'sent' WHERE id <> $1`,
+        [escalation],
+      );
+      await db.query(
+        `UPDATE notification_request
+         SET disposition = 'immediate', attempts = 1,
+             next_attempt_at = now() + interval '1 minute'
+         WHERE id = $1`,
+        [escalation],
+      );
+      const recovery = await queue(onCall, {
+        sensor: sensorAt(0),
+        reason: 'recovery',
+        state: 'up',
+      });
+      const down = await queue(onCall, { sensor: sensorAt(0) });
+
+      const decidable = await db.tx((q) => summaries.undecided(q, 100, [], ['email']));
+      const ids = decidable.map((request) => request.id);
+      assert.ok(!ids.includes(recovery), 'the recovery waits for the escalation');
+      assert.ok(ids.includes(down), 'the Down does not');
+
+      // The control: the same recovery waiting for an alarm of its own template does hold it.
+      await db.query('UPDATE notification_request SET template_id = $2 WHERE id = $1', [
+        escalation,
+        onCall,
+      ]);
+      const again = await db.tx((q) => summaries.undecided(q, 100, [], ['email']));
+      assert.ok(!again.some((request) => request.id === down), 'then the Down waits');
     });
 
     // ---------------------------------------------------------------------------------------

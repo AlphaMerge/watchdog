@@ -76,10 +76,14 @@ export class SummaryRepository {
    * (`N-21`). A sensor that goes Down again while its last recovery is still waiting behind a
    * refused Down queues a second Down, which nothing else orders: never tried, it would be
    * claimed first, and the last thing the recipient heard would be *up* about a sensor that is
-   * Down. So an alarm looks for an owed recovery or clear of the same sensor, trigger and channel
-   * exactly as a recovery looks for its alarm, and waits, or joins its digest, the same way.
-   * Alarms are not ordered among themselves here: an escalation queued behind a refused initial
-   * is not this ordering's business.
+   * Down. So an alarm looks for an owed recovery or clear of the same sensor, trigger and channel,
+   * **on its own template only**, and waits for its retry, or joins its digest. Never another
+   * template's, nor through a recovery of its own that is waiting for another template's alarm:
+   * a late page is worse than one out of order, and another template has other recipients and
+   * another transport, whose failure must not make this one's Downs late. Joining a digest never
+   * delays a Down the mode would send at once either: the dispatcher sends that digest now
+   * (`SummaryRepository.flush`). Alarms are not ordered among themselves here: an escalation
+   * queued behind a refused initial is not this ordering's business.
    *
    * **Every wait is bounded by the retries of the request at its head.** A request only ever
    * waits for an earlier one, so the waits form a chain that starts at a request waiting for
@@ -136,13 +140,31 @@ export class SummaryRepository {
           AND a.id < r.id
           AND (a.reason IN ('recovery', 'clear')) <> (r.reason IN ('recovery', 'clear'))
           AND a.status = 'pending'
-          -- Another template's request is waited for only while something will send it:
+          -- A recovery waits for another template's alarm only while something will send it:
           -- enabled, with a transport in this build, and inside its activation schedule.
-          -- Otherwise this one would wait on a message that is not coming, or not until the
-          -- morning.
+          -- Otherwise it would wait on a message that is not coming, or not until the morning.
+          -- An alarm never waits on another template at all: a late page is worse than one out
+          -- of order, and that template's recipients and transport are not this one's.
           AND (a.template_id = r.template_id
-               OR (tpl.enabled AND tpl.method = ANY($3::text[])
+               OR (r.reason IN ('recovery', 'clear')
+                   AND tpl.enabled AND tpl.method = ANY($3::text[])
                    AND NOT (a.template_id = ANY($2::bigint[]))))
+          -- Nor through a recovery of its own template that is itself waiting for another
+          -- template's alarm, an escalation say: that would be the same wait, one step removed.
+          AND (r.reason IN ('recovery', 'clear') OR NOT EXISTS (
+                SELECT 1
+                FROM notification_request b
+                JOIN notification_template bt ON bt.id = b.template_id
+                WHERE b.sensor_id = a.sensor_id
+                  AND b.trigger_kind = a.trigger_kind
+                  AND b.trigger_id IS NOT DISTINCT FROM a.trigger_id
+                  AND b.channel_key IS NOT DISTINCT FROM a.channel_key
+                  AND b.id < a.id
+                  AND b.reason NOT IN ('recovery', 'clear')
+                  AND b.status = 'pending'
+                  AND b.template_id <> a.template_id
+                  AND bt.enabled AND bt.method = ANY($3::text[])
+                  AND NOT (b.template_id = ANY($2::bigint[]))))
         ORDER BY waits DESC, a.id DESC
         LIMIT 1
       ) ahead ON true
@@ -203,6 +225,46 @@ export class SummaryRepository {
       released: row.released.filter(isKind),
       dueAt: row.due_at,
     };
+  }
+
+  /** What an open window has released, or null when the window is closed or gone. */
+  async releasedIfOpen(q: Queryable, windowId: number): Promise<MessageKind[] | null> {
+    const rows = await q.query<{ released: string[] }>(
+      `SELECT released FROM notification_summary WHERE id = $1 AND closed_at IS NULL FOR UPDATE`,
+      [windowId],
+    );
+    const row = rows[0];
+    return row === undefined ? null : row.released.filter(isKind);
+  }
+
+  /**
+   * Sends an open window's digest now, for a message the mode says goes at once (`N-21`).
+   *
+   * An alarm whose last recovery is held in this window must not go ahead of it, and must not
+   * wait for the window either: under `downs-immediate` that is a Down held for up to a day. So
+   * the window closes now, the alarm joins it, and the digest goes on this pass, ending on the
+   * alarm.
+   *
+   * **The rest of the window carries on as if it had not been cut short.** A successor opens
+   * with the same due time and with what the window had released, plus this alarm's kind — it
+   * did go at once. Without that, the next Down of another sensor would be the fresh window's
+   * "first Down" and go at once as well: one more message than the mode allows.
+   */
+  async flush(q: Queryable, windowId: number, now: Date, kind: MessageKind): Promise<void> {
+    const closed = await q.query<{ template_id: string; due_at: Date; released: string[] }>(
+      `UPDATE notification_summary SET closed_at = $2
+       WHERE id = $1 AND closed_at IS NULL
+       RETURNING template_id::text AS template_id, due_at, released`,
+      [windowId, now],
+    );
+    const window = closed[0];
+    if (window === undefined) return;
+    const released = window.released.includes(kind) ? window.released : [...window.released, kind];
+    await q.query(
+      `INSERT INTO notification_summary (template_id, opened_at, due_at, released)
+       VALUES ($1, $2, $3, $4::text[])`,
+      [window.template_id, now, window.due_at, released],
+    );
   }
 
   /** Records that a kind has gone out immediately inside this window. */

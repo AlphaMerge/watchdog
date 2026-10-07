@@ -3329,6 +3329,66 @@ because each is a decision rather than a defect:
         - the same kind;
         - no digest join for an alarm.
 
+      **Review, round 2: the alarm direction could make a Down late.** A late page is worse
+      than one out of order. All three findings came from the same cause:
+      - A Down the mode sends at once was held for its recovery's digest window, up to a day
+        under `downs-immediate`. Because nothing released it, a later Down of another sensor
+        became the window's "first Down" and went ahead of it.
+      - The alarm direction crossed templates. A Down on a healthy, always-immediate template
+        waited for another template's held digest or failing retries, for recipients who never
+        see that template's messages.
+      - With a failing recovery transport and a flapping sensor, the waits chained: each Down
+        waited for the last recovery, which waited for the Down before it.
+
+      **What changed.**
+      - **The alarm direction stays on the alarm's own template.** It waits only for an owed
+        recovery or clear on the same `template_id`, so the same recipients and transport. It
+        also never waits through such a recovery when that recovery is itself waiting for an
+        alarm on another template, an escalation say. That is a `NOT EXISTS` in the lateral,
+        on the same index. The recovery direction is unchanged.
+      - **A Down is never held for a window.** When the recovery ahead is held in its template's
+        open window and the mode would send the alarm at once, `SummaryRepository.flush` closes
+        the window now. The alarm joins it, so the digest goes on this pass and ends on the
+        alarm. I chose "with it in the same digest" over "after it in id order" because a
+        digest refused on this pass would otherwise leave the Down to be claimed alone, ahead of
+        the Up again. A Down the mode would hold joins the open window as it would anyway.
+      - **Release accounting.** The flush opens a successor window with the old window's due
+        time and released kinds, plus the alarm's kind. So another sensor's Down stays held, and
+        the window closes when it was due to. The message count is what the mode would have
+        sent: the flushed digest stands in for the immediate Down.
+      - **Kept:** the same-template retry wait (same transport, bounded by its retries), the
+        given-up release, and joining a closed digest that is waiting out a retry.
+      - **The cost:** an alarm that does not wait can still go out ahead of a recovery on
+        another template, or ahead of one waiting on another template's alarm, so the last word
+        that template's recipients get can be *up*. Accepted: their Down is on time.
+
+      **Tests.**
+      - `retry-recovery-scenario.test.ts`, 3 new:
+        - `downs-immediate` with a day's window: the second Down arrives on its own pass, in a
+          digest ending Up, Down, and nothing more follows that day;
+        - Downs on an always-immediate template, recoveries held for a day on another: both
+          Downs go on time;
+        - a sensor flapping three times while the recovery template refuses everything: each
+          Down arrives on its own pass.
+      - `notification-summaries.test.ts`:
+        - the old "holds a Down beside the recovery" test now asserts that the digest goes on
+          the Down's pass and ends on the Down, and that the successor window keeps the due
+          time and holds another sensor's Down;
+        - new: a Down the mode would hold joins without sending early;
+        - new: no wait through a recovery that waits for another template's escalation, with a
+          same-template control;
+        - the table: another template's recovery, retrying or held, no longer holds an alarm.
+
+      **Mutation 20/20.** The 12 above, plus:
+      - the alarm direction crossing templates;
+      - no transitive guard;
+      - no flush;
+      - always flush;
+      - flush for recoveries too;
+      - no successor window;
+      - a successor without the alarm's kind;
+      - a successor due now.
+
 ## Phase 5 — Web UI
 
 - [x] **U-01 — Frontend scaffold** · M · F-01 · React 19 + TypeScript + Vite 8, routing, design
