@@ -10339,6 +10339,35 @@ because each is a decision rather than a defect:
         the same millisecond, which are one result to the store and now to the count; the
         second is stamped a second later. `credential-pinning`'s assertions on `unearned` read
         its length; `unfit-results`' bound cases use the new option and stat names.
+      - **Amended on review** (a second commit). **Eviction was quadratic, and `P-295` put it on
+        every refusal.** One key out for every key in walked a full set's keys from the start,
+        past the holes V8 leaves until it rebuilds the table: a million keys took 8.7 s, 43.5 ms
+        a batch of 5,000 and 82 ms at worst, synchronously in `acceptProbeResults`, on the core's
+        event loop. Before `P-295` only rare unfit results paid it; a spool draining after a
+        delete or a move pays it on every result. Now the memory is its own class,
+        `ResultMemory` (`packages/core/src/ingestion/result-memory.ts`, the constants with it):
+        a probe's set grows past `RESULTS_REMEMBERED` by `RESULTS_REMEMBERED_SLACK` (a tenth, at
+        least one) and is trimmed back to the bound in one pass, oldest first. A key seen again
+        is still deleted and added, so a trim reaches it last; the probe-level LRU is unchanged.
+        At least the last 10,000 of a probe are remembered, at most 11,000; worst case about
+        75 MB (was 70), and `administration.md` says so.
+        - **Measured** (`test/perf/result-memory-performance.test.ts`, run alone in the
+          toolchain; the full `test:perf` was not run, since it needs a quiet machine and
+          `ms-server` stopped): a million refused results through `unfitResults` with the set
+          full, 0.50 s in all, a batch of 5,000 mean 2.5 ms, median 2.2 ms, worst 35.9 ms; a
+          second run 0.63 s, mean 3.1, median 2.7, worst 43.2. The worst is one batch in 200
+          and its cause was not looked into (a collection or a table rebuild would look like
+          it); the median is what a drain pays. Budget: a mean under 15 ms a batch. With the
+          per-key eviction put back it read 8.70 s, mean 43.5, median 43.4, worst 81.7, and
+          failed the budget.
+        - **Tests.** `result-memory.test.ts` (no database): 110 keys under a bound of 100 are all
+          kept and the 111th trims to 100, the eleven oldest gone; 10,000 keys never take it past
+          110 nor below 100 once full, and the last 100 always stay; a key seen again survives the
+          trim the next key starts while the two oldest go; the probe heard from least recently
+          is forgotten; the defaults are 10,000, 32 and a tenth, trimmed once at 11,001.
+          `unfit-results.test.ts`'s bound cases, at a bound of 2 and so a slack of 1, now step
+          past the slack to see the trim. Mutation: the slack set to nothing (per-key eviction)
+          fails the perf budget and two of the five memory tests.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then

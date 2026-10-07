@@ -17,6 +17,7 @@ import type { SensorResult, SensorStateService, StateStats } from '../state/serv
 import { ChannelResolver } from './channels.js';
 import type { Ingestor, SampleRow } from './ingestor.js';
 import { SensorOwnership, type Admitted } from './ownership.js';
+import { ResultMemory } from './result-memory.js';
 import type { ReplayPacer } from './replay-pacer.js';
 import type { ProbeRefusals } from '../probes/refusals.js';
 import type { ProbeOrigin } from '../transport/probe-endpoint.js';
@@ -109,7 +110,8 @@ export interface IngestionServiceOptions {
   monotonicMs?: () => number;
   /**
    * How many refused or fitted results are remembered for each probe, so one sent again is
-   * counted once (`P-288`, `P-295`). `RESULTS_REMEMBERED` unless a test states a smaller bound.
+   * counted once (`P-288`, `P-295`), before the slack (`ResultMemory`). `RESULTS_REMEMBERED`
+   * unless a test states a smaller bound.
    */
   resultsRemembered?: number;
   /**
@@ -118,32 +120,6 @@ export interface IngestionServiceOptions {
    */
   probesRemembered?: number;
 }
-
-/**
- * Counted results remembered for each probe (`P-288`, `P-295`): two full batches of 5,000, so a
- * batch whose acknowledgement was lost is still remembered when it is sent again behind another
- * as large. **Per probe**, because between the lost acknowledgement and the resend there is a
- * reconnect, and in a fleet-wide replay after an upgrade other probes send their own refusals
- * meanwhile: one set shared by all of them would forget the first probe's before it came back.
- */
-export const RESULTS_REMEMBERED = 10_000;
-
-/**
- * Probes whose counted results are remembered at once (`P-288`); the one heard from least
- * recently is forgotten first. v1 is sized for fewer than 30 remote probes (`CAPABILITIES.MD`),
- * and the local one makes 30 at most.
- *
- * **Worst case about 70 MB**, all 32 probes each holding 10,000: a key is the kind, the sensor id
- * and the result's `at` (at most 64 characters as the schema takes it, sent whole), so at most 82
- * characters, about 210 bytes with the string's header and the set's entry where a character
- * outside Latin-1 makes it two bytes a character. An ISO time makes it about 35 characters and
- * 80 bytes, some 25 MB for the same 320,000. **Only a refusal is remembered**, or a result that
- * lost readings to fitting: a result that did not fit, one for a sensor not under the probe
- * (`P-295`), or one marked withheld that was not the probe's to mark. Empty while every probe fits
- * its own results and reports only on its own sensors; a spool draining after a delete or a move
- * fills it for that probe, and no further than the bound.
- */
-export const PROBES_REMEMBERED = 32;
 
 /** Fifteen minutes. See `maxFutureSkewMs`. */
 export const DEFAULT_MAX_FUTURE_SKEW_MS = 15 * 60_000;
@@ -224,7 +200,8 @@ export interface ResultStats {
   discardedUnfitReadings: number;
   /**
    * Refused and fitted results remembered so that one sent again is counted once (`P-288`,
-   * `P-295`), across every probe: at most `RESULTS_REMEMBERED` for each of `PROBES_REMEMBERED`.
+   * `P-295`), across every probe: at most `RESULTS_REMEMBERED` and its slack for each of
+   * `PROBES_REMEMBERED`.
    */
   resultsRemembered: number;
   /** Probes whose results are remembered, at most `PROBES_REMEMBERED`. */
@@ -309,14 +286,8 @@ export class IngestionService {
   #refusedForeign = 0;
   #refusedUnfit = 0;
   #discardedUnfitReadings = 0;
-  /**
-   * The results already counted as refused or fitted, by probe GID and then by kind, sensor and
-   * time (`P-288`, `P-295`). Both levels in order of use, the least recent first and the first
-   * forgotten: a probe past `#probeBound`, a result past `#resultBound` of its probe's.
-   */
-  readonly #counted = new Map<string, Set<string>>();
-  readonly #resultBound: number;
-  readonly #probeBound: number;
+  /** The results already counted as refused or fitted, by probe and then by kind, sensor and time. */
+  readonly #counted: ResultMemory;
   readonly #counters = new CounterStore();
   #discardedReadings = 0;
   #discardedSpike = 0;
@@ -342,8 +313,7 @@ export class IngestionService {
     this.#windowClock =
       options.monotonicMs === undefined ? {} : { monotonicMs: options.monotonicMs };
     this.#now = options.now ?? (() => new Date());
-    this.#resultBound = options.resultsRemembered ?? RESULTS_REMEMBERED;
-    this.#probeBound = options.probesRemembered ?? PROBES_REMEMBERED;
+    this.#counted = new ResultMemory(options.resultsRemembered, options.probesRemembered);
   }
 
   stats(): ResultStats {
@@ -362,8 +332,8 @@ export class IngestionService {
       refusedForeign: this.#refusedForeign,
       refusedUnfit: this.#refusedUnfit,
       discardedUnfitReadings: this.#discardedUnfitReadings,
-      resultsRemembered: [...this.#counted.values()].reduce((sum, one) => sum + one.size, 0),
-      probesRemembered: this.#counted.size,
+      resultsRemembered: this.#counted.size,
+      probesRemembered: this.#counted.probes,
       cachedOwners: this.#ownership.cached,
       discardedReadings: this.#discardedReadings,
       discardedSpike: this.#discardedSpike,
@@ -621,17 +591,14 @@ export class IngestionService {
 
   /**
    * Whether this result is to be counted as refused or fitted: true the first time it is seen,
-   * and every time for one that cannot be named (`P-288`). Remembers it, forgetting the least
-   * recent past either bound.
+   * and every time for one that cannot be named (`P-288`). Remembered in `ResultMemory`, which
+   * forgets the least recent past either bound.
    *
    * **One `refused` kind for every refusal** (`P-295`): unfit, unknown, moved, foreign, and
    * `A-41c`'s unearned mark. One arrival of a result meets at most one of them, and a result is
    * the same result whatever refused it: one refused as moved and sent again after its sensor was
    * deleted is not a second refusal.
    *
-   * **A result seen again moves to the newest end**, and so does its probe: a batch sent a third
-   * time, after a second link lost its acknowledgement too, is still remembered, however many
-   * results the probe has sent since the first.
    */
   #firstCount(
     kind: 'refused' | 'fitted',
@@ -640,17 +607,8 @@ export class IngestionService {
     at: string | null,
   ): boolean {
     if (sensorId === null || at === null) return true;
-    const seen = this.#counted.get(gid) ?? new Set<string>();
-    this.#counted.delete(gid);
-    this.#counted.set(gid, seen);
-    forgetOldest(this.#counted, this.#probeBound);
     // Unambiguous without quoting: a sensor id holds no space, and `at` is the rest.
-    const key = `${kind === 'refused' ? 'r' : 'f'}${String(sensorId)} ${at}`;
-    const again = seen.delete(key);
-    seen.add(key);
-    if (again) return false;
-    forgetOldest(seen, this.#resultBound);
-    return true;
+    return this.#counted.first(gid, `${kind === 'refused' ? 'r' : 'f'}${String(sensorId)} ${at}`);
   }
 
   /**
@@ -1114,13 +1072,5 @@ class Refused {
       earliest: new Date(this.earliest).toISOString(),
       latest: new Date(this.latest).toISOString(),
     };
-  }
-}
-
-/** Deletes the first-inserted entries of a set or map until it holds no more than `bound`. */
-function forgetOldest(entries: Set<string> | Map<string, unknown>, bound: number): void {
-  for (const key of entries.keys()) {
-    if (entries.size <= bound) return;
-    entries.delete(key);
   }
 }

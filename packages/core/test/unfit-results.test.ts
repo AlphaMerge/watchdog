@@ -694,7 +694,11 @@ describe(
       const a = { gid: 'probe-a', probeObjectId: null };
       const b = { gid: 'probe-b', probeObjectId: null };
       const c = { gid: 'probe-c', probeObjectId: null };
-      /** Two results a probe, two probes: small enough to step past either bound. */
+      /**
+       * Two results a probe, two probes: small enough to step past either bound. A probe's set
+       * grows to three (the bound and a slack of one) and is trimmed back to two in one pass
+       * (`P-295` review).
+       */
       const small = (): IngestionService => {
         assert.ok(ingestor !== undefined);
         return new IngestionService({
@@ -714,22 +718,29 @@ describe(
         service.unfitResults(a, refusing(2));
         assert.equal(counted(service), 2, 'the same result counted once');
         service.unfitResults(a, refusing(3));
-        assert.equal(service.stats().resultsRemembered, 2, 'the bound holds');
+        assert.equal(service.stats().resultsRemembered, 3, 'past the bound by the slack');
+        service.unfitResults(a, refusing(4));
+        assert.equal(service.stats().resultsRemembered, 2, 'and trimmed back to the bound');
         service.unfitResults(a, refusing(1));
-        assert.equal(counted(service), 4, 'the oldest forgotten, so counted again');
+        assert.equal(counted(service), 5, 'the oldest forgotten, so counted again');
+        service.unfitResults(a, refusing(3));
+        assert.equal(counted(service), 5, 'the newest kept');
       });
 
       it('keeps a result sent a third time, though its probe sent more than the bound since', () => {
         const service = small();
         service.unfitResults(a, refusing(1));
         service.unfitResults(a, refusing(2));
-        // Sent again: it moves to the newest end, so the next result forgets 2, not 1.
+        // Sent again: it moves to the newest end, so the trim forgets 2 and 3, not 1.
         service.unfitResults(a, refusing(1));
         service.unfitResults(a, refusing(3));
         service.unfitResults(a, refusing(1));
-        assert.equal(counted(service), 3, 'the result sent three times counted once');
+        service.unfitResults(a, refusing(4));
+        assert.equal(service.stats().resultsRemembered, 2, 'trimmed');
+        service.unfitResults(a, refusing(1));
+        assert.equal(counted(service), 4, 'the result sent four times counted once');
         service.unfitResults(a, refusing(2));
-        assert.equal(counted(service), 4, 'and the other was the one forgotten');
+        assert.equal(counted(service), 5, 'and the others were the ones forgotten');
       });
 
       it('does not forget one probe’s results for another probe’s, however many', () => {
@@ -743,7 +754,8 @@ describe(
         service.unfitResults(b, refusing(1));
         assert.equal(counted(service), 6);
         assert.equal(service.stats().probesRemembered, 2);
-        assert.equal(service.stats().resultsRemembered, 3);
+        // A's one, and B's two left by the trim and the one since.
+        assert.equal(service.stats().resultsRemembered, 4);
       });
 
       it('forgets the probe heard from least recently past the bound on probes', () => {
@@ -775,12 +787,13 @@ describe(
         service.unfitResults(origin, refusing(1));
         service.unfitResults(origin, refusing(1));
         assert.equal(own.countsFor(probeId).refused, 1);
-        // One that dropped nothing takes no place: had it, sensor 1 would be the oldest of
-        // three, and forgotten.
+        // One that dropped nothing takes no place: had it, sensor 3 would have taken the set
+        // past its bound and slack, and the trim would have forgotten sensor 1.
         service.unfitResults(origin, fitting(0));
         service.unfitResults(origin, refusing(2));
+        service.unfitResults(origin, refusing(3));
         service.unfitResults(origin, refusing(1));
-        assert.equal(counted(service), 2, 'still remembered');
+        assert.equal(counted(service), 3, 'still remembered');
         assert.equal(service.stats().discardedUnfitReadings, 0);
         service.unfitResults(origin, fitting(2));
         service.unfitResults(origin, fitting(2));
