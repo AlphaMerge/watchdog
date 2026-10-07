@@ -26,10 +26,11 @@ import registry from './check-fixtures.js';
  * them to hang and not others:
  *
  * - `MS_TEST_REGISTRY_HANG_DIR` and `MS_TEST_REGISTRY_SCRIPT`: what each load does, in the order
- *   the loads begin, as a comma-separated list of `hang` (for ever), `throw` (the import fails) and
- *   `load` (as usual). Loads past the end of the list load as usual. A load claims its place by
- *   creating `<dir>/<n>`, which only one thread can do, so each entry is taken exactly once however
- *   the starts interleave.
+ *   the loads begin, as a comma-separated list of `hang` (for ever), `throw` (the import fails),
+ *   `slow` (as usual, after `MS_TEST_REGISTRY_SLOW_MS`, holding a loading turn that long without
+ *   failing, `P-271`) and `load` (as usual). Loads past the end of the list load as usual. A load
+ *   claims its place by creating `<dir>/<n>`, which only one thread can do, so each entry is taken
+ *   exactly once however the starts interleave.
  * - `MS_TEST_REGISTRY_CHANNEL`: a `BroadcastChannel` a hanging load posts `{ ticket, at }` on when
  *   it starts to hang and every 100 ms after, so a test can see when one began and that it ended.
  */
@@ -39,6 +40,10 @@ if (hangDir !== undefined) {
   const ticket = claim(hangDir, script.length);
   const action = ticket === undefined ? 'load' : script[ticket];
   if (action === 'throw') throw new Error('this registry fails to load on purpose');
+  if (action === 'slow') {
+    const slowMs = Number(process.env['MS_TEST_REGISTRY_SLOW_MS']);
+    await new Promise((resolve) => setTimeout(resolve, slowMs));
+  }
   if (action === 'hang' && ticket !== undefined) {
     const name = process.env['MS_TEST_REGISTRY_CHANNEL'];
     const channel = name === undefined ? undefined : new BroadcastChannel(name);

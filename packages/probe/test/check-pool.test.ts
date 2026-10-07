@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { readdirSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { BroadcastChannel } from 'node:worker_threads';
 import { tmpdir } from 'node:os';
@@ -590,13 +590,17 @@ describe('a worker that hangs while loading (P-263)', () => {
    * The environment is copied into a worker when it is constructed, so it has to stay set while
    * the pool under test is starting workers, and `close` must run before the next test's.
    */
-  async function scriptLoads(script: readonly ('hang' | 'throw' | 'load')[]): Promise<Hangs> {
+  async function scriptLoads(
+    script: readonly ('hang' | 'throw' | 'load' | 'slow')[],
+    options: { slowMs?: number } = {},
+  ): Promise<Hangs> {
     const scratch = await mkdtemp(join(tmpdir(), 'ms-hang-'));
     scratches.push(scratch);
     const name = `ms-hang-${String(process.pid)}-${scratch}`;
     process.env['MS_TEST_REGISTRY_HANG_DIR'] = scratch;
     process.env['MS_TEST_REGISTRY_SCRIPT'] = script.join(',');
     process.env['MS_TEST_REGISTRY_CHANNEL'] = name;
+    process.env['MS_TEST_REGISTRY_SLOW_MS'] = String(options.slowMs ?? 0);
     const beats = new Map<number, { first: number; last: number }>();
     const channel = new BroadcastChannel(name);
     channel.onmessage = (event: unknown) => {
@@ -613,6 +617,7 @@ describe('a worker that hangs while loading (P-263)', () => {
         delete process.env['MS_TEST_REGISTRY_HANG_DIR'];
         delete process.env['MS_TEST_REGISTRY_SCRIPT'];
         delete process.env['MS_TEST_REGISTRY_CHANNEL'];
+        delete process.env['MS_TEST_REGISTRY_SLOW_MS'];
         channel.close();
       },
     };
@@ -624,13 +629,13 @@ describe('a worker that hangs while loading (P-263)', () => {
   }
 
   function stalledPool(
-    options: { size: number; startupTimeoutMs: number; logger?: Logger },
+    options: { size: number; minSize?: number; startupTimeoutMs: number; logger?: Logger },
     seen: Seen[] = [],
   ): CheckPool {
     const pool = new CheckPool({
       logger: options.logger ?? silent,
       size: options.size,
-      minSize: options.size,
+      minSize: options.minSize ?? options.size,
       startupTimeoutMs: options.startupTimeoutMs,
       registryModule: STALLED,
       onResult: (result, meta) => seen.push({ result, meta }),
@@ -931,15 +936,21 @@ describe('a worker that hangs while loading (P-263)', () => {
 
   it('counts a crashed worker’s replacement as on its way while it waits for a loading turn', async () => {
     // The same gap after a crash: a ready worker dies, and its replacement waits for a turn while
-    // eight hangs hold them all. Two load, then eight hang, in a pool of ten, so every turn is held
-    // and every slot is filled before the crash.
+    // eight hangs hold them all. Two load, then eight hang, as the pool's first ten, so every turn
+    // is held before the crash.
+    //
+    // **Room to grow, and nine checks, since `P-271`.** The hangs are `start`'s own spawns, and
+    // those are now counted as on their way until they end, so each of the eight is in `#growing`
+    // and in `#slots` at once. At a ceiling of ten that alone stops `#grow`, and the test passed
+    // with the crash's count removed. At twenty, with the crash counted, the pool holds 9 and has
+    // 9 on their way: nine queued checks are met. Without it, the ninth grows one.
     const hangs = await scriptLoads([
       'load',
       'load',
       ...Array.from({ length: 8 }, () => 'hang' as const),
     ]);
     const seen: Seen[] = [];
-    const pool = stalledPool({ size: 10, startupTimeoutMs: 120_000 }, seen);
+    const pool = stalledPool({ size: 20, minSize: 10, startupTimeoutMs: 120_000 }, seen);
     try {
       void pool.start();
       await until(
@@ -951,12 +962,107 @@ describe('a worker that hangs while loading (P-263)', () => {
       pool.submit(request(761, 'test.crash'));
       await until(() => seen.some((one) => one.result.sensorId === 761), 'the crash', 60_000);
       assert.equal(seen.find((one) => one.result.sensorId === 761)?.meta.phase, 'worker-crash');
-      // One worker busy, one gone and waiting for a turn: a check queues, and must not grow one.
-      pool.submit(request(762, 'test.ok'));
+      // One worker busy, one gone and waiting for a turn: checks queue, and must not grow one.
+      for (let id = 762; id < 771; id += 1) pool.submit(request(id, 'test.ok'));
+      assert.equal(pool.stats().queued, 9);
       assert.equal(pool.stats().grown, 0, 'nothing was grown for the gap the replacement fills');
     } finally {
       await pool.stop();
       hangs.close();
+    }
+  });
+
+  it('counts start’s own workers as on their way while they wait for a loading turn (P-271)', async () => {
+    // A fixed pool of ten starts ten, eight load at a time, and the other two wait for a turn
+    // out of `#slots`. Uncounted, a check queued then had `#grow` see eight workers and buy a ninth
+    // for a slot one of the two was about to fill: ten became eleven. Eight slow loads hold every
+    // turn for long enough to queue a check inside the gap.
+    const hangs = await scriptLoads(
+      [...Array.from({ length: SPAWN_CONCURRENCY }, () => 'slow' as const), 'load', 'load', 'load'],
+      { slowMs: 3_000 },
+    );
+    const seen: Seen[] = [];
+    const pool = stalledPool({ size: 10, startupTimeoutMs: 120_000 }, seen);
+    let most = 0;
+    /** The size now, kept in `most` too: every read of the size is a sample. */
+    const sample = (): number => {
+      const size = pool.stats().size;
+      most = Math.max(most, size);
+      return size;
+    };
+    const sampler = setInterval(sample, 1);
+    try {
+      let started = false;
+      const starting = pool.start().then(() => {
+        started = true;
+      });
+      await until(() => sample() === SPAWN_CONCURRENCY, 'a full turn loading', 60_000);
+      // Two of the ten are still waiting for a turn, so none is ready and the check queues.
+      pool.submit(request(780, 'test.ok'));
+      assert.equal(pool.stats().queued, 1, 'the check is queued inside the gap');
+      assert.equal(pool.stats().grown, 0, 'nothing was grown for a slot start is filling');
+      await within(60_000, 'the pool to start', starting);
+      await until(
+        () => sample() >= 0 && started && seen.some((one) => one.result.sensorId === 780),
+        'the check to run',
+        60_000,
+      );
+      // A while longer, sampled throughout: an eleventh worker would have had its turn by now.
+      const settled = Date.now() + 1_000;
+      await until(() => sample() >= 0 && Date.now() >= settled, 'a settled pool', 10_000);
+      assert.ok(most <= 10, `the pool held ${String(most)} workers at its size of 10`);
+      assert.equal(hangs.claimed(), 10, 'ten loads began, not eleven');
+      assert.equal(pool.stats().grown, 0);
+    } finally {
+      clearInterval(sampler);
+      await pool.stop();
+      hangs.close();
+    }
+  });
+
+  it('counts a recycled worker’s replacement as on its way through its terminate (P-271)', async () => {
+    // A check that ignores its abort while its thread is in native code: the worker leaves the
+    // pool at the end of the abort grace, and its terminate lasts until the native call returns.
+    // Uncounted in that time, a check queued then had `#grow` buy a worker for the slot the
+    // replacement was about to fill, and the replacement made a pool of two hold three.
+    const scratch = await mkdtemp(join(tmpdir(), 'ms-recycle-'));
+    scratches.push(scratch);
+    const unblocked = join(scratch, 'unblocked');
+    const { pool, seen } = await poolOf({ size: 2, abortGraceMs: 100 });
+    let most = 0;
+    /** The size now, kept in `most` too: every read of the size is a sample. */
+    const sample = (): number => {
+      const size = pool.stats().size;
+      most = Math.max(most, size);
+      return size;
+    };
+    const sampler = setInterval(sample, 1);
+    try {
+      pool.submit({ ...request(790, 'test.slow', { delayMs: 60_000 }), timeoutMs: 120_000 });
+      pool.submit({
+        ...request(791, 'test.block', { delayMs: 3_000, marker: unblocked }),
+        timeoutMs: 100,
+      });
+      await until(() => sample() === 1, 'the blocked worker taken out', 20_000);
+      // Inside the terminate: one worker, busy, and the replacement not yet in the pool.
+      pool.submit(request(792, 'test.ok'));
+      assert.equal(pool.stats().queued, 1, 'the check is queued inside the gap');
+      assert.equal(pool.stats().grown, 0, 'nothing was grown for the slot the replacement fills');
+      await until(
+        () =>
+          sample() >= 0 && existsSync(unblocked) && seen.some((one) => one.result.sensorId === 792),
+        'the thread unblocked and the check run',
+        60_000,
+      );
+      // A while longer, sampled throughout: the replacement follows the terminate at once.
+      const settled = Date.now() + 1_000;
+      await until(() => sample() >= 0 && Date.now() >= settled, 'a settled pool', 10_000);
+      assert.ok(most <= 2, `the pool held ${String(most)} workers at its size of 2`);
+      assert.equal(pool.stats().grown, 0);
+      assert.equal(seen.find((one) => one.result.sensorId === 791)?.meta.phase, 'timeout');
+    } finally {
+      clearInterval(sampler);
+      await pool.stop();
     }
   });
 

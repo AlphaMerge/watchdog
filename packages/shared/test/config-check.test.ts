@@ -216,6 +216,28 @@ describe('checking a configuration', () => {
     assert.ok(out[0]?.includes('ms-probe'));
   });
 
+  it('refuses a probe abort grace shorter than the program grace it must hold, saying why (P-267)', () => {
+    // The probe would refuse to start on it, so the upgrade gate refuses it first, in words: a
+    // bare "must be >= 1500" would say nothing about the PowerShell it would leave running.
+    const path = tempFile(JSON.stringify({ probe: { checkAbortGraceMs: 500 } }));
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = runConfigCheck({
+      schema: probeConfigSchema,
+      service: 'ms-probe',
+      version: '9.9.9',
+      argv: ['--config', path],
+      env: {},
+      write: (line) => out.push(line),
+      writeError: (line) => err.push(line),
+    });
+    assert.equal(code, 1);
+    assert.deepEqual(out, []);
+    const said = err.join('\n');
+    assert.match(said, /probe\.checkAbortGraceMs: 500 ms is shorter than 1500 ms/);
+    assert.match(said, /leaves that PowerShell running\. Set it to 1500 or more/);
+  });
+
   describe('what only the build can know (`B-08`)', () => {
     // The schema accepts `flowListener.enabled` in every build, and a v1 probe does nothing with
     // it. The service asks its own build and hands the check what it found, as problems that

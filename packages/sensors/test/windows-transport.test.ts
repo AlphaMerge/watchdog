@@ -22,6 +22,7 @@ import {
 } from '../src/support/windows/index.js';
 import { queryCim, whereOf } from '../src/types/windows-shared.js';
 import { windowsService } from '../src/types/windows-service.js';
+import { CHECK_ABORT_GRACE_MIN_MS, WORKER_PROGRAM_GRACE_MAX_MS } from '@ms/shared';
 import { installFakePowerShell } from '@ms/simulators';
 
 /**
@@ -319,6 +320,19 @@ describe('running it', () => {
     );
     assert.ok(tookMs >= POWERSHELL_GRACE_MS - 5, `killed ${String(Math.round(tookMs))} ms after`);
     assert.ok(tookMs < 2_000, `killed ${String(Math.round(tookMs))} ms after, past the pool's 2 s`);
+  });
+
+  it('gives PowerShell no more than the probe’s abort grace is held to contain (`P-267`)', () => {
+    // The probe refuses a `checkAbortGraceMs` under `CHECK_ABORT_GRACE_MIN_MS`, which is built
+    // from `WORKER_PROGRAM_GRACE_MAX_MS`. A longer grace here would outlast a setting the probe
+    // accepts, and the worker would be terminated with its `SIGKILL` timer still waiting.
+    assert.equal(
+      Math.max(POWERSHELL_GRACE_MS, WORKER_PROGRAM_GRACE_MAX_MS),
+      WORKER_PROGRAM_GRACE_MAX_MS,
+      `PowerShell's ${String(POWERSHELL_GRACE_MS)} ms is over the floor's ` +
+        `${String(WORKER_PROGRAM_GRACE_MAX_MS)} ms`,
+    );
+    assert.ok(CHECK_ABORT_GRACE_MIN_MS > WORKER_PROGRAM_GRACE_MAX_MS);
   });
 
   it('reports the interpreter’s own failure with its stderr', async () => {

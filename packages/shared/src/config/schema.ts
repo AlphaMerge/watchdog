@@ -672,6 +672,9 @@ export interface ProbeConfig {
      * The cooperative path costs nothing — an aborted check returns and its worker is reusable.
      * Termination is the backstop for a check that cannot be interrupted, and it costs a worker
      * restart.
+     *
+     * At least `CHECK_ABORT_GRACE_MIN_MS` (`P-267`), a rule rather than the schema's `minimum`
+     * so that the refusal can say why: it has to hold the grace a check gives a program it ends.
      */
     checkAbortGraceMs: number;
     /**
@@ -1558,6 +1561,7 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
           default: 60_000,
         },
         checkQueueMaxLength: { type: 'integer', minimum: 1, maximum: 1_000_000, default: 1_000 },
+        // At least `CHECK_ABORT_GRACE_MIN_MS`, by the rule after this schema, saying why (`P-267`).
         checkAbortGraceMs: { type: 'integer', minimum: 100, maximum: 300_000, default: 2_000 },
         // Four at once, because each is a Node process rather than a thread awaiting a packet.
         processRunnerMaxConcurrent: { type: 'integer', minimum: 1, maximum: 64, default: 4 },
@@ -1664,3 +1668,49 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
     },
   },
 };
+
+/**
+ * The longest a sensor type running in a pool worker may give a program between `SIGTERM` and
+ * `SIGKILL` (`P-262`, `P-267`). PowerShell's `POWERSHELL_GRACE_MS` is the one today, and
+ * `windows-transport.test.ts` holds it to this.
+ *
+ * Here because the floor below is made of it, and `@ms/shared` cannot import a sensor type.
+ */
+export const WORKER_PROGRAM_GRACE_MAX_MS = 1_000;
+
+/**
+ * The least `probe.checkAbortGraceMs` may be (`P-267`): a worker's program grace, and half a
+ * second for the abort to reach the worker and its `SIGKILL` timer to fire.
+ *
+ * **Why a floor.** At a check's timeout the pool posts an abort to its worker, and terminates the
+ * worker `checkAbortGraceMs` later if the check has not answered. A Windows check ends PowerShell
+ * on that abort with `SIGTERM`, and `SIGKILL` a grace later — from a timer in that worker. Under
+ * the grace the worker is terminated first, the timer dies with it, and a PowerShell that ignored
+ * `SIGTERM` runs on in a process group nobody will end.
+ *
+ * **Refused rather than fitted.** The other way is to tell each worker the setting and give the
+ * program a grace inside it, which puts a probe setting into every check's context for the one
+ * operator who wants a worker recycled in under a second and a half — and a shorter `SIGTERM`
+ * grace is a less clean end for every program, to save a worker restart on a check that already
+ * failed. So the setting says what it must contain, and the probe and `config check` say why.
+ *
+ * The half second covers only the `SIGKILL` being sent, not the check's answer arriving: an
+ * answer that comes after the terminate costs a worker restart, and nothing is left running.
+ */
+export const CHECK_ABORT_GRACE_MIN_MS = WORKER_PROGRAM_GRACE_MAX_MS + 500;
+
+RULES.set(probeConfigSchema, (config: ProbeConfig): readonly string[] => {
+  const problems: string[] = [];
+  const grace = config.probe.checkAbortGraceMs;
+  if (grace < CHECK_ABORT_GRACE_MIN_MS) {
+    problems.push(
+      `probe.checkAbortGraceMs: ${String(grace)} ms is shorter than ` +
+        `${String(CHECK_ABORT_GRACE_MIN_MS)} ms. A check that ignores its abort runs in a worker ` +
+        'that is terminated this long after the abort, and a Windows check in it is still ' +
+        `waiting the ${String(WORKER_PROGRAM_GRACE_MAX_MS)} ms it gives PowerShell to end on ` +
+        'SIGTERM before it sends SIGKILL; a worker terminated first leaves that PowerShell ' +
+        `running. Set it to ${String(CHECK_ABORT_GRACE_MIN_MS)} or more`,
+    );
+  }
+  return problems;
+});

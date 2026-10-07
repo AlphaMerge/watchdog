@@ -472,7 +472,14 @@ export class CheckPool {
 
   #nextJobId = 0;
   #nextWorkerId = 0;
-  /** Spawns in flight, so a burst of pumps does not order the same worker several times over. */
+  /**
+   * Spawns in flight, so a burst of pumps does not order the same worker several times over.
+   *
+   * **Every spawn is in it until it settles** (`P-263`, `P-271`): `start`'s own, a growth step's, a
+   * failed start's retry while it waits out its delay, a crash's replacement and a recycle's. Each
+   * can wait out of `#slots` — for a loading turn, a delay or a terminate — and one left out of
+   * this as well is a gap `#grow` buys a second worker for.
+   */
   #growing = 0;
   /** Workers loading their registry right now, bounded by `SPAWN_CONCURRENCY` (`P-206`). */
   #loading = 0;
@@ -672,7 +679,19 @@ export class CheckPool {
   /** Resolves once every worker has loaded its registry and is ready for work. */
   async start(): Promise<void> {
     if (this.#slots.length > 0) return;
-    await Promise.all(Array.from({ length: this.#minSize }, () => this.#spawn()));
+    // **Counted as on their way until each has started** (`P-271`), like every other spawn. Past
+    // `SPAWN_CONCURRENCY` they wait for a loading turn out of `#slots`, and uncounted in that time
+    // a check queuing made `#grow` start a worker for a slot that one of these was about to fill:
+    // a fixed pool of ten held eleven.
+    this.#growing += this.#minSize;
+    await Promise.all(
+      Array.from({ length: this.#minSize }, () =>
+        this.#spawn().finally(() => {
+          this.#growing -= 1;
+          this.#pump();
+        }),
+      ),
+    );
     // Zero means never give a worker back, which is what a probe on a machine with memory to
     // spare and spiky work should choose: the pool then only ever climbs.
     if (this.#minSize < this.#maxSize && this.#idleShrinkMs > 0) {
@@ -1408,6 +1427,15 @@ export class CheckPool {
     this.#retryTimers.add(timer);
   }
 
+  /**
+   * Terminates a worker whose check ignored its abort, and starts its replacement.
+   *
+   * **The replacement is counted as on its way from the moment the worker leaves `#slots`**
+   * (`P-271`), through the terminate — which lasts as long as the thread takes to stop, and a
+   * thread blocked in native code stops only when that returns — and through the wait for a
+   * loading turn. Uncounted, a check queuing in that time made `#grow` start a worker for the same
+   * gap, and the replacement then made a pool of two hold three.
+   */
   async #recycle(slot: Slot): Promise<void> {
     slot.retired = true;
     this.#bankSessions(slot);
@@ -1415,9 +1443,14 @@ export class CheckPool {
     if (index >= 0) this.#slots.splice(index, 1);
     slot.job = undefined;
     slot.idleSince = process.hrtime.bigint();
-    await slot.worker.terminate();
-    if (this.#stopped) return;
-    await this.#spawn();
+    this.#growing += 1;
+    try {
+      await slot.worker.terminate();
+      if (this.#stopped) return;
+      await this.#spawn();
+    } finally {
+      this.#growing -= 1;
+    }
     this.#pump();
   }
 
@@ -1441,8 +1474,8 @@ export class CheckPool {
    * because the cost is per concurrent load wherever it comes from. `#grow` used to start the
    * whole shortfall at once, and a worker loaded among sixty-three others finished with about
    * 52 MiB of committed heap where one loaded among seven has 36; see the constant for the run.
-   * A waiting spawn is already counted in `#growing`, so a queue that it will absorb does not
-   * order it a second time.
+   * A waiting spawn, whichever of those it is, is already counted in `#growing` (`P-271`), so a
+   * queue that it will absorb does not order it a second time.
    */
   #loadingTurn(): Promise<void> {
     if (this.#loading < SPAWN_CONCURRENCY) {

@@ -12,11 +12,13 @@ export {
 export type { ConfigSources, LoadConfigOptions, LoadedConfig } from './config/load.js';
 export {
   allowedHostProblem,
+  CHECK_ABORT_GRACE_MIN_MS,
   coreConfigSchema,
   DEFAULT_RATE_LIMIT_PER_MINUTE,
   heartbeatUrlProblem,
   probeConfigSchema,
   trustedProxyProblem,
+  WORKER_PROGRAM_GRACE_MAX_MS,
 } from './config/schema.js';
 export type {
   CoreConfig,

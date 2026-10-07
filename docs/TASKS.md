@@ -8890,7 +8890,7 @@ because each is a decision rather than a defect:
         - **Runs:** the same seven files in the toolchain (Linux), 247/247, none skipped; the
           `P-266` tests twice more, 32/32 each.
 
-- [ ] **P-267 — `checkAbortGraceMs` below 1 s outruns PowerShell's kill** · S · P-262 · Found
+- [x] **P-267 — `checkAbortGraceMs` below 1 s outruns PowerShell's kill** · S · P-262 · Found
       2026-10-05 in `P-262`. A pool worker running a Windows sensor ends PowerShell on the
       check's abort, with SIGKILL 1 s after SIGTERM (`POWERSHELL_GRACE_MS`), inside the pool's
       default 2 s `checkAbortGraceMs`. An operator who sets `checkAbortGraceMs` below 1 s gets
@@ -8898,6 +8898,37 @@ because each is a decision rather than a defect:
       ignored SIGTERM running. **Done when** the setting refuses a value below the program grace
       it must contain (with `config check` saying why), or the worker is told the setting and
       fits its grace inside it; with a test.
+
+      **P-267 outcome. The probe refuses a `checkAbortGraceMs` under 1,500 ms, and says why.**
+      - **Refused, not fitted.** Fitting means passing a probe setting into every check's context
+        so a sensor can shrink its `SIGTERM` grace under it. That serves one operator, the one who
+        wants a worker recycled in under 1.5 s. It costs every program a shorter clean end, to save
+        a worker restart on a check that has already failed. Refusing is one rule.
+      - **Where:** a probe rule in `RULES` (`schema.ts`), the mechanism `A-38` and `P-229` use.
+        `loadConfig` runs it, so the service refuses to start and `config check` fails the same
+        way. The schema's `minimum` stays at 100, because an ajv `must be >= 1500` cannot say why
+        and would stop the rule from running. The message names the value and the floor. It says
+        a Windows check is still waiting out its 1,000 ms before `SIGKILL`, that a worker
+        terminated first leaves PowerShell running, and to set 1500 or more.
+      - **The numbers:** `WORKER_PROGRAM_GRACE_MAX_MS = 1_000` in `@ms/shared` is the longest grace
+        a pool-worker sensor may give a program. `@ms/shared` cannot import `POWERSHELL_GRACE_MS`
+        from a sensor package. `CHECK_ABORT_GRACE_MIN_MS` is that plus 500 ms, for the abort to
+        reach the worker and its timer to fire. The 500 is a judgement, not a measurement. It
+        needs to cover only the `SIGKILL` being sent. An answer that arrives after the terminate
+        costs a worker restart and leaves nothing running. The default of 2,000 and the shipped
+        example pass. `SCRIPT_GRACE_MS` is not involved, because script checks run in a check
+        process under the runner's `KILL_MARGIN_MS`, not in a pool worker.
+      - **Tests:** `config.test.ts` takes the default, takes 1,500 from the file and from
+        `MS_PROBE__CHECK_ABORT_GRACE_MS`, and refuses 100, 999 and 1,499 (and 900 from the
+        environment) with the whole reason. `config-check.test.ts`: `config check` exits 1 on
+        500, prints nothing that reads as a pass, and says why. `windows-transport.test.ts` holds
+        `POWERSHELL_GRACE_MS` at or under `WORKER_PROGRAM_GRACE_MAX_MS`.
+      - **Mutation 3/3 killed:** the rule's comparison at 100 (both refusal tests); the floor with
+        no margin (the floor, refusal and `config check` tests); `POWERSHELL_GRACE_MS` at 1,200
+        (*PowerShell's 1200 ms is over the floor's 1000 ms*).
+      - **Runs:** shared `config` and `config-check` 72/72, sensors `windows-transport` 50/50.
+      - **Not done:** `windows-transport.test.ts` *kills a PowerShell that ignores SIGTERM* still
+        asserts `tookMs < 2_000`, a wall-clock upper bound with about 1 s of slack.
 
 - [x] **P-268 — two SSH session tests keep under a second of slack** · S · P-261 · Found
       2026-10-07 in `P-261`. `packages/probe/test/ssh-session.test.ts` asserts a wall-clock
@@ -8984,12 +9015,51 @@ because each is a decision rather than a defect:
         killed** (2 tests fail each): the cap loop never running; the cap raised to 40.
         `ring.test.ts`: 36/36.
 
-- [ ] **P-271 — two more worker spawns are not counted as on their way** · S · P-263 · Found
+- [x] **P-271 — two more worker spawns are not counted as on their way** · S · P-263 · Found
       2026-10-07 in `P-263`. `#recycle` (a worker terminated for ignoring its abort) and
       `start()`'s own spawns are not in `#growing` while they wait for a loading turn, so `#grow`
       can start a worker for the same gap — the shape `P-263` fixed for the retry and the crash
       replacement. **Done when** both are counted until their spawn settles, each with a test that
       fails with the count removed.
+
+      **P-271 outcome. Every spawn the pool makes is now in `#growing` until it settles.**
+      - **`start()`** adds `minSize` before it spawns. Each spawn takes itself off and pumps when it
+        settles, as a growth step's does. Before this, past `SPAWN_CONCURRENCY` the rest waited
+        for a turn outside `#slots`, and a check queued then grew a worker: a fixed pool of 10
+        held 11.
+      - **`#recycle`** counts its replacement from the moment the worker leaves `#slots`, through
+        the terminate as well as the wait for a turn. The terminate was the larger part of the
+        gap. A thread held in native code stops only when that code returns, so a check queued
+        then grew a worker and the replacement made a pool of 2 hold 3. A `finally` takes the
+        count off, including when `stop` ends the wait.
+      - **Tests** (`check-pool.test.ts`). Each queues a check inside the gap and asserts
+        `grown === 0` there. It samples the size every millisecond and in every wait until 1 s
+        after the gap has closed, and asserts the most the pool held:
+        - **start:** eight `slow` loads hold every turn of a fixed pool of 10 for 3 s. A new
+          `slow` entry in `stalled-registry.ts` loads after `MS_TEST_REGISTRY_SLOW_MS`. A check
+          queued then grows nothing, the pool never holds more than 10, and exactly 10 loads begin.
+        - **recycle:** a new fixture `test.block` ignores its abort with its thread in a synchronous
+          `sleep` (3 s), then creates a marker file. In a pool of 2 at a 100 ms abort grace, the
+          check is queued once the size reads 1. Nothing grows, the pool never holds more than 2,
+          and the blocked check reads `timeout`.
+      - **The `P-263` crash test had to change, or it would have stopped catching anything.** Its
+        eight hangs are `start`'s spawns, so now each counts twice, in `#slots` and in
+        `#growing`. At its ceiling of 10 that alone kept `#grow` from acting, and reverting the
+        crash fix no longer failed the test. It now runs at a ceiling of 20 with a minimum of 10,
+        and queues 9 checks. With the crash replacement counted, 9 are on their way for 9 queued,
+        so nothing grows. Without it, the ninth check grows one.
+      - **Mutation 3/3 killed, then the sizes alone:** start's count removed (the start test,
+        *nothing was grown for a slot start is filling*; the crash test fails too, since it now
+        relies on it); the recycle's count removed (the recycle test); the crash replacement's count
+        removed (the reworked crash test). With the in-gap `grown` asserts taken out and both new
+        counts removed, the size samples fail by themselves: *held 11 workers at its size of 10*
+        and *held 3 workers at its size of 2*.
+      - **Runs:** check-pool whole 68/68. check-flow, pool-demand, pool-memory-cap, shutdown-order,
+        query-runner and process-runner 120/120.
+      - **Found, not fixed:** `#recycle` does not count its worker in `#terminating` while the
+        thread exits. `#retire` and `#startTimedOut` do. So a memory reading taken during a
+        recycle's terminate (seconds, for a thread in native code) counts that worker's memory
+        as taken by something else.
 
 - [ ] **P-272 — should a pool whose registry always hangs give up?** · S · P-263 · Found
       2026-10-07 in `P-263`. **Needs the user.** Since `P-263` a hang never latches the pool: a

@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { resourceLimits } from 'node:worker_threads';
 import {
   GROUP_MARKER,
@@ -48,6 +49,17 @@ const registry: CheckRegistry = {
           }, 50);
         });
         throw new Error('unreachable');
+
+      case 'test.block': {
+        // Ignores its abort *and holds the thread in native code*, which `terminate` cannot cut
+        // short: a synchronous child that sleeps `delayMs`, then creates `params.marker`. So the
+        // worker's terminate lasts until the marker appears, and a test can stand inside that
+        // window (`P-271`). POSIX `sh`; the suites run on Linux.
+        const marker = context.params['marker'];
+        if (typeof marker !== 'string') throw new Error('test.block needs a marker path');
+        execFileSync('sh', ['-c', 'sleep "$1"; : > "$2"', 'sh', String(delayMs / 1_000), marker]);
+        return { channels: [{ key: 'value', value: delayMs }], message: 'unblocked' };
+      }
 
       case 'test.throw':
         throw new Error('the check failed on purpose');

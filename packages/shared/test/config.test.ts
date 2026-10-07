@@ -7,10 +7,12 @@ import { describe, it } from 'node:test';
 import { loadConfig, type ConfigSources } from '../src/config/load.js';
 import { PRODUCT_ENV } from '../src/config/product-env.js';
 import {
+  CHECK_ABORT_GRACE_MIN_MS,
   coreConfigSchema,
   DEFAULT_RATE_LIMIT_PER_MINUTE,
   heartbeatUrlProblem,
   probeConfigSchema,
+  WORKER_PROGRAM_GRACE_MAX_MS,
 } from '../src/config/schema.js';
 import { ConfigError } from '../src/errors/app-error.js';
 
@@ -273,6 +275,47 @@ describe('loadConfig', () => {
       assert.match(refused({ exporters: [''] }), /exporters/);
       assert.match(refused({ address: '' }), /address/);
     });
+  });
+});
+
+describe('how long a worker has to honour an abort (P-267)', () => {
+  const load = (probe: Record<string, unknown>, env: NodeJS.ProcessEnv = {}) =>
+    loadConfig({
+      schema: probeConfigSchema,
+      env,
+      argv: ['--config', tempFile('probe.json', JSON.stringify({ probe }))],
+    });
+
+  it('is two seconds unless it is set, and the floor holds a program’s grace and half a second', () => {
+    const { config } = loadConfig({ schema: probeConfigSchema, env: {}, argv: [] });
+    assert.equal(config.probe.checkAbortGraceMs, 2_000);
+    assert.equal(WORKER_PROGRAM_GRACE_MAX_MS, 1_000);
+    assert.equal(CHECK_ABORT_GRACE_MIN_MS, 1_500);
+  });
+
+  it('takes the floor itself, from the file or the environment', () => {
+    assert.equal(load({ checkAbortGraceMs: 1_500 }).config.probe.checkAbortGraceMs, 1_500);
+    const fromEnv = load({}, { MS_PROBE__CHECK_ABORT_GRACE_MS: '1500' });
+    assert.equal(fromEnv.config.probe.checkAbortGraceMs, 1_500);
+  });
+
+  it('refuses one under the floor, saying what it would leave running and what to set', () => {
+    for (const value of [100, 999, 1_499]) {
+      const error = captureError(() => load({ checkAbortGraceMs: value }));
+      assert.ok(error instanceof ConfigError, String(value));
+      assert.match(
+        error.message,
+        new RegExp(
+          `probe\\.checkAbortGraceMs: ${String(value)} ms is shorter than 1500 ms\\. ` +
+            '.*1000 ms it gives PowerShell to end on SIGTERM before it sends SIGKILL; a worker ' +
+            'terminated first leaves that PowerShell running\\. Set it to 1500 or more$',
+        ),
+        String(value),
+      );
+    }
+    const fromEnv = captureError(() => load({}, { MS_PROBE__CHECK_ABORT_GRACE_MS: '900' }));
+    assert.ok(fromEnv instanceof ConfigError);
+    assert.match(fromEnv.message, /probe\.checkAbortGraceMs: 900 ms is shorter than 1500 ms/);
   });
 });
 

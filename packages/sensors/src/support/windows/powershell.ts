@@ -84,9 +84,9 @@ export type Authentication = (typeof AUTHENTICATIONS)[number];
  * it has not answered — and `runProgram`'s `SIGKILL` timer lives in that worker, so with its
  * default 5 s a PowerShell that ignored `SIGTERM` was left running in a process group nobody
  * would end. One second is half the default, as `SCRIPT_GRACE_MS` is of the process runner's
- * margin. Not read from the setting: the worker is not told it, and a probe whose operator set
- * it below a second terminates a worker that is still waiting out this, as it terminates any
- * other check that has not answered.
+ * margin. Not read from the setting: the worker is not told it. The setting is held above it
+ * instead — the probe refuses a `checkAbortGraceMs` under `CHECK_ABORT_GRACE_MIN_MS`, which is
+ * `WORKER_PROGRAM_GRACE_MAX_MS` and half a second (`P-267`), and a test holds this to that.
  */
 export const POWERSHELL_GRACE_MS = 1_000;
 
