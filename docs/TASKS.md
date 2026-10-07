@@ -3626,6 +3626,21 @@ because each is a decision rather than a defect:
       sensor's first Up in that window waits for the digest. One message fewer, never one more.
       **Done when** decided: give the slot back, or keep, with a scenario test either way.
 
+- [ ] **N-27 — a test send's error is not made legible, and invisible format characters are kept**
+      · XS · N-24 · Found 2026-10-08 in `N-24`. `test-send.ts` returns the transport's error to the
+      template form as it came, without `legible()`. Zero-width and other format characters
+      (U+200B, U+FEFF, U+2028/2029) are not controls and pass `legible()` untouched: they cannot
+      reorder text but can make two errors look alike. **Done when** the test send's error goes
+      through `legible()` with a test, and the format characters are decided (escape or keep, said
+      in `legible.ts`).
+
+- [ ] **N-28 — delivery errors stored before `N-24` keep their control characters** · S · N-24 ·
+      Found 2026-10-08 in `N-24`. `legible()` applies to what is written from now on; older
+      `last_error` values still carry C0/C1 and bidirectional controls to the API, the logs view
+      and Core Health's message. **Done when** decided: a data migration rewrites them (with a
+      tested rollback that need not restore the raw text), or they are left to age out with the
+      request rows, said in the outcome.
+
 ## Phase 5 — Web UI
 
 - [x] **U-01 — Frontend scaffold** · M · F-01 · React 19 + TypeScript + Vite 8, routing, design
@@ -10135,6 +10150,31 @@ because each is a decision rather than a defect:
       · Found 2026-10-07 in `P-283`. When `fitResult` drops channels that cannot be sent, the count
       appears only on Probe Health and in the probe's log; the sensor's own message is silent.
       **Done when** decided: say it in the sensor's message (or a warning), or keep, with a test.
+
+- [ ] **P-293 — the start-up limits pass cannot tell a type's fixed channels from its
+      parameter-made ones** · S · P-291 · Found 2026-10-08 in `P-291`'s review. The pass reads
+      `channels({})`, and every shipped type answers it with a placeholder, so it treats `{}` as
+      the authority for each key `{}` names: a limit a type declares on such a key only for some
+      parameters would be overwritten or cleared at the next start. A key `{}` does not name is
+      cleared only for a type whose `paramsSchema` admits no parameter, so Probe Health (which
+      takes `probeId`) keeps the declared limit of a key it drops outright, and sensors of an
+      unregistered type keep theirs. Latent: only the two health types declare limits.
+      **Done when** decided: an explicit `SensorType` flag for channels that do not depend on
+      parameters (the catalogue refusing `limits` on a parameter-made channel otherwise), or
+      per-sensor evaluation from stored parameters, with tests.
+
+- [ ] **P-294 — syslog and trap counters' protocol 13 is named by no capability** · XS · U-30 ·
+      Found 2026-10-08 in `U-30`. The form's minimum for those counters comes from a comment on
+      `P-64` in `messages.ts`; `capabilities.ts` names flow's 23 but not this one, so the web test
+      cannot hold the number to a shared constant. **Done when** a capability names it and the
+      form and its test read it from `@ms/shared`.
+
+- [ ] **P-295 — ownership refusals are counted again when a batch is sent again** · S · P-288 ·
+      Found 2026-10-08 in `P-288`. `#refuse` (unknown, moved, foreign) and `A-41c`'s unearned
+      `withheld` count on Reports refused for every arrival, so a batch resent after a lost ack
+      counts them twice. **Done when** they use the same probe, sensor and time memory as
+      `P-288`, or a stable batch id from the probe's spool (a protocol change) lets the core count
+      a batch once, with a test that loses the first ack.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
@@ -20856,6 +20896,13 @@ because each is a decision rather than a defect:
       - **Not done:** a probe that is not connected is still "not connected", with no version.
         The health answer gives `null` then, and the version recorded at its last handshake is
         `ADMIN` only. Whether it was too old will be known when it connects.
+
+- [ ] **U-31 — a probe that is not connected gives the add-sensor form no version** · S · U-30 ·
+      Found 2026-10-08 in `U-30`. `/probes/{id}/health` carries `protocolVersion` only for a live
+      connection; the version recorded at the last handshake is on `/probes`, which is admin-only.
+      A probe that is down is just "not connected", even when its last version already rules a
+      listener out. **Done when** decided: give readers of the probe the last recorded version
+      (and say it is the last one), or keep, with a test.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
