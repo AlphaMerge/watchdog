@@ -172,6 +172,18 @@ export interface ProbeHealthStats {
   readonly withheld: number;
 }
 
+/**
+ * What the registry recorded at a probe's last handshake (`U-31`, `U-32`): the version it declared,
+ * and when a handshake the core accepted spoke it, as ISO 8601. `at` is never given without
+ * `version`, and is `null` beside one that was refused or recorded before migration 072.
+ */
+export interface LastProtocol {
+  readonly version: number | null;
+  readonly at: string | null;
+}
+
+const NO_LAST_PROTOCOL: LastProtocol = { version: null, at: null };
+
 /** One reading of every channel. `null` is a gap and stays one — never a zero (`CLAUDE.md`). */
 export type ProbeHealthReading = Readonly<Record<string, number | null>>;
 
@@ -625,35 +637,50 @@ export class ProbeHealthService {
 
   /**
    * The protocol version this probe declared at the last handshake the registry recorded, kept
-   * after it disconnects (`U-31`), or `null` when none is.
+   * after it disconnects (`U-31`), and when a handshake the core accepted spoke it (`U-32`).
+   * `null` for either when none is.
    *
-   * **The one integer, read by the probe object's id, and nothing else from the row.** The row is
+   * **The two columns, read by the probe object's id, and nothing else from the row.** The row is
    * `GET /probes`' and holds the probe's address, its address filter and its key's hash, which is
    * why that route is the installation's; this is answered under the probe's own `read` right
    * beside `protocolVersion`, which a connected probe's reader already has. The live identity
    * only: a revoked one no longer holds the probe (`probe_registration_object_idx`). Zero is what
    * the `R-01` upgrade left for a probe that has not connected since, an absence and not a
-   * version, as `skewFor` reads it.
+   * version, as `skewFor` reads it, and a time with no version is not given either.
+   *
+   * **The time is `protocol_accepted_at`, never `last_seen_at`**, which every hello moves before
+   * it is decided. It is `null` beside a version a hello was refused over (`R-06`), and for a
+   * row recorded before migration 072: the version stands, and when is not known.
    *
    * **A database that cannot be asked is `null` too**, logged, rather than a refused answer: the
    * rest of the health answer needs no database, and a probe that is down is the moment it is
    * read (`P-126`).
    */
-  async lastProtocolVersion(probeObjectId: number): Promise<number | null> {
+  async lastProtocol(probeObjectId: number): Promise<LastProtocol> {
     try {
-      const rows = await this.#db.query<{ protocol_version: number }>(
-        `SELECT protocol_version FROM probe_registration
+      const rows = await this.#db.query<{
+        protocol_version: number;
+        protocol_accepted_at: Date | string | null;
+      }>(
+        `SELECT protocol_version, protocol_accepted_at FROM probe_registration
          WHERE object_id = $1 AND status <> 'revoked'`,
         [probeObjectId],
       );
-      const recorded = rows[0]?.protocol_version;
-      return recorded === undefined || recorded === 0 ? null : recorded;
+      const row = rows[0];
+      if (row === undefined || row.protocol_version === 0) return NO_LAST_PROTOCOL;
+      return {
+        version: row.protocol_version,
+        at:
+          row.protocol_accepted_at === null
+            ? null
+            : new Date(row.protocol_accepted_at).toISOString(),
+      };
     } catch (error: unknown) {
       this.#logger.warn(
         { ...describeError(error), probeId: probeObjectId },
         'could not read the protocol version a probe last connected with',
       );
-      return null;
+      return NO_LAST_PROTOCOL;
     }
   }
 

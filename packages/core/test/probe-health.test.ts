@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { after, before, describe, it } from 'node:test';
+import { after, afterEach, before, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
 import { PROBE_HEALTH_CHANNELS, PROBE_HEALTH_COUNTERS } from '@ms/sensors';
 import {
@@ -1868,7 +1868,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
 
       it('serves the recorded version for a probe that is not connected, and nothing else of the row', async () => {
         const service = build(() => ({ connected: false }));
-        assert.equal(await service.lastProtocolVersion(probeId), 12);
+        assert.equal((await service.lastProtocol(probeId)).version, 12);
         const answer = await ask(service, probeId);
         assert.equal(answer.status, 200, answer.body);
         assert.equal(answer.json['protocolVersion'], null, 'not connected: no live version');
@@ -1879,6 +1879,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
             'at',
             'channels',
             'lastProtocolVersion',
+            'lastProtocolVersionAt',
             'message',
             'numbersUnavailable',
             'probeId',
@@ -1903,7 +1904,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
 
       it('serves null where nothing is recorded: a revoked identity, or zero', async () => {
         const service = build(() => ({ connected: false }));
-        assert.equal(await service.lastProtocolVersion(watcherId), null, 'only a revoked one');
+        assert.equal((await service.lastProtocol(watcherId)).version, null, 'only a revoked one');
         const watcher = await ask(service, watcherId);
         assert.equal(watcher.status, 200, watcher.body);
         assert.equal(watcher.json['lastProtocolVersion'], null, watcher.body);
@@ -1911,13 +1912,72 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
         // Zero is what the `R-01` upgrade left for a probe that has not connected since.
         await db.query("UPDATE probe_registration SET protocol_version = 0 WHERE gid = 'u31-live'");
         try {
-          assert.equal(await service.lastProtocolVersion(probeId), null);
+          assert.equal((await service.lastProtocol(probeId)).version, null);
           assert.equal((await ask(service, probeId)).json['lastProtocolVersion'], null);
         } finally {
           await db.query(
             "UPDATE probe_registration SET protocol_version = 12 WHERE gid = 'u31-live'",
           );
         }
+      });
+
+      describe('and when it was accepted (U-32)', () => {
+        // The form says a probe that is down was too old "when it last connected", and now says
+        // when. `last_seen_at` is moved by every hello, refused ones too, so it is set to another
+        // time here to show it is not what is served.
+        const ACCEPTED = '2026-10-01T08:30:00.000Z';
+        const SEEN = '2026-10-07T23:59:00.000Z';
+        const stamp = (gid: string, at: string | null, seen: string | null): Promise<unknown> =>
+          db.query(
+            `UPDATE probe_registration SET protocol_accepted_at = $2, last_seen_at = $3
+             WHERE gid = $1`,
+            [gid, at, seen],
+          );
+        afterEach(async () => {
+          await db.query(
+            `UPDATE probe_registration SET protocol_accepted_at = NULL, last_seen_at = NULL
+             WHERE gid LIKE 'u31-%'`,
+          );
+        });
+
+        it('serves the time the recorded version was accepted, not when the probe was last seen', async () => {
+          await stamp('u31-live', ACCEPTED, SEEN);
+          // A revoked identity's time is no more the probe's than its version is.
+          await stamp('u31-revoked', '2026-10-06T00:00:00.000Z', SEEN);
+          const service = build(() => ({ connected: false }));
+          assert.deepEqual(await service.lastProtocol(probeId), { version: 12, at: ACCEPTED });
+
+          const answer = await ask(service, probeId);
+          assert.equal(answer.status, 200, answer.body);
+          assert.equal(answer.json['lastProtocolVersion'], 12, answer.body);
+          assert.equal(answer.json['lastProtocolVersionAt'], ACCEPTED, answer.body);
+          assert.ok(!answer.body.includes('2026-10-07T23:59'), `last seen served: ${answer.body}`);
+          assert.ok(!answer.body.includes('2026-10-06'), `revoked time served: ${answer.body}`);
+
+          // Connected, it is served beside the live version just the same.
+          const live = await ask(
+            build(() => connected({ protocolVersion: 22 })),
+            probeId,
+          );
+          assert.equal(live.json['lastProtocolVersionAt'], ACCEPTED, live.body);
+        });
+
+        it('serves null for the time where the version stands without one, and with none', async () => {
+          // A version a hello was refused over, or one recorded before migration 072.
+          await stamp('u31-live', null, SEEN);
+          const service = build(() => ({ connected: false }));
+          assert.deepEqual(await service.lastProtocol(probeId), { version: 12, at: null });
+          const answer = await ask(service, probeId);
+          assert.equal(answer.json['lastProtocolVersion'], 12, answer.body);
+          assert.ok('lastProtocolVersionAt' in answer.json, answer.body);
+          assert.equal(answer.json['lastProtocolVersionAt'], null, answer.body);
+
+          // Only a revoked identity, however recently it was accepted: neither.
+          await stamp('u31-watcher-revoked', ACCEPTED, SEEN);
+          assert.deepEqual(await service.lastProtocol(watcherId), { version: null, at: null });
+          const watcher = await ask(service, watcherId);
+          assert.equal(watcher.json['lastProtocolVersionAt'], null, watcher.body);
+        });
       });
 
       it('answers null rather than refusing when the database cannot be asked', async () => {
@@ -1932,10 +1992,11 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
           sources: { link: () => ({ connected: false }) },
           ingest: () => Promise.resolve(),
         });
-        assert.equal(await down.lastProtocolVersion(probeId), null);
+        assert.deepEqual(await down.lastProtocol(probeId), { version: null, at: null });
         const answer = await ask(down, probeId);
         assert.equal(answer.status, 200, answer.body);
         assert.equal(answer.json['lastProtocolVersion'], null, answer.body);
+        assert.equal(answer.json['lastProtocolVersionAt'], null, answer.body);
         assert.equal(answer.json['message'], 'not connected to the core');
       });
     });

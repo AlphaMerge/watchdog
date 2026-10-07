@@ -1596,6 +1596,95 @@ describe(
       }
     });
 
+    it('keeps when a probe’s recorded version was accepted, never without a version, and rolls back to none (072)', async () => {
+      // `U-32`: beside `protocol_version`, so the form can say when a probe that is down last
+      // connected. `last_seen_at` moves on refused hellos too.
+      const fresh = await createScratchDatabase('probe_protocol_accepted_at');
+      try {
+        const all = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 72),
+        );
+        // A row from before, carried over: it has no time, and is not given `last_seen_at`'s.
+        await migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 70),
+        ).up();
+        const q = fresh.db;
+        await q.query(
+          `INSERT INTO probe_registration (gid, protocol_version, last_seen_at)
+           VALUES ('before', 12, now()), ('never', 0, NULL)`,
+        );
+        await all.up();
+        const column = async (): Promise<boolean> =>
+          (
+            await q.query(
+              `SELECT 1 FROM information_schema.columns
+               WHERE table_name = 'probe_registration' AND column_name = 'protocol_accepted_at'`,
+            )
+          ).length === 1;
+        assert.equal(await column(), true);
+        const times = async (): Promise<string[]> =>
+          (
+            await q.query<{ line: string }>(
+              `SELECT gid || ':' || coalesce(
+                        to_char(protocol_accepted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI'),
+                        'null') AS line
+               FROM probe_registration ORDER BY gid`,
+            )
+          ).map((row) => row.line);
+        assert.deepEqual(await times(), ['before:null', 'never:null']);
+
+        const set = (gid: string, at: string | null, version?: number): Promise<unknown> =>
+          q.query(
+            `UPDATE probe_registration
+             SET protocol_accepted_at = $2::timestamptz,
+                 protocol_version = coalesce($3::integer, protocol_version)
+             WHERE gid = $1`,
+            [gid, at, version ?? null],
+          );
+        await set('before', '2026-10-01T08:30:00Z');
+        assert.deepEqual(await times(), ['before:2026-10-01 08:30', 'never:null']);
+        // The refusal over the version writes both at once: a version with no time.
+        await set('before', null, 0);
+        await set('before', '2026-10-01T08:30:00Z', 12);
+
+        const refused: [string, string | null, number | undefined][] = [
+          ['never', '2026-10-01T08:30:00Z', undefined],
+          ['before', '2026-10-01T08:30:00Z', 0],
+          ['before', 'infinity', undefined],
+          ['before', '-infinity', undefined],
+        ];
+        for (const [gid, at, version] of refused) {
+          await assert.rejects(
+            set(gid, at, version),
+            /probe_registration_protocol_accepted_at_check/,
+            `${gid} ${String(at)} ${String(version)}`,
+          );
+        }
+
+        await all.down(1);
+        assert.equal(await column(), false);
+        assert.equal(
+          await tableExists(q, 'probe_protocol_flap'),
+          true,
+          'and nothing else: 069 stays',
+        );
+        const again = await all.up();
+        assert.deepEqual(
+          again.applied.map((one) => one.id),
+          [72],
+        );
+        assert.deepEqual(
+          await times(),
+          ['before:null', 'never:null'],
+          'a time does not come back with the column',
+        );
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('applies the real migration set forward and all the way back', async () => {
       const fresh = await createScratchDatabase('roundtrip');
       try {

@@ -5,6 +5,7 @@ import { versionFor } from '@ms/shared';
 import type { ObjectRef, ProbeHealthView, SensorTypeSummary } from '../src/api/types';
 import { AddSensor } from '../src/routes/AddSensor';
 import {
+  agoInWords,
   listenerNotice,
   probeAbove,
   readsListener,
@@ -36,6 +37,8 @@ const health = (channels: Record<string, number | null>): ProbeHealthView => ({
   protocolVersion: channels['connected'] === 1 ? 32 : null,
   // And current when it last connected too, so that decides nothing either (`U-31`).
   lastProtocolVersion: 32,
+  // With no time beside it, as for a version recorded before the core kept one (`U-32`).
+  lastProtocolVersionAt: null,
   channels,
 });
 
@@ -74,10 +77,17 @@ const unavailable = (
 });
 
 /** A probe that is not connected, which declared `lastProtocolVersion` when it last was (`U-31`). */
-const downAt = (lastProtocolVersion: number | null): ProbeHealthView => ({
+const downAt = (
+  lastProtocolVersion: number | null,
+  lastProtocolVersionAt: string | null = null,
+): ProbeHealthView => ({
   ...unavailable({ reason: 'not-connected' }, 0),
   lastProtocolVersion,
+  lastProtocolVersionAt,
 });
+
+/** Six days and a bit before every answer's `at` above: when a probe's version was accepted. */
+const ACCEPTED = '2026-09-26T08:30:00.000Z';
 
 /** A probe that reported, at `protocolVersion`, with `channels` as its report left them. */
 const reportedAt = (
@@ -329,6 +339,92 @@ describe('whether a probe’s listener is running', () => {
     expect(say('flow', upgraded)).toBeNull();
     const off: ProbeHealthView = { ...OFF, lastProtocolVersion: 12 };
     expect(say('syslog', off)?.kind).toBe('off');
+  });
+
+  describe('and when it last connected (U-32)', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('says how long ago and the date and time, in the sentence, and marks which words they are', () => {
+      const notice = say('syslog', downAt(12, ACCEPTED));
+      const absolute = new Date(ACCEPTED).toLocaleString();
+      // 2026-10-02T10:00 less 2026-09-26T08:30 is 6 days and 1.5 hours.
+      const shown = `6 days ago (${absolute})`;
+      expect(notice?.kind).toBe('unknown');
+      expect(notice?.text).toBe(
+        'Probe “Berlin” is not connected, so whether its syslog listener is running cannot be ' +
+          `checked. When it last connected, ${shown}, it spoke protocol 12, and reporting it ` +
+          'needs protocol 13, so unless it has been upgraded since, it will not say when it ' +
+          'reconnects either. Check that syslogListener.enabled is true in that probe’s ' +
+          'configuration file.',
+      );
+      expect(notice?.time).toEqual({ dateTime: ACCEPTED, shown });
+      // Exactly once, so the form marks the right words.
+      expect(notice?.text.split(shown)).toHaveLength(2);
+    });
+
+    it('reckons how long ago from the answer, not this browser’s clock, so a render says it again', () => {
+      // The sentence is in a live region: new text at a re-render is read out again (`B-12`).
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2031-01-01T00:00:00Z'));
+      const first = text('flow', downAt(22, ACCEPTED));
+      vi.setSystemTime(new Date('2026-09-26T08:31:00Z'));
+      expect(text('flow', downAt(22, ACCEPTED))).toBe(first);
+      expect(first).toContain('When it last connected, 6 days ago (');
+      // A newer answer is what moves it.
+      const later = { ...downAt(22, ACCEPTED), at: '2026-09-26T11:30:00.000Z' };
+      expect(text('flow', later)).toContain('When it last connected, 3 hours ago (');
+    });
+
+    it('leaves the time out where there is none to say, and keeps the U-31 sentence', () => {
+      const without = text('syslog', downAt(12));
+      expect(without).toContain('When it last connected it spoke protocol 12,');
+      expect(say('syslog', downAt(12))?.time).toBeUndefined();
+      // A time that does not parse is no time, rather than "Invalid Date".
+      const garbled = say('syslog', downAt(12, 'yesterday-ish'));
+      expect(garbled?.text).toBe(without);
+      expect(garbled?.time).toBeUndefined();
+      // An answer whose own time does not parse still gives the date, without "how long ago".
+      const undated = say('syslog', { ...downAt(12, ACCEPTED), at: '' });
+      const absolute = new Date(ACCEPTED).toLocaleString();
+      expect(undated?.text).toContain(`When it last connected, on ${absolute}, it spoke`);
+      expect(undated?.time).toEqual({ dateTime: ACCEPTED, shown: `on ${absolute}` });
+    });
+
+    it('says no time where the last version decides nothing', () => {
+      // New enough when it last connected: the connection's own sentence, as before.
+      expect(text('syslog', downAt(13, ACCEPTED))).toBe(
+        'Probe “Berlin” is not connected, so whether its syslog listener is running cannot be ' +
+          'checked. This updates when it connects.',
+      );
+      expect(say('syslog', downAt(13, ACCEPTED))?.time).toBeUndefined();
+      // Connected: judged by the live version, and the last one's time is not news.
+      const live: ProbeHealthView = {
+        ...OFF,
+        lastProtocolVersion: 12,
+        lastProtocolVersionAt: ACCEPTED,
+      };
+      expect(say('syslog', live)?.kind).toBe('off');
+      expect(say('syslog', live)?.time).toBeUndefined();
+      expect(say('syslog', { ...RUNNING, lastProtocolVersionAt: ACCEPTED })).toBeNull();
+    });
+
+    it('counts in the units a reading’s age uses, in full words', () => {
+      const cases: [number, string][] = [
+        [-5_000, '0 seconds ago'],
+        [0, '0 seconds ago'],
+        [1_000, '1 second ago'],
+        [89_000, '89 seconds ago'],
+        [90_000, '2 minutes ago'],
+        [89 * 60_000, '89 minutes ago'],
+        [90 * 60_000, '2 hours ago'],
+        [47 * 3_600_000, '47 hours ago'],
+        [48 * 3_600_000, '2 days ago'],
+        [400 * 86_400_000, '400 days ago'],
+      ];
+      for (const [elapsed, said] of cases) expect(agoInWords(elapsed), String(elapsed)).toBe(said);
+    });
   });
 
   it('says nothing for a type that reads no listener, or one this form does not know', () => {
@@ -746,6 +842,28 @@ describe('the add-sensor form on a probe that was too old when it last connected
     );
     expect(notice().className).toContain('text-text-muted');
     expect(notice().className).not.toContain('text-warning-fg');
+  });
+
+  it('says when, with the time marked up as one and every word of it in the sentence (U-32)', async () => {
+    await open({ health: downAt(22, ACCEPTED) });
+    pick('flow.netflow');
+    await waitFor(() => {
+      expect(notice().textContent).toContain('When it last connected, 6 days ago (');
+    });
+    const absolute = new Date(ACCEPTED).toLocaleString();
+    expect(notice().textContent).toContain(
+      `When it last connected, 6 days ago (${absolute}), it spoke protocol 22, and reporting it ` +
+        'needs protocol 23',
+    );
+    // As the rest of the UI marks a time; the tooltip adds nothing the sentence does not say.
+    const times = notice().querySelectorAll('time');
+    expect(times).toHaveLength(1);
+    expect(times[0]?.getAttribute('dateTime')).toBe(ACCEPTED);
+    expect(times[0]?.getAttribute('title')).toBe(ACCEPTED);
+    expect(times[0]?.textContent).toBe(`6 days ago (${absolute})`);
+    // Still the muted status region the field is described by (WCAG 1.3.1, 1.4.3, 4.1.3).
+    expect(notice().getAttribute('role')).toBe('status');
+    expect(notice().className).toContain('text-text-muted');
   });
 
   it('keeps the plain "not connected" sentence for a probe that was new enough', async () => {

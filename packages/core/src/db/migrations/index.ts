@@ -68,6 +68,7 @@ import { migration067 } from './067-late-refusal-grace.js';
 import { migration068 } from './068-late-refusal-left.js';
 import { migration069 } from './069-probe-protocol-flap.js';
 import { migration070 } from './070-target-policy-exception.js';
+import { migration072 } from './072-probe-protocol-accepted-at.js';
 import { migration043 } from './043-request-settled-at.js';
 
 /**
@@ -147,6 +148,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration068,
   migration069,
   migration070,
+  migration072,
 ];
 
 export type { Migration } from './types.js';

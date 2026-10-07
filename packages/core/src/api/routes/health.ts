@@ -125,7 +125,10 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
           'declared at the last handshake the core recorded, kept after it disconnects: the ' +
           'one `GET /probes` shows, said of that connection and not of the probe now, which may ' +
           'have been upgraded since. `null` when none is recorded or the database could not be ' +
-          'asked.',
+          'asked. `lastProtocolVersionAt` is when a handshake the core accepted spoke that ' +
+          'version, as ISO 8601: not when the probe was last seen, which a refused hello moves ' +
+          'too. `null` whenever `lastProtocolVersion` is, beside a version a hello was refused ' +
+          'over, and for one recorded before the core kept the time.',
         params: {
           type: 'object',
           additionalProperties: false,
@@ -143,6 +146,7 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
               'numbersUnavailable',
               'protocolVersion',
               'lastProtocolVersion',
+              'lastProtocolVersionAt',
               'channels',
             ],
             properties: {
@@ -171,6 +175,9 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
               // for a listener then. The one integer from the registration row, under the same
               // `read` right: never its address, its filter or its key (`lastProtocolVersion`).
               lastProtocolVersion: { type: ['integer', 'null'] },
+              // `U-32`. When that version was accepted, so the form can say when the probe last
+              // connected. The registry's own column beside the version, not `last_seen_at`.
+              lastProtocolVersionAt: { type: ['string', 'null'], format: 'date-time' },
               channels: {
                 type: 'object',
                 additionalProperties: false,
@@ -193,14 +200,15 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
         return reply;
       }
       const { reading, message, unavailable, protocolVersion } = service.read(request.params.id);
-      const lastProtocolVersion = await service.lastProtocolVersion(request.params.id);
+      const last = await service.lastProtocol(request.params.id);
       return {
         at: new Date().toISOString(),
         probeId: request.params.id,
         message,
         numbersUnavailable: unavailable,
         protocolVersion,
-        lastProtocolVersion,
+        lastProtocolVersion: last.version,
+        lastProtocolVersionAt: last.at,
         channels: reading,
       };
     },

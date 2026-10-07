@@ -812,6 +812,141 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
     });
   });
 
+  /**
+   * When the recorded version was accepted (`U-32`).
+   *
+   * The add-sensor form says a probe that is down was too old "when it last connected", and says
+   * when from `protocol_accepted_at`. `last_seen_at` cannot: every hello moves it before it is
+   * decided. So the time is written with the version on an accepted handshake only, and a
+   * refusal over the version clears it, so the pair is never a version beside another's time.
+   */
+  describe('when the recorded version was accepted', () => {
+    let clock = new Date('2026-01-01T00:00:00.000Z');
+    let clocked: ProbeRegistry;
+    const at = (iso: string): void => {
+      clock = new Date(iso);
+    };
+    const recorded = async (
+      gid: string,
+    ): Promise<{ version: number; acceptedAt: string | null; seenAt: string | null }> => {
+      const [row] = await db.query<{
+        protocol_version: number;
+        protocol_accepted_at: Date | null;
+        last_seen_at: Date | null;
+      }>(
+        `SELECT protocol_version, protocol_accepted_at, last_seen_at
+         FROM probe_registration WHERE gid = $1`,
+        [gid],
+      );
+      assert.ok(row !== undefined, `no row for ${gid}`);
+      return {
+        version: row.protocol_version,
+        acceptedAt: row.protocol_accepted_at?.toISOString() ?? null,
+        seenAt: row.last_seen_at?.toISOString() ?? null,
+      };
+    };
+
+    beforeEach(() => {
+      clocked = new ProbeRegistry({
+        db,
+        audit: new DatabaseAuditSink(),
+        logger: silentLogger,
+        enrolmentKeys: ['shared-key'],
+        now: () => clock,
+      });
+    });
+
+    it('is written with the version by each accepted handshake, pending and approved', async () => {
+      at('2026-01-01T10:00:00.000Z');
+      const first = await clocked.admit(hello({ protocolVersion: PROTOCOL_VERSION - 9 }));
+      assert.ok(first.kind === 'pending');
+      assert.deepEqual(await recorded(first.gid), {
+        version: PROTOCOL_VERSION - 9,
+        acceptedAt: '2026-01-01T10:00:00.000Z',
+        seenAt: '2026-01-01T10:00:00.000Z',
+      });
+
+      at('2026-01-02T10:00:00.000Z');
+      const again = await clocked.admit(
+        hello({ gid: first.gid, protocolVersion: PROTOCOL_VERSION - 8 }),
+      );
+      assert.equal(again.kind, 'pending');
+      const pending = await recorded(first.gid);
+      assert.equal(pending.version, PROTOCOL_VERSION - 8);
+      assert.equal(pending.acceptedAt, '2026-01-02T10:00:00.000Z');
+
+      await clocked.approve(first.gid, probeId, testActor);
+      at('2026-01-03T10:00:00.000Z');
+      const approved = await clocked.admit(hello({ gid: first.gid }));
+      assert.equal(approved.kind, 'approved');
+      const now = await recorded(first.gid);
+      assert.equal(now.version, PROTOCOL_VERSION);
+      assert.equal(now.acceptedAt, '2026-01-03T10:00:00.000Z');
+    });
+
+    it('is left as it was by a refusal over anything but the version, which still moves last seen', async () => {
+      at('2026-01-01T10:00:00.000Z');
+      const first = await clocked.admit(hello({ protocolVersion: PROTOCOL_VERSION - 9 }));
+      assert.ok(first.kind === 'pending');
+      const kept = { version: PROTOCOL_VERSION - 9, acceptedAt: '2026-01-01T10:00:00.000Z' };
+      const unchanged = async (why: string): Promise<void> => {
+        const row = await recorded(first.gid);
+        assert.deepEqual({ version: row.version, acceptedAt: row.acceptedAt }, kept, why);
+        assert.notEqual(row.seenAt, kept.acceptedAt, `${why}: and last seen moved`);
+      };
+
+      at('2026-01-02T10:00:00.000Z');
+      // A pending probe on the wrong enrolment key.
+      const wrong = await clocked.admit(
+        hello({ gid: first.gid, protocolVersion: PROTOCOL_VERSION, accessKey: 'nope' }),
+      );
+      assert.equal(wrong.kind, 'refused');
+      await unchanged('a pending probe with the wrong key');
+
+      // An approved probe on a key that is not its own or the enrolment key.
+      await clocked.approve(first.gid, probeId, testActor);
+      const bad = await clocked.admit(
+        hello({ gid: first.gid, protocolVersion: PROTOCOL_VERSION, accessKey: 'nope' }),
+      );
+      assert.ok(bad.kind === 'refused' && bad.code === 'bad-access-key');
+      await unchanged('an approved probe with the wrong key');
+
+      // From an address its filter does not allow.
+      await clocked.setAllowFrom(first.gid, ['192.0.2.0/24'], testActor);
+      const elsewhere = await clocked.admit(
+        hello({ gid: first.gid, protocolVersion: PROTOCOL_VERSION }),
+      );
+      assert.ok(elsewhere.kind === 'refused' && elsewhere.code === 'source-not-allowed');
+      await unchanged('an address the filter refuses');
+      await clocked.setAllowFrom(first.gid, [], testActor);
+
+      // Revoked.
+      await clocked.revoke(first.gid, '', testActor);
+      const revoked = await clocked.admit(
+        hello({ gid: first.gid, protocolVersion: PROTOCOL_VERSION }),
+      );
+      assert.ok(revoked.kind === 'refused' && revoked.code === 'revoked');
+      await unchanged('a revoked identity');
+    });
+
+    it('is cleared by a refusal over the version, which records the version without a time', async () => {
+      at('2026-01-01T10:00:00.000Z');
+      const first = await clocked.admit(hello({ protocolVersion: PROTOCOL_VERSION - 9 }));
+      assert.ok(first.kind === 'pending');
+
+      at('2026-01-02T10:00:00.000Z');
+      const refused = await clocked.admit(hello({ gid: first.gid, protocolVersion: 0 }));
+      assert.ok(refused.kind === 'refused' && refused.code === 'protocol-version');
+      const row = await recorded(first.gid);
+      assert.equal(row.version, 0, 'the version is recorded, as R-06 has it');
+      assert.equal(row.acceptedAt, null, 'and no accepted handshake spoke it');
+
+      at('2026-01-03T10:00:00.000Z');
+      await clocked.admit(hello({ gid: first.gid, protocolVersion: PROTOCOL_VERSION - 9 }));
+      assert.equal((await recorded(first.gid)).acceptedAt, '2026-01-03T10:00:00.000Z');
+    });
+  });
+
   describe('the skew reported against a registration', () => {
     it('is current for a probe speaking this build’s own version', async () => {
       const decision = await registry.admit(hello({ gid: 'current-machine' }));

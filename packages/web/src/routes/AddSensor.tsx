@@ -15,6 +15,7 @@ import {
   readsListener,
   refusesProbe,
   type HealthAnswer,
+  type ListenerNotice,
 } from './add-sensor-model';
 
 /**
@@ -234,7 +235,7 @@ export function AddSensor(): React.JSX.Element {
                     : 'max-w-2xl text-xs text-text-muted'
               }
             >
-              {listenerSays?.text}
+              {listenerSays !== null && <NoticeText notice={listenerSays} />}
             </p>
             {probe !== null && <ProbeWatch probeId={probe.id} onNews={probeHealth.reload} />}
             {catalogue.length === 0 && (
@@ -301,6 +302,26 @@ export function AddSensor(): React.JSX.Element {
         </form>
       </Card>
     </div>
+  );
+}
+
+/**
+ * A notice's sentence, with the time it names marked up as one (`U-32`), as the rest of the UI
+ * marks a time: `<time>` with the instant in `dateTime` and `title`. What is read is the sentence,
+ * which says the time in words and in full, so nothing is only in the tooltip.
+ */
+function NoticeText({ notice }: { notice: ListenerNotice }): React.JSX.Element {
+  const time = notice.time;
+  const at = time === undefined ? -1 : notice.text.indexOf(time.shown);
+  if (time === undefined || at < 0) return <>{notice.text}</>;
+  return (
+    <>
+      {notice.text.slice(0, at)}
+      <time dateTime={time.dateTime} title={time.dateTime}>
+        {time.shown}
+      </time>
+      {notice.text.slice(at + time.shown.length)}
+    </>
   );
 }
 

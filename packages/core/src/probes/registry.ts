@@ -231,7 +231,8 @@ export class ProbeRegistry {
         'refusing a probe whose protocol this core cannot speak',
       );
       // `R-06`: the one refusal whose whole content is the version, so the queue shows it.
-      if (existing !== null) await this.#speaks(existing.gid, hello.protocolVersion);
+      // Not accepted, so no time beside it (`U-32`).
+      if (existing !== null) await this.#speaks(existing.gid, hello.protocolVersion, false);
       return { kind: 'refused', code: 'protocol-version', detail: explainSkew(skew) };
     }
 
@@ -274,7 +275,7 @@ export class ProbeRegistry {
           detail: 'the access key was not accepted',
         };
       }
-      await this.#speaks(existing.gid, hello.protocolVersion);
+      await this.#speaks(existing.gid, hello.protocolVersion, true);
       return { kind: 'pending', gid: existing.gid };
     }
 
@@ -287,7 +288,7 @@ export class ProbeRegistry {
       this.#logger.warn({ gid: existing.gid }, 'an approved probe presented the wrong key');
       return { kind: 'refused', code: 'bad-access-key', detail: 'the access key was not accepted' };
     }
-    await this.#speaks(existing.gid, hello.protocolVersion);
+    await this.#speaks(existing.gid, hello.protocolVersion, true);
 
     // **An approved probe that has never used a key of its own is given one now**, in the welcome
     // it is about to receive. This is the only moment a key can be delivered to a machine that
@@ -349,8 +350,8 @@ export class ProbeRegistry {
     await this.#db.query(
       `INSERT INTO probe_registration
          (gid, status, display_name, agent_version, protocol_version, last_address,
-          first_seen_at, last_seen_at)
-       VALUES ($1, 'pending', $2, $3, $4, $5, $6, $6)
+          first_seen_at, last_seen_at, protocol_accepted_at)
+       VALUES ($1, 'pending', $2, $3, $4, $5, $6, $6, $6)
        ON CONFLICT (gid) DO NOTHING`,
       [
         gid,
@@ -721,12 +722,19 @@ export class ProbeRegistry {
    * targets could be sent, and sent it to a probe that connects by name. Nothing that decides
    * what a probe is sent reads this now; it stays what an operator is shown, and so it says what
    * the probe that got in speaks.
+   *
+   * **And when it was accepted, in the same statement** (`U-32`). `accepted` is true for a hello
+   * that is about to be welcomed, approved or pending, and the time is the registry's clock then.
+   * For the refusal over the version it is false and the time is cleared: no accepted handshake
+   * spoke that version, and a time kept from an earlier one would date it wrongly. The form says
+   * "when it last connected" from this pair; `last_seen_at` moves on every hello and cannot.
    */
-  async #speaks(gid: string, protocolVersion: number): Promise<void> {
-    await this.#db.query('UPDATE probe_registration SET protocol_version = $2 WHERE gid = $1', [
-      gid,
-      protocolVersion,
-    ]);
+  async #speaks(gid: string, protocolVersion: number, accepted: boolean): Promise<void> {
+    await this.#db.query(
+      `UPDATE probe_registration SET protocol_version = $2, protocol_accepted_at = $3
+       WHERE gid = $1`,
+      [gid, protocolVersion, accepted ? this.#now().toISOString() : null],
+    );
   }
 }
 

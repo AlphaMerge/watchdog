@@ -21294,11 +21294,80 @@ because each is a decision rather than a defect:
         `last_seen_at`, which is touched by refused hellos too, so it is not the time of the
         recorded version.
 
-- [ ] **U-32 — the add-sensor form does not say when a probe last spoke its version** · S · U-31 ·
+- [x] **U-32 — the add-sensor form does not say when a probe last spoke its version** · S · U-31 ·
       Found 2026-10-08 in `U-31`. The form says a probe that is down was too old when it last
       connected, without saying when; `last_seen_at` is also touched by refused hellos, so it is not
       that time. **Done when** decided: record the handshake time (a migration) and show it, or
       keep, with a test.
+
+      **U-32 outcome. Decided: record it, beside the version, and show it.**
+      - **Why record it.** "When it last connected it spoke protocol 12" is advice whose weight
+        depends on when: an hour ago it very likely still holds, and three months ago somebody
+        may well have upgraded the machine. The reader cannot ask: `GET /probes` is `ADMIN`, and
+        its `lastSeenAt` is the wrong time anyway. One nullable column costs nothing at the
+        handshake, which already writes the version in that statement.
+      - **Migration 072, `probe_registration.protocol_accepted_at`.** It is when the recorded
+        `protocol_version` was spoken on a handshake the core accepted. A check keeps it finite
+        and never beside version 0. Existing rows get NULL, because `last_seen_at` is the one
+        guess known to be wrong. The rollback drops the column, and is tested. The time comes
+        from the registry's clock (`now`), as `first_seen_at` does.
+      - **Written where the version is, and only on acceptance.** `#speaks` takes `accepted` and
+        writes the version and the time in one `UPDATE`. That covers a pending and an approved
+        welcome, plus `#enrol`'s insert. **A hello refused over the version (`R-06`) still
+        records the version and clears the time.** No accepted handshake spoke that version, and
+        a time kept from an earlier one would put another handshake's date beside it. Every
+        other refusal (key, address, revoked) writes neither. So the pair always reads as one
+        fact.
+      - **`GET /probes/{id}/health` gains `lastProtocolVersionAt`** (ISO 8601 or `null`) beside
+        `lastProtocolVersion`. It is read-only, under the route's existing `onObject('read')`,
+        and comes from one query with the version in `ProbeHealthService.lastProtocol` (which
+        replaces `lastProtocolVersion`). It is `null` whenever the version is, for a revoked
+        identity, beside a refused version, for a pre-072 row and when the database cannot be
+        asked (`P-126`). No new route, so the runbook appendix is unchanged.
+        `docs/api-reference.md` is regenerated.
+      - **What the form says.** *…When it last connected, 6 days ago (26/09/2026, 08:30:00), it
+        spoke protocol 12, and reporting it needs protocol 13…*. The sentence gives how long ago
+        in words, with the thresholds `howLongAgo` uses but in full words because it is read
+        aloud. It then gives the date and time in the reader's locale (`toLocaleString`, as the
+        rest of the UI shows one). Both are in the sentence the field is described by, not in a
+        tooltip, and they are marked up as the UI marks a time: `<time dateTime title>`.
+        **How long ago is reckoned from the answer's `at`, not `Date.now()`.** Both times come
+        from the core's clock, so a wrong browser clock does not skew it. The sentence is also a
+        function of the answer alone, so the live region is not given new text at each render
+        (`B-12`). With no time, or one that does not parse, the `U-31` sentence is unchanged.
+        Same muted `role="status"` region (WCAG 1.3.1, 1.4.1, 1.4.3, 4.1.3).
+      - **Tests.**
+        - `migrator.test.ts` (072): a carried-over row gets NULL. A time is refused beside
+          version 0, and as ±infinity. Version and time together clear. The rollback drops it,
+          and a time does not come back.
+        - `probe-registry.test.ts`, with a clock: enrol, a pending re-hello and an approved
+          handshake each write the version with their time. Wrong key while pending, wrong key
+          while approved, a refused address and a revoked identity each leave both as they were
+          while `last_seen_at` moves. A version refusal records 0 with no time, and the next
+          accepted hello writes one again.
+        - `probe-health.test.ts`: the route serves the accepted time and neither `last_seen_at`
+          nor the revoked identity's time, whether connected or not. It serves `null` beside a
+          version without one, for only a revoked identity, and for a database that throws.
+        - `add-sensor-listener.test.tsx`, model: the sentence word for word with `time` marking
+          the words exactly once. The sentence stays the same under two different system clocks,
+          and a newer answer moves it. No time, or an unparseable one, gives the `U-31` sentence;
+          an unparseable answer `at` gives the date alone. No time is given where the last
+          version decides nothing. `agoInWords` is checked at each threshold. Rendered: one
+          `<time>` with `dateTime` and `title`, the whole phrase in the text, muted status
+          region.
+      - **Mutations** (each restored byte for byte, with `dist` rebuilt for the core ones):
+        - a version refusal writing the time fails 2 (the column's check refuses it too, which
+          fails `R-06`'s test);
+        - `#speaks` never writing it fails 2;
+        - `#enrol` inserting none fails 2;
+        - the service reading `last_seen_at` fails 2;
+        - the route serving `null` fails 1;
+        - 072 without its check fails 1;
+        - the form reckoning from `Date.now()` fails 4;
+        - no time in the sentence fails 4;
+        - no `<time>` element fails 1.
+      - **Not done:** `GET /probes` (admin) does not show the time; `ProbeRegistration` is
+        unchanged.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

@@ -104,6 +104,12 @@ export function probeAbove(parent: ObjectRef, ancestors: readonly ObjectRef[]): 
 export interface ListenerNotice {
   readonly kind: 'off' | 'unknown';
   readonly text: string;
+  /**
+   * A time `text` names, to be marked up as one (`U-32`): `shown` occurs in `text` exactly once,
+   * and `dateTime` is the instant it says, as ISO 8601. Only the sentence about a probe's last
+   * connection has one.
+   */
+  readonly time?: { readonly dateTime: string; readonly shown: string };
 }
 
 type NumbersUnavailable = NonNullable<ProbeHealthView['numbersUnavailable']>;
@@ -171,7 +177,12 @@ export function listenerNotice(
   // and the sentence stays the connection's.
   const spoke = health.lastProtocolVersion;
   if (speaks === null && typeof spoke === 'number' && spoke < spec.since) {
-    return { kind: 'unknown', text: tooOldWhenLastConnected(spec, probeName, spoke) };
+    const when = whenAccepted(health.lastProtocolVersionAt, health.at);
+    return {
+      kind: 'unknown',
+      text: tooOldWhenLastConnected(spec, probeName, spoke, when),
+      ...(when === null ? {} : { time: when }),
+    };
   }
 
   // **Read, not inferred** (`U-29`). The core says why a probe's numbers are missing, and a probe
@@ -250,14 +261,68 @@ function tooOld(spec: ListenerSpec, probeName: string, speaks: number, needs: nu
 /**
  * A probe that is not connected, and spoke a version too old for the listener's counter when it
  * last was (`U-31`). Said of then, not now: an upgrade while it was away would answer it.
+ *
+ * **And when that was, where the core knows** (`U-32`): how long ago in words, then the date and
+ * time in the reader's locale as the rest of the UI shows one, both in the sentence. A time only
+ * in a tooltip is one a keyboard or screen-reader user does not get, and this is the sentence the
+ * type's field is described by.
  */
-function tooOldWhenLastConnected(spec: ListenerSpec, probeName: string, spoke: number): string {
+function tooOldWhenLastConnected(
+  spec: ListenerSpec,
+  probeName: string,
+  spoke: number,
+  when: { readonly shown: string } | null,
+): string {
+  const lastConnected =
+    when === null ? 'When it last connected' : `When it last connected, ${when.shown},`;
   return (
     `Probe “${probeName}” is not connected, so whether its ${spec.name} is running cannot be ` +
-    `checked. When it last connected it spoke protocol ${String(spoke)}, and reporting it ` +
+    `checked. ${lastConnected} it spoke protocol ${String(spoke)}, and reporting it ` +
     `needs protocol ${String(spec.since)}, so unless it has been upgraded since, it will not ` +
     `say when it reconnects either. ${checkByHand(spec)}`
   );
+}
+
+/**
+ * When the last recorded version was accepted, as the sentence says it, or `null` to leave the
+ * time out: none recorded (a version refused, or recorded before the core kept the time), or one
+ * that does not parse.
+ *
+ * **How long ago is reckoned from the answer's own `at`, not from this browser's clock.** Both are
+ * the core's, so a browser whose clock is wrong does not move the probe's last connection. And the
+ * sentence is then a function of the answer alone: it sits in a live region, and one recomputed
+ * against `Date.now()` would be new text at every render, read out again for a probe that had not
+ * changed (`B-12`). It changes when a new answer arrives, and for a probe that is down the next
+ * one is asked when it connects, which replaces this sentence anyway.
+ */
+function whenAccepted(
+  at: string | null | undefined,
+  answeredAt: string,
+): { readonly dateTime: string; readonly shown: string } | null {
+  if (typeof at !== 'string') return null;
+  const instant = new Date(at).getTime();
+  if (Number.isNaN(instant)) return null;
+  const absolute = new Date(instant).toLocaleString();
+  const now = new Date(answeredAt).getTime();
+  return {
+    dateTime: at,
+    shown: Number.isNaN(now) ? `on ${absolute}` : `${agoInWords(now - instant)} (${absolute})`,
+  };
+}
+
+/**
+ * How long ago, in words: the thresholds `howLongAgo` uses for a reading's age, said in full
+ * ("3 days ago", not "3d ago") because this is read as part of a sentence, aloud as well.
+ */
+export function agoInWords(elapsedMs: number): string {
+  const words = new Intl.RelativeTimeFormat('en', { numeric: 'always' });
+  const seconds = Math.max(0, Math.round(elapsedMs / 1_000));
+  if (seconds < 90) return words.format(-seconds, 'second');
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90) return words.format(-minutes, 'minute');
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return words.format(-hours, 'hour');
+  return words.format(-Math.round(hours / 24), 'day');
 }
 
 function checkByHand(spec: ListenerSpec): string {
