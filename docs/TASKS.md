@@ -7888,13 +7888,44 @@ because each is a decision rather than a defect:
         while loading its registry has no start-up bound either: no check's time is spent, but
         it holds one of `SPAWN_CONCURRENCY`'s loading turns.
 
-- [ ] **P-261 — `pinned-target.test.ts` leaves 190 ms for a timer to be late** · S · P-258 ·
+- [x] **P-261 — `pinned-target.test.ts` leaves 190 ms for a timer to be late** · S · P-258 ·
       Found 2026-10-05 in `P-258`. The test at ~383 asserts a 200 ms resolution bound finished
       in under 390 ms. P-258 measured worker timers 2.5–323 ms late under load, so this is the
       next test to read red on a loaded machine for no fault of the product. **Done when** it
       asserts the bound without a wall-clock ceiling that load can cross (a fake clock, or a
       ceiling with a margin argued from a measurement), and twenty runs pass beside a running
       sensors suite.
+
+      **P-261 outcome. The test runs on a fake clock, so no late timer can fail it.** Test only.
+      - **The test** ("a resolver that does not answer … at its bound") mocks `setTimeout` with
+        `t.mock.timers` and moves the clock by hand. At 199 ms nothing has settled; at 200 ms the
+        refusal has, with phase `resolve` and *did not resolve within 200 ms*. That is a tighter
+        claim than the old 150–390 ms window: the timer is the 200 ms the message names, not
+        199 or 201, and nothing but the bound ends it. Whether it settled is asserted before the
+        promise is awaited, so a bound that is too long fails the test and does not hang it.
+      - **Not reproduced.** The old test passed 20 of 20 beside one sensors suite (load 6.0–6.9
+        on 8 CPUs) and 40 of 40 beside two (load 5.7–7.9). It took 200.4–269.8 ms, so the most
+        a timer was late was 70 ms of the 190 allowed. Main-thread timers here are late by less
+        than the 323 ms `P-258` measured in a worker. The new test passed 20 of 20 beside one
+        sensors suite (load 6.1–6.5), in 13–54 ms, because nothing in it waits.
+      - **Mutation: 8/8 killed, each by this test.** These were planted in `pinned-target.ts`:
+        - the bound's timer at ×3, +1 ms, −1 ms and 0
+        - the timer given the whole check timeout
+        - the timer resolving `[]` instead of refusing
+        - the timeout given the *cancelled* refusal
+        - the bound at half + 50 ms
+
+        Only this test catches four of them: ×3, +1, −1 and the whole timeout. Nor would the
+        old window have caught ±1 ms.
+      - **Checked, `sensors` and `probe` tests:** one other ceiling on timer-driven behaviour
+        has under 500 ms of slack. `ssh-session.test.ts` "leaves a handshake no time when the
+        lookup used it all" asserts a 900 ms `setTimeout` lookup ended the open in under
+        1,350 ms, which leaves 450 ms. Its neighbour, "gives the lookup and the handshake one
+        connect timeout between them", leaves 800 ms (2,000 ms against 2,800). The rest leave
+        at least 1 s (`windows-transport` and `exe-script` kill after a 1 s grace, under 2 s and
+        4 s; `dns-blocklist` 700 ms under 1.8 s; `db-checked-target` 400 ms under 1.5 s), or
+        bound an abort that should be immediate by 2 s or more, or are not timers: `sweep`'s
+        `longest <= 500` is a value read off a fake `Date.now`.
 
 - [x] **P-262 — an EXE/Script check does not hear its own cancel** · S · P-260 · Found
       2026-10-05 in `P-260`. `runScript` in `packages/sensors/src/types/exe-script-shared.ts`

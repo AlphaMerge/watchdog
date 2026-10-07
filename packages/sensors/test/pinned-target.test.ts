@@ -364,12 +364,30 @@ describe('a cancelled check', () => {
 describe('a resolver that does not answer', () => {
   const never: ResolveHost = () => new Promise(() => undefined);
 
-  it('is a refusal in the resolve phase, well before the check’s own timeout', async () => {
+  it('is a refusal in the resolve phase, at its bound and well before the check’s own timeout', async (t) => {
     // `getaddrinfo` against a resolver that is not answering outlasts the check. The runner then
     // reported a plain timeout, a failed scan, for a device nothing had been sent to.
-    const started = Date.now();
-    const error = await refusal(request({ timeoutMs: 400 }), never);
-    const took = Date.now() - started;
+    //
+    // On a fake clock (`P-261`). This asserted the refusal came in under 390 ms of real time,
+    // which left 190 ms for a timer to fire late, and `P-258` measured them up to 323 ms late on
+    // a loaded machine. The clock is moved by hand instead: nothing at 199 ms, the refusal at
+    // 200 ms, so it is the bound that ends the resolution and no other limit, and the bound is
+    // the one the message names.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let settled = false;
+    const pending = refusal(request({ timeoutMs: 400 }), never).finally(() => {
+      settled = true;
+    });
+    // `setImmediate` is not mocked, and runs once every promise the timer settles has.
+    const drained = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(199);
+    await drained();
+    assert.equal(settled, false, 'refused before its 200 ms bound');
+    t.mock.timers.tick(1);
+    await drained();
+    // Asserted before awaiting it, so that a bound longer than 200 ms fails here, not by hanging.
+    assert.equal(settled, true, 'not refused at its 200 ms bound');
+    const error = await pending;
     assert.equal(error.phase, 'resolve');
     assert.equal(error.code, CREDENTIALS_WITHHELD);
     assert.equal(error.kind, 'snmp');
@@ -379,7 +397,6 @@ describe('a resolver that does not answer', () => {
       error.message,
       /^Not scanned: switch\.example\.test did not resolve within 200 ms/,
     );
-    assert.ok(took >= 150 && took < 390, `refused after ${String(took)} ms of a 400 ms check`);
   });
 
   it('is cancelled first when the check is cancelled before the bound', async () => {
