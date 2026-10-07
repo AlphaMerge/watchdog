@@ -274,7 +274,10 @@ Behaviours that must be right:
   A new alarm waits for the last outage's recovery only on its own template, and is never made
   late by it. It waits out that recovery's retry, which uses the same transport. It joins that
   recovery's digest, and if the mode sends the alarm at once, the digest goes now and ends on the
-  alarm.
+  alarm. A recovery still owed when a newer alarm of its trigger has been delivered is not sent
+  at all (`N-22`): its recipients' last word stays the alarm before it, which is true again, and
+  the next outage's own recovery tells them when that one is over. It is kept while a newer alarm
+  of its own template is still waiting behind it, so those recipients hear Down, Up, Down.
 - **Immediate-only channels.** Slack, Teams, HTTP action, script execution and ticket
   assignment are never summarised — they are cheap and often machine-consumed.
 - **Template schedules.** A template can be active only during business hours, with a choice

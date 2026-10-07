@@ -538,5 +538,180 @@ describe(
         'every recovery was tried, and refused',
       );
     });
+
+    // -----------------------------------------------------------------------------------------
+    // A recovery a newer alarm has overtaken is not sent (`N-22`).
+    // -----------------------------------------------------------------------------------------
+
+    /** Why each request is no longer owed, in queue order: null for one that was delivered. */
+    async function reasons(): Promise<(string | null)[]> {
+      const rows = await db.query<{ last_error: string | null }>(
+        'SELECT last_error FROM notification_request ORDER BY id',
+      );
+      return rows.map((row) => row.last_error);
+    }
+
+    /**
+     * Downs to A, sent at once; recoveries to B, whose first attempt at each is refused. The
+     * sensor goes Down, comes back — that recovery refused and waiting out its retry minute — and
+     * goes Down again at `again`.
+     */
+    async function overtakenRecovery(again: number): Promise<void> {
+      const pages = await template('%sensor is %status', 'always-immediate');
+      const recoveries = await template('Recovered: %sensor is %status', 'always-immediate');
+      await trigger({
+        state: 'down',
+        initialLatencySeconds: 0,
+        initialTemplateId: pages,
+        recoveryTemplateId: recoveries,
+      });
+      refuse = (subject, attempt) =>
+        subject.startsWith('Recovered') && attempt === 1
+          ? { ok: false, retryable: true, error: '451 try again later' }
+          : null;
+
+      await scan(false, 0);
+      await scan(false, 60);
+      await tick(61);
+      await scan(true, 90);
+      await tick(91); // the recovery, refused: its retry is due at +151
+      assert.deepEqual(inbox, ['ping is down']);
+      assert.deepEqual(attempts, ['ping is down', 'Recovered: ping is up']);
+
+      await scan(false, again - 10);
+      await scan(false, again);
+      await tick(again + 1);
+    }
+
+    it('does not deliver a recovery after a newer Down has gone out to another template', async () => {
+      // The second Down goes at +111, inside the recovery's retry minute.
+      await overtakenRecovery(110);
+      assert.deepEqual(inbox, ['ping is down', 'ping is down'], 'the second Down went on time');
+      assert.deepEqual(await requests(), [
+        'initial/immediate/sent',
+        'recovery/immediate/discarded',
+        'initial/immediate/sent',
+      ]);
+      assert.match((await reasons())[1] ?? '', /^superseded: a newer alarm/);
+
+      // Its retry minute passes, and nothing comes: the last word anyone got is that it is Down.
+      await tick(151);
+      await tick(3_600);
+      assert.deepEqual(inbox, ['ping is down', 'ping is down']);
+      assert.equal(
+        attempts.filter((subject) => subject.startsWith('Recovered')).length,
+        1,
+        'the recovery was not tried again',
+      );
+
+      // Back for good: this outage's own recovery is what tells B it is over.
+      await scan(true, 3_700);
+      await tick(3_701);
+      assert.equal(inbox.length, 3);
+      assert.equal(inbox.at(-1), 'Recovered: ping is up');
+    });
+
+    it('does not deliver a recovery due in the same pass as the newer Down', async () => {
+      // The second Down is first sent at +151, the moment the recovery's retry falls due. Both
+      // are claimed together, the Down first, never having been tried.
+      await overtakenRecovery(150);
+      assert.deepEqual(inbox, ['ping is down', 'ping is down']);
+      assert.deepEqual(await requests(), [
+        'initial/immediate/sent',
+        'recovery/immediate/discarded',
+        'initial/immediate/sent',
+      ]);
+      const [, recovery] = await db.query<{ attempts: number }>(
+        'SELECT attempts FROM notification_request ORDER BY id',
+      );
+      assert.equal(recovery?.attempts, 1, 'the one refused try, not the claim that never sent');
+      await tick(3_600);
+      assert.deepEqual(inbox, ['ping is down', 'ping is down']);
+    });
+
+    it('does not put a recovery in a digest after a newer Down has gone out', async () => {
+      // B holds every Up for a day. The second Down goes at once on A, so the digest's line
+      // would be the last thing B's recipients hear: *up*, a day later, about a sensor that is
+      // Down.
+      const pages = await template('%sensor is %status', 'always-immediate');
+      const recoveries = await template('Recovered: %sensor is %status', 'downs-immediate', 86_400);
+      await trigger({
+        state: 'down',
+        initialLatencySeconds: 0,
+        initialTemplateId: pages,
+        recoveryTemplateId: recoveries,
+      });
+
+      await scan(false, 0);
+      await scan(false, 60);
+      await tick(61);
+      await scan(true, 90);
+      await tick(91);
+      assert.deepEqual(await requests(), ['initial/immediate/sent', 'recovery/held/pending']);
+
+      await scan(false, 100);
+      await scan(false, 110);
+      await tick(111);
+      assert.deepEqual(inbox, ['ping is down', 'ping is down'], 'the second Down went on time');
+      assert.deepEqual(await requests(), [
+        'initial/immediate/sent',
+        'recovery/held/discarded',
+        'initial/immediate/sent',
+      ]);
+
+      await tick(86_500);
+      assert.deepEqual(inbox, ['ping is down', 'ping is down'], 'and no digest a day later');
+    });
+
+    it('keeps a recovery its own template’s next Down is waiting behind', async () => {
+      // The initial and the recovery to one template, the escalation to another. The recovery is
+      // refused twice; the sensor goes Down again, and that Down waits behind the recovery on its
+      // own template (`N-21`). The new outage's escalation goes out first, to the other template.
+      // The recovery is not dropped for it: its own recipients still hear Down, Up, Down.
+      const onCall = await template('%sensor is %status', 'always-immediate');
+      const escalations = await template('Escalated: %sensor is %status', 'always-immediate');
+      await trigger({
+        state: 'down',
+        initialLatencySeconds: 0,
+        initialTemplateId: onCall,
+        escalationLatencySeconds: 30,
+        escalationTemplateId: escalations,
+        recoveryTemplateId: onCall,
+      });
+      refuse = (subject, attempt) =>
+        subject === 'ping is up' && attempt <= 2
+          ? { ok: false, retryable: true, error: '451 try again later' }
+          : null;
+
+      await scan(false, 0);
+      await scan(false, 60);
+      await tick(61);
+      await tick(91); // the escalation, due at +90
+      assert.deepEqual(inbox, ['ping is down', 'Escalated: ping is down']);
+      await scan(true, 100);
+      await tick(101); // the recovery, refused: due again at +161
+      await scan(false, 110);
+      await scan(false, 120);
+      await tick(121); // the second Down, behind the recovery
+      await tick(151); // its escalation, due at +150, goes
+      await tick(161); // the recovery, refused again: due at +281
+      assert.deepEqual(inbox, [
+        'ping is down',
+        'Escalated: ping is down',
+        'Escalated: ping is down',
+      ]);
+      assert.deepEqual(await requests(), [
+        'initial/immediate/sent',
+        'escalation/immediate/sent',
+        'recovery/immediate/pending',
+        'initial/undecided/pending',
+        'escalation/immediate/sent',
+      ]);
+
+      await tick(281);
+      assert.equal(inbox.length, 5, 'the recovery and the second Down');
+      assert.ok(inbox.includes('ping is up'), 'the recovery arrived');
+      assert.deepEqual(inbox.slice(3), ['ping is up', 'ping is down'], 'then the Down behind it');
+    });
   },
 );

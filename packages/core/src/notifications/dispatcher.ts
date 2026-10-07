@@ -71,6 +71,8 @@ export interface DispatchStats {
   digests: number;
   /** Notifications thrown away because their template was outside its schedule (`N-12`). */
   discarded: number;
+  /** Recoveries and clears dropped because a newer alarm was delivered first (`N-22`). */
+  superseded: number;
 }
 
 interface ClaimRow {
@@ -140,6 +142,7 @@ export class NotificationDispatcher {
     held: 0,
     digests: 0,
     discarded: 0,
+    superseded: 0,
   };
 
   constructor(options: NotificationDispatcherOptions) {
@@ -177,6 +180,9 @@ export class NotificationDispatcher {
     // pass may touch.
     const suppressed = await this.#activation.suppressed(this.#db, now);
     for (const template of suppressed.discarded) await this.#discard(template, now);
+    // Before deciding, so a recovery a newer alarm has overtaken (`N-22`) is not decided at all:
+    // decided at once, it would spend its window's "first Up" on a message that never goes.
+    await this.#supersede(now, null);
 
     // Before anything is claimed, because the decision is what says which requests are claimable
     // at all. A request folded into a digest is not owed as a message of its own.
@@ -206,6 +212,9 @@ export class NotificationDispatcher {
       // The loader builds a context for every notification it is given, including one whose
       // sensor has been deleted. Missing means the row was not in the batch, which cannot happen.
       if (context === undefined) continue;
+      // Asked again at the moment of sending (`N-22`): a newer alarm claimed in this same batch
+      // sorts first — never tried, its `next_attempt_at` is null — and has just been delivered.
+      if (isRecovery(row.reason) && (await this.#supersede(now, [requestId])).size > 0) continue;
 
       const transport = this.#transports.get(row.t_method ?? '');
       const settings = row.t_settings ?? {};
@@ -467,11 +476,43 @@ export class NotificationDispatcher {
     );
     let covered = 0;
     for (const window of owing) {
-      const members = await this.#claimMembers(window.id, now, suppressed);
+      const claimed = await this.#claimMembers(window.id, now, suppressed);
+      // A digest sent earlier in this loop may have delivered the newer alarm that makes one of
+      // these recoveries out of date (`N-22`). It is left out of the digest, not marked in it.
+      const recoveries = claimed
+        .filter((row) => isRecovery(row.reason))
+        .map((row) => Number(row.id));
+      const dropped =
+        recoveries.length === 0 ? new Set<number>() : await this.#supersede(now, recoveries);
+      const members = claimed.filter((row) => !dropped.has(Number(row.id)));
       if (members.length === 0) continue;
       covered += await this.#sendDigest(members, now);
     }
     return covered;
+  }
+
+  /**
+   * Drops what a newer, delivered alarm has made out of date (`N-22`).
+   *
+   * Asked wherever a recovery could still be sent: once at the start of a pass, and again for
+   * each one claimed, just before it would go, since a send earlier in the same pass may be the
+   * newer alarm. Returns the ids it dropped, for a caller holding claimed rows to leave out.
+   */
+  async #supersede(now: Date, claimed: readonly number[] | null): Promise<Set<number>> {
+    const dropped = await this.#db.tx((q) => this.#summaries.supersede(q, now, claimed));
+    this.#stats.superseded += dropped.length;
+    for (const request of dropped) {
+      this.#logger.info(
+        {
+          requestId: request.id,
+          sensorId: request.sensorId,
+          templateId: request.templateId,
+          supersededBy: request.by,
+        },
+        'a recovery was not sent: a newer alarm of its trigger was delivered first',
+      );
+    }
+    return new Set(dropped.map((request) => request.id));
   }
 
   /**
@@ -730,6 +771,11 @@ export class NotificationDispatcher {
     );
     return Number(rows[0]?.n ?? 0);
   }
+}
+
+/** A recovery or a clear: what tells a recipient an alarm is over. */
+function isRecovery(reason: NotificationReason): boolean {
+  return reason === 'recovery' || reason === 'clear';
 }
 
 function toPending(row: ClaimRow): PendingNotification {

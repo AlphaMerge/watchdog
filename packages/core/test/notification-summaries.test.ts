@@ -961,6 +961,374 @@ describe(
     });
 
     // ---------------------------------------------------------------------------------------
+    // A recovery a newer alarm has overtaken is not sent (`N-22`).
+    // ---------------------------------------------------------------------------------------
+
+    it('drops a recovery only once a newer alarm of its trigger has been delivered', async () => {
+      const summaries = new SummaryRepository();
+      type Queued = Parameters<typeof queue>[1];
+      type Status = 'pending' | 'sent' | 'failed' | 'discarded';
+      /** Something queued after the recovery, on its own template or another, and how it ended. */
+      interface Later {
+        options: Queued;
+        own: boolean;
+        status: Status;
+      }
+      interface Case {
+        name: string;
+        recovery?: Queued;
+        disposition?: 'immediate' | 'held' | 'undecided';
+        status?: Status;
+        /** Queued before the recovery, rather than after it. */
+        before?: Later;
+        later: Later[];
+        /** Narrow the sweep to these, as a pass does for what it has just claimed. */
+        only?: 'it' | 'another';
+        dropped: boolean;
+      }
+      const triggerIds: number[] = [];
+      for (let index = 0; index < 2; index += 1) {
+        const rows = await db.query<{ id: string }>(
+          `INSERT INTO notification_trigger (object_id, kind, settings)
+           VALUES ($1, 'state', '{}'::jsonb) RETURNING id::text AS id`,
+          [h.rootId],
+        );
+        triggerIds.push(Number(rows[0]?.id));
+      }
+      const [first, second] = triggerIds;
+      const down: Queued = { sensor: sensorAt(0), triggerId: first };
+      const up: Queued = { sensor: sensorAt(0), reason: 'recovery', state: 'up', triggerId: first };
+      const elsewhere = (status: Status, options: Queued = down): Later => ({
+        options,
+        own: false,
+        status,
+      });
+      const breach = (channelKey: string): Queued => ({
+        sensor: sensorAt(0),
+        reason: 'threshold',
+        state: 'warning',
+        triggerKind: 'threshold',
+        channelKey,
+      });
+      const clear: Queued = {
+        sensor: sensorAt(0),
+        reason: 'clear',
+        state: 'up',
+        triggerKind: 'threshold',
+        channelKey: 'loss',
+      };
+      const cases: Case[] = [
+        {
+          name: 'a newer alarm delivered to another template',
+          later: [elsewhere('sent')],
+          dropped: true,
+        },
+        { name: 'a newer alarm still owed', later: [elsewhere('pending')], dropped: false },
+        { name: 'a newer alarm given up on', later: [elsewhere('failed')], dropped: false },
+        { name: 'a newer alarm discarded', later: [elsewhere('discarded')], dropped: false },
+        { name: 'nothing newer', later: [], dropped: false },
+        {
+          name: 'only an older alarm delivered: the one it recovers from',
+          before: elsewhere('sent'),
+          later: [],
+          dropped: false,
+        },
+        { name: 'a newer recovery delivered', later: [elsewhere('sent', up)], dropped: false },
+        {
+          name: 'a newer alarm delivered to its own template',
+          later: [{ options: down, own: true, status: 'sent' }],
+          dropped: true,
+        },
+        {
+          // That Down waits behind it (`N-21`), so its own recipients hear Down, Up, Down.
+          name: 'a newer alarm of its own template still owed, and another delivered',
+          later: [{ options: down, own: true, status: 'pending' }, elsewhere('sent')],
+          dropped: false,
+        },
+        {
+          name: 'a newer alarm of its own template given up on, and another delivered',
+          later: [{ options: down, own: true, status: 'failed' }, elsewhere('sent')],
+          dropped: true,
+        },
+        // What keeps it is only a newer alarm of its own trigger, on its own template.
+        {
+          name: 'another template’s newer alarm still owed, and another delivered',
+          later: [elsewhere('pending'), elsewhere('sent')],
+          dropped: true,
+        },
+        {
+          name: 'its own template’s older alarm still owed, and a newer one delivered',
+          before: { options: down, own: true, status: 'pending' },
+          later: [elsewhere('sent')],
+          dropped: true,
+        },
+        {
+          name: 'its own template’s newer recovery still owed, and an alarm delivered',
+          later: [{ options: up, own: true, status: 'pending' }, elsewhere('sent')],
+          dropped: true,
+        },
+        {
+          name: 'its own template’s alarm of another sensor still owed',
+          later: [
+            { options: { sensor: sensorAt(1), triggerId: first }, own: true, status: 'pending' },
+            elsewhere('sent'),
+          ],
+          dropped: true,
+        },
+        {
+          name: 'its own template’s alarm of another trigger still owed',
+          later: [
+            { options: { sensor: sensorAt(0), triggerId: second }, own: true, status: 'pending' },
+            elsewhere('sent'),
+          ],
+          dropped: true,
+        },
+        {
+          name: 'its own template’s alarm of another kind of trigger still owed',
+          recovery: clear,
+          later: [
+            {
+              options: { sensor: sensorAt(0), triggerKind: 'state', channelKey: 'loss' },
+              own: true,
+              status: 'pending',
+            },
+            elsewhere('sent', breach('loss')),
+          ],
+          dropped: true,
+        },
+        {
+          name: 'its own template’s breach of another channel still owed',
+          recovery: clear,
+          later: [
+            { options: breach('rtt'), own: true, status: 'pending' },
+            elsewhere('sent', breach('loss')),
+          ],
+          dropped: true,
+        },
+        {
+          name: 'an alarm is never dropped',
+          recovery: down,
+          later: [elsewhere('sent')],
+          dropped: false,
+        },
+        {
+          name: 'another sensor’s alarm',
+          later: [elsewhere('sent', { sensor: sensorAt(1), triggerId: first })],
+          dropped: false,
+        },
+        {
+          name: 'another trigger’s alarm',
+          later: [elsewhere('sent', { sensor: sensorAt(0), triggerId: second })],
+          dropped: false,
+        },
+        {
+          // No trigger and no channel on either, so only the kind tells them apart.
+          name: 'another kind of trigger’s alarm',
+          recovery: { sensor: sensorAt(0), reason: 'recovery', state: 'up' },
+          later: [elsewhere('sent', { ...breach('loss'), channelKey: undefined })],
+          dropped: false,
+        },
+        {
+          name: 'a clear, by a newer breach of its channel',
+          recovery: clear,
+          later: [elsewhere('sent', breach('loss'))],
+          dropped: true,
+        },
+        {
+          name: 'a clear, by a breach of another channel',
+          recovery: clear,
+          later: [elsewhere('sent', breach('rtt'))],
+          dropped: false,
+        },
+        {
+          name: 'a recovery held for a digest',
+          disposition: 'held',
+          later: [elsewhere('sent')],
+          dropped: true,
+        },
+        {
+          name: 'a recovery not decided yet',
+          disposition: 'undecided',
+          later: [elsewhere('sent')],
+          dropped: true,
+        },
+        {
+          name: 'a recovery already delivered',
+          status: 'sent',
+          later: [elsewhere('sent')],
+          dropped: false,
+        },
+        { name: 'narrowed to the recovery', later: [elsewhere('sent')], only: 'it', dropped: true },
+        {
+          name: 'narrowed to something else',
+          later: [elsewhere('sent')],
+          only: 'another',
+          dropped: false,
+        },
+      ];
+
+      for (const entry of cases) {
+        await db.query('DELETE FROM notification_request');
+        const own = await template();
+        const other = await template();
+        const settle = async (id: number, status: Status): Promise<void> => {
+          await db.query(
+            `UPDATE notification_request
+             SET disposition = 'immediate', status = $2, attempts = 1 WHERE id = $1`,
+            [id, status],
+          );
+        };
+        if (entry.before !== undefined) {
+          await settle(
+            await queue(entry.before.own ? own : other, entry.before.options),
+            entry.before.status,
+          );
+        }
+        const recovery = await queue(own, entry.recovery ?? up);
+        await db.query(
+          `UPDATE notification_request
+           SET disposition = $2, status = $3, attempts = 1,
+               next_attempt_at = now() + interval '1 minute'
+           WHERE id = $1`,
+          [recovery, entry.disposition ?? 'immediate', entry.status ?? 'pending'],
+        );
+        for (const later of entry.later) {
+          await settle(await queue(later.own ? own : other, later.options), later.status);
+        }
+
+        const only =
+          entry.only === undefined ? null : entry.only === 'it' ? [recovery] : [recovery + 1];
+        const dropped = await db.tx((q) => summaries.supersede(q, new Date(), only));
+        assert.equal(
+          dropped.some((request) => request.id === recovery),
+          entry.dropped,
+          entry.name,
+        );
+        const [row] = await db.query<{
+          status: string;
+          attempts: number;
+          last_error: string | null;
+        }>('SELECT status, attempts, last_error FROM notification_request WHERE id = $1', [
+          recovery,
+        ]);
+        assert.equal(
+          row?.status,
+          entry.dropped ? 'discarded' : (entry.status ?? 'pending'),
+          `${entry.name}: status`,
+        );
+        if (entry.dropped) {
+          assert.match(row.last_error ?? '', /^superseded: /, `${entry.name}: why`);
+          // A sweep of the queue leaves the attempts alone; a pass that has just claimed it
+          // counted one for a send that is not going to happen, and gives it back.
+          assert.equal(row.attempts, entry.only === 'it' ? 0 : 1, `${entry.name}: attempts`);
+        }
+      }
+    });
+
+    it('drops a recovery or a clear claimed in the same batch as the newer alarm', async () => {
+      // The recovery is due its retry; the newer alarm, never tried, is claimed with it and
+      // sorts first. Asked at claim time, the recovery was not out of date yet; at its send, it is.
+      type Queued = Parameters<typeof queue>[1];
+      const cases: { name: string; recovery: Queued; alarm: Queued; subject: string }[] = [
+        {
+          name: 'a recovery',
+          recovery: { sensor: sensorAt(0), reason: 'recovery', state: 'up' },
+          alarm: { sensor: sensorAt(0) },
+          subject: 'Ping on edge-router is down',
+        },
+        {
+          name: 'a clear',
+          recovery: {
+            sensor: sensorAt(0),
+            reason: 'clear',
+            state: 'up',
+            triggerKind: 'threshold',
+            channelKey: 'loss',
+          },
+          alarm: {
+            sensor: sensorAt(0),
+            reason: 'threshold',
+            state: 'warning',
+            triggerKind: 'threshold',
+            channelKey: 'loss',
+          },
+          subject: 'Ping on edge-router is warning',
+        },
+      ];
+      for (const entry of cases) {
+        await db.query('DELETE FROM notification_request');
+        const pages = await template({ summarisation: 'always-immediate' });
+        const recoveries = await template({ summarisation: 'always-immediate' });
+        const recovery = await queue(recoveries, entry.recovery);
+        await db.query(
+          `UPDATE notification_request
+           SET disposition = 'immediate', attempts = 1,
+               next_attempt_at = now() - interval '1 second'
+           WHERE id = $1`,
+          [recovery],
+        );
+        await queue(pages, entry.alarm);
+
+        const { seen, transport } = recorder();
+        await dispatcherWith(transport).dispatch();
+        assert.deepEqual(
+          seen.map((message) => message.subject),
+          [entry.subject],
+          `${entry.name}: only the alarm went`,
+        );
+        const [row] = await db.query<{ status: string; attempts: number }>(
+          'SELECT status, attempts FROM notification_request WHERE id = $1',
+          [recovery],
+        );
+        assert.deepEqual({ ...row }, { status: 'discarded', attempts: 1 }, entry.name);
+      }
+    });
+
+    it('leaves a recovery out of its digest once a newer alarm went in an earlier one', async () => {
+      // Two digests close on the same pass: A's, opened first, holds the newer Down; B's holds
+      // the recovery and another sensor's Down. A's goes first, so by the time B's is claimed the
+      // recovery is out of date. B's digest still goes, without its line.
+      const summaries = new SummaryRepository();
+      const pages = await template({ summarisation: 'always-summarise' });
+      const recoveries = await template({ summarisation: 'always-summarise' });
+      const first = await db.tx((q) => summaries.openWindow(q, pages, new Date(), 900));
+      const second = await db.tx((q) => summaries.openWindow(q, recoveries, new Date(), 900));
+      assert.ok(first.id < second.id, 'A’s digest is sent first');
+
+      const recovery = await queue(recoveries, {
+        sensor: sensorAt(0),
+        reason: 'recovery',
+        state: 'up',
+      });
+      const other = await queue(recoveries, { sensor: sensorAt(1) });
+      const newer = await queue(pages, { sensor: sensorAt(0) });
+      await db.tx(async (q) => {
+        await summaries.decide(q, recovery, 'held', second.id);
+        await summaries.decide(q, other, 'held', second.id);
+        await summaries.decide(q, newer, 'held', first.id);
+      });
+
+      const { seen, transport } = recorder();
+      const dispatcher = dispatcherWith(transport);
+      await elapse();
+      await dispatcher.dispatch();
+      assert.equal(seen.length, 2, 'both digests went');
+      assert.deepEqual(seen[0]?.body.split('\n'), ['Ping on edge-router is down']);
+      assert.deepEqual(
+        seen[1]?.body.split('\n'),
+        ['HTTP on edge-router is down'],
+        'B’s digest, without the recovery',
+      );
+      assert.equal(seen[1].subject, 'Acme production: 1 notification — 1 down');
+      const [row] = await db.query<{ status: string; attempts: number }>(
+        'SELECT status, attempts FROM notification_request WHERE id = $1',
+        [recovery],
+      );
+      assert.deepEqual({ ...row }, { status: 'discarded', attempts: 0 }, 'never tried');
+      assert.equal(dispatcher.stats.superseded, 1);
+    });
+
+    // ---------------------------------------------------------------------------------------
     // The other five modes, where they differ.
     // ---------------------------------------------------------------------------------------
 

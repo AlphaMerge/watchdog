@@ -17,7 +17,10 @@ export interface DeliveryMethodHealth {
   readonly retrying: number;
   /** Given up on inside the window. Each one is an alarm nobody received. */
   readonly failed: number;
-  /** Thrown away by an activation schedule inside the window (`N-12`). Not a fault. */
+  /**
+   * Thrown away inside the window: by an activation schedule (`N-12`), or a recovery a newer
+   * alarm overtook (`N-22`). Not a fault.
+   */
   readonly discarded: number;
   readonly oldestPendingAt: Date | null;
   readonly lastDeliveredAt: Date | null;

@@ -3428,13 +3428,109 @@ because each is a decision rather than a defect:
         - hold-back after a permanent refusal;
         - hold-back after the last attempt.
 
-- [ ] **N-22 — an Up on another template can arrive after a newer Down** · S · N-21 · Found
+- [x] **N-22 — an Up on another template can arrive after a newer Down** · S · N-21 · Found
       2026-10-07 in review of `N-21`. Since `N-21` an alarm waits only for a recovery on its own
       template, so a Down is never late. The cost: a recovery on another template (other
       recipients) that is still waiting for its own retry or digest can be delivered after the
       newer Down, and its recipients hear "up" last while the sensor is Down. **Done when** such a
       recovery is dropped or marked superseded once a newer alarm of the same sensor and trigger
       has been sent, with a scenario test (`M-17`).
+
+      **N-22 outcome.** A recovery or a clear still owed when a newer alarm of the same sensor,
+      trigger and channel has been delivered is dropped. Its status becomes `discarded`, and its
+      `last_error` says *superseded: a newer alarm of this trigger (request N) was delivered
+      first*. Its recipients see nothing. In the reported case the Downs go to A and the
+      recoveries to B. B's recovery is refused and waits out its retry minute, and the sensor goes
+      Down again. A's recipients get Down, Down. B's get nothing more until the second outage's
+      own recovery.
+
+      **What decided it.**
+      - **Dropped, not marked.** A digest line marked "superseded" still tells B's recipients
+        *up* after the newer Down, with a footnote. A recovery sent on its own has no digest
+        line to mark. Dropped, their last word stays the alarm before it, which is true again.
+        One outage, one alarm: this only ever removes a message.
+      - **Once the newer alarm is delivered, not once it is queued.** A newer alarm still
+        waiting, held for its digest say, arrives after the recovery. That is the right order,
+        and a recipient on both templates hears Down, Up, Down. Dropping at queue time would lose
+        that Up for nothing.
+      - **Kept while a newer alarm on the recovery's own template is still owed.** That alarm
+        waits behind the recovery (`N-21`), so the recovery is not its recipients' last word.
+        The case: initial and recovery to one template, escalation to another. The next
+        outage's escalation is delivered while its Down waits behind the retrying recovery.
+        Dropping the recovery would give that template's recipients Down, Down.
+      - **`discarded`, not a new status.** It is `N-12`'s meaning, nobody is meant to receive
+        it any more, and it needs no migration. Core Health counts it as discarded, not failed,
+        and does not report its reason as the last delivery error.
+
+      **How.**
+      - `SummaryRepository.supersede` is one `UPDATE` over pending recoveries and clears. A
+        `LATERAL` finds the first newer delivered alarm of the same sensor, trigger kind, trigger
+        and channel, and a `NOT EXISTS` is the own-template exception. Both use the
+        `(sensor_id, at)` index `N-20`'s lookup uses. No migration.
+      - The dispatcher asks it in three places:
+        - at the start of every pass, before deciding, so a superseded recovery is not decided
+          and does not spend its window's first Up;
+        - just before each claimed recovery or clear is sent. A newer alarm claimed in the same
+          batch sorts first, never tried, and has just been delivered;
+        - on a digest's claimed members, because a digest sent earlier in the pass may have held
+          the newer alarm. The digest still goes, without that line.
+
+        The two at-send checks give back the attempt the claim counted.
+      - **Nothing waits behind a dropped recovery.** It is no longer pending, so `N-21`'s lookups
+        stop finding it. Nothing could be waiting anyway: the only request that waits on a
+        recovery is a newer alarm of its own template, and that one keeps it.
+      - **No Down is later.** Only recoveries and clears are touched, and only to remove them.
+      - **Split digests keep their order.** Members are dropped before a digest is split, so the
+        parts are cut from what remains, in id order. `N-21`'s hold-back is unchanged.
+      - `DispatchStats.superseded` counts them, and each is logged at info with the request that
+        superseded it.
+
+      **Tests.**
+      - `retry-recovery-scenario.test.ts`, 4 new (`M-17` style: the real engine, scheduler and
+        dispatcher, asserting what each recipient gets, in order):
+        - Downs to A, recoveries to B, B's first try refused, Down again inside the retry
+          minute. The recipient gets Down, Down, and nothing at the retry or in the hour after;
+          the recovery was tried once. The next outage's recovery then arrives;
+        - the same, with the second Down first sent the moment the recovery's retry falls due,
+          so both are claimed together. Only the Down goes, and the recovery keeps its one real
+          attempt;
+        - B holding every Up for a day: the recovery is discarded on the second Down's pass, and
+          no digest comes a day later;
+        - initial and recovery to one template, escalation to another, the recovery refused
+          twice. The new outage's escalation goes first and the recovery is kept: Down,
+          escalation, escalation, then Up, Down.
+      - `notification-summaries.test.ts`, 3 new:
+        - a table of 28 cases for `supersede`: the newer alarm delivered, owed, given up on or
+          discarded; older, or a recovery; another sensor, trigger, kind or channel; a clear; the
+          recovery held, undecided or already sent; the own-template exception against each
+          thing that does not trigger it; an alarm never dropped; the narrowed sweep, and the
+          attempt given back only by it;
+        - a recovery and a clear claimed in the same batch as the newer alarm;
+        - two digests on one pass: the first sends the newer Down, and the second goes without
+          the recovery's line, which keeps zero attempts.
+      - No existing test changed.
+
+      Mutation 25/25:
+      - the newer alarm's status, id order, kind, sensor, trigger kind, trigger id and channel,
+        each ignored (7);
+      - alarms dropped too;
+      - settled requests dropped too;
+      - the narrowed sweep not narrowed;
+      - the own-template exception removed, and its status, template, id order, kind, sensor,
+        trigger kind, trigger id and channel each ignored (9);
+      - the claimed attempt never given back, and always given back;
+      - no sweep at the start of a pass;
+      - no check at send;
+      - no check on a digest's members;
+      - clears not checked at send.
+
+      **Not done.**
+      - A recovery decided at once on the pass its newer alarm is sent, and dropped at its send,
+        has already counted as its window's released Up. Another sensor's first Up in that
+        window is then held for the digest. That is one message fewer, never one more, so it was
+        left.
+      - `N-23` is untouched. An older alarm still being retried can arrive after the newer one
+        that superseded its recovery.
 
 - [ ] **N-23 — alarms of one trigger are not ordered among themselves** · S · N-21 · Found
       2026-10-07 in `N-21`. An escalation queued while the initial alarm waits for a retry can be

@@ -36,6 +36,15 @@ export interface OpenWindow {
   readonly dueAt: Date;
 }
 
+/** A recovery or a clear dropped because a newer alarm was delivered first (`N-22`). */
+export interface SupersededRequest {
+  readonly id: number;
+  readonly sensorId: number;
+  readonly templateId: number | null;
+  /** The newer alarm that was delivered, which is what made it out of date. */
+  readonly by: number;
+}
+
 /** A window whose time is up and whose contents are owed as a digest. */
 export interface ClosedWindow {
   readonly id: number;
@@ -194,6 +203,95 @@ export class SummaryRepository {
         row.ahead_window_id === null
           ? null
           : { windowId: Number(row.ahead_window_id), nextAttemptAt: row.ahead_next_attempt_at },
+    }));
+  }
+
+  /**
+   * Drops the recoveries and clears that a newer alarm has overtaken (`N-22`).
+   *
+   * An alarm never waits on another template's recovery (`N-21`): a late page is worse than one
+   * out of order. So a recovery on another template — other recipients — that is still waiting
+   * for its own retry, its digest or its alarm can be overtaken by the next outage's alarm, and
+   * delivered after it: its recipients would hear *up* last about a sensor that is down again.
+   * Once a newer alarm of the same sensor, trigger and channel **has been delivered**, the
+   * recovery is out of date, and it is not sent at all. Its recipients see nothing: their last
+   * word stays the alarm before it, which is true again, and the next outage's own recovery tells
+   * them when it is over. Marking a digest line "superseded" was rejected: it still tells them
+   * *up* after the Down, with a footnote, and a recovery sent on its own has no line to mark.
+   *
+   * - **Delivered, not queued.** A newer alarm still waiting — held for its digest, say — will
+   *   arrive after the recovery, which is then the right order, and the recovery is kept.
+   * - **Not while a newer alarm of the recovery's own template is still owed.** That alarm waits
+   *   behind the recovery (`N-21`), so the recovery's own recipients hear the Down after the Up
+   *   and the recovery is not their last word. Dropping it would leave them two Downs in a row.
+   * - **`discarded`, with the reason.** Nobody was meant to receive it any more, which is
+   *   `N-12`'s meaning of the status, and it is no longer pending: nothing waits behind it, and
+   *   its digest, if this was the last thing in it, is tidied away like any empty window.
+   *
+   * `only` narrows it to the requests a pass has just claimed. Those had an attempt counted
+   * for a send that is not going to happen, which is given back.
+   */
+  async supersede(
+    q: Queryable,
+    now: Date,
+    only: readonly number[] | null = null,
+  ): Promise<SupersededRequest[]> {
+    const rows = await q.query<{
+      id: string;
+      sensor_id: string;
+      template_id: string | null;
+      by: string;
+    }>(
+      `
+      WITH stale AS (
+        SELECT r.id, newer.id AS by
+        FROM notification_request r
+        JOIN LATERAL (
+          SELECT n.id
+          FROM notification_request n
+          WHERE n.sensor_id = r.sensor_id
+            AND n.trigger_kind = r.trigger_kind
+            AND n.trigger_id IS NOT DISTINCT FROM r.trigger_id
+            AND n.channel_key IS NOT DISTINCT FROM r.channel_key
+            AND n.id > r.id
+            AND n.reason NOT IN ('recovery', 'clear')
+            AND n.status = 'sent'
+          ORDER BY n.id
+          LIMIT 1
+        ) newer ON true
+        WHERE r.status = 'pending'
+          AND r.reason IN ('recovery', 'clear')
+          AND ($2::bigint[] IS NULL OR r.id = ANY($2::bigint[]))
+          AND NOT EXISTS (
+            SELECT 1
+            FROM notification_request o
+            WHERE o.sensor_id = r.sensor_id
+              AND o.trigger_kind = r.trigger_kind
+              AND o.trigger_id IS NOT DISTINCT FROM r.trigger_id
+              AND o.channel_key IS NOT DISTINCT FROM r.channel_key
+              AND o.id > r.id
+              AND o.reason NOT IN ('recovery', 'clear')
+              AND o.status = 'pending'
+              AND o.template_id = r.template_id)
+        FOR UPDATE OF r SKIP LOCKED
+      )
+      UPDATE notification_request r
+      SET status = 'discarded', next_attempt_at = NULL, delivered_at = NULL, settled_at = $1,
+          attempts = CASE WHEN $3 THEN GREATEST(r.attempts - 1, 0) ELSE r.attempts END,
+          last_error = 'superseded: a newer alarm of this trigger (request ' || stale.by::text ||
+                       ') was delivered first, so this ' || r.reason || ' is out of date'
+      FROM stale
+      WHERE r.id = stale.id
+      RETURNING r.id::text AS id, r.sensor_id::text AS sensor_id,
+                r.template_id::text AS template_id, stale.by::text AS by
+      `,
+      [now, only === null ? null : [...only], only !== null],
+    );
+    return rows.map((row) => ({
+      id: Number(row.id),
+      sensorId: Number(row.sensor_id),
+      templateId: row.template_id === null ? null : Number(row.template_id),
+      by: Number(row.by),
     }));
   }
 
