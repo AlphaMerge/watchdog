@@ -610,7 +610,11 @@ function SystemEvents({
   );
 }
 
-/** `failed` is an alarm nobody received; `discarded` is one thrown away on purpose (`N-12`). */
+/**
+ * `failed` is an alarm nobody received. `discarded` is one nobody was meant to receive any more:
+ * thrown away by an activation schedule (`N-12`), or a recovery or clear dropped because a newer
+ * alarm of the same sensor and trigger was delivered first (`N-22`). The row's error says which.
+ */
 const STATUS_TONE: Record<string, string> = {
   sent: 'border-up-border bg-up-bg text-up-fg',
   pending: 'border-border text-text-muted',

@@ -803,9 +803,37 @@ describe(
       await dispatcher.dispatch();
       const after = await statusOf(requestId);
       assert.equal(after.status, 'failed');
-      assert.equal(after.error, '400 from hooks.example.test — badrequest');
+      // Escaped since `N-24`, which shows that something was there rather than dropping it.
+      assert.equal(after.error, '400 from hooks.example.test — bad\\u0000request');
       await dispatcher.dispatch();
       assert.equal(sends, 1);
+    });
+
+    it('stores a refusal with its controls and bidirectional controls escaped (N-24)', async () => {
+      // The far end's words reach the logs view, the API and Core Health's message. An escape
+      // sequence rewrites a terminal, a carriage return writes over what came before, and an
+      // override shows the text in an order it does not have. Newline and tab only lay it out.
+      const requestId = await queue(await emailTemplate());
+      const quoting = {
+        method: 'email',
+        send: () =>
+          Promise.resolve({
+            ok: false,
+            retryable: false,
+            error:
+              '400 from hooks.example.test — \u001b[2Jok\rFAILED\u009b \u202Eexe.txt\u2066 ' +
+              'line\r\nnext\tcolumn',
+          } as const),
+      };
+
+      await dispatcherWith(quoting).dispatch();
+      const after = await statusOf(requestId);
+      assert.equal(after.status, 'failed');
+      assert.equal(
+        after.error,
+        '400 from hooks.example.test — \\u001b[2Jok\\u000dFAILED\\u009b \\u202eexe.txt\\u2066 ' +
+          'line\nnext\tcolumn',
+      );
     });
 
     it('records who a message reached nobody among, by name and by count, and not in the error (A-44)', async () => {

@@ -4,6 +4,7 @@ import type { SensorState } from '../state/tables.js';
 import { discardReason, TemplateActivation, type Suppression } from './activation.js';
 import type { NotificationReason } from './chain.js';
 import type { MessageContextLoader, PendingNotification } from './context.js';
+import { legible } from './legible.js';
 import { notificationMethods } from './methods.js';
 import { render, substitute, type MessageContext } from './placeholders.js';
 import { describeSkipped, skippedCounts, type SkippedRecipient } from './recipients.js';
@@ -726,11 +727,12 @@ export class NotificationDispatcher {
        WHERE id = $1`,
       [
         requestId,
-        // **Without U+0000** (`P-277`), which PostgreSQL text cannot hold (`22021`). An error
-        // quotes the far end — a webhook's response body, a program's last line — and a NUL in it
-        // failed this write, so the request kept the lease its claim wrote and, each time that
-        // ran out, was claimed and sent again: one alarm, a message every five minutes.
-        result.error.replaceAll('\u0000', ''),
+        // **Legible** (`N-24`): every control and bidirectional control escaped. An error quotes
+        // the far end — a webhook's response body, a program's last line. A NUL in it failed this
+        // write (`22021`), so the request kept the lease its claim wrote and, each time that ran
+        // out, was claimed and sent again: one alarm, a message every five minutes (`P-277`). The
+        // rest reach every reader of this column, and an override makes it say something else.
+        legible(result.error),
         givingUp ? 'failed' : 'pending',
         givingUp ? null : new Date(now.getTime() + delayMs),
         now,

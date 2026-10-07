@@ -1196,7 +1196,7 @@ Read from the queue rather than counted in memory, deliberately: a core that res
 
 What happened to each notification
 
-Newest first, paged by `before` rather than by offset — notifications arrive while somebody is reading, and an offset page would show a row twice or not at all. `failed` is an alarm nobody received; `discarded` is one an activation schedule threw away on purpose (`N-12`), which is not the same thing. Only notifications about sensors the caller can read appear.
+Newest first, paged by `before` rather than by offset — notifications arrive while somebody is reading, and an offset page would show a row twice or not at all. `failed` is an alarm nobody received; `discarded` is one nobody was meant to receive any more, which is not the same thing. That is either a notification an activation schedule threw away on purpose (`N-12`), or a recovery or clear dropped because a newer alarm of the same sensor and trigger was delivered first (`N-22`); `lastError` says which. Only notifications about sensors the caller can read appear.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |

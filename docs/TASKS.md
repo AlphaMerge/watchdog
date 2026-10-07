@@ -3560,17 +3560,63 @@ because each is a decision rather than a defect:
       `N-21` left it. **Done when** decided: keep, or order a trigger's alarms (initial, escalation,
       repeat) per template without delaying any past its mode's promise, with a scenario test.
 
-- [ ] **N-24 — control characters other than NUL still reach a delivery's last error** · S ·
+- [x] **N-24 — control characters other than NUL still reach a delivery's last error** · S ·
       P-277 · Found 2026-10-07 in `P-277`. `P-277` removes NUL from `last_error` because it breaks
       the database write; other control characters from a program's output or a webhook's body
       still reach the UI. **Done when** they are escaped or removed where `last_error` is shown,
       with a test.
 
-- [ ] **N-25 — the API and the logs view describe `discarded` only as `N-12`'s** · XS · N-22 ·
+      **N-24 outcome.** `legible` (`packages/core/src/notifications/legible.ts`) escapes every
+      control character (`\p{Cc}`: C0, DEL, C1) and every bidirectional control
+      (`\p{Bidi_Control}`: U+202A–U+202E, U+2066–U+2069, U+061C, U+200E, U+200F) as `\uXXXX`.
+      It keeps newline and tab, turns CRLF into a newline, and escapes a lone carriage return.
+      The dispatcher's `#record` applies it where a transport's error becomes `last_error`,
+      replacing `P-277`'s NUL removal. A NUL is now stored as `\u0000` rather than dropped.
+
+      **What decided it.**
+      - **At storage, not where shown.** `#record` is the one writer. The readers are the logs
+        view, the `/notification-requests` API (scripts and terminals this project does not
+        write), and Notification delivery health. That last one puts the error into Core
+        Health's sensor message, which becomes state history and goes out as an alarm. Escaping
+        in the logs view alone would have left the other two.
+      - **Escaped, not removed.** A reader sees that something was there. A body that tried to
+        reverse itself reads as one that tried. Each costs at most six characters, and every
+        quoting error already keeps only 200 of the far end's.
+      - **Newline and tab kept.** The logs view shows the error on one line, where the browser
+        collapses them, so they change nothing there. The API returns multi-line webhook bodies
+        readably, and neither character can disguise text. A lone CR overwrites in a terminal,
+        so it is escaped.
+      - **The bidirectional marks too.** `\p{Bidi_Control}` is exactly the overrides, the
+        isolates and the three marks. Naming the property avoids a hand-kept range list.
+
+      **Tests.** `legible.test.ts` is table-driven over each class, with a sweep of the whole BMP
+      that nothing in the set survives. `email-delivery.test.ts` stores a refusal quoting ESC, a
+      lone CR, a C1, an override, an isolate, CRLF and a tab through the real dispatcher and
+      database, and `P-277`'s NUL case now expects the escape. Mutations: the dispatcher back to
+      NUL removal, the pattern without `\p{Bidi_Control}`, and newline and tab not kept. Each one
+      failed the tests.
+
+      **Not done.** Rows written before this keep what they had. Rewriting them needs a migration.
+      The test-send report returns the same transport error straight to the template form
+      without storing it, so it is not covered. Zero-width and other format characters (U+200B,
+      U+FEFF) are not controls and are kept.
+
+- [x] **N-25 — the API and the logs view describe `discarded` only as `N-12`'s** · XS · N-22 ·
       Found 2026-10-07 in `N-22`. `/notification-requests`' description
       (`packages/core/src/api/routes/notifications.ts`, mirrored in `docs/api-reference.md`) and
       the LogsView comment do not mention a recovery discarded because a newer alarm overtook it.
       **Done when** both say so and the reference is regenerated.
+
+      **N-25 outcome.** The route description now says `discarded` means nobody was meant to
+      receive the notification any more, for one of two reasons. Either an activation schedule
+      threw it away (`N-12`), or it was a recovery or clear dropped because a newer alarm of the
+      same sensor and trigger was delivered first (`N-22`). It adds that `lastError` says which.
+      Both write their reason there. The LogsView `STATUS_TONE` comment says the same. So does
+      the `status` comment on `NotificationRequestView` in `packages/web/src/api/types.ts`, which
+      had the same one-meaning wording. `docs/api-reference.md` was regenerated with
+      `node scripts/docs/api-reference.mjs`. One line changed, and `--check` reads current.
+      Comments and a description only, so there is no behaviour to test. Changing the
+      description without regenerating fails `--check` and `build-hygiene.test.ts`.
 
 - [ ] **N-26 — a recovery dropped at send uses up its window's immediate Up** · S · N-22 · Found
       2026-10-07 in `N-22`. A recovery decided as immediate on the pass its newer alarm is sent,

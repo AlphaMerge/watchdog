@@ -565,8 +565,10 @@ export interface NotificationRequestView {
   state: SensorState | null;
   message: string;
   /**
-   * `failed` is an alarm nobody received; `discarded` is one an activation schedule threw away
-   * on purpose (`N-12`). Not the same thing, and a log that conflated them would hide the first.
+   * `failed` is an alarm nobody received; `discarded` is one nobody was meant to receive any
+   * more — thrown away by an activation schedule (`N-12`), or a recovery or clear a newer
+   * delivered alarm overtook (`N-22`). Not the same thing, and a log that conflated them would
+   * hide the first.
    */
   status: string;
   disposition: string | null;
