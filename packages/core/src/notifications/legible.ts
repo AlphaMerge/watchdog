@@ -1,11 +1,17 @@
 /**
- * CRLF first, so it is taken as one; then every control, every format character (which holds
- * every bidirectional control), the two Unicode line and paragraph separators, every variation
- * selector (`N-29`), and every other default-ignorable code point that is not a mark (`N-27`
- * review).
+ * Every control, every format character (which holds every bidirectional control), the two
+ * Unicode line and paragraph separators, every variation selector (`N-29`), and every other
+ * default-ignorable code point that is not a mark (`N-27` review).
  */
-const UNSAFE =
-  /\r\n|[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Variation_Selector}]|(?!\p{Mn})\p{Default_Ignorable_Code_Point}/gu;
+const ESCAPABLE =
+  String.raw`[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Variation_Selector}]` +
+  String.raw`|(?!\p{Mn})\p{Default_Ignorable_Code_Point}`;
+
+/** CRLF first, so it is taken as one; then each of those. */
+const UNSAFE = new RegExp(String.raw`\r\n|${ESCAPABLE}`, 'gu');
+
+/** One code point of those, for asking whether a joiner's neighbour is left as it is. */
+const ESCAPABLE_ONE = new RegExp(`^(?:${ESCAPABLE})$`, 'u');
 
 /** The variation selectors: VS1–VS16, VS17–VS256, and Mongolian's four free ones (`N-29`). */
 const SELECTOR = /^\p{Variation_Selector}$/u;
@@ -14,8 +20,12 @@ const SELECTOR = /^\p{Variation_Selector}$/u;
 const TEXT_STYLE = '\ufe0e';
 const EMOJI_STYLE = '\ufe0f';
 
-/** What VS15 and VS16 vary: an emoji, which includes the digits, `#` and `*` a keycap is made of. */
-const EMOJI = /^\p{Emoji}$/u;
+/**
+ * What a keycap is made of: a digit, `#` or `*`, then U+FE0F, then the combining enclosing keycap.
+ * VS16 after one of those three is kept only inside a keycap (`N-29` review).
+ */
+const KEYCAP_BASE = /^[0-9#*]$/u;
+const KEYCAP = '\u{20e3}';
 
 /** Mongolian's free variation selectors, U+180B–U+180D and U+180F. */
 const MONGOLIAN_SELECTOR = /^(?=\p{Variation_Selector})\p{scx=Mong}$/u;
@@ -61,8 +71,8 @@ const JOINING_SCRIPTS: readonly RegExp[] = [
 /** What an emoji ZWJ sequence joins: the pictures. */
 const PICTURE = /^\p{Extended_Pictographic}$/u;
 
-/** What may stand between a picture and the ZWJ after it: a skin tone, or the emoji selector. */
-const PICTURE_SUFFIX = /^[\p{Emoji_Modifier}\ufe0f]$/u;
+/** A skin tone, which may stand between a picture and the ZWJ after it, as a kept VS16 may. */
+const SKIN_TONE = /^\p{Emoji_Modifier}$/u;
 
 /**
  * A delivery error fit to store as `last_error` and to show to whoever reads it (`N-24`), and to
@@ -100,12 +110,13 @@ const PICTURE_SUFFIX = /^[\p{Emoji_Modifier}\ufe0f]$/u;
  * characters too, and they are how Persian, Arabic and Indic text is written and how an emoji
  * sequence is one picture: escaped everywhere, a Persian relay's refusal would read broken. So a
  * joiner is kept between two characters of the same joining script (`JOINING_SCRIPTS`), and a
- * ZWJ is kept before a picture that follows a picture, alone or with a skin tone or U+FE0F.
- * Everywhere else it does nothing but hide, and is escaped: between Latin, Cyrillic, Greek,
+ * ZWJ is kept before a picture that follows a picture, alone, with a skin tone, or with a kept
+ * U+FE0F. Everywhere else it does nothing but hide, and is escaped: between Latin, Cyrillic, Greek,
  * Hebrew or CJK letters, which no joiner changes ("от" ZWJ "казано" reads as "отказано"),
  * between two scripts, at either end, or beside a space, a mark of another script or an escape.
  * A combining mark alone does not admit one: a Latin letter with an accent is still Latin, and
- * an Indic virama is already its script's.
+ * an Indic virama is already its script's. Nor does a neighbour that is itself escaped, so that
+ * a second pass changes nothing (`joins`).
  *
  * **Variation selectors only where they select, one at a time** (`N-29`). A variation selector
  * (VS1–VS16 at U+FE00–U+FE0F, VS17–VS256 at U+E0100–U+E01EF, and Mongolian's U+180B–U+180D and
@@ -114,18 +125,27 @@ const PICTURE_SUFFIX = /^[\p{Emoji_Modifier}\ufe0f]$/u;
  * each — is text nobody sees, and two errors carrying different runs read the same. A selector
  * is kept only in the two places it changes what a reader sees:
  *
- * - **VS15 or VS16 directly after an emoji** (`\p{Emoji}`, which holds the digits, `#` and `*`
- *   a keycap starts with). That is a heart drawn red rather than black, a keycap's digit, and
- *   the U+FE0F inside a ZWJ sequence: escaped, the emoji would break.
+ * - **VS15 or VS16 directly after a picture** (`\p{Extended_Pictographic}`, `PICTURE`), and
+ *   **VS16 between a digit, `#` or `*` and U+20E3**, which is a keycap (`N-29` review). That is
+ *   a heart drawn red rather than black, a keycap, and the U+FE0F inside a ZWJ sequence:
+ *   escaped, the emoji would break.
  * - **A Mongolian free variation selector directly after a Mongolian character that is drawn**
  *   (`MONGOLIAN`), which is how a Mongolian letter takes the form its word needs.
+ *
+ * The base is a picture, not `\p{Emoji}`, which also holds the digits, `#`, `*`, the regional
+ * indicators and the skin tones: "4" VS16 "0" reads as "40", so a selector kept after every
+ * digit would hide one per digit. Nor is it the bases `emoji-variation-sequences.txt` lists: no
+ * Unicode property names them, and a list copied here would be a table frozen at one Unicode
+ * version, the reason migration 071 calls this rather than restating it. A picture is what
+ * `joins` already takes one to be, and a VS16 before a ZWJ is kept only where `selects` keeps
+ * it, so the two cannot disagree.
  *
  * Every other one is escaped: after a letter, a space, an escape or another selector, at the
  * start, and VS1–VS14 and VS17–VS256 wherever they stand. Those pick between glyphs of a
  * character the reader still sees — a slashed zero, a regional form of an ideograph — and never
  * change what it says, so escaping them leaves the character there with its `\ufe00` after it;
  * kept after any ideograph, each would hide a byte. What a selector can still hide is one of two
- * after an emoji and one of four after a Mongolian character: a bit or two beside a character
+ * after a picture and one of four after a Mongolian character: a bit or two beside a character
  * that is there to see, never a run.
  *
  * Neither of the other two answers. **Escaping only runs** would keep one selector on every
@@ -157,6 +177,10 @@ const PICTURE_SUFFIX = /^[\p{Emoji_Modifier}\ufe0f]$/u;
  * only U+0000 to U+001F, so a C1 or an override would reach the journal as the far end wrote it.
  * A test send (`test-send.ts`) stores nothing, and applies this to what it reports and logs.
  *
+ * **It leaves its own output as it is**: `legible(legible(x))` is `legible(x)`. Migration 071
+ * runs it over rows that may already be legible, and stops rewriting them only because of this
+ * (`N-28`).
+ *
  * A literal backslash followed by `u` in the original reads the same as an escape. This is a
  * diagnosis for a person, not data to parse back.
  */
@@ -165,31 +189,61 @@ export function legible(text: string): string {
     if (found === '\r\n') return '\n';
     if (found === '\n' || found === '\t') return found;
     if ((found === ZWNJ || found === ZWJ) && joins(found, text, at)) return found;
-    if (SELECTOR.test(found) && selects(found, pointBefore(text, at))) return found;
+    if (SELECTOR.test(found) && selects(found, text, at)) return found;
     const point = found.codePointAt(0) ?? 0;
     const hex = point.toString(16);
     return point > 0xffff ? `\\u{${hex}}` : `\\u${hex.padStart(4, '0')}`;
   });
 }
 
-/** Whether the joiner at `at` stands where it joins: in a joining script, or in an emoji. */
+/**
+ * Whether the joiner at `at` stands where it joins: in a joining script, or in an emoji.
+ *
+ * **Never beside a neighbour that is itself escaped** (`N-29` review). Arabic's number signs
+ * U+0600–U+0604 and U+0890–U+0891, the letter mark U+061C, Syriac's U+070F and Mongolian's
+ * U+180B–U+180F are format characters or selectors of a joining script. A joiner kept beside one
+ * that was escaped stood, in the output, beside the last hex digit of its escape, and a second
+ * pass escaped it: `legible()` did not leave its own output as it was, which migration 071's
+ * re-run relies on (`N-28`).
+ */
 function joins(joiner: string, text: string, at: number): boolean {
   const before = pointBefore(text, at);
+  const beforeAt = at - before.length;
   const after = pointAt(text, at + 1);
+  if (!stays(before, text, beforeAt) || !stays(after, text, at + 1)) return false;
   if (JOINING_SCRIPTS.some((script) => script.test(before) && script.test(after))) return true;
   if (joiner !== ZWJ || !PICTURE.test(after)) return false;
   if (PICTURE.test(before)) return true;
-  // A skin tone or U+FE0F only where it follows a picture itself: after a letter it is drawn as
-  // nothing, and would carry a ZWJ in with it.
-  return PICTURE_SUFFIX.test(before) && PICTURE.test(pointBefore(text, at - before.length));
+  // VS16 only where `selects` keeps it, which before a ZWJ is only after a picture; a skin tone
+  // only where it follows a picture itself. After a letter either is drawn as nothing, and would
+  // carry a ZWJ in with it.
+  if (before === EMOJI_STYLE) return selects(before, text, beforeAt);
+  return SKIN_TONE.test(before) && PICTURE.test(pointBefore(text, beforeAt));
+}
+
+/** Whether the code point `point`, at `at`, is one `legible()` leaves as it is. Not at an end. */
+function stays(point: string, text: string, at: number): boolean {
+  if (point === '') return false;
+  if (!ESCAPABLE_ONE.test(point)) return true;
+  return SELECTOR.test(point) && selects(point, text, at);
 }
 
 /**
- * Whether a variation selector picks a glyph for `base`, the code point before it as it was
+ * Whether the variation selector at `at` picks a glyph for the code point before it, as it was
  * written (`N-29`). A selector before it is no base, so a run keeps at most its first.
+ *
+ * VS15 and VS16 vary a picture. After a digit, `#` or `*`, only VS16 is kept, and only when the
+ * keycap mark follows it (`N-29` review): "4" VS16 "0" reads as "40" and hides a selector, and a
+ * regional indicator or a skin tone is no picture either.
  */
-function selects(selector: string, base: string): boolean {
-  if (selector === TEXT_STYLE || selector === EMOJI_STYLE) return EMOJI.test(base);
+function selects(selector: string, text: string, at: number): boolean {
+  const base = pointBefore(text, at);
+  if (selector === TEXT_STYLE || selector === EMOJI_STYLE) {
+    if (KEYCAP_BASE.test(base)) {
+      return selector === EMOJI_STYLE && pointAt(text, at + selector.length) === KEYCAP;
+    }
+    return PICTURE.test(base);
+  }
   return MONGOLIAN_SELECTOR.test(selector) && MONGOLIAN.test(base);
 }
 

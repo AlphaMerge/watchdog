@@ -3767,9 +3767,10 @@ because each is a decision rather than a defect:
       **N-29 outcome. A selector is kept only where it selects, one at a time. Everywhere else it
       is escaped.**
       - **Kept:**
-        - VS15 or VS16 (U+FE0E, U+FE0F) directly after an emoji (`\p{Emoji}`, which includes
-          the digits, `#` and `*` that keycaps start with). This covers the red heart, keycaps,
-          and the U+FE0F inside ZWJ sequences.
+        - VS15 or VS16 (U+FE0E, U+FE0F) directly after a picture
+          (`\p{Extended_Pictographic}`), and VS16 between a digit, `#` or `*` and U+20E3. This
+          covers the red heart, keycaps, and the U+FE0F inside ZWJ sequences. (The first version
+          used `\p{Emoji}`; the review changed it, below.)
         - A Mongolian free variation selector (U+180B–U+180D, U+180F) directly after a
           Mongolian character that is drawn. That excludes another selector, the vowel separator
           U+180E (a format character, already escaped), and the narrow no-break space U+202F.
@@ -3818,6 +3819,42 @@ because each is a decision rather than a defect:
       - **Not done.** A run of the combining grapheme joiner U+034F, or of Khmer U+17B4/U+17B5,
         can still encode bits by its length or order. These characters are not variation
         selectors, so this ticket did not cover them.
+      - **Review fixes** (two findings, one commit).
+        - **`legible()` was not idempotent.**
+          - `joins()` took a U+FE0F after any pictograph as a ZWJ's suffix, but `selects()` kept
+            it only after `\p{Emoji}`. Unassigned pictographs such as U+1F02C are in the first
+            set and not the second, so the FE0F was escaped and the ZWJ after it kept. A second
+            pass then escaped the ZWJ.
+          - The same happened to a joiner beside a joining-script character that is itself
+            escaped: Arabic's U+0600–U+0604, U+061C and U+0890–U+0891, Syriac's U+070F, and
+            Mongolian's U+180E and escaped selectors.
+          - Migration 071's re-run and `Migration.data`'s contract both rely on idempotency.
+          - Now `joins()` asks `selects()` about a VS16 before a ZWJ, and keeps a joiner only
+            when both neighbours are left as they are (`stays`).
+        - **VS15/VS16 were kept after a bare digit, `#`, `*`, a regional indicator or a skin
+          tone**, so "HTTP 4" VS15 "0" VS16 "4" read as "HTTP 404".
+          - The base is now `\p{Extended_Pictographic}`, the set `joins()` already calls a
+            picture, so the two cannot disagree.
+          - After a digit, `#` or `*`, only VS16 is kept, and only when U+20E3 follows.
+          - Rejected: the bases listed in `emoji-variation-sequences.txt`. No Unicode property
+            names them, and a copy of the list would be a table frozen at one Unicode version,
+            for the reason given in `N-28`.
+        - **Tests.**
+          - The base sweep now uses pictures, and runs each selector both alone and before
+            U+20E3. Its presence counts: pictures + 12 for VS16 before the keycap mark.
+          - New rows cover the digit, keycap, regional indicator and skin-tone cases, and the
+            joiner beside each escaped joining-script character.
+          - An idempotency property: `legible(legible(x)) === legible(x)`. It covers every
+            string of up to four code points over a 30-symbol alphabet (selectors, joiners,
+            pictures including U+1F02C, digits, `#`, the keycap mark, a regional indicator, a
+            skin tone, Arabic, Devanagari and Mongolian with their format characters and
+            selectors, CR, LF, a space and a backslash), plus 50,000 seeded strings of 5–16 code
+            points.
+        - **Mutations**, each of which failed the tests:
+          - no neighbour check in `joins()`: failed 2;
+          - VS16 before a ZWJ judged by `\p{Emoji}` instead of `selects()`: failed 1;
+          - VS16 kept after a bare digit: failed 3;
+          - the VS15/VS16 base back to `\p{Emoji}`: failed 3.
 
 ## Phase 5 — Web UI
 

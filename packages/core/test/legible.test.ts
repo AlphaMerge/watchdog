@@ -207,22 +207,27 @@ describe('legible', () => {
     assert.equal(out.match(/[\n\t]/g)?.length, 2);
   });
 
-  it('keeps VS15 and VS16 after exactly the emoji, a Mongolian selector after exactly the drawn Mongolian characters, and no other selector after anything', () => {
-    // Every code point as the base of one selector of each kind (`N-29`). The base is made
-    // legible as it would be alone; the selector after it is kept only where it varies it.
-    const emoji = (base: string): boolean => /^\p{Emoji}$/u.test(base);
+  it('keeps VS15 and VS16 after exactly the pictures, VS16 in a keycap, a Mongolian selector after exactly the drawn Mongolian characters, and no other selector after anything', () => {
+    // Every code point as the base of one selector of each kind (`N-29`), alone and before the
+    // keycap mark. The base is made legible as it would be alone; the selector after it is kept
+    // only where it varies it, and the keycap mark is never escaped.
+    const picture = (base: string): boolean => /^\p{Extended_Pictographic}$/u.test(base);
+    const keycap = (base: string): boolean => picture(base) || /^[0-9#*]$/u.test(base);
     const mongolian = (base: string): boolean =>
       /^\p{scx=Mong}$/u.test(base) &&
       !/^[\p{Variation_Selector}\p{Cf}\p{White_Space}]$/u.test(base);
-    const selectors: readonly (readonly [string, string, (base: string) => boolean])[] = [
-      ['\u{fe0e}', '\\ufe0e', emoji],
-      ['\u{fe0f}', '\\ufe0f', emoji],
-      ['\u{fe00}', '\\ufe00', () => false],
-      ['\u{fe0d}', '\\ufe0d', () => false],
-      ['\u{e0100}', '\\u{e0100}', () => false],
-      ['\u{e01ef}', '\\u{e01ef}', () => false],
-      ['\u{180b}', '\\u180b', mongolian],
-      ['\u{180f}', '\\u180f', mongolian],
+    const never = (): boolean => false;
+    const selectors: readonly (readonly [string, string, string, (base: string) => boolean])[] = [
+      ['\u{fe0e}', '\\ufe0e', '', picture],
+      ['\u{fe0f}', '\\ufe0f', '', picture],
+      ['\u{fe0e}', '\\ufe0e', '\u{20e3}', picture],
+      ['\u{fe0f}', '\\ufe0f', '\u{20e3}', keycap],
+      ['\u{fe00}', '\\ufe00', '', never],
+      ['\u{fe0d}', '\\ufe0d', '', never],
+      ['\u{e0100}', '\\u{e0100}', '', never],
+      ['\u{e01ef}', '\\u{e01ef}', '', never],
+      ['\u{180b}', '\\u180b', '', mongolian],
+      ['\u{180f}', '\\u180f', '', mongolian],
     ];
     // Counted, and the first few named: a rule gone wrong is wrong for a million bases at once.
     const wrong: string[] = [];
@@ -232,22 +237,132 @@ describe('legible', () => {
       if (point >= 0xd800 && point <= 0xdfff) continue;
       const base = String.fromCodePoint(point);
       const alone = legible(base);
-      for (const [selector, escaped, varies] of selectors) {
+      for (const [selector, escaped, after, varies] of selectors) {
         const keep = varies(base);
-        if (keep) kept.set(selector, (kept.get(selector) ?? 0) + 1);
-        if (legible(base + selector) !== alone + (keep ? selector : escaped)) {
+        const name = `${escaped}${after === '' ? '' : '+keycap'}`;
+        if (keep) kept.set(name, (kept.get(name) ?? 0) + 1);
+        if (legible(base + selector + after) !== alone + (keep ? selector : escaped) + after) {
           wrongCount += 1;
-          if (wrong.length < 20) wrong.push(`${point.toString(16)}+${escaped}`);
+          if (wrong.length < 20) wrong.push(`${point.toString(16)}+${name}`);
         }
       }
     }
     assert.deepEqual({ wrongCount, wrong }, { wrongCount: 0, wrong: [] });
-    // Presence, so that the sweep cannot pass by keeping nothing: every emoji and the drawn
-    // Mongolian characters, and nothing for the rest.
-    assert.ok((kept.get('\u{fe0f}') ?? 0) > 1_000, 'VS16 kept after the emoji');
-    assert.equal(kept.get('\u{fe0e}'), kept.get('\u{fe0f}'));
-    assert.ok((kept.get('\u{180b}') ?? 0) > 150, 'a Mongolian selector kept after Mongolian');
-    assert.equal(kept.get('\u{fe00}'), undefined);
-    assert.equal(kept.get('\u{e0100}'), undefined);
+    // Presence, so that the sweep cannot pass by keeping nothing: every picture, the twelve
+    // keycap bases, the drawn Mongolian characters, and nothing for the rest.
+    const pictures = kept.get('\\ufe0f') ?? 0;
+    assert.ok(pictures > 2_000, 'VS16 kept after the pictures');
+    assert.equal(kept.get('\\ufe0e'), pictures);
+    assert.equal(kept.get('\\ufe0e+keycap'), pictures);
+    assert.equal(kept.get('\\ufe0f+keycap'), pictures + 12);
+    assert.ok((kept.get('\\u180b') ?? 0) > 150, 'a Mongolian selector kept after Mongolian');
+    assert.equal(kept.get('\\ufe00'), undefined);
+    assert.equal(kept.get('\\u{e0100}'), undefined);
+  });
+
+  it('keeps VS16 after a bare digit, a regional indicator or a skin tone nowhere (N-29 review)', () => {
+    const cases: readonly (readonly [string, string])[] = [
+      ['4\u{fe0f}0', '4\\ufe0f0'],
+      ['HTTP 4\u{fe0e}0\u{fe0f}4', 'HTTP 4\\ufe0e0\\ufe0f4'],
+      ['10.0.0.1:2\u{fe0f}5', '10.0.0.1:2\\ufe0f5'],
+      ['#\u{fe0f} *\u{fe0f}', '#\\ufe0f *\\ufe0f'],
+      ['4\u{fe0f}\u{20e3}', '4\u{fe0f}\u{20e3}'],
+      ['4\u{fe0e}\u{20e3}', '4\\ufe0e\u{20e3}'],
+      ['\u{2764}\u{fe0f}', '\u{2764}\u{fe0f}'],
+      ['\u{a9}\u{fe0f} \u{203c}\u{fe0e}', '\u{a9}\u{fe0f} \u{203c}\u{fe0e}'],
+      ['\u{1f1fa}\u{fe0f}', '\u{1f1fa}\\ufe0f'],
+      ['\u{1f1fa}\u{1f1f8}', '\u{1f1fa}\u{1f1f8}'],
+      ['\u{1f44d}\u{1f3fd}\u{fe0f}', '\u{1f44d}\u{1f3fd}\\ufe0f'],
+    ];
+    for (const [input, expected] of cases) assert.equal(legible(input), expected, input);
+  });
+
+  it('keeps a joiner only beside neighbours it leaves as they are (N-29 review)', () => {
+    const cases: readonly (readonly [string, string])[] = [
+      // A VS16 after an unassigned pictograph is kept, so the ZWJ after it is too.
+      ['\u{1f02c}\u{fe0f}\u{200d}\u{1f525}', '\u{1f02c}\u{fe0f}\u{200d}\u{1f525}'],
+      // A VS16 that is escaped admits no ZWJ.
+      ['4\u{fe0f}\u{200d}\u{1f525}', '4\\ufe0f\\u200d\u{1f525}'],
+      // A format character of a joining script is escaped, and so is the joiner beside it.
+      ['\u{61c}\u{200c}\u{645}', '\\u061c\\u200c\u{645}'],
+      ['\u{645}\u{200d}\u{600}', '\u{645}\\u200d\\u0600'],
+      ['\u{710}\u{200d}\u{70f}', '\u{710}\\u200d\\u070f'],
+      ['\u{1820}\u{200d}\u{180e}', '\u{1820}\\u200d\\u180e'],
+      // A Mongolian selector that is escaped admits no joiner; one that is kept does.
+      ['a\u{180b}\u{200d}\u{1820}', 'a\\u180b\\u200d\u{1820}'],
+      ['\u{1820}\u{180b}\u{200d}\u{1821}', '\u{1820}\u{180b}\u{200d}\u{1821}'],
+    ];
+    for (const [input, expected] of cases) assert.equal(legible(input), expected, input);
+  });
+
+  it('leaves its own output as it is (N-28, N-29 review)', () => {
+    // Every string of up to four code points from an alphabet of the things that interact —
+    // selectors, joiners, pictures, digits, the keycap mark, regional indicators, skin tones,
+    // joining-script letters and their format characters, Mongolian and its selectors, the
+    // escapable ones — and then longer ones drawn from it with a fixed seed.
+    const alphabet = [
+      'a',
+      '4',
+      '#',
+      ' ',
+      '\n',
+      '\r',
+      '\\',
+      '\u{fe0e}',
+      '\u{fe0f}',
+      '\u{fe00}',
+      '\u{e0100}',
+      '\u{200d}',
+      '\u{200c}',
+      '\u{200b}',
+      '\u{20e3}',
+      '\u{2764}',
+      '\u{1f525}',
+      '\u{1f02c}',
+      '\u{1f1fa}',
+      '\u{1f3fd}',
+      '\u{645}',
+      '\u{61c}',
+      '\u{600}',
+      '\u{915}',
+      '\u{94d}',
+      '\u{1820}',
+      '\u{180b}',
+      '\u{180e}',
+      '\u{202f}',
+      '\u{301}',
+    ];
+    const unstable: string[] = [];
+    let checked = 0;
+    const check = (text: string): void => {
+      checked += 1;
+      const once = legible(text);
+      if (legible(once) !== once && unstable.length < 20) unstable.push(JSON.stringify(text));
+    };
+    const extend = (prefix: string, left: number): void => {
+      if (prefix !== '') check(prefix);
+      if (left === 0) return;
+      for (const one of alphabet) extend(prefix + one, left - 1);
+    };
+    extend('', 4);
+    // mulberry32: a fixed sequence, so a failure is the same failure on every run.
+    let seed = 0x2829;
+    const random = (): number => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = seed;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+    };
+    for (let n = 0; n < 50_000; n += 1) {
+      let text = '';
+      const length = 5 + Math.floor(random() * 12);
+      for (let i = 0; i < length; i += 1) {
+        text += alphabet[Math.floor(random() * alphabet.length)] ?? '';
+      }
+      check(text);
+    }
+    assert.deepEqual(unstable, []);
+    assert.equal(checked, 30 + 30 ** 2 + 30 ** 3 + 30 ** 4 + 50_000);
   });
 });
