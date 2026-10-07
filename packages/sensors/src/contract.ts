@@ -246,11 +246,19 @@ export interface ReceivedBatch {
    * probe had just started, could not yet reach its core, or was not scanning it — so a count of
    * it would be several intervals as one reading, and every limit set per interval would alarm on
    * the one outage; and calling it `dropped` would fail every sensor that does not tolerate a
-   * loss, the same storm by another channel. What the buffer overwrote inside the window, or
-   * cannot date, is `dropped` and never this. A type names it in its message, so it is not lost silently. Absent on every
-   * other scan.
+   * loss, the same storm by another channel. What the buffer overwrote inside the window is
+   * `dropped` and never this. A type names it in its message, so it is not lost silently.
+   * Absent on every other scan.
    */
   readonly earlier?: number;
+  /**
+   * On the same scans only, and only when it is not zero: what the listener's buffer overwrote
+   * before it could tell when it arrived — after a flood of more than twice the buffer inside the
+   * window (`P-254`). It may have arrived inside the window or hours before it, so it is neither
+   * this scan's count nor its `dropped`; a type names it in its message, and Probe Health counts
+   * it as a loss.
+   */
+  readonly undated?: number;
   /** When this sensor's cursor was last reset, ISO-8601. Moves on a probe restart. */
   readonly since: string;
   /**

@@ -7830,13 +7830,48 @@ because each is a decision rather than a defect:
       One more was equivalent: clamping the window at the resume point. The search already
       answers it, so that clamp was removed. No protocol change.
 
-      **Not done.** `earlier` has no Probe Health counter. It is in the listener's received
-      count and in one message; a counter would need a protocol number. A sensor new to a
-      running probe still misses what arrived between its assignment and its first scan. A
-      parked sensor that comes back after a flood the ring cannot date may be credited, on
-      Probe Health, with records older than its own position. The running total is not split
-      by position, so `unread` can overcount there, though never by more than that sensor's
-      `dropped`. Starting it at its assignment needs `retain` (or the
+      **Third review, 2026-10-07: three more, fixed in a fourth commit.**
+      - **`since` no longer jumps back to the resume point after a quiet spell.** When nothing
+        arrived for longer than the window and a burst came in its last minute, the search
+        found the resume position itself inside the window, and `since` became the listener's
+        start (or the parked sensor's last scan). Now the resume point's own time decides it:
+        the read covers the whole stretch from there only when that point is itself inside the
+        window; otherwise `since` is one interval back, wherever the first record falls.
+        - Tests: two hours of silence, then three records in the last minute, after a restart
+          and for a parked sensor. Each reads three with `until − since` equal to the interval.
+      - **A flood the ring cannot date is no longer all `dropped`.** When the oldest arrival
+        the ring can date is inside the window, the read starts there. What it overwrote since
+        that point is `dropped`. What lies between the resume point and that point is `undated`,
+        a new optional field on `ReceivedBatch` named in the message
+        ("left the probe's buffer before it could tell when they arrived"). It is neither a
+        reading nor a miss, so it raises no Missed spike. `since` stays one interval back.
+        Probe Health counts the undated records once, from the running total of uncounted
+        overwrites.
+        - Tests: the ring case now spreads 1,000 arrivals over two minutes with a one-minute
+          window: `dropped` 100, `undated` 800, `earlier` 0, `unread` 900, counted once across two
+          sensors.
+        - A scenario case floods 2,000 traps a minute for two hours. The restart's first scan
+          accounts for every arrival, names the undated ones, and shows no minute with more misses
+          than a steady minute's arrivals.
+      - **The process test's timing is asserted, not assumed.** Both sensors now use a
+        300-second interval, with phases chosen relative to the probe's estimated tick when each
+        is sent (30 and 45 seconds ahead). Two assertions whose messages start "timing:" check
+        each first scan came more than 4 seconds after the whole push and within the interval of
+        the early messages.
+
+      **Mutations 8/8**:
+      - `since`: set to the resume point when the floor is in the window; set to the window
+        when the resume point is inside it; the whole-window case removed.
+      - Undated: called `earlier`; called `dropped`; not reported; not counted on Probe Health;
+        always named in the message.
+
+      **Not done.** `earlier` and `undated` have no Probe Health counter of their own. They are
+      in the listener's received count and in one message; a counter would need a protocol
+      number. A sensor new to a running probe still misses what arrived between its assignment
+      and its first scan. A parked sensor that comes back after a flood the ring cannot date may
+      be credited, on Probe Health, with records older than its own position. The running total
+      is not split by position, so `unread` can overcount there, though never by more than that
+      sensor's `undated`. Starting it at its assignment needs `retain` (or the
       `AssignmentStore` `onAdd` wiring in `main.ts`) to tell each listener which held sensors are
       its own. Without that, overwrites before its first drain could not be counted on Probe
       Health as they happen.

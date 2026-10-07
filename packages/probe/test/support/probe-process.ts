@@ -203,9 +203,9 @@ export class FakeCore {
     this.#socket?.write(encodeFrame(message));
   }
 
-  /** Hands the probe its sensors, as a whole set. */
-  sendConfig(): void {
-    this.#send({ type: 'config-set', version: 'v1', sensors: [...this.#sensors] });
+  /** Hands the probe its sensors, as a whole set: the ones it was started with, unless given. */
+  sendConfig(sensors: readonly SensorAssignment[] = this.#sensors): void {
+    this.#send({ type: 'config-set', version: 'v1', sensors: [...sensors] });
   }
 
   /**

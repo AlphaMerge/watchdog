@@ -57,21 +57,29 @@ async function scan(
   type: SensorType,
   sensorId: number,
   received: ReceivedBatch,
-): Promise<{ primary: number; message: string }> {
+  params: Readonly<Record<string, unknown>> = {},
+): Promise<{ primary: number; message: string; missed: number }> {
   const executed = await type.execute({
     sensorId,
     target: { host: '192.0.2.7', ipVersion: 'auto' },
-    params: { sourceIsDevice: false },
+    params: { sourceIsDevice: false, ...params },
     credentials: {},
     signal: new AbortController().signal,
     received,
   });
   const primary = executed.channels[0]?.value;
   assert.ok(typeof primary === 'number');
-  return { primary, message: executed.message ?? '' };
+  const missed = executed.channels.find((one) => one.key === 'dropped')?.value ?? 0;
+  return { primary, message: executed.message ?? '', missed };
 }
 
-async function probeOf(): Promise<{
+/** The syslog message the device sends, parsed once rather than per delivery. */
+const SYSLOG_LINE = parseSyslog('<35>Aug 27 09:15:00 gw sshd[1]: authentication failure');
+
+async function probeOf(
+  every = EVERY,
+  withSyslog = true,
+): Promise<{
   traps: TrapListener;
   syslog: SyslogListener;
   advance: (ms: number) => void;
@@ -114,19 +122,17 @@ async function probeOf(): Promise<{
   await traps.start();
   await syslog.start();
 
-  // The device's ordinary traffic, one of each every twenty seconds, for however long passes.
-  let nextSend = T0 + EVERY;
+  // The device's ordinary traffic, one every `every` milliseconds, for however long passes.
+  let nextSend = T0 + every;
   const advance = (ms: number): void => {
     const until = now + ms;
     while (nextSend <= until) {
       now = nextSend;
       deliverTrap?.({ source: '192.0.2.7', detail, community: 'public' });
-      deliverSyslog?.({
-        source: '192.0.2.7',
-        transport: 'udp',
-        message: parseSyslog('<35>Aug 27 09:15:00 gw sshd[1]: authentication failure'),
-      });
-      nextSend += EVERY;
+      if (withSyslog) {
+        deliverSyslog?.({ source: '192.0.2.7', transport: 'udp', message: SYSLOG_LINE });
+      }
+      nextSend += every;
     }
     now = until;
   };
@@ -257,6 +263,52 @@ describe('a probe restart after a long wait for its core (`P-254`)', () => {
     }
     assert.equal(failures, 0, 'a first scan after the cut failed: an alarm for the outage');
     assert.equal(breaches, 0, 'a first scan after the cut crossed its limit');
+  });
+
+  it('puts no outage on the Missed channel when a steady flood overran the buffer for two hours', async () => {
+    // Two thousand traps a minute into a buffer of a hundred, for the two hours the probe waited
+    // for its core. Every ordinary scan misses about 1,900 — the buffer is too small for this
+    // device, and the Missed channel says so, a minute at a time; an operator who accepts it
+    // turns off "fail when notifications were missed" and sets a limit on Missed above it. The
+    // first scans after the reconnect must read as one minute does, not as two hours: the
+    // ring cannot date most of what it lost, and that is undated, not missed.
+    const FLOOD = 30;
+    const probe = await probeOf(FLOOD, false);
+    probe.advance(OUTAGE);
+    probe.traps.retain(held, true);
+    const perMinute = MINUTE / FLOOD;
+
+    let spikes = 0;
+    for (const id of trapIds) {
+      probe.advance(3_000);
+      const received = probe.received().traps;
+      const batch = probe.traps.drain(id, MINUTE);
+      assert.equal(
+        batch.items.length + batch.dropped + (batch.earlier ?? 0) + (batch.undated ?? 0),
+        received,
+        `sensor ${String(id)} cannot account for every trap`,
+      );
+      const { missed, message } = await scan(trapType, id, batch, { warnOnDropped: false });
+      if (missed > perMinute) spikes += 1;
+      assert.match(message, /more traps left the probe’s buffer before it could tell/);
+    }
+    assert.equal(
+      spikes,
+      0,
+      'a first scan missed more than a minute’s traffic: the outage as one reading',
+    );
+    assert.ok(probe.traps.stats().overwrittenUnread > 200_000, 'and Probe Health has the loss');
+
+    // An ordinary minute on the same device, for comparison: the Missed channel's usual reading.
+    probe.advance(MINUTE);
+    const last = trapIds[SENSORS - 1] ?? 0;
+    const minute = await scan(trapType, last, probe.traps.drain(last, MINUTE), {
+      warnOnDropped: false,
+    });
+    assert.ok(
+      minute.missed > 1_800 && minute.missed <= perMinute,
+      `a minute missed ${String(minute.missed)}`,
+    );
   });
 
   it('would have alarmed on every sensor, read back to the listener’s start', async () => {

@@ -507,35 +507,37 @@ describe(
 
     it(
       'reads them at a first scan after the sweep, when a cut push came before the whole one (`P-254`)',
-      { timeout: 240_000 },
+      { timeout: 600_000 },
       async () => {
         // **The branch production takes.** The case above scans every second, before the push
         // settles, so its sensors read through "no push swept yet". In `H-15` the sweep came first
         // and the scans tens of seconds later, from the swept set. Here each sensor's interval is
-        // a minute and its phase puts its first scan about half a minute in, long after the two
-        // seconds a push takes to settle.
+        // five minutes, and its id is chosen as each push is sent so that its first scan falls
+        // about half a minute after that push — long after the two seconds a push takes to settle,
+        // and well inside the interval the early messages have to fall in. The wheel's tick counts
+        // seconds from its start, which is a little after the process's; the tick is estimated
+        // from the spawn, so the estimate runs ahead and a first scan comes later, never sooner.
+        // How long each actually waited is asserted below, so a failure from timing says so.
         //
         // **And the first push is cut.** The core sends chunk one — the syslog sensor alone,
         // marked not final — and the link drops before the trap sensor's chunk. That settles too,
         // and sweeping it would make the syslog sensor the whole of what the probe held across the
         // restart, so the trap sensor would come back on the reconnect's push as new and read
         // nothing. The sweep waits for a complete push, and both read what arrived before them.
-        const idWithPhase = (from: number): number => {
-          for (let id = from; ; id += 1) {
-            const phase = phaseFor(id, 60);
-            if (phase >= 35 && phase <= 45) return id;
-          }
+        const INTERVAL = 300;
+        /** A sensor id whose first scan the wheel puts `ahead` seconds after its estimated tick. */
+        const idScanning = (ahead: number, from: number): number => {
+          const tick = Math.floor((Date.now() - spawned) / 1_000);
+          const target = (tick + ahead) % INTERVAL;
+          for (let id = from; ; id += 1) if (phaseFor(id, INTERVAL) === target) return id;
         };
-        const trapId = idWithPhase(1_000);
-        const syslogId = idWithPhase(trapId + 1);
-        const trapAt = { ...trapSensor, sensorId: trapId, intervalSeconds: 60 };
-        const syslogAt = { ...syslogSensor, sensorId: syslogId, intervalSeconds: 60 };
 
         const trapPort = await freeUdpPort();
         const syslogPort = await freeTcpPort();
-        const { core, port } = await FakeCore.start(dir, [trapAt, syslogAt]);
+        const { core, port } = await FakeCore.start(dir, []);
         cores.push(core);
         core.holdConfig = true;
+        const spawned = Date.now();
         const probe = startProbe({
           dir,
           corePort: port,
@@ -562,6 +564,7 @@ describe(
 
         const EARLY = 3;
         const collector = { host: '127.0.0.1', port: trapPort };
+        const sentEarly = Date.now();
         for (let id = 0; id < EARLY; id += 1) await sendUdp(renderTrap(id), collector);
         await within(
           60_000,
@@ -582,6 +585,11 @@ describe(
 
         // Chunk one, then quiet past the settle, then the link drops.
         let mark = core.received.length;
+        const syslogAt = {
+          ...syslogSensor,
+          sensorId: idScanning(45, 1_000),
+          intervalSeconds: INTERVAL,
+        };
         core.sendFirstChunk([syslogAt]);
         await core.waitFor(
           'chunk one to be applied',
@@ -599,7 +607,14 @@ describe(
 
         // The reconnect's push is the whole set, because the cut one was never stamped.
         mark = core.received.length;
-        core.sendConfig();
+        const trapAt = {
+          ...trapSensor,
+          sensorId: idScanning(30, syslogAt.sensorId + 1),
+          intervalSeconds: INTERVAL,
+        };
+        const trapId = trapAt.sensorId;
+        const syslogId = syslogAt.sensorId;
+        core.sendConfig([trapAt, syslogAt]);
         await core.waitFor(
           'the whole push to be applied',
           (message) => (message.type === 'config-ack' ? message : undefined),
@@ -610,19 +625,27 @@ describe(
         const trapRead = await core.waitFor(
           'the trap sensor’s first scan',
           resultFor(trapId, () => true),
-          { from: mark, ms: 90_000 },
+          { from: mark, ms: 330_000 },
         );
         const syslogRead = await core.waitFor(
           'the syslog sensor’s first scan',
           resultFor(syslogId, () => true),
-          { from: mark, ms: 90_000 },
+          { from: mark, ms: 330_000 },
         );
-        // Each scanned after the whole push settled, so each read through the swept set.
+        // The preconditions, which are about timing and say so: each scanned after the whole
+        // push settled, so each read through the swept set, and within one interval of the early
+        // messages, so they were the window's to read.
         for (const result of [trapRead, syslogRead]) {
+          const at = Date.parse(result.at);
           assert.ok(
-            Date.parse(result.at) - applied > 4_000,
-            `sensor ${String(result.sensorId)} scanned ${String(Date.parse(result.at) - applied)} ms ` +
-              'after the push, before or near its settle, so this did not test the swept set',
+            at - applied > 4_000,
+            `timing: sensor ${String(result.sensorId)} scanned ${String(at - applied)} ms after ` +
+              'the push, before or near its settle, so this did not test the swept set',
+          );
+          assert.ok(
+            at - sentEarly < (INTERVAL - 10) * 1_000,
+            `timing: sensor ${String(result.sensorId)} scanned ${String(at - sentEarly)} ms after ` +
+              'the early messages, too near its interval for them to be in its window',
           );
         }
         assert.equal(trapRead.outcome, 'ok', trapRead.message);

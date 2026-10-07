@@ -226,28 +226,53 @@ describe('how far back a restart reads: one interval (`P-254`, the alarm volume)
     assert.equal(h.ring.unread, 6);
   });
 
-  it('counts a flood it cannot date as dropped, not earlier: a thousand in a buffer of a hundred', () => {
-    // The listener has run two quiet minutes, so the window does not reach its start. A thousand
-    // arrive inside it; the ring can date the last two hundred, all inside the window, and
-    // nothing says the other eight hundred were not. They are a loss, and are counted as one.
+  it('counts a flood it cannot date as undated, and only what it can date inside the window as dropped', () => {
+    // A buffer of a hundred. Five hundred arrive a minute after the start, two quiet minutes
+    // pass, five hundred more arrive, and the sensor scans once a minute. The ring can date the
+    // last two hundred, all inside the window; the eight hundred before them left it undated —
+    // five hundred of them two minutes ago, three hundred inside the window, and no telling which.
     const h = ringOf(100);
     h.ring.retain([1, 2]);
+    h.tick(60);
+    h.push(500);
     h.tick(120);
-    h.push(1_000);
+    h.push(500);
+
     const first = h.ring.drain(1, TRAP, MINUTE);
     assert.equal(first.items.length, 100);
-    assert.equal(first.earlier, 0, 'nothing is said to have come before the window');
-    assert.equal(first.dropped, 900);
-    assert.equal(h.ring.unread, 900, 'every one of them on Probe Health');
-    assert.equal(first.since, h.started, 'the loss it reports reaches back to the start');
+    assert.equal(first.dropped, 100, 'the dated hundred lost inside the window: one buffer');
+    assert.equal(first.undated, 800, 'the rest, which could have arrived any time since the start');
+    assert.equal(first.earlier, 0);
+    assert.equal(
+      first.items.length + first.dropped + (first.undated ?? 0) + (first.earlier ?? 0),
+      1_000,
+    );
+    assert.equal(first.since, new Date(1_800_000_000_000 + 120_000).toISOString(), 'the window');
+    assert.equal(h.ring.unread, 900, 'Probe Health counts every one lost, undated or not');
 
     const second = h.ring.drain(2, TRAP, MINUTE);
-    assert.equal(second.dropped, 900);
+    assert.equal(second.dropped, 100);
+    assert.equal(second.undated, 800);
     assert.equal(
       h.ring.unread,
       900,
       'once a record, from the running total and not the side array',
     );
+  });
+
+  it('starts `since` at the window, not the listener’s start, after a quiet ring', () => {
+    // Two hours of nothing, then three in the last half minute: the record it resumes at is
+    // itself inside the window. `since` is the window's start — a flow rate over the two hours
+    // would read a hundred and twenty times too low.
+    const h = ringOf(100);
+    h.ring.retain([1]);
+    h.tick(7_170);
+    h.push(3);
+    h.tick(30);
+    const first = h.ring.drain(1, TRAP, MINUTE);
+    assert.equal(first.items.length, 3);
+    assert.equal(first.earlier, 0);
+    assert.equal(Date.parse(first.until) - Date.parse(first.since), MINUTE);
   });
 
   it('measures the window on the monotonic clock, when the wall clock steps back an hour', () => {
@@ -346,6 +371,21 @@ describe('a sensor a cut push took off the wheel (`P-254`)', () => {
       new Date(1_800_000_000_000 + 300_000).toISOString(),
       'since its last scan, not the listener’s start',
     );
+  });
+
+  it('starts `since` at the window, not its last scan, when it was quiet while parked', () => {
+    const h = ringOf(100);
+    h.ring.retain([1, 2]);
+    h.ring.drain(2, TRAP, MINUTE);
+    h.ring.retain([1], false);
+    h.tick(7_170);
+    h.push(3);
+    h.tick(30);
+    h.ring.retain([1, 2], true);
+    const back = h.ring.drain(2, TRAP, MINUTE);
+    assert.equal(back.items.length, 3);
+    assert.equal(back.earlier, 0);
+    assert.equal(Date.parse(back.until) - Date.parse(back.since), MINUTE);
   });
 
   it('is new if the whole push leaves it out', () => {

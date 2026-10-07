@@ -46,8 +46,10 @@ import type { ReceivedBatch, ReceivedNotification } from '@ms/sensors';
  * exceeded — many alarms for one outage. Nor is what came before the window `dropped`: that fails
  * the scan of every sensor that does not tolerate a loss, the same storm by another channel. It is
  * `earlier`, a count the type names in its message. What the ring overwrote *inside* the window is
- * `dropped`, as it is on any scan — and whatever the ring cannot place, it counts as `dropped`
- * too, because a loss it cannot date is still a loss.
+ * `dropped`, as it is on any scan. What it overwrote before it could tell when it arrived is
+ * `undated`: the type names it too, and Probe Health counts it as a loss, because a loss it
+ * cannot date is still a loss — but not as this scan's, which would be the outage as one reading
+ * on the Missed channel.
  *
  * **The window is measured on a monotonic clock.** Arrivals, the listener's start and each
  * cursor's last drain are stamped with it; the wall clock is read only for `at`, `since` and
@@ -69,6 +71,17 @@ interface Resume {
   readonly fromMono: number;
 }
 
+/** Where a resuming sensor's first read begins, and how what precedes it is reported. */
+interface Placed {
+  /** The first sequence read, or counted `dropped` if the ring overwrote it. */
+  readonly first: number;
+  /** Before the window, known by when it arrived. */
+  readonly earlier: number;
+  /** Overwritten before the ring could tell when it arrived; just before `first`. */
+  readonly undated: number;
+  readonly sinceMono: number;
+}
+
 interface Cursor {
   next: number;
   /** On the monotonic clock, so `since` and the window survive a step of the wall clock. */
@@ -86,7 +99,7 @@ export class NotificationRing {
    *
    * A resuming sensor reads one interval back, and some of what the ring overwrote may fall inside
    * it: those are that sensor's `dropped`, the rest are `earlier`. Telling them apart needs when
-   * each arrived. What is older than these `size` cannot be dated, and is `dropped`.
+   * each arrived. What is older than these `size` cannot be dated, and is `undated`.
    */
   readonly #leftArrived: Float64Array;
   readonly #leftCounted: Uint8Array;
@@ -174,7 +187,7 @@ export class NotificationRing {
     const nowMono = this.#monotonic();
     const now = this.#now();
     let cursor = this.#cursors.get(sensorId);
-    let earlier: number | undefined;
+    let resumed: Placed | undefined;
     if (cursor === undefined) {
       const resume = this.#resumeOf(sensorId);
       if (resume === undefined) {
@@ -189,14 +202,11 @@ export class NotificationRing {
           until: now.toISOString(),
         };
       }
-      // A window reaching back past where it resumes needs no clamp: everything from `floor` on
-      // arrived after that, so the search answers `floor` and nothing is earlier.
-      const from = nowMono - windowMs;
-      const first = this.#firstFrom(from, resume.floor);
-      earlier = first - resume.floor;
-      cursor = { next: first, sinceMono: first === resume.floor ? resume.fromMono : from };
+      resumed = this.#place(resume, nowMono - windowMs);
+      cursor = { next: resumed.first, sinceMono: resumed.sinceMono };
       this.#cursors.set(sensorId, cursor);
-      this.#countLostFrom(first);
+      // Everything this sensor lost from where it resumes, dated or not, is a loss on Probe Health.
+      this.#countLostFrom(resumed.first - resumed.undated);
     }
 
     const size = this.#slots.length;
@@ -220,8 +230,51 @@ export class NotificationRing {
       dropped,
       since: since.toISOString(),
       until: now.toISOString(),
-      ...(earlier === undefined ? {} : { earlier }),
+      ...(resumed === undefined
+        ? {}
+        : {
+            earlier: resumed.earlier,
+            ...(resumed.undated === 0 ? {} : { undated: resumed.undated }),
+          }),
     };
+  }
+
+  /**
+   * Where a resuming sensor's read begins, given the window opens at `from` (`P-254`).
+   *
+   * Three answers, and `since` is the window's true start in each:
+   *
+   * - **The window reaches back past where it resumes.** Everything from `floor` on arrived inside
+   *   it: nothing is earlier, and whatever the ring overwrote is `dropped`.
+   * - **The ring can date the boundary.** It is the first record at or after `from`; what came
+   *   before it is `earlier`. That includes the boundary being `floor` itself — a ring quiet from
+   *   the resume point until inside the window — where `since` is still `from`, not the resume
+   *   point hours back.
+   * - **It cannot.** The oldest record it can date is already inside the window, and what is
+   *   older left the ring before anything recorded when it arrived. The read begins at that
+   *   oldest dated record, and what the ring overwrote from there is `dropped`: at most a buffer,
+   *   all of it inside the window. What is older is `undated` — neither read nor this scan's
+   *   loss, since it may have arrived hours before the window — and Probe Health counts it as a
+   *   loss, once, because some sensor was waiting for it. Counting it as `dropped` instead put
+   *   the whole outage on a Missed channel, several intervals as one reading again.
+   */
+  #place(resume: Resume, from: number): Placed {
+    if (from <= resume.fromMono) {
+      return { first: resume.floor, earlier: 0, undated: 0, sinceMono: resume.fromMono };
+    }
+    const size = this.#slots.length;
+    const known = Math.max(resume.floor, this.#nextSequence - 2 * size, 0);
+    let low = known;
+    let high = this.#nextSequence;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (this.#arrivedAt(middle) >= from) high = middle;
+      else low = middle + 1;
+    }
+    if (low === known && known > resume.floor) {
+      return { first: known, earlier: 0, undated: known - resume.floor, sinceMono: from };
+    }
+    return { first: low, earlier: low - resume.floor, undated: 0, sinceMono: from };
   }
 
   /** Where a sensor with no cursor resumes from, or `undefined` if it starts now. */
@@ -245,28 +298,6 @@ export class NotificationRing {
     const oldest = Math.max(0, this.#nextSequence - size);
     const at = (sequence >= oldest ? this.#arrived : this.#leftArrived)[sequence % size];
     return at ?? 0;
-  }
-
-  /**
-   * The first sequence at or after `floor` that arrived at or after `from`.
-   *
-   * Searched over what the ring can date — what it holds, and the last `size` it overwrote — on
-   * the monotonic clock, where arrivals rise with the sequence. When the oldest it can date is
-   * already inside the window, the answer is `floor`: either the window reaches back past where
-   * the sensor resumes, so nothing is earlier, or what lies before cannot be placed, and a loss
-   * that cannot be dated is counted as `dropped`, never as `earlier`.
-   */
-  #firstFrom(from: number, floor: number): number {
-    const size = this.#slots.length;
-    const known = Math.max(floor, this.#nextSequence - 2 * size, 0);
-    let low = known;
-    let high = this.#nextSequence;
-    while (low < high) {
-      const middle = Math.floor((low + high) / 2);
-      if (this.#arrivedAt(middle) >= from) high = middle;
-      else low = middle + 1;
-    }
-    return low === known ? floor : low;
   }
 
   /**
