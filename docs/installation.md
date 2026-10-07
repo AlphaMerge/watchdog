@@ -363,6 +363,24 @@ is in `api.allowedHosts`, or is the host of `notifications.publicUrl` or of an `
 entry. An upgrade does not add the machine's name, since it never rewrites your configuration.
 List them before upgrading (`administration.md` → The names the core answers to).
 
+**From a release before `P-267`**, check `checkAbortGraceMs` on every probe host before
+upgrading. It is how long a check that ignores its abort has before its worker is ended. A probe
+now refuses a value under 1500 ms, because a Windows check still waiting its 1000 ms to `SIGKILL`
+a PowerShell would leave that PowerShell running. Earlier releases accepted down to 100, and the
+default has always been 2000. Look in two places:
+
+- **`probe.checkAbortGraceMs` in `/etc/ms/probe.json`.** The installer's configuration check
+  reads the file, so it catches this one. The tarball stops with nothing changed. A package
+  leaves the probe stopped, as above, and on a remote host that probe's sites are unmonitored
+  until you fix the file and start it.
+- **`MS_PROBE__CHECK_ABORT_GRACE_MS` in a systemd drop-in** (`systemctl cat ms-probe` shows
+  it). The installer's check does not run with the service's environment, so it passes, and the
+  new probe then refuses to start and restarts over and over.
+
+Set it to 1500 or more, or remove it to take the default, before you upgrade. The refusal names
+the setting and says why, in the installer's output for the file and in `journalctl -u ms-probe`
+for the drop-in.
+
 ### The units are the release's
 
 The systemd units live in `/usr/lib/systemd/system`, and every upgrade replaces them: `ms-core`,
