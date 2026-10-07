@@ -69,9 +69,9 @@ const CHILDREN: ProcessRunnerStats = {
   refused: 5,
   crashed: 1,
   startupFailed: 4,
-  scriptGroupsEnded: 0,
-  scriptGroupsRefused: 0,
-  scriptGroupsRecycled: 0,
+  scriptGroupsEnded: 8,
+  scriptGroupsRefused: 1,
+  scriptGroupsRecycled: 3,
   waitMs: { p50: 30, p95: 400, p99: 900, max: 3_000 },
   runMs: { p50: 200, p95: 2_000, p99: 4_000, max: 9_000 },
   startupMs: { p50: 25, p95: 9_400, p99: 14_800, max: 30_000 },
@@ -188,6 +188,25 @@ describe('the probe’s own health report', () => {
     const report = reporter({}).report();
     assert.equal(report.childStartupFailed, 4);
     assert.deepEqual(report.childStartupMs, { p50: 25, p95: 9_400, p99: 14_800, max: 30_000 });
+  });
+
+  it('reports the script groups a dead check process left open, each its own count (`P-275`)', () => {
+    // Distinct values, so two swapped is a failure. The refused one is the one with a warning.
+    const report = reporter({}).report();
+    assert.equal(report.scriptGroupsEnded, 8);
+    assert.equal(report.scriptGroupsRefused, 1);
+    assert.equal(report.scriptGroupsRecycled, 3);
+    // A reported zero is a reading: a runner that refused nothing says so.
+    const none = reporter({
+      childStats: { ...CHILDREN, scriptGroupsEnded: 0, scriptGroupsRefused: 0 },
+    }).report();
+    assert.equal(none.scriptGroupsEnded, 0);
+    assert.equal(none.scriptGroupsRefused, 0);
+    // A build with no child runner has none of the three, rather than three zeros.
+    const without = reporter({ children: false }).report();
+    for (const field of ['scriptGroupsEnded', 'scriptGroupsRefused', 'scriptGroupsRecycled']) {
+      assert.equal(field in without, false, `${field} reported with no child runner`);
+    }
   });
 
   it('says nothing of a start-up time before any child has started, rather than zero', () => {
@@ -351,6 +370,7 @@ describe('the probe’s own health report', () => {
         // against what it gave up unread (`B-14`).
         overwritten: 8_000_000,
         overwrittenUnread: 1_300,
+        earlier: 357,
       }),
       syslogListener: () => ({
         running: true,
@@ -361,6 +381,7 @@ describe('the probe’s own health report', () => {
         cursors: 1,
         overwritten: 20_000,
         overwrittenUnread: 75,
+        earlier: 1_200,
       }),
     }).report();
 
@@ -370,6 +391,9 @@ describe('the probe’s own health report', () => {
       'what was lost unread, not all that was overwritten',
     );
     assert.equal(report.syslogOverwritten, 75, 'and each listener’s own');
+    // `P-270`: what a resuming first scan named as before its window, each listener's own.
+    assert.equal(report.trapEarlier, 357);
+    assert.equal(report.syslogEarlier, 1_200);
     assert.equal(report.trapReceived, 900);
     assert.equal(report.trapRejected, 412, 'the number that turns "reads zero" into a diagnosis');
     assert.equal(report.trapMalformed, 3);
@@ -398,6 +422,7 @@ describe('the probe’s own health report', () => {
         // against what it gave up unread (`B-11`).
         overwritten: 3_912,
         overwrittenUnread: 250,
+        earlier: 9_000,
       }),
     }).report();
 
@@ -407,6 +432,7 @@ describe('the probe’s own health report', () => {
     assert.equal(report.flowMissed, 61, 'what did not arrive, which nothing else counts');
     assert.equal(report.flowUndecodable, 7);
     assert.equal(report.flowOverwritten, 250, 'what was lost unread, not all that was overwritten');
+    assert.equal(report.flowEarlier, 9_000, 'and what a first scan kept out, apart from it');
   });
 
   it('says nothing about a flow collector this probe does not run', () => {
@@ -418,6 +444,7 @@ describe('the probe’s own health report', () => {
       'flowMissed',
       'flowUndecodable',
       'flowOverwritten',
+      'flowEarlier',
     ]) {
       assert.equal(field in report, false, `${field} reported by a probe with no collector`);
     }
@@ -430,6 +457,8 @@ describe('the probe’s own health report', () => {
     const report = reporter({}).report();
     assert.equal(report.trapReceived, undefined);
     assert.equal(report.syslogReceived, undefined);
+    assert.equal('trapEarlier' in report, false);
+    assert.equal('syslogEarlier' in report, false);
   });
 
   it('reports the spool when there is one', () => {

@@ -517,10 +517,20 @@ describe('what a resuming sensor adds to Probe Health is its own loss, once (`P-
     h.ring.retain(all);
     const parked = new Set<number>();
     const lost = new Set<number>();
+    // `P-270`: every record some scan named as `earlier`, which the ring counts once each.
+    const named = new Set<number>();
     let sent = 0;
-    const note = (batch: { dropped: number; undated?: number }): void => {
+    const note = (batch: {
+      items: readonly unknown[];
+      dropped: number;
+      undated?: number;
+      earlier?: number;
+    }): void => {
       const oldest = Math.max(0, sent - size);
       for (let s = oldest - batch.dropped - (batch.undated ?? 0); s < oldest; s += 1) lost.add(s);
+      // The read begins where its items and its `dropped` begin; `earlier` is just below that.
+      const first = sent - batch.items.length - batch.dropped;
+      for (let s = first - (batch.earlier ?? 0); s < first; s += 1) named.add(s);
     };
     for (let round = 0; round < 400; round += 1) {
       const arrivals = random(4) === 0 ? 15 + random(30) : random(8);
@@ -534,6 +544,7 @@ describe('what a resuming sensor adds to Probe Health is its own loss, once (`P-
         if (!parked.has(sensor)) note(h.ring.drain(sensor, TRAP, MINUTE));
       }
       assert.equal(h.ring.unread, lost.size, `round ${String(round)}`);
+      assert.equal(h.ring.earlier, named.size, `earlier, round ${String(round)}`);
       const push = random(3);
       if (push === 0) {
         // A cut push: what its chunks named is on the wheel, a parked sensor among them coming
@@ -554,6 +565,147 @@ describe('what a resuming sensor adds to Probe Health is its own loss, once (`P-
     assert.equal(late.dropped, h.ring.overwritten, 'sensor 5 missed everything that left');
     assert.equal(h.ring.unread, lost.size);
     assert.equal(h.ring.unread, h.ring.overwritten, 'and each is counted once');
+    assert.ok(named.size > 0, 'the walk named some records as earlier');
+    assert.equal(h.ring.earlier, named.size);
+  });
+});
+
+describe('what a resuming first scan kept out, counted on Probe Health once (`P-270`)', () => {
+  it('counts once the records two restarted sensors both named as earlier', () => {
+    const h = ringOf();
+    h.ring.retain([1, 2]);
+    h.push(5);
+    h.tick(120);
+    h.push(2);
+    assert.equal(h.ring.earlier, 0, 'nothing until a scan names them');
+
+    assert.equal(h.ring.drain(1, TRAP, MINUTE).earlier, 5);
+    assert.equal(h.ring.earlier, 5);
+    assert.equal(h.ring.drain(2, TRAP, MINUTE).earlier, 5);
+    assert.equal(h.ring.earlier, 5, 'the same five, once');
+    assert.equal(h.ring.unread, 0, 'and none of them is a loss');
+    // Later scans name nothing, and the count stays.
+    h.push(1);
+    h.ring.drain(1, TRAP, MINUTE);
+    assert.equal(h.ring.earlier, 5);
+  });
+
+  it('counts the union of what sensors with different intervals named, in either order', () => {
+    // Thirty records ten seconds apart. A one-minute sensor names the 24 before its window, a
+    // two-minute one the 18 before its own, and reads six the first named: those stay counted,
+    // since a scan with a longer window may still read what a shorter one named.
+    const run = (order: [number, number][]): { earlier: number; named: number[] } => {
+      const h = ringOf();
+      h.ring.retain([1, 2]);
+      for (let at = 0; at < 30; at += 1) {
+        h.push(1);
+        h.tick(10);
+      }
+      const named = order.map(
+        ([sensor, window]) => h.ring.drain(sensor, TRAP, window).earlier ?? 0,
+      );
+      return { earlier: h.ring.earlier, named };
+    };
+    const shortFirst = run([
+      [1, MINUTE],
+      [2, 2 * MINUTE],
+    ]);
+    assert.deepEqual(shortFirst.named, [24, 18]);
+    assert.equal(shortFirst.earlier, 24);
+    const longFirst = run([
+      [2, 2 * MINUTE],
+      [1, MINUTE],
+    ]);
+    assert.deepEqual(longFirst.named, [18, 24]);
+    assert.equal(longFirst.earlier, 24, 'the same count whichever scans first');
+  });
+
+  it('counts what a parked sensor names on its return, apart from what the ring lost', () => {
+    // Sensor 1 keeps its cursor and never scans, so what the ring overwrites is counted lost as it
+    // goes; sensor 2 is parked by a cut push and names 357 on its return, as above.
+    const h = ringOf(100);
+    h.ring.retain([1, 2]);
+    h.ring.drain(1, TRAP, MINUTE);
+    h.ring.drain(2, TRAP, MINUTE);
+    h.ring.retain([1], false);
+    for (let at = 0; at < 360; at += 1) {
+      h.push(1);
+      h.tick(20);
+    }
+    const lost = h.ring.unread;
+    assert.equal(lost, 260, 'sensor 1 was behind what the ring overwrote');
+    h.ring.retain([1, 2], true);
+    const back = h.ring.drain(2, TRAP, MINUTE);
+    assert.equal(back.earlier, 357);
+    assert.equal(h.ring.earlier, 357);
+    assert.equal(h.ring.unread, lost, 'and nothing added to the loss');
+  });
+
+  it('counts nothing for a flood it cannot date, which is a loss', () => {
+    // More than twice the buffer inside the window: `undated`, counted in `unread`, not here.
+    const h = ringOf(10);
+    h.ring.retain([1]);
+    h.tick(120);
+    h.push(1_000);
+    const first = h.ring.drain(1, TRAP, MINUTE);
+    assert.equal(first.earlier, 0);
+    assert.ok((first.undated ?? 0) > 0, 'the flood is undated');
+    assert.equal(h.ring.earlier, 0);
+    assert.equal(h.ring.unread, h.ring.overwritten);
+  });
+
+  /**
+   * Sensor 1 is parked by a cut push `episodes` times and names five each time; between the
+   * episodes it reads four. Sensor 2 was held across the restart and scans only at the end, one
+   * interval back from the listener's start, so it names everything before its window.
+   */
+  function parkedRepeatedly(episodes: number): {
+    h: ReturnType<typeof ringOf>;
+    named: number;
+  } {
+    const h = ringOf(100);
+    h.ring.retain([1, 2]);
+    h.ring.drain(1, TRAP, MINUTE);
+    let named = 0;
+    for (let episode = 0; episode < episodes; episode += 1) {
+      h.ring.retain([2], false);
+      h.push(5);
+      h.tick(120);
+      h.push(1);
+      h.ring.retain([1, 2], true);
+      const back = h.ring.drain(1, TRAP, MINUTE);
+      assert.equal(back.earlier, 5, `episode ${String(episode)}`);
+      named += 5;
+      assert.equal(h.ring.earlier, named, `episode ${String(episode)}`);
+      h.push(3);
+      h.ring.drain(1, TRAP, MINUTE);
+    }
+    return { h, named };
+  }
+
+  it('counts each cut push’s apart, and a later restart scan’s from 0 as their union', () => {
+    // Five episodes of nine records: 45 sent, the last four inside sensor 2's window. It names
+    // the 41 before it, which include the twenty sensor 1 read between its own: the union is 41.
+    const { h, named } = parkedRepeatedly(5);
+    assert.equal(named, 25);
+    const late = h.ring.drain(2, TRAP, MINUTE);
+    assert.equal(late.earlier, 41);
+    assert.equal(h.ring.earlier, 41);
+  });
+
+  it('keeps 32 ranges apart at most, and then counts less than it named, never more', () => {
+    // Forty episodes: forty ranges apart, so the lowest are joined, the records sensor 1 read
+    // between them taken as counted. Every claim above them is still exact; sensor 2's from 0
+    // reaches the joined gaps and counts less than the 356 it named.
+    const { h, named } = parkedRepeatedly(40);
+    assert.equal(named, 200);
+    const late = h.ring.drain(2, TRAP, MINUTE);
+    assert.equal(late.earlier, 356);
+    assert.ok(h.ring.earlier <= 356, `never more than the union: ${String(h.ring.earlier)}`);
+    assert.ok(
+      h.ring.earlier >= 356 - 4 * 8,
+      `less only by the joined gaps: ${String(h.ring.earlier)}`,
+    );
   });
 });
 

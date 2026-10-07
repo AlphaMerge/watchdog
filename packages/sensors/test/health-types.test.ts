@@ -113,6 +113,60 @@ describe('the self-monitoring sensor types', () => {
     );
   });
 
+  it('carries what each listener kept out of a first scan as a counter, without limits (`P-270`)', () => {
+    // Not a loss: the sensor's message names it, and a limit would alarm on every reconnect after
+    // an outage the link channels already alarm on. Each beside its listener's overwritten count.
+    const channels = probeHealth.channels({});
+    const keys = channels.map((one) => one.key);
+    for (const [key, name, unit, beside] of [
+      ['trapEarlier', 'Traps before a first scan', 'traps', 'syslogOverwritten'],
+      ['syslogEarlier', 'Syslog before a first scan', 'messages', 'trapEarlier'],
+      ['flowEarlier', 'Flows before a first scan', 'flows', 'flowOverwritten'],
+    ] as const) {
+      assert.deepEqual(
+        channels.find((one) => one.key === key),
+        { key, name, unit, counter: { bits: 64 } },
+      );
+      assert.equal(keys.indexOf(key), keys.indexOf(beside) + 1, `${key} after ${beside}`);
+    }
+  });
+
+  it('warns on a refused script group, and on nothing else a dead check process left (`P-275`)', () => {
+    // A refused group is a check process naming one that is not its own child: a forged line, in
+    // all but a rare race. A warning on its rate, below the smallest rate one refusal makes. An
+    // ended group is already the failed sensor's news, and one left alone is mostly a reused pid.
+    const channels = probeHealth.channels({});
+    const counter = { bits: 64 } as const;
+    assert.deepEqual(
+      channels.find((one) => one.key === 'scriptGroupsEnded'),
+      { key: 'scriptGroupsEnded', name: 'Script groups ended', unit: 'groups', counter },
+    );
+    assert.deepEqual(
+      channels.find((one) => one.key === 'scriptGroupsRecycled'),
+      { key: 'scriptGroupsRecycled', name: 'Script groups left alone', unit: 'groups', counter },
+    );
+    const refused = channels.find((one) => one.key === 'scriptGroupsRefused');
+    assert.deepEqual(refused, {
+      key: 'scriptGroupsRefused',
+      name: 'Script groups refused',
+      unit: 'groups',
+      counter,
+      limits: {
+        // Below 1/3600, the rate one refusal makes across an hour between two records.
+        upperWarning: 0.000_01,
+        warningMessage:
+          'a check process named process groups that are not its own, and this probe left them alone',
+      },
+    });
+    const keys = channels.map((one) => one.key);
+    const from = keys.indexOf('childStartup');
+    assert.deepEqual(keys.slice(from + 1, from + 4), [
+      'scriptGroupsEnded',
+      'scriptGroupsRefused',
+      'scriptGroupsRecycled',
+    ]);
+  });
+
   it('carries a probe’s late refusals as a number of their own and not an alarm', () => {
     // `A-56`. A refusal that arrived after the probe's configuration moved on is dropped and
     // nothing is wrong: a limit or a lookup would be an alarm for a change somebody made on

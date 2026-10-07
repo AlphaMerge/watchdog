@@ -291,6 +291,19 @@ const CHANNELS: readonly ChannelDef[] = [
     unit: 'messages',
     counter: { bits: 64 },
   },
+  // **What a restart or a cut push kept out of a first scan (`P-270`), and no limit.** A sensor's
+  // first scan after either reads one interval back, and what the listener heard before that is
+  // `earlier`: neither read nor lost, and named in that scan's message. This is the probe's count
+  // of it, once a record however many sensors named it. A limit would alarm on every reconnect
+  // after an outage the link channels already alarm on — the storm `P-254` kept off the sensors
+  // themselves. `flowEarlier` below is the same for the flow collector.
+  { key: 'trapEarlier', name: 'Traps before a first scan', unit: 'traps', counter: { bits: 64 } },
+  {
+    key: 'syslogEarlier',
+    name: 'Syslog before a first scan',
+    unit: 'messages',
+    counter: { bits: 64 },
+  },
   // **The flow collector (`B-02`), and one of these is unlike everything else on this sensor.**
   // `flowMissed` counts what did *not* arrive — read out of the exporter's own running sequence,
   // which is the only evidence there is, because UDP drops silently. Without it a collector losing
@@ -321,6 +334,7 @@ const CHANNELS: readonly ChannelDef[] = [
     unit: 'flows',
     counter: { bits: 64 },
   },
+  { key: 'flowEarlier', name: 'Flows before a first scan', unit: 'flows', counter: { bits: 64 } },
   { key: 'scheduled', name: 'Sensors scheduled', unit: 'sensors' },
   // **The second runner (`P-61`).** EXE and Script checks run in a child process rather than a
   // worker, with their own much smaller ceiling — so the pool channels above say nothing at all
@@ -347,6 +361,46 @@ const CHANNELS: readonly ChannelDef[] = [
     counter: { bits: 64 },
   },
   { key: 'childStartup', name: 'Child process start-up (p95)', unit: 'ms' },
+  // **The script groups a dead check process left open (`P-266`, `P-275`).** Ended: the runner
+  // killed what a check process killed outright, out of heap or crashed had started and could no
+  // longer end. No limit: the sensor whose check process died already fails saying so, and
+  // `childCrashes` or `childTimedOut` counts that process; this says a script outlived it.
+  {
+    key: 'scriptGroupsEnded',
+    name: 'Script groups ended',
+    unit: 'groups',
+    counter: { bits: 64 },
+  },
+  // **Refused: a warning, and the one channel here a correct probe never moves.** A check process
+  // named a process group on its output that `/proc` did not show to be its own child: a forged
+  // line — something running as the scripts' user trying to have the probe kill a process it may
+  // not — or, rarely, a check process that died between starting its script and the runner
+  // reading the line. The probe signalled nothing, so a warning rather than an error, and nothing
+  // else alarms on it: the check that wrote the line may well pass, and no device outage makes
+  // one, so it cannot multiply an alarm. A rate like `spoolDropped`'s, bounded below the smallest
+  // rate one refusal makes, so the record a refusal falls in warns and the next one clears.
+  {
+    key: 'scriptGroupsRefused',
+    name: 'Script groups refused',
+    unit: 'groups',
+    counter: { bits: 64 },
+    limits: {
+      upperWarning: 0.000_01,
+      warningMessage:
+        'a check process named process groups that are not its own, and this probe left them alone',
+    },
+  },
+  // **Left alone: no limit.** A group whose id had passed to something else by the time its check
+  // process died. Its commonest cause is benign — the script's group had emptied and its pid was
+  // reused, so nothing was left running — and the rest is a script descendant that changed user,
+  // which the probe will not signal. Its not signalling is the protection working; a warning
+  // would page for that. The probe's log names each one, and this says how often.
+  {
+    key: 'scriptGroupsRecycled',
+    name: 'Script groups left alone',
+    unit: 'groups',
+    counter: { bits: 64 },
+  },
   // Results written to disk and not yet acknowledged. Non-zero is not a fault — it is what a
   // probe does while the core is unreachable — but a number that climbs and never falls is.
   { key: 'spoolDepth', name: 'Results spooled', unit: 'results' },

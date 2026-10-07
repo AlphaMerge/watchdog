@@ -718,6 +718,58 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(older['childStartup'], null);
     });
 
+    it('carries what each listener kept out of a first scan, and gaps for a probe that cannot say', () => {
+      // `P-270`. Each from its own field, apart from the overwritten counts it is not part of.
+      const { reading } = build(() =>
+        connected({
+          health: {
+            ...FULL,
+            trapOverwritten: 1_300,
+            trapEarlier: 357,
+            syslogEarlier: 1_200,
+            flowEarlier: 9_000,
+          },
+        }),
+      ).read(probeId);
+      assert.equal(reading['trapEarlier'], 357);
+      assert.equal(reading['syslogEarlier'], 1_200);
+      assert.equal(reading['flowEarlier'], 9_000);
+      assert.equal(reading['trapOverwritten'], 1_300, 'and not added to the loss');
+      const zero = build(() =>
+        connected({ health: { ...FULL, trapEarlier: 0, syslogEarlier: 0 } }),
+      ).read(probeId).reading;
+      assert.equal(zero['trapEarlier'], 0, 'nothing kept out is a reading');
+      // No listener, an older probe, or a core below 31 on the other end: a gap, never a zero.
+      const { reading: older } = build(() => connected()).read(probeId);
+      for (const key of ['trapEarlier', 'syslogEarlier', 'flowEarlier']) {
+        assert.equal(older[key], null, key);
+      }
+      assert.equal(older['trapReceived'], 900, 'what the listener did send is unaffected');
+    });
+
+    it('carries the script groups a dead check process left open, and gaps for a probe that cannot say', () => {
+      // `P-275`. Three counts, each from its own field.
+      const { reading } = build(() =>
+        connected({
+          health: {
+            ...FULL,
+            scriptGroupsEnded: 8,
+            scriptGroupsRefused: 1,
+            scriptGroupsRecycled: 3,
+          },
+        }),
+      ).read(probeId);
+      assert.equal(reading['scriptGroupsEnded'], 8);
+      assert.equal(reading['scriptGroupsRefused'], 1);
+      assert.equal(reading['scriptGroupsRecycled'], 3);
+      assert.equal(reading['childCrashes'], 1, 'and the crash count is its own');
+      // A probe or a core below 31 does not send them: gaps, never a zero that says none refused.
+      const { reading: older } = build(() => connected()).read(probeId);
+      for (const key of ['scriptGroupsEnded', 'scriptGroupsRefused', 'scriptGroupsRecycled']) {
+        assert.equal(older[key], null, key);
+      }
+    });
+
     it('carries the workers the pool could not start, and gaps for a probe that cannot say', () => {
       // `P-263`: a worker still loading at its start-up bound is terminated and replaced.
       const { reading } = build(() =>

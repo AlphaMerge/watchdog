@@ -482,6 +482,12 @@ const PROBE_METRICS: readonly Metric[] = [
     counter: true,
   },
   {
+    key: 'trapEarlier',
+    name: 'ms_probe_traps_before_first_scan_total',
+    help: "SNMP traps this probe received before the window of a sensor's first scan after a probe restart or a cut configuration push: neither read nor lost, once each.",
+    counter: true,
+  },
+  {
     key: 'syslogReceived',
     name: 'ms_probe_syslog_received_total',
     help: 'Syslog messages this probe’s listener accepted.',
@@ -503,6 +509,12 @@ const PROBE_METRICS: readonly Metric[] = [
     key: 'syslogOverwritten',
     name: 'ms_probe_syslog_overwritten_total',
     help: 'Syslog messages this probe received and its buffer overwrote before a sensor read them.',
+    counter: true,
+  },
+  {
+    key: 'syslogEarlier',
+    name: 'ms_probe_syslog_before_first_scan_total',
+    help: "Syslog messages this probe received before the window of a sensor's first scan after a probe restart or a cut configuration push: neither read nor lost, once each.",
     counter: true,
   },
   {
@@ -539,6 +551,12 @@ const PROBE_METRICS: readonly Metric[] = [
     key: 'flowOverwritten',
     name: 'ms_probe_flows_overwritten_total',
     help: 'Flow records this probe received and its buffer overwrote before a sensor read them.',
+    counter: true,
+  },
+  {
+    key: 'flowEarlier',
+    name: 'ms_probe_flows_before_first_scan_total',
+    help: "Flow records this probe received before the window of a sensor's first scan after a probe restart or a cut configuration push: neither read nor lost, once each.",
     counter: true,
   },
   {
@@ -594,6 +612,26 @@ const PROBE_METRICS: readonly Metric[] = [
     name: 'ms_probe_child_startup_p95_seconds',
     help: 'How long a check child process took to be ready to run its check, 95th percentile.',
     scale: MS,
+  },
+  // `P-275`. The script groups a check process left open when it died: ended, refused as not its
+  // own, or left alone as no longer its own.
+  {
+    key: 'scriptGroupsEnded',
+    name: 'ms_probe_script_groups_ended_total',
+    help: 'Script process groups a check process left running when it died, which this probe then ended.',
+    counter: true,
+  },
+  {
+    key: 'scriptGroupsRefused',
+    name: 'ms_probe_script_groups_refused_total',
+    help: 'Process groups a check process named that /proc did not show to be its own, which this probe left alone: a forged line, or a check process that died as its script started.',
+    counter: true,
+  },
+  {
+    key: 'scriptGroupsRecycled',
+    name: 'ms_probe_script_groups_left_alone_total',
+    help: 'Script process groups left open by a dead check process whose id had passed to another process or group, which this probe left alone.',
+    counter: true,
   },
   {
     key: 'spoolDepth',

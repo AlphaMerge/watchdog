@@ -445,6 +445,62 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       assert.equal(without.has(`ms_probe_workers_not_started_total${label}`), false);
     });
 
+    it('exports the script groups a dead check process left open, and nothing for a probe that sent none', async () => {
+      // `P-275`. Distinct values, so a series reading its neighbour's field is seen.
+      const label = `{probe="${String(probeId)}"}`;
+      const left = (): ProbeLink => ({
+        ...connected,
+        health: {
+          ...connected.health,
+          scriptGroupsEnded: 8,
+          scriptGroupsRefused: 1,
+          scriptGroupsRecycled: 3,
+        },
+      });
+      const metrics = parse((await varying(left).scrape()).body);
+      assert.equal(metrics.get(`ms_probe_script_groups_ended_total${label}`), 8);
+      assert.equal(metrics.get(`ms_probe_script_groups_refused_total${label}`), 1);
+      assert.equal(metrics.get(`ms_probe_script_groups_left_alone_total${label}`), 3);
+
+      const without = parse((await varying(() => connected).scrape()).body);
+      for (const name of [
+        'ms_probe_script_groups_ended_total',
+        'ms_probe_script_groups_refused_total',
+        'ms_probe_script_groups_left_alone_total',
+      ]) {
+        assert.equal(without.has(`${name}${label}`), false, name);
+      }
+    });
+
+    it('exports what each listener kept out of a first scan, and nothing for a probe that sent none', async () => {
+      // `P-270`. Beside each listener's overwritten count, and not added to it.
+      const label = `{probe="${String(probeId)}"}`;
+      const resumed = (): ProbeLink => ({
+        ...connected,
+        health: {
+          ...connected.health,
+          trapOverwritten: 1_300,
+          trapEarlier: 357,
+          syslogEarlier: 1_200,
+          flowEarlier: 9_000,
+        },
+      });
+      const metrics = parse((await varying(resumed).scrape()).body);
+      assert.equal(metrics.get(`ms_probe_traps_before_first_scan_total${label}`), 357);
+      assert.equal(metrics.get(`ms_probe_syslog_before_first_scan_total${label}`), 1_200);
+      assert.equal(metrics.get(`ms_probe_flows_before_first_scan_total${label}`), 9_000);
+      assert.equal(metrics.get(`ms_probe_traps_overwritten_total${label}`), 1_300);
+
+      const without = parse((await varying(() => connected).scrape()).body);
+      for (const name of [
+        'ms_probe_traps_before_first_scan_total',
+        'ms_probe_syslog_before_first_scan_total',
+        'ms_probe_flows_before_first_scan_total',
+      ]) {
+        assert.equal(without.has(`${name}${label}`), false, name);
+      }
+    });
+
     it('exports each listener’s malformed count beside its received count (`B-16`)', async () => {
       const label = `{probe="${String(probeId)}"}`;
       // Distinct values, so a series reading its neighbour's channel is seen.

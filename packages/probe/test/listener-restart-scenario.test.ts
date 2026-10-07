@@ -237,6 +237,7 @@ describe('a probe restart after a long wait for its core (`P-254`)', () => {
 
     let breaches = 0;
     let failures = 0;
+    const named = { traps: 0, messages: 0 };
     // Each sensor's first scan, spread across the next minute as the wheel's phases spread them.
     for (let index = 0; index < SENSORS; index += 1) {
       probe.advance(3_000);
@@ -244,6 +245,12 @@ describe('a probe restart after a long wait for its core (`P-254`)', () => {
 
       const trapBatch = probe.traps.drain(trapIds[index] ?? 0, MINUTE);
       const syslogBatch = probe.syslog.drain(syslogIds[index] ?? 0, MINUTE);
+      // Each window opens three seconds after the one before, so each names all the one before
+      // named and a little more: what the listener counts once is the latest.
+      named.traps = trapBatch.earlier ?? 0;
+      named.messages = syslogBatch.earlier ?? 0;
+      assert.equal(probe.traps.stats().earlier, named.traps, 'trap: once a record (`P-270`)');
+      assert.equal(probe.syslog.stats().earlier, named.messages, 'syslog: once a record');
       for (const [type, id, batch, received, noun] of [
         [trapType, trapIds[index] ?? 0, trapBatch, total.traps, 'traps'],
         [syslogType, syslogIds[index] ?? 0, syslogBatch, total.messages, 'messages'],
@@ -305,6 +312,7 @@ describe('a probe restart after a long wait for its core (`P-254`)', () => {
     probe.advance(OUTAGE);
     probe.traps.retain(held, true);
     probe.syslog.retain(held, true);
+    const named = new Map<number, number>();
 
     let breaches = 0;
     let failures = 0;
@@ -330,6 +338,7 @@ describe('a probe restart after a long wait for its core (`P-254`)', () => {
           received - (lastRead.get(id) ?? 0),
           `sensor ${String(id)} cannot account for what arrived since its last scan`,
         );
+        named.set(id, batch.earlier ?? 0);
         assert.ok((batch.earlier ?? 0) > 300, 'two hours came before the window');
         try {
           const { primary } = await scan(type, id, batch);
@@ -341,6 +350,10 @@ describe('a probe restart after a long wait for its core (`P-254`)', () => {
     }
     assert.equal(failures, 0, 'a first scan after the cut failed: an alarm for the outage');
     assert.equal(breaches, 0, 'a first scan after the cut crossed its limit');
+    // `P-270`: every sensor was parked at the same place, so the last, whose window opened latest,
+    // named all the others did; Probe Health counts that once.
+    assert.equal(probe.traps.stats().earlier, named.get(trapIds[SENSORS - 1] ?? 0));
+    assert.equal(probe.syslog.stats().earlier, named.get(syslogIds[SENSORS - 1] ?? 0));
   });
 
   it('puts no outage on the Missed channel when a steady flood overran the buffer for two hours', async () => {
@@ -506,6 +519,8 @@ describe('a first scan that fails on what it missed still names what it did not 
     const earlier = batch.earlier ?? 0;
     assert.equal(earlier, probe.received().flows, 'all of it came before the window');
     assert.ok(earlier > 300);
+    // `P-270`: and Probe Health has the same count.
+    assert.equal(probe.flows.stats().earlier, earlier);
 
     let message: string | undefined;
     await assert.rejects(

@@ -445,6 +445,10 @@ export class ProbeHealthService {
       // reads as a buffer that lost nothing.
       trapOverwritten: health?.trapOverwritten ?? null,
       syslogOverwritten: health?.syslogOverwritten ?? null,
+      // `P-270`. What a resuming sensor's first scan named as before its window: neither read nor
+      // lost. A gap for no listener and for either end below protocol 31, never a zero.
+      trapEarlier: health?.trapEarlier ?? null,
+      syslogEarlier: health?.syslogEarlier ?? null,
       flowReceived: health?.flowReceived ?? null,
       flowRejected: health?.flowRejected ?? null,
       flowMalformed: health?.flowMalformed ?? null,
@@ -453,6 +457,7 @@ export class ProbeHealthService {
       // `B-11`. A gap for no collector and for either end below protocol 25, never a zero that
       // reads as a buffer that lost nothing.
       flowOverwritten: health?.flowOverwritten ?? null,
+      flowEarlier: health?.flowEarlier ?? null,
       // Null, not 0, when the probe sends nothing: a build with no child-process runner has
       // nothing to say here, and a confident zero cannot be told from one that is idle.
       childSlots: health?.childSlots ?? null,
@@ -466,6 +471,11 @@ export class ProbeHealthService {
       // also until a child has started: no start measured is not a start that took no time.
       childStartupFailed: health?.childStartupFailed ?? null,
       childStartup: health?.childStartupMs?.p95 ?? null,
+      // `P-275`. The script groups a dead check process left open: a gap for no child runner and
+      // for either end below protocol 31, never a zero that says none was refused.
+      scriptGroupsEnded: health?.scriptGroupsEnded ?? null,
+      scriptGroupsRefused: health?.scriptGroupsRefused ?? null,
+      scriptGroupsRecycled: health?.scriptGroupsRecycled ?? null,
       // `?? null` throughout, so a probe whose registry keeps no session pools gaps these rather
       // than reading zero — a probe with nothing to report is not a probe with nothing open
       // (`P-36`, and `R-06` again).

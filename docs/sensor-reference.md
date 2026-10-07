@@ -1078,12 +1078,15 @@ cost: **light** · evaluated by the core, never by a probe
 | `syslogMalformed` | Syslog malformed | messages | 64-bit counter → rate |
 | `trapOverwritten` | Traps overwritten unread | traps | 64-bit counter → rate |
 | `syslogOverwritten` | Syslog overwritten unread | messages | 64-bit counter → rate |
+| `trapEarlier` | Traps before a first scan | traps | 64-bit counter → rate |
+| `syslogEarlier` | Syslog before a first scan | messages | 64-bit counter → rate |
 | `flowReceived` | Flows received | flows | 64-bit counter → rate |
 | `flowRejected` | Flows rejected | flows | 64-bit counter → rate |
 | `flowMalformed` | Flow datagrams malformed | datagrams | 64-bit counter → rate |
 | `flowMissed` | Flows missed | flows | 64-bit counter → rate |
 | `flowUndecodable` | Flow records with no template | records | 64-bit counter → rate |
 | `flowOverwritten` | Flows overwritten unread | flows | 64-bit counter → rate |
+| `flowEarlier` | Flows before a first scan | flows | 64-bit counter → rate |
 | `scheduled` | Sensors scheduled | sensors | — |
 | `childSlots` | Child process slots | processes | — |
 | `childBusy` | Child processes running | processes | — |
@@ -1094,6 +1097,9 @@ cost: **light** · evaluated by the core, never by a probe
 | `childCrashes` | Child process crashes | processes | 64-bit counter → rate |
 | `childStartupFailed` | Child checks not started | checks | 64-bit counter → rate |
 | `childStartup` | Child process start-up (p95) | ms | — |
+| `scriptGroupsEnded` | Script groups ended | groups | 64-bit counter → rate |
+| `scriptGroupsRefused` | Script groups refused | groups | 64-bit counter → rate; default limits: warn above 0.00001 |
+| `scriptGroupsRecycled` | Script groups left alone | groups | 64-bit counter → rate |
 | `spoolDepth` | Results spooled | results | — |
 | `spoolBytes` | Spool on disk | MB | — |
 | `spoolDropped` | Results dropped | results | 64-bit counter → rate; default limits: error above 0.00001 |

@@ -74,8 +74,8 @@ export interface ProcessRunnerStats {
   /**
    * Process groups a check process started and left running when it went, which the runner then
    * ended (`P-266`): a script whose check process was killed outright, ran out of heap or crashed,
-   * and so never ended it. Each is logged with its sensor. Not on the heartbeat yet: a new field
-   * there needs a protocol version.
+   * and so never ended it. Each is logged with its sensor. On the heartbeat from protocol 31, with
+   * the two below (`P-275`).
    */
   scriptGroupsEnded: number;
   /**

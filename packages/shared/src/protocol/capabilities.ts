@@ -177,6 +177,17 @@ export interface ProbeCapabilities {
    * stripped below this.
    */
   workerStartup: boolean;
+  /**
+   * Reports what each listener kept out of a resuming sensor's first scan as `earlier` (`P-270`):
+   * three fields, `trapEarlier`, `syslogEarlier` and `flowEarlier`, stripped below this together.
+   */
+  listenerEarlier: boolean;
+  /**
+   * Reports the script groups its child-process runner ended, refused or left alone after a check
+   * process died (`P-275`): three fields, `scriptGroupsEnded`, `scriptGroupsRefused` and
+   * `scriptGroupsRecycled`, stripped below this together.
+   */
+  scriptGroups: boolean;
 }
 
 /**
@@ -209,6 +220,8 @@ const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
   ['targetPolicyException', 28],
   ['childStartup', 29],
   ['workerStartup', 30],
+  ['listenerEarlier', 31],
+  ['scriptGroups', 31],
 ];
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -241,6 +254,10 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
     'connect to an address one device is excepted for, although its target policy refuses it',
   childStartup: 'report the script checks it could not start, and how long one takes to start',
   workerStartup: 'report the check workers it could not start',
+  listenerEarlier:
+    'report what its listeners heard that a restart or a cut push kept out of a first scan',
+  scriptGroups:
+    'report the script process groups it ended, or refused to end, after a check process died',
 };
 
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
@@ -268,6 +285,8 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     targetPolicyException: has(28),
     childStartup: has(29),
     workerStartup: has(30),
+    listenerEarlier: has(31),
+    scriptGroups: has(31),
   };
 }
 
@@ -300,6 +319,19 @@ export function healthForPeer(health: ProbeHealthReport, peerVersion: number): P
   let sent = health;
   // Newest first; each capability's fields are stripped on their own, so a peer one version
   // behind loses only that version's.
+  if (!capabilities.scriptGroups) {
+    const {
+      scriptGroupsEnded: _ended,
+      scriptGroupsRefused: _refused,
+      scriptGroupsRecycled: _recycled,
+      ...older
+    } = sent;
+    sent = older;
+  }
+  if (!capabilities.listenerEarlier) {
+    const { trapEarlier: _traps, syslogEarlier: _syslog, flowEarlier: _flows, ...older } = sent;
+    sent = older;
+  }
   if (!capabilities.workerStartup) {
     const { workerStartupFailed: _workers, ...older } = sent;
     sent = older;

@@ -8934,12 +8934,49 @@ because each is a decision rather than a defect:
       interval back like a restarted one (`earlier` for the rest), with a ring test and the
       listener-restart scenario extended.
 
-- [ ] **P-270 — `earlier` and `undated` listener records have no Probe Health count** · S ·
+- [x] **P-270 — `earlier` and `undated` listener records have no Probe Health count** · S ·
       P-254 · Found 2026-10-07 in `P-254`. A resuming sensor names what it did not read in its
       message (`earlier`, `undated`), and the overwritten total counts the undated ones, but
       Probe Health has no channel for records a restart or a cut push kept out of every reading.
       **Done when** Probe Health counts them (a heartbeat field, so a protocol number after 30,
       with the capability gate `P-260` and `P-263` used), with core, metrics and report tests.
+
+      **P-270 outcome. Each listener counts what a resuming first scan named as `earlier`, once a
+      record, and sends it at protocol 31 (with `P-275`).**
+      - **Only `earlier` is new.** `undated` was already a loss, counted in `trapOverwritten`,
+        `syslogOverwritten` and `flowOverwritten` since `P-254`/`P-273`; putting it in a second
+        channel would count one record twice for one reason. `earlier` was in no count at all.
+      - **What is counted: the union of what first scans named, not "out of every reading".** The
+        ticket's phrase cannot be known when a scan is counted: a sensor with a longer interval
+        may scan later and read records a shorter one named (a 60 s and a 300 s sensor after an
+        outage do exactly that), and a counter cannot take them back. Waiting until a record left
+        the buffer would be exact, but a quiet listener (`H-15`'s three traps) would then count
+        nothing for as long as its buffer did not wrap. So `NotificationRing.earlier` counts, at
+        the scan, each record some sensor's first scan after a restart or a cut push named, once
+        however many named it, as `unread` counts what some sensor lost. A record one sensor
+        named and another read is in both, as a record one read and another lost is.
+      - **How.** `#place` always puts a resume's `earlier` as one range, `[floor, first)`. The
+        ring keeps the named ranges as sequence intervals, disjoint and in order, and a new claim
+        counts only what no range held. At most 32 ranges: past that the lowest two are joined
+        and the gap between them taken as counted, so a later claim reaching into it counts less
+        than it named, never more. Ranges stay apart only across separate cut pushes.
+      - **Visible:** `TrapListenerStats.earlier` (and syslog's, flow's), in each listener's stop
+        line; on the heartbeat as `trapEarlier`, `syslogEarlier`, `flowEarlier`; on Probe Health
+        as *Traps/Syslog/Flows before a first scan*, counters with **no limits** (not a loss, and
+        a limit would alarm on every reconnect after an outage the link channels already alarm
+        on: `P-254`'s storm by another channel); on `/metrics` as
+        `ms_probe_{traps,syslog,flows}_before_first_scan_total`. Capability `listenerEarlier` at
+        **protocol 31**: stripped for a core below 31, gaps for a probe below it.
+        `administration.md` has a row and the protocol paragraph; the sensor reference is
+        regenerated.
+      - **Tests.** `ring.test.ts`: two restarted sensors naming the same five count 5; two
+        intervals give the union, 24, in either order; a parked sensor's 357 counted with
+        `unread` unchanged; a flood it cannot date counts 0 here; five cut pushes and a late
+        restart scan give the exact union (41); forty give at most the union and at least it
+        less the joined gaps; and the 400-round walk now also asserts, after every round, that
+        `earlier` equals the distinct records some scan named. `listener-restart-scenario`: each
+        listener's count after twenty restarted and twenty parked sensors, and the flow
+        collector's after the silence case. Protocol, core, metrics and report tests as below.
 
 - [ ] **P-271 — two more worker spawns are not counted as on their way** · S · P-263 · Found
       2026-10-07 in `P-263`. `#recycle` (a worker terminated for ignoring its abort) and
@@ -9069,13 +9106,58 @@ because each is a decision rather than a defect:
       - **Mutations 5/5:** the note removed from the silence failure; the helper rethrowing
         without the note; and each type's lookup given a batch with no earlier count.
 
-- [ ] **P-275 — the script groups a runner ended, refused or skipped are not on Probe Health** · S
+- [x] **P-275 — the script groups a runner ended, refused or skipped are not on Probe Health** · S
       · P-266 · Found 2026-10-07 in `P-266`. The runner counts `scriptGroupsEnded`,
       `scriptGroupsRefused` and `scriptGroupsRecycled` and logs each, but they are in its stats
       only. A refused or recycled group is either a forged line or a reused id, which an operator
       should see. **Done when** the three counts are on the heartbeat and Probe Health (a protocol
       number after 30, with the capability gate `P-260` used; `P-270` needs one too, so they can
       share it), with core, metrics and report tests.
+
+      **P-275 outcome. The three counts are heartbeat fields at protocol 31, and a refused group
+      warns.**
+      - **On the wire:** `scriptGroupsEnded`, `scriptGroupsRefused`, `scriptGroupsRecycled` in the
+        child block of the health report, capability `scriptGroups` at **31**, shared with
+        `P-270`'s `listenerEarlier` (two capabilities at one version, as 16 had, each stripped on
+        its own). A core below 31 is sent none; a probe below 31 sends none and the channels gap,
+        as they do for a probe with no child-process runner.
+      - **Probe Health:** *Script groups ended*, *refused*, *left alone*, counters.
+        - **Refused warns**, on its rate above 0.00001/s (below what one refusal makes even across
+          an hour between records), so the record a refusal falls in warns and the next clears.
+          A correct check process never names a group that is not its own child; the only benign
+          cause is a check process dying between its script's spawn and the runner reading the
+          line. Warning, not error: the probe signalled nothing. One outage, one alarm: no device
+          outage produces a refusal, and nothing else alarms on one (the check that wrote the
+          line may pass). Known gap: a refusal in the first record after a probe restart, or
+          after a gap longer than a counter's, has no rate, so it is counted and logged but does
+          not warn. `reportsForeign` solved the same with a five-minute count on the core; doing
+          that for a probe's running total is a follow-up.
+        - **Ended has no limit:** the sensor whose check process died already fails, and
+          `childCrashes`/`childTimedOut` count that process.
+        - **Left alone has no limit:** its commonest cause is a pid reused after the script's
+          group emptied (a pid stays allocated while it is a live group's id), so nothing was
+          left running; otherwise a descendant that changed user. Not signalling is the
+          protection working, and the log names the groups.
+      - **`/metrics`:** `ms_probe_script_groups_{ended,refused,left_alone}_total`.
+        `administration.md` has a row and a sentence in the scripts section; the sensor reference
+        is regenerated.
+      - **Tests (both tickets):** `capabilities.test.ts` (both capabilities at 31 and not 30,
+        `healthForPeer` at 16–31 with each set stripped on its own, the schema taking all six as
+        counts and gapping a negative or fractional one, `SINCE`, every `missingCapabilities`
+        list, `PROTOCOL_VERSION` 31); `health-types.test.ts` (each channel's declaration and
+        position, the refused warning); `probe-health-report.test.ts` (each field from its own
+        stat, absent with no runner or listener); core `probe-health.test.ts` (read, zero is a
+        reading, gap for an older probe) and `metrics.test.ts` (each series, none for a probe
+        that sent none; the listener-series test picks the three new ones up).
+      - **Mutation 16/16 killed:** earlier never counted; no dedupe; the cap join dropping a range;
+        each listener's stat 0 (three); the report sending `overwrittenUnread` as `trapEarlier`,
+        and recycled as refused; `listenerEarlier` at 30; `scriptGroups` never stripped;
+        `flowEarlier` out of the schema; the core reading recycled as refused, and a missing
+        `trapEarlier` as 0; the metric reading `flowOverwritten`; the refused warning a lower
+        bound; `PROTOCOL_VERSION` 30.
+      - **Runs:** capabilities, health-types, ring, probe-health-report, listener-restart-scenario,
+        trap/syslog/flow listener, core probe-health, metrics and `build-hygiene`: 351/351, none
+        skipped.
 
 - [ ] **P-276 — a probe running as root without `processUid` gives scripts the probe's power** ·
       S · P-266 · Found 2026-10-07 in review of `P-266`. Every uid check `P-266` added protects

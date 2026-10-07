@@ -42,6 +42,15 @@ import { MAX_EXCEPTION_ADDRESSES } from '../net/target-policy.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
+ * Version 31 adds six counters under two capabilities. `listenerEarlier` (`P-270`):
+ * `trapEarlier`, `syslogEarlier` and `flowEarlier`, what each listener received that a sensor's
+ * first scan after a probe restart or a cut configuration push named as `earlier` — before its
+ * window, neither read nor lost — once a record. `scriptGroups` (`P-275`): `scriptGroupsEnded`,
+ * `scriptGroupsRefused` and `scriptGroupsRecycled`, the script process groups the child-process
+ * runner ended after their check process died, refused because `/proc` did not show them to be
+ * that process's own, or left alone because their id had passed to something else. A core below
+ * 31 is sent none of them, and a probe below 31 sends none and the six channels gap.
+ *
  * Version 30 adds `workerStartupFailed` (`P-263`): check workers that never said ready — still
  * loading the probe's sensor types when the pool's start-up bound passed, so the pool terminated
  * them, or dead while loading. One new field in a closed schema under one capability,
@@ -153,7 +162,7 @@ import { MAX_EXCEPTION_ADDRESSES } from '../net/target-policy.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 30;
+export const PROTOCOL_VERSION = 31;
 
 /**
  * The oldest peer version this build still understands.
@@ -568,6 +577,25 @@ export interface ProbeHealthReport {
    */
   childStartupMs?: { p50: number; p95: number; p99: number; max: number };
   /**
+   * Script process groups a check process started and left open when it went, which the runner
+   * then ended with `SIGKILL` (`P-266`): the check process was killed outright, ran out of heap or
+   * crashed, and so never ended its script. A running total, absent with the rest of the child
+   * block, and sent only to a core at protocol 31 (`P-275`).
+   */
+  scriptGroupsEnded?: number;
+  /**
+   * Groups a check process named on its stdout that `/proc` did not show to be its own (`P-266`):
+   * a forged line, or a check process killed so soon after its script's spawn that the script was
+   * orphaned before the line was read. Never signalled. Sent only to a core at protocol 31.
+   */
+  scriptGroupsRefused?: number;
+  /**
+   * Groups left open whose id named something else by the time the check process had gone
+   * (`P-266`): the leader's pid reused, or, the leader reaped, a member outside the script's
+   * session or of another uid. Never signalled. Sent only to a core at protocol 31.
+   */
+  scriptGroupsRecycled?: number;
+  /**
    * The SNMP-trap and syslog listeners (`P-64`), each absent unless this probe runs that one.
    *
    * **`rejected` is the one worth having.** A message turned away by the community or sender
@@ -597,6 +625,22 @@ export interface ProbeHealthReport {
   trapOverwritten?: number;
   syslogOverwritten?: number;
   /**
+   * What a listener received that a sensor's first scan after a probe restart, or after a cut
+   * configuration push took it off the scheduler, named as `earlier` (`P-254`, `P-270`): it
+   * arrived before that scan's window, which reaches one interval back, so it is neither in the
+   * reading nor in the scan's `dropped`. A running total since the listener started, counted once
+   * a record however many sensors named it — as `trapOverwritten` counts a loss once however many
+   * sensors had it — and absent with the listener it belongs to. Sent only to a core at protocol
+   * 31.
+   *
+   * **Not a loss, and not in `trapOverwritten`.** What the ring overwrote before it could tell
+   * when it arrived (`undated`) is a loss and is counted there; this is what it could date and
+   * kept out of the scan, because a scan covering hours of an outage as one reading would trip
+   * every limit set per interval at once.
+   */
+  trapEarlier?: number;
+  syslogEarlier?: number;
+  /**
    * The flow collector's counters (`B-02`), absent unless this probe runs it — and sent only to a
    * core at protocol 23 (`B-07`), where `healthForPeer` leaves them in.
    */
@@ -624,6 +668,8 @@ export interface ProbeHealthReport {
    * record however many sensors were behind it.
    */
   flowOverwritten?: number;
+  /** The flow collector's `earlier` (`P-270`), as `trapEarlier` is the trap listener's. */
+  flowEarlier?: number;
   /**
    * Whether this probe is getting back the checks it dispatches (`P-76`): 1 yes, 0 no.
    *
@@ -1026,6 +1072,9 @@ const PROBE_HEALTH_SCHEMA = {
     childCrashes: { type: 'integer', minimum: 0 },
     childStartupFailed: { type: 'integer', minimum: 0 },
     childStartupMs: PERCENTILES_SCHEMA,
+    scriptGroupsEnded: { type: 'integer', minimum: 0 },
+    scriptGroupsRefused: { type: 'integer', minimum: 0 },
+    scriptGroupsRecycled: { type: 'integer', minimum: 0 },
     trapReceived: { type: 'integer', minimum: 0 },
     trapRejected: { type: 'integer', minimum: 0 },
     trapMalformed: { type: 'integer', minimum: 0 },
@@ -1034,12 +1083,15 @@ const PROBE_HEALTH_SCHEMA = {
     syslogMalformed: { type: 'integer', minimum: 0 },
     trapOverwritten: { type: 'integer', minimum: 0 },
     syslogOverwritten: { type: 'integer', minimum: 0 },
+    trapEarlier: { type: 'integer', minimum: 0 },
+    syslogEarlier: { type: 'integer', minimum: 0 },
     flowReceived: { type: 'integer', minimum: 0 },
     flowRejected: { type: 'integer', minimum: 0 },
     flowMalformed: { type: 'integer', minimum: 0 },
     flowMissed: { type: 'integer', minimum: 0 },
     flowUndecodable: { type: 'integer', minimum: 0 },
     flowOverwritten: { type: 'integer', minimum: 0 },
+    flowEarlier: { type: 'integer', minimum: 0 },
     checksCompleting: { type: 'integer', minimum: 0, maximum: 1 },
     checksBehind: { type: 'integer', minimum: 0 },
     checksOutstanding: { type: 'integer', minimum: 0 },

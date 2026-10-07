@@ -58,6 +58,8 @@ describe('what a protocol version can do', () => {
       targetPolicyException: false,
       childStartup: false,
       workerStartup: false,
+      listenerEarlier: false,
+      scriptGroups: false,
     });
   });
 
@@ -236,9 +238,25 @@ describe('the health a peer can be sent', () => {
     childStartupFailed: 3,
     childStartupMs: { p50: 40, p95: 9_500, p99: 14_800, max: 30_000 },
     workerStartupFailed: 4,
+    trapEarlier: 357,
+    syslogEarlier: 1_200,
+    flowEarlier: 9_000,
+    scriptGroupsEnded: 2,
+    scriptGroupsRefused: 1,
+    scriptGroupsRecycled: 3,
   };
-  /** `health` as a core at 29 is sent it: everything but 30's one field (`P-263`). */
-  const { workerStartupFailed: _workers, ...withoutWorkerStartup } = health;
+  /** `health` as a core at 30 is sent it: everything but 31's six fields (`P-270`, `P-275`). */
+  const {
+    trapEarlier: _trapEarlier,
+    syslogEarlier: _syslogEarlier,
+    flowEarlier: _flowEarlier,
+    scriptGroupsEnded: _ended,
+    scriptGroupsRefused: _refused,
+    scriptGroupsRecycled: _recycled,
+    ...withoutEarlierAndGroups
+  } = health;
+  /** `health` as a core at 29 is sent it: that, less 30's one field (`P-263`). */
+  const { workerStartupFailed: _workers, ...withoutWorkerStartup } = withoutEarlierAndGroups;
   /** `health` as a core at 26 to 28 is sent it: that, less 29's two fields (`P-260`). */
   const {
     childStartupFailed: _failed,
@@ -459,6 +477,68 @@ describe('the health a peer can be sent', () => {
     assert.equal(healthForPeer(health, 30).workerStartupFailed, 4);
   });
 
+  it('leaves 31’s listener and script-group counts out for a core at 30, and keeps 30’s', () => {
+    // `P-270` and `P-275`: two capabilities at one version, each stripped on its own.
+    const fields = [
+      'trapEarlier',
+      'syslogEarlier',
+      'flowEarlier',
+      'scriptGroupsEnded',
+      'scriptGroupsRefused',
+      'scriptGroupsRecycled',
+    ];
+    for (const version of [16, 26, 29, 30]) {
+      const sent = healthForPeer(health, version);
+      for (const field of fields) {
+        assert.equal(field in sent, false, `${field} sent to a core at ${String(version)}`);
+      }
+    }
+    assert.deepEqual(healthForPeer(health, 30), withoutEarlierAndGroups);
+    assert.equal(healthForPeer(health, 30).workerStartupFailed, 4);
+    assert.equal(healthForPeer(health, 30).trapOverwritten, 1_300);
+    const sent = healthForPeer(health, 31);
+    for (const field of fields) {
+      assert.equal(sent[field as keyof typeof sent], health[field as keyof typeof health], field);
+    }
+    // Each capability alone: a report with only one set loses only that set below 31.
+    assert.deepEqual(healthForPeer({ memoryMb: 1, trapEarlier: 2 }, 30), { memoryMb: 1 });
+    assert.deepEqual(healthForPeer({ memoryMb: 1, scriptGroupsRefused: 2 }, 30), { memoryMb: 1 });
+    assert.deepEqual(healthForPeer({ memoryMb: 1, flowEarlier: 2, scriptGroupsEnded: 1 }, 31), {
+      memoryMb: 1,
+      flowEarlier: 2,
+      scriptGroupsEnded: 1,
+    });
+  });
+
+  it('knows 31’s six counts in this build’s health schema, as counts', () => {
+    // The other end of the gate: a core at 31 is sent them, so its schema must take them.
+    const read = (field: string, sent: unknown): unknown => {
+      const parsed = parseProbeToCore({
+        type: 'heartbeat',
+        seq: 1,
+        sentAt: 'now',
+        health: { memoryMb: 12, [field]: sent },
+      });
+      if (parsed.type !== 'heartbeat') return 'not a heartbeat';
+      assert.equal(parsed.health?.memoryMb, 12, `${field} cost the heartbeat its health`);
+      return (parsed.health as Record<string, unknown>)[field];
+    };
+    for (const field of [
+      'trapEarlier',
+      'syslogEarlier',
+      'flowEarlier',
+      'scriptGroupsEnded',
+      'scriptGroupsRefused',
+      'scriptGroupsRecycled',
+    ]) {
+      assert.equal(read(field, 7), 7, field);
+      assert.equal(read(field, 0), 0, field);
+      // A value no count can be is a gap on the channel, and the heartbeat is kept (`P-224`).
+      assert.equal(read(field, -1), undefined, field);
+      assert.equal(read(field, 1.5), undefined, field);
+    }
+  });
+
   it('knows the workers not started in this build’s health schema, as a count', () => {
     // The other end of the gate: a core at 30 is sent it, so its schema must take it.
     const read = (sent: unknown): unknown => {
@@ -504,8 +584,8 @@ describe('the health a peer can be sent', () => {
   });
 
   it('sends everything to a core that knows it', () => {
-    assert.equal(PROTOCOL_VERSION, 30);
-    assert.deepEqual(healthForPeer(health, 30), health);
+    assert.equal(PROTOCOL_VERSION, 31);
+    assert.deepEqual(healthForPeer(health, 31), health);
     assert.deepEqual(healthForPeer(health, PROTOCOL_VERSION), health);
   });
 
@@ -542,6 +622,13 @@ describe('the health a peer can be sent', () => {
       childStartupMs: 29,
       // `P-263`: one new field, at the version that adds it.
       workerStartupFailed: 30,
+      // `P-270` and `P-275`: six new fields under two capabilities, at the version that adds them.
+      trapEarlier: 31,
+      syslogEarlier: 31,
+      flowEarlier: 31,
+      scriptGroupsEnded: 31,
+      scriptGroupsRefused: 31,
+      scriptGroupsRecycled: 31,
     };
     // The rest predate `P-178`, and a core older than that refuses a newer probe at the handshake,
     // in words, so it is never sent a heartbeat at all. Pinned by count, so that a new field is
@@ -637,6 +724,8 @@ describe('the health a peer can be sent', () => {
       'connect to an address one device is excepted for, although its target policy refuses it',
       'report the script checks it could not start, and how long one takes to start',
       'report the check workers it could not start',
+      'report what its listeners heard that a restart or a cut push kept out of a first scan',
+      'report the script process groups it ended, or refused to end, after a check process died',
     ]);
     // Stripping what a peer does not know is by capability: 27 has no health field, so a core
     // at 26 is sent what a core at 27 is.
@@ -667,6 +756,8 @@ describe('the child start-up counters (`P-260`)', () => {
     assert.deepEqual(missingCapabilities(28), [
       'report the script checks it could not start, and how long one takes to start',
       'report the check workers it could not start',
+      'report what its listeners heard that a restart or a cut push kept out of a first scan',
+      'report the script process groups it ended, or refused to end, after a check process died',
     ]);
   });
 });
@@ -677,8 +768,28 @@ describe('the check workers not started (`P-263`)', () => {
     assert.equal(versionFor('workerStartup'), 30);
     assert.equal(capabilitiesFor(29).workerStartup, false);
     assert.equal(capabilitiesFor(30).workerStartup, true);
-    assert.deepEqual(missingCapabilities(29), ['report the check workers it could not start']);
-    assert.deepEqual(missingCapabilities(30), []);
+    assert.deepEqual(missingCapabilities(29), [
+      'report the check workers it could not start',
+      'report what its listeners heard that a restart or a cut push kept out of a first scan',
+      'report the script process groups it ended, or refused to end, after a check process died',
+    ]);
+  });
+});
+
+describe('the listener and script-group counts (`P-270`, `P-275`)', () => {
+  it('are reported from 31, and by nothing older', () => {
+    // Two capabilities at one version, three health fields each, stripped below 31.
+    assert.equal(versionFor('listenerEarlier'), 31);
+    assert.equal(versionFor('scriptGroups'), 31);
+    assert.equal(capabilitiesFor(30).listenerEarlier, false);
+    assert.equal(capabilitiesFor(30).scriptGroups, false);
+    assert.equal(capabilitiesFor(31).listenerEarlier, true);
+    assert.equal(capabilitiesFor(31).scriptGroups, true);
+    assert.deepEqual(missingCapabilities(30), [
+      'report what its listeners heard that a restart or a cut push kept out of a first scan',
+      'report the script process groups it ended, or refused to end, after a check process died',
+    ]);
+    assert.deepEqual(missingCapabilities(31), []);
   });
 });
 

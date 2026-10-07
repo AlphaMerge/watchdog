@@ -240,6 +240,11 @@ export class ProbeHealthReporter {
             // has started or been given up, rather than a start that took no time.
             childStartupFailed: children.startupFailed,
             ...(children.startupMs === null ? {} : { childStartupMs: children.startupMs }),
+            // `P-275`: the script groups a dead check process left open, ended, refused as not its
+            // own, or left alone as no longer its own. Sent only to a core at protocol 31.
+            scriptGroupsEnded: children.scriptGroupsEnded,
+            scriptGroupsRefused: children.scriptGroupsRefused,
+            scriptGroupsRecycled: children.scriptGroupsRecycled,
           }),
       ...(flow === undefined
         ? {}
@@ -258,6 +263,9 @@ export class ProbeHealthReporter {
             // `B-14`: received, and overwritten in the buffer before a sensor read it. Sent only
             // to a core at protocol 26, as the syslog one below is.
             trapOverwritten: trap.overwrittenUnread,
+            // `P-270`: what a resuming sensor's first scan named as before its window. Sent only to
+            // a core at protocol 31, as the syslog and flow ones below are.
+            trapEarlier: trap.earlier,
           }),
       ...(syslog === undefined
         ? {}
@@ -266,6 +274,7 @@ export class ProbeHealthReporter {
             syslogRejected: syslog.rejected,
             syslogMalformed: syslog.malformed,
             syslogOverwritten: syslog.overwrittenUnread,
+            syslogEarlier: syslog.earlier,
           }),
       ...(flows === undefined
         ? {}
@@ -282,6 +291,7 @@ export class ProbeHealthReporter {
             // `B-11`: received, and overwritten in the buffer before a sensor read it. Sent only
             // to a core at protocol 25.
             flowOverwritten: flows.overwrittenUnread,
+            flowEarlier: flows.earlier,
           }),
       ...(spool === undefined
         ? {}

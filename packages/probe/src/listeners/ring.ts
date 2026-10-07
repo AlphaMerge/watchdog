@@ -45,7 +45,8 @@ import type { ReceivedBatch, ReceivedNotification } from '@ms/sensors';
  * every sensor with a limit would alarm at once on the reconnect, though no interval's rate was
  * exceeded — many alarms for one outage. Nor is what came before the window `dropped`: that fails
  * the scan of every sensor that does not tolerate a loss, the same storm by another channel. It is
- * `earlier`, a count the type names in its message. What the ring overwrote *inside* the window is
+ * `earlier`, a count the type names in its message and Probe Health counts apart from every loss,
+ * once a record (`P-270`). What the ring overwrote *inside* the window is
  * `dropped`, as it is on any scan. What it overwrote before it could tell when it arrived is
  * `undated`: the type names it too, and Probe Health counts it as a loss, because a loss it
  * cannot date is still a loss — but not as this scan's, which would be the outage as one reading
@@ -88,6 +89,15 @@ interface Placed {
   readonly undated: number;
   readonly sinceMono: number;
 }
+
+/**
+ * How many disjoint ranges of `earlier` sequences the ring keeps apart (`P-270`). Past this the
+ * lowest two are joined, the gap between them taken as counted: a later claim reaching into that
+ * gap then counts less than it named, never more. Ranges are apart only across separate cut
+ * pushes, so a probe meets this after 32 of them on one listener, and only a sensor resuming from
+ * before all of them could reach the gap.
+ */
+const MAX_EARLIER_RANGES = 32;
 
 interface Cursor {
   next: number;
@@ -153,6 +163,13 @@ export class NotificationRing {
   /** Where the ranges folded into `#claimedPruned` begin and end. */
   #prunedFrom = 0;
   #prunedTo = 0;
+  /**
+   * Every record some resuming sensor's first scan named as `earlier`, since the listener started,
+   * once a record (`P-270`). Kept as sequence ranges, disjoint and in order, as `[from, to)`, so a
+   * record two sensors both named is counted by the first.
+   */
+  #earlierRanges: [number, number][] = [];
+  #earlier = 0;
   /** The lowest sequence any cursor has yet to read. Infinity while no sensor reads this ring. */
   #slowest = Number.POSITIVE_INFINITY;
 
@@ -240,6 +257,8 @@ export class NotificationRing {
       this.#cursors.set(sensorId, cursor);
       // Everything this sensor lost from where it resumes, dated or not, is a loss on Probe Health.
       this.#countLostFrom(resumed.first - resumed.undated, resume);
+      // What it left out before its window is not, and is counted apart (`P-270`).
+      this.#countEarlier(resume.floor, resume.floor + resumed.earlier);
     }
 
     const size = this.#slots.length;
@@ -345,6 +364,44 @@ export class NotificationRing {
    */
   #countLostFrom(start: number, resume: Resume): void {
     this.#unread += this.#claim(this.#uncountedBefore(start, resume));
+  }
+
+  /**
+   * Counts on Probe Health the records from `from` to `to` that a resuming sensor named as
+   * `earlier`, less those an earlier claim already counted (`P-270`).
+   *
+   * `#place` puts a resuming sensor's `earlier` just below where its read begins and from where it
+   * resumes, so it is always one range. Whether another sensor read some of it does not change the
+   * count: this is what a restart or a cut push kept out of some sensor's reading, as `unread` is
+   * what some sensor lost, and a sensor whose interval is longer may still read a record a shorter
+   * one named as earlier, so "out of every reading" could not be known when the scan is counted.
+   */
+  #countEarlier(from: number, to: number): void {
+    if (to <= from) return;
+    let fresh = to - from;
+    let low = from;
+    let high = to;
+    const kept: [number, number][] = [];
+    for (const range of this.#earlierRanges) {
+      const [start, end] = range;
+      // Apart, and not touching: kept as it is. Touching ranges are joined.
+      if (end < from || start > to) {
+        kept.push(range);
+        continue;
+      }
+      fresh -= Math.max(0, Math.min(end, to) - Math.max(start, from));
+      low = Math.min(low, start);
+      high = Math.max(high, end);
+    }
+    kept.push([low, high]);
+    kept.sort((a, b) => a[0] - b[0]);
+    while (kept.length > MAX_EARLIER_RANGES) {
+      const [first, second] = kept;
+      if (first === undefined || second === undefined) break;
+      kept.splice(0, 2, [first[0], second[1]]);
+    }
+    this.#earlierRanges = kept;
+    this.#earlier += fresh;
   }
 
   /**
@@ -524,5 +581,20 @@ export class NotificationRing {
    */
   get unread(): number {
     return this.#unread;
+  }
+
+  /**
+   * Records a sensor's first scan after a probe restart, or after a cut push took it off the
+   * scheduler, named as `earlier`: they arrived before its window, which reaches one interval
+   * back, so that scan neither read them nor counted them as `dropped` (`P-254`, `P-270`).
+   *
+   * Counted at that scan, once a record however many sensors named it, and never taken back. Not
+   * a loss and not in `unread`: what the ring overwrote before it could tell when it arrived is
+   * `undated`, which is a loss and is counted there. A record one sensor named and another read,
+   * or lost, is counted here and in that sensor's reading or in `unread`, as a record one sensor
+   * read and another lost is in both.
+   */
+  get earlier(): number {
+    return this.#earlier;
   }
 }

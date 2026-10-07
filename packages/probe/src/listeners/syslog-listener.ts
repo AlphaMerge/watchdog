@@ -67,6 +67,12 @@ export interface SyslogListenerStats {
    * that scan, once however many lost it (`P-254`, `P-273`).
    */
   readonly overwrittenUnread: number;
+  /**
+   * Messages a sensor's first scan after a probe restart, or after a cut push took it off the
+   * scheduler, named as `earlier`: before its window, so neither read nor lost (`P-270`). Once a
+   * record however many sensors named it. Since the listener started.
+   */
+  readonly earlier: number;
 }
 
 export class SyslogListener {
@@ -160,6 +166,7 @@ export class SyslogListener {
       cursors: this.#ring.cursors,
       overwritten: this.#ring.overwritten,
       overwrittenUnread: this.#ring.unread,
+      earlier: this.#ring.earlier,
     };
   }
 
