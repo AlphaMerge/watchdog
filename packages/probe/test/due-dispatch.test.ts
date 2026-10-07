@@ -35,10 +35,21 @@ function harness(verdict: SubmitOutcome, sensorType = 'snmp.trap') {
   const pool = runner(verdict);
   const processRunner = runner(verdict);
   const dispatched: { sensorId: number; timeoutMs: number; runner: string }[] = [];
+  const windows: number[] = [];
   const dispatch = dueDispatcher({
     assignments: { get: (id) => (id === 1 ? assignment(1, sensorType) : undefined) },
     listenerFor: new Map([['snmp.trap', TRAP]]),
-    listeners: new Map([[TRAP, { drain: (id: number) => ring.drain(id, TRAP) }]]),
+    listeners: new Map([
+      [
+        TRAP,
+        {
+          drain: (id: number, windowMs: number) => {
+            windows.push(windowMs);
+            return ring.drain(id, TRAP, windowMs);
+          },
+        },
+      ],
+    ]),
     isolated: new Set(['exe.script']),
     pool,
     processRunner,
@@ -56,7 +67,7 @@ function harness(verdict: SubmitOutcome, sensorType = 'snmp.trap') {
       });
     }
   };
-  return { dispatch, ring, pool, processRunner, push, dispatched };
+  return { dispatch, ring, pool, processRunner, push, dispatched, windows };
 }
 
 /**
@@ -78,6 +89,12 @@ describe('handing a due listener sensor its notifications (P-57)', () => {
 
     assert.equal(h.pool.seen.length, 1);
     assert.equal(h.pool.seen[0]?.received?.items.length, 3, 'the batch travels with the check');
+  });
+
+  it('hands the sensor’s interval as how far back a restart’s first scan reads (`P-254`)', () => {
+    const h = harness('accepted');
+    h.dispatch([1]);
+    assert.deepEqual(h.windows, [60_000], 'one interval, in milliseconds');
   });
 
   it('leaves them in the ring when the check is deferred', () => {

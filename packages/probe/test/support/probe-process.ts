@@ -208,6 +208,14 @@ export class FakeCore {
     this.#send({ type: 'config-set', version: 'v1', sensors: [...this.#sensors] });
   }
 
+  /**
+   * The first chunk of a split push and nothing after it (`R18`, `P-254`): a set marked not final,
+   * as a core sends when a push is above the message cap, before a link that drops.
+   */
+  sendFirstChunk(sensors: readonly SensorAssignment[]): void {
+    this.#send({ type: 'config-set', version: 'v1', sensors: [...sensors], final: false });
+  }
+
   /** Closes the link the way a core restart does. The probe dials again by itself. */
   dropLink(): void {
     this.#socket?.destroy();

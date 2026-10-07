@@ -237,6 +237,18 @@ export interface ReceivedBatch {
    * trap sensor that silently missed the flood it exists to report is the worst version of it.
    */
   readonly dropped: number;
+  /**
+   * On a sensor's first scan after a probe restart only: what the listener received since it
+   * started and before this batch's window, which reaches one interval back (`P-254`).
+   *
+   * Neither this sensor's count nor its loss. No scan of it was there to cover that time — the
+   * probe had just started, or could not yet reach its core — so a count of it would be several
+   * intervals as one reading, and every limit set per interval would alarm on the one outage; and
+   * calling it `dropped` would fail every sensor that does not tolerate a loss, the same storm by
+   * another channel. A type names it in its message, so it is not lost silently. Absent on every
+   * other scan.
+   */
+  readonly earlier?: number;
   /** When this sensor's cursor was last reset, ISO-8601. Moves on a probe restart. */
   readonly since: string;
   /**

@@ -7738,8 +7738,54 @@ because each is a decision rather than a defect:
       never kept; kept for counted records too; `since` now; every set treated as the first; a
       sensor that left stays a restart candidate.
 
-      **Not done.** A sensor new to a running probe still misses what arrived between its
-      assignment and its first scan. Starting it at its assignment needs `retain` (or the
+      **Review, 2026-10-07: two defects and a test gap, fixed in a second commit.**
+      - **A restart reads one interval back, not to the listener's start.** Read to the start,
+        a probe that waited two hours for its core handed every sensor's first scan two hours
+        as one reading. Trap `count` and syslog `messages` are per-scan counts, and their limits
+        are set per interval, so every limited sensor would alarm on the reconnect: many alarms
+        for one outage. Calling the excess `dropped` instead would fail every sensor that does
+        not tolerate a loss, which is the same storm. Normalising to a rate, as flow does, would
+        need the interval inside the check, and that crosses `pool.ts`.
+
+        So `due-dispatch` hands the interval to `drain`. The first scan reads from
+        max(listener start, now − interval), and `since` says so. What the ring overwrote
+        inside that window is `dropped`. Exactness comes from the arrival times of the last
+        `bufferSize` overwritten records, kept beside the ring with a counted flag, so Probe
+        Health stays once a record.
+
+        What came before the window is `ReceivedBatch.earlier`, new and optional, on that scan
+        only. It is neither read nor lost. The trap, syslog and flow types name it in the
+        message, and it moves no channel. A flood of more than twice the buffer within one
+        interval starts the window at the oldest arrival known. That scan still fails on its
+        dropped, and the rest is `earlier`.
+      - **The restart set is the first *complete* push.** `onConfig` now carries `final`, true
+        when absent. `core-handlers` sweeps cursors only once a push completes. Before, a link
+        cut after chunk one settled anyway, the sweep made chunk one the restart set, and later
+        chunks returned as new. The same rule also stops a cut push deleting cursors (`P-42`'s
+        shape). The pool is still sized on every settle.
+      - **The process-level test takes the swept-set branch.** Sensors have 60 s intervals and
+        phases of 35–45 s. The first push is cut after the syslog sensor's chunk, the link
+        drops, and the whole push follows on reconnect. Each first scan is asserted to come more
+        than 4 s after that push applied, and each reads 3. The older case now shows the window:
+        1 s sensors scanning 2.5 s after the early messages read 0, fail nothing, and name the
+        three in their message.
+      - **The alarm volume** is covered by `listener-restart-scenario.test.ts`. 20 trap and 20
+        syslog sensors with a limit of 5 a minute sit through a two-hour wait for the core at
+        three a minute, with buffers of 100 overrun. Their first scans give 0 failures and 0
+        limit breaches, and read + earlier + dropped equals each listener's received count. The
+        same traffic read back to the listener's start alarms on all 20 trap sensors.
+
+      Also `ring.test.ts` (window, overflow inside and before it, the flood, `earlier` only on a
+      restart's first scan), `core-handlers.test.ts` (5 cases of a cut push), `due-dispatch`
+      (the interval as the window), and a flow sensor case for the message. **Mutations 14/14**:
+      window ignored; search inverted; overwritten arrivals unused; or not kept; push-time count
+      forgotten; window loss not counted; or counted twice; `earlier` zero; `since` the listener
+      start; a cut push swept; `final` ignored in the handlers; or in the client (process case);
+      dispatch with no window; the note never said. No protocol change.
+
+      **Not done.** `earlier` has no Probe Health counter. It is in the listener's received
+      count and in one message; a counter would need a protocol number. A sensor new to a
+      running probe still misses what arrived between its assignment and its first scan. Starting it at its assignment needs `retain` (or the
       `AssignmentStore` `onAdd` wiring in `main.ts`) to tell each listener which held sensors are
       its own. Without that, overwrites before its first drain could not be counted on Probe
       Health as they happen.

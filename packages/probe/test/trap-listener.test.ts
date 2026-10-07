@@ -89,12 +89,28 @@ describe('handing each sensor what it has not seen', () => {
   it('counts what a sensor held across a restart lost before its first scan (`P-254`)', async () => {
     const trapListener = await listener(4);
     trapListener.retain([1]);
-    for (let at = 0; at < 10; at += 1) deliver(trap());
+    for (let at = 0; at < 7; at += 1) deliver(trap());
 
-    const first = trapListener.drain(1);
+    const first = trapListener.drain(1, 60_000);
     assert.equal(first.items.length, 4);
-    assert.equal(first.dropped, 6, 'received, lost to the buffer, and said so');
-    assert.equal(trapListener.stats().overwrittenUnread, 6, 'and on Probe Health');
+    assert.equal(first.dropped, 3, 'received, lost to the buffer, and said so');
+    assert.equal(trapListener.stats().overwrittenUnread, 3, 'and on Probe Health');
+  });
+
+  it('reads one interval back after a restart, and names what came before (`P-254`)', async () => {
+    // The clock here moves a second a reading. Five traps, then two minutes, then two: a sensor
+    // that scans every minute reads the two, as any scan of it would, and is told of the five.
+    const trapListener = await listener();
+    trapListener.retain([1]);
+    for (let at = 0; at < 5; at += 1) deliver(trap());
+    clock += 120;
+    deliver(trap());
+    deliver(trap());
+
+    const first = trapListener.drain(1, 60_000);
+    assert.equal(first.items.length, 2);
+    assert.equal(first.earlier, 5);
+    assert.equal(first.dropped, 0);
   });
 
   it('returns what arrived since the last drain, and only that', async () => {

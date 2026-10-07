@@ -5,6 +5,7 @@ import type {
   ReceivedNotification,
   SensorType,
 } from '../contract.js';
+import { earlierNote } from '../support/earlier.js';
 
 /**
  * What the probe's flow collector received for this exporter since this sensor last looked
@@ -426,7 +427,8 @@ export const flowCollector: SensorType = {
         // Said out loud, because an estimate from one packet in two thousand deserves to be
         // read as one — and because an operator comparing this against an interface counter
         // needs to know why the two do not agree exactly.
-        (sampled === 0 ? '' : `; estimated from ${String(sampled)} sampled`),
+        (sampled === 0 ? '' : `; estimated from ${String(sampled)} sampled`) +
+        earlierNote(batch, 'flow records'),
     };
   },
 };

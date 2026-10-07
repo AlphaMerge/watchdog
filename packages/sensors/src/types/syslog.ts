@@ -6,6 +6,7 @@ import type {
   SensorType,
 } from '../contract.js';
 import { SEVERITIES } from '../support/syslog/parse.js';
+import { earlierNote } from '../support/earlier.js';
 
 /**
  * What arrived on the probe's syslog port since this sensor last looked (`T-20`).
@@ -252,7 +253,8 @@ export const syslogReceiver: SensorType = {
       ],
       message:
         `${String(total)} message${total === 1 ? '' : 's'} since ${batch.since}` +
-        (recent.length === 0 ? '' : `; ${recent.join(' | ')}`),
+        (recent.length === 0 ? '' : `; ${recent.join(' | ')}`) +
+        earlierNote(batch, 'messages'),
     };
   },
 };

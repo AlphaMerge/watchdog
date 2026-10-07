@@ -5,6 +5,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { sendTcp } from '@ms/simulators';
 import {
   versionFor,
@@ -23,6 +24,7 @@ import {
   within,
   type RunningProbe,
 } from './support/probe-process.js';
+import { phaseFor } from '../src/scheduler/wheel.js';
 
 /**
  * What the trap and syslog buffers overwrote unread, in a running probe (`B-14`).
@@ -403,13 +405,15 @@ describe(
     );
 
     it(
-      'hands each sensor what arrived after a restart and before its first scan (`P-254`)',
+      'reads one interval back at a first scan before any sweep, and names the rest (`P-254`)',
       { timeout: 180_000 },
       async () => {
-        // `H-15`: a probe restarted, three traps came 41 s later, before either trap sensor's
-        // first scan, and `trapReceived` counted them while no sensor did. Here the probe is up,
-        // welcomed, and listening, and has not been told its sensors; three traps and three
-        // syslog messages arrive; then it is told, and each sensor's first scan has to read them.
+        // A probe that is listening and has not been told its sensors — it has just started, or
+        // cannot reach its core. Three traps and three syslog messages arrive; then it is told,
+        // and each sensor scans every second, before the push settles. Its first scan reads one
+        // interval back, as a scan a second earlier would have: the six arrived seconds before,
+        // so its reading is zero, as a per-interval count should be, and its message names them.
+        // Not `dropped`, which would fail the scan: one outage, and no alarm from the counts.
         const trapPort = await freeUdpPort();
         const syslogPort = await freeTcpPort();
         const { core, port } = await FakeCore.start(dir, [trapSensor, syslogSensor]);
@@ -462,6 +466,8 @@ describe(
             : undefined;
         });
         assert.equal(heard.trapOverwritten, 0);
+        // More than an interval, so all six fall before the first scan's window.
+        await delay(2_500);
 
         const mark = core.received.length;
         core.sendConfig();
@@ -470,26 +476,164 @@ describe(
           (message) => (message.type === 'config-ack' ? message : undefined),
           { from: mark },
         );
-        const syslogRead = await core.waitFor(
-          'a syslog scan that read the early messages',
-          resultFor(
-            SYSLOG_SENSOR,
-            (result) => result.outcome === 'ok' && channel(result, 'messages') > 0,
-          ),
+        const syslogFirst = await core.waitFor(
+          'the syslog sensor’s first scan',
+          resultFor(SYSLOG_SENSOR, () => true),
           { from: mark },
         );
-        assert.equal(channel(syslogRead, 'messages'), EARLY, syslogRead.message);
-        const traps = await core.waitFor(
-          'the trap sensor to read the early traps',
-          () => {
-            const now = trapTotals(core);
-            return now.read > 0 ? now : undefined;
+        assert.equal(syslogFirst.outcome, 'ok', syslogFirst.message);
+        assert.equal(channel(syslogFirst, 'messages'), 0, syslogFirst.message);
+        assert.match(syslogFirst.message, /; 3 messages the probe received before /);
+        const trapFirst = await core.waitFor(
+          'the trap sensor’s first scan',
+          resultFor(TRAP_SENSOR, () => true),
+          { from: mark },
+        );
+        assert.equal(trapFirst.outcome, 'ok', trapFirst.message);
+        assert.equal(channel(trapFirst, 'count') + channel(trapFirst, 'unmatched'), 0);
+        assert.equal(channel(trapFirst, 'dropped'), 0, 'what came before the window is not a loss');
+        assert.match(trapFirst.message, /; 3 traps the probe received before /);
+
+        // And what arrives once they scan is counted, as ever.
+        for (let id = 0; id < 2; id += 1) await sendUdp(renderTrap(EARLY + id), collector);
+        await core.waitFor('the two later traps to be read', () =>
+          trapTotals(core).read === 2 ? true : undefined,
+        );
+
+        assert.deepEqual(core.refused, [], 'the probe sent something a core refuses');
+        assert.equal(await probe.stop(), 0, 'the probe did not stop cleanly');
+      },
+    );
+
+    it(
+      'reads them at a first scan after the sweep, when a cut push came before the whole one (`P-254`)',
+      { timeout: 240_000 },
+      async () => {
+        // **The branch production takes.** The case above scans every second, before the push
+        // settles, so its sensors read through "no push swept yet". In `H-15` the sweep came first
+        // and the scans tens of seconds later, from the swept set. Here each sensor's interval is
+        // a minute and its phase puts its first scan about half a minute in, long after the two
+        // seconds a push takes to settle.
+        //
+        // **And the first push is cut.** The core sends chunk one — the syslog sensor alone,
+        // marked not final — and the link drops before the trap sensor's chunk. That settles too,
+        // and sweeping it would make the syslog sensor the whole of what the probe held across the
+        // restart, so the trap sensor would come back on the reconnect's push as new and read
+        // nothing. The sweep waits for a complete push, and both read what arrived before them.
+        const idWithPhase = (from: number): number => {
+          for (let id = from; ; id += 1) {
+            const phase = phaseFor(id, 60);
+            if (phase >= 35 && phase <= 45) return id;
+          }
+        };
+        const trapId = idWithPhase(1_000);
+        const syslogId = idWithPhase(trapId + 1);
+        const trapAt = { ...trapSensor, sensorId: trapId, intervalSeconds: 60 };
+        const syslogAt = { ...syslogSensor, sensorId: syslogId, intervalSeconds: 60 };
+
+        const trapPort = await freeUdpPort();
+        const syslogPort = await freeTcpPort();
+        const { core, port } = await FakeCore.start(dir, [trapAt, syslogAt]);
+        cores.push(core);
+        core.holdConfig = true;
+        const probe = startProbe({
+          dir,
+          corePort: port,
+          config: {
+            trapListener: {
+              enabled: true,
+              port: trapPort,
+              address: '127.0.0.1',
+              bufferSize: BUFFER,
+            },
+            syslogListener: {
+              enabled: true,
+              port: syslogPort,
+              address: '127.0.0.1',
+              udp: false,
+              tcp: true,
+              bufferSize: BUFFER,
+            },
           },
+          profile: 'full',
+        });
+        running.push(probe);
+        await core.waitFor('a first heartbeat', healthOf);
+
+        const EARLY = 3;
+        const collector = { host: '127.0.0.1', port: trapPort };
+        for (let id = 0; id < EARLY; id += 1) await sendUdp(renderTrap(id), collector);
+        await within(
+          60_000,
+          'the early syslog messages to be sent',
+          sendTcp(
+            syslogPort,
+            Array.from({ length: EARLY }, (_unused, index) => ({
+              message: `early ${String(index)}`,
+            })),
+          ),
+        );
+        await core.waitFor('a heartbeat carrying all six', (message) => {
+          const health = healthOf(message);
+          return health?.trapReceived === EARLY && health.syslogReceived === EARLY
+            ? health
+            : undefined;
+        });
+
+        // Chunk one, then quiet past the settle, then the link drops.
+        let mark = core.received.length;
+        core.sendFirstChunk([syslogAt]);
+        await core.waitFor(
+          'chunk one to be applied',
+          (message) => (message.type === 'config-ack' ? message : undefined),
           { from: mark },
         );
-        assert.equal(traps.read, EARLY, 'the trap sensor counted what arrived before its scan');
-        assert.equal(traps.dropped, 0);
-        assert.equal(traps.failed, 0);
+        await delay(3_000); // past the two-second settle
+        mark = core.received.length;
+        core.dropLink();
+        await core.waitFor(
+          'the probe to dial again',
+          (message) => (message.type === 'hello' ? message : undefined),
+          { from: mark },
+        );
+
+        // The reconnect's push is the whole set, because the cut one was never stamped.
+        mark = core.received.length;
+        core.sendConfig();
+        await core.waitFor(
+          'the whole push to be applied',
+          (message) => (message.type === 'config-ack' ? message : undefined),
+          { from: mark },
+        );
+        const applied = Date.now();
+
+        const trapRead = await core.waitFor(
+          'the trap sensor’s first scan',
+          resultFor(trapId, () => true),
+          { from: mark, ms: 90_000 },
+        );
+        const syslogRead = await core.waitFor(
+          'the syslog sensor’s first scan',
+          resultFor(syslogId, () => true),
+          { from: mark, ms: 90_000 },
+        );
+        // Each scanned after the whole push settled, so each read through the swept set.
+        for (const result of [trapRead, syslogRead]) {
+          assert.ok(
+            Date.parse(result.at) - applied > 4_000,
+            `sensor ${String(result.sensorId)} scanned ${String(Date.parse(result.at) - applied)} ms ` +
+              'after the push, before or near its settle, so this did not test the swept set',
+          );
+        }
+        assert.equal(trapRead.outcome, 'ok', trapRead.message);
+        assert.equal(
+          channel(trapRead, 'count') + channel(trapRead, 'unmatched'),
+          EARLY,
+          `the trap sensor, absent from the cut push, read: ${trapRead.message}`,
+        );
+        assert.equal(channel(trapRead, 'dropped'), 0);
+        assert.equal(syslogRead.outcome, 'ok', syslogRead.message);
+        assert.equal(channel(syslogRead, 'messages'), EARLY, syslogRead.message);
 
         assert.deepEqual(core.refused, [], 'the probe sent something a core refuses');
         assert.equal(await probe.stop(), 0, 'the probe did not stop cleanly');

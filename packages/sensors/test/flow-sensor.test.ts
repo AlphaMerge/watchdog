@@ -330,6 +330,14 @@ describe('the flow sensor', () => {
     });
   });
 
+  it('names what a restart’s first scan did not cover, and leaves the rates alone (`P-254`)', async () => {
+    const plain = await flowCollector.execute(context(batch([flow({})])));
+    const first = await flowCollector.execute(context({ ...batch([flow({})]), earlier: 12 }));
+    assert.deepEqual(first.channels, plain.channels, 'what came before the window is no rate');
+    assert.match(first.message ?? '', /; 12 flow records the probe received before /);
+    assert.doesNotMatch(plain.message ?? '', /received before/);
+  });
+
   it('matches on the exporter address, which is not in the flow record', () => {
     assert.equal(
       matchesFlow(flow({}), [{ field: 'exporter', equals: EXPORTER, contains: '', cidr: '' }]),

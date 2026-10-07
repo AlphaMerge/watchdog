@@ -6,6 +6,7 @@ import type { SensorAssignment } from '@ms/shared';
 import { AssignmentStore, type ConfigUpdate } from '../src/scheduler/assignments.js';
 import { TimingWheel } from '../src/scheduler/wheel.js';
 import { coreHandlers, type CoreHandlerDeps, type CursorSweeper } from '../src/core-handlers.js';
+import { NotificationRing } from '../src/listeners/ring.js';
 
 const silent = pino({ level: 'silent' });
 const SETTLE_MS = 5;
@@ -165,6 +166,92 @@ describe('config push handling (P-41, P-42, P-43)', () => {
     const h = harness();
     assert.equal(h.handlers.onConfig(set([assignment(1), assignment(2)])), 2);
     assert.equal(h.handlers.onConfig(delta([assignment(3)])), 3);
+  });
+});
+
+/**
+ * `P-254`: a push that stopped arriving is not one that finished.
+ *
+ * A link that drops between chunks leaves the store holding chunk one, and two seconds of quiet
+ * follow it as they follow a complete push. The listeners take the first set they are swept with
+ * as what the probe held across a restart, so sweeping chunk one made every sensor in the chunks
+ * never delivered come back on the reconnect's push as new, reading nothing of what arrived
+ * before its first scan — `H-15`'s loss again — and deleted their cursors besides (`P-42`).
+ */
+describe('a config push cut short (P-254)', () => {
+  const all = [assignment(1), assignment(2), assignment(3)];
+
+  it('sweeps nothing until a push completes, and still sizes the pool', async () => {
+    const h = harness();
+    h.handlers.onConfig(set(all.slice(0, 1)), false);
+    await settled();
+    assert.equal(h.traps.sweeps.length, 0, 'chunk one is not what the probe holds');
+    assert.equal(h.sized(), 1, 'the pool is sized for what is running');
+
+    // The reconnect's push, whole, because the cut one was never stamped (`R18`).
+    h.handlers.onConfig(set(all), true);
+    await settled();
+    assert.deepEqual(h.traps.sweeps, [[1, 2, 3]]);
+  });
+
+  it('sweeps a complete push that came as chunks, once its last arrives', async () => {
+    const h = harness();
+    h.handlers.onConfig(set(all.slice(0, 1)), false);
+    h.handlers.onConfig(delta(all.slice(1)), true);
+    await settled();
+    assert.deepEqual(h.traps.sweeps, [[1, 2, 3]]);
+  });
+
+  it('takes an older core’s push, which has no flag, as complete', async () => {
+    const h = harness();
+    h.handlers.onConfig(set(all));
+    await settled();
+    assert.deepEqual(h.traps.sweeps, [[1, 2, 3]]);
+  });
+
+  it('leaves a sensor in a chunk never delivered reading what came before its first scan', async () => {
+    let now = 1_800_000_000_000;
+    const ring = new NotificationRing(100, () => new Date(now));
+    const h = harness({
+      listeners: [
+        {
+          retain: (ids) => {
+            ring.retain(ids);
+          },
+        },
+      ],
+    });
+
+    h.handlers.onConfig(set(all.slice(0, 2)), false);
+    await settled();
+    for (let i = 0; i < 3; i += 1) {
+      ring.push({ at: new Date(now).toISOString(), source: '192.0.2.3', text: 'trap', detail: {} });
+    }
+    h.handlers.onConfig(set(all), true);
+    await settled();
+    now += 30_000;
+
+    assert.equal(ring.drain(3, 'snmp-trap', 60_000).items.length, 3, 'sensor 3 read nothing');
+  });
+
+  it('keeps every cursor through a later push that was cut', async () => {
+    const ring = new NotificationRing(100);
+    const h = harness({
+      listeners: [
+        {
+          retain: (ids) => {
+            ring.retain(ids);
+          },
+        },
+      ],
+    });
+    h.handlers.onConfig(set(all));
+    await settled();
+    for (const one of all) ring.drain(one.sensorId, 'snmp-trap', 60_000);
+
+    h.handlers.onConfig(set(all.slice(0, 1)), false);
+    await settled();
+    assert.equal(ring.cursors, 3, 'two sensors lost their cursors to a chunk boundary');
   });
 });
 

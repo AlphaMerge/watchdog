@@ -173,9 +173,13 @@ export class FlowListener {
     this.#logger.info({ ...this.stats() }, 'flow listener stopped');
   }
 
-  /** Everything this sensor has not seen, and how much it missed. See `NotificationRing`. */
-  drain(sensorId: number): ReceivedBatch {
-    return this.#ring.drain(sensorId, LISTENER_ID);
+  /**
+   * Everything this sensor has not seen, and how much it missed. See `NotificationRing`.
+   *
+   * `windowMs` is the sensor's interval: how far back its first scan after a restart reads.
+   */
+  drain(sensorId: number, windowMs?: number): ReceivedBatch {
+    return this.#ring.drain(sensorId, LISTENER_ID, windowMs);
   }
 
   retain(sensorIds: Iterable<number>): void {

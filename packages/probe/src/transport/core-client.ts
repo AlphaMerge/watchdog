@@ -51,8 +51,12 @@ export interface CoreClientOptions {
    * The client applies nothing itself — it owns the socket, not the scheduler. It hands over
    * what arrived and reports back how many assignments the scheduler ended up holding, which is
    * what the core acknowledges against.
+   *
+   * `final` is whether this message completes its push (`R18`): false on every chunk of a split
+   * push but the last, true otherwise, an older core that does not send the flag included. What
+   * must see the whole push — the listeners' cursor sweep — waits for it (`P-254`).
    */
-  onConfig?: (config: ConfigUpdate) => number;
+  onConfig?: (config: ConfigUpdate, final: boolean) => number;
   /**
    * A discovery sweep to start, resume or stop (`D-01`).
    *
@@ -267,7 +271,7 @@ export class CoreClient {
     if (apply === undefined) return;
     this.#configVersion = '';
     try {
-      const scheduled = apply({ kind: 'set', version: '', sensors: [] });
+      const scheduled = apply({ kind: 'set', version: '', sensors: [] }, true);
       this.#logger.warn({ code, scheduled }, 'stopped scanning: this core has refused this probe');
     } catch (error: unknown) {
       // Loud, and nothing else to do: the scheduler is the only thing that can stop itself, and
@@ -749,7 +753,7 @@ export class CoreClient {
 
     let scheduled: number;
     try {
-      scheduled = apply(update);
+      scheduled = apply(update, final !== false);
     } catch (error: unknown) {
       // Refusing to update the version is what makes this recoverable: the next reconnect
       // presents the old fingerprint, the core sees a mismatch, and a full snapshot is sent.

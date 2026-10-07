@@ -39,7 +39,13 @@ export interface DueRunner {
 
 /** Just enough of `TrapListener` and `SyslogListener`. */
 export interface DueListener {
-  drain(sensorId: number): ReceivedBatch;
+  /**
+   * `windowMs` is the sensor's interval, and required: it is how far back a sensor's first scan
+   * after a probe restart reads (`P-254`), and a caller that forgot it would hand that scan
+   * everything since the listener started — hours, after a long wait for the core — as one
+   * reading.
+   */
+  drain(sensorId: number, windowMs: number): ReceivedBatch;
 }
 
 export interface DueDispatchDeps {
@@ -85,7 +91,9 @@ export function dueDispatcher(deps: DueDispatchDeps): (due: Iterable<number>) =>
       const wants = deps.listenerFor.get(assignment.sensorType);
       const listener = wants === undefined ? undefined : deps.listeners.get(wants);
       const received =
-        listener !== undefined && runner.accepts(sensorId) ? listener.drain(sensorId) : undefined;
+        listener !== undefined && runner.accepts(sensorId)
+          ? listener.drain(sensorId, assignment.intervalSeconds * 1_000)
+          : undefined;
 
       const outcome = runner.submit({
         sensorId,

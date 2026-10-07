@@ -7,6 +7,7 @@ import type {
   SensorType,
 } from '../contract.js';
 import { readRule, ruleMatches, type TrapRule } from '../support/snmp/trap.js';
+import { earlierNote } from '../support/earlier.js';
 
 /**
  * SNMP traps and informs arriving at the probe (`T-06`).
@@ -213,7 +214,7 @@ export const snmpTrap: SensorType = {
       );
     }
 
-    return { channels, message: describe(mine, unmatched, batch) };
+    return { channels, message: describe(mine, unmatched, batch) + earlierNote(batch, 'traps') };
   },
 };
 

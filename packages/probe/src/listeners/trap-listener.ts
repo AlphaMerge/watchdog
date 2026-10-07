@@ -141,9 +141,13 @@ export class TrapListener {
     this.#logger.info({ ...this.stats() }, 'snmp trap listener stopped');
   }
 
-  /** Everything this sensor has not seen, and how much it missed. See `NotificationRing`. */
-  drain(sensorId: number): ReceivedBatch {
-    return this.#ring.drain(sensorId, LISTENER_ID);
+  /**
+   * Everything this sensor has not seen, and how much it missed. See `NotificationRing`.
+   *
+   * `windowMs` is the sensor's interval: how far back its first scan after a restart reads.
+   */
+  drain(sensorId: number, windowMs?: number): ReceivedBatch {
+    return this.#ring.drain(sensorId, LISTENER_ID, windowMs);
   }
 
   /** Keeps only the cursors for sensors the probe still holds, so a deleted one stops costing. */

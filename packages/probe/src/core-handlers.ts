@@ -77,7 +77,8 @@ export interface CoreHandlerDeps {
  */
 export interface CoreHandlers {
   readonly onStateChange: (state: LinkState) => void;
-  readonly onConfig: (update: ConfigUpdate) => number;
+  /** `final` is false on a chunk of a split push that is not its last; absent means final. */
+  readonly onConfig: (update: ConfigUpdate, final?: boolean) => number;
   readonly onSweep: (message: SweepCommand) => void;
   readonly onQuery: (message: QueryCommand) => void;
   /** Cancels a settle that has not fired. For shutdown. */
@@ -89,6 +90,8 @@ export const DEFAULT_SETTLE_MS = 2_000;
 export function coreHandlers(deps: CoreHandlerDeps): CoreHandlers {
   const settleMs = deps.settleMs ?? DEFAULT_SETTLE_MS;
   let settling: NodeJS.Timeout | undefined;
+  /** Whether the last config message completed its push. */
+  let complete = true;
 
   /**
    * Everything that must read the assignment store *after* a push has finished arriving.
@@ -108,14 +111,25 @@ export function coreHandlers(deps: CoreHandlerDeps): CoreHandlers {
    *   current sequence and returns an empty batch with `dropped: 0`. Mid-push that is every trap
    *   and syslog sensor outside chunk one, so an ordinary push would discard their buffered
    *   notifications *and report none missing* (`P-42`).
+   *
+   * **And a push that stopped arriving is not one that finished** (`P-254`). Two seconds of quiet
+   * also follows a link that dropped between chunks, leaving the store holding chunk one. A sweep
+   * then would delete the cursors of every sensor in the chunks never delivered — `P-42` again —
+   * and the listeners take the first set they are swept with as what the probe held across a
+   * restart, so those sensors would come back on the reconnect's push as new and miss what
+   * arrived before their first scan. So the sweep waits for a message that completes its push;
+   * the reconnect sends the whole set again, because the cut push was never stamped (`R18`).
+   * Sizing the pool is not deferred: it reads the workload the scheduler is actually running.
    */
   const settle = (): void => {
     if (settling !== undefined) clearTimeout(settling);
     settling = setTimeout(() => {
       settling = undefined;
-      // One sorted copy of up to five thousand ids, not one per listener.
-      const held = deps.assignments.ids();
-      for (const listener of deps.listeners) listener.retain(held);
+      if (complete) {
+        // One sorted copy of up to five thousand ids, not one per listener.
+        const held = deps.assignments.ids();
+        for (const listener of deps.listeners) listener.retain(held);
+      }
       deps.sizePool();
     }, settleMs);
     settling.unref();
@@ -127,8 +141,9 @@ export function coreHandlers(deps: CoreHandlerDeps): CoreHandlers {
       if (state === 'connected') deps.wakeDrain();
     },
 
-    onConfig: (update) => {
+    onConfig: (update, final = true) => {
       const size = deps.assignments.apply(update);
+      complete = final;
       // The workload just changed, so both the ceiling derived from it (`P-34`) and the set of
       // cursors worth keeping are stale. Recomputed after a push rather than only on the timer,
       // because a push is exactly when a probe goes from fifty sensors to five thousand and
