@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { runProgram, type CheckResult, type Logger } from '@ms/shared';
+import { describeError, fitResult, runProgram, type CheckResult, type Logger } from '@ms/shared';
 // From `types.js`, never from `check-child.js`: that module is an entry point with top-level
 // `await` on stdin, and importing it here once made the probe sit waiting for its own stdin.
 import { READY_MARKER, RESULT_MARKER } from './types.js';
@@ -332,12 +332,33 @@ export class ProcessRunner {
       if (job === undefined) return;
       this.#running += 1;
       this.#inProgress.add(job);
-      void this.#run(job).finally(() => {
-        this.#running -= 1;
-        this.#inProgress.delete(job);
-        this.#active.delete(job.request.sensorId);
-        this.#pump();
-      });
+      void this.#run(job)
+        .catch((error: unknown) => {
+          // Nothing in `#run` is meant to throw. One that did reached `unhandledRejection`, which
+          // ends the probe and every sensor on it (`P-277`); it is logged, and a check not yet
+          // answered is answered.
+          this.#logger.error(
+            {
+              sensorId: job.request.sensorId,
+              sensorType: job.request.sensorType,
+              err: describeError(error),
+            },
+            'the process runner failed while settling a check',
+          );
+          if (job.settled) return;
+          this.#failed += 1;
+          this.#emit(job, 0, 'worker-crash', {
+            outcome: 'error',
+            durationMs: 0,
+            message: 'this probe failed while reading what the check process said',
+          });
+        })
+        .finally(() => {
+          this.#running -= 1;
+          this.#inProgress.delete(job);
+          this.#active.delete(job.request.sensorId);
+          this.#pump();
+        });
     }
   }
 
@@ -434,7 +455,38 @@ export class ProcessRunner {
 
     // Abandoned by `stop` while it ran, and answered there.
     if (job.settled) return;
-    const answer = parseAnswer(run.stdout);
+    // **A claim, read as one** (`P-277`). The check process runs as `processUid`, and so does the
+    // script it runs, which may `ptrace` it or take its stdout with `pidfd_getfd` and write any
+    // line there. What such a line can reach is this sensor's own result, which its script decides
+    // anyway: `sensorId` is the job's, never the line's. What it must not reach is the probe: a
+    // `durationMs` that was not a number threw in `#emit` and ended the probe on
+    // `unhandledRejection`. So a marked line that is not an answer is a check process that did not
+    // answer, and what an answer holds is made to fit the wire in `#emit`.
+    const said = parseAnswer(run.stdout);
+    // `startup` is said only by a process that could not load the probe's sensor types, which is
+    // before its ready line. After that line it is somebody else's claim, and counting it would
+    // put the probe's start-up failing on Probe Health for a check that ran.
+    const refusal =
+      typeof said === 'string'
+        ? said
+        : said?.startup === true && readyAt !== undefined
+          ? 'it said its start-up failed after it had said it was ready'
+          : null;
+    if (refusal !== null) {
+      this.#crashed += 1;
+      this.#failed += 1;
+      this.#logger.error(
+        { sensorId: job.request.sensorId, sensorType: job.request.sensorType, problem: refusal },
+        'a check process answered with something that is not a result',
+      );
+      this.#emit(job, waitMs, 'worker-crash', {
+        outcome: 'error',
+        durationMs: run.durationMs,
+        message: `the check process's answer is not a result this probe can read: ${refusal}`,
+      });
+      return;
+    }
+    const answer = typeof said === 'string' ? null : said;
 
     if (answer?.startup === true) {
       // The catalogue would not load. Every check in a process fails the same way until the
@@ -636,7 +688,9 @@ export class ProcessRunner {
   ): void {
     if (job.settled) return;
     job.settled = true;
-    const result: CheckResult = {
+    // Made to fit the wire before it is spooled (`P-277`): one result the core's schema refuses
+    // closes the connection on every resend of its batch, for every sensor on this probe.
+    const { result, problems } = fitResult({
       sensorId: job.request.sensorId,
       at: new Date().toISOString(),
       outcome: parts.outcome,
@@ -644,7 +698,8 @@ export class ProcessRunner {
       durationMs: Number(parts.durationMs.toFixed(3)),
       channels: parts.outcome === 'ok' ? parts.channels : [],
       ...(parts.outcome === 'error' && parts.withheld === true ? { withheld: true as const } : {}),
-    };
+    } satisfies CheckResult);
+    if (problems.length > 0) unfit(this.#logger, job.request, problems);
     // `workerId` is -1 rather than absent: Probe Health reads one shape for both runners, and a
     // check that ran in a process of its own genuinely has no worker.
     this.#onResult(result, { phase, waitMs, workerId: -1 });
@@ -727,27 +782,74 @@ export class ProcessRunner {
 }
 
 /**
- * The marked line, or null.
+ * The marked line: an answer, the reason it is not one, or null when there is no line.
  *
  * **Read from the end**, because the marker is the last thing a child writes. Anything a library
  * printed came before it — including, in the worst case, something that looks like a marker of
  * its own, since a check whose job is to run somebody's script may well end up echoing text it
  * does not control. Taking the first match would let that text be the result.
+ *
+ * **Checked, not cast** (`P-277`): each field the runner reads must be what it reads it as. The
+ * channels are `fitResult`'s, which drops what cannot be sent.
  */
-function parseAnswer(stdout: string): ChildAnswer | null {
+function parseAnswer(stdout: string): ChildAnswer | string | null {
   const lines = stdout.split('\n');
   for (let at = lines.length - 1; at >= 0; at -= 1) {
     const line = lines[at] ?? '';
     if (!line.startsWith(RESULT_MARKER)) continue;
+    let value: unknown;
     try {
-      return JSON.parse(line.slice(RESULT_MARKER.length)) as ChildAnswer;
+      value = JSON.parse(line.slice(RESULT_MARKER.length));
     } catch {
       // A truncated marked line — the output bound cut it. Treated as no answer at all, which is
       // right: half a result is not a reading.
       return null;
     }
+    return readAnswer(value);
   }
   return null;
+}
+
+/** An answer, or why the value is not one. */
+function readAnswer(value: unknown): ChildAnswer | string {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return 'it is not an object';
+  }
+  const answer = value as Record<string, unknown>;
+  if (typeof answer['ok'] !== 'boolean') return '"ok" is not true or false';
+  const duration = answer['durationMs'];
+  if (typeof duration !== 'number' || !Number.isFinite(duration) || duration < 0) {
+    return '"durationMs" is not a number of milliseconds';
+  }
+  const message = answer['message'];
+  if (message !== undefined && typeof message !== 'string') return '"message" is not text';
+  const channels = answer['channels'];
+  if (channels !== undefined && !Array.isArray(channels)) return '"channels" is not a list';
+  for (const flag of ['aborted', 'unknownType', 'withheld', 'startup']) {
+    const said = answer[flag];
+    if (said !== undefined && typeof said !== 'boolean') return `"${flag}" is not true or false`;
+  }
+  return answer as unknown as ChildAnswer;
+}
+
+/**
+ * Logs what `fitResult` had to take out of a check's readings, once per result (`P-277`). The
+ * channels it names are gaps in the sensor's graphs, and this is where an operator learns why.
+ */
+export function unfit(
+  logger: Logger,
+  request: { sensorId: number; sensorType: string },
+  problems: readonly string[],
+): void {
+  logger.warn(
+    {
+      sensorId: request.sensorId,
+      sensorType: request.sensorType,
+      problems: problems.slice(0, 8),
+      count: problems.length,
+    },
+    'a check returned readings that cannot be sent as they are; this probe sent the rest',
+  );
 }
 
 /**

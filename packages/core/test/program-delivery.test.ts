@@ -255,6 +255,15 @@ describe('execute-program delivery', { skip: posix ? false : 'POSIX only' }, () 
       assert.match(result.error, /exited 4 — the gateway rejected it/);
     });
 
+    it('says what a program said without a NUL in it, which the database cannot hold (`P-277`)', async () => {
+      // The error is the request's `last_error`. PostgreSQL text refuses U+0000 (`22021`), and
+      // the write that failed was the one recording this attempt.
+      await script('binary.sh', "printf 'the gateway said \\000no\\000\\n' >&2; exit 3");
+      const result = await transport().send(message({ settings: { path: 'binary.sh' } }));
+      assert.ok(!result.ok);
+      assert.equal(result.error, 'binary.sh exited 3 — the gateway said no');
+    });
+
     it('will try again after a timeout, because the program never answered', async () => {
       await script('slow.sh', 'sleep 30');
       const result = await transport().send(

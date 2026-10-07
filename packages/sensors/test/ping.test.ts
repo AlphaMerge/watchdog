@@ -4,8 +4,10 @@ import type { CheckTarget } from '../src/contract.js';
 import {
   jitterOf,
   parsePingOutput,
+  PING_OUTPUT_CHARS,
   pingCommand,
   pingPlatform,
+  runPing,
   summarise,
   type PingParams,
 } from '../src/support/ping.js';
@@ -298,5 +300,20 @@ describe('jitter', () => {
     // the order the packets arrived in, and no summary statistic of the set can see it.
     assert.equal(jitterOf([10, 10, 30]), 1.25);
     assert.equal(jitterOf([10, 30, 10]), 2.422);
+  });
+});
+
+describe('running ping (`P-277`)', () => {
+  it('keeps a bounded amount of what it prints, and reads the rest to the end', async () => {
+    // A reply prints a line, and so does every duplicate of one, which the device answering
+    // decides. A program printing 4 MiB on each stream stands in for a device that answers each
+    // echo thousands of times; it must finish, so nothing was left blocked on a full pipe.
+    const flood =
+      "const line = 'x'.repeat(1023) + '\\n';" +
+      'for (let i = 0; i < 4096; i += 1) { process.stdout.write(line); process.stderr.write(line); }';
+    const run = await runPing(process.execPath, ['-e', flood], AbortSignal.timeout(30_000));
+    // stdout, the newline between them, and stderr: each kept to the bound.
+    assert.equal(run.output.length, 2 * PING_OUTPUT_CHARS + 1);
+    assert.ok(run.detail.length <= PING_OUTPUT_CHARS);
   });
 });

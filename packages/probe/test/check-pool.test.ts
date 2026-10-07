@@ -18,6 +18,7 @@ import {
 import { typicalOf } from '../src/runner/pool.js';
 import { STARTUP_TIMEOUT_MS } from '../src/runner/process-runner.js';
 import { within } from './support/probe-process.js';
+import { assertFits } from './support/fits.js';
 import { ICMP_PING_CHECK_MS, littleFloor, V1_TARGET_BURST } from '../src/measured.js';
 import { poolDemand } from '../src/runner/demand.js';
 
@@ -134,6 +135,16 @@ describe('check pool', () => {
     assert.equal(refused.message, 'Not scanned: outside the allowed targets');
     assert.deepEqual(refused.channels, []);
     assert.equal('withheld' in failed, false, 'an ordinary failure carries no mark at all');
+  });
+
+  it('sends what can be sent of readings no core would take (`P-277`)', async () => {
+    // A worker runs this probe's own code, but a check's readings are a device's words and a
+    // script's numbers. One result the core's schema refuses used to close the connection on
+    // every resend of its batch, for every sensor on the probe.
+    const { pool, seen } = await poolOf();
+    pool.submit(request(5, 'test.unfit'));
+    await until(() => seen.length === 1, 'the check');
+    assertFits(seen[0]?.result);
   });
 
   it('reports a resolver that hangs as a refusal, not as the check timing out', async () => {

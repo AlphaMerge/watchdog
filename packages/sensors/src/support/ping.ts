@@ -267,6 +267,9 @@ export function jitterOf(times: readonly number[]): number | null {
   return round(jitter);
 }
 
+/** How much of each of ping's streams is kept (`P-277`). */
+export const PING_OUTPUT_CHARS = 64 * 1024;
+
 export interface PingRun {
   readonly output: string;
   /** Something worth adding to a failure message: stderr, or why the process ended. */
@@ -299,12 +302,23 @@ export async function runPing(
     // `ctx.signal` without a race of its own.
     const child = spawn(command, [...args], { signal, windowsHide: true });
 
+    // **Kept to a bound, read to the end** (`P-277`). A reply prints a line, and so does every
+    // duplicate of one, which the device answering decides: one that answers each echo
+    // thousands of times grew these strings for as long as the check ran. Sixty replies and a
+    // summary are a few kilobytes; past the bound the rest is read and not kept, so ping never
+    // blocks on a full pipe.
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => (stdout += chunk));
-    child.stderr.on('data', (chunk: string) => (stderr += chunk));
+    child.stdout.on('data', (chunk: string) => {
+      if (stdout.length < PING_OUTPUT_CHARS)
+        stdout += chunk.slice(0, PING_OUTPUT_CHARS - stdout.length);
+    });
+    child.stderr.on('data', (chunk: string) => {
+      if (stderr.length < PING_OUTPUT_CHARS)
+        stderr += chunk.slice(0, PING_OUTPUT_CHARS - stderr.length);
+    });
 
     child.on('error', (error: NodeJS.ErrnoException) => {
       if (signal.aborted) {

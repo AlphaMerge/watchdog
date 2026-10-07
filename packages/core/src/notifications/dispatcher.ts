@@ -685,7 +685,11 @@ export class NotificationDispatcher {
        WHERE id = $1`,
       [
         requestId,
-        result.error,
+        // **Without U+0000** (`P-277`), which PostgreSQL text cannot hold (`22021`). An error
+        // quotes the far end — a webhook's response body, a program's last line — and a NUL in it
+        // failed this write, so the request kept the lease its claim wrote and, each time that
+        // ran out, was claimed and sent again: one alarm, a message every five minutes.
+        result.error.replaceAll('\u0000', ''),
         givingUp ? 'failed' : 'pending',
         givingUp ? null : new Date(now.getTime() + delayMs),
         now,

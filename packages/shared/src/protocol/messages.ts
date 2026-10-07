@@ -1,6 +1,7 @@
 import { Ajv, type ErrorObject } from 'ajv';
 import { AppError } from '../errors/app-error.js';
 import { MAX_EXCEPTION_ADDRESSES } from '../net/target-policy.js';
+import { RESULT_LIMITS } from './result-fit.js';
 
 /**
  * The core↔probe wire protocol.
@@ -1122,7 +1123,8 @@ const PROBE_HEALTH_SCHEMA = {
 export const PROBE_HEALTH_FIELDS: readonly string[] = Object.keys(PROBE_HEALTH_SCHEMA.properties);
 
 /**
- * One check result on the wire.
+ * One check result on the wire. Its bounds are `RESULT_LIMITS`, which `fitResult` makes every
+ * result a runner settles fit before it is spooled (`P-277`).
  *
  * Extracted so `results` and `R-09`'s `query-result` cannot drift: an on-demand check answers
  * with the same shape a scheduled one reports, and two copies of this would eventually disagree
@@ -1134,17 +1136,17 @@ const CHECK_RESULT_SCHEMA = {
     sensorId: { type: 'integer', minimum: 1 },
     at: { type: 'string', minLength: 1, maxLength: 64 },
     outcome: { type: 'string', enum: ['ok', 'error'] },
-    message: { type: 'string', maxLength: 2000 },
+    message: { type: 'string', maxLength: RESULT_LIMITS.message },
     durationMs: { type: 'number', minimum: 0 },
     // Only `true` (`A-41c`): a check the probe refused over where its credentials may go.
     withheld: { const: true },
     channels: {
       type: 'array',
-      maxItems: 500,
+      maxItems: RESULT_LIMITS.channels,
       items: {
         type: 'object',
         properties: {
-          key: { type: 'string', minLength: 1, maxLength: 100 },
+          key: { type: 'string', minLength: 1, maxLength: RESULT_LIMITS.key },
           // No NaN and no Infinity: JSON cannot carry them, and a channel whose value is not a
           // number is a gap, which is the absence of a reading.
           value: { type: 'number' },
@@ -1152,8 +1154,8 @@ const CHECK_RESULT_SCHEMA = {
           // 64-bit counter does not survive a double, and 20 digits is the most one can have.
           counter: { type: 'string', pattern: '^[0-9]{1,20}$' },
           counterBits: { type: 'integer', enum: [32, 64] },
-          name: { type: 'string', minLength: 1, maxLength: 200 },
-          unit: { type: 'string', maxLength: 50 },
+          name: { type: 'string', minLength: 1, maxLength: RESULT_LIMITS.name },
+          unit: { type: 'string', maxLength: RESULT_LIMITS.unit },
         },
         required: ['key', 'value'],
         additionalProperties: false,

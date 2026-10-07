@@ -1,4 +1,7 @@
 import { strict as assert } from 'node:assert';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { RecipientResolver } from '../src/notifications/recipients.js';
 import { AccessService } from '../src/auth/access.js';
 import { addressesOnly } from './support/recipients.js';
@@ -11,6 +14,7 @@ import type { Database } from '../src/db/pool.js';
 import { MessageContextLoader } from '../src/notifications/context.js';
 import { EmailTransport } from '../src/notifications/delivery/email.js';
 import { DeliveryLoop } from '../src/notifications/delivery/loop.js';
+import { ProgramTransport } from '../src/notifications/delivery/program.js';
 import { headerSafe, type OutgoingMessage } from '../src/notifications/delivery/transport.js';
 import { NotificationDispatcher } from '../src/notifications/dispatcher.js';
 import { TemplateService } from '../src/notifications/templates.js';
@@ -736,6 +740,72 @@ describe(
       const after = await statusOf(requestId);
       assert.equal(after.status, 'failed');
       assert.ok(after.error?.includes('no transport'), after.error ?? '');
+    });
+
+    it('records a program that printed a NUL as failed once, and does not run it again (P-277)', async () => {
+      // The program's last line is the request's `last_error`, and PostgreSQL text cannot hold
+      // U+0000. The write failed, so the request stayed claimed, and every time its lease ran out
+      // it was claimed and the program run again: one alarm, a ticket every five minutes. The real
+      // program transport behind the template's method, so what is recorded is what it said.
+      const root = await mkdtemp(join(tmpdir(), 'ms-nul-'));
+      try {
+        const runs = join(root, 'runs.txt');
+        const file = join(root, 'binary.sh');
+        await writeFile(
+          file,
+          `#!/bin/sh\necho ran >> '${runs}'\nprintf 'refused \\000by the gateway\\n' >&2\nexit 3\n`,
+          'utf8',
+        );
+        await chmod(file, 0o755);
+        const program = new ProgramTransport({
+          config: { directory: root, maxOutputBytes: 4096, killGraceMs: 500, uid: -1, gid: -1 },
+          logger: silent,
+        });
+        const viaProgram = {
+          method: 'email',
+          send: (outgoing: OutgoingMessage) =>
+            program.send({ ...outgoing, settings: { path: 'binary.sh', timeoutMs: 10_000 } }),
+        };
+        const requestId = await queue(await emailTemplate());
+        const dispatcher = dispatcherWith(viaProgram);
+
+        await dispatcher.dispatch();
+        const after = await statusOf(requestId);
+        assert.equal(after.status, 'failed', 'a non-zero exit is an answer');
+        assert.equal(after.attempts, 1);
+        assert.equal(after.error, 'binary.sh exited 3 — refused by the gateway');
+
+        await dispatcher.dispatch();
+        assert.equal((await readFile(runs, 'utf8')).trim().split('\n').length, 1, 'run once');
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('records a refusal that quotes a NUL, and does not send the message again (P-277)', async () => {
+      // A webhook's response body is the far end's words, and a 4xx is quoted into the error.
+      const templateId = await emailTemplate();
+      const requestId = await queue(templateId);
+      let sends = 0;
+      const quoting = {
+        method: 'email',
+        send: () => {
+          sends += 1;
+          return Promise.resolve({
+            ok: false,
+            retryable: false,
+            error: '400 from hooks.example.test — bad\u0000request',
+          } as const);
+        },
+      };
+      const dispatcher = dispatcherWith(quoting);
+
+      await dispatcher.dispatch();
+      const after = await statusOf(requestId);
+      assert.equal(after.status, 'failed');
+      assert.equal(after.error, '400 from hooks.example.test — badrequest');
+      await dispatcher.dispatch();
+      assert.equal(sends, 1);
     });
 
     it('records who a message reached nobody among, by name and by count, and not in the error (A-44)', async () => {

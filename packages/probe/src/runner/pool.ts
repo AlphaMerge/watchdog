@@ -1,9 +1,9 @@
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
-import { describeError, type CheckResult, type Logger } from '@ms/shared';
+import { describeError, fitResult, type CheckResult, type Logger } from '@ms/shared';
 import type { MemoryCapReading } from './memory-cap.js';
-import { STARTUP_TIMEOUT_MS } from './process-runner.js';
+import { STARTUP_TIMEOUT_MS, unfit } from './process-runner.js';
 import { RefusalLog } from './refusal-log.js';
 import type { CheckPhase, CheckRequest, ResultMeta, SessionCounters } from './types.js';
 
@@ -1589,7 +1589,11 @@ export class CheckPool {
     clear(job);
     this.#active.delete(job.request.sensorId);
 
-    const result: CheckResult = {
+    // **Made to fit the wire before it is spooled** (`P-277`). A worker runs this probe's own
+    // code, but what a check returns is a device's words and a script's numbers, and one result
+    // the core's schema refuses closes the connection on every resend of its batch, for every
+    // sensor on this probe.
+    const { result, problems } = fitResult({
       sensorId: job.request.sensorId,
       at: new Date().toISOString(),
       outcome: parts.outcome,
@@ -1598,7 +1602,8 @@ export class CheckPool {
       // A failed check records no channel values: the gap is the data (CLAUDE.md).
       channels: parts.outcome === 'ok' ? parts.channels : [],
       ...(parts.outcome === 'error' && parts.withheld === true ? { withheld: true as const } : {}),
-    };
+    } satisfies CheckResult);
+    if (problems.length > 0) unfit(this.#logger, job.request, problems);
     this.#onResult(result, { phase, waitMs: job.waitMs, workerId: slot?.id ?? 0 });
     if (this.#onDrained !== undefined && this.#inFlight() === 0) this.#onDrained();
   }

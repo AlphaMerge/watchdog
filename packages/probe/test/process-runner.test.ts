@@ -18,6 +18,7 @@ import {
 import { linuxProcessView, type ProcessView } from '../src/runner/script-groups.js';
 import { READY_MARKER, type ResultMeta } from '../src/runner/types.js';
 import { within } from './support/probe-process.js';
+import { assertFits } from './support/fits.js';
 
 /**
  * The child-process runner (`P-03`), against checks that misbehave on purpose.
@@ -480,6 +481,106 @@ describe('process runner', () => {
     await until(() => seen.length === 1, 'the check');
     assert.equal(seen[0]?.result.message, 'the real answer');
     assert.deepEqual(seen[0].result.channels, [{ key: 'value', value: 2 }]);
+  });
+
+  describe('an answer read as a claim (`P-277`)', () => {
+    // What a script running as `processUid` can write on its check process's stdout, by `ptrace`
+    // or `pidfd_getfd`. Each used to be cast and believed; a `durationMs` that was not a number
+    // threw while the result was built, and the rejection ended the probe.
+    const forged: readonly [string, string][] = [
+      ['{"ok":true}', '"durationMs" is not a number of milliseconds'],
+      ['{"ok":true,"durationMs":"1"}', '"durationMs" is not a number of milliseconds'],
+      ['{"ok":true,"durationMs":-1}', '"durationMs" is not a number of milliseconds'],
+      ['[1,2]', 'it is not an object'],
+      ['null', 'it is not an object'],
+      ['{"ok":"yes","durationMs":1}', '"ok" is not true or false'],
+      ['{"ok":true,"durationMs":1,"message":5}', '"message" is not text'],
+      ['{"ok":true,"durationMs":1,"channels":"x"}', '"channels" is not a list'],
+      ['{"ok":false,"durationMs":1,"withheld":"yes"}', '"withheld" is not true or false'],
+      [
+        '{"ok":false,"durationMs":1,"startup":true}',
+        'it said its start-up failed after it had said it was ready',
+      ],
+    ];
+
+    it('takes a marked line that is not an answer for no answer, and goes on running', async () => {
+      const rejections: unknown[] = [];
+      const onRejection = (reason: unknown): void => {
+        rejections.push(reason);
+      };
+      process.on('unhandledRejection', onRejection);
+      try {
+        const { runner, seen } = runnerOf({ maxConcurrent: 4 });
+        for (const [at, [line]] of forged.entries()) {
+          assert.equal(runner.submit(request(300 + at, 'test.forge-answer', { line })), 'accepted');
+        }
+        await until(() => seen.length === forged.length, 'every forged answer');
+        for (const [at, [line, why]] of forged.entries()) {
+          const entry = seen.find((one) => one.result.sensorId === 300 + at);
+          assert.ok(entry !== undefined, line);
+          assert.equal(entry.result.outcome, 'error', line);
+          assert.equal(entry.meta.phase, 'worker-crash', line);
+          assert.equal(
+            entry.result.message,
+            `the check process's answer is not a result this probe can read: ${why}`,
+            line,
+          );
+          assert.deepEqual(entry.result.channels, [], line);
+        }
+        const stats = runner.stats();
+        assert.equal(stats.crashed, forged.length);
+        assert.equal(stats.startupFailed, 0, 'a claim after the ready line is not a start-up');
+
+        runner.submit(request(399, 'test.ok'));
+        await until(() => seen.length === forged.length + 1, 'the next check');
+        assert.equal(seen.at(-1)?.result.outcome, 'ok');
+        assert.deepEqual(rejections, []);
+      } finally {
+        process.off('unhandledRejection', onRejection);
+      }
+    });
+
+    it('answers a check whose result could not be handed on, rather than ending the probe', async () => {
+      // Nothing in the runner is meant to throw once the run is over. If something does, the
+      // check is answered and the runner goes on, where it used to be an unhandled rejection.
+      const rejections: unknown[] = [];
+      const onRejection = (reason: unknown): void => {
+        rejections.push(reason);
+      };
+      process.on('unhandledRejection', onRejection);
+      try {
+        const errors: string[] = [];
+        const logger = pino(
+          { level: 'error' },
+          { write: (line: string) => void errors.push(line) },
+        );
+        const seen: CheckResult[] = [];
+        const runner = new ProcessRunner({
+          logger,
+          registryModule: FIXTURES,
+          onResult: (result) => {
+            seen.push(result);
+            if (result.sensorId === 310) throw new Error('the sink refused it');
+          },
+        });
+        runners.push(runner);
+        runner.submit(request(310, 'test.ok'));
+        await until(() => errors.some((line) => line.includes('while settling')), 'the log');
+        runner.submit(request(311, 'test.ok'));
+        await until(() => seen.some((one) => one.sensorId === 311), 'the next check');
+        assert.deepEqual(rejections, []);
+        assert.match(errors.join(''), /the sink refused it/);
+      } finally {
+        process.off('unhandledRejection', onRejection);
+      }
+    });
+
+    it('sends what can be sent of readings no core would take', async () => {
+      const { runner, seen } = runnerOf();
+      runner.submit(request(320, 'test.unfit'));
+      await until(() => seen.length === 1, 'the check');
+      assertFits(seen[0]?.result);
+    });
   });
 
   it('hands the check its credentials without putting them in the command line', async () => {

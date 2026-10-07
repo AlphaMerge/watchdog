@@ -9281,12 +9281,128 @@ because each is a decision rather than a defect:
         connection.
       - **Not done:** a root drop-in is learnt at the restart, not by the installer's check.
 
-- [ ] **P-277 — check every runner that acts on what a child process writes** · S · P-266 ·
+- [x] **P-277 — check every runner that acts on what a child process writes** · S · P-266 ·
       Found 2026-10-07 in `P-266`. The P-266 review found the runner trusting a line on the check
       process's stdout to choose what to kill. Only `process-runner.ts` was checked. **Done when**
       every parent in `packages/probe` and `packages/core` that acts on a child's output (pool
       workers' messages, check-child lines, ms-setup outcome files, any other) is listed with
       why what it trusts is safe, and any that is not is fixed with a test.
+
+      **P-277 outcome. Nothing else kills, writes a file or picks a path on a child's say-so, but
+      four things a child or a device could write took down more than their own sensor, and
+      they are fixed.** Found by grep for `spawn`, `fork`, `execFile`, `Worker`, `runProgram`,
+      `child_process`, `worker_threads`, `on('message'` and every `$(…)` and outcome file in
+      `deploy/`. Threat model as the ticket gives it: a script or a sensor-supplied program
+      (perhaps as `processUid` under a root probe, and able to `ptrace` its check process or take
+      its stdout with `pidfd_getfd`) and a device answering a check are untrusted.
+      - **The four, fixed.**
+        - **One result no core takes stopped every sensor on its probe.** The core validates a
+          `results` batch whole, and a batch its schema refuses is a protocol violation
+          (`MessageConnection#failProtocol`): the socket is destroyed, the probe reconnects and
+          offers the same batch from its spool, for ever. Nothing on the probe held a result to
+          the schema, and a script reaches it without any `ptrace`: `exe.script` and
+          `exe.script.advanced` pass the program's own `message` (unbounded; the schema allows
+          2,000) and its channels' `key`, `name` and `unit` (100, 200, 50) straight through,
+          and a sensor's channel with a field the schema does not list is refused too. A U+0000
+          anywhere a string reaches PostgreSQL failed differently and as completely: text cannot
+          hold it (`22021`, measured on this stack's database), ingestion answers
+          `storage-error`, and the probe retries the batch for ever. Now **`fitResult`**
+          (`@ms/shared`, `protocol/result-fit.ts`) makes every result both runners settle fit
+          before it is handed on, scheduled and on-demand alike: NULs out of every string, the
+          message clipped to 2,000 with an ellipsis (never half a surrogate pair), a channel
+          whose key or value cannot be sent dropped (a gap, never a made-up value; a key is never
+          clipped, which would make it another channel), a bad `counter` or `counterBits` left
+          off with the value kept, `name` and `unit` clipped, channels past 500 dropped, unknown
+          fields not copied. The schema now reads its bounds from `RESULT_LIMITS` beside it. What
+          was dropped is logged per result with the sensor (*a check returned readings that
+          cannot be sent as they are*).
+        - **A forged answer line ended the probe.** `ProcessRunner` cast the check process's
+          `ms-check-result:` JSON. `{"ok":true}` with no `durationMs`, or a string one, threw at
+          `toFixed` in `#emit`, inside `void this.#run(job).finally(…)`: an unhandled rejection,
+          which the lifecycle answers by shutting the probe down. Now `readAnswer` checks each
+          field the runner reads (`ok` a boolean, `durationMs` a finite number ≥ 0, `message`
+          text, `channels` a list, the four flags booleans); a line that is not an answer is
+          the check process not answering (`worker-crash`, counted in `crashed`, its reason in
+          the message and the log). And `#pump` catches whatever `#run` throws, logs it and
+          answers the check if it is not yet answered.
+        - **`startup: true` is believed only before the ready line**, which is the only place
+          `check-child.ts` says it. After it, it was any script's way to put the probe's start-up
+          failing on Probe Health (`childStartupFailed`) for a check that ran.
+        - **`ping`'s output was kept whole.** Every duplicate reply prints a line, and the
+          device being pinged decides how many it sends; `runPing` concatenated both streams for
+          the whole check. Now each keeps 64 Ki characters (`PING_OUTPUT_CHARS`) and the rest is
+          read and dropped, so ping never blocks on a full pipe.
+        - **A notification's error with a NUL was re-sent every five minutes, for ever.** The
+          dispatcher writes `result.error` to `notification_request.last_error`, and it quotes the
+          far end: an execute-program action's last line of output, a webhook's response body.
+          With a NUL in it the `UPDATE` failed, the pass ended there, the request kept the
+          five-minute lease its claim wrote, and once that ran out it was claimed and the program
+          run (or the webhook sent) again; the claim has no attempt bound. Now `#record` writes
+          the error without NULs, for every method, and `ProgramTransport`'s excerpt drops them
+          as well, since a test send shows it to the caller.
+      - **Every parent, what it trusts, and why that is safe.**
+
+        | Parent ← child | What the parent acts on | Why it is safe |
+        | --- | --- | --- |
+        | `ProcessRunner` ← check process: ready line | starts the check's clock | `ReadyLine` holds at most the marker; a forged or early line moves a clock that `runProgram`'s backstop (start-up + timeout + margin) still bounds |
+        | `ProcessRunner` ← check process: group lines | `SIGKILL` to a script group | `P-266`: each line is a claim `/proc` must confirm (parent from the runner's own spawn, `pid == pgrp == session`, uid, `starttime`), at most 16 a check |
+        | `ProcessRunner` ← check process: result line | the sensor's result | `sensorId` is the job's, never the line's, so a check can answer only for itself, which its script decides anyway; fields checked and fitted (above) |
+        | `ProcessRunner` ← check process: exit, signal, stderr | phase and message | first 64 KiB of each stream kept, the rest drained; the last 400 characters of stderr in a message that is then fitted |
+        | `ProcessRunner` → check process | credentials on stdin | the process holds its own sensor's request only, which its script (same uid, given `MS_SECRET` anyway) can read; argv carries none |
+        | check process / pool worker ← script (`exe.script*`, `runScript`) | the reading | runs as the same uid as the script, so no privilege is lent; 64 KiB per stream, truncated output refused, at most 50 channels; message and channels fitted at the runner (above) |
+        | `CheckPool` ← worker thread: `ready`, `result` | marks a worker ready; settles the job | the worker is this probe's own code in this process: it could do anything the probe can, so its messages are not a boundary; a result settles only the job the pool dispatched to that slot (`jobId` match), and `sensorId` is the pool's; what a check's result holds is a device's words and is fitted (above) |
+        | pool worker ← `ping` | reply times, loss | a system binary run with an argv the probe builds; output bounded (above) and parsed by regex into numbers |
+        | pool worker ← PowerShell (`runPowerShell`) | the WMI reading | 512 KiB per stream, truncated output refused, the last marked line parsed as JSON and read field by field; same user as the probe |
+        | `runProgram` (all of the above, and the core's program action) ← any program | exit code, signal, pid | the group it signals is the pid of its own spawn; `kill(-pid, 0)` only asks; output bounded and drained |
+        | `ProgramTransport` (core) ← notification program | retry or not; `last_error`; the journal | runs as `notifications.program` uid/gid, chosen by a path resolved inside the configured directory, never from output; a non-zero exit is not retried; a timeout or signal is, within `maxAttempts`; 200 characters of the last line, without NULs (above); both streams to the journal, scrubbed, at most `maxOutputBytes` (≤ 1 MiB) each |
+        | `ReportFormatter` (core) ← format worker | the formatted report's bytes | the core's own code in its own process, formatting a document the core built; a reply settles only its slot's job (`id` match); bounded by the job's timeout |
+        | `systemd-notify` (`lifecycle/systemd.ts`) | nothing but its error, logged | output ignored |
+        | `install.sh` ← `ms-setup --outcome FILE` | the summary's wording | both run as root from the same release; the file is `mktemp`'s (0600, unguessable, removed on exit); its word is matched against three literals in a `case`, and anything else prints "as ms-setup said above"; never run, sourced or used as a path |
+        | `place-release.sh`, `setup.sh`, `ms-setup.ps1` ← `ms-<svc> config check` | whether to go on | root running the release it is installing; exit status decides; the output is only printed, indented (`setup.sh` picks its `warning:` lines to print) |
+        | `install-probe.sh` ← `node -p` on `probe.json` | `core.host`, printed | a root-owned file the installer wrote |
+        | `recover.sh` ← `busctl`, `systemctl show` | numbers in shell arithmetic | systemd's own answers, read as root about its own units |
+
+        Not in the table: `scripts/sizing/*.mjs` (measurement tools, never shipped) and
+        `packages/simulators` (test doubles).
+      - **Not done, for follow-ups.**
+        - **The core is a boundary too, and it is still as strict as it was.** A peer that does
+          not fit its results (an older probe, anything else speaking the protocol) can still
+          stop itself with one bad result: the core should refuse the result, not the batch and
+          the connection, and should drop NULs from what it stores. That is a core change with
+          its own test from a peer that skips `fitResult`.
+        - **Duplicate ping replies count as replies.** `parsePingOutput` counts every `time=`
+          line, so a target answering each echo twice reports no loss for echoes it lost, and
+          jitter over the duplicates. iputils and BSD mark them `(DUP!)`.
+        - **Dropped readings are logged, not counted.** A count on Probe Health needs a protocol
+          field, and `P-275`'s bump is the one to share.
+        - **A webhook's response is quoted by the far end and may carry other control
+          characters**; only NUL breaks a write, so only NUL is taken out.
+      - **Tests.** `result-fit.test.ts` (shared): a fitting result unchanged; the refusal mark
+        kept; the message clipped, at a surrogate pair too; NULs out of message, name and unit;
+        keys (100 kept, 101, empty, NUL, a number dropped, 100 emoji kept, as Ajv counts); values
+        (NaN, Infinity, text, missing); counter and width; name and unit; 503 channels; unknown
+        fields; durations; and a property over 300 runs of arbitrary junk, each fitted result
+        taken by the core's own `parseProbeToCore` and holding no NUL. `process-runner.test.ts`:
+        ten forged answer lines (`test.forge-answer`), each answered `worker-crash` with its
+        reason, `crashed` 10, `startupFailed` 0, the runner then running an ordinary check, and no
+        unhandled rejection; an `onResult` that throws is logged and the next check runs; and
+        `test.unfit` (a 5,000-character message with a NUL, a long name and unit, four channels
+        no core takes) arrives fitted, which `check-pool.test.ts` asserts through a worker too.
+        `ping.test.ts`: a program writing 4 MiB to each stream finishes and leaves exactly the
+        bound of each. `program-delivery.test.ts`: a program printing NULs on stderr. And
+        `email-delivery.test.ts` (scenario, against the database): the real program transport
+        printing a NUL is recorded `failed` once and not run again; a refusal quoting a NUL is
+        recorded and not sent again.
+      - **Mutation 18/19 killed, one equivalent.** `fitResult`: NULs kept, no clip, half a pair
+        left, keys unchecked, finiteness unchecked, channels uncapped; `readAnswer`'s `durationMs`
+        and `ok` checks; `startup` believed after the ready line; either runner not fitting; the
+        `#pump` catch rethrowing; ping's stdout and stderr slices; the program excerpt's and the
+        dispatcher's NULs. Survived: ping's `if (stdout.length < bound)`, which only skips a
+        slice that would be empty.
+      - **Runs** (toolchain, Linux): shared `result-fit`, `messages`, `run-program`, 125/125;
+        sensors `ping`, `icmp-ping`, 36/36; probe `process-runner`, `check-pool`,
+        `script-groups`, `query-runner`, `result-sink`, 153/153; core `program-delivery`,
+        `email-delivery` (database), 61/61. None skipped.
 
 - [ ] **P-278 — a script leader that exits before the runner reads its line is never recorded**
       · S · P-266 · Found 2026-10-07 in `P-266`. A script whose leader exits before the runner

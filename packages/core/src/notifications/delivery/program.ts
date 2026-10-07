@@ -325,9 +325,15 @@ function scrubbed(run: ProgramRun, secrets: readonly string[]): ProgramRun {
     : { ...run, ...said };
 }
 
-/** The last thing the program said, which is usually why it failed. */
+/**
+ * The last thing the program said, which is usually why it failed.
+ *
+ * **Without U+0000** (`P-277`). This becomes the request's `last_error`, and PostgreSQL text
+ * cannot hold a NUL (`22021`): a program that printed one, as a binary body passed through by
+ * `curl` can, failed the write that records its attempt, so the attempt was never recorded.
+ */
 function excerpt(run: ProgramRun): string {
-  const said = (run.stderr === '' ? run.stdout : run.stderr).trim();
+  const said = (run.stderr === '' ? run.stdout : run.stderr).replaceAll('\u0000', '').trim();
   if (said === '') return '';
   const lines = said.split('\n');
   return ` — ${(lines[lines.length - 1] ?? '').slice(0, 200)}`;

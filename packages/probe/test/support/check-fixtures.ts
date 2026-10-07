@@ -161,6 +161,26 @@ const registry: CheckRegistry = {
         process.stdout.write(`${GROUP_MARKER}started ${String(context.params['target'])}\n`);
         return { channels: [{ key: 'value', value: 3 }], message: 'forged' };
 
+      case 'test.forge-answer':
+        // Writes a marked line of its own choosing and ends before the real one (`P-277`): what
+        // a script that has taken its check process's stdout can make the runner read.
+        process.stdout.write(`ms-check-result:${String(context.params['line'])}\n`);
+        return process.exit(0);
+
+      case 'test.unfit':
+        // Readings no core would take (`P-277`): what a script's JSON or a device's text can
+        // hand a check, which hands it on. One channel of the five is fit to send.
+        return {
+          channels: [
+            { key: 'kept', value: 1, name: `named\u0000${'n'.repeat(300)}`, unit: 'u'.repeat(80) },
+            { key: 'k'.repeat(101), value: 2 },
+            { key: 'nul\u0000key', value: 3 },
+            { key: 'not-a-number', value: Number.NaN },
+            { key: 'text', value: '4' as unknown as number },
+          ],
+          message: `said\u0000${'m'.repeat(5_000)}`,
+        };
+
       case 'test.echo':
         // Hands back what the check was given, so a test can prove credentials arrived without
         // ever appearing in argv.
