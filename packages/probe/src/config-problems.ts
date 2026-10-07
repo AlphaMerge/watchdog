@@ -28,7 +28,10 @@ export function carriesFlow(listenerFor: ReadonlyMap<string, string>): boolean {
 
 export function buildFindings(
   config: Pick<ProbeConfig, 'flowListener'> & {
-    probe: Pick<ProbeConfig['probe'], 'processUid' | 'scriptDir' | 'allowScriptsAsRoot'>;
+    probe: Pick<
+      ProbeConfig['probe'],
+      'processUid' | 'processGid' | 'scriptDir' | 'allowScriptsAsRoot'
+    >;
   },
   listenerFor: ReadonlyMap<string, string>,
   profile: BuildProfile,

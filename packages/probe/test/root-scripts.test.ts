@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -31,9 +31,13 @@ import {
 /** At runtime this file is `dist/test/root-scripts.test.js`. */
 const MAIN = join(import.meta.dirname, '..', 'src', 'main.js');
 
-type Settings = Pick<ProbeConfig['probe'], 'processUid' | 'scriptDir' | 'allowScriptsAsRoot'>;
+type Settings = Pick<
+  ProbeConfig['probe'],
+  'processUid' | 'processGid' | 'scriptDir' | 'allowScriptsAsRoot'
+>;
 const settings = (over: Partial<Settings> = {}): Settings => ({
   processUid: 0,
+  processGid: 0,
   scriptDir: '/srv/scripts',
   allowScriptsAsRoot: false,
   ...over,
@@ -51,16 +55,48 @@ describe('a probe whose scripts would run as root (`P-276`)', () => {
     }[] = [
       { name: 'root, scripts, no processUid', probe: settings(), euid: 0, kind: 'refused' },
       {
-        name: 'root, scripts, a processUid',
-        probe: settings({ processUid: 998 }),
+        name: 'root, scripts, a processUid and a processGid',
+        probe: settings({ processUid: 998, processGid: 998 }),
         euid: 0,
         kind: 'fine',
       },
       {
-        name: 'root, scripts, a processUid and the opt-out',
-        probe: settings({ processUid: 998, allowScriptsAsRoot: true }),
+        name: 'root, scripts, a processUid and a processGid and the opt-out',
+        probe: settings({ processUid: 998, processGid: 998, allowScriptsAsRoot: true }),
         euid: 0,
         kind: 'fine',
+      },
+      // The runner passes a gid only above 0, so this would be uid 998 in root's group.
+      {
+        name: 'root, scripts, a processUid and no processGid',
+        probe: settings({ processUid: 998 }),
+        euid: 0,
+        kind: 'refused',
+      },
+      {
+        name: 'root, scripts, a processUid and no processGid, the opt-out',
+        probe: settings({ processUid: 998, allowScriptsAsRoot: true }),
+        euid: 0,
+        kind: 'allowed',
+      },
+      {
+        name: 'root, no scripts, a processUid and no processGid',
+        probe: settings({ processUid: 998, scriptDir: '' }),
+        euid: 0,
+        kind: 'fine',
+      },
+      {
+        name: 'not root, scripts, a processUid and no processGid',
+        probe: settings({ processUid: 998 }),
+        euid: 998,
+        kind: 'fine',
+      },
+      // A gid alone leaves the user root.
+      {
+        name: 'root, scripts, a processGid and no processUid',
+        probe: settings({ processGid: 998 }),
+        euid: 0,
+        kind: 'refused',
       },
       {
         name: 'root, scripts, the opt-out',
@@ -97,8 +133,24 @@ describe('a probe whose scripts would run as root (`P-276`)', () => {
       // The setting first, the way the loader names one.
       assert.match(message, /^probe\.processUid: is not set, and this probe runs as root/);
       assert.match(message, /\(probe\.scriptDir: \/srv\/scripts\)/);
-      assert.match(message, /set probe\.processUid \(and probe\.processGid\)/);
+      assert.match(message, /set probe\.processUid and probe\.processGid to an unprivileged/);
       assert.match(message, /probe\.allowScriptsAsRoot: true/);
+    });
+
+    it("names the gid when a processUid would keep root's group", () => {
+      const verdict = rootScripts(settings({ processUid: 998 }), 0);
+      assert.equal(verdict.kind, 'refused');
+      const message = messageOf(verdict);
+      assert.match(message, /^probe\.processGid: is not set, so this probe, which runs as root/);
+      assert.match(message, /as uid 998 in root's group \(gid 0\)/);
+      assert.match(message, /\(probe\.scriptDir: \/srv\/scripts\)/);
+      assert.match(message, /probe\.allowScriptsAsRoot: true to run them in root's group/);
+
+      const allowed = rootScripts(settings({ processUid: 998, allowScriptsAsRoot: true }), 0);
+      assert.match(
+        messageOf(allowed),
+        /^probe\.allowScriptsAsRoot: is true, so every script in \/srv\/scripts runs as uid 998 in root's group \(gid 0\)/,
+      );
     });
 
     it('says what the opt-out costs, at every start', () => {
@@ -150,13 +202,22 @@ describe('a probe whose scripts would run as root (`P-276`)', () => {
 
     it('notes nothing where root would start it', () => {
       for (const probe of [
-        settings({ processUid: 998 }),
+        settings({ processUid: 998, processGid: 998 }),
         settings({ allowScriptsAsRoot: true }),
         settings({ scriptDir: '' }),
       ]) {
         assert.equal(rootScriptsNote(probe), undefined);
         assert.deepEqual(findings(probe).notes ?? [], []);
       }
+    });
+
+    it('notes a processUid without a processGid, naming the gid', () => {
+      const { notes = [] } = findings(settings({ processUid: 998 }));
+      assert.equal(notes.length, 1);
+      assert.match(
+        notes[0] ?? '',
+        /^started as root, this probe would refuse to start: probe\.processGid: is not set/,
+      );
     });
 
     describe('through the verb', () => {
@@ -205,7 +266,7 @@ describe('a probe whose scripts would run as root (`P-276`)', () => {
 
       it('says nothing of it with a processUid, or with the opt-out', { timeout: 150_000 }, () => {
         for (const probe of [
-          { scriptDir: dir, processUid: 65_534 },
+          { scriptDir: dir, processUid: 65_534, processGid: 65_534 },
           { scriptDir: dir, allowScriptsAsRoot: true },
         ]) {
           const run = check(probe);
@@ -281,23 +342,44 @@ describe('a probe whose scripts would run as root (`P-276`)', () => {
     const said = (pattern: RegExp) => (one: Record<string, unknown>) =>
       typeof one['msg'] === 'string' && pattern.test(one['msg']);
 
+    /**
+     * Starts a probe that must refuse, and asserts it did so before it opened anything: exit 78,
+     * the line, no spool directory (the first thing the probe creates) and no connection to the
+     * core (the last).
+     */
+    const refuses = async (probe: Record<string, unknown>, reason: RegExp): Promise<void> => {
+      const spoolDir = join(dir, `refused-spool-${String(process.hrtime.bigint())}`);
+      const connections = core?.connections ?? -1;
+      assert.ok(connections >= 0, 'no core to count connections on');
+      const one = start({ ...probe, spoolDir });
+      const status = await within(60_000, 'the probe to refuse', one.exited);
+      const logs = one.logs();
+      assert.equal(status, 78, JSON.stringify(logs));
+      assert.ok(logs.some(said(reason)), JSON.stringify(logs));
+      assert.ok(!logs.some(said(/^ready$/)), 'a refused probe said it was ready');
+      assert.equal(existsSync(spoolDir), false, 'a refused probe created its spool directory');
+      assert.equal(core?.connections, connections, 'a refused probe connected to the core');
+    };
+
     it(
       'refuses with exit 78 and the reason, before it opens anything',
       { skip, timeout: 150_000 },
       async () => {
-        const probe = start({ scriptDir: dir });
-        const status = await within(60_000, 'the probe to refuse', probe.exited);
-        const logs = probe.logs();
-        assert.equal(status, 78, JSON.stringify(logs));
-        assert.ok(
-          logs.some(
-            said(
-              /^Configuration error: probe\.processUid: is not set, and this probe runs as root/,
-            ),
-          ),
-          JSON.stringify(logs),
+        await refuses(
+          { scriptDir: dir },
+          /^Configuration error: probe\.processUid: is not set, and this probe runs as root/,
         );
-        assert.ok(!logs.some(said(/^ready$/)), 'a refused probe said it was ready');
+      },
+    );
+
+    it(
+      'refuses a processUid without a processGid the same way, naming the gid',
+      { skip, timeout: 150_000 },
+      async () => {
+        await refuses(
+          { scriptDir: dir, processUid: 65_534 },
+          /^Configuration error: probe\.processGid: is not set, .* as uid 65534 in root's group \(gid 0\)/,
+        );
       },
     );
 

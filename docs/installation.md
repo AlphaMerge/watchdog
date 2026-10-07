@@ -362,9 +362,11 @@ Migrations run on startup and are reversible. A build started against a database
 affected; a probe under a drop-in that sets `User=root`, or started by hand as root, is. The
 installer's configuration check passes it, because the check cannot see which account the unit
 runs as, and the restart then fails with *probe.processUid: is not set, and this probe runs as
-root …*. Before upgrading, run it as an unprivileged account, or set `probe.processUid` and
-`probe.processGid`, or — if root is what you mean — `"allowScriptsAsRoot": true` under `probe`
-(`administration.md` → Script sensors).
+root …*. The same goes for a root probe that sets `probe.processUid` and leaves
+`probe.processGid` at 0, which ran its scripts in root's group. Before upgrading, run it as an
+unprivileged account, or set both `probe.processUid` and `probe.processGid`, or — if root is
+what you mean — `"allowScriptsAsRoot": true` under `probe` (`administration.md` → Script
+sensors).
 
 **From a release before `A-47`**, check two things first. An `api.trustedProxies` range wider
 than /16 for IPv4 or /48 for IPv6 is now refused, so the configuration check above stops there

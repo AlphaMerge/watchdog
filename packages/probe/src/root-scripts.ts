@@ -22,7 +22,7 @@ import type { ProbeConfig } from '@ms/shared';
  */
 
 export type RootScripts =
-  /** Not root, not POSIX, or root with checks run as another account: nothing to say. */
+  /** Not root, not POSIX, or root with checks run as another user and group: nothing to say. */
   | { readonly kind: 'fine' }
   /** Root, and no script directory: said, and the probe starts. */
   | { readonly kind: 'no-scripts'; readonly message: string }
@@ -31,16 +31,32 @@ export type RootScripts =
   /** Root with scripts, and nobody said so: the probe does not start. */
   | { readonly kind: 'refused'; readonly message: string };
 
-type Settings = Pick<ProbeConfig['probe'], 'processUid' | 'scriptDir' | 'allowScriptsAsRoot'>;
+type Settings = Pick<
+  ProbeConfig['probe'],
+  'processUid' | 'processGid' | 'scriptDir' | 'allowScriptsAsRoot'
+>;
 
 const HOW =
-  'set probe.processUid (and probe.processGid) to an unprivileged account, or run the probe as ' +
+  'set probe.processUid and probe.processGid to an unprivileged account, or run the probe as ' +
   'one, as the packaged ms-probe.service does';
 
-/** What a probe with these settings, running as effective user `euid`, says or does at start. */
+/**
+ * What a probe with these settings, running as effective user `euid`, says or does at start.
+ *
+ * **A `processUid` without a `processGid` is root's group** (`P-276` review). The runner passes a
+ * gid only when it is above 0, so a root probe's scripts would run as that user and keep group 0:
+ * every file root's group may write — a `root:root 0660` socket, say — is open to whoever writes
+ * the script directory. So that is refused the same way, naming the gid, and the opt-out covers
+ * it too. Nothing shipped sets one without the other, so no installation meets it unchosen.
+ */
 export function rootScripts(probe: Settings, euid: number | undefined): RootScripts {
-  if (euid !== 0 || probe.processUid > 0) return { kind: 'fine' };
+  if (euid !== 0) return { kind: 'fine' };
+  const user = probe.processUid > 0;
+  if (user && probe.processGid > 0) return { kind: 'fine' };
   if (probe.scriptDir === '') {
+    // Nothing runs in a process of its own without a script directory, so with a uid set there
+    // nothing of this probe's settings runs as root or in its group.
+    if (user) return { kind: 'fine' };
     return {
       kind: 'no-scripts',
       message:
@@ -51,21 +67,28 @@ export function rootScripts(probe: Settings, euid: number | undefined): RootScri
   if (probe.allowScriptsAsRoot) {
     return {
       kind: 'allowed',
-      message:
-        `probe.allowScriptsAsRoot: is true, so every script in ${probe.scriptDir} runs as root: ` +
-        'whoever can write there has this machine, and the probe cannot tell what a dead check ' +
-        `left running from any other root process. To stop it, ${HOW}`,
+      message: user
+        ? `probe.allowScriptsAsRoot: is true, so every script in ${probe.scriptDir} runs as uid ` +
+          `${String(probe.processUid)} in root's group (gid 0): whoever can write there can ` +
+          `write whatever root's group can. To stop it, ${HOW}`
+        : `probe.allowScriptsAsRoot: is true, so every script in ${probe.scriptDir} runs as ` +
+          'root: whoever can write there has this machine, and the probe cannot tell what a ' +
+          `dead check left running from any other root process. To stop it, ${HOW}`,
     };
   }
-  return { kind: 'refused', message: refusal(probe.scriptDir) };
+  return { kind: 'refused', message: refusal(probe, user) };
 }
 
-function refusal(scriptDir: string): string {
-  return (
-    'probe.processUid: is not set, and this probe runs as root with a script directory ' +
-    `(probe.scriptDir: ${scriptDir}), so every script in it would run as root. Either ${HOW}; ` +
-    'or set probe.allowScriptsAsRoot: true to run them as root anyway'
-  );
+function refusal(probe: Settings, user: boolean): string {
+  const where = `(probe.scriptDir: ${probe.scriptDir})`;
+  return user
+    ? `probe.processGid: is not set, so this probe, which runs as root with a script directory ` +
+        `${where}, would run every script in it as uid ${String(probe.processUid)} in root's ` +
+        `group (gid 0). Either ${HOW}; or set probe.allowScriptsAsRoot: true to run them in ` +
+        "root's group anyway"
+    : 'probe.processUid: is not set, and this probe runs as root with a script directory ' +
+        `${where}, so every script in it would run as root. Either ${HOW}; or set ` +
+        'probe.allowScriptsAsRoot: true to run them as root anyway';
 }
 
 /**

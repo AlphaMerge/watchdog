@@ -9272,9 +9272,14 @@ because each is a decision rather than a defect:
         `config check` note through the verb, and, as root, `dist/src/main.js` refusing with 78
         and starting with the opt-out, a `processUid` and no script directory. The shared check's
         notes in `config-check.test.ts`.
-      - **Not done:** a root drop-in is learnt at the restart, not by the installer's check; and
-        `processGid` left at 0 under a `processUid` keeps scripts in group root, which is not
-        said.
+      - **Review: a `processUid` with `processGid` 0 is refused too.** The runner passes a gid
+        only above 0, so a root probe's scripts ran as that uid in group 0, able to write what
+        root's group may. It is refused the same way, naming the gid (*probe.processGid: is not
+        set, … as uid N in root's group (gid 0)*), and the opt-out covers it — refused rather than
+        warned because nothing shipped or in `dev/` sets a uid without a gid. The as-root refusal
+        tests now also assert that no spool directory was created and that the core saw no
+        connection.
+      - **Not done:** a root drop-in is learnt at the restart, not by the installer's check.
 
 - [ ] **P-277 — check every runner that acts on what a child process writes** · S · P-266 ·
       Found 2026-10-07 in `P-266`. The P-266 review found the runner trusting a line on the check

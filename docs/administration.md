@@ -654,7 +654,11 @@ arguments and the variables — so treat both as untrusted input in every script
   or under a drop-in that sets `User=root`, does. Run it as an unprivileged account, or set
   `probe.processUid` and `probe.processGid` to one. If root is what you mean, set
   `"allowScriptsAsRoot": true` under `probe`: it starts, and logs a warning at every start that
-  its scripts run as root. A root probe with no script directory starts, and logs a warning that
+  its scripts run as root. **A `processUid` needs a `processGid` too:** with the gid left at 0 the
+  scripts run as that user in root's group, which can write whatever root's group may (a
+  `root:root 0660` socket, say), so a root probe with scripts refuses that the same way, with
+  *probe.processGid: is not set, … as uid N in root's group (gid 0)*, and `allowScriptsAsRoot`
+  starts it with a warning. A root probe with no script directory starts, and logs a warning that
   it runs as root. `ms-probe config check` cannot know which account the service will run as — the
   installer runs it as root, for a unit that runs as `ms-probe` — so it passes such a file and
   prints a `note:` line saying a root start would refuse it; the installer does not show notes.

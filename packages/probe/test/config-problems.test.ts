@@ -24,7 +24,7 @@ const MAIN = join(import.meta.dirname, '..', 'src', 'main.js');
 
 const flow = (enabled: boolean): Parameters<typeof buildFindings>[0] => ({
   // No script directory, so `P-276`'s note has nothing to say and these cases are about flow.
-  probe: { processUid: 0, scriptDir: '', allowScriptsAsRoot: false },
+  probe: { processUid: 0, processGid: 0, scriptDir: '', allowScriptsAsRoot: false },
   flowListener: {
     enabled,
     port: 2055,

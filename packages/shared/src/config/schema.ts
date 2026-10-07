@@ -696,7 +696,8 @@ export interface ProbeConfig {
      * run as the user holding this probe's certificate and credential material. Setting it needs
      * the probe to be started with the privilege to change user, which in practice means root or
      * `CAP_SETUID`; it is ignored on Windows, which has no equivalent this can reach. A probe
-     * that starts as root with a `scriptDir` and no `processUid` refuses to start, unless
+     * that starts as root with a `scriptDir` and no `processUid`, or a `processUid` and no
+     * `processGid` (which would leave its scripts in root's group), refuses to start, unless
      * `allowScriptsAsRoot` says to (`P-276`).
      */
     processUid: number;
@@ -709,8 +710,9 @@ export interface ProbeConfig {
      * machine, and the checks `P-266` makes before ending what a dead check left running compare
      * against a user every root process shares. The packaged `ms-probe.service` runs the probe as
      * `ms-probe` and never meets this; a probe run by hand, or under a drop-in that sets
-     * `User=root`, does. `true` starts it anyway, and the probe says so in its log at every start.
-     * It does nothing for a probe that is not root, or that has a `processUid`.
+     * `User=root`, does. The same goes for a `processUid` with `processGid` left at 0, which runs
+     * the scripts in root's group. `true` starts it anyway, and the probe says so in its log at
+     * every start. It does nothing for a probe that is not root, or that has both ids.
      */
     allowScriptsAsRoot: boolean;
     /**

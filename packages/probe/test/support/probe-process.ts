@@ -113,6 +113,8 @@ export async function within<T>(ms: number, what: string, promise: Promise<T>): 
  */
 export class FakeCore {
   readonly received: ProbeToCoreMessage[] = [];
+  /** Every TCP connection accepted, handshake or not: what a refused probe must not have made. */
+  connections = 0;
   /** Why each message the core's own validator turned away was refused. Empty, if all is well. */
   readonly refused: string[] = [];
   /** What the next `welcome` says this core speaks. An older core is this, lowered. */
@@ -143,6 +145,9 @@ export class FakeCore {
       requestCert: true,
       rejectUnauthorized: true,
       minVersion: 'TLSv1.2',
+    });
+    server.on('connection', () => {
+      core.connections += 1;
     });
     server.on('secureConnection', (socket) => {
       core.#socket = socket;
