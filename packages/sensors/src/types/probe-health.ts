@@ -242,6 +242,16 @@ const CHANNELS: readonly ChannelDef[] = [
   { key: 'refused', name: 'Checks refused', unit: 'checks', counter: { bits: 64 } },
   { key: 'timedOut', name: 'Checks timed out', unit: 'checks', counter: { bits: 64 } },
   { key: 'workerCrashes', name: 'Worker crashes', unit: 'workers', counter: { bits: 64 } },
+  // **Workers the pool could not start (`P-263`), and no limit.** A worker still loading the
+  // catalogue at its start-up bound is terminated and replaced, and no check is lost to it, since
+  // checks go only to ready workers; a probe short of them shows in `checkWait` and `refused`,
+  // which carry their own limits. This says why.
+  {
+    key: 'workerStartupFailed',
+    name: 'Workers not started',
+    unit: 'workers',
+    counter: { bits: 64 },
+  },
   // **The alarm for a probe that is up and monitoring nothing** (`P-62`). The pool latches itself
   // off after repeated worker start failures and runs nothing until the probe restarts, while the
   // link stays connected and `poolUsage` reads 0% — a quiet night, as far as every other channel

@@ -429,6 +429,12 @@ const PROBE_METRICS: readonly Metric[] = [
     counter: true,
   },
   {
+    key: 'workerStartupFailed',
+    name: 'ms_probe_workers_not_started_total',
+    help: "Check workers that never became ready: still loading the probe's sensor types at the start-up bound, so terminated and replaced, or dead while loading them.",
+    counter: true,
+  },
+  {
     key: 'poolState',
     name: 'ms_probe_pool_failed',
     help: '1 when this probe’s worker pool has given up and it can run no checks.',

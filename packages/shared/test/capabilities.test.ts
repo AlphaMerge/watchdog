@@ -57,6 +57,7 @@ describe('what a protocol version can do', () => {
       databaseAddressPinning: false,
       targetPolicyException: false,
       childStartup: false,
+      workerStartup: false,
     });
   });
 
@@ -234,9 +235,16 @@ describe('the health a peer can be sent', () => {
     syslogOverwritten: 75,
     childStartupFailed: 3,
     childStartupMs: { p50: 40, p95: 9_500, p99: 14_800, max: 30_000 },
+    workerStartupFailed: 4,
   };
-  /** `health` as a core at 26 to 28 is sent it: everything but 29's two fields (`P-260`). */
-  const { childStartupFailed: _failed, childStartupMs: _startup, ...withoutStartup } = health;
+  /** `health` as a core at 29 is sent it: everything but 30's one field (`P-263`). */
+  const { workerStartupFailed: _workers, ...withoutWorkerStartup } = health;
+  /** `health` as a core at 26 to 28 is sent it: that, less 29's two fields (`P-260`). */
+  const {
+    childStartupFailed: _failed,
+    childStartupMs: _startup,
+    ...withoutStartup
+  } = withoutWorkerStartup;
   /** `health` as a core at 25 is sent it: that, less 26's two fields (`B-14`). */
   const {
     trapOverwritten: _traps,
@@ -432,6 +440,45 @@ describe('the health a peer can be sent', () => {
     assert.deepEqual(healthForPeer(health, 29).childStartupMs, health.childStartupMs);
   });
 
+  it('leaves the workers not started out for a core at 29, and keeps 29’s', () => {
+    // `P-263`, stripped on its own: a core at 29 knows everything else.
+    for (const version of [16, 26, 28, 29]) {
+      assert.equal(
+        'workerStartupFailed' in healthForPeer(health, version),
+        false,
+        `workerStartupFailed sent to a core at ${String(version)}`,
+      );
+    }
+    assert.deepEqual(healthForPeer(health, 29), withoutWorkerStartup);
+    assert.equal(healthForPeer(health, 29).childStartupFailed, 3);
+    assert.deepEqual(healthForPeer({ memoryMb: 1, workerStartupFailed: 2 }, 29), { memoryMb: 1 });
+    assert.deepEqual(healthForPeer({ memoryMb: 1, workerStartupFailed: 2 }, 30), {
+      memoryMb: 1,
+      workerStartupFailed: 2,
+    });
+    assert.equal(healthForPeer(health, 30).workerStartupFailed, 4);
+  });
+
+  it('knows the workers not started in this build’s health schema, as a count', () => {
+    // The other end of the gate: a core at 30 is sent it, so its schema must take it.
+    const read = (sent: unknown): unknown => {
+      const parsed = parseProbeToCore({
+        type: 'heartbeat',
+        seq: 1,
+        sentAt: 'now',
+        health: { memoryMb: 12, workerStartupFailed: sent },
+      });
+      if (parsed.type !== 'heartbeat') return 'not a heartbeat';
+      assert.equal(parsed.health?.memoryMb, 12, 'the count cost the heartbeat its health');
+      return parsed.health.workerStartupFailed;
+    };
+    assert.equal(read(4), 4);
+    assert.equal(read(0), 0);
+    // A value no count can be is a gap on the channel, and the heartbeat is kept (`P-224`).
+    assert.equal(read(-1), undefined);
+    assert.equal(read(1.5), undefined);
+  });
+
   it('knows both child start-up fields in this build’s health schema', () => {
     // The other end of the gate: a core at 29 is sent them, so its schema must take them.
     const read = (field: 'childStartupFailed' | 'childStartupMs', sent: unknown): unknown => {
@@ -457,8 +504,8 @@ describe('the health a peer can be sent', () => {
   });
 
   it('sends everything to a core that knows it', () => {
-    assert.equal(PROTOCOL_VERSION, 29);
-    assert.deepEqual(healthForPeer(health, 29), health);
+    assert.equal(PROTOCOL_VERSION, 30);
+    assert.deepEqual(healthForPeer(health, 30), health);
     assert.deepEqual(healthForPeer(health, PROTOCOL_VERSION), health);
   });
 
@@ -493,6 +540,8 @@ describe('the health a peer can be sent', () => {
       // `P-260`: two new fields, at the version that adds them.
       childStartupFailed: 29,
       childStartupMs: 29,
+      // `P-263`: one new field, at the version that adds it.
+      workerStartupFailed: 30,
     };
     // The rest predate `P-178`, and a core older than that refuses a newer probe at the handshake,
     // in words, so it is never sent a heartbeat at all. Pinned by count, so that a new field is
@@ -587,6 +636,7 @@ describe('the health a peer can be sent', () => {
     assert.deepEqual(missingCapabilities(27), [
       'connect to an address one device is excepted for, although its target policy refuses it',
       'report the script checks it could not start, and how long one takes to start',
+      'report the check workers it could not start',
     ]);
     // Stripping what a peer does not know is by capability: 27 has no health field, so a core
     // at 26 is sent what a core at 27 is.
@@ -616,8 +666,19 @@ describe('the child start-up counters (`P-260`)', () => {
     assert.equal(capabilitiesFor(29).childStartup, true);
     assert.deepEqual(missingCapabilities(28), [
       'report the script checks it could not start, and how long one takes to start',
+      'report the check workers it could not start',
     ]);
-    assert.deepEqual(missingCapabilities(29), []);
+  });
+});
+
+describe('the check workers not started (`P-263`)', () => {
+  it('are reported from 30, and by nothing older', () => {
+    // One health field under one capability, stripped below 30.
+    assert.equal(versionFor('workerStartup'), 30);
+    assert.equal(capabilitiesFor(29).workerStartup, false);
+    assert.equal(capabilitiesFor(30).workerStartup, true);
+    assert.deepEqual(missingCapabilities(29), ['report the check workers it could not start']);
+    assert.deepEqual(missingCapabilities(30), []);
   });
 });
 

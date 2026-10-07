@@ -3,6 +3,7 @@ import { pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { describeError, type CheckResult, type Logger } from '@ms/shared';
 import type { MemoryCapReading } from './memory-cap.js';
+import { STARTUP_TIMEOUT_MS } from './process-runner.js';
 import { RefusalLog } from './refusal-log.js';
 import type { CheckPhase, CheckRequest, ResultMeta, SessionCounters } from './types.js';
 
@@ -186,6 +187,15 @@ export interface PoolStats {
    */
   disabled: boolean;
   workerCrashes: number;
+  /**
+   * Workers that never said ready (`P-263`): still loading their registry when the start-up bound
+   * passed, so the pool terminated them, or dead while loading. A running total.
+   *
+   * **A worker that dies while loading is also in `workerCrashes`**, as it always was. One that
+   * hangs is only here: nothing crashed, the pool gave up on it. The checks it would have run went
+   * to other workers, so no sensor reads anything for it; this is where it shows.
+   */
+  startupFailed: number;
   waitMs: { p50: number; p95: number; p99: number; max: number };
   runMs: { p50: number; p95: number; p99: number; max: number };
 }
@@ -239,6 +249,12 @@ export interface CheckPoolOptions {
    * costs a worker restart.
    */
   abortGraceMs?: number;
+  /**
+   * How long a new worker has to load its registry and say ready (`P-263`). `STARTUP_TIMEOUT_MS`
+   * unless a test sets it. A worker still loading at the bound is terminated, counted in
+   * `startupFailed`, and replaced after a growing delay.
+   */
+  startupTimeoutMs?: number;
   /** Module whose default export is a `CheckRegistry`. P-05 supplies the real one. */
   registryModule?: string;
   /**
@@ -424,6 +440,7 @@ export class CheckPool {
   readonly #durationWindowMs: number;
   readonly #queueMax: number;
   readonly #abortGraceMs: number;
+  readonly #startupTimeoutMs: number;
   readonly #registryModule: string;
   readonly #onResult: (result: CheckResult, meta: ResultMeta) => void;
 
@@ -501,6 +518,7 @@ export class CheckPool {
   readonly #refusals: RefusalLog;
   #discarded = 0;
   #crashes = 0;
+  #startupFailed = 0;
 
   constructor(options: CheckPoolOptions) {
     this.#logger = options.logger.child({ component: 'check-pool' });
@@ -514,6 +532,7 @@ export class CheckPool {
     this.#durationWindowMs = options.durationWindowMs ?? DURATION_WINDOW_MS;
     this.#queueMax = options.queueMaxLength ?? 1_000;
     this.#abortGraceMs = options.abortGraceMs ?? 2_000;
+    this.#startupTimeoutMs = Math.max(1, options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS);
     this.#registryModule =
       options.registryModule ?? join(import.meta.dirname, 'catalogue-registry.js');
     this.#onResult = options.onResult;
@@ -673,6 +692,8 @@ export class CheckPool {
     this.#shrinkTimer = undefined;
     if (this.#overCeilingTimer !== undefined) clearTimeout(this.#overCeilingTimer);
     this.#overCeilingTimer = undefined;
+    // Each was counted in `#growing` while it waited; none will spawn now.
+    this.#growing -= this.#retryTimers.size;
     for (const timer of this.#retryTimers) clearTimeout(timer);
     this.#retryTimers.clear();
     for (const job of this.#queue.splice(0)) this.#settle(job, 'pool-stopped', 'probe is stopping');
@@ -816,6 +837,7 @@ export class CheckPool {
       discarded: this.#discarded,
       disabled: this.#disabled,
       workerCrashes: this.#crashes,
+      startupFailed: this.#startupFailed,
       waitMs: percentiles(this.#wait),
       runMs: percentiles(this.#run),
     };
@@ -1132,6 +1154,9 @@ export class CheckPool {
 
   #onWorkerMessage(slot: Slot, message: unknown): void {
     const parsed = message as { type?: string; jobId?: string };
+    // A worker the pool has let go: one that said ready just after its start-up bound passed
+    // (`P-263`) must not end the streak of failed starts, and is no longer in `#slots` to serve.
+    if (slot.retired) return;
     if (parsed.type === 'ready') {
       slot.ready = true;
       if (this.#startFailures > 0) {
@@ -1232,63 +1257,125 @@ export class CheckPool {
     if (index >= 0) this.#slots.splice(index, 1);
 
     if (!slot.ready) {
-      this.#startFailures += 1;
-      // **Only when nothing is left working** (`P-80`). The counter is pool-wide and reset only by
-      // a worker reaching `ready`, and it used to latch on its own — so three failures during a
-      // *growth* burst killed a pool that was running fine. `#grow` spawned the whole shortfall at
-      // once (sixty at the v1 target, each loading the ~35 MB catalogue; eight at a time since
-      // `P-206`, which still leaves room for three), so on a memory-tight host three died during
-      // bootstrap before any sibling reported ready, and the probe
-      // monitored nothing until somebody restarted it — `#admission` answers `disabled` before it
-      // looks at anything else. The latch is for a pool that cannot run checks at all, which is
-      // `P-62`'s broken registry: there every worker dies, so nothing is ready and this still
-      // fires. Holding ready workers is exactly the difference between the two.
-      const working = this.#slots.some((held) => held.ready);
-      if (this.#startFailures >= MAX_CONSECUTIVE_START_FAILURES && !working) {
-        this.#disabled = true;
-        // **And answer what was already accepted.** A queued job carries no timeout — the timer is
-        // armed in `#dispatch`, when it *leaves* the queue — so returning here left every accepted
-        // check permanently unsettled: no result, no timer, and counted in none of `completed`,
-        // `failed`, `timedOut`, `refused` or `discarded`. `stop()` has always drained for this
-        // exact reason, and `check-flow.ts` states the guarantee verbatim: a check accepted by a
-        // runner must settle.
-        const abandoned = this.#queue.splice(0);
-        for (const job of abandoned) {
-          this.#settle(job, 'pool-disabled', 'the worker pool has given up and cannot run checks');
-        }
-        this.#logger.error(
-          {
-            failures: this.#startFailures,
-            registry: this.#registryModule,
-            abandoned: abandoned.length,
-          },
-          'check workers keep failing to start; the pool is disabled until the probe restarts',
-        );
-        return;
-      }
-      // Some workers are working, so this keeps trying, but not at the speed of the event loop.
-      const delayMs = Math.min(
-        START_RETRY_MAX_MS,
-        START_RETRY_BASE_MS * 2 ** (this.#startFailures - 1),
-      );
-      if (this.#startFailures === 1) {
-        this.#logger.warn(
-          { reason, registry: this.#registryModule, retryInMs: delayMs },
-          'a check worker failed to start; retrying with a growing delay while the others work',
-        );
-      }
-      const timer = setTimeout(() => {
-        this.#retryTimers.delete(timer);
-        void this.#spawn().then(() => {
-          this.#pump();
-        });
-      }, delayMs);
-      this.#retryTimers.add(timer);
+      this.#startFailed(reason, { hung: false });
       return;
     }
     void this.#spawn().then(() => {
       this.#pump();
     });
+  }
+
+  /**
+   * A worker was still loading its registry when its start-up bound passed (`P-263`).
+   *
+   * Terminated, so it holds neither a loading turn nor its memory, and replaced like any other
+   * failed start: after a growing delay, so a registry that always hangs is retried at a rate the
+   * log and the CPU can carry. Its exit is the pool's own doing, so `retired` keeps it out of
+   * `#onWorkerGone` and it is not a crash.
+   */
+  #startTimedOut(slot: Slot, startedAt: bigint): void {
+    if (slot.ready || slot.gone || slot.retired || this.#stopped) return;
+    slot.retired = true;
+    const index = this.#slots.indexOf(slot);
+    if (index >= 0) this.#slots.splice(index, 1);
+    // Still resident until its thread exits, as a retired worker is (`#readMemory`).
+    this.#terminating += 1;
+    void slot.worker.terminate().finally(() => {
+      this.#terminating -= 1;
+    });
+    const tookMs = Math.round(Number(process.hrtime.bigint() - startedAt) / 1e6);
+    this.#startFailed(
+      `had not loaded its sensor types within the ${String(this.#startupTimeoutMs)} ms it is allowed (${String(tookMs)} ms)`,
+      { hung: true, workerId: slot.id },
+    );
+  }
+
+  /**
+   * A worker never said ready: counted, then replaced after a growing delay, or the pool gives up.
+   *
+   * **A hang never latches the pool off**, and that is a choice. The latch is for a pool that
+   * cannot run checks at all (`P-62`, `P-80`): a registry that throws throws again on every
+   * attempt, and three such deaths with nothing working is proof. A worker that misses the bound
+   * may be the machine and not the registry — `P-258` measured the catalogue's import at up to
+   * 14.8 s on an overloaded VM — and a latch lasts until somebody restarts the probe, long after
+   * the load has gone. So a hang is retried for as long as it lasts, at most one start per slot per
+   * bound plus delay, and `startupFailed` climbing on Probe Health is how it shows.
+   */
+  #startFailed(reason: string, how: { hung: boolean; workerId?: number }): void {
+    this.#startupFailed += 1;
+    this.#startFailures += 1;
+    // **Never for a hang** (above), and **only when nothing is left working** (`P-80`). The counter is pool-wide and reset only by
+    // a worker reaching `ready`, and it used to latch on its own — so three failures during a
+    // *growth* burst killed a pool that was running fine. `#grow` spawned the whole shortfall at
+    // once (sixty at the v1 target, each loading the ~35 MB catalogue; eight at a time since
+    // `P-206`, which still leaves room for three), so on a memory-tight host three died during
+    // bootstrap before any sibling reported ready, and the probe
+    // monitored nothing until somebody restarted it — `#admission` answers `disabled` before it
+    // looks at anything else. The latch is for a pool that cannot run checks at all, which is
+    // `P-62`'s broken registry: there every worker dies, so nothing is ready and this still
+    // fires. Holding ready workers is exactly the difference between the two.
+    const working = this.#slots.some((held) => held.ready);
+    if (!how.hung && this.#startFailures >= MAX_CONSECUTIVE_START_FAILURES && !working) {
+      this.#disabled = true;
+      // **And answer what was already accepted.** A queued job carries no timeout — the timer is
+      // armed in `#dispatch`, when it *leaves* the queue — so returning here left every accepted
+      // check permanently unsettled: no result, no timer, and counted in none of `completed`,
+      // `failed`, `timedOut`, `refused` or `discarded`. `stop()` has always drained for this
+      // exact reason, and `check-flow.ts` states the guarantee verbatim: a check accepted by a
+      // runner must settle.
+      const abandoned = this.#queue.splice(0);
+      for (const job of abandoned) {
+        this.#settle(job, 'pool-disabled', 'the worker pool has given up and cannot run checks');
+      }
+      this.#logger.error(
+        {
+          failures: this.#startFailures,
+          registry: this.#registryModule,
+          abandoned: abandoned.length,
+        },
+        'check workers keep failing to start; the pool is disabled until the probe restarts',
+      );
+      return;
+    }
+    // Some workers are working, or this was a hang, so this keeps trying, but not at the speed of
+    // the event loop.
+    const delayMs = Math.min(
+      START_RETRY_MAX_MS,
+      START_RETRY_BASE_MS * 2 ** (this.#startFailures - 1),
+    );
+    // One line per streak at warn, the rest at debug (`P-227`); the streak's end is the line `ready`
+    // logs, and its size is in `startupFailed`.
+    const level = this.#startFailures === 1 ? 'warn' : 'debug';
+    if (how.hung) {
+      this.#logger[level](
+        {
+          workerId: how.workerId,
+          reason,
+          startupTimeoutMs: this.#startupTimeoutMs,
+          registry: this.#registryModule,
+          retryInMs: delayMs,
+        },
+        'a check worker had not loaded its sensor types within its start-up bound; terminated it, and retrying with a growing delay',
+      );
+    } else if (level === 'warn') {
+      this.#logger.warn(
+        { reason, registry: this.#registryModule, retryInMs: delayMs },
+        'a check worker failed to start; retrying with a growing delay while the others work',
+      );
+    }
+    // **Counted as on its way while it waits** (`P-263`). Out of `#slots` and in no other count,
+    // the replacement was invisible to `#grow`, which started a worker for the same gap the moment
+    // a check queued, and then the retry started another: a pool of two held three after one hang.
+    // A start failure's delay made that window 250 ms to 30 s; a hang's bound made it likely.
+    this.#growing += 1;
+    const timer = setTimeout(() => {
+      this.#retryTimers.delete(timer);
+      void this.#spawn().finally(() => {
+        this.#growing -= 1;
+        this.#pump();
+      });
+    }, delayMs);
+    this.#retryTimers.add(timer);
   }
 
   async #recycle(slot: Slot): Promise<void> {
@@ -1342,7 +1429,18 @@ export class CheckPool {
     else next();
   }
 
-  /** Starts one worker and resolves when it has said ready, or died trying. */
+  /**
+   * Starts one worker and resolves when it has said ready, died trying, or missed its start-up
+   * bound.
+   *
+   * **The bound is `STARTUP_TIMEOUT_MS`, the check process's** (`P-260`), because it bounds the
+   * same work: booting a runtime and importing `catalogue-registry.js`. `P-258` measured that import
+   * at 0.45–14.8 s beside two probe suites at load 6.5–29, and `P-206` measured a pool loading
+   * eight workers at a time with all 64 ready in 6.1 s on 8 cores and 12.7 s on 2, so a turn of
+   * eight finishes in well under two seconds. Thirty seconds is twice the worst ever seen, and what
+   * a false positive costs here is small — a slow worker started again, not a check failed and not
+   * the pool latched — so there is no case for more.
+   */
   async #start(): Promise<void> {
     this.#nextWorkerId += 1;
     const worker = new Worker(join(import.meta.dirname, 'check-worker.js'), {
@@ -1379,8 +1477,20 @@ export class CheckPool {
       this.#onWorkerGone(slot, `exited with code ${String(code)}`);
     });
 
+    // **Bounded** (`P-263`). Until a worker says ready it holds one of `SPAWN_CONCURRENCY`'s loading
+    // turns, so one whose registry import never finishes held it for ever, and with eight such the
+    // pool could start nothing. No check waits on it — checks go only to ready workers — so the
+    // cost of a hang is the turn, the memory and the silence, and the bound ends all three.
+    const startedAt = process.hrtime.bigint();
     await new Promise<void>((resolve) => {
+      const bound = setTimeout(() => {
+        this.#startTimedOut(slot, startedAt);
+        resolve();
+      }, this.#startupTimeoutMs);
+      // The worker itself keeps the process alive while it loads; its bound must not.
+      bound.unref();
       const settle = (): void => {
+        clearTimeout(bound);
         resolve();
       };
       worker.once('message', settle);

@@ -99,6 +99,20 @@ describe('the self-monitoring sensor types', () => {
     );
   });
 
+  it('carries the workers the pool could not start as a counter, without limits', () => {
+    // `P-263`. No check is lost to a worker that hangs while loading, since checks go only to
+    // ready workers; a probe short of them shows in `checkWait` and `refused`, which have limits.
+    assert.deepEqual(
+      probeHealth.channels({}).find((one) => one.key === 'workerStartupFailed'),
+      {
+        key: 'workerStartupFailed',
+        name: 'Workers not started',
+        unit: 'workers',
+        counter: { bits: 64 },
+      },
+    );
+  });
+
   it('carries a probe’s late refusals as a number of their own and not an alarm', () => {
     // `A-56`. A refusal that arrived after the probe's configuration moved on is dropped and
     // nothing is wrong: a limit or a lookup would be an alarm for a change somebody made on

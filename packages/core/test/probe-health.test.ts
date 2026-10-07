@@ -706,6 +706,18 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(older['childStartup'], null);
     });
 
+    it('carries the workers the pool could not start, and gaps for a probe that cannot say', () => {
+      // `P-263`: a worker still loading at its start-up bound is terminated and replaced.
+      const { reading } = build(() =>
+        connected({ health: { ...FULL, workerStartupFailed: 4 } }),
+      ).read(probeId);
+      assert.equal(reading['workerStartupFailed'], 4);
+      assert.equal(reading['workerCrashes'], 0, 'and it is not a crash');
+      // A probe or a core below 30 does not send it, and it gaps rather than reads zero.
+      const { reading: older } = build(() => connected()).read(probeId);
+      assert.equal(older['workerStartupFailed'], null);
+    });
+
     /**
      * The stall the probe reports, as a channel an operator can alarm on (`H-01`).
      *

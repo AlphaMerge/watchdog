@@ -8077,13 +8077,90 @@ because each is a decision rather than a defect:
           (61/61), in turn, beside the probe suite on loop in one `dev.sh` started at VM count 0:
           21 suite runs, all 505/505, load 1.4–19.1.
 
-- [ ] **P-263 — a pool worker that hangs while loading has no start-up bound** · S · P-260 ·
+- [x] **P-263 — a pool worker that hangs while loading has no start-up bound** · S · P-260 ·
       Found 2026-10-05 in `P-260`. `pool.ts` `#start` waits for a new worker's `ready`, `error`
       or `exit` with no timer. No check's time is spent on it, since checks go only to ready
       workers, but a worker whose registry import hangs holds one of `SPAWN_CONCURRENCY`'s
       loading turns for ever, and nothing says so. **Done when** a worker's start is bounded as
       a child's is since `P-260`, a worker that misses it is terminated and replaced, and Probe
       Health counts it; with a test whose worker registry hangs.
+
+      **P-263 outcome. A worker's start is bounded at 30 s, a worker that misses it is ended and
+      replaced with backoff, and Probe Health counts it.**
+      - **The bound is `STARTUP_TIMEOUT_MS`, the child's** (`P-260`), because it covers the same work:
+        boot a runtime, import `catalogue-registry.js`. `P-258` measured that import at 0.45–14.8 s
+        at load 6.5–29. `P-206` measured 64 workers loaded eight at a time, all ready in 6.1 s on
+        8 cores and 12.7 s on 2, so one turn of eight takes under 2 s. Thirty seconds is twice
+        the worst seen. A false positive costs only a slow worker started again: no check fails
+        and the pool does not latch.
+      - **`#start`** arms the bound beside its `ready`/`error`/`exit` wait (`startupTimeoutMs`,
+        injectable). If the bound fires, `#startTimedOut` takes the slot out, marks it `retired` (its
+        exit is not a crash), terminates it (counted in `#terminating` until its thread exits),
+        and gives back its loading turn. The worker is then replaced through the same path as a
+        start that dies: `#startFailed`, a delay doubling from 250 ms to 30 s (`P-227`), one
+        line at warn per streak and the rest at debug. A worker that says ready just after its
+        bound is ignored.
+      - **A hang never latches the pool off.** The latch (`P-62`, `P-80`) is for a registry that
+        cannot load, which fails the same way every time. A hang may be the machine, and a latch
+        lasts until a restart. So a hang is retried for as long as it lasts, at most one start
+        per slot per bound plus delay. A registry that always hangs costs one 30 s start per
+        slot per minute at most. A side effect: `main.ts` awaits `pool.start()`, so before this
+        a probe whose registry hung never finished starting. Now it starts after 30 s.
+      - **Found and fixed on the way:** a replacement waiting out its delay was counted nowhere,
+        so `#grow` started a worker for the same gap when a check queued, and the retry then
+        started another: a pool of size 2 held 3 after one hang. The pending replacement is now
+        counted in `#growing` until it has started (`stop` takes the pending ones off). This
+        was already reachable for a start that dies (250 ms–30 s windows); a hang's bound made
+        it likely.
+      - **Visible:** `PoolStats.startupFailed` counts every worker that never said ready: hung, or
+        dead while loading. The dead ones are still in `workerCrashes` as before; a hang is
+        not. It goes out on the heartbeat as `workerStartupFailed`. On Probe Health it is the
+        `workerStartupFailed` counter, *Workers not started*, with no limits, because no check
+        is lost to it, and `checkWait`/`refused` alarm when it costs checks. On `/metrics` it
+        is `ms_probe_workers_not_started_total`. **Protocol 30**, capability `workerStartup`,
+        because the health schema is closed. `workerCrashes` could not take it: that field names
+        a check type that fell over (`troubleshooting.md`), and a hang crashes nothing. Stripped for
+        a core below 30; gaps for a probe below it. `administration.md` and the sensor reference
+        list it.
+      - **Tests** (`check-pool.test.ts`, with `stalled-registry.ts` extended: the first N loads
+        claim a ticket by `mkdir` and hang, posting a heartbeat on a `BroadcastChannel`):
+        - One of two workers hangs at a 5 s bound. The other runs checks during and after.
+          The hang is counted no earlier than the bound, and `start` resolves. Its heartbeat
+          stops (terminated, not forgotten). It is not a crash. A check then runs on the
+          replacement, and the pool is back at 2. Three checks queued behind two busy workers
+          grow nothing.
+        - Eight hangs hold every loading turn of a 9-worker pool, and a check still runs once
+          the bound frees them.
+        - A registry that always hangs, at a 1 s bound: the fifth start begins no earlier than
+          4 bounds + 250 + 500 + 1,000 + 2,000 ms after `start` (a lower bound, so load cannot
+          fail it). The pool is not disabled, and it holds one hang at a time. It logs warn
+          once, then debug, with `retryInMs` 250 then 500.
+        - With the default bound, a hang is not given up 10 s in. `stop` ends it, `start`
+          resolves, and nothing is counted.
+        - A registry that cannot load counts 3 in both `startupFailed` and `workerCrashes`.
+        - `healthForPeer` at 16–30, the schema taking the field, the core's reading, `/metrics`,
+          the channel, and the report.
+        - Every wall-clock assertion is a lower bound or a generous wait (`P-258`, `P-261`).
+      - **Mutation: 13/13 killed** (one equivalent dropped): the bound never acting; the hung
+        worker not terminated; a hang latching the pool; no backoff for a hang; the failed start
+        not counted; a hang counted as a crash; the pending replacement not in `#growing`
+        (survived until the queued-behind-two step was added); the bound halved; the default not
+        `STARTUP_TIMEOUT_MS` (survived until the default-bound test was added); every hang logged
+        at warn; the capability at 31; the report sending `workerCrashes`; the core reading
+        `workerCrashes`. Equivalent: the bound's callback not resolving `#start`, since the
+        terminate's `exit` resolves it.
+      - **Runs:** capabilities, health-types, probe-health-report, check-pool, core probe-health,
+        metrics and `build-hygiene` whole: 218/218, 62/62 and 14/14. check-pool then ran 20/20
+        (62/62 each) beside the probe suite on loop, in one `dev.sh` started at VM count 0: 13
+        suite runs, all 512/512, at load 3.2–14.1.
+      - **Found, not fixed:**
+        - A worker that crashes after it was ready is replaced at once through `#spawn`. While
+          that spawn waits for a loading turn it is in no count either, so `#grow` can over-start
+          for that gap. The window is short (a turn), and the ticket did not ask for it.
+        - A pool whose registry always hangs never latches. Accepted checks then sit in the queue
+          until it fills, and are refused and counted from then on. They are not settled as
+          `pool-disabled` the way a broken registry's are. Whether a long run of hangs with
+          nothing working should latch, perhaps after a longer streak, is a decision.
 
 - [ ] **P-264 — two more tests read red on a loaded machine** · S · P-258 · Found 2026-10-05
       in `P-260`, each once while a probe suite ran on loop beside it at load up to 28:

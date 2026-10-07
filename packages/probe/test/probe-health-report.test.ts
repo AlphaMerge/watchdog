@@ -52,6 +52,7 @@ const POOL: PoolStats = {
   discarded: 0,
   disabled: false,
   workerCrashes: 0,
+  startupFailed: 6,
   waitMs: { p50: 1, p95: 40, p99: 90, max: 500 },
   runMs: { p50: 30, p95: 200, p99: 900, max: 3_000 },
 };
@@ -157,6 +158,13 @@ describe('the probe’s own health report', () => {
     assert.equal(report.refused, 2);
     assert.equal(report.workerCrashes, 0);
     assert.equal(report.clockJumps, 1);
+  });
+
+  it('reports the workers the pool could not start, apart from its crashes (`P-263`)', () => {
+    // A worker still loading at its start-up bound is terminated and replaced; nothing crashed.
+    const report = reporter({}).report();
+    assert.equal(report.workerStartupFailed, 6);
+    assert.equal(report.workerCrashes, 0);
   });
 
   it('reports the child-process runner, which is a second runner and a second set of counters', () => {

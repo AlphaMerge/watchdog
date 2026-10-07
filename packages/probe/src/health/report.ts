@@ -210,6 +210,9 @@ export class ProbeHealthReporter {
       poolState: pool.disabled ? 1 : 0,
       timedOut: pool.timedOut,
       workerCrashes: pool.workerCrashes,
+      // `P-263`: workers that never said ready, a hang the pool ended among them. Sent only to a
+      // core at protocol 30.
+      workerStartupFailed: pool.startupFailed,
       // Absent when no registry keeps session pools (`P-36`), so the channels gap rather than
       // reading a confident zero on a build that has nothing to report.
       ...(pool.sessions === undefined

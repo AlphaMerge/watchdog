@@ -42,7 +42,9 @@ const { registryModule } = workerData as { registryModule: string };
 
 // Top-level await: the port buffers anything the pool sends before the listener is attached, so
 // a slow import delays the first check rather than losing it. An import that *fails* takes the
-// worker down, which the pool sees as an early exit and reports rather than retrying for ever.
+// worker down, which the pool sees as an early exit and reports rather than retrying for ever. One
+// that never *finishes* is the pool's to end: it terminates a worker that has not posted `ready`
+// within its start-up bound, and starts another after a growing delay (`P-263`).
 const registry = ((await import(registryModule)) as { default: CheckRegistry }).default;
 
 const running = new Map<string, AbortController>();

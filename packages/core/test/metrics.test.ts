@@ -431,6 +431,20 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       assert.equal(without.has(`ms_probe_child_startup_p95_seconds${label}`), false);
     });
 
+    it('exports the workers the pool could not start, and nothing for a probe that sent none', async () => {
+      // `P-263`. Beside the worker crashes; a hang the pool ended is not one of them.
+      const label = `{probe="${String(probeId)}"}`;
+      const hung = (): ProbeLink => ({
+        ...connected,
+        health: { ...connected.health, workerStartupFailed: 4 },
+      });
+      const metrics = parse((await varying(hung).scrape()).body);
+      assert.equal(metrics.get(`ms_probe_workers_not_started_total${label}`), 4);
+
+      const without = parse((await varying(() => connected).scrape()).body);
+      assert.equal(without.has(`ms_probe_workers_not_started_total${label}`), false);
+    });
+
     it('exports each listener’s malformed count beside its received count (`B-16`)', async () => {
       const label = `{probe="${String(probeId)}"}`;
       // Distinct values, so a series reading its neighbour's channel is seen.

@@ -42,6 +42,12 @@ import { MAX_EXCEPTION_ADDRESSES } from '../net/target-policy.js';
  * missing. That is the `R-06` rule applied again: a capability the peer does not have is
  * reported in words, never silently absent.
  *
+ * Version 30 adds `workerStartupFailed` (`P-263`): check workers that never said ready — still
+ * loading the probe's sensor types when the pool's start-up bound passed, so the pool terminated
+ * them, or dead while loading. One new field in a closed schema under one capability,
+ * `workerStartup`: a core below 30 is not sent it, and a probe below 30 does not send it and the
+ * channel gaps.
+ *
  * Version 29 adds `childStartupFailed` and `childStartupMs` (`P-260`): checks whose child process
  * never got as far as running them — still loading the probe's sensor types at the start-up bound,
  * unable to load them, or ended before it was ready — and how long a child takes to start. The check's own timeout now runs
@@ -147,7 +153,7 @@ import { MAX_EXCEPTION_ADDRESSES } from '../net/target-policy.js';
  * operator can see it, rather than a peer that misbehaves later. An *older* probe simply omits
  * the field and the channel gaps, which is the `R-06` rule again: absent is absent, never zero.
  */
-export const PROTOCOL_VERSION = 29;
+export const PROTOCOL_VERSION = 30;
 
 /**
  * The oldest peer version this build still understands.
@@ -505,6 +511,16 @@ export interface ProbeHealthReport {
    */
   poolState?: number;
   workerCrashes?: number;
+  /**
+   * Check workers that never said ready (`P-263`): still loading the probe's sensor types when the
+   * pool's start-up bound passed, so the pool terminated them, or dead while loading. A running
+   * total. Sent only to a core at protocol 30.
+   *
+   * **Not `workerCrashes`**, which names a check type that fell over. A worker that hangs while
+   * loading ran no check and crashed nothing: the pool gave up on it and started another. One that
+   * dies while loading is in both, as it was in `workerCrashes` before this field existed.
+   */
+  workerStartupFailed?: number;
   /**
    * Session-pool counters, summed across the probe's check workers (`P-36`).
    *
@@ -996,6 +1012,7 @@ const PROBE_HEALTH_SCHEMA = {
     discarded: { type: 'integer', minimum: 0 },
     poolState: { type: 'integer', minimum: 0, maximum: 1 },
     workerCrashes: { type: 'integer', minimum: 0 },
+    workerStartupFailed: { type: 'integer', minimum: 0 },
     sessionsOpen: { type: 'integer', minimum: 0 },
     sessionOverflows: { type: 'integer', minimum: 0 },
     sessionsEvicted: { type: 'integer', minimum: 0 },

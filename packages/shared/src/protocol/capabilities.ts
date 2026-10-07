@@ -172,6 +172,11 @@ export interface ProbeCapabilities {
    * stripped below this together, as `listenerOverwritten`'s two are.
    */
   childStartup: boolean;
+  /**
+   * Reports the check workers it could not start (`P-263`): one field, `workerStartupFailed`,
+   * stripped below this.
+   */
+  workerStartup: boolean;
 }
 
 /**
@@ -203,6 +208,7 @@ const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
   ['databaseAddressPinning', 27],
   ['targetPolicyException', 28],
   ['childStartup', 29],
+  ['workerStartup', 30],
 ];
 
 /** Plain English for each capability, for a message an operator reads rather than greps. */
@@ -234,6 +240,7 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   targetPolicyException:
     'connect to an address one device is excepted for, although its target policy refuses it',
   childStartup: 'report the script checks it could not start, and how long one takes to start',
+  workerStartup: 'report the check workers it could not start',
 };
 
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
@@ -260,6 +267,7 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     databaseAddressPinning: has(27),
     targetPolicyException: has(28),
     childStartup: has(29),
+    workerStartup: has(30),
   };
 }
 
@@ -292,6 +300,10 @@ export function healthForPeer(health: ProbeHealthReport, peerVersion: number): P
   let sent = health;
   // Newest first; each capability's fields are stripped on their own, so a peer one version
   // behind loses only that version's.
+  if (!capabilities.workerStartup) {
+    const { workerStartupFailed: _workers, ...older } = sent;
+    sent = older;
+  }
   if (!capabilities.childStartup) {
     const { childStartupFailed: _failed, childStartupMs: _startup, ...older } = sent;
     sent = older;

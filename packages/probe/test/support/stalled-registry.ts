@@ -1,5 +1,8 @@
 // First, so the pid is on disk before anything else this module loads (see `pid-first.ts`).
 import './pid-first.js';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { BroadcastChannel } from 'node:worker_threads';
 import registry from './check-fixtures.js';
 
 /**
@@ -18,7 +21,47 @@ import registry from './check-fixtures.js';
  * - `MS_TEST_REGISTRY_EXIT`: the process exits with this code while loading.
  * - `MS_TEST_REGISTRY_SIGNAL`: the process sends itself this signal while loading, which is how a
  *   native module crashing during the load looks from outside.
+ *
+ * And for a pool's workers (`P-263`), which share the probe's environment, so a test needs some of
+ * them to hang and not others:
+ *
+ * - `MS_TEST_REGISTRY_HANG_DIR` and `MS_TEST_REGISTRY_HANG_COUNT`: the first that many loads hang
+ *   for ever and the rest load as usual. A load claims a ticket by creating `<dir>/<n>`, which only
+ *   one thread can do, so exactly that many hang however the starts interleave.
+ * - `MS_TEST_REGISTRY_CHANNEL`: a `BroadcastChannel` a hanging load posts `{ ticket, at }` on when
+ *   it starts to hang and every 100 ms after, so a test can see when one began and that it ended.
  */
+const hangDir = process.env['MS_TEST_REGISTRY_HANG_DIR'];
+if (hangDir !== undefined) {
+  const tickets = Number(process.env['MS_TEST_REGISTRY_HANG_COUNT'] ?? '0');
+  const ticket = claim(hangDir, tickets);
+  if (ticket !== undefined) {
+    const name = process.env['MS_TEST_REGISTRY_CHANNEL'];
+    const channel = name === undefined ? undefined : new BroadcastChannel(name);
+    const beat = (): void => {
+      channel?.postMessage({ ticket, at: Date.now() });
+    };
+    beat();
+    await new Promise<never>(() => {
+      // A handle, so the thread waits rather than ending, and a heartbeat its terminate stops.
+      setInterval(beat, 100);
+    });
+  }
+}
+
+/** The first free ticket below `count`, claimed, or undefined when every one is taken. */
+function claim(dir: string, count: number): number | undefined {
+  for (let ticket = 0; ticket < count; ticket += 1) {
+    try {
+      mkdirSync(join(dir, String(ticket)));
+      return ticket;
+    } catch {
+      // Taken by another load; try the next.
+    }
+  }
+  return undefined;
+}
+
 const delay = process.env['MS_TEST_REGISTRY_DELAY_MS'] ?? '0';
 if (delay === 'forever') {
   await new Promise<never>(() => {

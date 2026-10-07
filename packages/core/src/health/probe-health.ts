@@ -378,6 +378,8 @@ export class ProbeHealthService {
       refused: health?.refused ?? null,
       timedOut: health?.timedOut ?? null,
       workerCrashes: health?.workerCrashes ?? null,
+      // `P-263`. A gap for either end below protocol 30.
+      workerStartupFailed: health?.workerStartupFailed ?? null,
       // Null, not 0, when the probe does not send it: an older probe cannot say whether its pool
       // is alive, and reading that silence as "running" is the one mistake this channel exists to
       // prevent. The lookup's `undefinedState` makes the gap a warning rather than an Up.

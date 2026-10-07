@@ -1067,6 +1067,7 @@ cost: **light** · evaluated by the core, never by a probe
 | `refused` | Checks refused | checks | 64-bit counter → rate |
 | `timedOut` | Checks timed out | checks | 64-bit counter → rate |
 | `workerCrashes` | Worker crashes | workers | 64-bit counter → rate |
+| `workerStartupFailed` | Workers not started | workers | 64-bit counter → rate |
 | `poolState` | Worker pool | — | lookup `ms.probe.pool` |
 | `discarded` | Checks discarded | checks | 64-bit counter → rate |
 | `trapReceived` | Traps received | traps | 64-bit counter → rate |
