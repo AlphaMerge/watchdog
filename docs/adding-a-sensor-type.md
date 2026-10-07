@@ -240,8 +240,11 @@ channel the sensor is judged by.
   build declares: a changed declaration replaces the old one, and a withdrawn one — the key
   declares no `limits` any more — is cleared (`P-291`). An operator who changes or clears them owns
   them from then on, and no start touches them again, because a default that came back after
-  somebody removed it is worse than no default. The start-up pass reads `channels({})`, so a type
-  whose channels need parameters gets its declarations at creation only. The catalogue refuses a declaration with no bound in it, one that is not a
+  somebody removed it is worse than no default. The start-up pass reads `channels({})`, so for a
+  type whose channels come from its parameters it only reaches the keys `{}` names: a limit
+  declared on a channel only real parameters produce is written at creation and never cleared,
+  because `{}` not naming that key says nothing about it. A key is cleared when it is gone
+  outright only for a type whose `paramsSchema` admits no parameter at all. The catalogue refuses a declaration with no bound in it, one that is not a
   number, and one whose warning sits outside its error, at registration rather than at the first
   reading.
 

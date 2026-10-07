@@ -10019,23 +10019,40 @@ because each is a decision rather than a defect:
         whole column, so the dropped bound goes with it (now pinned by a test). Limits are not
         inherited — they live on the channel row and the resolver never sees them — so nothing
         there moves.
-      - **Only types the catalogue can read without parameters.** A type whose `channels({})`
-        throws may declare limits on keys the parameterless call never names, and a sensor whose
-        type this build does not register says nothing either way, so both are left alone.
+      - **Only where the type's answer covers the key.** A row is cleared when (a) `channels({})`
+        names the key and declares no limits on it, or (b) the type's `paramsSchema` admits no
+        parameter at all (`additionalProperties: false`, no `properties`, no
+        `patternProperties`), so `{}` is every sensor's read and a key it does not name is gone.
+        A sensor whose type this build does not register is left alone.
         `adding-a-sensor-type.md` no longer says declarations are "never re-applied", which had
         been untrue since the start-up pass, and says what a start does now.
+      - **Amended on review** (a second commit). The first commit cleared any undeclared key of a
+        type whose `channels({})` did not throw, on the theory that a parameter-dependent type
+        would throw. None does: the catalogue calls `channels({})` at registration, and
+        `ssh-script`, `snmp-table`, `port-tcp` and the rest answer with a placeholder set on
+        purpose. So a limit declared at creation on a channel only real parameters produce (a
+        banner channel, a table column) would have been reset at the next start, ending its
+        alarm silently. Latent — only the two health types declare limits — but the guide
+        promised the opposite. Rule (b) is decided from the schema rather than from a new
+        `SensorType` flag: it is provable from what a type already says, and it errs towards
+        leaving a limit. The cost is that Probe Health, which has a `probeId` parameter, is not
+        (b): a key it drops outright keeps a stale declared limit, which nothing evaluates unless
+        something still reports that key. The concrete case is (a) and still clears.
       - **No scenario test, deliberately.** Clearing a limit can only remove a bound, so a
         channel's outcome can only get less severe: the next reading turns a stale Warning to Up,
         and no new Warning or Down can come of it. That is one transition per affected sensor,
         the same one the condition clearing would have made, so nothing can multiply. The
         concrete case barely moves state at all: the total's old rate warning fired only when a
         refusal arrived, which `scriptGroupsRefusedRecently` already warns on.
-      - **Tests.** `declared-limits.test.ts` 10 new: a table of 8 (declares nothing any more;
+      - **Tests.** `declared-limits.test.ts` 11 new: a table of 7 (declares nothing any more;
         moved to another channel; channel gone from the type; one bound fewer; unchanged;
-        operator-owned; type not registered; type needs parameters), each also checking a second
-        start does nothing; a cleared channel taking a later re-declaration; and the real
-        Probe Health type clearing protocol 31's `upperWarning: 0.00001` from
-        `scriptGroupsRefused` while `scriptGroupsRefusedRecently` keeps its own.
+        operator-owned; type not registered), each also checking a second start does nothing; a
+        parameter-dependent type built on the placeholder convention (`{}` names `value`,
+        `banner: true` adds `banner` with a declared limit), whose `banner` limit survives a
+        restart and whose `value` is still cleared when an earlier build had declared one there;
+        a cleared channel taking a later re-declaration; and the real Probe Health type clearing
+        protocol 31's `upperWarning: 0.00001` from `scriptGroupsRefused` while
+        `scriptGroupsRefusedRecently` keeps its own.
 
 - [ ] **P-292 — a sensor whose channels were dropped says nothing in its own result** · S · P-283
       · Found 2026-10-07 in `P-283`. When `fitResult` drops channels that cannot be sent, the count

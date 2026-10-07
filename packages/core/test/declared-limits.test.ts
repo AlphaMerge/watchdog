@@ -72,6 +72,31 @@ const watchedLater = (channels: readonly ChannelDef[]): SensorType => ({
   channels: () => channels,
 });
 
+/**
+ * A type whose channels come from its parameters, built the way the shipped ones are (`P-291`).
+ *
+ * `{}` answers with a placeholder — the catalogue asks every type for it at registration, so no
+ * shipped type throws there (`ssh-script`'s `value` is the model) — and real parameters add a
+ * channel with a declared limit, which a sensor gets at creation and `{}` never names.
+ */
+const shaped: SensorType = {
+  id: 'test.shaped',
+  category: 'System',
+  costHint: 'light',
+  paramsSchema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: { banner: { type: 'boolean' } },
+  },
+  channels: (params) => [
+    { key: 'value', name: 'Value', isPrimary: true },
+    ...(params['banner'] === true
+      ? [{ key: 'banner', name: 'Banner', limits: { upperError: 10 } }]
+      : []),
+  ],
+  execute: () => Promise.resolve({ channels: [] }),
+};
+
 const LAG: ChannelDef = { key: 'lag', name: 'Lag', unit: 'ms', isPrimary: true };
 const PLAIN: ChannelDef = { key: 'plain', name: 'Plain', unit: '' };
 
@@ -96,7 +121,7 @@ describe(
       scratch = await createScratchDatabase('declaredlimits');
       db = scratch.db;
       // Builds the schema as well as the service, so nothing may read a table before this.
-      h = await buildHarness(db, { types: [watched] });
+      h = await buildHarness(db, { types: [watched, shaped] });
     });
 
     after(async () => {
@@ -416,22 +441,6 @@ describe(
           applied: 0,
           lag: { source: 'declared', limits: LAG_DECLARED },
         },
-        {
-          // Its channels vary per sensor, so a parameterless read cannot speak for this one.
-          name: 'the type needs parameters to name its channels',
-          catalogue: () =>
-            catalogueOf({
-              ...watched,
-              channels: (params) => {
-                if (params['shape'] === undefined) throw new Error('needs a shape');
-                return [LAG, PLAIN];
-              },
-            }),
-          owner: 'declared',
-          cleared: 0,
-          applied: 0,
-          lag: { source: 'declared', limits: LAG_DECLARED },
-        },
       ];
 
       for (const one of cases) {
@@ -476,6 +485,72 @@ describe(
           assert.equal(again.applied, 0, 'nothing left to apply');
         });
       }
+
+      describe('a type whose channels come from its parameters', () => {
+        let shapedId: number;
+        const read = async (key: string): Promise<{ limits: unknown; source: string }> => {
+          const rows = await db.query<{ limits: unknown; limits_source: string }>(
+            'SELECT limits, limits_source FROM channel WHERE sensor_id = $1 AND key = $2',
+            [shapedId, key],
+          );
+          const row = rows[0];
+          assert.ok(row !== undefined, `no channel ${key}`);
+          return { limits: row.limits, source: row.limits_source };
+        };
+
+        beforeEach(async () => {
+          const rows = await db.query<{ parent_id: number }>(
+            'SELECT parent_id FROM object WHERE id = $1',
+            [sensorId],
+          );
+          const sensor = await h.service.create(testActor, {
+            kind: 'sensor',
+            parentId: Number(rows[0]?.parent_id),
+            name: 'Shaped sensor',
+            sensorType: 'test.shaped',
+            params: { banner: true },
+          });
+          shapedId = sensor.id;
+          const banner = await read('banner');
+          assert.equal(banner.source, 'declared', 'created with the real parameters’ limit');
+        });
+
+        it('keeps a limit declared on a channel the parameterless read never names', async () => {
+          // **The defect review found.** `{}` names only `value`, so "absent from `{}`" said
+          // nothing about `banner` — and treating it as withdrawn would end its alarm at the
+          // next start, silently, on every sensor of the type.
+          const before = await read('banner');
+          const report = await applyDeclaredLimits({
+            db,
+            logger: silent,
+            catalogue: catalogueOf(shaped),
+          });
+          assert.equal(report.cleared, 0);
+          assert.deepEqual(await read('banner'), before);
+          assert.deepEqual(parseLimits(before.limits), { ...NO_LIMITS, upperError: 10 });
+        });
+
+        it('still clears a key the parameterless read names without a limit', async () => {
+          // `{}` does speak for `value`: the type names it, whatever the parameters, and
+          // declares nothing for it. So a limit an earlier build declared there is withdrawn.
+          await db.query(
+            `UPDATE channel SET limits = $3::jsonb, limits_source = 'declared'
+             WHERE sensor_id = $1 AND key = $2`,
+            [shapedId, 'value', JSON.stringify(limitsFromDeclaration({ upperWarning: 1 }))],
+          );
+          const banner = await read('banner');
+
+          const report = await applyDeclaredLimits({
+            db,
+            logger: silent,
+            catalogue: catalogueOf(shaped),
+          });
+
+          assert.equal(report.cleared, 1, '`value`, and not `banner`');
+          assert.deepEqual(await read('value'), { limits: {}, source: 'unset' });
+          assert.deepEqual(await read('banner'), banner);
+        });
+      });
 
       it('gives a cleared channel back to a later build that declares it again', async () => {
         await applyDeclaredLimits({
