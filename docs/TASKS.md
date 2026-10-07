@@ -10563,6 +10563,30 @@ because each is a decision rather than a defect:
         already has (`snmp.custom`'s `mode`, `snmp.custom.string`'s `lookup`) still leaves the stored
         row as created, since an update declares no channels; and a clone copies no `lookup_id` or
         `counter_bits`. Listed as follow-ups.
+      - **Amended on review** (a second commit). **The fallback was silent.** A bare `catch`
+        took `{}`'s answer for any throw (a `P-296` breach, a type's `TypeError` on parameters
+        it no longer expects, any bug), and a channel created from it can keep no lookup and no
+        counter width for good, which nobody was told. It is still caught, so the batch keeps its
+        readings, but `declaredChannelLookup(catalogue, { logger })` (`main.ts` passes the core's)
+        now warns with the type, the sensor id, `phase: 'declare-channels-on-ingest'`, the
+        error's `code` (or its name) and message, and what the fallback gave. Once per type and
+        kind of error rather than per message, which could differ per sensor and grow without
+        bound. Stored parameters can hold `writeOnly` secrets, so every string in them of three
+        characters or more, and a secret of any length, is cut out of the message before it is
+        logged; no parameter is logged as a field. The resolver passes the sensor id, the one
+        signature change.
+        - **No counter.** The fallback sits in the lookup, and the counters beside it in
+          `IngestionService.stats()` (`channelsCreated`) reach no surface an operator sees: Core
+          Health reads only that service's discard fields. A Core Health channel for it is a new
+          fixed channel with its own tests, listed as a follow-up rather than grown here.
+        - **Test** (`channel-provisioning.test.ts`, real database): four sensors of a test type
+          whose stored parameters make it throw, two a `TypeError` with a secret and a label in its
+          message and two a `BAD_SENSOR_TYPE` breach, plus a later channel of the first. All five
+          channels are still created, with the `{}` answer's counter width; exactly two warnings,
+          one per kind, naming the type, the phase, the code and the first sensor of each; the
+          `TypeError`'s message carries `[a parameter]`; no line holds the secret (two characters,
+          so only being `writeOnly` removes it) or the label. Mutations: the warning removed fails
+          it; the secret's length rule removed fails it on the secret.
 
 - [x] **P-298 — `capabilitiesFor` writes each version a second time** · XS · P-294 · Found
       2026-10-08 in `P-294`. The version table now lives in `capability-versions.ts`, but

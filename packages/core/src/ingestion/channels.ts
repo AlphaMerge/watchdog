@@ -77,6 +77,7 @@ export interface ChannelResolverOptions {
   declaredShape?: (
     sensorType: string,
     params: Readonly<Record<string, unknown>>,
+    sensorId: number,
   ) => ReadonlyMap<string, ChannelShape>;
 }
 
@@ -213,7 +214,7 @@ export class ChannelResolver {
       if (sensor === undefined) return NO_SHAPE;
       let shapes = bySensor.get(id);
       if (shapes === undefined) {
-        shapes = declared(sensor.type, sensor.params);
+        shapes = declared(sensor.type, sensor.params, one.sensorId);
         bySensor.set(id, shapes);
       }
       return shapes.get(one.key) ?? NO_SHAPE;

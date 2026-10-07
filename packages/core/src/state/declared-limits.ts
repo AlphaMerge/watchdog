@@ -62,13 +62,48 @@ export interface ChannelShape {
  * neither. Only when that answer cannot be had — a type that throws for these stored parameters,
  * or breaks its own declaration with them (`P-296`) — is the type's `{}` answer used, which is
  * what every sensor got before.
+ *
+ * **That fallback is said, not swallowed** (`P-297` review). It is still caught — a type that
+ * cannot answer must not cost the batch its other readings — but a channel it creates may get no
+ * lookup and no counter width for good, since an edit declares no channels and the row is never
+ * written again: `P-80`'s failure, on one sensor. So `logger` warns, once for each type and kind
+ * of error (its `code`, or its name): the type, the sensor, and the error with every value of the
+ * sensor's parameters taken out of its message, since those can be secrets. Once rather than per
+ * sensor, because one broken type would otherwise write a line for every sensor of it on every
+ * new channel; and by kind rather than by message, because a message can differ per sensor and
+ * the set of them would have no bound.
  */
 export function declaredChannelLookup(
   catalogue: SensorCatalogue,
+  options: { readonly logger?: Logger } = {},
 ): (
   sensorType: string,
   params: Readonly<Record<string, unknown>>,
+  sensorId: number,
 ) => ReadonlyMap<string, ChannelShape> {
+  const warned = new Set<string>();
+  const warn = (sensorType: string, sensorId: number, cause: unknown): void => {
+    const logger = options.logger;
+    if (logger === undefined) return;
+    const code = codeOf(cause);
+    const once = `${sensorType} ${code}`;
+    if (warned.has(once)) return;
+    warned.add(once);
+    logger.warn(
+      {
+        sensorType,
+        sensorId,
+        phase: 'declare-channels-on-ingest',
+        err: { code, message: messageOf(cause, sensorType) },
+        fallback: bare.has(sensorType) ? 'the type’s answer to {}' : 'nothing',
+      },
+      'a sensor type could not declare its channels for a sensor’s stored parameters, so a ' +
+        'channel ingestion created for it may have no lookup or counter width; later errors ' +
+        'of this kind from this type are not logged again',
+    );
+  };
+  const messageOf = (cause: unknown, sensorType: string): string =>
+    cause instanceof Error ? cause.message : `${sensorType} threw ${typeof cause}`;
   const shapesOf = (defs: readonly ChannelDef[]): ReadonlyMap<string, ChannelShape> =>
     new Map(
       defs.map((def) => [
@@ -85,14 +120,69 @@ export function declaredChannelLookup(
       // A type whose channels need parameters: it has no answer to fall back on.
     }
   }
-  return (sensorType, params) => {
+  return (sensorType, params, sensorId) => {
     if (!catalogue.has(sensorType)) return none;
     try {
       return shapesOf(catalogue.channelsFor(sensorType, params));
-    } catch {
+    } catch (cause) {
+      warn(
+        sensorType,
+        sensorId,
+        withoutValuesOf(cause, params, catalogue.writeOnlyPaths(sensorType)),
+      );
       return bare.get(sensorType) ?? none;
     }
   };
+}
+
+/** `SensorTypeError`'s code, any other error's own `code` if it has a string one, or its name. */
+function codeOf(cause: unknown): string {
+  if (typeof cause === 'object' && cause !== null) {
+    const code = (cause as { code?: unknown }).code;
+    if (typeof code === 'string' && code !== '') return code;
+    if (cause instanceof Error) return cause.name;
+  }
+  return typeof cause;
+}
+
+/**
+ * The error with every string the stored parameters hold taken out of its message.
+ *
+ * A type's own `throw new Error(\`bad column ${column}\`)` puts a value in the message, and a
+ * `writeOnly` parameter is a credential. Every string of three characters or more goes, and a
+ * secret whatever its length; a shorter one would take pieces out of ordinary words, and is not
+ * a value anyone could recognise. Longest first, so a value inside another goes with it.
+ */
+function withoutValuesOf(
+  cause: unknown,
+  params: Readonly<Record<string, unknown>>,
+  secretPaths: readonly string[],
+): unknown {
+  if (!(cause instanceof Error)) return cause;
+  const secrets = new Set(secretPaths);
+  const values: string[] = [];
+  const walk = (node: unknown, path: string): void => {
+    if (typeof node === 'string') {
+      if (node.length >= 3 || (node !== '' && secrets.has(path))) values.push(node);
+    } else if (Array.isArray(node)) {
+      for (const item of node) walk(item, path);
+    } else if (typeof node === 'object' && node !== null) {
+      for (const [key, value] of Object.entries(node)) {
+        walk(value, path === '' ? key : `${path}.${key}`);
+      }
+    }
+  };
+  walk(params, '');
+  let message = cause.message;
+  for (const value of values.sort((a, b) => b.length - a.length)) {
+    message = message.split(value).join('[a parameter]');
+  }
+  if (message === cause.message) return cause;
+  const scrubbed = new Error(message);
+  scrubbed.name = cause.name;
+  const code = (cause as { code?: unknown }).code;
+  if (typeof code === 'string') Object.assign(scrubbed, { code });
+  return scrubbed;
 }
 
 /**

@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
+import { pino } from 'pino';
 import { SensorCatalogue, standardCatalogue, type SensorType } from '@ms/sensors';
 import type { CheckResult } from '@ms/shared';
 import { ChannelResolver } from '../src/ingestion/channels.js';
@@ -60,6 +61,42 @@ const columns: SensorType = {
 };
 
 /**
+ * A type that cannot answer for some stored parameters (`P-297` review): `limited` puts limits on
+ * a channel only parameters make, which `channelsFor` refuses with `BAD_SENSOR_TYPE` (`P-293`),
+ * and `typeError` is a type's own bug, with a secret and a label in its message. Its `{}` answer
+ * is a 64-bit counter, which is what the fallback gives.
+ */
+const brittle: SensorType = {
+  id: 'test.brittle',
+  category: 'Custom',
+  costHint: 'light',
+  secretDestinations: { token: [] },
+  paramsSchema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      mode: { enum: ['fine', 'limited', 'typeError'] },
+      token: { type: 'string', writeOnly: true },
+      label: { type: 'string' },
+    },
+  },
+  channels: (params) => {
+    if (params['mode'] === 'typeError') {
+      throw new TypeError(
+        `no column "${String(params['label'])}" readable with ${String(params['token'])}`,
+      );
+    }
+    return [
+      { key: 'value', name: 'Value', isPrimary: true, counter: { bits: 64 } },
+      ...(params['mode'] === 'limited'
+        ? [{ key: 'bounded', name: 'Bounded', limits: { upperError: 1 } }]
+        : []),
+    ];
+  },
+  execute: () => Promise.resolve({ channels: [] }),
+};
+
+/**
  * What a channel gets when **ingestion** creates it rather than sensor creation (`P-80`).
  *
  * `ChannelResolver.resolve` is the only path by which a key a sensor type newly declares reaches
@@ -87,7 +124,7 @@ describe(
     before(async () => {
       scratch = await createScratchDatabase('provisioning');
       db = scratch.db;
-      harness = await buildHarness(db, { types: [columns] });
+      harness = await buildHarness(db, { types: [columns, brittle] });
       const probe = await harness.service.create(testActor, {
         kind: 'probe',
         parentId: harness.rootId,
@@ -156,6 +193,114 @@ describe(
       // a limit written for a rate — `spoolUnwritten`'s `upperError: 0.00001`, for instance —
       // latches Down for the life of the probe process and cannot be cleared.
       assert.equal(byKey.get('in')?.counter_bits, 64);
+    });
+
+    it('says once, without a parameter’s value, when a type cannot answer for a sensor', async () => {
+      // `P-297` review. The fallback is still taken, so the batch keeps its readings, but a
+      // channel created from it may never get its lookup or counter width, and that is logged.
+      const SECRET = 'k9'; // short, so only being a secret takes it out of the message
+      const LABEL = 'router-west';
+      const sensors: number[] = [];
+      for (const name of ['type-error', 'type-error-again', 'limited', 'limited-again']) {
+        const sensor = await harness.service.create(testActor, {
+          kind: 'sensor',
+          parentId: deviceId,
+          name,
+          sensorType: 'test.brittle',
+          params: { mode: 'fine' },
+        });
+        sensors.push(sensor.id);
+      }
+      // Stored behind the type's back, as an earlier build or an earlier rule would have left
+      // them: a create with these is refused now (`P-296`).
+      const [typeError, typeErrorAgain, limitedOne, limitedAgain] = sensors as [
+        number,
+        number,
+        number,
+        number,
+      ];
+      for (const [id, mode] of [
+        [typeError, 'typeError'],
+        [typeErrorAgain, 'typeError'],
+        [limitedOne, 'limited'],
+        [limitedAgain, 'limited'],
+      ] as const) {
+        await db.query('UPDATE sensor_config SET params = $2::jsonb WHERE object_id = $1', [
+          id,
+          JSON.stringify({ mode, token: SECRET, label: LABEL }),
+        ]);
+      }
+      await db.query('DELETE FROM channel WHERE sensor_id = ANY($1::bigint[])', [sensors]);
+
+      const lines: string[] = [];
+      const catalogue = testCatalogue([columns, brittle]);
+      const resolver = new ChannelResolver({
+        logger: silent,
+        declaredLimits: declaredLimitsLookup(catalogue),
+        declaredShape: declaredChannelLookup(catalogue, {
+          logger: pino(
+            { level: 'info', base: null },
+            { write: (line: string) => lines.push(line) },
+          ),
+        }),
+      });
+      const reading = (sensorId: number, key: string): CheckResult => ({
+        sensorId,
+        at: new Date('2026-10-08T11:00:00.000Z').toISOString(),
+        outcome: 'ok',
+        message: '',
+        durationMs: 1,
+        channels: [{ key, value: 1 }],
+      });
+      const resolved = await db.tx((q) =>
+        resolver.resolve(
+          q,
+          sensors.map((id) => reading(id, 'value')),
+        ),
+      );
+      // And a later channel of the first sensor: the same type, the same kind of error.
+      await db.tx((q) => resolver.resolve(q, [reading(typeError, 'later')]));
+
+      assert.equal(resolved.created, 4, 'every channel was still created');
+      assert.equal(resolved.droppedReadings, 0);
+      const rows = await db.query<{ sensor_id: string; key: string; counter_bits: number | null }>(
+        'SELECT sensor_id::text AS sensor_id, key, counter_bits FROM channel ' +
+          'WHERE sensor_id = ANY($1::bigint[]) ORDER BY sensor_id, key',
+        [sensors],
+      );
+      assert.equal(rows.length, 5);
+      for (const row of rows.filter((one) => one.key === 'value')) {
+        assert.equal(row.counter_bits, 64, `sensor ${row.sensor_id} took the type's {} answer`);
+      }
+
+      const warnings = lines.map(
+        (line) =>
+          JSON.parse(line) as {
+            level: number;
+            sensorType: string;
+            sensorId: number;
+            phase: string;
+            err: { code: string; message: string };
+          },
+      );
+      assert.deepEqual(
+        warnings.map((one) => [one.level, one.sensorType, one.phase, one.err.code]),
+        [
+          [40, 'test.brittle', 'declare-channels-on-ingest', 'TypeError'],
+          [40, 'test.brittle', 'declare-channels-on-ingest', 'BAD_SENSOR_TYPE'],
+        ],
+        'one warning for each kind of error, however many sensors and channels met it',
+      );
+      const [first, second] = warnings;
+      assert.ok(first !== undefined && second !== undefined);
+      assert.equal(first.sensorId, typeError);
+      assert.equal(second.sensorId, limitedOne);
+      assert.match(first.err.message, /\[a parameter\]/u);
+      assert.match(second.err.message, /declares limits on channel "bounded"/u);
+      for (const line of lines) {
+        assert.ok(!line.includes(SECRET), `a secret reached the log: ${line}`);
+        assert.ok(!line.includes(LABEL), `a parameter's value reached the log: ${line}`);
+      }
     });
 
     it('reads a column an edit added from the sensor’s own parameters, not `{}` (P-297)', async () => {
@@ -334,13 +479,13 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
       // Asked first: an unregistered type answers nothing, which would pass a row expecting it.
       assert.ok(catalogue.has(one.type), `${one.type} is not a shipped type`);
       assert.equal(catalogue.declaration(one.type).fixedChannels, undefined, 'not a fixed type');
-      assert.deepEqual(shipped(one.type, one.params).get(one.key), one.shape, 'the sensor');
-      assert.deepEqual(shipped(one.type, {}).get(one.key), one.bare, '`{}`');
+      assert.deepEqual(shipped(one.type, one.params, 1).get(one.key), one.shape, 'the sensor');
+      assert.deepEqual(shipped(one.type, {}, 1).get(one.key), one.bare, '`{}`');
     });
   }
 
   it('answers nothing for a type this build does not register', () => {
-    assert.equal(shipped('gone.type', { anything: 1 }).size, 0);
+    assert.equal(shipped('gone.type', { anything: 1 }, 1).size, 0);
   });
 
   it('falls back to `{}` only when the sensor’s own answer cannot be had', () => {
@@ -374,11 +519,11 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
     const shapes = declaredChannelLookup(catalogue.seal());
 
     const bare: Shape = { lookup: null, counterBits: 64 };
-    assert.deepEqual(shapes('test.fragile', { broken: true }).get('total'), bare);
-    assert.deepEqual(shapes('test.fragile', { limited: true }).get('total'), bare);
-    assert.equal(shapes('test.fragile', { limited: true }).get('extra'), undefined);
+    assert.deepEqual(shapes('test.fragile', { broken: true }, 1).get('total'), bare);
+    assert.deepEqual(shapes('test.fragile', { limited: true }, 1).get('total'), bare);
+    assert.equal(shapes('test.fragile', { limited: true }, 1).get('extra'), undefined);
     // With no `{}` answer to fall back on it answers nothing, rather than throwing into ingestion.
-    assert.equal(shapes('test.unanswerable', {}).size, 0);
-    assert.deepEqual(shapes('test.unanswerable', { columns: [] }).get('one'), bare);
+    assert.equal(shapes('test.unanswerable', {}, 1).size, 0);
+    assert.deepEqual(shapes('test.unanswerable', { columns: [] }, 1).get('one'), bare);
   });
 });

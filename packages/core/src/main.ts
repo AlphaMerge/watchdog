@@ -404,7 +404,7 @@ async function serve(): Promise<void> {
     logger,
     lookups,
     declaredLimits: declaredLimitsLookup(catalogue),
-    declaredShape: declaredChannelLookup(catalogue),
+    declaredShape: declaredChannelLookup(catalogue, { logger }),
   });
   // `settings` is what makes the failure policy per-sensor and inheritable (M-03): a group can
   // set "warn for three intervals" for everything beneath it, and a sensor can override.
