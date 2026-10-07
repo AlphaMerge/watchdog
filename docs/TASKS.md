@@ -3566,6 +3566,18 @@ because each is a decision rather than a defect:
       still reach the UI. **Done when** they are escaped or removed where `last_error` is shown,
       with a test.
 
+- [ ] **N-25 — the API and the logs view describe `discarded` only as `N-12`'s** · XS · N-22 ·
+      Found 2026-10-07 in `N-22`. `/notification-requests`' description
+      (`packages/core/src/api/routes/notifications.ts`, mirrored in `docs/api-reference.md`) and
+      the LogsView comment do not mention a recovery discarded because a newer alarm overtook it.
+      **Done when** both say so and the reference is regenerated.
+
+- [ ] **N-26 — a recovery dropped at send uses up its window's immediate Up** · S · N-22 · Found
+      2026-10-07 in `N-22`. A recovery decided as immediate on the pass its newer alarm is sent,
+      then dropped at send, has spent the summarisation window's single immediate Up, so another
+      sensor's first Up in that window waits for the digest. One message fewer, never one more.
+      **Done when** decided: give the slot back, or keep, with a scenario test either way.
+
 ## Phase 5 — Web UI
 
 - [x] **U-01 — Frontend scaffold** · M · F-01 · React 19 + TypeScript + Vite 8, routing, design
@@ -9912,6 +9924,44 @@ because each is a decision rather than a defect:
       - **Not done:** two other tests in `windows-transport.test.ts` ("kills a script that will
         not finish", "ends PowerShell on the check's cancel") still assert `< 15_000` on the wall
         clock. That bound is generous, but it is the same kind of assert.
+
+- [ ] **P-287 — two Windows transport tests still bound a wall clock** · XS · P-286 · Found
+      2026-10-07 in `P-286`. "kills a script that will not finish" and "ends PowerShell on the
+      check's cancel" in `windows-transport.test.ts` assert `< 15_000` on the wall clock, the kind
+      of assert a loaded VM breaks. **Done when** each waits through `within` and asserts what
+      happened, not how long it took.
+
+- [ ] **P-288 — a stored batch sent again counts its refused results again** · S · P-281 · Found
+      2026-10-07 in `P-281`'s review. The core counts what it refused from a batch when it acks
+      it. A batch whose ack was lost is sent again, stored idempotently (`ON CONFLICT DO NOTHING`)
+      and acked again, so its refusals are counted twice on Reports refused; the core keeps no
+      record of batch ids. **Done when** decided: remember recent batch ids per probe and count a
+      batch once, or accept the rare double count and say so, with a test that loses the first
+      ack either way.
+
+- [ ] **P-289 — a query result is still refused whole for one result that does not fit** · S ·
+      P-281 · Found 2026-10-07 in `P-281`. `query-result` carries the same result schema, and the
+      core still closes the link for one unfit result in it. It is not spooled, so it wedges
+      nothing. **Done when** decided: fit and refuse alone as `P-281` does for `results`, or keep,
+      with a test either way.
+
+- [ ] **P-290 — results the core refused or fitted are not on Core Health or `/metrics`** · S ·
+      P-281 · Found 2026-10-07 in `P-281`. Ingestion's `refusedUnfit` and
+      `discardedUnfitReadings` are seen only as Probe Health's Reports refused and in the log.
+      **Done when** both are exported (Core Health channel or Prometheus counter) with a test, or
+      the reason not to is written down.
+
+- [ ] **P-291 — a limit a sensor type stops declaring stays on its channels** · S · P-284 · Found
+      2026-10-07 in `P-284`. `applyDeclaredLimits` (`packages/core/src/state/declared-limits.ts`)
+      writes declared limits but never removes one the type no longer declares. An install that
+      ran protocol 31 keeps `scriptGroupsRefused`'s old 0.00001 rate warning although the docs say
+      it has none. **Done when** a `declared` limit for a key the type no longer declares is
+      cleared at start-up, an operator-set one is left, with a test.
+
+- [ ] **P-292 — a sensor whose channels were dropped says nothing in its own result** · S · P-283
+      · Found 2026-10-07 in `P-283`. When `fitResult` drops channels that cannot be sent, the count
+      appears only on Probe Health and in the probe's log; the sensor's own message is silent.
+      **Done when** decided: say it in the sensor's message (or a warning), or keep, with a test.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
