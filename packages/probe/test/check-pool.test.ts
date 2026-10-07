@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { readdirSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { BroadcastChannel } from 'node:worker_threads';
 import { tmpdir } from 'node:os';
@@ -577,6 +578,8 @@ describe('a worker that hangs while loading (P-263)', () => {
     beats: Map<number, { first: number; last: number }>;
     /** Every hang has stopped beating for this long: its thread is gone. */
     quiet: (forMs: number) => boolean;
+    /** How many of the scripted entries a load has claimed so far. */
+    claimed: () => number;
     close: () => void;
   }
 
@@ -605,6 +608,7 @@ describe('a worker that hangs while loading (P-263)', () => {
     return {
       beats,
       quiet: (forMs) => [...beats.values()].every((one) => Date.now() - one.last >= forMs),
+      claimed: () => readdirSync(scratch).length,
       close: () => {
         delete process.env['MS_TEST_REGISTRY_HANG_DIR'];
         delete process.env['MS_TEST_REGISTRY_SCRIPT'];
@@ -701,14 +705,6 @@ describe('a worker that hangs while loading (P-263)', () => {
       // Waited for, because a worker slow enough under load to miss the bound as well is replaced
       // after a delay; settled, it is two, and a pool that replaced a hang twice stays at three.
       await until(() => pool.size === 2, 'the pool to be back at its size', 30_000);
-      assert.equal(pool.stats().size, 2);
-
-      // And it is counted as on its way while it waits out its delay, so a check that queues behind
-      // two busy workers is not a reason to grow: the pool is at its size, not one under it.
-      const before = seen.length;
-      for (let n = 0; n < 3; n += 1) pool.submit(request(790 + n, 'test.slow', { delayMs: 300 }));
-      await until(() => seen.length === before + 3, 'three checks on two workers', 60_000);
-      assert.equal(pool.stats().grown, 0, 'nothing was grown for the gap a replacement fills');
       assert.equal(pool.stats().size, 2);
     } finally {
       // Stopped before the environment goes, so no retry of this pool's reads the next test's.
@@ -833,6 +829,10 @@ describe('a worker that hangs while loading (P-263)', () => {
     // the pool until a restart, and with eight hangs in flight one death did — and must not wipe
     // out the deaths before it. Only a worker that says ready ends the streak. One worker, so
     // nothing is ever ready while the script runs.
+    //
+    // Each row ends on a death, and the verdict is read once every entry has been claimed and every
+    // scripted death seen. A load slow enough under load to miss the bound before it claims its
+    // entry is one more hang, which changes no verdict, and the entry goes to the next load.
     const rows: { script: ('hang' | 'throw')[]; disabled: boolean }[] = [
       { script: ['hang', 'hang', 'throw'], disabled: false },
       { script: ['hang', 'hang', 'hang', 'throw', 'throw'], disabled: false },
@@ -843,13 +843,14 @@ describe('a worker that hangs while loading (P-263)', () => {
       const what = row.script.join(', ');
       const hangs = await scriptLoads(row.script);
       const seen: Seen[] = [];
-      const pool = stalledPool({ size: 1, startupTimeoutMs: 1_000 }, seen);
+      const pool = stalledPool({ size: 1, startupTimeoutMs: 5_000 }, seen);
+      const throws = row.script.filter((one) => one === 'throw').length;
       try {
         void pool.start();
         await until(
-          () => pool.stats().startupFailed >= row.script.length,
-          `${what}: every scripted start to fail`,
-          120_000,
+          () => hangs.claimed() === row.script.length && pool.stats().workerCrashes >= throws,
+          `${what}: every scripted start to have happened`,
+          180_000,
         );
         // The latch is decided at the failure itself, synchronously, so this reads its verdict.
         assert.equal(pool.stats().disabled, row.disabled, what);
@@ -863,6 +864,37 @@ describe('a worker that hangs while loading (P-263)', () => {
         await pool.stop();
         hangs.close();
       }
+    }
+  });
+
+  it('logs the latch once, however many loads were still in flight when it fired', async () => {
+    // Three deaths latch the pool while two loads hang. Each of those reaches its bound later and
+    // is a failed start, and each used to latch and log again: one error per straggler for the one
+    // event (`P-227`). Counted, terminated, and nothing more.
+    const hangs = await scriptLoads(['throw', 'throw', 'throw', 'hang', 'hang']);
+    const lines: Record<string, unknown>[] = [];
+    const logger = pino(
+      { level: 'debug' },
+      { write: (line: string) => lines.push(JSON.parse(line) as Record<string, unknown>) },
+    );
+    const pool = stalledPool({ size: 5, startupTimeoutMs: 5_000, logger });
+    try {
+      void pool.start();
+      // Every one of the five has failed one way or another, and nothing retries once latched.
+      await until(
+        () => pool.stats().disabled && pool.stats().startupFailed >= 5,
+        'the latch, and the hangs after it',
+        120_000,
+      );
+      await until(() => hangs.quiet(2_000), 'the hung workers’ threads to end', 30_000);
+      const latched = lines.filter((line) =>
+        String(line['msg']).includes('disabled until the probe restarts'),
+      );
+      assert.equal(latched.length, 1, `${String(latched.length)} latch lines`);
+      assert.equal(latched[0]?.['level'], 50);
+    } finally {
+      await pool.stop();
+      hangs.close();
     }
   });
 
@@ -922,7 +954,6 @@ describe('a worker that hangs while loading (P-263)', () => {
       // One worker busy, one gone and waiting for a turn: a check queues, and must not grow one.
       pool.submit(request(762, 'test.ok'));
       assert.equal(pool.stats().grown, 0, 'nothing was grown for the gap the replacement fills');
-      assert.ok(pool.stats().size <= 10);
     } finally {
       await pool.stop();
       hangs.close();

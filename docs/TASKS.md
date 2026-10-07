@@ -8187,6 +8187,22 @@ because each is a decision rather than a defect:
           the default bound an hour.
         - **Runs:** check-pool, core probe-health and metrics, probe-health-report, health-types,
           capabilities and `build-hygiene` whole, 297/297, at VM count 1.
+      - **Amended on second review** (a third commit):
+        - **The latch logged once per straggler.** A worker still loading when the pool latched
+          reached its bound later, ran the latch branch again and logged the error again.
+          `#startFailed` now counts the failure and returns once the pool is disabled. A worker
+          that died after the latch did the same before `P-263`. Test: three deaths latch while two
+          loads hang; once both hangs end, the error has been logged once.
+        - **The latch table read its verdict too early under load.** At a 1 s bound, a slow import
+          was timed out as a hang before it claimed its entry. The rows now run at 5 s and read the
+          verdict only when every entry has been claimed and every scripted death has been seen.
+        - **Two assertions that could not fail were removed:** the replacement test's last block
+          (the pool was already full) and the crash test's single `size <= 10` sample. The
+          retry-window and crash tests' `grown === 0` are what catch the `#growing` reverts.
+        - **Mutation 3/3 killed:** the early return removed; the retry's replacement uncounted, by
+          reverting only the fix; the crash's replacement uncounted, by reverting only the fix.
+        - **Runs:** check-pool, core probe-health and metrics, probe-health-report, health-types,
+          capabilities and `build-hygiene` whole, 298/298, at VM count 1.
 
 - [ ] **P-264 — two more tests read red on a loaded machine** · S · P-258 · Found 2026-10-05
       in `P-260`, each once while a probe suite ran on loop beside it at load up to 28:

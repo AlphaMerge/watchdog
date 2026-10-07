@@ -1327,6 +1327,11 @@ export class CheckPool {
     this.#startupFailed += 1;
     this.#startFailures += 1;
     if (!how.hung) this.#startDeaths += 1;
+    // **Already given up: counted, and nothing more** (`P-227`, one error per streak). A worker
+    // still loading when the pool latched reaches its bound, or dies, afterwards; it was terminated
+    // or is gone, and latching and logging again for each one was a second error line per
+    // straggler for the one event. Nothing is retried on a disabled pool either.
+    if (this.#disabled) return;
     // **Deaths only, never hangs** (above, `#startDeaths`), and **only when nothing is left
     // working** (`P-80`). The count is pool-wide and reset only by a worker reaching `ready`, and
     // it used to latch on its own — so three failures during a
