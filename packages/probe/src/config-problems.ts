@@ -1,5 +1,6 @@
 import type { BuildProfile, ConfigFindings, ProbeConfig } from '@ms/shared';
 import { LISTENER_ID as FLOW_LISTENER_ID } from './listeners/flow-listener.js';
+import { rootScriptsNote } from './root-scripts.js';
 
 /**
  * What this build cannot do with a configuration its schema accepts (`B-08`).
@@ -26,11 +27,17 @@ export function carriesFlow(listenerFor: ReadonlyMap<string, string>): boolean {
 }
 
 export function buildFindings(
-  config: Pick<ProbeConfig, 'flowListener'>,
+  config: Pick<ProbeConfig, 'flowListener'> & {
+    probe: Pick<ProbeConfig['probe'], 'processUid' | 'scriptDir' | 'allowScriptsAsRoot'>;
+  },
   listenerFor: ReadonlyMap<string, string>,
   profile: BuildProfile,
 ): ConfigFindings {
   const warnings: string[] = [];
+  // A note and not a warning: whether it applies depends on the account the probe runs as,
+  // which the file does not say (`P-276`).
+  const asRoot = rootScriptsNote(config.probe);
+  const notes = asRoot === undefined ? [] : [asRoot];
   if (config.flowListener.enabled && !carriesFlow(listenerFor)) {
     warnings.push(
       `flowListener.enabled: is true, and this build (the ${profile} profile) carries no flow ` +
@@ -39,5 +46,5 @@ export function buildFindings(
         'flow monitoring',
     );
   }
-  return { warnings };
+  return { warnings, notes };
 }

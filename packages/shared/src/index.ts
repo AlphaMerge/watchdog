@@ -4,6 +4,7 @@ export type { ErrorContext } from './errors/app-error.js';
 export { loadConfig } from './config/load.js';
 export { isProductEnv, PRODUCT_ENV } from './config/product-env.js';
 export {
+  CONFIG_NOTE_PREFIX,
   CONFIG_WARNING_PREFIX,
   runConfigCheck,
   type ConfigCheckOptions,

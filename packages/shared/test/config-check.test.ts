@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
-import { CONFIG_WARNING_PREFIX, runConfigCheck, type ConfigFindings } from '../src/config/check.js';
+import {
+  CONFIG_NOTE_PREFIX,
+  CONFIG_WARNING_PREFIX,
+  runConfigCheck,
+  type ConfigFindings,
+} from '../src/config/check.js';
 import { coreConfigSchema, probeConfigSchema } from '../src/config/schema.js';
 
 /**
@@ -282,6 +287,27 @@ describe('checking a configuration', () => {
       assert.deepEqual(err, ['warning: first: odd', 'warning: second: odd']);
       assert.equal(CONFIG_WARNING_PREFIX, 'warning: ');
       assert.ok(out[0]?.includes('configuration is valid'), 'a warning stopped the pass line');
+    });
+
+    it('gives notes on stdout after a pass, marked, and not where the installer reads (`P-276`)', () => {
+      // `ms-setup` shows a passing check's `warning: ` lines from stderr and nothing else, so a
+      // note — true only for an account the check cannot see — reaches a person and not every
+      // upgrade.
+      const path = tempFile(JSON.stringify({}));
+      const passing = probeCheck(['--config', path], () => ({ notes: ['if: so'] }));
+      assert.equal(passing.code, 0);
+      assert.deepEqual(passing.err, []);
+      assert.ok(passing.out[0]?.includes('configuration is valid'));
+      assert.equal(passing.out.at(-1), 'note: if: so');
+      assert.equal(CONFIG_NOTE_PREFIX, 'note: ');
+
+      const failing = probeCheck(['--config', path], () => ({
+        problems: ['broken: yes'],
+        notes: ['if: so'],
+      }));
+      assert.equal(failing.code, 1);
+      assert.deepEqual(failing.err, ['broken: yes']);
+      assert.deepEqual(failing.out, [], 'a failed check printed its notes as if it had passed');
     });
 
     it('fails on a problem whatever the warnings, and still gives the warnings', () => {

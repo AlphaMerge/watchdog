@@ -364,6 +364,8 @@ export interface RunningProbe {
   readonly logs: () => readonly Record<string, unknown>[];
   /** Stops it the way a service manager does, and resolves with its exit code. */
   readonly stop: () => Promise<number | null>;
+  /** Its exit code, once it has exited and both pipes have ended, however it came to. */
+  readonly exited: Promise<number | null>;
 }
 
 /**
@@ -449,6 +451,7 @@ export function startProbe(options: {
 
   return {
     logs: () => lines,
+    exited,
     stop: async () => {
       if (child.exitCode !== null) return child.exitCode;
       child.kill('SIGTERM');

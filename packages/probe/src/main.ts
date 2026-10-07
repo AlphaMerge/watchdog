@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import {
   bootstrap,
+  ConfigError,
   describeBuild,
   exitWithLine,
   probeConfigSchema,
@@ -40,6 +41,7 @@ import { CoreClient } from './transport/core-client.js';
 import { BUILD, VERSION } from './version.js';
 import { dispatchTables } from './catalogue.js';
 import { buildFindings, carriesFlow } from './config-problems.js';
+import { rootScripts } from './root-scripts.js';
 
 /**
  * `ms-probe config check` — the only verb this service has, and it earns its place (`H-03`).
@@ -107,6 +109,18 @@ async function main(): Promise<void> {
     },
     'probe configured',
   );
+
+  // **Before anything is opened** (`P-276`): a probe that would run its scripts as root without
+  // being told to does not start, and says why on the line `systemctl status` shows, exit 78 so
+  // systemd does not restart it into the same refusal. `root-scripts.ts` says why.
+  const asRoot = rootScripts(config.probe, process.geteuid?.());
+  if (asRoot.kind === 'refused') throw new ConfigError(asRoot.message);
+  if (asRoot.kind !== 'fine') {
+    logger.warn(
+      { scriptDir: config.probe.scriptDir, processUid: config.probe.processUid },
+      asRoot.message,
+    );
+  }
 
   // Results go to disk before anything else touches them: a probe that cannot reach the core
   // keeps scanning and keeps them, where PRTG buffers in RAM and loses the lot on a restart.

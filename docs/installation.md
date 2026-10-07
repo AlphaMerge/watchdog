@@ -356,6 +356,16 @@ running before.
 Migrations run on startup and are reversible. A build started against a database migrated by a
 *newer* build refuses to start; install the matching release rather than migrating backwards.
 
+**From a release before `P-276`**, a probe that runs **as root** with a `probe.scriptDir` and no
+`probe.processUid` no longer starts: every script it ran was running as root. The packaged
+`ms-probe.service` runs the probe as `ms-probe`, so a package or tarball installation is not
+affected; a probe under a drop-in that sets `User=root`, or started by hand as root, is. The
+installer's configuration check passes it, because the check cannot see which account the unit
+runs as, and the restart then fails with *probe.processUid: is not set, and this probe runs as
+root …*. Before upgrading, run it as an unprivileged account, or set `probe.processUid` and
+`probe.processGid`, or — if root is what you mean — `"allowScriptsAsRoot": true` under `probe`
+(`administration.md` → Script sensors).
+
 **From a release before `A-47`**, check two things first. An `api.trustedProxies` range wider
 than /16 for IPv4 or /48 for IPv6 is now refused, so the configuration check above stops there
 until it names the proxy. And a browser that reaches the core by a name gets 421 unless that name

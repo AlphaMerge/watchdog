@@ -695,10 +695,24 @@ export interface ProbeConfig {
      * The point of a separate account is that a script somebody dropped in a directory does not
      * run as the user holding this probe's certificate and credential material. Setting it needs
      * the probe to be started with the privilege to change user, which in practice means root or
-     * `CAP_SETUID`; it is ignored on Windows, which has no equivalent this can reach.
+     * `CAP_SETUID`; it is ignored on Windows, which has no equivalent this can reach. A probe
+     * that starts as root with a `scriptDir` and no `processUid` refuses to start, unless
+     * `allowScriptsAsRoot` says to (`P-276`).
      */
     processUid: number;
     processGid: number;
+    /**
+     * Run this probe's scripts as root, said on purpose (`P-276`).
+     *
+     * A probe that starts as root, with a script directory and no `processUid`, refuses to start:
+     * every script in that directory would run as root, so whoever can put a file there has this
+     * machine, and the checks `P-266` makes before ending what a dead check left running compare
+     * against a user every root process shares. The packaged `ms-probe.service` runs the probe as
+     * `ms-probe` and never meets this; a probe run by hand, or under a drop-in that sets
+     * `User=root`, does. `true` starts it anyway, and the probe says so in its log at every start.
+     * It does nothing for a probe that is not root, or that has a `processUid`.
+     */
+    allowScriptsAsRoot: boolean;
     /**
      * Where this probe keeps the programs an EXE/Script sensor may run (`T-19`).
      *
@@ -1530,6 +1544,7 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
         'processMemoryLimitMb',
         'processUid',
         'processGid',
+        'allowScriptsAsRoot',
         'scriptDir',
         'powerShellPath',
         'targetPolicy',
@@ -1574,6 +1589,8 @@ export const probeConfigSchema: JSONSchemaType<ProbeConfig> = {
         processMemoryLimitMb: { type: 'integer', minimum: 64, maximum: 8_192, default: 256 },
         processUid: { type: 'integer', minimum: 0, maximum: 4_294_967_295, default: 0 },
         processGid: { type: 'integer', minimum: 0, maximum: 4_294_967_295, default: 0 },
+        // Off: a root probe with scripts and no `processUid` refuses to start unless told (`P-276`).
+        allowScriptsAsRoot: { type: 'boolean', default: false },
         // Empty by default: a probe runs no programs until somebody deliberately says where.
         scriptDir: { type: 'string', default: '' },
         // Empty means "work it out from the platform", which is right on Windows and honest

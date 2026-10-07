@@ -15,7 +15,8 @@
     "spoolSegmentMaxBytes": 8388608,
     "spoolBatchMaxRows": 500,
     "spoolCatchUpMaxRows": 2000,
-    "scriptDir": "dev/scripts"
+    "scriptDir": "dev/scripts",
+    "allowScriptsAsRoot": true
   },
   "trapListener": {
     "enabled": true,

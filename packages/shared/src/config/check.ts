@@ -66,10 +66,23 @@ export interface ConfigFindings {
   readonly problems?: readonly string[];
   /** Each is reported and does not. */
   readonly warnings?: readonly string[];
+  /**
+   * What is true of this configuration only on a condition the check cannot see (`P-276`).
+   *
+   * A probe that starts as root with scripts and no `processUid` refuses to, and nothing in the
+   * file says which account the service will run as: the installer runs this check as root for a
+   * unit that runs the probe as `ms-probe`. So it is not a warning, which the installer shows on
+   * every upgrade, but a line on standard output with a pass, marked `note: `, for whoever runs
+   * the check by hand. A failed check gives its problems and not these.
+   */
+  readonly notes?: readonly string[];
 }
 
 /** What every warning line starts with, so an installer or a person can pick them out. */
 export const CONFIG_WARNING_PREFIX = 'warning: ';
+
+/** What every note line starts with (`P-276`). */
+export const CONFIG_NOTE_PREFIX = 'note: ';
 
 export function runConfigCheck<T>(options: ConfigCheckOptions<T>): number {
   try {
@@ -106,6 +119,9 @@ export function runConfigCheck<T>(options: ConfigCheckOptions<T>): number {
       // *misspelt section* looks exactly like one and is otherwise silent. What the product sets
       // itself never reaches here (`PRODUCT_ENV`, `H-32`).
       options.write(`  ignored MS_*    ${loaded.sources.ignoredEnv.join(', ')}`);
+    }
+    for (const note of findings.notes ?? []) {
+      options.write(`${CONFIG_NOTE_PREFIX}${note}`);
     }
     return 0;
   } catch (error) {

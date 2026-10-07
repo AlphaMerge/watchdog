@@ -9235,12 +9235,46 @@ because each is a decision rather than a defect:
         trap/syslog/flow listener, core probe-health, metrics and `build-hygiene`: 351/351, none
         skipped.
 
-- [ ] **P-276 — a probe running as root without `processUid` gives scripts the probe's power** ·
+- [x] **P-276 — a probe running as root without `processUid` gives scripts the probe's power** ·
       S · P-266 · Found 2026-10-07 in review of `P-266`. Every uid check `P-266` added protects
       only when `probe.processUid` is set. Without it a root probe runs its scripts as root, so
       a script author already is root. `administration.md` says to set it. **Done when** a probe
       that starts as root with no `processUid` says so at start-up (a warn line and a Probe Health
       notice, or `config check` refusing it with a way to opt out), with a test.
+
+      **P-276 outcome. A probe that starts as root with a script directory and no `processUid`
+      refuses to start, exit 78, unless `probe.allowScriptsAsRoot` says it was meant.**
+      - **Refusal, because the packaged installs never meet it.** `ms-probe.service` (and the
+        legacy unit the smoke tests carry) runs the probe as `User=ms-probe`, without
+        `CAP_SETUID`, and no installer, example or package script sets `processUid`. So root
+        arises only by hand or under a drop-in that sets `User=root`, and a fresh package install
+        and an upgrade start as before. A Probe Health notice would have needed a heartbeat field;
+        a refusal needs none and cannot be missed. Exit 78 is `RestartPreventExitStatus`, so
+        systemd does not restart into it, and the line names the setting, the directory, the fix
+        and the opt-out.
+      - **Only with a script directory.** The EXE/Script family is the only one that runs in a
+        process of its own, and it runs nothing without `scriptDir`, so there `processUid` would
+        change nothing: a root probe with no script directory starts and logs a warning that it
+        runs as root. With the opt-out it starts and warns at every start. With `processUid`, or
+        not root, nothing is said. On Windows `process.geteuid` does not exist and nothing is
+        asked: `processUid` is ignored there and WinSW (release 1.1) is unaffected.
+      - **`config check` does not refuse it, because it cannot know the account.** `ms-setup` runs
+        the check as root for a unit that runs as `ms-probe`; a refusal, or a `warning:` (which
+        `ms-setup` shows), would have failed or cluttered every packaged upgrade with scripts.
+        `ConfigFindings` gained `notes`: printed on stdout after a pass as `note: `, never by the
+        installer, and the probe's says *started as root, this probe would refuse to start: …*.
+      - `dev/probe.json` sets the opt-out, because the toolchain container runs the development
+        probe and `ms-server`'s as root with `dev/scripts`; `dev/scripts/README.md` says why.
+        `administration.md` (Script sensors) and `installation.md` (Upgrading: a root probe under
+        a drop-in now stops at the restart) describe it.
+      - Tests: `packages/probe/test/root-scripts.test.ts` — the rule as a table (root with and
+        without `processUid`, not root, no POSIX user, no script directory, the opt-out), the
+        `config check` note through the verb, and, as root, `dist/src/main.js` refusing with 78
+        and starting with the opt-out, a `processUid` and no script directory. The shared check's
+        notes in `config-check.test.ts`.
+      - **Not done:** a root drop-in is learnt at the restart, not by the installer's check; and
+        `processGid` left at 0 under a `processUid` keeps scripts in group root, which is not
+        said.
 
 - [ ] **P-277 — check every runner that acts on what a child process writes** · S · P-266 ·
       Found 2026-10-07 in `P-266`. The P-266 review found the runner trusting a line on the check

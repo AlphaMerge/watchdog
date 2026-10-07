@@ -5,7 +5,6 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import type { ProbeConfig } from '@ms/shared';
 import { dispatchTables, probeCatalogue } from '../src/catalogue.js';
 import { buildFindings, carriesFlow } from '../src/config-problems.js';
 
@@ -23,7 +22,9 @@ import { buildFindings, carriesFlow } from '../src/config-problems.js';
 /** At runtime this file is `dist/test/config-problems.test.js`. */
 const MAIN = join(import.meta.dirname, '..', 'src', 'main.js');
 
-const flow = (enabled: boolean): Pick<ProbeConfig, 'flowListener'> => ({
+const flow = (enabled: boolean): Parameters<typeof buildFindings>[0] => ({
+  // No script directory, so `P-276`'s note has nothing to say and these cases are about flow.
+  probe: { processUid: 0, scriptDir: '', allowScriptsAsRoot: false },
   flowListener: {
     enabled,
     port: 2055,

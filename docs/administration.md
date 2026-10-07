@@ -646,6 +646,19 @@ arguments and the variables — so treat both as untrusted input in every script
 - **Scripts run as the probe's account**, which holds the probe's identity and the credentials the
   core sends it. `probe.processUid`/`processGid` run them as another account instead, but need the
   probe to have `CAP_SETUID`, which the shipped unit does not grant.
+- **A probe that runs as root, with a script directory and no `processUid`, does not start**
+  (`P-276`). Every script would run as root, so whoever can put a file in the directory has the
+  machine. It exits 78, which systemd does not restart, with *Configuration error:
+  probe.processUid: is not set, and this probe runs as root with a script directory …*. The
+  shipped unit runs the probe as `ms-probe` and never meets this; a probe started by hand as root,
+  or under a drop-in that sets `User=root`, does. Run it as an unprivileged account, or set
+  `probe.processUid` and `probe.processGid` to one. If root is what you mean, set
+  `"allowScriptsAsRoot": true` under `probe`: it starts, and logs a warning at every start that
+  its scripts run as root. A root probe with no script directory starts, and logs a warning that
+  it runs as root. `ms-probe config check` cannot know which account the service will run as — the
+  installer runs it as root, for a unit that runs as `ms-probe` — so it passes such a file and
+  prints a `note:` line saying a root start would refuse it; the installer does not show notes.
+  On Windows (release 1.1) none of this applies: `processUid` is ignored there.
 - **A check's timeout is the check's own** (`P-260`). Each check runs in a process of its own,
   which first loads the probe's sensor types: about 21 ms on a quiet machine, and measured at up
   to 15 s on a badly overloaded one. The timeout starts once that is done, and the process is
@@ -677,8 +690,10 @@ arguments and the variables — so treat both as untrusted input in every script
   its session and of that user; a group named by anything else is left alone and logged as *named
   process groups that are not its own*, or *whose id now names another process or group*. Probe
   Health counts all three — `scriptGroupsEnded`, `scriptGroupsRefused` and `scriptGroupsRecycled`
-  — and warns on a refusal, which a correct check process never causes. On a
-  probe that runs as root, set `processUid`: without it the user check has nothing to compare. On a probe without `/proc` — macOS, used for development only —
+  — and warns on a refusal, which a correct check process never causes. On a probe that runs as
+  root, set `processUid`: without it the user check has nothing to compare, which is why such a
+  probe does not start without `allowScriptsAsRoot` (above). On a probe without `/proc` — macOS,
+  used for development only —
   nothing is checked, so nothing is ended this way.
 
   **On Windows, today,** the script itself is ended at once with `TerminateProcess`, which it
