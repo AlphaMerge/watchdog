@@ -64,8 +64,9 @@ export interface ResultReceiver {
     message: Extract<ProbeToCoreMessage, { type: 'results' }>,
   ): Promise<CoreToProbeMessage>;
   /**
-   * Told, as a batch arrives, what the parser refused from it or fitted (`P-281`), to count and
-   * log. The batch that follows to `acceptProbeResults` holds what was kept.
+   * Told what the parser refused from a batch or fitted (`P-281`), to count and log, once
+   * `acceptProbeResults` has acknowledged the batch, which held what was kept. Not for a batch
+   * refused back: the probe sends it again, and it is told then.
    */
   unfitResults?(origin: ProbeOrigin, unfit: UnfitResults): void;
 }
@@ -570,6 +571,11 @@ export class ProbeEndpoint {
    * `disconnect` find it.
    */
   readonly #pending = new Map<string, ProbeSession>();
+  /**
+   * What the parser refused or fitted from a results batch, by the parsed message (`P-281`).
+   * Weak, so a batch that is never queued (one before the handshake) holds nothing.
+   */
+  readonly #unfit = new WeakMap<ProbeToCoreMessage, UnfitResults>();
   #server: Server | undefined;
 
   constructor(options: ProbeEndpointOptions) {
@@ -694,8 +700,14 @@ export class ProbeEndpoint {
       new MessageConnection<ProbeToCoreMessage, CoreToProbeMessage>({
         socket,
         logger: connectionLogger,
-        parse: (value) =>
-          parseProbeToCore(value, {
+        parse: (value) => {
+          // `P-281`: what the parser refused from a results batch, or fitted, is carried with the
+          // batch it was parsed from, and counted only once that batch is acknowledged (see
+          // `#queueResults`). Counting it here was before the session knew its probe object,
+          // which a reconnect's first batch usually is, and again on every resend of a batch
+          // that was then refused back.
+          const told: { unfit?: UnfitResults } = {};
+          const message = parseProbeToCore(value, {
             onUnusableHealth: (fields) => {
               const fresh = fields.filter(({ field }) => !unusableHealth.has(field));
               if (fresh.length === 0) return;
@@ -706,28 +718,13 @@ export class ProbeEndpoint {
                   'heartbeat is kept, and this is said once per field for this connection',
               );
             },
-            // `P-281`: a result that does not fit is refused alone, and the rest of its batch
-            // kept. Counted and logged by ingestion, against the probe that sent it. Results
-            // before the handshake are refused whole a moment later, so only said here.
             onUnfitResults: (unfit) => {
-              const receiver = this.#options.results;
-              if (session === undefined || receiver?.unfitResults === undefined) {
-                connectionLogger.warn(
-                  {
-                    probeGid: session?.info.gid,
-                    refused: unfit.refused.slice(0, 20),
-                    fitted: unfit.fitted.slice(0, 20),
-                  },
-                  'probe sent results that do not fit; those that cannot be fitted are refused',
-                );
-                return;
-              }
-              receiver.unfitResults(
-                { gid: session.info.gid, probeObjectId: session.probeObjectId },
-                unfit,
-              );
+              told.unfit = unfit;
             },
-          }),
+          });
+          if (told.unfit !== undefined) this.#unfit.set(message, told.unfit);
+          return message;
+        },
         // Three missed heartbeats and the probe is gone as far as we are concerned.
         idleTimeoutMs: config.heartbeatIntervalMs * 3,
         onMessage: (message) => {
@@ -1085,12 +1082,36 @@ export class ProbeEndpoint {
         return;
       }
       try {
-        connection.send(
-          await receiver.acceptProbeResults(
-            { gid: session.info.gid, probeObjectId: session.probeObjectId },
-            message,
-          ),
-        );
+        const origin = { gid: session.info.gid, probeObjectId: session.probeObjectId };
+        const reply = await receiver.acceptProbeResults(origin, message);
+        // **Counted with the batch's acknowledgement, and only then** (`P-281` review): here the
+        // session has resolved its probe object, which the batch waited for behind `pending`,
+        // and a batch refused back is sent again and would be counted again.
+        const unfit = this.#unfit.get(message);
+        if (unfit !== undefined && reply.type === 'results-ack') {
+          if (receiver.unfitResults === undefined) {
+            logger.warn(
+              {
+                batchId: message.batchId,
+                refused: unfit.refused.slice(0, 20),
+                fitted: unfit.fitted.slice(0, 20),
+              },
+              'probe sent results that do not fit; those that cannot be fitted were refused',
+            );
+          } else {
+            try {
+              receiver.unfitResults(origin, unfit);
+            } catch (error: unknown) {
+              // The batch is stored; a count that could not be kept must not turn its ack into a
+              // nack, which would have it stored again.
+              logger.error(
+                { err: describeError(error), batchId: message.batchId },
+                'counting the results refused from a stored batch failed',
+              );
+            }
+          }
+        }
+        connection.send(reply);
       } catch (error: unknown) {
         // The receiver is not supposed to throw. If it does, the probe still needs an answer —
         // an unanswered batch is one the probe holds for ever.

@@ -242,21 +242,18 @@ describe('protocol message validation', () => {
       channels: [] as { key: string; value: number }[],
       withheld: true,
     };
-    const batch = (one: Record<string, unknown>): Record<string, unknown> => ({
-      type: 'results',
-      batchId: 'b1',
-      results: [one],
-    });
-
     it('is accepted as an error with no readings', () => {
-      assert.doesNotThrow(() => parseProbeToCore(batch(result)));
+      // As sent, and nothing said (`P-281` review): not throwing no longer means taken.
       const { withheld: _mark, ...plain } = result;
-      assert.doesNotThrow(() => parseProbeToCore(batch(plain)), 'and a result without the mark');
-      assert.doesNotThrow(() =>
-        parseProbeToCore(
-          batch({ ...plain, outcome: 'ok', channels: [{ key: 'rtt', value: 1.2 }] }),
-        ),
-      );
+      for (const sent of [
+        result,
+        plain,
+        { ...plain, outcome: 'ok', channels: [{ key: 'rtt', value: 1.2 }] },
+      ]) {
+        const { kept, unfit } = taken([sent]);
+        assert.deepEqual(kept, [sent]);
+        assert.equal(unfit, undefined, JSON.stringify(unfit));
+      }
     });
 
     // Refused alone since `P-281`, the rest of its batch kept: it used to refuse the batch.

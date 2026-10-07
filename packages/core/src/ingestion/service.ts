@@ -477,8 +477,9 @@ export class IngestionService {
   }
 
   /**
-   * What the parser refused from a probe's batch, or fitted, as it arrived (`P-281`). Counted and
-   * said here; the batch that follows holds only what was kept.
+   * What the parser refused from a probe's batch, or fitted (`P-281`), told once the batch, which
+   * held only what was kept, has been acknowledged: so against the probe object the session has
+   * resolved by then, and once however often a batch refused back is sent again.
    *
    * **Refused results are counted with what Probe Health counts as refused** (`reportsRefused`),
    * the core's own number, so it reads on a probe of any version, which is the point: what sends

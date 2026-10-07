@@ -15,6 +15,7 @@ import {
   pinningCapabilityFor,
   versionFor,
   type ProbeHealthReport,
+  type UnfitResults,
 } from '../src/index.js';
 import { PROBE_HEALTH_FIELDS } from '../src/protocol/messages.js';
 
@@ -822,16 +823,30 @@ describe('the check result a peer can be sent (`A-41c`)', () => {
       batchId: 'b',
       results: [result],
     });
-    assert.doesNotThrow(() => parseProbeToCore(batch({ ...plain, withheld: true })));
-    assert.doesNotThrow(() => parseProbeToCore(batch(plain)));
-    // Refused alone since `P-281`, the batch kept: it used to be refused whole.
-    for (const withheld of [false, 'yes']) {
-      let refused = 0;
-      const parsed = parseProbeToCore(batch({ ...plain, withheld }), {
-        onUnfitResults: (unfit) => (refused += unfit.refused.length),
+    // **Taken as sent, not merely not thrown at** (`P-281` review). The core fits and refuses
+    // results one by one now, so a batch it does not throw at may still have lost the result.
+    const told = (result: unknown) => {
+      const said: { unfit?: UnfitResults } = {};
+      const parsed = parseProbeToCore(batch(result), {
+        onUnfitResults: (unfit) => (said.unfit = unfit),
       });
-      assert.ok(parsed.type === 'results' && parsed.results.length === 0, String(withheld));
-      assert.equal(refused, 1, String(withheld));
+      assert.ok(parsed.type === 'results');
+      return { kept: parsed.results, unfit: said.unfit };
+    };
+    for (const sent of [{ ...plain, withheld: true as const }, plain]) {
+      const { kept, unfit } = told(sent);
+      assert.deepEqual(kept, [sent]);
+      assert.equal(unfit, undefined, JSON.stringify(unfit));
+    }
+    // Refused alone since `P-281`, the batch kept: it used to be refused whole. **For the value**,
+    // which only a schema that knows the field can say: one that did not would refuse it as a
+    // field a result does not have, and for `true` as well.
+    for (const withheld of [false, 'yes']) {
+      const { kept, unfit } = told({ ...plain, withheld });
+      assert.deepEqual(kept, [], String(withheld));
+      assert.equal(unfit?.refused.length, 1, String(withheld));
+      assert.match(unfit.refused[0]?.reason ?? '', /^\/withheld: must be equal to constant/);
+      assert.doesNotMatch(unfit.refused[0]?.reason ?? '', /additional properties/);
     }
   });
 });

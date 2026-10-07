@@ -9704,6 +9704,28 @@ because each is a decision rather than a defect:
         core `unfit-results`, `probe-endpoint`, `ingestion`, `probe-ownership`,
         `probe-ownership-scenario`, `metrics`, `probe-refusals`, 154/154; probe `spool-drain`,
         `process-runner`, `check-pool`, 132/132. None skipped.
+      - **Amended on review** (a second commit). Four findings:
+        - **A refusal was counted as the batch was parsed**, which is before the session has
+          looked up its probe's branch: that happens behind `pending`, and a reconnect's first
+          batch, the spool's, is the one that arrives meanwhile. It went to `refused(null)`, on no
+          probe's Reports refused, in exactly the case `P-281` is about; and a batch refused back
+          was counted again at every resend. Now the parser's report is kept with the parsed
+          message (a `WeakMap` in the endpoint) and handed to `unfitResults` in `#queueResults`,
+          after `acceptProbeResults` answers, with the probe object the session has by then, and
+          only for a `results-ack`. A throw from the count is logged and does not turn the ack
+          into a nack. Tests: the first batch after the welcome, parsed while `probeObjectFor` is
+          held (a heartbeat sent after it is acked first), counts on its probe; a batch nacked
+          `storage-error` and sent again counts once.
+        - **`A-41c`'s acceptance tests passed with `withheld` gone from the schema**: not throwing
+          no longer means taken. `capabilities.test.ts` and `messages.test.ts` now assert each
+          result is kept as sent and nothing is said, and that `false` and `'yes'` are refused
+          for the constant, not as a field the schema does not know.
+        - **`unfit-results.test.ts`'s `after` threw on a partial `before`**, leaving the scratch
+          database and the key directory behind. Each step is now undone only if it was done,
+          and the directory is removed in a `finally`.
+        - **Mutation 3/3:** counting as parsed, against what the session knew then (both new
+          tests fail); counting a nacked batch (the resend test); `withheld` taken out of the
+          schema (four shared tests).
 
 - [x] **P-282 — ping counts duplicate replies as replies** · S · P-277 · Found 2026-10-07 in
       `P-277`. `(DUP!)` lines from the system `ping` are counted as replies, which hides packet

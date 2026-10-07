@@ -21,7 +21,7 @@ import { SensorOwnership } from '../src/ingestion/ownership.js';
 import { IngestionService } from '../src/ingestion/service.js';
 import { EMPTY_ASSIGNMENTS } from '../src/probes/config.js';
 import { ProbeRefusals } from '../src/probes/refusals.js';
-import { ProbeEndpoint } from '../src/transport/probe-endpoint.js';
+import { ProbeEndpoint, type ResultReceiver } from '../src/transport/probe-endpoint.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -217,18 +217,55 @@ describe(
         : false,
   },
   () => {
-    let dir: string;
-    let scratch: ScratchDatabase;
+    // Each `undefined` until `before` gets that far, so `after` undoes what was done and no more.
+    let dir: string | undefined;
+    let scratch: ScratchDatabase | undefined;
     let db: Database;
     let h: Harness;
-    let ingestor: Ingestor;
+    let ingestor: Ingestor | undefined;
     let ingestion: IngestionService;
     let refusals: ProbeRefusals;
-    let endpoint: ProbeEndpoint;
+    let endpoint: ProbeEndpoint | undefined;
     let port: number;
     let probeId: number;
     const sensors: number[] = [];
     const logged: Record<string, unknown>[] = [];
+
+    /**
+     * An endpoint on this core's ingestion. `probeObjectFor` and `results` are what a case
+     * changes: when the probe's branch is known, and what answers a batch.
+     */
+    async function startEndpoint(
+      options: {
+        probeObjectFor?: () => Promise<number | null>;
+        results?: ResultReceiver;
+      } = {},
+    ): Promise<{ endpoint: ProbeEndpoint; port: number }> {
+      assert.ok(dir !== undefined);
+      const started = new ProbeEndpoint({
+        config: {
+          host: '127.0.0.1',
+          port: 0,
+          tls: {
+            certFile: join(dir, 'core.crt'),
+            keyFile: join(dir, 'core.key'),
+            caFile: join(dir, 'ca.crt'),
+          },
+          accessKeys: [],
+          handshakeTimeoutMs: 5_000,
+          heartbeatIntervalMs: 60_000,
+        },
+        logger: silent,
+        coreVersion: '9.9.9',
+        results: options.results ?? ingestion,
+        probeConfig: {
+          probeObjectFor: options.probeObjectFor ?? (() => Promise.resolve(probeId)),
+          assignmentsFor: () => Promise.resolve(EMPTY_ASSIGNMENTS),
+          touch: () => Promise.resolve(),
+        },
+      });
+      return { endpoint: started, port: (await started.start()).port };
+    }
 
     before(async () => {
       dir = mkdtempSync(join(tmpdir(), 'ms-p281-'));
@@ -280,41 +317,23 @@ describe(
         ownership: new SensorOwnership(),
         refusals,
       });
-      endpoint = new ProbeEndpoint({
-        config: {
-          host: '127.0.0.1',
-          port: 0,
-          tls: {
-            certFile: join(dir, 'core.crt'),
-            keyFile: join(dir, 'core.key'),
-            caFile: join(dir, 'ca.crt'),
-          },
-          accessKeys: [],
-          handshakeTimeoutMs: 5_000,
-          heartbeatIntervalMs: 60_000,
-        },
-        logger: silent,
-        coreVersion: '9.9.9',
-        results: ingestion,
-        probeConfig: {
-          probeObjectFor: () => Promise.resolve(probeId),
-          assignmentsFor: () => Promise.resolve(EMPTY_ASSIGNMENTS),
-          touch: () => Promise.resolve(),
-        },
-      });
-      port = (await endpoint.start()).port;
+      ({ endpoint, port } = await startEndpoint());
     });
 
     after(async () => {
-      await endpoint.stop();
-      await ingestor.stop();
-      await scratch.drop();
-      rmSync(dir, { recursive: true, force: true });
+      try {
+        await endpoint?.stop();
+        await ingestor?.stop();
+        await scratch?.drop();
+      } finally {
+        if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     /** Connected, said hello, and given its (empty) configuration, so its branch is known. */
-    async function peer(): Promise<RawPeer> {
-      const connected = await RawPeer.connect(dir, port);
+    async function peer(to = port): Promise<RawPeer> {
+      assert.ok(dir !== undefined);
+      const connected = await RawPeer.connect(dir, to);
       connected.send({
         type: 'hello',
         protocolVersion: PROTOCOL_VERSION,
@@ -474,6 +493,114 @@ describe(
         assert.equal(probe.open, true);
       } finally {
         probe.close();
+      }
+    });
+
+    // `P-281` review: the refusal was counted as the batch was parsed, which on a reconnect is
+    // before the session has looked up its probe's branch, so it went to no probe at all.
+    it('counts a refusal in the first batch after the handshake on its probe, before the branch is known', async () => {
+      const gate = { open: (): void => undefined };
+      const opened = new Promise<void>((resolve) => {
+        gate.open = resolve;
+      });
+      const started = await startEndpoint({
+        probeObjectFor: async () => {
+          await opened;
+          return probeId;
+        },
+      });
+      try {
+        assert.ok(dir !== undefined);
+        const probe = await RawPeer.connect(dir, started.port);
+        try {
+          probe.send({
+            type: 'hello',
+            protocolVersion: PROTOCOL_VERSION,
+            gid: 'old-probe',
+            displayName: 'Old probe',
+            agentVersion: '1.0.0-rc.2',
+            accessKey: '',
+          });
+          await probe.waitFor('the welcome', (m) => (m.type === 'welcome' ? m : undefined));
+          const before = refusals.countsFor(probeId).refused;
+          probe.send({
+            type: 'results',
+            batchId: 'first',
+            sentAt: at(),
+            results: [good(sensors[4] ?? 0, 1), { ...good(sensors[1] ?? 0, 2), outcome: 'maybe' }],
+          });
+          // Answered at once and behind nothing: once its ack is here, the batch sent before it
+          // has been parsed, while the branch is still being looked up.
+          probe.send({ type: 'heartbeat', seq: 1, sentAt: at() });
+          await probe.waitFor('the heartbeat’s ack', (m) =>
+            m.type === 'heartbeat-ack' ? m : undefined,
+          );
+          assert.equal(
+            probe.received.some((m) => answerTo('first')(m) !== undefined),
+            false,
+            'the batch was answered before the branch was known',
+          );
+          gate.open();
+          const answer = await probe.waitFor('the answer to the first batch', answerTo('first'));
+          assert.equal(answer.type, 'results-ack', JSON.stringify(answer));
+          assert.equal(refusals.countsFor(probeId).refused, before + 1, 'counted on this probe');
+        } finally {
+          probe.close();
+        }
+      } finally {
+        gate.open();
+        await started.endpoint.stop();
+      }
+    });
+
+    it('counts a refusal once, though the batch was refused back and sent again', async () => {
+      let calls = 0;
+      // Ingestion answers a write it could not make with a nack, as this does the first time.
+      const flaky: ResultReceiver = {
+        acceptProbeResults: (origin, message) => {
+          calls += 1;
+          return calls === 1
+            ? Promise.resolve({
+                type: 'results-nack',
+                batchId: message.batchId,
+                reason: 'storage-error',
+                retryAfterMs: 0,
+              })
+            : ingestion.acceptProbeResults(origin, message);
+        },
+        unfitResults: (origin, unfit) => {
+          ingestion.unfitResults(origin, unfit);
+        },
+      };
+      const started = await startEndpoint({ results: flaky });
+      try {
+        const probe = await peer(started.port);
+        try {
+          const before = refusals.countsFor(probeId).refused;
+          const unfitBefore = ingestion.stats().refusedUnfit;
+          const batch = {
+            type: 'results',
+            batchId: 'again',
+            sentAt: at(),
+            results: [good(sensors[4] ?? 0, 1), { ...good(sensors[1] ?? 0, 2), outcome: 'maybe' }],
+          };
+          probe.send(batch);
+          const nack = await probe.waitFor('the batch refused back', (m) =>
+            m.type === 'results-nack' && m.batchId === 'again' ? m : undefined,
+          );
+          assert.equal(nack.reason, 'storage-error');
+          assert.equal(refusals.countsFor(probeId).refused, before, 'not counted for a nack');
+          probe.send(batch);
+          await probe.waitFor('the batch acknowledged', (m) =>
+            m.type === 'results-ack' && m.batchId === 'again' ? m : undefined,
+          );
+          assert.equal(refusals.countsFor(probeId).refused, before + 1, 'counted once');
+          assert.equal(ingestion.stats().refusedUnfit, unfitBefore + 1);
+        } finally {
+          probe.close();
+        }
+      } finally {
+        await started.endpoint.stop();
       }
     });
 
