@@ -184,6 +184,13 @@ export class Migrator {
         throw new MigrationError('duplicate migration id', { context: { id: migration.id } });
       }
       seen.add(migration.id);
+      // A data step commits batch by batch, so one transaction around it would be a lie
+      // (`N-28`): refused here, before any database is touched.
+      if (migration.data !== undefined && migration.transactional !== false) {
+        throw new MigrationError('a migration with a data step must not be transactional', {
+          context: { id: migration.id, name: migration.name },
+        });
+      }
     }
   }
 
@@ -375,6 +382,11 @@ export class Migrator {
     try {
       if (migration.transactional === false) {
         await this.#db.query(migration.up);
+        // Before the record, so that a step that fails leaves the migration to be run again.
+        await migration.data?.({
+          db: this.#db,
+          logger: this.#logger.child({ migration: migration.id }),
+        });
         await this.#db.query(record, values);
       } else {
         await this.#db.transaction(async (client) => {

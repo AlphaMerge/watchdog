@@ -1,14 +1,19 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
-import { Client } from 'pg';
+import { Client, type QueryResultRow } from 'pg';
 import { pino } from 'pino';
 import type { Logger } from '@ms/shared';
 import { runMigrateCommand } from '../src/commands/migrate.js';
 import { MIGRATION_LOCK_KEY, Migrator, MigrationError, type LockWait } from '../src/db/migrator.js';
 import { MIGRATIONS } from '../src/db/migrations/index.js';
+import {
+  LEGIBLE_CANDIDATE,
+  rewriteDeliveryErrors,
+} from '../src/db/migrations/071-legible-delivery-errors.js';
 import { refuseSchema } from '../src/db/schema-gate.js';
 import type { Migration } from '../src/db/migrations/types.js';
-import type { Database } from '../src/db/pool.js';
+import type { Database, Queryable } from '../src/db/pool.js';
+import { legible } from '../src/notifications/legible.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -1683,6 +1688,266 @@ describe(
       } finally {
         await fresh.drop();
       }
+    });
+
+    it('runs a data step after `up` and before the record, and runs both again after the step fails (N-28)', async () => {
+      const fresh = await createScratchDatabase('data_step');
+      try {
+        let calls = 0;
+        let fail = true;
+        const step: Migration = {
+          id: 9003,
+          name: 'data-step',
+          transactional: false,
+          up: 'CREATE TABLE IF NOT EXISTS data_thing (id int PRIMARY KEY, done boolean NOT NULL)',
+          data: async ({ db }) => {
+            calls += 1;
+            // Into the table `up` made, so the step ran after it.
+            await db.query('INSERT INTO data_thing VALUES (1, false) ON CONFLICT DO NOTHING');
+            if (fail) throw new Error('half way through');
+            await db.query('UPDATE data_thing SET done = true');
+          },
+          down: 'DROP TABLE data_thing',
+        };
+        const m = migrator(fresh.db, [step]);
+        await assert.rejects(
+          m.up(),
+          (error: unknown) =>
+            error instanceof MigrationError &&
+            /migration 9003 \(data-step\) failed: half way through/u.test(error.message),
+        );
+        const status = await m.status();
+        assert.deepEqual(
+          status.pending.map((one) => one.id),
+          [9003],
+          'a step that fails leaves its migration unrecorded',
+        );
+        const rows = (): Promise<{ done: boolean }[]> =>
+          fresh.db.query<{ done: boolean }>('SELECT done FROM data_thing');
+        assert.deepEqual(await rows(), [{ done: false }], 'and what it committed stays');
+
+        fail = false;
+        const { applied } = await m.up();
+        assert.deepEqual(
+          applied.map((one) => one.id),
+          [9003],
+        );
+        assert.equal(calls, 2);
+        assert.deepEqual(await rows(), [{ done: true }]);
+        assert.deepEqual((await m.up()).applied, [], 'and once recorded, it is not run again');
+        assert.equal(calls, 2);
+
+        await m.down(1);
+        assert.equal(await tableExists(fresh.db, 'data_thing'), false);
+      } finally {
+        await fresh.drop();
+      }
+    });
+
+    it('refuses a data step on a migration that runs in one transaction (N-28)', () => {
+      assert.throws(
+        () =>
+          migrator(scratch.db, [
+            {
+              id: 9004,
+              name: 'data-in-a-transaction',
+              up: 'SELECT 1',
+              down: null,
+              data: () => Promise.resolve(),
+            },
+          ]),
+        (error: unknown) =>
+          error instanceof MigrationError && /must not be transactional/u.test(error.message),
+      );
+    });
+
+    it('rewrites every delivery error as legible() writes it, window by window, and leaves the rows as they are on the way back (071)', async () => {
+      // `N-28`: rows written before `N-24` kept the far end's controls, overrides and invisible
+      // characters, and nothing deletes them. The rewrite calls `legible()` itself.
+      const fresh = await createScratchDatabase('legible_errors');
+      try {
+        const q = fresh.db;
+        const all = migrator(
+          q,
+          MIGRATIONS.filter((one) => one.id <= 71),
+        );
+        await migrator(
+          q,
+          MIGRATIONS.filter((one) => one.id <= 70),
+        ).up();
+        const [root] = await q.query<{ id: string }>(`SELECT id FROM object WHERE kind = 'root'`);
+        const insert = async (kind: string, name: string, parent: string): Promise<string> => {
+          const [row] = await q.query<{ id: string }>(
+            'INSERT INTO object (parent_id, kind, name) VALUES ($1, $2, $3) RETURNING id::text',
+            [parent, kind, name],
+          );
+          return row?.id ?? assert.fail('no row');
+        };
+        const probe = await insert('probe', 'probe', root?.id ?? '');
+        const sensor = await insert('sensor', 'sensor', await insert('device', 'device', probe));
+
+        // Ids far apart, so that the rewrite has to walk windows with nothing in them to reach
+        // the rows beyond, and the first and last ids of a window.
+        const stored: readonly (readonly [number, string | null])[] = [
+          [1, '\u{1b}[2J\u{1b}[31mrefused'],
+          [2, 'relay refused the message: 550 no such mailbox'],
+          [3, null],
+          [10_000, 'a\u{85}b\u{9b}c'],
+          [10_001, 'all good\rFAILED\r\nnext line'],
+          [25_000, 'invoice\u{202e}txt.exe and \u{2066}isolated\u{2069}'],
+          [40_000, 're\u{200b}fused \u{feff}503 ok\u{e0041}\u{e007f}'],
+          [40_001, 'line one\n\tline two'],
+          [55_555, 'down \u{2764}\u{fe0f} \u{1f468}\u{200d}\u{1f469} می\u{200c}خواهم'],
+          [70_000, 'ok\u{e0168}\u{e0165}\u{e016c} r\u{fe0f}'],
+          [70_001, 'bad\\u0000request, escaped already'],
+          [99_999, 'ad\u{200d}min \u{115f}x'],
+        ];
+        for (const [id, lastError] of stored) {
+          await q.query(
+            `INSERT INTO notification_request
+               (id, at, sensor_id, trigger_kind, reason, state, status, last_error)
+             VALUES ($1, now(), $2, 'state', 'initial', 'down', 'failed', $3)`,
+            [id, sensor, lastError],
+          );
+        }
+        const read = async (): Promise<Map<number, { text: string | null; xmin: string }>> =>
+          new Map(
+            (
+              await q.query<{ id: string; last_error: string | null; xmin: string }>(
+                'SELECT id::text AS id, last_error, xmin::text AS xmin FROM notification_request',
+              )
+            ).map((row) => [Number(row.id), { text: row.last_error, xmin: row.xmin }]),
+          );
+        const written = await read();
+
+        assert.deepEqual(
+          (await all.up()).applied.map((one) => one.id),
+          [71],
+        );
+        const rewritten = await read();
+        let changed = 0;
+        for (const [id, original] of stored) {
+          const now = rewritten.get(id) ?? assert.fail(`row ${String(id)} gone`);
+          const expected = original === null ? null : legible(original);
+          assert.equal(now.text, expected, `row ${String(id)}`);
+          if (expected === original) {
+            assert.equal(now.xmin, written.get(id)?.xmin, `row ${String(id)} is not written`);
+          } else {
+            changed += 1;
+            assert.notEqual(now.xmin, written.get(id)?.xmin);
+          }
+        }
+        // Presence: the rows that needed it, in every window they are in, the last one too.
+        assert.equal(changed, 7);
+        assert.equal(rewritten.get(99_999)?.text, 'ad\\u200dmin \\u115fx');
+        assert.equal(
+          rewritten.get(55_555)?.text,
+          stored[8]?.[1],
+          'an emoji with its VS16, a family and a Persian joiner are left as they are',
+        );
+        const comment = async (): Promise<string | null> =>
+          (
+            await q.query<{ comment: string | null }>(
+              `SELECT col_description('notification_request'::regclass, attnum) AS comment
+                 FROM pg_attribute
+                WHERE attrelid = 'notification_request'::regclass AND attname = 'last_error'`,
+            )
+          )[0]?.comment ?? null;
+        assert.match((await comment()) ?? '', /migration 071/u);
+
+        // The way back cannot restore what was replaced, and leaves the rows as they are.
+        assert.deepEqual(
+          (await all.down(1)).reverted.map((one) => one.id),
+          [71],
+        );
+        assert.equal(await comment(), null);
+        assert.deepEqual(await read(), rewritten);
+        // And forward again rewrites nothing: legible text is what `legible()` leaves alone.
+        await all.up();
+        assert.deepEqual(await read(), rewritten);
+      } finally {
+        await fresh.drop();
+      }
+    });
+
+    it('keeps a delivery error written between its read and its rewrite (071)', async () => {
+      const fresh = await createScratchDatabase('legible_race');
+      try {
+        const q = fresh.db;
+        await migrator(
+          q,
+          MIGRATIONS.filter((one) => one.id <= 71),
+        ).up();
+        const [root] = await q.query<{ id: string }>(`SELECT id FROM object WHERE kind = 'root'`);
+        const [probe] = await q.query<{ id: string }>(
+          `INSERT INTO object (parent_id, kind, name) VALUES ($1, 'probe', 'p') RETURNING id::text`,
+          [root?.id],
+        );
+        const [device] = await q.query<{ id: string }>(
+          `INSERT INTO object (parent_id, kind, name) VALUES ($1, 'device', 'd') RETURNING id::text`,
+          [probe?.id],
+        );
+        const [sensor] = await q.query<{ id: string }>(
+          `INSERT INTO object (parent_id, kind, name) VALUES ($1, 'sensor', 's') RETURNING id::text`,
+          [device?.id],
+        );
+        for (const id of [1, 2, 3, 4, 5]) {
+          await q.query(
+            `INSERT INTO notification_request
+               (id, at, sensor_id, trigger_kind, reason, state, status, last_error)
+             VALUES ($1, now(), $2, 'state', 'initial', 'down', 'failed', $3)`,
+            [id, sensor?.id, `refused\u{1b}[31m ${String(id)}`],
+          );
+        }
+        // The dispatcher writes row 2 again just before its window's update.
+        let raced = false;
+        const racing: Queryable = {
+          query: async <T extends QueryResultRow>(
+            text: string,
+            values?: readonly unknown[],
+          ): Promise<T[]> => {
+            if (!raced && text.includes('UPDATE notification_request')) {
+              raced = true;
+              await q.query(`UPDATE notification_request SET last_error = 'newer' WHERE id = 2`);
+            }
+            return q.query<T>(text, values);
+          },
+        };
+        // Windows of two: 1–2, 3–4, 5.
+        assert.equal(await rewriteDeliveryErrors(racing, 2), 4);
+        const rows = await q.query<{ id: string; last_error: string }>(
+          'SELECT id::text AS id, last_error FROM notification_request ORDER BY id',
+        );
+        assert.deepEqual(
+          rows.map((row) => [row.id, row.last_error]),
+          [
+            ['1', 'refused\\u001b[31m 1'],
+            ['2', 'newer'],
+            ['3', 'refused\\u001b[31m 3'],
+            ['4', 'refused\\u001b[31m 4'],
+            ['5', 'refused\\u001b[31m 5'],
+          ],
+        );
+      } finally {
+        await fresh.drop();
+      }
+    });
+
+    it('sends the rewrite every row outside printable ASCII, and only those (071)', async () => {
+      // The candidate filter is exact only if PostgreSQL ranges by code point, and `legible()`
+      // leaves printable ASCII alone: both, over every code point a text can hold.
+      const [row] = await scratch.db.query<{ wrong: number; ascii: number }>(
+        `SELECT count(*) FILTER (WHERE (c BETWEEN 32 AND 126) = (chr(c) ~ $1))::int AS wrong,
+                count(*) FILTER (WHERE NOT chr(c) ~ $1)::int AS ascii
+           FROM generate_series(1, 1114111) AS c
+          WHERE c < 55296 OR c > 57343`,
+        [LEGIBLE_CANDIDATE],
+      );
+      assert.deepEqual(row, { wrong: 0, ascii: 95 });
+      const printable = Array.from({ length: 95 }, (_, at) => String.fromCharCode(32 + at)).join(
+        '',
+      );
+      assert.equal(legible(printable), printable);
     });
 
     it('applies the real migration set forward and all the way back', async () => {

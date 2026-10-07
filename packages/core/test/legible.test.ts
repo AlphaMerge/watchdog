@@ -65,7 +65,6 @@ describe('legible', () => {
     ['a joiner between two joining scripts is escaped', 'م\u200dक', 'م\\u200dक'],
     ['ZWNJ between two emoji is escaped', '👨\u200c👩', '👨\\u200c👩'],
     ['ZWJ before a letter after an emoji is escaped', '👨\u200da', '👨\\u200da'],
-    ['U+FE0F after a letter does not admit a ZWJ', 'd\ufe0f\u200d🔥', 'd\ufe0f\\u200d🔥'],
     ['ZWNJ beside ASCII on one side is escaped', 'می\u200ca', 'می\\u200ca'],
     ['a joiner at either end is escaped', '\u200dمی\u200c', '\\u200dمی\\u200c'],
     ['a joiner beside a space is escaped', 'می\u00a0\u200cخ', 'می\u00a0\\u200cخ'],
@@ -83,11 +82,73 @@ describe('legible', () => {
       'a\u2065b\ufff0c\ufff8d\u{e0000}e\u{e0002}f\u{e0080}g\u{e0fff}',
       'a\\u2065b\\ufff0c\\ufff8d\\u{e0000}e\\u{e0002}f\\u{e0080}g\\u{e0fff}',
     ],
+    ['the default-ignorable marks that are not selectors are kept: CGJ', 'a\u{34f}b', 'a\u{34f}b'],
+    ['and Khmer’s inherent vowels', '\u{1780}\u{17b4}\u{17b5}', '\u{1780}\u{17b4}\u{17b5}'],
+    // The variation selectors (`N-29`): one, where it picks a glyph a reader sees, and no more.
+    ['VS16 after an emoji is kept', 'down \u{2764}\u{fe0f}', 'down \u{2764}\u{fe0f}'],
+    ['VS15 after an emoji is kept', '\u{2614}\u{fe0e}', '\u{2614}\u{fe0e}'],
     [
-      'the default-ignorable marks are kept: CGJ and the variation selectors',
-      'a\u034fb\ufe0e✓\u{e0100}',
-      'a\u034fb\ufe0e✓\u{e0100}',
+      'a keycap keeps its VS16',
+      '1\u{fe0f}\u{20e3} #\u{fe0f}\u{20e3} *\u{fe0f}\u{20e3}',
+      '1\u{fe0f}\u{20e3} #\u{fe0f}\u{20e3} *\u{fe0f}\u{20e3}',
     ],
+    [
+      'a ZWJ sequence keeps its VS16s',
+      '\u{1f3f3}\u{fe0f}\u{200d}\u{1f308} \u{1f441}\u{fe0f}\u{200d}\u{1f5e8}\u{fe0f}',
+      '\u{1f3f3}\u{fe0f}\u{200d}\u{1f308} \u{1f441}\u{fe0f}\u{200d}\u{1f5e8}\u{fe0f}',
+    ],
+    ['VS16 after a letter is escaped', 'refused\u{fe0f}', 'refused\\ufe0f'],
+    ['VS15 after a letter is escaped', 'b\u{fe0e}', 'b\\ufe0e'],
+    [
+      'U+FE0F after a letter is escaped, and does not admit a ZWJ',
+      'd\u{fe0f}\u{200d}\u{1f525}',
+      'd\\ufe0f\\u200d\u{1f525}',
+    ],
+    [
+      'a second selector after an emoji is escaped',
+      '\u{2764}\u{fe0f}\u{fe0f}\u{fe0e}',
+      '\u{2764}\u{fe0f}\\ufe0f\\ufe0e',
+    ],
+    [
+      'a run of supplementary selectors on one letter is escaped, every one',
+      'ok\u{e0168}\u{e0165}\u{e016c}\u{e016c}',
+      'ok\\u{e0168}\\u{e0165}\\u{e016c}\\u{e016c}',
+    ],
+    [
+      'one selector on each letter is escaped',
+      'r\u{e0100}e\u{e0101}f\u{fe0f}',
+      'r\\u{e0100}e\\u{e0101}f\\ufe0f',
+    ],
+    [
+      'an ideographic variation selector is escaped, and its ideograph kept',
+      '\u{845b}\u{e0100}',
+      '\u{845b}\\u{e0100}',
+    ],
+    [
+      'VS1–VS14 are escaped even after an emoji or a symbol they vary',
+      '\u{2764}\u{fe00} \u{2269}\u{fe00} 0\u{fe00} \u{2764}\u{fe0d}',
+      '\u{2764}\\ufe00 \u{2269}\\ufe00 0\\ufe00 \u{2764}\\ufe0d',
+    ],
+    ['a selector at the start is escaped', '\u{fe0f}ok', '\\ufe0fok'],
+    ['a selector after a space is escaped', '\u{2764} \u{fe0f}', '\u{2764} \\ufe0f'],
+    ['a selector after an escape is escaped', '\u{200b}\u{fe0f}', '\\u200b\\ufe0f'],
+    ['a selector after a newline is escaped', '\u{2764}\n\u{fe0f}', '\u{2764}\n\\ufe0f'],
+    [
+      'a Mongolian free variation selector after a Mongolian letter is kept',
+      '\u{1820}\u{180b} \u{182d}\u{180f}',
+      '\u{1820}\u{180b} \u{182d}\u{180f}',
+    ],
+    [
+      'a second Mongolian selector is escaped',
+      '\u{182d}\u{180b}\u{180c}\u{180d}',
+      '\u{182d}\u{180b}\\u180c\\u180d',
+    ],
+    [
+      'a Mongolian selector after anything but a Mongolian character is escaped',
+      'a\u{180b} \u{2764}\u{180c} \u{1820}\u{180e}\u{180b} \u{1820}\u{202f}\u{180d}',
+      'a\\u180b \u{2764}\\u180c \u{1820}\\u180e\\u180b \u{1820}\u{202f}\\u180d',
+    ],
+    ['VS16 after a Mongolian letter is escaped', '\u{1820}\u{fe0f}', '\u{1820}\\ufe0f'],
   ];
 
   for (const [name, input, expected] of cases) {
@@ -96,10 +157,11 @@ describe('legible', () => {
     });
   }
 
-  it('escapes exactly the controls, format characters, separators and default-ignorables that are not marks', () => {
+  it('escapes exactly the controls, format characters, separators, variation selectors and default-ignorables that are not marks', () => {
     // Every code point there is, alone, beyond the BMP too since the tag characters are
     // (`N-27`): escaped when it is one of those and is not newline or tab, and otherwise left
-    // exactly as it was. A joiner alone joins nothing, so it is escaped too.
+    // exactly as it was. A joiner alone joins nothing, and a selector alone selects nothing
+    // (`N-29`), so both are escaped too.
     const wrong: string[] = [];
     for (let point = 0; point <= 0x10ffff; point += 1) {
       if (point >= 0xd800 && point <= 0xdfff) continue;
@@ -110,6 +172,7 @@ describe('legible', () => {
         /\p{Cf}/u.test(one) ||
         /\p{Zl}/u.test(one) ||
         /\p{Zp}/u.test(one) ||
+        /\p{Variation_Selector}/u.test(one) ||
         (/\p{Default_Ignorable_Code_Point}/u.test(one) && !/\p{Mn}/u.test(one));
       const expected =
         !unsafe || one === '\n' || one === '\t'
@@ -122,9 +185,12 @@ describe('legible', () => {
     assert.deepEqual(wrong, []);
   });
 
-  it('leaves none of them in a text that holds every code point, except newline and tab', () => {
-    // In context, so a joiner has neighbours: each joiner's are format characters, so neither
-    // is kept.
+  it('leaves none of them in a text that holds every code point, except newline, tab and one selector', () => {
+    // In context, so a joiner and a selector have neighbours. Each joiner's are format
+    // characters, so neither is kept. Each selector follows another selector, a format
+    // character, or a character it does not vary, but for U+180B, the first Mongolian free
+    // variation selector, which follows U+180A MONGOLIAN NIRUGU: a Mongolian character that is
+    // drawn, so it is kept (`N-29`).
     let all = '';
     for (let point = 0; point <= 0x10ffff; point += 1) {
       if (point >= 0xd800 && point <= 0xdfff) continue;
@@ -133,10 +199,55 @@ describe('legible', () => {
     const out = legible(all);
     const left =
       out.match(
-        /[^\P{Cc}\n\t]|[\p{Cf}\p{Zl}\p{Zp}]|(?!\p{Mn})\p{Default_Ignorable_Code_Point}/gu,
+        /[^\P{Cc}\n\t]|[\p{Cf}\p{Zl}\p{Zp}\p{Variation_Selector}]|(?!\p{Mn})\p{Default_Ignorable_Code_Point}/gu,
       ) ?? [];
-    assert.deepEqual(left, []);
+    assert.deepEqual(left, ['\u{180b}']);
+    assert.ok(out.includes('\u{180a}\u{180b}\\u180c\\u180d\\u180e\\u180f'));
     // And the two it keeps are still there, once each.
     assert.equal(out.match(/[\n\t]/g)?.length, 2);
+  });
+
+  it('keeps VS15 and VS16 after exactly the emoji, a Mongolian selector after exactly the drawn Mongolian characters, and no other selector after anything', () => {
+    // Every code point as the base of one selector of each kind (`N-29`). The base is made
+    // legible as it would be alone; the selector after it is kept only where it varies it.
+    const emoji = (base: string): boolean => /^\p{Emoji}$/u.test(base);
+    const mongolian = (base: string): boolean =>
+      /^\p{scx=Mong}$/u.test(base) &&
+      !/^[\p{Variation_Selector}\p{Cf}\p{White_Space}]$/u.test(base);
+    const selectors: readonly (readonly [string, string, (base: string) => boolean])[] = [
+      ['\u{fe0e}', '\\ufe0e', emoji],
+      ['\u{fe0f}', '\\ufe0f', emoji],
+      ['\u{fe00}', '\\ufe00', () => false],
+      ['\u{fe0d}', '\\ufe0d', () => false],
+      ['\u{e0100}', '\\u{e0100}', () => false],
+      ['\u{e01ef}', '\\u{e01ef}', () => false],
+      ['\u{180b}', '\\u180b', mongolian],
+      ['\u{180f}', '\\u180f', mongolian],
+    ];
+    // Counted, and the first few named: a rule gone wrong is wrong for a million bases at once.
+    const wrong: string[] = [];
+    let wrongCount = 0;
+    const kept = new Map<string, number>();
+    for (let point = 0; point <= 0x10ffff; point += 1) {
+      if (point >= 0xd800 && point <= 0xdfff) continue;
+      const base = String.fromCodePoint(point);
+      const alone = legible(base);
+      for (const [selector, escaped, varies] of selectors) {
+        const keep = varies(base);
+        if (keep) kept.set(selector, (kept.get(selector) ?? 0) + 1);
+        if (legible(base + selector) !== alone + (keep ? selector : escaped)) {
+          wrongCount += 1;
+          if (wrong.length < 20) wrong.push(`${point.toString(16)}+${escaped}`);
+        }
+      }
+    }
+    assert.deepEqual({ wrongCount, wrong }, { wrongCount: 0, wrong: [] });
+    // Presence, so that the sweep cannot pass by keeping nothing: every emoji and the drawn
+    // Mongolian characters, and nothing for the rest.
+    assert.ok((kept.get('\u{fe0f}') ?? 0) > 1_000, 'VS16 kept after the emoji');
+    assert.equal(kept.get('\u{fe0e}'), kept.get('\u{fe0f}'));
+    assert.ok((kept.get('\u{180b}') ?? 0) > 150, 'a Mongolian selector kept after Mongolian');
+    assert.equal(kept.get('\u{fe00}'), undefined);
+    assert.equal(kept.get('\u{e0100}'), undefined);
   });
 });

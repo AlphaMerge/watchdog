@@ -3691,17 +3691,133 @@ because each is a decision rather than a defect:
         unescaped.
       - **Not done.** Stored rows are still `N-28`'s.
 
-- [ ] **N-28 — delivery errors stored before `N-24` keep their control characters** · S · N-24 ·
+- [x] **N-28 — delivery errors stored before `N-24` keep their control characters** · S · N-24 ·
       Found 2026-10-08 in `N-24`. `legible()` applies to what is written from now on; older
       `last_error` values still carry C0/C1 and bidirectional controls to the API, the logs view
       and Core Health's message. **Done when** decided: a data migration rewrites them (with a
       tested rollback that need not restore the raw text), or they are left to age out with the
       request rows, said in the outcome.
 
-- [ ] **N-29 — variation selectors can carry text nobody sees** · S · N-27 · Found 2026-10-08 in
+      **N-28 outcome. Migration 071 rewrites them, by calling `legible()`.**
+      - **Not left to age out, because they do not.** Nothing deletes a `notification_request`
+        except the deletion of its sensor (the foreign key cascades). There is no retention for
+        request rows, so an old row's controls would reach the API, the logs view and Core
+        Health's message for as long as the installation runs.
+      - **In JavaScript, not SQL.** PostgreSQL's regular expressions have no Unicode properties,
+        and `legible()` is built from them: `\p{Cf}`, `\p{Default_Ignorable_Code_Point}`, the
+        joiners' seventeen scripts by `Script_Extensions`, `\p{Extended_Pictographic}`, and now
+        `\p{Emoji}` (`N-29`). Spelled out in SQL that is several hundred code-point ranges, frozen
+        at Unicode 17.0. It would be a second copy of a rule that this same commit changes, and
+        it would stop agreeing with the first when Node's Unicode version moves. Calling
+        `legible()` makes the rewrite exactly what `#record` writes.
+      - **The framework gains a data step.** The migration framework had no JavaScript step, so
+        `Migration` gains an optional `data({ db, logger })`. The migrator runs it after `up` and
+        before it records the migration. It is allowed only with `transactional: false`, and the
+        constructor refuses it otherwise, because the step commits batch by batch. A failure
+        leaves the migration unrecorded, so the next run applies `up` and the step again. The
+        step is not in the checksum: it is compiled code, and what it calls may change after it
+        ships. So it must be a rewrite that leaves its own output as it is. `legible()` is such
+        a rewrite, and the doc on `types.ts` says so.
+      - **Bounded.** `rewriteDeliveryErrors` walks ids from the lowest to the highest that
+        existed when it began, in windows of 10,000. Each window is one read and at most one
+        update, each its own statement on the pool. No lock is held across windows, and a row
+        is locked only while its own window's update runs.
+        - The read sends only rows with a character outside printable ASCII, by
+          `last_error ~ '[^ -~]'`. Every character `legible()` changes is outside that range.
+        - The update rewrites a row only if it still holds the text that was read. If the
+          dispatcher writes a newer error in between, that newer error is already legible and
+          is kept.
+        - The migrator's progress reports keep systemd waiting for as long as the rewrite runs
+          (`P-215`).
+      - **`up` comments the column; the rollback removes the comment and leaves every row as it
+        is.** The raw text cannot be put back, and does not need to be. The build before already
+        writes escaped errors itself and reads them as text, so an escaped row is one it could
+        have written. Running `up` again rewrites nothing.
+      - **Tests** (`migrator.test.ts`):
+        - The data step runs after `up` and before the record. A step that throws leaves the
+          migration pending, with its message in the refusal, and keeps what it committed. The
+          next run completes it. Once recorded, the step does not run again. A data step on a
+          transactional migration is refused at construction.
+        - 071 stores twelve rows at ids spread across nine windows, with gaps of empty windows
+          between them: ESC, C1, a lone CR and CRLF, an override and an isolate, a zero-width
+          space, a BOM, tag characters, a run of selectors, a ZWJ between Latin letters and a
+          Hangul filler. Rows that must stay as they are hold emoji with VS16, a family ZWJ
+          sequence, a Persian ZWNJ, a newline and a tab, plain ASCII, an already-escaped NUL, and
+          NULL. Every row afterwards equals `legible()` of what was stored. The seven that
+          changed have a new `xmin`; the rest keep theirs, so they were not written. The rollback
+          clears the comment and leaves the rows unchanged, and a second `up` rewrites nothing.
+        - A row the dispatcher rewrites between the read and the update keeps the newer text.
+          This test uses windows of two.
+        - The candidate filter is checked against every code point in PostgreSQL. It matches
+          exactly the ones outside U+0020–U+007E, and `legible()` leaves printable ASCII as it
+          is.
+        - The real-set round trip covers 071.
+      - **Mutations**, each of which failed the tests: the step never run; the step run after
+        the record; the step allowed in a transaction; only the first window walked; the guard
+        on a newer write removed; and the candidate filter missing `~`.
+      - **Not done.** Core Health messages already written into state history, and log lines
+        already in the journal, keep what they quoted. Those are history, not rows read back as
+        a delivery's error.
+
+- [x] **N-29 — variation selectors can carry text nobody sees** · S · N-27 · Found 2026-10-08 in
       `N-27`. `legible()` keeps U+FE00–FE0F and U+E0100–E01EF so emoji survive, but a run of them
       on one visible character can hold hidden text. **Done when** decided: escape runs, or those
       not after an emoji base, or keep, said in `legible.ts`, with tests.
+
+      **N-29 outcome. A selector is kept only where it selects, one at a time. Everywhere else it
+      is escaped.**
+      - **Kept:**
+        - VS15 or VS16 (U+FE0E, U+FE0F) directly after an emoji (`\p{Emoji}`, which includes
+          the digits, `#` and `*` that keycaps start with). This covers the red heart, keycaps,
+          and the U+FE0F inside ZWJ sequences.
+        - A Mongolian free variation selector (U+180B–U+180D, U+180F) directly after a
+          Mongolian character that is drawn. That excludes another selector, the vowel separator
+          U+180E (a format character, already escaped), and the narrow no-break space U+202F.
+      - **Escaped:** every other selector. That means one after a letter, a space, a newline, an
+        escape or another selector, one at the start, and VS1–VS14 and VS17–VS256 wherever they
+        stand.
+      - **What decided it.**
+        - Unicode gives a character at most one selector, so a second one is never meaningful.
+        - VS1–VS14 and the supplementary selectors only pick between glyphs of a character the
+          reader can still see, such as a slashed zero or a regional form of an ideograph.
+          Escaped, the character stays and its selector is shown after it. Kept after any
+          ideograph, each would hide a byte.
+        - What a selector can still hide is one of two choices after an emoji, or one of four
+          after a Mongolian character.
+        - **Escaping only runs** was rejected. It would keep one selector on every letter, and
+          "refused" with a different VS17–VS256 on each letter carries seven hidden bytes while
+          reading exactly as "refused".
+        - **Keeping them** was the old behaviour.
+        - The Mongolian selectors are outside the ranges the ticket names. They are included
+          because they are `\p{Variation_Selector}` and a run of them hides text in the same
+          way. Escaping them everywhere would break Mongolian letter forms, which `N-27` took
+          care to keep.
+      - **Code.** `UNSAFE` gains `\p{Variation_Selector}`, and `selects()` decides from the code
+        point written before the selector. The doc in `legible.ts` says all of this. The
+        combining grapheme joiner and Khmer's U+17B4/U+17B5 are still kept, as `N-27` left them.
+      - **Tests** (`legible.test.ts`):
+        - Rows kept: VS16 and VS15 after an emoji, keycaps, the rainbow flag and the
+          eye-in-speech-bubble ZWJ sequences, and Mongolian with its selectors.
+        - Rows escaped: after a letter, a second selector, a run of supplementary selectors, one
+          selector on each letter, an ideographic variation selector, VS1 and VS14 after an emoji
+          or a math symbol, at the start, after a space, an escape or a newline, a Mongolian
+          selector after Latin, an emoji, U+180E or U+202F, and VS16 after a Mongolian letter.
+        - The single-code-point sweep stays exact: a selector alone is escaped. The text holding
+          every code point now keeps exactly one selector, U+180B, because it follows U+180A
+          MONGOLIAN NIRUGU. The test names that one.
+        - A new sweep puts every code point in front of eight selectors and checks that each is
+          kept exactly after `\p{Emoji}` or a drawn Mongolian character, and never otherwise. It
+          also checks that some selectors were kept, so it cannot pass by keeping none. It runs
+          in about 4.5 s.
+      - **Mutations**, each of which failed the tests: selectors never kept; selectors left out
+        of `UNSAFE` (`N-27`'s pattern); a selector kept after a selector; VS15/VS16 kept after
+        anything that is not a selector (the "escape runs" option); and the Mongolian base
+        without its exclusions. The first version of the new sweep collected every failure, and
+        under the second mutation it ran out of memory. It now counts failures and names the
+        first twenty.
+      - **Not done.** A run of the combining grapheme joiner U+034F, or of Khmer U+17B4/U+17B5,
+        can still encode bits by its length or order. These characters are not variation
+        selectors, so this ticket did not cover them.
 
 ## Phase 5 — Web UI
 

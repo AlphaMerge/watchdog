@@ -1,9 +1,31 @@
 /**
  * CRLF first, so it is taken as one; then every control, every format character (which holds
- * every bidirectional control), the two Unicode line and paragraph separators, and every other
- * default-ignorable code point that is not a mark (`N-27` review).
+ * every bidirectional control), the two Unicode line and paragraph separators, every variation
+ * selector (`N-29`), and every other default-ignorable code point that is not a mark (`N-27`
+ * review).
  */
-const UNSAFE = /\r\n|[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]|(?!\p{Mn})\p{Default_Ignorable_Code_Point}/gu;
+const UNSAFE =
+  /\r\n|[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Variation_Selector}]|(?!\p{Mn})\p{Default_Ignorable_Code_Point}/gu;
+
+/** The variation selectors: VS1–VS16, VS17–VS256, and Mongolian's four free ones (`N-29`). */
+const SELECTOR = /^\p{Variation_Selector}$/u;
+
+/** VS15 and VS16, which draw an emoji as text or as a picture. */
+const TEXT_STYLE = '\ufe0e';
+const EMOJI_STYLE = '\ufe0f';
+
+/** What VS15 and VS16 vary: an emoji, which includes the digits, `#` and `*` a keycap is made of. */
+const EMOJI = /^\p{Emoji}$/u;
+
+/** Mongolian's free variation selectors, U+180B–U+180D and U+180F. */
+const MONGOLIAN_SELECTOR = /^(?=\p{Variation_Selector})\p{scx=Mong}$/u;
+
+/**
+ * What a Mongolian free variation selector varies: a Mongolian character that is drawn. Not
+ * another selector, not the vowel separator U+180E (a format character, escaped), and not the
+ * narrow no-break space U+202F, which Mongolian uses and which draws as a gap.
+ */
+const MONGOLIAN = /^(?![\p{Variation_Selector}\p{Cf}\p{White_Space}])\p{scx=Mong}$/u;
 
 /** The two joiners, kept only where they join (`N-27`). */
 const ZWNJ = '\u200c';
@@ -85,10 +107,33 @@ const PICTURE_SUFFIX = /^[\p{Emoji_Modifier}\ufe0f]$/u;
  * A combining mark alone does not admit one: a Latin letter with an accent is still Latin, and
  * an Indic virama is already its script's.
  *
- * **Not the variation selectors**, nor the other default-ignorable marks (`\p{Mn}`: U+034F, the
- * Mongolian and Khmer ones). An emoji's U+FE0F is one, and escaping them would break the emoji to
- * catch the rare text that hides behind them; they attach to a visible character without
- * changing what it says.
+ * **Variation selectors only where they select, one at a time** (`N-29`). A variation selector
+ * (VS1–VS16 at U+FE00–U+FE0F, VS17–VS256 at U+E0100–U+E01EF, and Mongolian's U+180B–U+180D and
+ * U+180F) draws nothing and says nothing: it picks a glyph for the character before it. Unicode
+ * gives a character at most one. So a run of them after one letter — 256 to pick from, a byte
+ * each — is text nobody sees, and two errors carrying different runs read the same. A selector
+ * is kept only in the two places it changes what a reader sees:
+ *
+ * - **VS15 or VS16 directly after an emoji** (`\p{Emoji}`, which holds the digits, `#` and `*`
+ *   a keycap starts with). That is a heart drawn red rather than black, a keycap's digit, and
+ *   the U+FE0F inside a ZWJ sequence: escaped, the emoji would break.
+ * - **A Mongolian free variation selector directly after a Mongolian character that is drawn**
+ *   (`MONGOLIAN`), which is how a Mongolian letter takes the form its word needs.
+ *
+ * Every other one is escaped: after a letter, a space, an escape or another selector, at the
+ * start, and VS1–VS14 and VS17–VS256 wherever they stand. Those pick between glyphs of a
+ * character the reader still sees — a slashed zero, a regional form of an ideograph — and never
+ * change what it says, so escaping them leaves the character there with its `\ufe00` after it;
+ * kept after any ideograph, each would hide a byte. What a selector can still hide is one of two
+ * after an emoji and one of four after a Mongolian character: a bit or two beside a character
+ * that is there to see, never a run.
+ *
+ * Neither of the other two answers. **Escaping only runs** would keep one selector on every
+ * character, and "refused" with a different VS17–VS256 on each letter is seven hidden bytes that
+ * look exactly like "refused". **Keeping them all** is what this was.
+ *
+ * **Not the other default-ignorable marks** (`\p{Mn}`: the combining grapheme joiner U+034F and
+ * Khmer's U+17B4 and U+17B5). They attach to a visible character without changing what it says.
  *
  * **Escaped, not removed.** Each becomes `\uXXXX`, or `\u{XXXXX}` beyond the BMP so that a tag
  * character is not read as four hex digits and a letter. A reader sees *something was there* —
@@ -106,7 +151,8 @@ const PICTURE_SUFFIX = /^[\p{Emoji_Modifier}\ufe0f]$/u;
  * `/notification-requests` API, and the Notification delivery health that Core Health turns
  * into its sensor message, which becomes state history and is itself sent out as an alarm.
  * Escaping in the logs view alone would leave the other two, and the API's readers are scripts
- * and terminals this project does not write. Rows written before `N-24` keep what they had.
+ * and terminals this project does not write. Rows written before `N-24` are rewritten with this
+ * by migration 071 (`N-28`), which calls it rather than restating it.
  * The log lines `#record` writes beside the row carry the same escaped text: pino's JSON escapes
  * only U+0000 to U+001F, so a C1 or an override would reach the journal as the far end wrote it.
  * A test send (`test-send.ts`) stores nothing, and applies this to what it reports and logs.
@@ -119,6 +165,7 @@ export function legible(text: string): string {
     if (found === '\r\n') return '\n';
     if (found === '\n' || found === '\t') return found;
     if ((found === ZWNJ || found === ZWJ) && joins(found, text, at)) return found;
+    if (SELECTOR.test(found) && selects(found, pointBefore(text, at))) return found;
     const point = found.codePointAt(0) ?? 0;
     const hex = point.toString(16);
     return point > 0xffff ? `\\u{${hex}}` : `\\u${hex.padStart(4, '0')}`;
@@ -135,6 +182,15 @@ function joins(joiner: string, text: string, at: number): boolean {
   // A skin tone or U+FE0F only where it follows a picture itself: after a letter it is drawn as
   // nothing, and would carry a ZWJ in with it.
   return PICTURE_SUFFIX.test(before) && PICTURE.test(pointBefore(text, at - before.length));
+}
+
+/**
+ * Whether a variation selector picks a glyph for `base`, the code point before it as it was
+ * written (`N-29`). A selector before it is no base, so a run keeps at most its first.
+ */
+function selects(selector: string, base: string): boolean {
+  if (selector === TEXT_STYLE || selector === EMOJI_STYLE) return EMOJI.test(base);
+  return MONGOLIAN_SELECTOR.test(selector) && MONGOLIAN.test(base);
 }
 
 /** The whole code point that ends at `end`, or '' at the start. */

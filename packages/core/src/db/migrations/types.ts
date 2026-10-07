@@ -1,3 +1,6 @@
+import type { Logger } from '@ms/shared';
+import type { Queryable } from '../pool.js';
+
 /**
  * Migrations are TypeScript modules rather than loose `.sql` files.
  *
@@ -31,4 +34,19 @@ export interface Migration {
    * a partial application is safe to re-run.
    */
   readonly transactional?: boolean;
+  /**
+   * Rewrites existing rows in JavaScript, after `up` and before the migration is recorded
+   * (`N-28`). For a rewrite SQL cannot say faithfully — one that has to be exactly what a
+   * function of the application computes — and that is large enough to need batches.
+   *
+   * - **Only with `transactional: false`**, which the migrator checks: the step commits as it
+   *   goes, so a failure leaves `up` applied and the migration unrecorded, and the next run
+   *   applies `up` and this again. Both must be safe to run twice.
+   * - **Batched by the step**, each statement its own, so that it holds no lock for longer than
+   *   one batch takes. The migrator reports progress for as long as it runs.
+   * - **Not in the checksum.** It is compiled code, and its text changes with the compiler; and
+   *   what it calls may change after it ships. So it has to be a rewrite whose result may follow
+   *   the code it calls, and that leaves its own output as it is.
+   */
+  readonly data?: (context: { readonly db: Queryable; readonly logger: Logger }) => Promise<void>;
 }
