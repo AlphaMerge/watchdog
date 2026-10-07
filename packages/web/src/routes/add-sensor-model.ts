@@ -17,6 +17,11 @@ import type { ObjectRef, ProbeHealthView } from '../api/types';
  * then would be a guess. "Off" is said only when the probe *has* reported and the listener's
  * counter is not in what it reported. Otherwise the form says why it cannot tell (`U-29`), so that
  * saying nothing means the listener runs.
+ *
+ * **Reported is not enough: reported at a version that carries the counter** (`U-30`). Each
+ * listener's counter arrived in a protocol version of its own, and a probe below it reports
+ * everything else and leaves the counter out whether the listener runs or not. So the version the
+ * probe speaks, which the core answers beside the channels, comes before the counter.
  */
 
 interface ListenerSpec {
@@ -28,6 +33,12 @@ interface ListenerSpec {
   readonly setting: string;
   /** Where the setting alone is not the whole answer. */
   readonly caveat?: string;
+  /**
+   * The protocol version the channel arrived in. Below it a probe that reports leaves the channel
+   * out whatever the listener is doing (`U-30`). A shipped version never changes what it carries,
+   * so the number is fixed; `add-sensor-listener.test.tsx` holds it to the protocol's own table.
+   */
+  readonly since: number;
 }
 
 /** By the `listener` a sensor type declares, which is what the catalogue publishes. */
@@ -38,12 +49,21 @@ const LISTENERS: Readonly<Record<string, ListenerSpec>> = {
     setting: 'flowListener.enabled',
     // `H-12`: a v1 probe warns and binds nothing whatever the setting says (`B-07`).
     caveat: 'A probe on the v1 build has no flow collector, whatever that setting says.',
+    // `flowCounters` (`B-07`): the first version whose heartbeat may carry `flowReceived`.
+    since: 23,
   },
-  syslog: { channel: 'syslogReceived', name: 'syslog listener', setting: 'syslogListener.enabled' },
+  // Both at 13, with the listeners' throughput counters (`P-64`), which no capability names.
+  syslog: {
+    channel: 'syslogReceived',
+    name: 'syslog listener',
+    setting: 'syslogListener.enabled',
+    since: 13,
+  },
   'snmp-trap': {
     channel: 'trapReceived',
     name: 'SNMP trap listener',
     setting: 'trapListener.enabled',
+    since: 13,
   },
 };
 
@@ -131,6 +151,15 @@ export function listenerNotice(
     };
   }
 
+  // **The version first** (`U-30`). A probe below the version its listener's counter arrived in
+  // will not carry it on any heartbeat, so neither a report nor the next heartbeat would answer:
+  // the same order the core gives its own reasons in. Before `U-30` a probe that reported at 22
+  // was told its flow collector was off, and pointed at a setting that could not change that.
+  const speaks = health.protocolVersion;
+  if (speaks !== null && speaks < spec.since) {
+    return { kind: 'unknown', text: tooOld(spec, probeName, speaks, spec.since) };
+  }
+
   // **Read, not inferred** (`U-29`). The core says why a probe's numbers are missing, and a probe
   // that has not reported has said nothing about its listener: the sentence is why.
   if (health.numbersUnavailable !== null) {
@@ -161,7 +190,7 @@ export function listenerNotice(
  */
 function cannotTell(missing: NumbersUnavailable, spec: ListenerSpec, probeName: string): string {
   const whether = `whether its ${spec.name} is running`;
-  const check = `Check that ${spec.setting} is true in that probe’s configuration file.${caveat(spec)}`;
+  const check = checkByHand(spec);
   // Widened to a string, so that a reason none of the cases knows — from a core newer than this
   // build — still reaches the last sentence rather than reading as one it is not.
   const reason: string = missing.reason;
@@ -172,11 +201,9 @@ function cannotTell(missing: NumbersUnavailable, spec: ListenerSpec, probeName: 
     );
   }
   if (missing.reason === 'protocol') {
-    return (
-      `Probe “${probeName}” is too old to report ${whether}: it speaks protocol ` +
-      `${String(missing.protocolVersion)}, and reporting it needs protocol ` +
-      `${String(missing.requiredVersion)}. ${check}`
-    );
+    // Reached only when the answer gives no version beside the reason: with one, the version
+    // check in `listenerNotice` has already named the listener's own, larger, number (`U-30`).
+    return tooOld(spec, probeName, missing.protocolVersion, missing.requiredVersion);
   }
   if (reason === 'not-connected') {
     return (
@@ -195,6 +222,19 @@ function cannotTell(missing: NumbersUnavailable, spec: ListenerSpec, probeName: 
     `Probe “${probeName}” has not reported its own numbers (${reason}), so ${whether} cannot ` +
     `be checked. ${check}`
   );
+}
+
+/** A probe whose version cannot carry the listener's counter: no answer is coming (`U-30`). */
+function tooOld(spec: ListenerSpec, probeName: string, speaks: number, needs: number): string {
+  return (
+    `Probe “${probeName}” is too old to report whether its ${spec.name} is running: it speaks ` +
+    `protocol ${String(speaks)}, and reporting it needs protocol ${String(needs)}. ` +
+    checkByHand(spec)
+  );
+}
+
+function checkByHand(spec: ListenerSpec): string {
+  return `Check that ${spec.setting} is true in that probe’s configuration file.${caveat(spec)}`;
 }
 
 function caveat(spec: ListenerSpec): string {

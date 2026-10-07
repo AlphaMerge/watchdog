@@ -268,7 +268,10 @@ its listener off, and the sentence says why instead, from the reason Probe Healt
 (`U-29`): the probe is not connected, it has connected and not sent its first heartbeat yet, it
 is too old to report (naming its protocol and the one needed), or its heartbeats carry no
 numbers. The first two say the sentence updates when that changes; the last two name the
-setting to check by hand. When the core does not answer the question, because it is starting,
+setting to check by hand. A probe that has reported, but speaks a protocol older than the one its
+listener's counter arrived in (23 for flows, 13 for syslog and SNMP traps), is too old in the same
+words, with its protocol and the one needed, rather than called off (`U-30`): it leaves the
+counter out whether the listener runs or not. When the core does not answer the question, because it is starting,
 it failed, or it cannot be reached, the sentence says the form could not ask. Nothing is shown
 to an account the core refuses the probe to (403 or 404). Otherwise, no sentence means the
 listener is running.

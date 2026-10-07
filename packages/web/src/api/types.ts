@@ -139,6 +139,12 @@ export interface ProbeHealthView {
     | { reason: 'no-heartbeat'; connectedSeconds: number }
     | { reason: 'not-reported' }
     | null;
+  /**
+   * The protocol version the probe speaks on its current connection, or `null` when it is not
+   * connected (`U-30`). A probe that reports, below the version a listener's counters arrived in,
+   * leaves them out whether the listener runs or not.
+   */
+  protocolVersion: number | null;
   channels: Record<string, number | null>;
 }
 

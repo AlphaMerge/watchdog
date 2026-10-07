@@ -393,6 +393,13 @@ export class ProbeHealthService {
     message: string;
     /** Why the probe's own numbers are gaps, or `null` when it reported them (`P-255`). */
     unavailable: ProbeNumbersUnavailable | null;
+    /**
+     * The protocol version this probe speaks on its current connection, or `null` when it is not
+     * connected (`U-30`). What decides which of its numbers it can send at all: a probe that
+     * reports, below the version a listener's counters arrived in, leaves them out whether the
+     * listener runs or not.
+     */
+    protocolVersion: number | null;
   } {
     const link = options.link ?? this.#sources.link(probeObjectId);
     if (!link.connected) {
@@ -403,6 +410,7 @@ export class ProbeHealthService {
         reading: { ...blank(), connected: 0 },
         message: 'not connected to the core',
         unavailable: { reason: 'not-connected' },
+        protocolVersion: null,
       };
     }
 
@@ -600,6 +608,7 @@ export class ProbeHealthService {
     return {
       reading,
       unavailable,
+      protocolVersion: link.protocolVersion,
       message: describe(
         reading,
         skew,

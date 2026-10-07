@@ -1788,6 +1788,31 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
         await app.close();
       }
     });
+
+    it('serves the version the probe speaks, and null for one not connected (U-30)', async () => {
+      // A probe that reports, below the version a listener's counters arrived in, leaves them
+      // out whether the listener runs or not: the add-sensor form needs the version to tell that
+      // from a listener that is off. Through the route, for the same reason as the case above.
+      for (const [link, expected] of [
+        [connected({ protocolVersion: 22 }), 22],
+        [connected(), PROTOCOL_VERSION],
+        [fresh({ protocolVersion: 6 }), 6],
+        [{ connected: false }, null],
+      ] as const) {
+        const service = build(() => link);
+        assert.equal(service.read(probeId).protocolVersion, expected);
+        const app = await serve(service);
+        const response = await app.inject({
+          method: 'GET',
+          url: `/api/v1/probes/${String(probeId)}/health`,
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        const body = response.json<{ protocolVersion: unknown }>();
+        assert.ok('protocolVersion' in body, response.body);
+        assert.equal(body.protocolVersion, expected, response.body);
+        await app.close();
+      }
+    });
   });
 
   describe('turning a reading into channel readings', () => {

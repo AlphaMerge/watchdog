@@ -20636,11 +20636,53 @@ because each is a decision rather than a defect:
         has `flowReceived` stripped, and the form still calls its flow collector off and points
         at the setting, as it did before `U-29`, where it is the version that is short.
 
-- [ ] **U-30 — the add-sensor form blames the setting when the probe is too old for flows** ·
+- [x] **U-30 — the add-sensor form blames the setting when the probe is too old for flows** ·
       S · U-29 · Found 2026-10-07 in `U-29`. A probe that reports but is below protocol 23 has
       `flowReceived` stripped, so the form calls its flow collector off and points at the setting,
       when the cause is the probe's version. **Done when** the form names the probe's protocol in
       that case, with a test.
+
+      **U-30 outcome. The form reads the probe's version before its counter.**
+      - **The version was not available to the form.** `GET /probes` has `protocolVersion`, but
+        it is `ADMIN`, and it is the version recorded at the last handshake, kept after the probe
+        drops. The health answer named a version only inside `numbersUnavailable`, for a probe
+        below 7.
+      - **Exposed, narrowly.** `GET /probes/{id}/health` gains `protocolVersion`: the version the
+        probe speaks on its current connection, `null` when it is not connected. It is read-only,
+        under the route's existing `onObject('read')`, and comes from `ProbeHealthService.read`,
+        which already had the link. The `protocol` channel and the message already turn on it.
+        No other link field comes with it, and nothing near a credential. No new route, so the
+        runbook appendix is unchanged; `docs/api-reference.md` is regenerated.
+      - **What the form says.** Each listener names the version its counter arrived in: 23 for
+        flows (`flowCounters`), 13 for syslog and SNMP traps (`P-64`, no capability names it).
+        A probe below that version gets an `unknown` notice, checked before `numbersUnavailable`
+        because no heartbeat will change it: *Probe "Berlin" is too old to report whether its
+        flow collector is running: it speaks protocol 22, and reporting it needs protocol 23*,
+        then the setting to check by hand. Same muted `role="status"` region as the other
+        `unknown` notices (WCAG 1.3.1, 1.4.1, 1.4.3, 4.1.3).
+      - **A probe below 7 now hears the listener's version too.** The `protocol` reason said a
+        probe at 6 "needs protocol 7" for flows. 7 is what the probe's own numbers need, and a
+        probe moved up to 7 still could not report flows. The version check comes first, so it
+        now says 23.
+      - **Syslog and SNMP traps included.** A probe at 7 to 12 reports and leaves their counters
+        out in the same way. It costs one number each.
+      - **Tests.**
+        - `add-sensor-listener.test.tsx`, model: too old (22, with the sentence word for word, and
+          the number held to `versionFor('flowCounters')` from `@ms/shared`); collector off (23
+          and 32, counter a gap); collector on (23 and 32, counter 0); each listener's own
+          version (syslog off at 22, too old at 12); the version before a missing heartbeat.
+        - Rendered form: too old (the protocol named, muted, described by the field, no
+          "is not running"); off at 23 (warning colour); on at 23 (silent).
+        - `probe-health.test.ts`: `read` and the route serve the version (22, current, 6) and
+          `null` when not connected.
+      - **Mutations** (each restored byte for byte, and `dist` rebuilt for the core one):
+        - no version check fails 5;
+        - 23 counted as too old fails 3, off and on at 23 among them;
+        - flow's version set to 13 fails 5;
+        - the route serving `null` fails the core test.
+      - **Not done:** a probe that is not connected is still "not connected", with no version.
+        The health answer gives `null` then, and the version recorded at its last handshake is
+        `ADMIN` only. Whether it was too old will be known when it connects.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

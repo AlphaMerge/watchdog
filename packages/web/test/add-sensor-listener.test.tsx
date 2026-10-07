@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { versionFor } from '@ms/shared';
 import type { ObjectRef, ProbeHealthView, SensorTypeSummary } from '../src/api/types';
 import { AddSensor } from '../src/routes/AddSensor';
 import {
@@ -31,6 +32,8 @@ const health = (channels: Record<string, number | null>): ProbeHealthView => ({
       : typeof channels['scheduled'] === 'number'
         ? null
         : { reason: 'no-heartbeat', connectedSeconds: 4 },
+  // A current probe, so the version decides nothing here (`U-30`); none when it is not connected.
+  protocolVersion: channels['connected'] === 1 ? 32 : null,
   channels,
 });
 
@@ -59,6 +62,19 @@ const unavailable = (
 ): ProbeHealthView => ({
   ...health({ connected, scheduled: null, flowReceived: null, syslogReceived: null }),
   numbersUnavailable,
+  // The core gives the version beside the reason, and they agree.
+  ...(numbersUnavailable?.reason === 'protocol'
+    ? { protocolVersion: numbersUnavailable.protocolVersion }
+    : {}),
+});
+
+/** A probe that reported, at `protocolVersion`, with `channels` as its report left them. */
+const reportedAt = (
+  protocolVersion: number,
+  channels: Record<string, number | null>,
+): ProbeHealthView => ({
+  ...health({ connected: 1, scheduled: 12, ...channels }),
+  protocolVersion,
 });
 
 describe('whether a probe’s listener is running', () => {
@@ -118,6 +134,8 @@ describe('whether a probe’s listener is running', () => {
     ).toBe(waiting);
 
     // Too old to report at all: no answer is coming, so the setting is named to check by hand.
+    // The version named is the one the flow counter needs, not the one the core's own numbers
+    // need (`U-30`): a probe moved up to 7 still could not say.
     const old = text(
       'flow',
       unavailable({ reason: 'protocol', protocolVersion: 6, requiredVersion: 7 }),
@@ -125,7 +143,7 @@ describe('whether a probe’s listener is running', () => {
     expect(old).toContain(
       'Probe “Berlin” is too old to report whether its flow collector is running',
     );
-    expect(old).toContain('it speaks protocol 6, and reporting it needs protocol 7');
+    expect(old).toContain('it speaks protocol 6, and reporting it needs protocol 23');
     expect(old).toContain('Check that flowListener.enabled is true');
     expect(old).toContain('A probe on the v1 build has no flow collector');
     expect(old).not.toContain('heartbeat');
@@ -192,6 +210,55 @@ describe('whether a probe’s listener is running', () => {
       numbersUnavailable: { reason: 'no-heartbeat', connectedSeconds: 2 },
     };
     expect(say('flow', notYet)?.kind).toBe('unknown');
+  });
+
+  it('names the probe’s protocol when it reported at a version without the counter (U-30)', () => {
+    // A probe at 22 reports everything else and leaves `flowReceived` out whatever its collector
+    // is doing. Until `U-30` that read as "off", and pointed at a setting that could not help.
+    const tooOld = say('flow', reportedAt(22, { flowReceived: null }));
+    expect(tooOld?.kind).toBe('unknown');
+    expect(tooOld?.text).toBe(
+      'Probe “Berlin” is too old to report whether its flow collector is running: it speaks ' +
+        'protocol 22, and reporting it needs protocol 23. Check that flowListener.enabled is ' +
+        'true in that probe’s configuration file. A probe on the v1 build has no flow ' +
+        'collector, whatever that setting says.',
+    );
+    expect(tooOld?.text).not.toContain('is not running');
+    // The number the protocol itself gives, so this form cannot drift from it.
+    expect(tooOld?.text).toContain(`needs protocol ${String(versionFor('flowCounters'))}.`);
+  });
+
+  it('judges the counter itself from the version that carries it, either way (U-30)', () => {
+    // Collector off: reported at the version that carries the counter, and the counter a gap.
+    expect(say('flow', reportedAt(23, { flowReceived: null }))?.kind).toBe('off');
+    expect(say('flow', reportedAt(32, { flowReceived: null }))?.kind).toBe('off');
+    // Collector on: the counter has a value, at the first version that carries it.
+    expect(say('flow', reportedAt(23, { flowReceived: 0 }))).toBeNull();
+    expect(say('flow', reportedAt(32, { flowReceived: 0 }))).toBeNull();
+  });
+
+  it('asks each listener’s own version, not flow’s (U-30)', () => {
+    // The trap and syslog counters arrived at 13 (`P-64`), so a probe at 22 that left them out
+    // has them off, and one at 12 cannot say.
+    const at22 = reportedAt(22, { syslogReceived: null, trapReceived: null, flowReceived: null });
+    expect(say('syslog', at22)?.kind).toBe('off');
+    expect(say('snmp-trap', at22)?.kind).toBe('off');
+    expect(say('flow', at22)?.kind).toBe('unknown');
+    const at12 = text('syslog', reportedAt(12, { syslogReceived: null }));
+    expect(at12).toContain('it speaks protocol 12, and reporting it needs protocol 13');
+    expect(at12).not.toContain('v1 build');
+  });
+
+  it('puts the version before a heartbeat that has not come, since one will not help (U-30)', () => {
+    const waitingAt20: ProbeHealthView = {
+      ...unavailable({ reason: 'no-heartbeat', connectedSeconds: 4 }),
+      protocolVersion: 20,
+    };
+    const said = text('flow', waitingAt20);
+    expect(said).toContain('it speaks protocol 20, and reporting it needs protocol 23');
+    expect(said).not.toContain('heartbeat');
+    // Not connected: no version to judge, and the sentence is the connection's.
+    expect(text('flow', unavailable({ reason: 'not-connected' }, 0))).toContain('is not connected');
   });
 
   it('says nothing for a type that reads no listener, or one this form does not know', () => {
@@ -526,5 +593,58 @@ describe('the add-sensor form on a probe that has not reported (U-29)', () => {
       expect(notice().textContent).toContain('is not running');
     });
     expect(notice().className).toContain('text-warning-fg');
+  });
+});
+
+describe('the add-sensor form on a probe too old to report its flow collector (U-30)', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal('WebSocket', QuietSocket);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('names the protocol it speaks and the one it needs, not the setting as the cause', async () => {
+    await open({ health: reportedAt(22, { flowReceived: null }) });
+    pick('flow.netflow');
+    await waitFor(() => {
+      expect(notice().textContent).toContain(
+        'it speaks protocol 22, and reporting it needs protocol 23',
+      );
+    });
+    expect(notice().textContent).not.toContain('is not running');
+    expect(notice().textContent).not.toContain('Set flowListener.enabled to true');
+    // WCAG 1.3.1 and 4.1.3: tied to the field and announced, as every notice is. Not a caution,
+    // so the muted colour (1.4.3), and the sentence carries the meaning on its own (1.4.1).
+    expect(notice().getAttribute('role')).toBe('status');
+    expect(screen.getByLabelText('Sensor type').getAttribute('aria-describedby')).toBe(
+      'sensor-type-listener',
+    );
+    expect(notice().className).toContain('text-text-muted');
+    expect(notice().className).not.toContain('text-warning-fg');
+  });
+
+  it('still calls the collector off on a probe new enough to carry it', async () => {
+    await open({ health: reportedAt(23, { flowReceived: null }) });
+    pick('flow.netflow');
+    await waitFor(() => {
+      expect(notice().textContent).toContain('The flow collector on probe “Berlin” is not running');
+    });
+    expect(notice().textContent).toContain('Set flowListener.enabled to true');
+    expect(notice().className).toContain('text-warning-fg');
+  });
+
+  it('says nothing when a probe new enough to carry it has the collector on', async () => {
+    const { asked } = await open({ health: reportedAt(23, { flowReceived: 0 }) });
+    pick('flow.netflow');
+    await waitFor(() => {
+      expect(asked).toContain('/probes/2/health');
+    });
+    // Long enough for the answer to have been read, so this is "it said nothing" and not "it
+    // has not said it yet".
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getByLabelText('Sensor type').getAttribute('aria-describedby')).toBeNull();
+    expect(notice().textContent).toBe('');
   });
 });

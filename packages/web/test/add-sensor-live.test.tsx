@@ -31,6 +31,8 @@ const health = (channels: Record<string, number | null>): ProbeHealthView => ({
       : typeof channels['scheduled'] === 'number'
         ? null
         : { reason: 'no-heartbeat', connectedSeconds: 4 },
+  // A current probe, so the version decides nothing here (`U-30`); none when it is not connected.
+  protocolVersion: channels['connected'] === 1 ? 32 : null,
   channels,
 });
 

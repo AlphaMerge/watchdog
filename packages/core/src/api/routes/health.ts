@@ -118,7 +118,10 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
           '`not-connected`; `protocol`, the only reason that is about versions, with the ' +
           'version it speaks and the one its numbers need; `no-heartbeat`, connected and none ' +
           'arrived yet, with how long it has been connected; `not-reported`, heartbeats that ' +
-          'carry none. `null` when it reported them.',
+          'carry none. `null` when it reported them. `protocolVersion` is the version the probe ' +
+          'speaks on its current connection, `null` when it is not connected: a probe that ' +
+          'reports, below the version a channel arrived in, leaves that channel a gap whether ' +
+          'or not what it counts is running.',
         params: {
           type: 'object',
           additionalProperties: false,
@@ -129,7 +132,14 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
           200: {
             type: 'object',
             additionalProperties: false,
-            required: ['at', 'probeId', 'message', 'numbersUnavailable', 'channels'],
+            required: [
+              'at',
+              'probeId',
+              'message',
+              'numbersUnavailable',
+              'protocolVersion',
+              'channels',
+            ],
             properties: {
               at: { type: 'string' },
               probeId: { type: 'integer' },
@@ -147,6 +157,11 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
                   connectedSeconds: { type: 'integer' },
                 },
               },
+              // `U-30`. The add-sensor form needs it to tell a listener that is off from a probe
+              // too old to report one. The version alone, under the same `read` right: the
+              // `protocol` channel and the message already turn on it, and a skewed probe's
+              // message names it. Nothing else about the link comes with it.
+              protocolVersion: { type: ['integer', 'null'] },
               channels: {
                 type: 'object',
                 additionalProperties: false,
@@ -168,12 +183,13 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
         await reply.status(503).send(mapped.body);
         return reply;
       }
-      const { reading, message, unavailable } = service.read(request.params.id);
+      const { reading, message, unavailable, protocolVersion } = service.read(request.params.id);
       return {
         at: new Date().toISOString(),
         probeId: request.params.id,
         message,
         numbersUnavailable: unavailable,
+        protocolVersion,
         channels: reading,
       };
     },
