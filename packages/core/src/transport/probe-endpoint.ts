@@ -254,6 +254,8 @@ export interface ProbeQuerySink {
       message?: string;
     },
     from: number | null,
+    /** What the parser refused or fitted of the answer's result (`P-289`), when it did. */
+    unfit?: UnfitResults,
   ): void;
   probeDisconnected(probeObjectId: number): void;
 }
@@ -816,8 +818,9 @@ export class ProbeEndpoint {
         case 'query-result':
           // Straight through, and never queued behind `pending`: a query has a caller holding a
           // deadline, and chaining it behind a results batch that is mid-write would spend that
-          // deadline waiting for work nobody is watching.
-          this.#options.queries?.deliver(message, session.probeObjectId);
+          // deadline waiting for work nobody is watching. With what the parser refused or fitted
+          // of its result (`P-289`), so the caller is told why there is none.
+          this.#options.queries?.deliver(message, session.probeObjectId, this.#unfit.get(message));
           return session;
         case 'config-ack':
           if (message.version !== session.sentVersion) {

@@ -60,11 +60,18 @@ export class ProbeRefusals {
     this.#refused.set(probeObjectId, (this.#refused.get(probeObjectId) ?? 0) + n);
   }
 
-  /** Refused, and the probe never had it. Counted as refused as well. */
-  foreign(probeObjectId: number | null, n = 1): void {
+  /**
+   * Refused, and the probe never had it. Counted as refused as well.
+   *
+   * @param n What arrived, which the five-minute window counts: a result sent again is the probe
+   *   sending it again, and the warning lasts five minutes after the last of them.
+   * @param counted Of those, the ones not counted before (`P-295`), which the totals and
+   *   `refused` count: a batch sent again after a lost acknowledgement is not more refusals.
+   */
+  foreign(probeObjectId: number | null, n = 1, counted = n): void {
     if (n <= 0) return;
-    this.refused(probeObjectId, n);
-    this.#foreignTotal += n;
+    this.refused(probeObjectId, counted);
+    this.#foreignTotal += counted;
     if (probeObjectId === null) return;
     let recent = this.#foreign.get(probeObjectId);
     if (recent === undefined) {

@@ -1490,6 +1490,16 @@ hosts in — and finish, and so provision — another probe's discovery run.
 | An answer to a query put to another probe | `reportsForeign` as well | Likewise. The caller keeps waiting for the real answer |
 | A message about a discovery run dispatched to another probe | `reportsForeign` as well | Likewise |
 | A result that cannot be made to fit the protocol: a field missing or of the wrong type, an outcome or sensor id that is not one | `reportsRefused` | A probe built before `P-277`, or a peer that is not our probe. Refused alone: the rest of its batch is stored and acknowledged, and the core's log names the sensor (*cannot be made to fit the protocol*). A result that only does not fit as sent (a message too long, a channel no core takes) is fitted as a current probe fits it before sending, and kept (`P-281`). Counted once however often it is sent: a batch whose acknowledgement was lost comes again, and the core remembers such results by sensor and time, the last 10,000 for each of the 32 probes it heard from most recently. One with no sensor id or no time cannot be named, and is counted each time it arrives (`P-288`). The fleet's total is Core Health's `resultsRefusedUnfit` |
+| An answer to a query (**Check now**) whose result cannot be made to fit the protocol | `reportsRefused` | Likewise an older probe. The answer is refused, not the link: the request fails with `PROBE_QUERY_TOO_OLD` (409), saying what did not fit and to upgrade the probe, and the core's log names the sensor. A result that only does not fit as sent is fitted as above and is the answer (`P-289`). Not in Core Health's `resultsRefusedUnfit`, which counts what a probe reported for storage |
+
+**A refused result is counted once however often it is sent** (`P-288`, `P-295`). A batch whose
+acknowledgement was lost comes again, and every refusal above that is a result (a deleted,
+moved or foreign sensor, an unfit result, a `withheld` mark the probe had no claim to) is
+remembered by probe, sensor and time and counted the first time only, in `reportsRefused` and
+in the core's own totals. `reportsForeign` is the exception: it is a count of what arrived in the
+last five minutes, a result sent again is the probe sending it again, and so the warning lasts
+five minutes after the last arrival, as before. The log line for a batch sent again still says
+what arrived, with `countedBefore` for what had been counted already.
 
 **Whether a sensor was once under a probe is read from the audit log**: every move records the
 probe it left, in the move's own transaction, and the core follows a sensor's history back

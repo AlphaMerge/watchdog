@@ -10059,11 +10059,55 @@ because each is a decision rather than a defect:
         remembered while its probe's other one is forgotten; the probe heard from least
         recently is the one forgotten.
 
-- [ ] **P-289 — a query result is still refused whole for one result that does not fit** · S ·
+- [x] **P-289 — a query result is still refused whole for one result that does not fit** · S ·
       P-281 · Found 2026-10-07 in `P-281`. `query-result` carries the same result schema, and the
       core still closes the link for one unfit result in it. It is not spooled, so it wedges
       nothing. **Done when** decided: fit and refuse alone as `P-281` does for `results`, or keep,
       with a test either way.
+
+      **P-289 outcome. Fitted, and refused alone: the answer fails, the link does not.** No
+      protocol number and no new field: `too-old` is an existing `QUERY_FAILURES` value.
+      - **What decided it: closing the link was not free just because nothing is spooled.** The
+        operator who pressed **Check now** was told *the probe disconnected before it answered*,
+        which is false; every other query in flight on that probe failed with it; and pressing
+        again did the same, for ever, on an older probe whose script writes a long message. The
+        link drop also costs the reconnect and a configuration fingerprint check. Fitting it is
+        one function call, since the path exists.
+      - **One path for both** (`@ms/shared`). `parseResults`'s per-result body is now
+        `receiveResult(raw, errors)`, which `parseResults` and the new `parseQueryResult` both
+        call, so a batch and a query cannot take different results. `parseQueryResult` validates
+        the answer whole: an error outside `/result` (`queryId`, `failure`, a field the message
+        does not have) is still a `ProtocolError`. The result is fitted as a batch's is, the ones
+        the schema took included (NULs out, so the operator sees what a scan would store). A
+        result fitting cannot mend is taken out, the answer kept without it, and
+        `onUnfitResults` told; a fitted one is told too when fitting changed more than NULs.
+      - **The core answers the query `too-old`** (`ProbeQueryService.deliver`, which the endpoint
+        now hands the parser's report): 409 `PROBE_QUERY_TOO_OLD`, *the probe answered with a
+        result that does not fit the protocol (…); a current probe fits its results before
+        sending them — upgrade the probe*. Every probe since `P-277` fits its own, so an upgrade
+        is what mends it, and the client puts up an upgrade prompt, not a retry. Counted on the
+        probe's Reports refused (as `P-281` counts a batch's) and in the query service's new
+        `unfit` stat; warned with the sensor id and reason. Foreign is still decided first: an
+        unfit answer from another probe is foreign and the caller keeps waiting. A fitted result
+        is the answer, warned and not counted (nothing is stored). Not in Core Health's
+        `resultsRefusedUnfit`, which counts what was reported for storage; said in
+        `administration.md`'s refusal table.
+      - **Not done.** An answer nobody awaits (late) is logged at debug with the report and not
+        counted, as a late answer is not today. No alarm volume change, so no scenario test.
+      - **Tests.** `messages.test.ts` (shared): an answer that fits is taken as sent and nothing
+        said; each of the nine unmendable results `P-281` lists is refused alone with its sensor
+        id and reason, the answer kept without `result`; a long message with a NUL and an
+        unsendable channel fitted (clipped, NUL gone, one channel dropped, the reason said); NULs
+        alone taken out silently; five faults outside the result still throw and say nothing; an
+        answer with no result is left as it was. `A-41c`'s case, which asserted a throw for a
+        withheld `ok` in a query's answer, now asserts it refused alone. `probe-queries.test.ts`:
+        refused gives `too-old` with the reason, counts Reports refused and `unfit`; fitted hands
+        the result over and counts nothing; an unfit answer from another probe is foreign.
+        `unfit-results.test.ts` (real TLS endpoint, `ProbeQueryService` on it): a raw peer
+        answers a query with `outcome: 'maybe'`; the caller gets `too-old` naming `/outcome`,
+        Reports refused +1, the warn line names the sensor; the same link then answers a second
+        query with a 5,001-character message ending in a NUL, which comes back `ok`, clipped to
+        2,000, without the NUL, and the link is up.
 
 - [x] **P-290 — results the core refused or fitted are not on Core Health or `/metrics`** · S ·
       P-281 · Found 2026-10-07 in `P-281`. Ingestion's `refusedUnfit` and
@@ -10247,12 +10291,54 @@ because each is a decision rather than a defect:
         - `listenerCounters` at 12 fails 3 shared and 3 web;
         - syslog reading flow's version fails 4 web.
 
-- [ ] **P-295 — ownership refusals are counted again when a batch is sent again** · S · P-288 ·
+- [x] **P-295 — ownership refusals are counted again when a batch is sent again** · S · P-288 ·
       Found 2026-10-08 in `P-288`. `#refuse` (unknown, moved, foreign) and `A-41c`'s unearned
       `withheld` count on Reports refused for every arrival, so a batch resent after a lost ack
       counts them twice. **Done when** they use the same probe, sensor and time memory as
       `P-288`, or a stable batch id from the probe's spool (a protocol change) lets the core count
       a batch once, with a test that loses the first ack.
+
+      **P-295 outcome. The same memory, now for every refusal that is a result.** In
+      `IngestionService` (`packages/core/src/ingestion/service.ts`). No protocol change, no
+      migration, the bound unchanged.
+      - **One memory, renamed for what it holds.** `P-288`'s per-probe sets are shared, not
+        copied: `#refuse` and the unearned count call the same `#firstCount('refused', gid,
+        sensorId, at)` as `unfitResults`. Since it now holds more than unfit results it is
+        renamed: `RESULTS_REMEMBERED` (10,000 a probe) and `PROBES_REMEMBERED` (32), options
+        `resultsRemembered` / `probesRemembered`, stats `resultsRemembered` / `probesRemembered`
+        (were `UNFIT_*` / `unfit*Remembered`; nothing outside the service and its test read
+        them). Worst case still about 70 MB; it is no longer empty in ordinary running, since a
+        spool draining after a delete or a move fills it for that probe up to the bound.
+      - **One `refused` kind for every refusal.** One arrival of a result meets at most one of
+        unfit, unknown, moved, foreign or unearned, and a result refused as moved and sent again
+        after its sensor was deleted is the same result, not a second refusal.
+      - **Counted once:** Reports refused, `refusedUnknown` / `refusedMoved` / `refusedForeign`,
+        `discardedUnknownSensor`, `ProbeRefusals`' totals, and the unearned mark.
+        `resultsReceived` / `readingsReceived` still count every arrival, as `P-288` left them.
+        `CredentialVouching.reported`'s `unearned` is now the marked results as sent (was a
+        count), so their sensor and `at` can name them.
+      - **Not counted once: `reportsForeign`'s five-minute window.** It warns while the probe has
+        sent work it was never given in the last five minutes, and a result sent again is the
+        probe sending it again. Deduplicated, the warning could end at the first arrival's five
+        minutes and a later foreign result open a second one, which is more alarms, not fewer.
+        `ProbeRefusals.foreign(id, n, counted)` now takes both: the window counts what arrived,
+        the totals and `refused` what was new. So the warning is unchanged and alarm volume is
+        too; no scenario test.
+      - **The log still says what arrived**, with `countedBefore` on the foreign warn, the
+        unearned warn and the unknown/moved debug line.
+      - **Not done.** `A-53`'s `late` and `A-72`'s `withheldDropped` counts are per arrival too
+        (counts, not results, from `reported`); outside this ticket, listed as a follow-up.
+      - **Tests.** `probe-ownership.test.ts`: one ingestion service, a batch of an owned result
+        and a moved, a foreign and an unknown one, acked; the ack lost, the same results again
+        under a new batch id with one more foreign result queued since. Reports refused 3 then
+        4, `reportsForeign`'s window 1 then 3, `ProbeRefusals.stats()` 4 refused / 2 foreign,
+        unknown / moved / foreign 1 / 1 / 2, the unknown sensor's reading dropped once,
+        `resultsReceived` 9, `resultsRemembered` 4. `credential-pinning.test.ts`: an unearned
+        mark sent again after a lost ack counts once and the one queued since counts. Changed:
+        `probe-ownership`'s mixed batch sent two results for one foreign sensor stamped within
+        the same millisecond, which are one result to the store and now to the count; the
+        second is stamped a second later. `credential-pinning`'s assertions on `unearned` read
+        its length; `unfit-results`' bound cases use the new option and stat names.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then

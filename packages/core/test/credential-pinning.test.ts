@@ -402,7 +402,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
     const batch = [measured(1, T(0)), measured(2, T(0), 'error')];
     const reported = await credentials.reported(7, batch);
     assert.equal(reported.results, batch);
-    assert.equal(reported.unearned, 0);
+    assert.equal(reported.unearned.length, 0);
     assert.equal(settled.length, 0);
     assert.equal(credentials.stats().withheld, 0);
   });
@@ -414,7 +414,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       reported.results.map((result) => result.sensorId),
       [2],
     );
-    assert.equal(reported.unearned, 0);
+    assert.equal(reported.unearned.length, 0);
     assert.deepEqual(settled, [{ owner: 'credentials-probe:7', refused: new Map([[1, REFUSED]]) }]);
     assert.equal(credentials.stats().withheld, 1);
   });
@@ -610,7 +610,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       const { credentials, settled } = await holder();
       // Sensor 9 was sent to probe 7 with no set that leaves its name to the probe.
       const reported = await credentials.reported(7, [refused(9, T(0)), refused(1, T(0))]);
-      assert.equal(reported.unearned, 1);
+      assert.equal(reported.unearned.length, 1);
       assert.deepEqual(
         reported.results,
         [measured(9, T(0), 'error')].map((one) => ({
@@ -630,7 +630,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       const ok: CheckResult = { ...refused(1, T(0)), outcome: 'ok' };
       const readings: CheckResult = { ...refused(2, T(0)), channels: [{ key: 'a', value: 1 }] };
       const reported = await credentials.reported(7, [ok, readings]);
-      assert.equal(reported.unearned, 2);
+      assert.equal(reported.unearned.length, 2);
       assert.equal(reported.results.length, 2, 'neither reading is dropped');
       assert.equal(settled.length, 0);
       assert.equal(credentials.stats().withheld, 0);
@@ -653,7 +653,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       const reported = await credentials.reported(7, [refused(1, T(0))]);
       // Not a mark it may make, and not a failed scan either: the core withholds the sensor
       // from this probe, so the result was made under a configuration before (`A-72`).
-      assert.equal(reported.unearned, 0);
+      assert.equal(reported.unearned.length, 0);
       assert.equal(reported.late, 0);
       assert.equal(reported.withheldDropped, 1);
       assert.equal(reported.results.length, 0);
@@ -665,7 +665,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       await credentials.withhold(7, [leftToProbe(2)], PINNING);
       clock.ms += LATE_REFUSAL_GRACE_MS + 1;
       const reported = await credentials.reported(7, [refused(1, T(0)), refused(2, T(0))]);
-      assert.equal(reported.unearned, 1);
+      assert.equal(reported.unearned.length, 1);
       assert.equal(reported.late, 0);
       assert.deepEqual(
         reported.results.map((one) => one.sensorId),
@@ -685,7 +685,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       const reported = await credentials.reported(7, [refused(1, T(0)), refused(2, T(0))]);
       assert.deepEqual(reported.results, [], 'nothing for the machine to count as a failure');
       assert.equal(reported.late, 1);
-      assert.equal(reported.unearned, 0);
+      assert.equal(reported.unearned.length, 0);
       // Sensor 2 is still the probe's to refuse, and is held; sensor 1 is not held by this.
       assert.deepEqual(settled, [
         { owner: 'credentials-probe:7', refused: new Map([[2, REFUSED]]) },
@@ -711,7 +711,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       const reported = await credentials.reported(7, [refused(1, T(0)), failed]);
       assert.deepEqual(reported.results, [failed]);
       assert.equal(reported.late, 1);
-      assert.equal(reported.unearned, 0);
+      assert.equal(reported.unearned.length, 0);
     });
 
     it('is bounded: to the last millisecond of the grace, and not one after', async () => {
@@ -725,7 +725,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       clock.ms += 1;
       const after = await credentials.reported(7, [refused(1, T(1))]);
       assert.equal(after.late, 0);
-      assert.equal(after.unearned, 1, 'a mark the probe has no claim to any more');
+      assert.equal(after.unearned.length, 1, 'a mark the probe has no claim to any more');
       assert.deepEqual(after.results, [{ ...measured(1, T(1), 'error'), message: REFUSED }]);
     });
 
@@ -762,7 +762,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       clock.ms += 1;
       const after = await credentials.reported(7, [refused(1, T(0))]);
       assert.equal(after.late, 0, 'the later configuration did not start it again');
-      assert.equal(after.unearned, 1);
+      assert.equal(after.unearned.length, 1);
     });
 
     it('forgets at the first configuration after the cool-off, and remembers until then (A-68)', async () => {
@@ -774,7 +774,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       clock.ms -= LATE_REFUSAL_GRACE_MS + LATE_REFUSAL_COOL_OFF_MS;
       const reported = await credentials.reported(7, [refused(1, T(0))]);
       assert.equal(reported.late, 0);
-      assert.equal(reported.unearned, 1);
+      assert.equal(reported.unearned.length, 1);
     });
 
     it('starts again when the sensor is left to the probe and then is not', async () => {
@@ -806,7 +806,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       // Sensor 9 was never left to probe 7, before or after.
       const seven = await credentials.reported(7, [refused(9, T(0))]);
       assert.equal(seven.late, 0);
-      assert.equal(seven.unearned, 1);
+      assert.equal(seven.unearned.length, 1);
       assert.equal(seven.results.length, 1);
     });
 
@@ -817,7 +817,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       const readings: CheckResult = { ...refused(1, T(1)), channels: [{ key: 'a', value: 1 }] };
       const reported = await credentials.reported(7, [ok, readings]);
       assert.equal(reported.late, 0);
-      assert.equal(reported.unearned, 2);
+      assert.equal(reported.unearned.length, 2);
       assert.equal(reported.results.length, 2);
       assert.equal(
         reported.results.some((one) => 'withheld' in one),
@@ -864,7 +864,7 @@ describe('what a probe refuses to scan is held, not counted as a failed scan (A-
       await credentials.reconcile();
       const reported = await credentials.reported(7, [refused(1, T(0))]);
       assert.equal(reported.late, 0);
-      assert.equal(reported.unearned, 1);
+      assert.equal(reported.unearned.length, 1);
     });
   });
 });
@@ -1261,7 +1261,7 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
       const failed = measured(1, T(2), 'error');
       const reported = await credentials.reported(7, [ok, readings, failed, refused(1, T(3))]);
       assert.equal(reported.late, 1);
-      assert.equal(reported.unearned, 2);
+      assert.equal(reported.unearned.length, 2);
       assert.equal(reported.results.length, 3, 'a failed scan after the restart is a failed scan');
     });
 
@@ -1985,7 +1985,7 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
       const second = core(first.table());
       await second.credentials.restore();
       const reported = await second.credentials.reported(7, [refused(1, T(0)), refused(9, T(0))]);
-      assert.equal(reported.unearned, 1, 'sensor 9 was never left to it');
+      assert.equal(reported.unearned.length, 1, 'sensor 9 was never left to it');
       assert.deepEqual(
         reported.results.map((one) => one.sensorId),
         [9],
@@ -2749,7 +2749,7 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
             tick(LATE_REFUSAL_GRACE_MS);
             const batch = await credentials.reported(7, [refused(5, T(1)), measured(5, T(2))]);
             assert.deepEqual(
-              [batch.results.length, batch.withheldDropped, batch.unearned, await late(5)],
+              [batch.results.length, batch.withheldDropped, batch.unearned.length, await late(5)],
               [0, 2, 0, 0],
             );
           }
@@ -2779,7 +2779,7 @@ describe('what a configuration stopped leaving to a probe is stored, and read ba
           ],
           'the sensor no longer sent is not withheld: its results are what they were',
         );
-        assert.equal(batch.unearned, 1);
+        assert.equal(batch.unearned.length, 1);
         assert.equal(batch.late, 0);
       });
 
@@ -4096,6 +4096,46 @@ describe(
         assert.deepEqual(await stateOf(sensor), { state: 'down', message: marked });
         assert.equal(vouching.withheld().has(sensor), false, 'not held Unknown: not believed');
         assert.equal(refusals.countsFor(site).refused, 2, 'and counted as unearned, each scan');
+      });
+
+      // `P-295`: a batch whose acknowledgement was lost is sent again, and its unearned marks
+      // were counted again with it. One ingestion service, as the running core has: what it
+      // remembers is what counts a result once.
+      it('counts an unearned mark once when the acknowledgement was lost and the batch comes again', async () => {
+        const sensor = await addressed('routed-again', '10.20.0.43');
+        const marked = 'Not scanned: 10.20.0.43 handed the connection on to elsewhere.test.';
+        const refusals = new ProbeRefusals();
+        const ingestor = new Ingestor({ db, logger: silent, config: CONFIG, alarms: engine });
+        try {
+          const ingestion = new IngestionService({
+            db,
+            logger: silent,
+            ingestor,
+            credentialRefusals: credentials,
+            refusals,
+            ...(h.states === undefined ? {} : { states: h.states }),
+          });
+          const origin = { gid: `gid-${String(site)}`, probeObjectId: site };
+          const spooled = [refused(sensor, at(-4), marked)];
+          const first = await ingestion.acceptProbeResults(origin, {
+            type: 'results',
+            batchId: 'unearned-1',
+            results: spooled,
+          });
+          assert.equal(first.type, 'results-ack');
+          assert.equal(refusals.countsFor(site).refused, 1);
+          // The acknowledgement was lost: the same result again, under a new send's id, with
+          // one more queued since.
+          const again = await ingestion.acceptProbeResults(origin, {
+            type: 'results',
+            batchId: 'unearned-2',
+            results: [...spooled, refused(sensor, at(-3), marked)],
+          });
+          assert.equal(again.type, 'results-ack');
+          assert.equal(refusals.countsFor(site).refused, 2, 'the one sent again counted once');
+        } finally {
+          await ingestor.stop();
+        }
       });
 
       it('said as the failed check it is: one Down, one page, the sentence, and nothing counted against the probe', async () => {

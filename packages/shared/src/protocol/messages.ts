@@ -1679,7 +1679,10 @@ export interface UnusableHealthField {
   readonly reason: string;
 }
 
-/** A result the core took out of a `results` batch because it cannot be made to fit (`P-281`). */
+/**
+ * A result the core took out of a `results` batch, or a `query-result`, because it cannot be made
+ * to fit (`P-281`, `P-289`).
+ */
 export interface RefusedResult {
   /** The result's `sensorId` when it was a positive integer, or null. */
   readonly sensorId: number | null;
@@ -1705,7 +1708,10 @@ export interface FittedReceivedResult {
   readonly droppedChannels: number;
 }
 
-/** What `parseProbeToCore` did to a `results` batch's results to take the rest (`P-281`). */
+/**
+ * What `parseProbeToCore` did to a `results` batch's results to take the rest (`P-281`), or to a
+ * `query-result`'s one result (`P-289`).
+ */
 export interface UnfitResults {
   readonly refused: readonly RefusedResult[];
   readonly fitted: readonly FittedReceivedResult[];
@@ -1717,6 +1723,8 @@ export interface ParseProbeToCoreOptions {
   /**
    * Told of every `results` batch from which a result was refused, or in which one was changed
    * by more than the removal of NULs and lone surrogates (`P-281`). The batch itself was kept.
+   * Told of a `query-result` the same way (`P-289`): kept, without its result when that was
+   * refused.
    */
   readonly onUnfitResults?: (unfit: UnfitResults) => void;
 }
@@ -1738,7 +1746,8 @@ export interface ParseProbeToCoreOptions {
  * about it is how a skew becomes lost data. So is anything wrong outside `health`.
  *
  * **And except a result in a `results` batch, which is fitted or refused alone** (`P-281`):
- * `parseResults` says why.
+ * `parseResults` says why. **And a `query-result`'s result likewise** (`P-289`):
+ * `parseQueryResult` says why.
  */
 export function parseProbeToCore(
   value: unknown,
@@ -1746,6 +1755,9 @@ export function parseProbeToCore(
 ): ProbeToCoreMessage {
   if (isRecord(value) && value['type'] === 'results' && Array.isArray(value['results'])) {
     return parseResults(value, value['results'], options);
+  }
+  if (isRecord(value) && value['type'] === 'query-result' && value['result'] !== undefined) {
+    return parseQueryResult(value, value['result'], options);
   }
   if (validateProbeToCore(value)) return value;
   const errors = validateProbeToCore.errors ?? [];
@@ -1798,6 +1810,15 @@ const validateCheckResult = ajv.compile<CheckResult>(CHECK_RESULT_SCHEMA);
 /** `/results/3/channels/0/key`: the result's index, and the path within it. */
 const RESULT_ERROR = /^\/results\/(\d+)(\/.*)?$/;
 
+/** `/result/channels/0/key`: a `query-result`'s result, and the path within it (`P-289`). */
+const QUERY_RESULT_ERROR = /^\/result(\/.*)?$/;
+
+/** One error under a result, and its path within the result. */
+interface ResultError {
+  readonly error: ErrorObject;
+  readonly within: string;
+}
+
 /**
  * Whether `fitResult` makes what this error names fit by the same rules a probe applies before it
  * sends (`P-277`): anything inside a channel (a key or value that cannot be sent drops the
@@ -1817,7 +1838,7 @@ function fittable(error: ErrorObject, within: string): boolean {
 }
 
 /** Errors under one result, at most five of them, by their path within it. */
-function describeResultErrors(errors: readonly { error: ErrorObject; within: string }[]): string {
+function describeResultErrors(errors: readonly ResultError[]): string {
   const shown = errors
     .slice(0, 5)
     .map(
@@ -1868,7 +1889,7 @@ function parseResults(
   given: readonly unknown[],
   options: ParseProbeToCoreOptions,
 ): ProbeToCoreMessage {
-  const byIndex = new Map<number, { error: ErrorObject; within: string }[]>();
+  const byIndex = new Map<number, ResultError[]>();
   if (!validateProbeToCore(value)) {
     const errors = validateProbeToCore.errors ?? [];
     for (const error of errors) {
@@ -1886,41 +1907,107 @@ function parseResults(
   const refused: RefusedResult[] = [];
   const fitted: FittedReceivedResult[] = [];
   for (const [index, raw] of given.entries()) {
-    const errors = byIndex.get(index);
-    const reason = errors === undefined ? '' : describeResultErrors(errors);
-    if (errors !== undefined && !errors.every(({ error, within }) => fittable(error, within))) {
-      refused.push({ sensorId: sensorIdOf(raw), at: atOf(raw), reason });
+    const received = receiveResult(raw, byIndex.get(index));
+    if (received.kind === 'refused') {
+      refused.push(received.refused);
       continue;
     }
-    // A record: an index without errors passed the schema, and one whose errors are all
-    // fittable has none at the result itself, where "not an object" would be reported.
-    const fit = fitResult(raw as CheckResult);
-    if (errors !== undefined && !validateCheckResult(fit.result)) {
-      // Not expected: every error was one `fitResult` mends. Refused rather than trusted.
-      refused.push({
-        sensorId: sensorIdOf(raw),
-        at: atOf(raw),
-        reason: `${reason}; and fitted it is still refused: ${describeErrors(validateCheckResult.errors)}`,
-      });
-      continue;
-    }
-    results.push(fit.result);
-    if (errors !== undefined || fit.problems.length > 0) {
-      const sent = isRecord(raw) && Array.isArray(raw['channels']) ? raw['channels'].length : 0;
-      fitted.push({
-        sensorId: fit.result.sensorId,
-        at: fit.result.at,
-        reason,
-        problems: fit.problems,
-        droppedChannels: sent - fit.result.channels.length,
-      });
-    }
+    results.push(received.result);
+    if (received.fitted !== undefined) fitted.push(received.fitted);
   }
   if (refused.length > 0 || fitted.length > 0) options.onUnfitResults?.({ refused, fitted });
   // Everything outside `results` passed the schema (any error there threw above), and every
   // result kept either passed it as sent or was checked again once fitted; `fitResult` of a
   // result the schema takes is one it takes too, which `result-fit.test.ts` holds by property.
   return { ...value, results } as ProbeToCoreMessage;
+}
+
+/** One result as the core takes it: kept, fitted when that changed it, or refused. */
+type ReceivedResult =
+  | { readonly kind: 'kept'; readonly result: CheckResult; readonly fitted?: FittedReceivedResult }
+  | { readonly kind: 'refused'; readonly refused: RefusedResult };
+
+/**
+ * One result, given the schema's errors under it (none when it passed): fitted by `fitResult`, or
+ * refused when any error is one fitting cannot mend (`P-281`). The one path for a result in a
+ * `results` batch and for a `query-result`'s (`P-289`), so the two cannot take different results.
+ */
+function receiveResult(raw: unknown, errors: readonly ResultError[] | undefined): ReceivedResult {
+  const reason = errors === undefined ? '' : describeResultErrors(errors);
+  if (errors !== undefined && !errors.every(({ error, within }) => fittable(error, within))) {
+    return { kind: 'refused', refused: { sensorId: sensorIdOf(raw), at: atOf(raw), reason } };
+  }
+  // A record: a result without errors passed the schema, and one whose errors are all fittable
+  // has none at the result itself, where "not an object" would be reported.
+  const fit = fitResult(raw as CheckResult);
+  if (errors !== undefined && !validateCheckResult(fit.result)) {
+    // Not expected: every error was one `fitResult` mends. Refused rather than trusted.
+    return {
+      kind: 'refused',
+      refused: {
+        sensorId: sensorIdOf(raw),
+        at: atOf(raw),
+        reason: `${reason}; and fitted it is still refused: ${describeErrors(validateCheckResult.errors)}`,
+      },
+    };
+  }
+  if (errors === undefined && fit.problems.length === 0)
+    return { kind: 'kept', result: fit.result };
+  const sent = isRecord(raw) && Array.isArray(raw['channels']) ? raw['channels'].length : 0;
+  return {
+    kind: 'kept',
+    result: fit.result,
+    fitted: {
+      sensorId: fit.result.sensorId,
+      at: fit.result.at,
+      reason,
+      problems: fit.problems,
+      droppedChannels: sent - fit.result.channels.length,
+    },
+  };
+}
+
+/**
+ * A `query-result` whose result is checked and fitted as one in a `results` batch is (`P-289`).
+ *
+ * **One result that does not fit costs that answer, not the link.** The answer was validated
+ * whole, so a result its schema refused closed the connection: the operator who pressed "check
+ * now" was told the probe had disconnected, every other query in flight on that probe failed
+ * with it, and pressing again did the same. Now what is wrong outside the result is still a
+ * protocol violation (a `queryId`, a `failure` that is not one), and the result itself is
+ * fitted as `parseResults` fits one, by the same function: the operator sees what a scheduled
+ * scan would have stored. A result fitting cannot mend is taken out, and the answer kept without
+ * it; `onUnfitResults` says so, and the core answers the query with why.
+ */
+function parseQueryResult(
+  value: Record<string, unknown>,
+  given: unknown,
+  options: ParseProbeToCoreOptions,
+): ProbeToCoreMessage {
+  const errors: ResultError[] = [];
+  if (!validateProbeToCore(value)) {
+    const all = validateProbeToCore.errors ?? [];
+    for (const error of all) {
+      const at = QUERY_RESULT_ERROR.exec(error.instancePath);
+      if (at === null) {
+        throw new ProtocolError(`unrecognised message from probe: ${describeErrors(all)}`);
+      }
+      errors.push({ error, within: at[1] ?? '' });
+    }
+  }
+  const received = receiveResult(given, errors.length === 0 ? undefined : errors);
+  if (received.kind === 'refused') {
+    options.onUnfitResults?.({ refused: [received.refused], fitted: [] });
+    // Everything but the result passed the schema, and none of it is required but the type and
+    // the id, which it holds: the answer without its result is a message the schema takes.
+    return Object.fromEntries(
+      Object.entries(value).filter(([key]) => key !== 'result'),
+    ) as ProbeToCoreMessage;
+  }
+  if (received.fitted !== undefined) {
+    options.onUnfitResults?.({ refused: [], fitted: [received.fitted] });
+  }
+  return { ...value, result: received.result } as ProbeToCoreMessage;
 }
 
 /** Parses a decoded frame from the core. */

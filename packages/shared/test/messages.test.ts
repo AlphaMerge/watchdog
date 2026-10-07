@@ -49,6 +49,22 @@ function taken(results: readonly unknown[]): {
   return { kept: parsed.results, unfit };
 }
 
+/**
+ * What the core keeps of a `query-result` carrying this result, and what it said it refused or
+ * fitted (`P-289`). Throws, as `parseProbeToCore` does, for an answer it refuses whole.
+ */
+function answered(
+  result: unknown,
+  rest: Record<string, unknown> = {},
+): { message: ProbeToCoreMessage; unfit: UnfitResults | undefined } {
+  let unfit: UnfitResults | undefined;
+  const message = parseProbeToCore(
+    { type: 'query-result', queryId: 'q1', ...rest, result },
+    { onUnfitResults: (told) => (unfit = told) },
+  );
+  return { message, unfit };
+}
+
 /** Asserts the core refuses this one result alone, and returns why it said it did. */
 function refusedAlone(result: unknown): string {
   const { kept, unfit } = taken([result]);
@@ -272,13 +288,13 @@ describe('protocol message validation', () => {
 
     it('is refused as anything but true, and in a query’s answer under the same rule', () => {
       assert.match(refusedAlone({ ...result, withheld: false }), /\/withheld: must be equal to/);
-      const answer = (one: Record<string, unknown>): Record<string, unknown> => ({
-        type: 'query-result',
-        queryId: 'q1',
-        result: one,
-      });
-      assert.doesNotThrow(() => parseProbeToCore(answer(result)));
-      assert.throws(() => parseProbeToCore(answer({ ...result, outcome: 'ok' })), ProtocolError);
+      const kept = answered(result);
+      assert.deepEqual(kept.message, { type: 'query-result', queryId: 'q1', result });
+      assert.equal(kept.unfit, undefined);
+      // Refused alone since `P-289`, the answer kept without it: it used to close the link.
+      const refused = answered({ ...result, outcome: 'ok' });
+      assert.deepEqual(refused.message, { type: 'query-result', queryId: 'q1' });
+      assert.match(refused.unfit?.refused[0]?.reason ?? '', /\(result\): must match "then"/);
     });
   });
 
@@ -1160,5 +1176,92 @@ describe('a results batch holding a result that does not fit (`P-281`)', () => {
     const { kept, unfit } = taken([{ ...good(1), outcome: 'maybe' }]);
     assert.deepEqual(kept, []);
     assert.equal(unfit?.refused.length, 1);
+  });
+
+  /**
+   * A `query-result` carries the same result (`P-289`). Validated whole, one result its schema
+   * refused closed the link: the operator was told the probe had gone, and every other query on
+   * it failed too. Now its result goes the way a batch's does, by the same function.
+   */
+  describe('and a query’s answer holding one (`P-289`)', () => {
+    it('takes an answer that fits as it was sent, and says nothing', () => {
+      const { message, unfit } = answered(good(2));
+      assert.deepEqual(message, { type: 'query-result', queryId: 'q1', result: good(2) });
+      assert.equal(unfit, undefined);
+    });
+
+    for (const [name, change, reason, sensorId] of unmendable) {
+      it(`refuses ${name} alone, and keeps the answer without it`, () => {
+        const bad =
+          typeof change === 'string'
+            ? change
+            : Object.fromEntries(
+                Object.entries({ ...good(2), ...change } as Record<string, unknown>).filter(
+                  ([, value]) => value !== undefined,
+                ),
+              );
+        const { message, unfit } = answered(bad, { message: 'from the probe' });
+        assert.deepEqual(message, {
+          type: 'query-result',
+          queryId: 'q1',
+          message: 'from the probe',
+        });
+        assert.equal(unfit?.refused.length, 1);
+        assert.equal(unfit.refused[0]?.sensorId, sensorId);
+        assert.match(unfit.refused[0].reason, reason);
+        assert.deepEqual(unfit.fitted, []);
+      });
+    }
+
+    it('fits a result as a batch’s is fitted, and says what it changed', () => {
+      const { message, unfit } = answered({
+        ...good(2),
+        message: `${'x'.repeat(5_000)}\u0000`,
+        channels: [
+          { key: 'rtt', value: 1, name: 'Round\u0000trip' },
+          { key: 'text', value: 'four' },
+        ],
+      });
+      assert.ok(message.type === 'query-result');
+      assert.equal(message.result?.message.length, RESULT_LIMITS.message);
+      assert.ok(!JSON.stringify(message).includes('\\u0000'), 'no NUL anywhere');
+      assert.deepEqual(message.result.channels, [{ key: 'rtt', value: 1, name: 'Roundtrip' }]);
+      assert.deepEqual(unfit?.refused, []);
+      assert.equal(unfit.fitted.length, 1);
+      assert.equal(unfit.fitted[0]?.droppedChannels, 1);
+      assert.match(unfit.fitted[0].reason, /\/message: must NOT have more than 2000 characters/);
+    });
+
+    it('takes the NULs out of a result the schema took, and says nothing', () => {
+      const { message, unfit } = answered({ ...good(2), message: 'one\u0000two' });
+      assert.ok(message.type === 'query-result');
+      assert.equal(message.result?.message, 'onetwo');
+      assert.equal(unfit, undefined);
+    });
+
+    it('still refuses an answer whole for what is wrong outside its result', () => {
+      const told: UnfitResults[] = [];
+      const parse = (message: Record<string, unknown>) => () =>
+        parseProbeToCore(message, { onUnfitResults: (unfit) => told.push(unfit) });
+      const bad = { ...good(2), outcome: 'maybe' };
+      assert.throws(parse({ type: 'query-result', result: bad }), ProtocolError);
+      assert.throws(parse({ type: 'query-result', queryId: '', result: good(2) }), ProtocolError);
+      assert.throws(
+        parse({ type: 'query-result', queryId: 'q1', failure: 'nope', result: bad }),
+        ProtocolError,
+      );
+      assert.throws(
+        parse({ type: 'query-result', queryId: 'q1', result: good(2), extra: 1 }),
+        ProtocolError,
+      );
+      // `/results/…` is a batch's path, not this one's.
+      assert.throws(parse({ type: 'query-result', queryId: 'q1', results: [bad] }), ProtocolError);
+      assert.deepEqual(told, [], 'nothing is said of an answer that was refused');
+    });
+
+    it('leaves an answer with no result as it was', () => {
+      const failure = { type: 'query-result', queryId: 'q1', failure: 'busy', message: 'later' };
+      assert.deepEqual(parseProbeToCore(failure), failure);
+    });
   });
 });

@@ -6,6 +6,7 @@ import {
   type Logger,
   type ProbeQuery,
   type QueryFailure,
+  type UnfitResults,
 } from '@ms/shared';
 import type { ProbeRefusals } from './refusals.js';
 
@@ -111,6 +112,11 @@ export interface ProbeQueryStats {
   abandoned: number;
   /** Answers refused because a probe other than the one asked sent them (`P-228`). */
   foreign: number;
+  /**
+   * Answers whose result could not be made to fit the protocol, refused and answered `too-old`
+   * (`P-289`). Counted on the probe's Reports refused as well.
+   */
+  unfit: number;
 }
 
 interface Pending {
@@ -138,6 +144,7 @@ export class ProbeQueryService {
   #timedOut = 0;
   #abandoned = 0;
   #foreign = 0;
+  #unfit = 0;
 
   constructor(options: ProbeQueryServiceOptions) {
     this.#logger = options.logger.child({ component: 'probe-queries' });
@@ -168,6 +175,7 @@ export class ProbeQueryService {
       timedOut: this.#timedOut,
       abandoned: this.#abandoned,
       foreign: this.#foreign,
+      unfit: this.#unfit,
     };
   }
 
@@ -255,6 +263,14 @@ export class ProbeQueryService {
    * anyone makes by accident, and that is exactly why an answer from elsewhere is foreign rather
    * than late: it is refused, the caller keeps waiting for the real one, and Probe Health warns
    * on the probe that sent it.
+   *
+   * **A result the core could not make fit is refused, and the query answered `too-old`**
+   * (`P-289`). It used to close the link, so the caller was told the probe had gone and every
+   * other query on it failed too. Every probe since `P-277` fits its results before sending, so
+   * one that does not is a build before it (or not our probe), and an upgrade is what mends it:
+   * `too-old` is the answer that says so, and puts an upgrade prompt where a retry would do the
+   * same again. Counted on Reports refused, as a refused result in a batch is (`P-281`). A result
+   * only fitted is the answer, and said in the log: nothing was stored, so nothing is counted.
    */
   deliver(
     message: {
@@ -264,10 +280,14 @@ export class ProbeQueryService {
       message?: string;
     },
     from: number | null,
+    unfit?: UnfitResults,
   ): void {
     const pending = this.#pending.get(message.queryId);
     if (pending === undefined) {
-      this.#logger.debug({ queryId: message.queryId }, 'a probe answered a query nobody awaits');
+      this.#logger.debug(
+        { queryId: message.queryId, ...(unfit === undefined ? {} : { unfit }) },
+        'a probe answered a query nobody awaits',
+      );
       return;
     }
     if (pending.probeObjectId !== from) {
@@ -282,6 +302,33 @@ export class ProbeQueryService {
     this.#pending.delete(message.queryId);
     this.#timer.clear(pending.timer);
     this.#answered += 1;
+
+    const refused = unfit?.refused[0];
+    if (refused !== undefined) {
+      this.#unfit += 1;
+      this.#refusals?.refused(from);
+      this.#logger.warn(
+        { queryId: message.queryId, probeObjectId: from, refused },
+        'a probe answered a query with a result that cannot be made to fit the protocol; ' +
+          'refused, and the query answered too-old',
+      );
+      pending.settle({
+        kind: 'failed',
+        failure: 'too-old',
+        message:
+          `the probe answered with a result that does not fit the protocol (${refused.reason}); ` +
+          'a current probe fits its results before sending them — upgrade the probe',
+      });
+      return;
+    }
+    const fitted = unfit?.fitted[0];
+    if (fitted !== undefined) {
+      this.#logger.warn(
+        { queryId: message.queryId, probeObjectId: from, fitted },
+        'a probe answered a query with a result that does not fit the protocol as it is; ' +
+          'fitted as a current probe fits it before sending',
+      );
+    }
 
     if (message.result !== undefined) {
       pending.settle({ kind: 'ok', result: message.result });

@@ -207,6 +207,66 @@ describe('on-demand probe queries', { timeout: 20_000 }, () => {
     assert.match(outcome.message, /already running/);
   });
 
+  // `P-289`: a result the core could not make fit used to close the link, and the caller was
+  // told the probe had gone. The parser now takes it out of the answer and says so.
+  it('answers too-old for a result that cannot be made to fit, and counts it on the probe', async () => {
+    const refusals = new ProbeRefusals();
+    const { service, sender } = build({ refusals });
+    const waiting = service.ask(1, QUERY);
+    await Promise.resolve();
+    const queryId = sender.asked[0] ?? '';
+    service.deliver({ queryId, message: 'from the probe' }, 1, {
+      refused: [{ sensorId: 42, at: RESULT.at, reason: '/outcome: must be equal to one of' }],
+      fitted: [],
+    });
+
+    const outcome = await waiting;
+    assert.ok(outcome.kind === 'failed', JSON.stringify(outcome));
+    assert.equal(outcome.failure, 'too-old', 'an upgrade mends it, and a retry does not');
+    assert.match(outcome.message, /does not fit the protocol \(\/outcome: must be equal/);
+    assert.match(outcome.message, /upgrade the probe$/);
+    assert.equal(service.stats().unfit, 1);
+    assert.equal(service.stats().answered, 1);
+    assert.deepEqual(refusals.countsFor(1), { refused: 1, foreignRecently: 0 });
+  });
+
+  it('hands over a result the parser fitted, and counts nothing', async () => {
+    const refusals = new ProbeRefusals();
+    const { service, sender } = build({ refusals });
+    const waiting = service.ask(1, QUERY);
+    await Promise.resolve();
+    const queryId = sender.asked[0] ?? '';
+    service.deliver({ queryId, result: RESULT }, 1, {
+      refused: [],
+      fitted: [
+        { sensorId: 42, at: RESULT.at, reason: '', problems: ['dropped'], droppedChannels: 1 },
+      ],
+    });
+
+    const outcome = await waiting;
+    assert.ok(outcome.kind === 'ok');
+    assert.deepEqual(outcome.result, RESULT);
+    assert.equal(service.stats().unfit, 0);
+    assert.deepEqual(refusals.countsFor(1), { refused: 0, foreignRecently: 0 });
+  });
+
+  it('refuses an unfit answer from another probe as foreign, not as unfit', async () => {
+    const refusals = new ProbeRefusals();
+    const { service, sender } = build({ refusals });
+    const waiting = service.ask(1, QUERY);
+    await Promise.resolve();
+    const queryId = sender.asked[0] ?? '';
+    service.deliver({ queryId }, 2, {
+      refused: [{ sensorId: 42, at: RESULT.at, reason: '/outcome: invalid' }],
+      fitted: [],
+    });
+    assert.equal(service.stats().foreign, 1);
+    assert.equal(service.stats().unfit, 0);
+    assert.equal(service.stats().inFlight, 1, 'the caller is still waiting');
+    service.deliver({ queryId, result: RESULT }, 1);
+    assert.equal((await waiting).kind, 'ok');
+  });
+
   it('names a probe that answered with nothing at all', async () => {
     // A peer that sends neither a result nor a reason has still answered, so the caller must be
     // settled — the alternative is spending the whole deadline on a message already received.

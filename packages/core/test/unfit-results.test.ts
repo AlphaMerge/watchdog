@@ -20,6 +20,7 @@ import { Ingestor } from '../src/ingestion/ingestor.js';
 import { SensorOwnership } from '../src/ingestion/ownership.js';
 import { IngestionService } from '../src/ingestion/service.js';
 import { EMPTY_ASSIGNMENTS } from '../src/probes/config.js';
+import { ProbeQueryService } from '../src/probes/queries.js';
 import { ProbeRefusals } from '../src/probes/refusals.js';
 import { ProbeEndpoint, type ResultReceiver } from '../src/transport/probe-endpoint.js';
 import {
@@ -239,6 +240,7 @@ describe(
       options: {
         probeObjectFor?: () => Promise<number | null>;
         results?: ResultReceiver;
+        queries?: ProbeQueryService;
       } = {},
     ): Promise<{ endpoint: ProbeEndpoint; port: number }> {
       assert.ok(dir !== undefined);
@@ -258,6 +260,7 @@ describe(
         logger: silent,
         coreVersion: '9.9.9',
         results: options.results ?? ingestion,
+        ...(options.queries === undefined ? {} : { queries: options.queries }),
         probeConfig: {
           probeObjectFor: options.probeObjectFor ?? (() => Promise.resolve(probeId)),
           assignmentsFor: () => Promise.resolve(EMPTY_ASSIGNMENTS),
@@ -698,8 +701,8 @@ describe(
           db,
           logger: silent,
           ingestor,
-          unfitRemembered: 2,
-          unfitProbesRemembered: 2,
+          resultsRemembered: 2,
+          probesRemembered: 2,
         });
       };
       const counted = (service: IngestionService): number => service.stats().refusedUnfit;
@@ -711,7 +714,7 @@ describe(
         service.unfitResults(a, refusing(2));
         assert.equal(counted(service), 2, 'the same result counted once');
         service.unfitResults(a, refusing(3));
-        assert.equal(service.stats().unfitRemembered, 2, 'the bound holds');
+        assert.equal(service.stats().resultsRemembered, 2, 'the bound holds');
         service.unfitResults(a, refusing(1));
         assert.equal(counted(service), 4, 'the oldest forgotten, so counted again');
       });
@@ -739,8 +742,8 @@ describe(
         // And the same sensor at the same time from another probe is that probe's own.
         service.unfitResults(b, refusing(1));
         assert.equal(counted(service), 6);
-        assert.equal(service.stats().unfitProbesRemembered, 2);
-        assert.equal(service.stats().unfitRemembered, 3);
+        assert.equal(service.stats().probesRemembered, 2);
+        assert.equal(service.stats().resultsRemembered, 3);
       });
 
       it('forgets the probe heard from least recently past the bound on probes', () => {
@@ -750,7 +753,7 @@ describe(
         // A again, so B is now the least recent.
         service.unfitResults(a, refusing(1));
         service.unfitResults(c, refusing(1));
-        assert.equal(service.stats().unfitProbesRemembered, 2);
+        assert.equal(service.stats().probesRemembered, 2);
         assert.equal(counted(service), 3);
         service.unfitResults(a, refusing(1));
         assert.equal(counted(service), 3, 'A kept');
@@ -766,7 +769,7 @@ describe(
           logger: silent,
           ingestor,
           refusals: own,
-          unfitRemembered: 2,
+          resultsRemembered: 2,
         });
         const origin = { gid: 'bounded', probeObjectId: probeId };
         service.unfitResults(origin, refusing(1));
@@ -783,6 +786,95 @@ describe(
         service.unfitResults(origin, fitting(2));
         assert.equal(service.stats().discardedUnfitReadings, 2);
       });
+    });
+
+    // `P-289`: a query's answer carries the same result, validated whole, so one its schema
+    // refused closed the link: the operator who pressed "check now" was told the probe had gone,
+    // and every other query on it failed with it.
+    it('refuses a query’s result that cannot be fitted alone, says why, and keeps the link', async () => {
+      const sender: { endpoint?: ProbeEndpoint } = {};
+      const said: Record<string, unknown>[] = [];
+      const queries = new ProbeQueryService({
+        logger: pino(
+          { level: 'warn' },
+          {
+            write: (line: string) => {
+              said.push(JSON.parse(line) as Record<string, unknown>);
+            },
+          },
+        ),
+        refusals,
+        sender: {
+          sendQuery: (probeObjectId, message) =>
+            sender.endpoint?.sendQuery(probeObjectId, message) ?? { kind: 'offline' },
+        },
+      });
+      const started = await startEndpoint({ queries });
+      sender.endpoint = started.endpoint;
+      try {
+        const probe = await peer(started.port);
+        try {
+          const sensorId = sensors[1] ?? 0;
+          const check = {
+            kind: 'check',
+            assignment: {
+              sensorId,
+              sensorType: 'icmp.ping',
+              params: {},
+              target: { host: '192.0.2.10', ipVersion: 'v4' },
+              intervalSeconds: 60,
+              timeoutMs: 5_000,
+            },
+          } as const;
+          const asked = new Set<string>();
+          /** The next query the core sent, and nothing it sent before. */
+          const nextQuery = (): Promise<string> =>
+            probe.waitFor('a query', (m) => {
+              if (m.type !== 'query' || asked.has(m.queryId)) return undefined;
+              asked.add(m.queryId);
+              return m.queryId;
+            });
+          const before = refusals.countsFor(probeId).refused;
+
+          const refusing = queries.ask(probeId, check, { timeoutMs: 10_000 });
+          probe.send({
+            type: 'query-result',
+            queryId: await nextQuery(),
+            result: { ...good(sensorId, 1), outcome: 'maybe' },
+          });
+          const refused = await within(10_000, 'the refused answer', refusing);
+          assert.ok(refused.kind === 'failed', JSON.stringify(refused));
+          assert.equal(refused.failure, 'too-old', refused.message);
+          assert.match(refused.message, /\/outcome: must be equal to one of the allowed values/);
+          assert.equal(refusals.countsFor(probeId).refused, before + 1);
+          assert.equal(queries.stats().unfit, 1);
+          const warned = said.find((line) => 'refused' in line);
+          assert.deepEqual(
+            (warned?.['refused'] as { sensorId?: unknown } | undefined)?.sensorId,
+            sensorId,
+            `the log names the sensor: ${JSON.stringify(said)}`,
+          );
+
+          // The same link answers the next query, with a result the core fits as a current
+          // probe fits it before sending: clipped, and without its NUL.
+          const fitting = queries.ask(probeId, check, { timeoutMs: 10_000 });
+          probe.send({
+            type: 'query-result',
+            queryId: await nextQuery(),
+            result: { ...good(sensorId, 2), message: `${'x'.repeat(5_000)}\u0000` },
+          });
+          const fitted = await within(10_000, 'the fitted answer', fitting);
+          assert.ok(fitted.kind === 'ok', JSON.stringify(fitted).slice(0, 300));
+          assert.equal(fitted.result.message.length, RESULT_LIMITS.message);
+          assert.ok(!fitted.result.message.includes('\u0000'));
+          assert.ok(probe.open, 'the link is up');
+          assert.equal(refusals.countsFor(probeId).refused, before + 1, 'a fitted one is not');
+        } finally {
+          probe.close();
+        }
+      } finally {
+        await started.endpoint.stop();
+      }
     });
 
     it('still closes on a batch that is wrong outside its results: that is the conversation', async () => {

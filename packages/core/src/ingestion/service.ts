@@ -66,7 +66,8 @@ export interface IngestionServiceOptions {
       lastResultAt: (sensorId: number) => Date | null | undefined,
     ): Promise<{
       readonly results: readonly CheckResult[];
-      readonly unearned: number;
+      /** Marked withheld and not the probe's to mark, as sent: counted once each (`P-295`). */
+      readonly unearned: readonly CheckResult[];
       /** Refusals made under the configuration before the probe's last, and dropped (`A-53`). */
       readonly late: number;
       /** Results for a sensor withheld from the probe, and dropped (`A-72`). */
@@ -107,39 +108,42 @@ export interface IngestionServiceOptions {
   /** A monotonic clock in milliseconds, for the refusal windows. Injectable for the same reason. */
   monotonicMs?: () => number;
   /**
-   * How many unfit results are remembered for each probe, so one sent again is counted once
-   * (`P-288`). `UNFIT_RESULTS_REMEMBERED` unless a test states a smaller bound.
+   * How many refused or fitted results are remembered for each probe, so one sent again is
+   * counted once (`P-288`, `P-295`). `RESULTS_REMEMBERED` unless a test states a smaller bound.
    */
-  unfitRemembered?: number;
+  resultsRemembered?: number;
   /**
-   * How many probes' unfit results are remembered at once. `UNFIT_PROBES_REMEMBERED` unless a test
-   * states a smaller bound.
+   * How many probes' results are remembered at once. `PROBES_REMEMBERED` unless a test states a
+   * smaller bound.
    */
-  unfitProbesRemembered?: number;
+  probesRemembered?: number;
 }
 
 /**
- * Unfit results remembered for each probe (`P-288`): two full batches of 5,000, so a batch whose
- * acknowledgement was lost is still remembered when it is sent again behind another as large.
- * **Per probe**, because between the lost acknowledgement and the resend there is a reconnect,
- * and in a fleet-wide replay after an upgrade other probes send their own unfit results
+ * Counted results remembered for each probe (`P-288`, `P-295`): two full batches of 5,000, so a
+ * batch whose acknowledgement was lost is still remembered when it is sent again behind another
+ * as large. **Per probe**, because between the lost acknowledgement and the resend there is a
+ * reconnect, and in a fleet-wide replay after an upgrade other probes send their own refusals
  * meanwhile: one set shared by all of them would forget the first probe's before it came back.
  */
-export const UNFIT_RESULTS_REMEMBERED = 10_000;
+export const RESULTS_REMEMBERED = 10_000;
 
 /**
- * Probes whose unfit results are remembered at once (`P-288`); the one heard from least recently
- * is forgotten first. v1 is sized for fewer than 30 remote probes (`CAPABILITIES.MD`), and the
- * local one makes 30 at most.
+ * Probes whose counted results are remembered at once (`P-288`); the one heard from least
+ * recently is forgotten first. v1 is sized for fewer than 30 remote probes (`CAPABILITIES.MD`),
+ * and the local one makes 30 at most.
  *
  * **Worst case about 70 MB**, all 32 probes each holding 10,000: a key is the kind, the sensor id
  * and the result's `at` (at most 64 characters as the schema takes it, sent whole), so at most 82
  * characters, about 210 bytes with the string's header and the set's entry where a character
  * outside Latin-1 makes it two bytes a character. An ISO time makes it about 35 characters and
- * 80 bytes, some 25 MB for the same 320,000. **Empty** while every probe fits its own results, as
- * every probe since `P-277` does: only a result that did not fit is ever remembered.
+ * 80 bytes, some 25 MB for the same 320,000. **Only a refusal is remembered**, or a result that
+ * lost readings to fitting: a result that did not fit, one for a sensor not under the probe
+ * (`P-295`), or one marked withheld that was not the probe's to mark. Empty while every probe fits
+ * its own results and reports only on its own sensors; a spool draining after a delete or a move
+ * fills it for that probe, and no further than the bound.
  */
-export const UNFIT_PROBES_REMEMBERED = 32;
+export const PROBES_REMEMBERED = 32;
 
 /** Fifteen minutes. See `maxFutureSkewMs`. */
 export const DEFAULT_MAX_FUTURE_SKEW_MS = 15 * 60_000;
@@ -219,12 +223,12 @@ export interface ResultStats {
    */
   discardedUnfitReadings: number;
   /**
-   * Unfit results remembered so that one sent again is counted once (`P-288`), across every
-   * probe: at most `UNFIT_RESULTS_REMEMBERED` for each of `UNFIT_PROBES_REMEMBERED` probes.
+   * Refused and fitted results remembered so that one sent again is counted once (`P-288`,
+   * `P-295`), across every probe: at most `RESULTS_REMEMBERED` for each of `PROBES_REMEMBERED`.
    */
-  unfitRemembered: number;
-  /** Probes whose unfit results are remembered, at most `UNFIT_PROBES_REMEMBERED`. */
-  unfitProbesRemembered: number;
+  resultsRemembered: number;
+  /** Probes whose results are remembered, at most `PROBES_REMEMBERED`. */
+  probesRemembered: number;
   /** Sensors whose owning probe is cached. */
   cachedOwners: number;
   /**
@@ -306,13 +310,13 @@ export class IngestionService {
   #refusedUnfit = 0;
   #discardedUnfitReadings = 0;
   /**
-   * The unfit results already counted, by probe GID and then by kind, sensor and time (`P-288`).
-   * Both levels in order of use, the least recent first and the first forgotten: a probe past
-   * `#unfitProbeBound`, a result past `#unfitBound` of its probe's.
+   * The results already counted as refused or fitted, by probe GID and then by kind, sensor and
+   * time (`P-288`, `P-295`). Both levels in order of use, the least recent first and the first
+   * forgotten: a probe past `#probeBound`, a result past `#resultBound` of its probe's.
    */
-  readonly #unfitCounted = new Map<string, Set<string>>();
-  readonly #unfitBound: number;
-  readonly #unfitProbeBound: number;
+  readonly #counted = new Map<string, Set<string>>();
+  readonly #resultBound: number;
+  readonly #probeBound: number;
   readonly #counters = new CounterStore();
   #discardedReadings = 0;
   #discardedSpike = 0;
@@ -338,8 +342,8 @@ export class IngestionService {
     this.#windowClock =
       options.monotonicMs === undefined ? {} : { monotonicMs: options.monotonicMs };
     this.#now = options.now ?? (() => new Date());
-    this.#unfitBound = options.unfitRemembered ?? UNFIT_RESULTS_REMEMBERED;
-    this.#unfitProbeBound = options.unfitProbesRemembered ?? UNFIT_PROBES_REMEMBERED;
+    this.#resultBound = options.resultsRemembered ?? RESULTS_REMEMBERED;
+    this.#probeBound = options.probesRemembered ?? PROBES_REMEMBERED;
   }
 
   stats(): ResultStats {
@@ -358,8 +362,8 @@ export class IngestionService {
       refusedForeign: this.#refusedForeign,
       refusedUnfit: this.#refusedUnfit,
       discardedUnfitReadings: this.#discardedUnfitReadings,
-      unfitRemembered: [...this.#unfitCounted.values()].reduce((sum, one) => sum + one.size, 0),
-      unfitProbesRemembered: this.#unfitCounted.size,
+      resultsRemembered: [...this.#counted.values()].reduce((sum, one) => sum + one.size, 0),
+      probesRemembered: this.#counted.size,
       cachedOwners: this.#ownership.cached,
       discardedReadings: this.#discardedReadings,
       discardedSpike: this.#discardedSpike,
@@ -461,13 +465,22 @@ export class IngestionService {
         );
         results = reported.results;
         batch = reported;
-        if (reported.unearned > 0) {
+        if (reported.unearned.length > 0) {
           // **Marked withheld, and not this probe's to mark** (`A-41c`). Taken as the results
           // they are and counted with what Probe Health counts as refused: a probe that marks
-          // what it should not is one to look at.
-          this.#refusals?.refused(origin.probeObjectId, reported.unearned);
+          // what it should not is one to look at. Once however often it is sent (`P-295`).
+          const unearned = reported.unearned.length;
+          const counted = reported.unearned.filter((one) =>
+            this.#firstCount('refused', origin.gid, one.sensorId, one.at),
+          ).length;
+          this.#refusals?.refused(origin.probeObjectId, counted);
           this.#logger.warn(
-            { source: origin.gid, probeObjectId: origin.probeObjectId, results: reported.unearned },
+            {
+              source: origin.gid,
+              probeObjectId: origin.probeObjectId,
+              results: unearned,
+              ...(counted < unearned ? { countedBefore: unearned - counted } : {}),
+            },
             'a probe marked results withheld for sensors it was not left to check, or that were ' +
               'not errors; taken as the results they are',
           );
@@ -545,9 +558,10 @@ export class IngestionService {
    * again has a new one, its spool may group it with results queued since, and the numbering
    * starts again with the process, so an id remembered would one day name another batch. A
    * result is what the store itself goes by: the same sensor at the same time is the same result,
-   * so its probe, sensor and time are remembered once counted (`UNFIT_RESULTS_REMEMBERED` for
-   * each of `UNFIT_PROBES_REMEMBERED` probes) and it is not counted again. A refused result with no sensor id or no time cannot be
-   * named, and is counted every time it arrives: a resend of one of those counts twice.
+   * so its probe, sensor and time are remembered once counted (`RESULTS_REMEMBERED` for each of
+   * `PROBES_REMEMBERED` probes) and it is not counted again. A refused result with no sensor id or
+   * no time cannot be named, and is counted every time it arrives: a resend of one of those counts
+   * twice.
    *
    * **Warned once a batch, naming the sensors**, as `#refuse` does: a probe replaying an hour of
    * spool would otherwise write a line for every result in it. Warned for a batch sent again as
@@ -606,9 +620,14 @@ export class IngestionService {
   }
 
   /**
-   * Whether this unfit result is to be counted: true the first time it is seen, and every time
-   * for one that cannot be named (`P-288`). Remembers it, forgetting the least recent past either
-   * bound.
+   * Whether this result is to be counted as refused or fitted: true the first time it is seen,
+   * and every time for one that cannot be named (`P-288`). Remembers it, forgetting the least
+   * recent past either bound.
+   *
+   * **One `refused` kind for every refusal** (`P-295`): unfit, unknown, moved, foreign, and
+   * `A-41c`'s unearned mark. One arrival of a result meets at most one of them, and a result is
+   * the same result whatever refused it: one refused as moved and sent again after its sensor was
+   * deleted is not a second refusal.
    *
    * **A result seen again moves to the newest end**, and so does its probe: a batch sent a third
    * time, after a second link lost its acknowledgement too, is still remembered, however many
@@ -621,20 +640,30 @@ export class IngestionService {
     at: string | null,
   ): boolean {
     if (sensorId === null || at === null) return true;
-    const seen = this.#unfitCounted.get(gid) ?? new Set<string>();
-    this.#unfitCounted.delete(gid);
-    this.#unfitCounted.set(gid, seen);
-    forgetOldest(this.#unfitCounted, this.#unfitProbeBound);
+    const seen = this.#counted.get(gid) ?? new Set<string>();
+    this.#counted.delete(gid);
+    this.#counted.set(gid, seen);
+    forgetOldest(this.#counted, this.#probeBound);
     // Unambiguous without quoting: a sensor id holds no space, and `at` is the rest.
     const key = `${kind === 'refused' ? 'r' : 'f'}${String(sensorId)} ${at}`;
     const again = seen.delete(key);
     seen.add(key);
     if (again) return false;
-    forgetOldest(seen, this.#unfitBound);
+    forgetOldest(seen, this.#resultBound);
     return true;
   }
 
-  /** Counts what `admit` refused, here and per probe. Returns how many results that was. */
+  /**
+   * Counts what `admit` refused, here and per probe. Returns how many results that was.
+   *
+   * **Counted once however often it is sent** (`P-295`), by the same memory as `unfitResults`: a
+   * batch whose acknowledgement was lost comes again, and its refusals with it. Received counts
+   * every arrival, as it does for a stored batch sent again; the refusals, and the readings of a
+   * sensor that does not exist, count each result once. **Except `foreign`'s window**: Probe
+   * Health's `reportsForeign` warns while the probe has sent work it was never given in the last
+   * five minutes, and a result sent again is the probe sending it again. It is told every arrival,
+   * so the warning lasts as long as it did; only the totals count the result once.
+   */
   #refuse(origin: ProbeOrigin, admitted: Admitted): number {
     const { unknown, moved, foreign } = admitted.refused;
     const total = unknown.length + moved.length + foreign.length;
@@ -645,21 +674,31 @@ export class IngestionService {
     for (const list of [unknown, moved, foreign]) {
       for (const result of list) this.#readingsReceived += result.channels.length;
     }
-    for (const result of unknown) this.#discardedUnknownSensor += result.channels.length;
-    this.#refusedUnknown += unknown.length;
-    this.#refusedMoved += moved.length;
-    this.#refusedForeign += foreign.length;
-    this.#refusals?.refused(origin.probeObjectId, unknown.length + moved.length);
-    this.#refusals?.foreign(origin.probeObjectId, foreign.length);
+    const first = (list: readonly CheckResult[]): CheckResult[] =>
+      list.filter((one) => this.#firstCount('refused', origin.gid, one.sensorId, one.at));
+    const unknownNew = first(unknown);
+    const movedNew = first(moved);
+    const foreignNew = first(foreign);
+    for (const result of unknownNew) this.#discardedUnknownSensor += result.channels.length;
+    this.#refusedUnknown += unknownNew.length;
+    this.#refusedMoved += movedNew.length;
+    this.#refusedForeign += foreignNew.length;
+    this.#refusals?.refused(origin.probeObjectId, unknownNew.length + movedNew.length);
+    this.#refusals?.foreign(origin.probeObjectId, foreign.length, foreignNew.length);
+    const countedBefore = total - unknownNew.length - movedNew.length - foreignNew.length;
 
     if (foreign.length > 0) {
       // Warned once a batch, not once a result: a probe replaying an hour of spool for sensors it
-      // never had would otherwise write thousands of identical lines.
+      // never had would otherwise write thousands of identical lines. Warned for a batch sent
+      // again as well: the log says what arrived.
       this.#logger.warn(
         {
           source: origin.gid,
           probeObjectId: origin.probeObjectId,
           results: foreign.length,
+          ...(foreignNew.length < foreign.length
+            ? { countedBefore: foreign.length - foreignNew.length }
+            : {}),
           sensorIds: [...new Set(foreign.map((one) => one.sensorId))].slice(0, 20),
         },
         'a probe reported on sensors that were never under it; refused',
@@ -672,6 +711,7 @@ export class IngestionService {
           probeObjectId: origin.probeObjectId,
           unknown: unknown.length,
           moved: moved.length,
+          ...(countedBefore > 0 ? { countedBefore } : {}),
         },
         'refused results for sensors deleted or moved away from this probe',
       );

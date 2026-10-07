@@ -1217,9 +1217,10 @@ export interface ReportedBatch {
   /**
    * Results marked `withheld` that were not this probe's to mark: not an error with no readings,
    * or for a sensor it was not left to check. Kept in `results`, as the results they are without
-   * the mark, and counted by the caller.
+   * the mark, and counted by the caller: each as it was sent, since its sensor and its `at` name
+   * it when the batch is sent again, and the caller counts it once (`P-295`).
    */
-  readonly unearned: number;
+  readonly unearned: readonly CheckResult[];
   /**
    * Refusals for a sensor a configuration stopped leaving to this probe within the grace
    * (`A-53`): made under the configuration before, and delivered after. Not in `results`, and
@@ -2248,7 +2249,7 @@ export class CredentialVouching {
       withheldHere === undefined &&
       !results.some((result) => result.withheld === true)
     ) {
-      return { results, unearned: 0, late: 0, withheldDropped: 0, stored: NOTHING_LET_GO };
+      return { results, unearned: [], late: 0, withheldDropped: 0, stored: NOTHING_LET_GO };
     }
 
     const held = this.#refusedByProbe.get(probeId);
@@ -2260,7 +2261,7 @@ export class CredentialVouching {
     const letGo = new Set<number>();
     /** When the first refusal that says something new was made, by the probe's clock. */
     let news: number | undefined;
-    let unearned = 0;
+    const unearned: CheckResult[] = [];
     let late = 0;
     let withheldDropped = 0;
     const inOrder = [...results].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
@@ -2287,7 +2288,7 @@ export class CredentialVouching {
       }
       if (!earned) {
         if (result.withheld === true) {
-          unearned += 1;
+          unearned.push(result);
           kept.push(unmarked(result));
         } else {
           kept.push(result);

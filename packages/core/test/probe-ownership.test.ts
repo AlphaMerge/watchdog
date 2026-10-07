@@ -334,7 +334,13 @@ describe(
               // The worst of the three paths: no readings at all, so a gate in the channel
               // resolver would never have seen it, and it is what turns a sensor Down.
               result(t.sensorB, 'error'),
-              { ...result(t.sensorB), channels: [{ key: 'injected', value: 999 }] },
+              // A second later: the same sensor at the same time is one result, to the store
+              // and, since `P-295`, to the count of what was refused.
+              {
+                ...result(t.sensorB),
+                at: new Date(Date.now() + 1_000).toISOString(),
+                channels: [{ key: 'injected', value: 999 }],
+              },
             ],
           },
         );
@@ -392,6 +398,64 @@ describe(
         await ingestor.stop();
         assert.equal(ingestion.stats().discardedUnknownSensor, dropped + 1);
         assert.equal(ingestion.stats().refusedUnknown, 1);
+      });
+
+      // `P-295`: a batch whose acknowledgement was lost is sent again, and its refusals were
+      // counted again with it. Not under the same batch id: the probe numbers every send, and
+      // its spool may put the results with others queued since (`P-288`).
+      it('counts each refusal once when the acknowledgement was lost and the batch comes again', async () => {
+        const t = await tree();
+        const refusals = new ProbeRefusals();
+        const { ingestion, ingestor } = service(refusals);
+        try {
+          await move(t.deviceA, t.b);
+          const stamp = new Date().toISOString();
+          // As the spool holds them: sent again, each is the same result.
+          const spooled = [
+            { ...result(t.directA), at: stamp },
+            { ...result(t.sensorA, 'error'), at: stamp },
+            { ...result(t.sensorB, 'error'), at: stamp },
+            { ...result(2_000_000_002), at: stamp },
+          ];
+          const origin = { gid: 'gid-a', probeObjectId: t.a };
+
+          const first = await ingestion.acceptProbeResults(origin, {
+            type: 'results',
+            batchId: 'gid-a-1',
+            results: spooled,
+          });
+          assert.equal(first.type, 'results-ack');
+          assert.deepEqual(refusals.countsFor(t.a), { refused: 3, foreignRecently: 1 });
+
+          // The acknowledgement was lost. The same results again, under a new send's id, with
+          // one more foreign result queued since.
+          const queuedSince = {
+            ...result(t.sensorB, 'error'),
+            at: new Date(Date.parse(stamp) + 1_000).toISOString(),
+          };
+          const again = await ingestion.acceptProbeResults(origin, {
+            type: 'results',
+            batchId: 'gid-a-2',
+            results: [...spooled, queuedSince],
+          });
+          assert.equal(again.type, 'results-ack');
+
+          // Each refused result once: only the one queued since is new. The foreign window is
+          // told every arrival, so the warning lasts five minutes after the last of them.
+          assert.deepEqual(refusals.countsFor(t.a), { refused: 4, foreignRecently: 3 });
+          assert.deepEqual(refusals.stats(), { refused: 4, foreign: 2 });
+          const stats = ingestion.stats();
+          assert.deepEqual(
+            [stats.refusedUnknown, stats.refusedMoved, stats.refusedForeign],
+            [1, 1, 2],
+          );
+          assert.equal(stats.discardedUnknownSensor, 1, 'the unknown sensor’s reading once');
+          // And what arrived is still what arrived: two sends of four, and the one since.
+          assert.equal(stats.resultsReceived, 9);
+          assert.equal(stats.resultsRemembered, 4, 'the refusals, and not the stored result');
+        } finally {
+          await ingestor.stop();
+        }
       });
     });
   },
