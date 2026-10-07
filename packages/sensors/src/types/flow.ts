@@ -330,11 +330,14 @@ export const flowCollector: SensorType = {
     }
 
     if (batch.dropped > 0 && context.params['warnOnDropped'] !== false) {
+      // With what a resuming scan did not read: a flood the ring could not date always leaves a
+      // full buffer dropped, so this is where `undated` lands (`P-274`).
       throw new Error(
         `${String(batch.dropped)} flow${batch.dropped === 1 ? '' : 's'} reached this probe but ` +
           'were overwritten before this sensor read them, so every count below is short by an ' +
           'unknown amount — the probe’s flow buffer is smaller than the export it is seeing, ' +
-          'or this sensor scans too rarely for the volume',
+          'or this sensor scans too rarely for the volume' +
+          earlierNote(batch, 'flow records'),
       );
     }
 

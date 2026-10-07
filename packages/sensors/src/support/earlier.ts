@@ -9,6 +9,10 @@ import type { ReceivedBatch } from '../contract.js';
  * before that as `earlier`: not this scan's reading, not a loss. Said in the
  * message so it is not lost silently, and only there, so it moves no channel and no limit. Each
  * is also in Probe Health's received count for its listener.
+ *
+ * Said in the failure for `dropped` as well as in a passing scan's message (`P-274`). A batch with
+ * `undated` always has a full buffer `dropped`, so a type that fails on `dropped` would otherwise
+ * never name the much larger number the ring could not date.
  */
 export function earlierNote(batch: ReceivedBatch, noun: string): string {
   const earlier = batch.earlier ?? 0;

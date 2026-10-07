@@ -8496,7 +8496,7 @@ because each is a decision rather than a defect:
       keep it, or latch (or settle the queue) after a long streak of hangs with nothing ever
       ready — with the streak length, a test and the administration note.
 
-- [ ] **P-273 — a parked sensor resuming inside its window can overcount Probe Health** · S ·
+- [x] **P-273 — a parked sensor resuming inside its window can overcount Probe Health** · S ·
       P-254 · Found 2026-10-07 in review of `P-254`. `NotificationRing.#countLostFrom` draws from
       the running total of overwrites not counted at push time whenever the read starts below the
       oldest datable record. That total is fungible: when another live cursor sat at or before a
@@ -8507,7 +8507,61 @@ because each is a decision rather than a defect:
       growth of that total since it was parked (or the draw is limited to restart resumes), with
       the traced case as a ring test.
 
-- [ ] **P-274 — a failing first scan never names what the ring could not date** · S · P-254 ·
+      **P-273 outcome (2026-10-07).** A resuming sensor now claims exactly its own uncounted
+      losses, so `overwrittenUnread` counts each lost record once and never one nobody missed.
+      - **What decided it.** Neither option the ticket names fixes the traced case. "Growth since
+        parked" still counts 990–999: both sensors had read them, and the ring overwrote them
+        after the park. "Restart resumes only" leaves Probe Health short whenever every sensor
+        was parked through a flood, the common shape of a cut push. The draw also had a second
+        defect: a second parked sensor drew the same undated records again (two parked sensors,
+        a flood of 50 in a buffer of 10, gave 70 where 40 were lost).
+      - **How.** Overwrites leave in sequence order, so the uncounted ones are numbered by the
+        running total, which now only rises. The uncounted records from any sequence on are the
+        range from the total when that sequence was about to leave up to the total now.
+        - A restart claims from 0.
+        - A parked sensor claims from the total when the record just before its floor left.
+          `push` notes that number, at once if it has already left. With no sensor parked,
+          a push checks one empty list.
+        - A claim starting inside the last `bufferSize` overwritten is located from the counted
+          flags. Those flags are no longer changed after the push that sets them.
+        - Claimed ranges are kept, so each number is counted once. Ranges no later claim can
+          reach are folded into one count, so the list stays a few ranges.
+      - **The getter's doc is corrected.** "Equal to the slowest sensor's dropped" was not true
+        once sensors resume. It now says exactly what is counted, and when: at the push if a
+        cursor stood at or before the record, otherwise at the first drain of a sensor resuming
+        from at or before it that reports it as `dropped` or `undated`. With one sensor, the
+        count is the sum of what it reported. Records every cursor and parked sensor had read,
+        and `earlier` ones, are not counted. The trap and syslog listener field docs and
+        `administration.md`'s row say the same.
+
+      Tests (`ring.test.ts`, new block):
+      - **The traced case.** `unread` is 20 at the resume, not 30.
+      - **Two parked sensors, a flood of 50.** 40, counted once, and not the ten both had read.
+      - **A restarted sensor that missed everything.** `unread === overwritten` (1,040).
+      - **A seeded walk of 400 rounds.** Arrivals, scans, cut pushes that park some sensors
+        and bring back others, and whole pushes. After every round's scans, `unread` equals the
+        number of distinct records some scan reported as `dropped` or `undated`. At the end, a
+        restart sensor reading from 0 makes it equal `overwritten`. A scratch run of the same
+        walk over 2,000 seeds failed none.
+
+      **Mutations 7/7**, against `ring.test.ts` and the scenario:
+      - The old fungible draw put back (4 tests fail).
+      - The mark taken at park time, which is "growth since parked" (4).
+      - Earlier claims ignored (6).
+      - The folded count ignored by a restart's claim (the walk).
+      - `push` never notes the mark (3).
+      - Folding past a parked sensor's mark (the walk). This one survived the first version of
+        the walk, which never let a cut push bring back some parked sensors while others stayed
+        parked. The walk now does. It also uses an exact generator, since the first
+        LCG's products passed 2^53 and lost precision.
+      - The flags ignored when locating a claim (5).
+
+      **Not done.** A record counted at push because a cursor stood behind it still stays
+      counted if that cursor is then parked and its resume calls the record `earlier`, or if a
+      complete push deletes the cursor. Those are `P-254`'s rule ("overwritten while some sensor
+      had yet to read it"), and nothing here changes them.
+
+- [x] **P-274 — a failing first scan never names what the ring could not date** · S · P-254 ·
       Found 2026-10-07 in review of `P-254`. A batch with `undated` always has `dropped` equal to
       the buffer size, and syslog (always), and trap and flow under the default `warnOnDropped`,
       throw on `dropped` before `earlierNote` runs. So the message names the 100 overwritten and
@@ -8516,6 +8570,24 @@ because each is a decision rather than a defect:
       **Done when** the dropped failure of all three types carries the `earlier`/`undated` note,
       with the scenario extended to syslog and the default trap and flow parameters.
 
+      **P-274 outcome (2026-10-07).** The `dropped` failure of `snmp.trap`, `syslog.receiver` and
+      `flow.netflow` now ends with `earlierNote` (`support/earlier.ts`), the same wording a passing
+      scan's message carries. When nothing is earlier or undated the note is empty, so every
+      other failure message is unchanged. No channel value or pass/fail outcome changes: the
+      throw happens in the same place and on the same condition.
+
+      Tests (`listener-restart-scenario.test.ts`):
+      - **The harness.** It now runs a flow listener beside the trap and syslog ones, and has a
+        `burst`.
+      - **A flood of 2,000 a minute for two hours.** The first scan of each type fails on its
+        100 dropped and names the undated count exactly.
+      - **Two hours at three a minute, then a burst of 150 inside the window.** Each fails on
+        about 53 dropped and names the `earlier` count and `since` exactly.
+      - **Parameters.** Defaults throughout, apart from `sourceIsDevice: false`, which the
+        harness always sets because the simulated device is not the sensor's host.
+
+      **Mutations 3/3.** With the note removed from any one type's throw, both cases fail on that
+      type.
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer

@@ -63,7 +63,8 @@ export interface SyslogListenerStats {
    * Messages the buffer overwrote before a sensor that was following it had read them (`B-14`):
    * received and counted, and lost to `bufferSize`. Once a message however many sensors were
    * behind, and nothing while no syslog sensor is assigned. Since the listener started. What a
-   * sensor held across a restart lost before its first scan is added at that scan (`P-254`).
+   * sensor held across a restart, or parked by a cut push, lost before its first scan is added at
+   * that scan, once however many lost it (`P-254`, `P-273`).
    */
   readonly overwrittenUnread: number;
 }

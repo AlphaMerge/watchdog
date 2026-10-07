@@ -8,8 +8,10 @@ import {
   type SensorType,
   type TrapDetail,
 } from '@ms/sensors';
+import type { FlowReceiverOptions, ReceivedFlow } from '@ms/sensors/flow';
 import type { ReceivedTrap, TrapReceiverOptions } from '@ms/sensors/snmp';
 import type { ReceivedSyslog, SyslogReceiverOptions } from '@ms/sensors/syslog';
+import { FlowListener } from '../src/listeners/flow-listener.js';
 import { TrapListener } from '../src/listeners/trap-listener.js';
 import { SyslogListener } from '../src/listeners/syslog-listener.js';
 
@@ -45,6 +47,7 @@ const typeOf = (id: string): SensorType => {
 };
 const trapType = typeOf('snmp.trap');
 const syslogType = typeOf('syslog.receiver');
+const flowType = typeOf('flow.netflow');
 
 const detail: TrapDetail = {
   trapOid: '1.3.6.1.6.3.1.1.5.3',
@@ -76,18 +79,51 @@ async function scan(
 /** The syslog message the device sends, parsed once rather than per delivery. */
 const SYSLOG_LINE = parseSyslog('<35>Aug 27 09:15:00 gw sshd[1]: authentication failure');
 
+/** One NetFlow v5 export of one flow record, numbered as the exporter would. */
+const flowExport = (sequence: number): ReceivedFlow => ({
+  source: '192.0.2.7',
+  message: {
+    dialect: 'netflow5',
+    sequence,
+    sequenceCounts: 'flows',
+    undecodable: 0,
+    sysUptimeMs: 3_600_000,
+    unixSecs: 1_700_000_000,
+    records: [
+      {
+        srcAddr: '10.0.0.1',
+        dstAddr: '10.0.0.2',
+        srcPort: 1_000,
+        dstPort: 443,
+        protocol: 6,
+        packets: 1,
+        octets: 64,
+        inputIf: 1,
+        outputIf: 2,
+        samplingRate: 1,
+      },
+    ],
+  },
+});
+
 async function probeOf(
   every = EVERY,
   withSyslog = true,
+  withFlow = false,
 ): Promise<{
   traps: TrapListener;
   syslog: SyslogListener;
+  flows: FlowListener;
   advance: (ms: number) => void;
-  received: () => { traps: number; messages: number };
+  /** `count` of each, all at once, as a device in trouble sends them. */
+  burst: (count: number) => void;
+  received: () => { traps: number; messages: number; flows: number };
 }> {
   let now = T0;
   let deliverTrap: ((trap: ReceivedTrap) => void) | undefined;
   let deliverSyslog: ((message: ReceivedSyslog) => void) | undefined;
+  let deliverFlow: ((flow: ReceivedFlow) => void) | undefined;
+  let flowSequence = 0;
   const clock = (): Date => new Date(now);
   const traps = new TrapListener({
     logger: silent,
@@ -119,28 +155,62 @@ async function probeOf(
       return { close: () => Promise.resolve() };
     },
   });
+  const flows = new FlowListener({
+    logger: silent,
+    port: 0,
+    address: '127.0.0.1',
+    ipVersion: 'udp4',
+    exporters: [],
+    bufferSize: 100,
+    now: clock,
+    monotonic: () => now - T0,
+    open: (options: FlowReceiverOptions) => {
+      deliverFlow = options.onFlow;
+      return {
+        close: () => Promise.resolve(),
+        templates: () => ({ held: 0, redefined: 0, expired: 0, evicted: 0 }),
+      };
+    },
+  });
   await traps.start();
   await syslog.start();
+  await flows.start();
 
+  const send = (): void => {
+    deliverTrap?.({ source: '192.0.2.7', detail, community: 'public' });
+    if (withSyslog) {
+      deliverSyslog?.({ source: '192.0.2.7', transport: 'udp', message: SYSLOG_LINE });
+    }
+    if (withFlow) {
+      deliverFlow?.(flowExport(flowSequence));
+      flowSequence += 1;
+    }
+  };
   // The device's ordinary traffic, one every `every` milliseconds, for however long passes.
   let nextSend = T0 + every;
   const advance = (ms: number): void => {
     const until = now + ms;
     while (nextSend <= until) {
       now = nextSend;
-      deliverTrap?.({ source: '192.0.2.7', detail, community: 'public' });
-      if (withSyslog) {
-        deliverSyslog?.({ source: '192.0.2.7', transport: 'udp', message: SYSLOG_LINE });
-      }
+      send();
       nextSend += every;
     }
     now = until;
   };
+  const burst = (count: number): void => {
+    for (let i = 0; i < count; i += 1) send();
+  };
   return {
     traps,
     syslog,
+    flows,
     advance,
-    received: () => ({ traps: traps.stats().received, messages: syslog.stats().received }),
+    burst,
+    received: () => ({
+      traps: traps.stats().received,
+      messages: syslog.stats().received,
+      flows: flows.stats().received,
+    }),
   };
 }
 
@@ -333,5 +403,77 @@ describe('a probe restart after a long wait for its core (`P-254`)', () => {
       }
     }
     assert.equal(alarms, SENSORS, 'one outage, and an alarm on every trap sensor');
+  });
+});
+
+describe('a first scan that fails on what it missed still names what it did not read (`P-274`)', () => {
+  // A batch the ring could not date always carries a full buffer `dropped`, and syslog always,
+  // and trap and flow under their default parameters, fail on `dropped`. Before `P-274` that
+  // failure said the hundred overwritten and not the hundreds of thousands the ring could not
+  // date, which only Probe Health's total had. Only `sourceIsDevice` is set, as everywhere here:
+  // the simulated device is not the sensor's host.
+  const FLOW_ID = 301;
+  const all = [...held, FLOW_ID];
+
+  async function firstScans(
+    probe: Awaited<ReturnType<typeof probeOf>>,
+  ): Promise<{ type: SensorType; noun: string; batch: ReceivedBatch; message: string }[]> {
+    probe.traps.retain(all, true);
+    probe.syslog.retain(all, true);
+    probe.flows.retain(all, true);
+    probe.advance(3_000);
+    const scans: { type: SensorType; noun: string; batch: ReceivedBatch; message: string }[] = [];
+    for (const [type, noun, id, batch] of [
+      [trapType, 'traps', trapIds[0] ?? 0, probe.traps.drain(trapIds[0] ?? 0, MINUTE)],
+      [syslogType, 'messages', syslogIds[0] ?? 0, probe.syslog.drain(syslogIds[0] ?? 0, MINUTE)],
+      [flowType, 'flow records', FLOW_ID, probe.flows.drain(FLOW_ID, MINUTE)],
+    ] as const) {
+      let message: string | undefined;
+      await assert.rejects(scan(type, id, batch), (error: unknown) => {
+        assert.ok(error instanceof Error);
+        message = error.message;
+        return true;
+      });
+      assert.ok(message !== undefined);
+      assert.match(
+        message,
+        /overwritten before this sensor read them/,
+        `${type.id}: the failure is still for what it missed`,
+      );
+      scans.push({ type, noun, batch, message });
+    }
+    return scans;
+  }
+
+  it('names the undated, after a flood the ring could not date', async () => {
+    // Two thousand a minute of each, for the two hours the probe waited for its core.
+    const probe = await probeOf(30, true, true);
+    probe.advance(OUTAGE);
+    for (const { type, noun, batch, message } of await firstScans(probe)) {
+      const undated = batch.undated ?? 0;
+      assert.ok(undated > 200_000, `${type.id}: most of two hours could not be dated`);
+      assert.equal(batch.dropped, 100, `${type.id}: and a full buffer is dropped`);
+      const said =
+        `; ${String(undated)} more ${noun} left the probe’s ` +
+        'buffer before it could tell when they arrived';
+      assert.ok(message.includes(said), `${type.id} does not name the undated: ${message}`);
+    }
+  });
+
+  it('names the earlier, after a burst inside the window', async () => {
+    // Two hours of the ordinary three a minute, then a burst of 150 half a minute before the
+    // scans: more than the buffer holds inside the window, and two hours before it.
+    const probe = await probeOf(EVERY, true, true);
+    probe.advance(OUTAGE + 30_000);
+    probe.burst(150);
+    for (const { type, noun, batch, message } of await firstScans(probe)) {
+      const earlier = batch.earlier ?? 0;
+      assert.ok(earlier > 300, `${type.id}: two hours came before the window`);
+      assert.ok(batch.dropped > 0, `${type.id}: and the burst overran the buffer`);
+      const said =
+        `; ${String(earlier)} ${noun} the probe received ` +
+        `before ${batch.since} are not in this reading`;
+      assert.ok(message.includes(said), `${type.id} does not name the earlier: ${message}`);
+    }
   });
 });

@@ -69,6 +69,13 @@ interface Resume {
   readonly floor: number;
   /** On the monotonic clock: the listener's start after a restart, its last drain when parked. */
   readonly fromMono: number;
+  /**
+   * How many overwrites no cursor was behind had happened to records before `floor` (`P-273`):
+   * where this sensor's share of that running total begins. 0 after a restart. When parked, set
+   * by `push` as the ring overwrites the record just before `floor`, or at once if it already has;
+   * `undefined` until then.
+   */
+  uncountedBefore: number | undefined;
 }
 
 /** Where a resuming sensor's first read begins, and how what precedes it is reported. */
@@ -95,11 +102,13 @@ export class NotificationRing {
   readonly #arrived: Float64Array;
   /**
    * When each of the last `size` overwritten records arrived, at the same index as its slot, and
-   * whether `unread` already counted it (`P-254`).
+   * whether a cursor was behind it when it left (`P-254`).
    *
    * A resuming sensor reads one interval back, and some of what the ring overwrote may fall inside
    * it: those are that sensor's `dropped`, the rest are `earlier`. Telling them apart needs when
-   * each arrived. What is older than these `size` cannot be dated, and is `undated`.
+   * each arrived. What is older than these `size` cannot be dated, and is `undated`. The flag is
+   * never changed after the push that sets it: it says where in the running total of uncounted
+   * overwrites a sequence inside these `size` falls (`P-273`).
    */
   readonly #leftArrived: Float64Array;
   readonly #leftCounted: Uint8Array;
@@ -118,16 +127,32 @@ export class NotificationRing {
   #held: Set<number> | undefined;
   /** Sensors a cut push took off the wheel, and where each resumes (`P-254`). */
   readonly #parked = new Map<number, Resume>();
+  /** Parked sensors whose `uncountedBefore` waits for the ring to reach `floor`, lowest first. */
+  #awaiting: Resume[] = [];
   #nextSequence = 0;
   #overwritten = 0;
   #unread = 0;
   /**
-   * Overwritten records `unread` has not counted: no cursor was behind them when they left.
+   * Every record that left with no cursor behind it, since the listener started: `unread` did not
+   * count it then. It only rises.
    *
-   * A running total, so that what a resuming sensor lost is counted once on Probe Health however
-   * far back it reaches, without depending on the side arrays that date the last `size`.
+   * Records leave in sequence order, so the uncounted ones are numbered by this total as they go,
+   * and the ones from any sequence on are a range of those numbers: from the total as it stood
+   * when that sequence was about to leave, to the total now. A resuming sensor claims the range
+   * from where it resumes, and `#claimed` keeps what has been claimed, so a record two sensors
+   * were waiting for is counted once whichever resumes first, and a record no resuming sensor was
+   * waiting for — read by every cursor before it left — is counted by none (`P-273`). A single
+   * count drawn down by each claim could not tell those apart: it handed a parked sensor records
+   * below its own position.
    */
   #uncounted = 0;
+  /** Claimed ranges of that numbering, disjoint and in order, as `[from, to)` (`P-273`). */
+  #claimed: [number, number][] = [];
+  /** How many claimed numbers `#claimed` no longer lists: all below every claim still to come. */
+  #claimedPruned = 0;
+  /** Where the ranges folded into `#claimedPruned` begin and end. */
+  #prunedFrom = 0;
+  #prunedTo = 0;
   /** The lowest sequence any cursor has yet to read. Infinity while no sensor reads this ring. */
   #slowest = Number.POSITIVE_INFINITY;
 
@@ -160,6 +185,14 @@ export class NotificationRing {
       // that sensor's to lose (`P-254`).
       this.#leftArrived[slot] = this.#arrived[slot] ?? 0;
       this.#leftCounted[slot] = counted ? 1 : 0;
+      // A parked sensor's share of the uncounted total starts here once its floor's predecessor
+      // has left (`P-273`). Nothing to check while no sensor is parked.
+      const left = this.#nextSequence - size;
+      for (let next = this.#awaiting[0]; next !== undefined && next.floor <= left + 1;) {
+        next.uncountedBefore = this.#uncounted;
+        this.#awaiting.shift();
+        next = this.#awaiting[0];
+      }
     }
     this.#slots[slot] = notification;
     this.#arrived[slot] = this.#monotonic();
@@ -206,7 +239,7 @@ export class NotificationRing {
       cursor = { next: resumed.first, sinceMono: resumed.sinceMono };
       this.#cursors.set(sensorId, cursor);
       // Everything this sensor lost from where it resumes, dated or not, is a loss on Probe Health.
-      this.#countLostFrom(resumed.first - resumed.undated);
+      this.#countLostFrom(resumed.first - resumed.undated, resume);
     }
 
     const size = this.#slots.length;
@@ -281,13 +314,13 @@ export class NotificationRing {
   #resumeOf(sensorId: number): Resume | undefined {
     const parked = this.#parked.get(sensorId);
     if (parked !== undefined) {
-      this.#parked.delete(sensorId);
+      this.#unpark(sensorId);
       this.#held?.delete(sensorId);
       return parked;
     }
     if (this.#held === undefined || this.#held.has(sensorId)) {
       this.#held?.delete(sensorId);
-      return { floor: 0, fromMono: this.#startedMono };
+      return { floor: 0, fromMono: this.#startedMono, uncountedBefore: 0 };
     }
     return undefined;
   }
@@ -304,28 +337,119 @@ export class NotificationRing {
    * Counts on Probe Health what a resuming sensor lost and nobody had counted yet.
    *
    * Those were overwritten while no cursor was behind them, so `push` could not know a sensor was
-   * waiting; this one was. Where the ring still dates the record, its flag says whether it was
-   * counted, and is set; before that, the running total of uncounted overwrites is what is left to
-   * count, all of it older than anything dated. `unread` stays once a record, however many sensors
-   * were behind it.
+   * waiting; this one was, for every record from `start` on — what it reports as `dropped` or
+   * `undated`. It claims their numbers in the running total of uncounted overwrites, and what an
+   * earlier claim took is not counted again, so `unread` stays once a record however many sensors
+   * were behind it. A record below `start` is not this sensor's, whoever else counted it: a parked
+   * sensor had read it, and one it reports as `earlier` is not a loss (`P-273`).
    */
-  #countLostFrom(first: number): void {
+  #countLostFrom(start: number, resume: Resume): void {
+    this.#unread += this.#claim(this.#uncountedBefore(start, resume));
+  }
+
+  /**
+   * The uncounted total as it stood when the record at `sequence` was about to leave: the number
+   * its share of that total starts at (`P-273`).
+   *
+   * Inside the last `size` overwritten, the flags count back from the total now. Below them the
+   * ring keeps nothing per record, and only the resume point is ever asked for there — a
+   * restart's 0, or the number `push` noted for a parked sensor as the ring reached its floor.
+   */
+  #uncountedBefore(sequence: number, resume: Resume): number {
     const size = this.#slots.length;
     const oldest = Math.max(0, this.#nextSequence - size);
     const dated = Math.max(0, this.#nextSequence - 2 * size);
-    for (let sequence = Math.max(first, dated); sequence < oldest; sequence++) {
-      const slot = sequence % size;
-      if (this.#leftCounted[slot] === 0) {
-        this.#leftCounted[slot] = 1;
-        this.#unread += 1;
-        this.#uncounted -= 1;
+    if (sequence < dated) {
+      // `#place` starts a read below `dated` only at the resume point, which `push` has passed.
+      // Were the number ever not noted, the total now claims nothing: an undercount, never more.
+      return resume.uncountedBefore ?? this.#uncounted;
+    }
+    let before = this.#uncounted;
+    for (let left = sequence; left < oldest; left++) {
+      if (this.#leftCounted[left % size] === 0) before -= 1;
+    }
+    return before;
+  }
+
+  /**
+   * Claims the uncounted overwrites numbered from `from` to the total now, and says how many of
+   * them no earlier claim had (`P-273`).
+   */
+  #claim(from: number): number {
+    const to = this.#uncounted;
+    if (from >= to) return 0;
+    let fresh = to - from;
+    let start = from;
+    if (this.#claimedPruned > 0 && from < this.#prunedTo) {
+      // Only a claim from below everything folded away reaches it — a restart's, from 0 — and
+      // that covers all of it.
+      fresh -= this.#claimedPruned;
+      start = Math.min(start, this.#prunedFrom);
+      this.#claimedPruned = 0;
+    }
+    const kept: [number, number][] = [];
+    for (const range of this.#claimed) {
+      const [low, high] = range;
+      if (high < from) {
+        kept.push(range);
+        continue;
       }
+      fresh -= high - Math.max(low, from);
+      start = Math.min(start, low);
     }
-    if (first < dated) {
-      const undated = Math.min(dated - first, this.#uncounted);
-      this.#unread += undated;
-      this.#uncounted -= undated;
+    kept.push([start, to]);
+    this.#claimed = kept;
+    this.#prune();
+    return fresh;
+  }
+
+  /**
+   * Folds into one count the claimed ranges no later claim can reach, so `#claimed` stays a few
+   * ranges however long the listener runs (`P-273`).
+   *
+   * A later claim starts at 0 (a restart's, which reaches everything and needs only the count), at
+   * a parked sensor's noted number, at one `push` has yet to note (at least the total now), or
+   * inside the last `size` overwritten (at least the total now less `size`).
+   */
+  #prune(): void {
+    let reach = this.#uncounted - this.#slots.length;
+    for (const parked of this.#parked.values()) {
+      if (parked.uncountedBefore !== undefined) reach = Math.min(reach, parked.uncountedBefore);
     }
+    for (let range = this.#claimed[0]; range !== undefined && range[1] <= reach;) {
+      this.#claimed.shift();
+      if (this.#claimedPruned === 0) this.#prunedFrom = range[0];
+      this.#claimedPruned += range[1] - range[0];
+      this.#prunedTo = range[1];
+      range = this.#claimed[0];
+    }
+  }
+
+  /** Parks a sensor where its cursor stood (`P-254`), noting where its share of the total begins. */
+  #park(sensorId: number, cursor: Cursor): void {
+    const oldest = Math.max(0, this.#nextSequence - this.#slots.length);
+    // When the ring has overwritten up to its cursor already, what it overwrote from the cursor on
+    // went while this cursor was behind it and was counted then, so its share begins at the total
+    // now. Otherwise `push` notes it when the record just before its cursor leaves: until then
+    // what the ring overwrites is what this sensor had read.
+    const resume: Resume = {
+      floor: cursor.next,
+      fromMono: cursor.sinceMono,
+      uncountedBefore: cursor.next <= oldest ? this.#uncounted : undefined,
+    };
+    this.#parked.set(sensorId, resume);
+    if (resume.uncountedBefore === undefined) {
+      this.#awaiting.push(resume);
+      this.#awaiting.sort((a, b) => a.floor - b.floor);
+    }
+  }
+
+  /** Forgets a parked sensor, and the number `push` was to note for it. */
+  #unpark(sensorId: number): void {
+    const parked = this.#parked.get(sensorId);
+    if (parked === undefined) return;
+    this.#parked.delete(sensorId);
+    this.#awaiting = this.#awaiting.filter((resume) => resume !== parked);
   }
 
   /**
@@ -344,11 +468,11 @@ export class NotificationRing {
     for (const [sensorId, cursor] of [...this.#cursors]) {
       if (keep.has(sensorId)) continue;
       this.#cursors.delete(sensorId);
-      if (!complete) this.#parked.set(sensorId, { floor: cursor.next, fromMono: cursor.sinceMono });
+      if (!complete) this.#park(sensorId, cursor);
     }
     if (complete) {
       for (const sensorId of [...this.#parked.keys()]) {
-        if (!keep.has(sensorId)) this.#parked.delete(sensorId);
+        if (!keep.has(sensorId)) this.#unpark(sensorId);
       }
       if (this.#held === undefined) {
         this.#held = keep;
@@ -390,11 +514,13 @@ export class NotificationRing {
   /**
    * Records overwritten while at least one sensor had yet to read them.
    *
-   * Counted once a record, however many sensors were behind it, and equal to the `dropped` the
-   * slowest sensor's next drain reports. A ring nobody reads loses nothing and counts nothing:
-   * a record no sensor was waiting for is not a record a sensor missed. What a resuming sensor
-   * lost inside its first window is counted at its first drain, since only then is it known that
-   * the sensor reads this ring (`P-254`).
+   * Counted once a record, however many sensors were behind it: when it leaves, if a cursor stood
+   * at or before it; otherwise at the first drain of a sensor that resumes from at or before it
+   * and reports it as `dropped` or `undated` — only then is it known that the sensor reads this
+   * ring (`P-254`). So with one sensor reading the ring this is the sum of what it reported
+   * `dropped` and `undated`; with several, a record each of them missed is in it once. A record no
+   * sensor was waiting for is not counted — one every cursor and every parked sensor had read, or
+   * one a resuming sensor reports as `earlier` — and a ring nobody reads counts nothing (`P-273`).
    */
   get unread(): number {
     return this.#unread;

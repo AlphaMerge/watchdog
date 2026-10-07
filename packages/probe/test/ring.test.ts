@@ -419,6 +419,144 @@ describe('a sensor a cut push took off the wheel (`P-254`)', () => {
   });
 });
 
+describe('what a resuming sensor adds to Probe Health is its own loss, once (`P-273`)', () => {
+  /**
+   * Sensors that keep up with a buffer of ten for a thousand records: the ring overwrites 990
+   * that they had all read, which no cursor was behind, and counts none of them. `held` are the
+   * sensors the probe held across its restart, which may include one that has not scanned yet.
+   */
+  function keptUp(sensors: number[], held: number[] = sensors): ReturnType<typeof ringOf> {
+    const h = ringOf(10);
+    h.ring.retain(held);
+    for (let batch = 0; batch < 100; batch += 1) {
+      h.push(10);
+      for (const sensor of sensors) h.ring.drain(sensor, TRAP, MINUTE);
+    }
+    assert.equal(h.ring.overwritten, 990);
+    assert.equal(h.ring.unread, 0, 'nobody missed any of them');
+    return h;
+  }
+
+  it('does not count what it had read, when another sensor kept its cursor — the traced case', () => {
+    // Sensor 1 is parked by a cut push at 1000; sensor 2 keeps its cursor there. Thirty arrive
+    // within the interval: the ring overwrites 990–999, which both had read, and 1000–1019, which
+    // both missed and which sensor 2's cursor counted as they left. Sensor 1, back 40 s after its
+    // last scan, lost 1000–1019 too: twenty, already counted. The single running total it drew
+    // from held the 990 and the ten both had read, and Probe Health read thirty.
+    const h = keptUp([1, 2]);
+    h.ring.retain([2], false);
+    for (let at = 0; at < 30; at += 1) {
+      h.push(1);
+      h.tick();
+    }
+    h.tick(10);
+    assert.equal(h.ring.unread, 20, 'sensor 2’s cursor counted its twenty as they left');
+    h.ring.retain([1, 2], true);
+
+    const back = h.ring.drain(1, TRAP, MINUTE);
+    assert.equal(back.earlier, 0, 'inside its window: everything since its last scan');
+    assert.equal(back.undated, undefined);
+    assert.equal(back.dropped, 20);
+    assert.equal(back.items.length, 10);
+    assert.equal(h.ring.unread, 20, 'the twenty both lost, once — not thirty');
+    assert.equal(h.ring.drain(2, TRAP, MINUTE).dropped, 20);
+    assert.equal(h.ring.unread, 20);
+  });
+
+  it('counts once what two parked sensors both lost, and none of what they had read', () => {
+    // Both parked at 1000 with no cursor left: fifty arrive in the interval, and the ring
+    // overwrites 990–1039 with nobody behind any of it. 990–999 both had read; 1000–1039 both
+    // lost, thirty of them more than a buffer back, where the ring keeps nothing per record.
+    const h = keptUp([1, 2]);
+    h.ring.retain([], false);
+    h.push(50);
+    h.tick(30);
+    assert.equal(h.ring.unread, 0, 'nobody is known to be waiting yet');
+    h.ring.retain([1, 2], true);
+
+    const first = h.ring.drain(1, TRAP, MINUTE);
+    assert.equal(first.dropped, 40);
+    assert.equal(h.ring.unread, 40, 'its own forty, not the ten it had read');
+    const second = h.ring.drain(2, TRAP, MINUTE);
+    assert.equal(second.dropped, 40);
+    assert.equal(h.ring.unread, 40, 'the same forty, counted once');
+  });
+
+  it('leaves a restarted sensor that missed everything with every overwrite counted once', () => {
+    // Sensor 3 was held across the restart and never scanned until now: it missed every record
+    // the ring overwrote, the 990 the others read, and the forty the parked pair lost.
+    const h = keptUp([1, 2], [1, 2, 3]);
+    h.ring.retain([3], false);
+    h.push(50);
+    h.ring.retain([1, 2, 3], true);
+    h.ring.drain(1, TRAP, MINUTE);
+    h.ring.drain(2, TRAP, MINUTE);
+    assert.equal(h.ring.unread, 40);
+
+    const late = h.ring.drain(3, TRAP);
+    assert.equal(late.dropped, 1_040);
+    assert.equal(h.ring.unread, 1_040, 'every overwrite, once');
+    assert.equal(h.ring.unread, h.ring.overwritten);
+  });
+
+  it('matches the union of what every scan reported missing, through many cuts — table of 400 rounds', () => {
+    // A seeded walk: each round some records arrive, every sensor on the wheel scans, and then a
+    // cut push may park some and bring back some parked ones, or a whole push bring back all.
+    // After each round's scans, Probe Health must equal the number of distinct records some scan
+    // reported as `dropped` or `undated` — counted once, and never a record nobody reported
+    // missing. Sensor 5 is held across the restart and scans only at the end, so its claim from 0
+    // reaches every range the ring has folded away.
+    const size = 10;
+    const h = ringOf(size);
+    let seed = 0x2731;
+    const random = (n: number): number => {
+      seed = (seed * 48_271) % 2_147_483_647;
+      return seed % n;
+    };
+    const all = [1, 2, 3, 4, 5];
+    h.ring.retain(all);
+    const parked = new Set<number>();
+    const lost = new Set<number>();
+    let sent = 0;
+    const note = (batch: { dropped: number; undated?: number }): void => {
+      const oldest = Math.max(0, sent - size);
+      for (let s = oldest - batch.dropped - (batch.undated ?? 0); s < oldest; s += 1) lost.add(s);
+    };
+    for (let round = 0; round < 400; round += 1) {
+      const arrivals = random(4) === 0 ? 15 + random(30) : random(8);
+      for (let i = 0; i < arrivals; i += 1) {
+        h.push(1);
+        sent += 1;
+        h.tick(random(3));
+      }
+      h.tick(random(40));
+      for (const sensor of [1, 2, 3, 4]) {
+        if (!parked.has(sensor)) note(h.ring.drain(sensor, TRAP, MINUTE));
+      }
+      assert.equal(h.ring.unread, lost.size, `round ${String(round)}`);
+      const push = random(3);
+      if (push === 0) {
+        // A cut push: what its chunks named is on the wheel, a parked sensor among them coming
+        // back while others stay parked; what they did not name is parked, or stays so.
+        parked.clear();
+        for (const sensor of [1, 2, 3, 4]) if (random(2) === 0) parked.add(sensor);
+        h.ring.retain(
+          all.filter((sensor) => !parked.has(sensor)),
+          false,
+        );
+      } else if (push === 1 && parked.size > 0) {
+        parked.clear();
+        h.ring.retain(all, true);
+      }
+    }
+    const late = h.ring.drain(5, TRAP);
+    note(late);
+    assert.equal(late.dropped, h.ring.overwritten, 'sensor 5 missed everything that left');
+    assert.equal(h.ring.unread, lost.size);
+    assert.equal(h.ring.unread, h.ring.overwritten, 'and each is counted once');
+  });
+});
+
 describe('a sensor new to a running probe (`P-254`)', () => {
   it('starts at its first scan, with nothing and nothing dropped', () => {
     const h = ringOf();

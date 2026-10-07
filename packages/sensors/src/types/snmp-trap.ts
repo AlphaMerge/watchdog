@@ -206,11 +206,14 @@ export const snmpTrap: SensorType = {
       // A failed check records *no* channel values, and that is the point rather than a cost:
       // the count is known to be short, and a gap is the honest reading for a number nobody
       // should act on. It is "no-data is not zero" applied to no-trustworthy-data. The escape
-      // hatch is the parameter, for a device whose flood is expected.
+      // hatch is the parameter, for a device whose flood is expected. What a resuming scan did not
+      // read is named here as well as on success: a flood the ring could not date always leaves
+      // this one full buffer dropped, so this is where `undated` lands (`P-274`).
       throw new Error(
         `${String(dropped)} notifications reached this probe but were overwritten before this ` +
           `sensor read them, so the count of ${String(mine.length)} is short by that much — the ` +
-          'probe’s trap buffer is too small for this volume, or this sensor scans too rarely',
+          'probe’s trap buffer is too small for this volume, or this sensor scans too rarely' +
+          earlierNote(batch, 'traps'),
       );
     }
 

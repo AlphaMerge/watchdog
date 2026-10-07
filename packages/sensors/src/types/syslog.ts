@@ -206,11 +206,14 @@ export const syslogReceiver: SensorType = {
       );
     }
     if (batch.dropped > 0) {
+      // With what a resuming scan did not read: a flood the ring could not date always leaves a
+      // full buffer dropped, so `undated` is only ever named here (`P-274`).
       throw new Error(
         `${String(batch.dropped)} message${batch.dropped === 1 ? '' : 's'} were overwritten ` +
           'before this sensor read them — the probe’s syslog buffer is smaller than the flood ' +
           'it is seeing, or this sensor scans too rarely for the volume. Reporting the rest ' +
-          'as a count would undercount exactly the incident this sensor exists to find',
+          'as a count would undercount exactly the incident this sensor exists to find' +
+          earlierNote(batch, 'messages'),
       );
     }
 
