@@ -3572,6 +3572,8 @@ because each is a decision rather than a defect:
       It keeps newline and tab, turns CRLF into a newline, and escapes a lone carriage return.
       The dispatcher's `#record` applies it where a transport's error becomes `last_error`,
       replacing `P-277`'s NUL removal. A NUL is now stored as `\u0000` rather than dropped.
+      The retry and give-up log lines beside the row log the same escaped text (review fix):
+      pino's JSON escapes only U+0000–U+001F, so a C1 or an override reached the journal raw.
 
       **What decided it.**
       - **At storage, not where shown.** `#record` is the one writer. The readers are the logs

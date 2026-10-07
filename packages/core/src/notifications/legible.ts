@@ -34,6 +34,8 @@ const UNSAFE = /\r\n|[\p{Cc}\p{Bidi_Control}]/gu;
  * into its sensor message, which becomes state history and is itself sent out as an alarm.
  * Escaping in the logs view alone would leave the other two, and the API's readers are scripts
  * and terminals this project does not write. Rows written before `N-24` keep what they had.
+ * The log lines `#record` writes beside the row carry the same escaped text: pino's JSON escapes
+ * only U+0000 to U+001F, so a C1 or an override would reach the journal as the far end wrote it.
  *
  * A literal backslash followed by `u` in the original reads the same as an escape. This is a
  * diagnosis for a person, not data to parse back.

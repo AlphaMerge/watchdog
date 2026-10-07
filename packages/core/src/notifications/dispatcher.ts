@@ -717,6 +717,14 @@ export class NotificationDispatcher {
     const delayMs = givingUp
       ? 0
       : (sharedDelayMs ?? retryDelayMs(this.#retry, attempts, this.#random));
+    // **Legible** (`N-24`): every control and bidirectional control escaped, once, for the row
+    // and for both log lines below. An error quotes the far end — a webhook's response body, a
+    // program's last line. A NUL in it failed the write (`22021`), so the request kept the lease
+    // its claim wrote and, each time that ran out, was claimed and sent again: one alarm, a
+    // message every five minutes (`P-277`). The rest reach every reader of the column, and an
+    // override makes it say something else. The log needs it as much: pino's JSON escapes only
+    // U+0000-U+001F, so a C1 or an override reached the journal as the far end wrote it.
+    const error = legible(result.error);
     await this.#db.query(
       `UPDATE notification_request
        SET status = $3, last_error = $2, next_attempt_at = $4,
@@ -727,12 +735,7 @@ export class NotificationDispatcher {
        WHERE id = $1`,
       [
         requestId,
-        // **Legible** (`N-24`): every control and bidirectional control escaped. An error quotes
-        // the far end — a webhook's response body, a program's last line. A NUL in it failed this
-        // write (`22021`), so the request kept the lease its claim wrote and, each time that ran
-        // out, was claimed and sent again: one alarm, a message every five minutes (`P-277`). The
-        // rest reach every reader of this column, and an override makes it say something else.
-        legible(result.error),
+        error,
         givingUp ? 'failed' : 'pending',
         givingUp ? null : new Date(now.getTime() + delayMs),
         now,
@@ -749,7 +752,7 @@ export class NotificationDispatcher {
           requestId,
           attempts,
           retryable: result.retryable,
-          err: result.error,
+          err: error,
           ...journalled(skipped),
         },
         'notification could not be delivered and will not be tried again',
@@ -757,7 +760,7 @@ export class NotificationDispatcher {
       return;
     }
     this.#logger.warn(
-      { requestId, attempts, retryInMs: delayMs, err: result.error },
+      { requestId, attempts, retryInMs: delayMs, err: error },
       'notification delivery failed; retrying',
     );
   }

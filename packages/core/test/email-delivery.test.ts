@@ -8,6 +8,7 @@ import { addressesOnly } from './support/recipients.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createTransport, type SendMailOptions } from 'nodemailer';
+import { pino } from 'pino';
 import type { SmtpConfig, SmtpRelay } from '@ms/shared';
 import { DatabaseAuditSink } from '../src/audit/store.js';
 import type { Database } from '../src/db/pool.js';
@@ -634,11 +635,11 @@ describe(
 
     function dispatcherWith(
       transport: { method: string; send: (m: OutgoingMessage) => Promise<never> } | object,
-      options: { retryDelayMs?: number; maxAttempts?: number } = {},
+      options: { retryDelayMs?: number; maxAttempts?: number; logger?: typeof silent } = {},
     ): NotificationDispatcher {
       return new NotificationDispatcher({
         db,
-        logger: silent,
+        logger: options.logger ?? silent,
         contexts,
         transports: [transport as never],
         // No wait between attempts, so a test can drive several in a row. `leaseMs` matters as
@@ -834,6 +835,35 @@ describe(
         '400 from hooks.example.test — \\u001b[2Jok\\u000dFAILED\\u009b \\u202eexe.txt\\u2066 ' +
           'line\nnext\tcolumn',
       );
+    });
+
+    it('logs the refusal it stored, escaped the same way, when retrying and when giving up (N-24)', async () => {
+      // pino's JSON escapes U+0000 to U+001F and nothing else, so a C1 or an override in the far
+      // end's words reached the journal as written, beside a row that had them escaped.
+      const lines: string[] = [];
+      const logger = pino({ level: 'info' }, { write: (line: string) => lines.push(line) });
+      const said = '503 from hooks.example.test — \u202Eexe.txt\u009b';
+      const shown = '503 from hooks.example.test — \\u202eexe.txt\\u009b';
+      const requestId = await queue(await emailTemplate());
+      const quoting = {
+        method: 'email',
+        send: () => Promise.resolve({ ok: false, retryable: true, error: said } as const),
+      };
+      const dispatcher = dispatcherWith(quoting, { maxAttempts: 2, logger });
+
+      await dispatcher.dispatch();
+      await dispatcher.dispatch();
+      assert.equal((await statusOf(requestId)).status, 'failed');
+      const logged = lines
+        .map((line) => JSON.parse(line) as { msg: string; err?: unknown })
+        .filter((entry) => entry.err !== undefined);
+      const retrying = logged.find((entry) => entry.msg.includes('retrying'));
+      const givenUp = logged.find((entry) => entry.msg.includes('will not be tried again'));
+      assert.ok(retrying !== undefined, 'the retry was logged');
+      assert.ok(givenUp !== undefined, 'giving up was logged');
+      assert.equal(retrying.err, shown);
+      assert.equal(givenUp.err, shown);
+      assert.ok(!lines.join('').includes('\u202E'), 'no override reaches the log');
     });
 
     it('records who a message reached nobody among, by name and by count, and not in the error (A-44)', async () => {
