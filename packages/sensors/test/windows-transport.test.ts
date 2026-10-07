@@ -253,12 +253,21 @@ describe('running it', () => {
   });
 
   it('kills a script that will not finish', async () => {
-    const startedAt = Date.now();
-    await assert.rejects(
-      () => run('#FAKE:hang', { timeoutMs: 700 }),
-      /still running after 700 ms and was stopped with SIGTERM/,
+    // **What happened, not how long it took** (`P-287`). Ended at its own timeout by SIGTERM,
+    // which the fake honours, so never killed after a grace: the message says both, and
+    // `within` says which wait gave up if it never ends.
+    const error = await within(
+      15_000,
+      'PowerShell to be stopped at its own timeout',
+      run('#FAKE:hang', { timeoutMs: 700 }).then(
+        () => assert.fail('PowerShell was not ended'),
+        (failure: unknown) => failure,
+      ),
     );
-    assert.ok(Date.now() - startedAt < 15_000, 'and did not wait for the grace period twice');
+    assert.match(
+      String(error),
+      /^WindowsError: PowerShell was still running after 700 ms and was stopped with SIGTERM$/,
+    );
   });
 
   it('ends PowerShell on the check’s cancel, and says that was why (`P-262`)', async () => {
@@ -268,16 +277,26 @@ describe('running it', () => {
     const early = setTimeout(() => {
       controller.abort(new Error('the check exceeded its timeout'));
     }, 300);
-    const startedAt = Date.now();
+    // **What happened, not how long it took** (`P-287`). The message names the abort and its
+    // reason, which its own minute's timeout would not, and `within` gives up well inside that
+    // minute so that an abort that reached nothing is said as one.
+    let error: unknown;
     try {
-      await assert.rejects(
-        () => run('#FAKE:hang', { timeoutMs: 60_000, signal: controller.signal }),
-        /^WindowsError: PowerShell was still running after \d+ ms when the check was ended \(the check exceeded its timeout\), and was stopped with SIGTERM$/,
+      error = await within(
+        30_000,
+        'PowerShell to be ended by the check’s cancel',
+        run('#FAKE:hang', { timeoutMs: 60_000, signal: controller.signal }).then(
+          () => assert.fail('PowerShell was not ended'),
+          (failure: unknown) => failure,
+        ),
       );
     } finally {
       clearTimeout(early);
     }
-    assert.ok(Date.now() - startedAt < 15_000, 'ended on the abort, not its own minute');
+    assert.match(
+      String(error),
+      /^WindowsError: PowerShell was still running after \d+ ms when the check was ended \(the check exceeded its timeout\), and was stopped with SIGTERM$/,
+    );
   });
 
   it('kills a PowerShell that ignores SIGTERM inside the pool’s abort grace (`P-262`)', async () => {

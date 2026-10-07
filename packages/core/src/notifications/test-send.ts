@@ -8,6 +8,7 @@ import type { MessageContextLoader } from './context.js';
 import type { DeliveryTransport } from './delivery/transport.js';
 import { notificationMethods } from './methods.js';
 import { render, type MessageContext } from './placeholders.js';
+import { legible } from './legible.js';
 import { describeCounts, describeSkipped, skippedCounts } from './recipients.js';
 import { summarises } from './summarisation.js';
 import {
@@ -203,16 +204,23 @@ export class NotificationTester {
       unknownPlaceholders: rendered.unknown,
       delivered: result.ok,
       // Who it would have missed, in the one place somebody testing a template is looking.
+      // **Legible** (`N-27`), as a stored delivery error is (`N-24`): what the far end said is
+      // quoted here as it is in `last_error` — a relay's queue id, a webhook's body, a
+      // program's last line — and the form shows it to the person deciding whether it worked.
       detail: result.ok
-        ? missed === ''
-          ? said(result.detail, result.withoutOutput, 'sent')
-          : `${said(result.detail, result.withoutOutput, 'sent')}; not sent to ${missed}`
+        ? legible(
+            missed === ''
+              ? said(result.detail, result.withoutOutput, 'sent')
+              : `${said(result.detail, result.withoutOutput, 'sent')}; not sent to ${missed}`,
+          )
         : null,
       error: result.ok
         ? null
-        : missed === ''
-          ? said(result.error, result.withoutOutput, 'not sent')
-          : `${said(result.error, result.withoutOutput, 'not sent')}: ${missed}`,
+        : legible(
+            missed === ''
+              ? said(result.error, result.withoutOutput, 'not sent')
+              : `${said(result.error, result.withoutOutput, 'not sent')}: ${missed}`,
+          ),
       retryable: result.ok ? null : result.retryable,
       durationMs,
       notes,
@@ -240,7 +248,8 @@ export class NotificationTester {
         templateId: template.id,
         delivered: result.ok,
         durationMs,
-        said: result.ok ? result.detail : result.error,
+        // The same escaping in the journal: pino's JSON leaves a C1 or an override as it came.
+        said: legible(result.ok ? result.detail : result.error),
       },
       'test notification sent',
     );

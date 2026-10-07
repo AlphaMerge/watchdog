@@ -19,7 +19,7 @@ export function assertCoreTakesAsSent(result: CheckResult): void {
 /**
  * That a runner made `test.unfit`'s readings fit the wire (`P-277`): the core's own parser takes
  * a batch holding it, no string in it holds a NUL, and only the one channel fit to send is sent,
- * with its name and unit clipped.
+ * with its name and unit clipped, and the message says how many were not (`P-292`).
  */
 export function assertFits(result: CheckResult | undefined): void {
   assert.ok(result !== undefined);
@@ -27,7 +27,12 @@ export function assertFits(result: CheckResult | undefined): void {
   assertCoreTakesAsSent(result);
   assert.ok(!JSON.stringify(result).includes('\\u0000'), 'no NUL anywhere');
   assert.ok(result.message.startsWith('saidmmm'), result.message.slice(0, 20));
-  assert.ok(result.message.endsWith('…'));
+  // The four channels that could not be sent, said in the sensor's own message (`P-292`), and
+  // the check's words clipped to make room for it.
+  assert.ok(
+    result.message.endsWith('m… (4 channels could not be sent)'),
+    result.message.slice(-40),
+  );
   assert.equal(result.message.length, RESULT_LIMITS.message);
   assert.deepEqual(
     result.channels.map((channel) => channel.key),

@@ -442,6 +442,8 @@ describe(
           ['custom', 'loss', 'rtt'],
         );
         assert.equal(await samplesOf(surrogate), 1);
+        // And the sensor says so in its own message, fitted on the core as on a probe (`P-292`).
+        assert.equal(await messageOf(surrogate), '3 ms (1 channel could not be sent)');
         // The message clipped.
         const clipped = await messageOf(long);
         assert.equal(clipped?.length, RESULT_LIMITS.message);

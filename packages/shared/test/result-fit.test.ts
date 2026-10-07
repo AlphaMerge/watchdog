@@ -99,7 +99,10 @@ describe('fitResult', () => {
         { key: 'pair😀', value: 3, name: 'n\uD83D', unit: '\uDE00u' },
       ],
     });
-    assert.equal(result.message, 'high \uFFFD and low \uFFFD, a pair 😀');
+    assert.equal(
+      result.message,
+      'high \uFFFD and low \uFFFD, a pair 😀 (2 channels could not be sent)',
+    );
     assert.deepEqual(result.channels, [
       { key: 'pair😀', value: 3, name: 'n\uFFFD', unit: '\uFFFDu' },
     ]);
@@ -197,6 +200,71 @@ describe('fitResult', () => {
     coreTakes(result);
   });
 
+  describe('saying in the sensor’s own message what was dropped (`P-292`)', () => {
+    const unsendable = { key: 'nan', value: Number.NaN };
+
+    it('ends the message with how many channels could not be sent', () => {
+      const one = fitResult({ ...base, channels: [...base.channels, unsendable] });
+      assert.equal(one.result.message, 'all well (1 channel could not be sent)');
+      const three = fitResult({
+        ...base,
+        channels: [unsendable, { key: '', value: 1 }, 'not a channel', ...base.channels],
+      } as unknown as CheckResult);
+      assert.equal(three.dropped, 3);
+      assert.equal(three.result.message, 'all well (3 channels could not be sent)');
+      coreTakes(three.result);
+    });
+
+    it('says it alone when the check had nothing to say', () => {
+      const { result } = fitResult({ ...base, message: '', channels: [unsendable] });
+      assert.equal(result.message, '1 channel could not be sent');
+    });
+
+    it('counts the channels past the limit with the rest', () => {
+      const channels = Array.from({ length: RESULT_LIMITS.channels + 2 }, (_, at) => ({
+        key: `c${String(at)}`,
+        value: at,
+      }));
+      channels[0] = unsendable;
+      const { result } = fitResult({ ...base, channels });
+      assert.equal(result.message, 'all well (3 channels could not be sent)');
+    });
+
+    it('keeps the note whole when the message is clipped, and clips the check’s words instead', () => {
+      const { result } = fitResult({
+        ...base,
+        message: 'x'.repeat(5_000),
+        channels: [unsendable],
+      });
+      assert.equal(result.message.length, RESULT_LIMITS.message);
+      assert.ok(result.message.endsWith('x… (1 channel could not be sent)'), result.message);
+      coreTakes(result);
+    });
+
+    it('says nothing when every value was sent, even with a counter left off', () => {
+      const { result, problems } = fitResult({
+        ...base,
+        channels: [{ key: 'a', value: 1, counter: '-1' }],
+      });
+      assert.equal(problems.length, 1);
+      assert.equal(result.message, 'all well');
+    });
+
+    it('says it once, however often the result is fitted again', () => {
+      // The drain fits a spooled result on every retry, and the core fits what it refused.
+      const once = fitResult({ ...base, channels: [unsendable, ...base.channels] });
+      const twice = fitResult(once.result);
+      assert.deepEqual(twice.result, once.result);
+      assert.equal(twice.dropped, 0);
+    });
+
+    it('leaves the outcome as the check gave it', () => {
+      // A Warning would change alarm volume (`M-17`); the message says it, the state does not.
+      const { result } = fitResult({ ...base, channels: [unsendable] });
+      assert.equal(result.outcome, 'ok');
+    });
+  });
+
   it('copies no field the schema does not know, on a channel or on the result', () => {
     const { result } = fitResult({
       ...base,
@@ -248,6 +316,15 @@ describe('fitResult', () => {
           coreTakes(result);
           // `P-283`: every channel given is sent or counted as dropped, never both or neither.
           assert.equal(result.channels.length + dropped, channels.length);
+          // `P-292`: the message says so whenever one was dropped, and fitting again adds nothing.
+          if (dropped > 0) {
+            const said = `${String(dropped)} channel${dropped === 1 ? '' : 's'} could not be sent`;
+            assert.ok(
+              result.message === said || result.message.endsWith(` (${said})`),
+              result.message,
+            );
+          }
+          assert.deepEqual(fitResult(result).result, result);
           assert.ok(!JSON.stringify(result).includes('\\u0000'));
           // Node's own `isWellFormed`, which the ES2023 lib this build targets does not type.
           const texts = [

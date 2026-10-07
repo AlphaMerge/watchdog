@@ -3626,13 +3626,44 @@ because each is a decision rather than a defect:
       sensor's first Up in that window waits for the digest. One message fewer, never one more.
       **Done when** decided: give the slot back, or keep, with a scenario test either way.
 
-- [ ] **N-27 — a test send's error is not made legible, and invisible format characters are kept**
+- [x] **N-27 — a test send's error is not made legible, and invisible format characters are kept**
       · XS · N-24 · Found 2026-10-08 in `N-24`. `test-send.ts` returns the transport's error to the
       template form as it came, without `legible()`. Zero-width and other format characters
       (U+200B, U+FEFF, U+2028/2029) are not controls and pass `legible()` untouched: they cannot
       reorder text but can make two errors look alike. **Done when** the test send's error goes
       through `legible()` with a test, and the format characters are decided (escape or keep, said
       in `legible.ts`).
+
+      **N-27 outcome. The test send is legible, and format characters are escaped, except a
+      joiner that is joining.**
+      - **Test send.** `NotificationTester.send` applies `legible()` to the report's `error` and
+        also to its `detail`, which quotes the far end too (a relay's queue id). The `said` field
+        of its log line is escaped the same way, as the dispatcher's lines are.
+      - **Format characters escaped.** The pattern is now `[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]`. Every
+        bidirectional control is a `\p{Cf}`, so N-24's set is inside it. The new ones include
+        U+200B, the word joiner and invisible operators U+2060–U+2064, U+FEFF, the soft hyphen,
+        and the tag characters U+E0001–U+E007F, which spell ASCII nobody can see. U+2028 and
+        U+2029 are separators rather than format characters, and are escaped because they break
+        a line in one reader and not in the next. What decided it: none of them can reorder
+        text, but each can make "refused" and "re\u200Bfused" two errors nobody can tell apart.
+        A reader should see that something was there, as with the controls. A code point beyond
+        the BMP is escaped as `\u{e0041}`, so it does not read as four hex digits and a letter.
+      - **ZWNJ and ZWJ are kept only between two visible non-ASCII characters.** Persian, Arabic
+        and Indic text and emoji sequences need them, and escaping them everywhere would break a
+        Persian relay's refusal. Anywhere else they only hide, so they are escaped there: between
+        Latin letters, at either end, or beside a space, a surrogate half or another escape.
+      - **Not escaped:** variation selectors and the rest of `\p{Default_Ignorable_Code_Point}`.
+        They are marks attached to a visible character, and U+FE0F is part of an emoji.
+      - **Tests.** `legible.test.ts` gains a row for each new class and each joiner case, kept and
+        escaped. N-24's sweep now covers every code point, not only the BMP, since the tag
+        characters are astral. It checks that no control, format character or separator except
+        newline and tab survives. `test-send.test.ts` sends a refusal and a success that both
+        quote ESC, a lone CR, an override, a zero-width space and a tag character, and checks
+        the report's `error`, `detail` and logged `said`. N-24's existing tests pass unchanged.
+        Mutations, each failing the tests: no `legible` on the error, the detail and the log line
+        in turn; the pattern back to N-24's; joiners never kept; joiners always kept; and astral
+        code points escaped without braces.
+      - **Not done.** Stored rows are still `N-28`'s.
 
 - [ ] **N-28 — delivery errors stored before `N-24` keep their control characters** · S · N-24 ·
       Found 2026-10-08 in `N-24`. `legible()` applies to what is written from now on; older
@@ -9988,11 +10019,25 @@ because each is a decision rather than a defect:
         not finish", "ends PowerShell on the check's cancel") still assert `< 15_000` on the wall
         clock. That bound is generous, but it is the same kind of assert.
 
-- [ ] **P-287 — two Windows transport tests still bound a wall clock** · XS · P-286 · Found
+- [x] **P-287 — two Windows transport tests still bound a wall clock** · XS · P-286 · Found
       2026-10-07 in `P-286`. "kills a script that will not finish" and "ends PowerShell on the
       check's cancel" in `windows-transport.test.ts` assert `< 15_000` on the wall clock, the kind
       of assert a loaded VM breaks. **Done when** each waits through `within` and asserts what
       happened, not how long it took.
+
+      **P-287 outcome.** Neither test reads the clock now. Each waits for the run's rejection
+      through the sensors package's `within`, and then asserts the whole anchored message.
+      - **The script that will not finish** must have been "still running after 700 ms and was
+        stopped with SIGTERM", ending there. This is what the old bound stood for: it was ended
+        at its own timeout, and was never killed after a grace.
+      - **The cancel** must name the end of the check and its reason. The run's own one-minute
+        timeout would not say either.
+      - **The bounds.** `within` gives up at 15 s for the first test and at 30 s for the cancel.
+        The 30 s is well inside that one minute, so an abort that reached nothing is reported as a
+        wait that gave up, naming what it waited for.
+      - **Mutations, each failing the tests.** With the check's signal not passed to PowerShell,
+        the cancel test fails at `within`'s 30 s and names the wait. With every timeout ending
+        by SIGKILL, both tests fail on the message.
 
 - [x] **P-288 — a stored batch sent again counts its refused results again** · S · P-281 · Found
       2026-10-07 in `P-281`'s review. The core counts what it refused from a batch when it acks
@@ -10190,10 +10235,43 @@ because each is a decision rather than a defect:
         protocol 31's `upperWarning: 0.00001` from `scriptGroupsRefused` while
         `scriptGroupsRefusedRecently` keeps its own.
 
-- [ ] **P-292 — a sensor whose channels were dropped says nothing in its own result** · S · P-283
+- [x] **P-292 — a sensor whose channels were dropped says nothing in its own result** · S · P-283
       · Found 2026-10-07 in `P-283`. When `fitResult` drops channels that cannot be sent, the count
       appears only on Probe Health and in the probe's log; the sensor's own message is silent.
       **Done when** decided: say it in the sensor's message (or a warning), or keep, with a test.
+
+      **P-292 outcome. Said in the sensor's message, and the state is left alone.** When
+      `fitResult` (`packages/shared/src/protocol/result-fit.ts`) drops a channel, the message ends
+      with the count, for example "2/2 replies (3 channels could not be sent)". When the check
+      said nothing, the count is the whole message.
+      - **What decided it.** The person looking at the sensor looks at the sensor. Its readings
+        just stopped. `P-283` put the count on Probe Health and the names in the probe's log,
+        and neither is where that person looks. The message costs no protocol change, because
+        every runner, the drain and the core already fit through this one function.
+      - **Count, not names.** The names are in the log, which has room for them.
+      - **The note survives the clip.** The check's own words are clipped to the message bound
+        less the note, and end in the ellipsis.
+      - **Said once.** A fitted result drops nothing more when it is fitted again, so nothing more
+        is added. The drain refits the spooled record on every retry, and the core refits a result
+        its schema refused.
+      - **The state is not changed.** A Warning would change alarm volume. The cause is one
+        sensor's own output, mostly a script's JSON, and a state change would not fix it. It
+        would also hold the sensor in Warning until the script is fixed, as `P-283` found for
+        the probe. Message changes make no state-history transition (`StateService` records one
+        on a state or cause change only), so alarm volume is untouched.
+      - **Tests.** `result-fit.test.ts`: singular and plural, an empty message, the channels
+        past the limit counted with the rest, the note kept whole when a 5,000-character message
+        is clipped, nothing said for a counter left off, fitting again changes nothing, and the
+        outcome is kept. The property now also checks that the message says the count whenever
+        one is dropped, and that `fitResult` is idempotent. Through the real runners,
+        `check-pool` and `process-runner`'s `test.unfit` must end "m… (4 channels could not be
+        sent)" at exactly the bound (`support/fits.ts`). `spool-drain` checks the note on a
+        refitted old record, and the same single note on all three offers of a retried batch.
+        `unfit-results` (core, real database) stores "3 ms (1 channel could not be sent)".
+        Mutations, each failing the tests: no note at all, and the note added after a full-length
+        clip, which cuts it off.
+      - **Not done.** A limit's or a lookup's message replaces the check's on the core, and the
+        note goes with it. That sensor is then explaining its own state, which matters more.
 
 - [x] **P-293 — the start-up limits pass cannot tell a type's fixed channels from its
       parameter-made ones** · S · P-291 · Found 2026-10-08 in `P-291`'s review. The pass reads

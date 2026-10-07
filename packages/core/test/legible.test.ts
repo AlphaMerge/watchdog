@@ -35,6 +35,27 @@ describe('legible', () => {
     ['the bidirectional marks', '\u200e\u200f\u061c', '\\u200e\\u200f\\u061c'],
     ['right-to-left text itself is not a control', 'שגיאה 500', 'שגיאה 500'],
     ['an emoji is not a control', 'down 🔥', 'down 🔥'],
+    // `N-27`: the format characters, which cannot reorder text but can hide in it.
+    ['a zero-width space', 're\u200bfused', 're\\u200bfused'],
+    ['a byte-order mark', '\ufeff503 Service Unavailable', '\\ufeff503 Service Unavailable'],
+    ['a soft hyphen', 'de\u00adnied', 'de\\u00adnied'],
+    ['the word joiner and an invisible operator', 'a\u2060b\u2062c', 'a\\u2060b\\u2062c'],
+    ['the line and paragraph separators', 'one\u2028two\u2029three', 'one\\u2028two\\u2029three'],
+    [
+      'a tag character, escaped with braces beyond the BMP',
+      'ok\u{e0041}\u{e007f}',
+      'ok\\u{e0041}\\u{e007f}',
+    ],
+    ['ZWNJ inside a Persian word is kept', 'می\u200cخواهم', 'می\u200cخواهم'],
+    ['ZWJ inside an emoji sequence is kept', '👨\u200d👩\u200d👧', '👨\u200d👩\u200d👧'],
+    ['ZWJ after a variation selector is kept', '❤\ufe0f\u200d🔥', '❤\ufe0f\u200d🔥'],
+    ['ZWJ after a virama is kept', 'क्\u200dष', 'क्\u200dष'],
+    ['ZWJ between Latin letters is escaped', 'ad\u200dmin', 'ad\\u200dmin'],
+    ['ZWNJ beside ASCII on one side is escaped', 'می\u200ca', 'می\\u200ca'],
+    ['a joiner at either end is escaped', '\u200dمی\u200c', '\\u200dمی\\u200c'],
+    ['a joiner beside a space is escaped', 'می\u00a0\u200cخ', 'می\u00a0\\u200cخ'],
+    ['a joiner beside another escape is escaped', 'م\u200b\u200dخ', 'م\\u200b\\u200dخ'],
+    ['a joiner beside half a surrogate pair is escaped', 'م\u200d\ud83d', 'م\\u200d\ud83d'],
   ];
 
   for (const [name, input, expected] of cases) {
@@ -43,16 +64,19 @@ describe('legible', () => {
     });
   }
 
-  it('leaves nothing that is a control or a bidirectional control, except newline and tab', () => {
-    // Every code point in the BMP, once each: whatever the regex misses shows up here.
+  it('leaves nothing that is a control, a format character or a separator, except newline and tab', () => {
+    // Every code point there is, once each, beyond the BMP too since the tag characters are
+    // (`N-27`): whatever the pattern misses shows up here. Each joiner's neighbours are format
+    // characters themselves, so neither is kept.
     let all = '';
-    for (let point = 0; point <= 0xffff; point += 1) {
+    for (let point = 0; point <= 0x10ffff; point += 1) {
       if (point >= 0xd800 && point <= 0xdfff) continue;
       all += String.fromCodePoint(point);
     }
-    const left = legible(all).match(/[^\P{Cc}\n\t]|\p{Bidi_Control}/gu) ?? [];
+    const out = legible(all);
+    const left = out.match(/[^\P{Cc}\n\t]|[\p{Cf}\p{Zl}\p{Zp}]/gu) ?? [];
     assert.deepEqual(left, []);
     // And the two it keeps are still there, once each.
-    assert.equal(legible(all).match(/[\n\t]/g)?.length, 2);
+    assert.equal(out.match(/[\n\t]/g)?.length, 2);
   });
 });

@@ -28,6 +28,7 @@ export interface FittedResult {
    * What was taken out of the readings to fit: a channel dropped, or a field of one left off.
    * Empty when the readings were sent as they were. A message clipped or a NUL removed is not
    * listed: the message says the first itself, with its ellipsis, and the second loses nothing.
+   * A channel dropped is also said in the message, by count (`P-292`).
    */
   readonly problems: readonly string[];
   /**
@@ -64,7 +65,8 @@ export interface FittedResult {
  * clipped or replaced, since either would make it another channel; a key with a NUL or a lone
  * surrogate is dropped. A counter or a width the schema refuses is left off,
  * which leaves the value. A name or unit is clipped, and a name left empty is left off. The
- * channels past `RESULT_LIMITS.channels` are dropped. A `durationMs` that is not a finite number
+ * channels past `RESULT_LIMITS.channels` are dropped. When any channel is dropped, the message
+ * ends by saying how many (`withDropped`, `P-292`). A `durationMs` that is not a finite number
  * of zero or more is 0. Fields the schema does not know are not copied.
  */
 export function fitResult(result: CheckResult): FittedResult {
@@ -84,20 +86,48 @@ export function fitResult(result: CheckResult): FittedResult {
   }
   const duration: unknown = result.durationMs;
   const message: unknown = result.message;
+  const dropped = given.length - channels.length;
   return {
     result: {
       sensorId: result.sensorId,
       at: result.at,
       outcome: result.outcome,
-      message: typeof message === 'string' ? clip(textOf(message), RESULT_LIMITS.message) : '',
+      message: withDropped(typeof message === 'string' ? textOf(message) : '', dropped),
       durationMs:
         typeof duration === 'number' && Number.isFinite(duration) && duration >= 0 ? duration : 0,
       channels,
       ...(result.withheld === true ? { withheld: true as const } : {}),
     },
     problems,
-    dropped: given.length - channels.length,
+    dropped,
   };
+}
+
+/**
+ * The check's message, clipped to leave room for what was dropped from its readings, and then
+ * that (`P-292`): "2/2 replies (3 channels could not be sent)".
+ *
+ * **Said in the sensor's own message**, because that is where the person looking at the sensor
+ * looks. Probe Health counts the channels and the log names them (`P-283`), but neither is on
+ * the sensor, whose readings simply stop with nothing to say why. The note always survives the
+ * clip: it is what the message would otherwise not say, and the check's own words end in the
+ * ellipsis instead.
+ *
+ * **The message only, never the state.** A Warning would change alarm volume, and the cause is
+ * one sensor's own output, mostly a script's JSON, which a state change does not fix.
+ *
+ * **Counted, not named**: the problems name each channel, and they go to the log, which has room.
+ * Fitting what this returned drops nothing more, so it adds nothing more: a probe's drain fits
+ * the spooled result again on every retry, and the core fits a result its schema refused, and
+ * the note is said once either way. A limit's or a lookup's message replaces the check's on the
+ * core (`StateService`), and this note with it: the sensor then says why it is in its state.
+ */
+function withDropped(message: string, dropped: number): string {
+  if (dropped === 0) return clip(message, RESULT_LIMITS.message);
+  const said = `${String(dropped)} ${dropped === 1 ? 'channel' : 'channels'} could not be sent`;
+  if (message === '') return said;
+  const note = ` (${said})`;
+  return clip(message, RESULT_LIMITS.message - note.length) + note;
 }
 
 function fitChannel(raw: unknown, at: number, problems: string[]): ChannelReading | null {

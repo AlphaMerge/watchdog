@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, before, beforeEach, describe, it } from 'node:test';
+import { pino } from 'pino';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -249,6 +250,57 @@ describe(
       assert.equal(report.error, 'the relay refused it');
       assert.equal(report.retryable, false);
       assert.equal(report.detail, null);
+    });
+
+    it('shows what the far end said legibly, as a stored delivery error is (N-27)', async () => {
+      // A relay's or an endpoint's words, quoting what can rewrite a terminal (ESC), write over
+      // the text before it (a lone CR), reorder it (an override), or hide in it (a zero-width
+      // space, a tag character). The form and the log get the same escapes `last_error` does.
+      const far = 'denied\u001b[2J\rOK \u202eevil re\u200bfused\u{e0041}\r\nline two\tend';
+      const shown = 'denied\\u001b[2J\\u000dOK \\u202eevil re\\u200bfused\\u{e0041}\nline two\tend';
+      const said = (ok: boolean) => ({
+        method: 'email',
+        send: () =>
+          Promise.resolve(
+            ok
+              ? ({ ok: true, detail: `queued as ${far}` } as const)
+              : ({ ok: false, retryable: false, error: far } as const),
+          ),
+      });
+      const lines: string[] = [];
+      const logger = pino({ level: 'info' }, { write: (line: string) => lines.push(line) });
+      const tester = (transport: object): NotificationTester =>
+        new NotificationTester({
+          db,
+          logger,
+          contexts,
+          transports: [transport as never],
+          audit: new DatabaseAuditSink(),
+        });
+      const templateId = await template();
+
+      const refused = await tester(said(false)).send(testActor, {
+        seenBy: Visibility.EVERYTHING,
+        templateId,
+        sensorId,
+      });
+      assert.equal(refused.delivered, false);
+      assert.equal(refused.error, shown);
+      const sent = await tester(said(true)).send(testActor, {
+        seenBy: Visibility.EVERYTHING,
+        templateId,
+        sensorId,
+      });
+      assert.equal(sent.delivered, true);
+      assert.equal(sent.detail, `queued as ${shown}`);
+
+      // And in the journal, where pino's JSON would have left the override and the rest as sent.
+      const logged = lines.map((line) => JSON.parse(line) as { msg: string; said?: string });
+      const told = logged.filter((entry) => entry.msg === 'test notification sent');
+      assert.deepEqual(
+        told.map((entry) => entry.said),
+        [shown, `queued as ${shown}`],
+      );
     });
 
     it('counts who it missed unless the caller may be told who (A-44)', async () => {

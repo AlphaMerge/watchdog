@@ -440,7 +440,8 @@ describe('what leaves the spool (`P-277` review)', () => {
     }
     const sent = core.offered[0]?.[0];
     assert.ok(sent !== undefined);
-    assert.equal(sent.message, 'said so');
+    // The two channels that could not be sent, said in the sensor's own message (`P-292`).
+    assert.equal(sent.message, 'said so (2 channels could not be sent)');
     assert.deepEqual(sent.channels, [{ key: 'kept', value: 3, name: 'half \uFFFD a pair' }]);
     assertCoreTakesAsSent(sent);
   });
@@ -475,6 +476,12 @@ describe('what leaves the spool (`P-277` review)', () => {
     }
     assert.equal(core.offered.length, 3, 'offered twice before the core took it');
     assert.equal(drain.stats().channelsDropped, 2);
+    // Fitted from the spooled record each time, so the message says it once on every offer
+    // rather than once more on each (`P-292`).
+    assert.deepEqual(
+      core.offered.map((batch) => batch.map((one) => one.message)),
+      Array.from({ length: 3 }, () => ['2 channels could not be sent']),
+    );
   });
 
   it('splits a backlog of large results into batches that each fit a frame', async () => {
