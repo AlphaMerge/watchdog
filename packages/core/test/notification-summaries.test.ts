@@ -150,6 +150,16 @@ describe(
       return Number(rows[0]?.id ?? 0);
     }
 
+    /** A trigger to queue against: a request whose trigger was deleted has none (`N-22`). */
+    async function triggerRow(): Promise<number> {
+      const rows = await db.query<{ id: string }>(
+        `INSERT INTO notification_trigger (object_id, kind, settings)
+         VALUES ($1, 'state', '{}'::jsonb) RETURNING id::text AS id`,
+        [h.rootId],
+      );
+      return Number(rows[0]?.id);
+    }
+
     /** A transport that records every message it was handed and always succeeds. */
     function recorder(answer: () => { ok: boolean; retryable?: boolean } = () => ({ ok: true })) {
       const seen: OutgoingMessage[] = [];
@@ -1003,11 +1013,12 @@ describe(
         own: false,
         status,
       });
-      const breach = (channelKey: string): Queued => ({
+      const breach = (channelKey: string | undefined): Queued => ({
         sensor: sensorAt(0),
         reason: 'threshold',
         state: 'warning',
         triggerKind: 'threshold',
+        triggerId: first,
         channelKey,
       });
       const clear: Queued = {
@@ -1015,6 +1026,7 @@ describe(
         reason: 'clear',
         state: 'up',
         triggerKind: 'threshold',
+        triggerId: first,
         channelKey: 'loss',
       };
       const cases: Case[] = [
@@ -1088,7 +1100,12 @@ describe(
           recovery: clear,
           later: [
             {
-              options: { sensor: sensorAt(0), triggerKind: 'state', channelKey: 'loss' },
+              options: {
+                sensor: sensorAt(0),
+                triggerKind: 'state',
+                triggerId: first,
+                channelKey: 'loss',
+              },
               own: true,
               status: 'pending',
             },
@@ -1122,10 +1139,17 @@ describe(
           dropped: false,
         },
         {
-          // No trigger and no channel on either, so only the kind tells them apart.
+          // The same trigger id and no channel on either, so only the kind tells them apart.
           name: 'another kind of trigger’s alarm',
+          later: [elsewhere('sent', breach(undefined))],
+          dropped: false,
+        },
+        {
+          // A deleted trigger leaves NULL behind. Two deleted triggers of one kind on one
+          // sensor, no channel on either: they must not be taken for one trigger.
+          name: 'two deleted triggers',
           recovery: { sensor: sensorAt(0), reason: 'recovery', state: 'up' },
-          later: [elsewhere('sent', { ...breach('loss'), channelKey: undefined })],
+          later: [elsewhere('sent', { sensor: sensorAt(0) })],
           dropped: false,
         },
         {
@@ -1259,7 +1283,8 @@ describe(
         await db.query('DELETE FROM notification_request');
         const pages = await template({ summarisation: 'always-immediate' });
         const recoveries = await template({ summarisation: 'always-immediate' });
-        const recovery = await queue(recoveries, entry.recovery);
+        const triggerId = await triggerRow();
+        const recovery = await queue(recoveries, { ...entry.recovery, triggerId });
         await db.query(
           `UPDATE notification_request
            SET disposition = 'immediate', attempts = 1,
@@ -1267,7 +1292,7 @@ describe(
            WHERE id = $1`,
           [recovery],
         );
-        await queue(pages, entry.alarm);
+        await queue(pages, { ...entry.alarm, triggerId });
 
         const { seen, transport } = recorder();
         await dispatcherWith(transport).dispatch();
@@ -1295,13 +1320,15 @@ describe(
       const second = await db.tx((q) => summaries.openWindow(q, recoveries, new Date(), 900));
       assert.ok(first.id < second.id, 'A’s digest is sent first');
 
+      const triggerId = await triggerRow();
       const recovery = await queue(recoveries, {
         sensor: sensorAt(0),
         reason: 'recovery',
         state: 'up',
+        triggerId,
       });
-      const other = await queue(recoveries, { sensor: sensorAt(1) });
-      const newer = await queue(pages, { sensor: sensorAt(0) });
+      const other = await queue(recoveries, { sensor: sensorAt(1), triggerId });
+      const newer = await queue(pages, { sensor: sensorAt(0), triggerId });
       await db.tx(async (q) => {
         await summaries.decide(q, recovery, 'held', second.id);
         await summaries.decide(q, other, 'held', second.id);

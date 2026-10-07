@@ -224,6 +224,10 @@ export class SummaryRepository {
    * - **Not while a newer alarm of the recovery's own template is still owed.** That alarm waits
    *   behind the recovery (`N-21`), so the recovery's own recipients hear the Down after the Up
    *   and the recovery is not their last word. Dropping it would leave them two Downs in a row.
+   * - **Only while its trigger is known.** A deleted trigger leaves its requests with no
+   *   trigger, and two deleted triggers of one kind on one sensor would look like one: another
+   *   trigger's alarm, about another state and to other recipients, would drop this recovery.
+   *   A recovery whose trigger is gone is sent as it was before `N-22`.
    * - **`discarded`, with the reason.** Nobody was meant to receive it any more, which is
    *   `N-12`'s meaning of the status, and it is no longer pending: nothing waits behind it, and
    *   its digest, if this was the last thing in it, is tidied away like any empty window.
@@ -251,7 +255,9 @@ export class SummaryRepository {
           FROM notification_request n
           WHERE n.sensor_id = r.sensor_id
             AND n.trigger_kind = r.trigger_kind
-            AND n.trigger_id IS NOT DISTINCT FROM r.trigger_id
+            -- Equal, not "not distinct": a deleted trigger leaves NULL (ON DELETE SET NULL), and
+            -- two deleted triggers are not one trigger.
+            AND n.trigger_id = r.trigger_id
             AND n.channel_key IS NOT DISTINCT FROM r.channel_key
             AND n.id > r.id
             AND n.reason NOT IN ('recovery', 'clear')

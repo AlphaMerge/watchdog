@@ -3532,6 +3532,28 @@ because each is a decision rather than a defect:
       - `N-23` is untouched. An older alarm still being retried can arrive after the newer one
         that superseded its recovery.
 
+      **Review, round 1: two deleted triggers counted as one.** `notification_request.trigger_id`
+      is `ON DELETE SET NULL` (migration 016), and the lookup matched it with `IS NOT DISTINCT
+      FROM`. Once two triggers of one kind on one sensor were both deleted, their requests shared
+      NULL. A state trigger has no channel to separate them either. So a pending recovery of one
+      could be dropped for the other's alarm, about another state and to other recipients.
+      - **The fix:** the lookup matches `n.trigger_id = r.trigger_id`, so NULL matches nothing. A
+        recovery whose trigger is gone is sent as it was before `N-22`. The own-template
+        exception is unchanged: it only ever keeps a recovery, and with no trigger there is
+        nothing to keep it from.
+      - **`undecided` (`N-20`, `N-21`) keeps `IS NOT DISTINCT FROM`.** There, two deleted
+        triggers taken for one only make a request wait for another's delivery or join its
+        digest. Each wait is still bounded by that request's own retries, and nothing is
+        dropped. A deleted trigger also queues nothing new, so the mix-up ends with the
+        requests already queued. It is ordering, not loss, so it was left.
+      - **Tests.** The table gained a 29th row, *two deleted triggers*: a recovery and another
+        trigger's delivered alarm, both with no trigger and no channel. The recovery is kept.
+        The threshold rows and the dispatcher-level same-batch and digest tests now carry a
+        trigger, as the engine's requests always do. The kind row keeps one trigger id on both
+        sides, so only the kind tells them apart.
+      - **Mutation 26/26.** The 25 above, re-run against the changed tests, plus the fix
+        reverted to `IS NOT DISTINCT FROM`, which fails the new row.
+
 - [ ] **N-23 — alarms of one trigger are not ordered among themselves** · S · N-21 · Found
       2026-10-07 in `N-21`. An escalation queued while the initial alarm waits for a retry can be
       delivered first. Ordering alarms among themselves breaks the overflowing-digest test, so
