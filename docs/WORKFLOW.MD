@@ -266,7 +266,9 @@ Behaviours that must be right:
 - **Summarisation** batches storms. Default policy is _first down and up immediately, then
   summarise_: the first event of a storm goes out at once, the rest are collected into a
   digest. Cap the digest (PRTG uses ~1000 characters / 25 events, splitting overflow into
-  additional messages).
+  additional messages). **A recovery is never told before its alarm** (`N-20`): one whose alarm
+  is still held joins the same digest, listed after it, and one whose alarm is held for another
+  template's digest waits for that digest to go.
 - **Immediate-only channels.** Slack, Teams, HTTP action, script execution and ticket
   assignment are never summarised — they are cheap and often machine-consumed.
 - **Template schedules.** A template can be active only during business hours, with a choice

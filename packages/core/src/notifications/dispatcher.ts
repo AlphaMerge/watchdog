@@ -290,7 +290,16 @@ export class NotificationDispatcher {
     now: Date,
     suppressed: readonly number[],
   ): Promise<ClaimRow[]> {
-    return this.#claimWhere(now, suppressed, `r.summary_id = $6`, [windowId], MAX_DIGEST_MEMBERS);
+    const members = await this.#claimWhere(
+      now,
+      suppressed,
+      `r.summary_id = $6`,
+      [windowId],
+      MAX_DIGEST_MEMBERS,
+    );
+    // In the order they were queued, which `UPDATE ... RETURNING` does not promise. A recovery
+    // held beside its alarm (`N-20`) was queued after it, so it is listed after it.
+    return members.sort((a, b) => Number(a.id) - Number(b.id));
   }
 
   /**
@@ -377,9 +386,23 @@ export class NotificationDispatcher {
       // window that would open and close while nobody is listening. When the schedule reopens
       // the whole backlog is decided together, which is what makes "collect and send when
       // reactivated" arrive as one message and one digest rather than as a stale digest.
-      const pending = await this.#summaries.undecided(q, this.#batchSize * 4, suppressed);
+      const pending = await this.#summaries.undecided(
+        q,
+        this.#batchSize * 4,
+        suppressed,
+        this.methods,
+      );
       let held = 0;
       for (const request of pending) {
+        // A recovery whose alarm is still in a digest goes in the same digest, after it
+        // (`N-20`), whatever the mode would say about an Up. Sent at once, it told a recipient
+        // the probe was back eight minutes before telling them anything was wrong.
+        if (request.alarmHeldIn !== null) {
+          await this.#summaries.holdBeside(q, request.id, request.alarmHeldIn);
+          held += 1;
+          continue;
+        }
+
         const mode = isSummarisationMode(request.summarisation)
           ? request.summarisation
           : DEFAULT_SUMMARISATION;

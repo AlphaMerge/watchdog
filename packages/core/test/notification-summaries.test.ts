@@ -125,18 +125,25 @@ describe(
         sensor?: number | undefined;
         reason?: string | undefined;
         state?: SensorState | null | undefined;
+        triggerKind?: string | undefined;
+        triggerId?: number | undefined;
+        channelKey?: string | undefined;
       } = {},
     ): Promise<number> {
       const rows = await db.query<{ id: string }>(
         `INSERT INTO notification_request
-           (at, sensor_id, trigger_id, trigger_kind, template_id, reason, state, message)
-         VALUES (now(), $1, NULL, 'state', $2, $3, $4, 'no ICMP reply')
+           (at, sensor_id, trigger_id, trigger_kind, template_id, reason, state, message,
+            channel_key)
+         VALUES (now(), $1, $7, $5, $2, $3, $4, 'no ICMP reply', $6)
          RETURNING id::text AS id`,
         [
           options.sensor ?? sensorAt(0),
           templateId,
           options.reason ?? 'initial',
           options.state ?? 'down',
+          options.triggerKind ?? 'state',
+          options.channelKey ?? null,
+          options.triggerId ?? null,
         ],
       );
       return Number(rows[0]?.id ?? 0);
@@ -259,12 +266,237 @@ describe(
       await queue(templateId, { sensor: sensorAt(1), reason: 'recovery', state: 'up' });
 
       const { seen, transport } = recorder();
-      await dispatcherWith(transport).dispatch();
+      const dispatcher = dispatcherWith(transport);
+      // Two passes: a recovery is decided after its alarm has been (`N-20`).
+      await dispatcher.dispatch();
+      await dispatcher.dispatch();
       assert.equal(seen.length, 2, 'the first Down and the first Up');
       assert.deepEqual(
         (await dispositions()).map((row) => row.disposition),
         ['immediate', 'held', 'immediate', 'held'],
       );
+    });
+
+    // ---------------------------------------------------------------------------------------
+    // A recovery is never told before its alarm (`N-20`).
+    // ---------------------------------------------------------------------------------------
+
+    it('holds a recovery beside its held alarm, so the digest tells the alarm first', async () => {
+      // The rehearsal: a Warning is held, and its recovery was the window's first Up, so it went
+      // out at once and the Warning came eight minutes later.
+      const templateId = await template();
+      const { seen, transport } = recorder();
+      const dispatcher = dispatcherWith(transport);
+
+      await queue(templateId, { sensor: sensorAt(0), state: 'warning' });
+      await dispatcher.dispatch();
+      await queue(templateId, { sensor: sensorAt(0), reason: 'recovery', state: 'up' });
+      await dispatcher.dispatch();
+      assert.equal(seen.length, 0, 'the recovery waits with its Warning');
+      assert.deepEqual(
+        (await dispositions()).map((row) => `${row.disposition}/${row.status}`),
+        ['held/pending', 'held/pending'],
+      );
+
+      // Another sensor's recovery, with no alarm held, is still the window's first Up.
+      await queue(templateId, { sensor: sensorAt(1), reason: 'recovery', state: 'up' });
+      await dispatcher.dispatch();
+      assert.deepEqual(
+        seen.map((message) => message.subject),
+        ['HTTP on edge-router is up'],
+      );
+
+      await elapse();
+      await dispatcher.dispatch();
+      assert.equal(seen.length, 2);
+      assert.equal(seen[1]?.subject, 'Acme production: 2 notifications — 1 up, 1 other');
+      assert.deepEqual(seen[1].body.split('\n'), [
+        'Ping on edge-router is warning',
+        'Ping on edge-router is up',
+      ]);
+    });
+
+    it('decides a recovery a pass after its alarm when both are waiting together', async () => {
+      // Decided in one pass, the recovery would be read before its alarm had a window to be
+      // found in, and go first.
+      const templateId = await template();
+      await queue(templateId, { sensor: sensorAt(0), state: 'warning' });
+      await queue(templateId, { sensor: sensorAt(0), reason: 'recovery', state: 'up' });
+
+      const { seen, transport } = recorder();
+      const dispatcher = dispatcherWith(transport);
+      await dispatcher.dispatch();
+      assert.deepEqual(
+        (await dispositions()).map((row) => row.disposition),
+        ['held', 'undecided'],
+      );
+      await dispatcher.dispatch();
+      assert.deepEqual(
+        (await dispositions()).map((row) => row.disposition),
+        ['held', 'held'],
+      );
+      assert.equal(seen.length, 0);
+    });
+
+    it('keeps a recovery behind its alarm held in another template’s digest', async () => {
+      const alarms = await template();
+      const recoveries = await template();
+      const { seen, transport } = recorder();
+      const dispatcher = dispatcherWith(transport);
+
+      await queue(alarms, { sensor: sensorAt(0), state: 'warning' });
+      await dispatcher.dispatch();
+      await queue(recoveries, { sensor: sensorAt(0), reason: 'recovery', state: 'up' });
+      await dispatcher.dispatch();
+      assert.equal(seen.length, 0, 'it cannot join that digest, so it waits for it');
+      assert.deepEqual(
+        (await dispositions()).map((row) => row.disposition),
+        ['held', 'undecided'],
+      );
+
+      await elapse();
+      await dispatcher.dispatch();
+      await dispatcher.dispatch();
+      assert.deepEqual(
+        seen.map((message) => message.subject),
+        ['Acme production: 1 notification — 1 other', 'Ping on edge-router is up'],
+      );
+    });
+
+    it('does not keep a recovery waiting for a digest that cannot be sent', async () => {
+      const alarms = await template();
+      const recoveries = await template();
+      const { seen, transport } = recorder();
+      const dispatcher = dispatcherWith(transport);
+
+      await queue(alarms, { sensor: sensorAt(0), state: 'warning' });
+      await dispatcher.dispatch();
+      await db.query('UPDATE notification_template SET enabled = false WHERE id = $1', [alarms]);
+      await queue(recoveries, { sensor: sensorAt(0), reason: 'recovery', state: 'up' });
+      await dispatcher.dispatch();
+      assert.deepEqual(
+        seen.map((message) => message.subject),
+        ['Ping on edge-router is up'],
+      );
+    });
+
+    it('keeps a recovery beside its alarm while their digest waits out a refusal', async () => {
+      const templateId = await template();
+      let succeed = false;
+      const { seen, transport } = recorder(() => ({ ok: succeed, retryable: true }));
+      const dispatcher = new NotificationDispatcher({
+        db,
+        logger: silent,
+        contexts,
+        transports: [transport],
+        retry: { firstDelayMs: 60_000, maxDelayMs: 60_000 },
+        leaseMs: 0,
+      });
+
+      await queue(templateId, { sensor: sensorAt(0), state: 'warning' });
+      await dispatcher.dispatch();
+      await elapse();
+      await dispatcher.dispatch();
+      assert.equal(seen.length, 1, 'the digest of the Warning, refused');
+
+      // The recovery arrives while the refused digest is waiting for its next try.
+      await queue(templateId, { sensor: sensorAt(0), reason: 'recovery', state: 'up' });
+      succeed = true;
+      await dispatcher.dispatch();
+      assert.equal(seen.length, 1, 'not sent ahead of the Warning it answers');
+
+      await dispatcher.dispatch(new Date(Date.now() + 60 * 60 * 1000));
+      assert.equal(seen.length, 2);
+      assert.deepEqual(seen[1]?.body.split('\n'), [
+        'Ping on edge-router is warning',
+        'Ping on edge-router is up',
+      ]);
+    });
+
+    it('holds only the alarm’s own recovery: same sensor, trigger and channel', async () => {
+      type Queued = Parameters<typeof queue>[1];
+      const breach = (channelKey: string): Queued => ({
+        sensor: sensorAt(1),
+        reason: 'threshold',
+        state: 'warning',
+        triggerKind: 'threshold',
+        channelKey,
+      });
+      const clear = (channelKey?: string): Queued => ({
+        sensor: sensorAt(1),
+        reason: 'clear',
+        state: 'up',
+        triggerKind: 'threshold',
+        channelKey,
+      });
+      // Two triggers on one sensor, so a recovery can be told apart from another trigger's.
+      const triggerIds: number[] = [];
+      for (let index = 0; index < 2; index += 1) {
+        const rows = await db.query<{ id: string }>(
+          `INSERT INTO notification_trigger (object_id, kind, settings)
+           VALUES ($1, 'state', '{}'::jsonb) RETURNING id::text AS id`,
+          [h.rootId],
+        );
+        triggerIds.push(Number(rows[0]?.id));
+      }
+      const [first, second] = triggerIds;
+      const cases: { name: string; alarm: Queued; recovery: Queued; expected: string }[] = [
+        {
+          name: 'its own trigger’s recovery',
+          alarm: { sensor: sensorAt(0), state: 'warning', triggerId: first },
+          recovery: { sensor: sensorAt(0), reason: 'recovery', state: 'up', triggerId: first },
+          expected: 'held',
+        },
+        {
+          name: 'another trigger of the same kind',
+          alarm: { sensor: sensorAt(0), state: 'warning', triggerId: first },
+          recovery: { sensor: sensorAt(0), reason: 'recovery', state: 'up', triggerId: second },
+          expected: 'immediate',
+        },
+        {
+          name: 'its own recovery',
+          alarm: { sensor: sensorAt(0), state: 'warning' },
+          recovery: { sensor: sensorAt(0), reason: 'recovery', state: 'up' },
+          expected: 'held',
+        },
+        {
+          name: 'another sensor',
+          alarm: { sensor: sensorAt(0), state: 'warning' },
+          recovery: { sensor: sensorAt(1), reason: 'recovery', state: 'up' },
+          expected: 'immediate',
+        },
+        {
+          // No channel on either, so only the kind tells them apart.
+          name: 'another kind of trigger',
+          alarm: { sensor: sensorAt(1), state: 'warning' },
+          recovery: clear(),
+          expected: 'immediate',
+        },
+        { name: 'its own clear', alarm: breach('loss'), recovery: clear('loss'), expected: 'held' },
+        {
+          name: 'the same trigger, another channel',
+          alarm: breach('loss'),
+          recovery: clear('rtt'),
+          expected: 'immediate',
+        },
+      ];
+
+      for (const entry of cases) {
+        await db.query('DELETE FROM notification_request');
+        const templateId = await template();
+        const dispatcher = dispatcherWith(recorder().transport);
+        // A Down first, so that a threshold breach, which counts as one, is held as well.
+        await queue(templateId, { sensor: sensorAt(2) });
+        await queue(templateId, entry.alarm);
+        await dispatcher.dispatch();
+        await queue(templateId, entry.recovery);
+        await dispatcher.dispatch();
+        assert.deepEqual(
+          (await dispositions()).map((row) => row.disposition),
+          ['immediate', 'held', entry.expected],
+          entry.name,
+        );
+      }
     });
 
     // ---------------------------------------------------------------------------------------
@@ -302,7 +534,10 @@ describe(
       await queue(templateId, { sensor: sensorAt(0), reason: 'recovery', state: 'up' });
 
       const { seen, transport } = recorder();
-      await dispatcherWith(transport).dispatch();
+      const dispatcher = dispatcherWith(transport);
+      // Two passes: a recovery is decided after its alarm has been (`N-20`).
+      await dispatcher.dispatch();
+      await dispatcher.dispatch();
       assert.equal(seen.length, 5, 'every Down');
       assert.deepEqual(
         (await dispositions()).map((row) => row.disposition),

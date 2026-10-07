@@ -3150,7 +3150,7 @@ because each is a decision rather than a defect:
       - the raw pattern message instead of the words;
       - the property name left out.
 
-- [ ] **N-20 — a held alarm's recovery is delivered before the alarm** · S · N-05, M-18 · Found
+- [x] **N-20 — a held alarm's recovery is delivered before the alarm** · S · N-05, M-18 · Found
       2026-10-04 by `H-15`. A template's default summarisation, `first-down-and-up`, sends the
       first Down and the first Up of a window at once and holds the rest, a Warning included,
       for the 15-minute digest. In the
@@ -3166,6 +3166,66 @@ because each is a decision rather than a defect:
       whose alarm is still held goes out with or after it, or the digest says the alarm has
       already recovered. A scenario test (`M-17`) plays a Warning, a recovery inside the window
       and the digest, and asserts the order the recipient sees.
+
+      **N-20 outcome.** A recovery whose alarm is still held now goes in the same digest, listed
+      after it. The rehearsal's outage is one message, *2 notifications — 1 up, 1 other*: the
+      Warning line, then the Up line.
+
+      **What decided it.** The docs say nothing about this case, so this is a choice. It follows
+      `CLAUDE.md`'s "one outage, one alarm", which summarisation exists for, and
+      `WORKFLOW.MD §6`'s "the rest are collected into a digest". Two alternatives were rejected:
+      - flushing the held Warning early would undo the mode the operator chose;
+      - suppressing both would lose an alarm that was past its latency.
+
+      `WORKFLOW.MD §6` now says this in one sentence.
+
+      **How.**
+      - `SummaryRepository.undecided` looks up a recovery's or a clear's own alarm: same sensor,
+        trigger kind, trigger and channel, queued earlier and still pending.
+      - Alarm held in a digest of the same template: the recovery joins that window, and takes
+        the alarm's `next_attempt_at`. A digest refused and waiting out a retry then takes both
+        together, rather than sending the ripe recovery alone and first.
+      - Alarm not decided yet, or held for another template's digest: the recovery is left out
+        of the batch in SQL, so waiting recoveries cannot fill it, and it is decided after its
+        alarm.
+      - The other template must be enabled and have a transport in this build, or nothing
+        would ever release the recovery.
+      - Digest members are sorted by id, because `UPDATE … RETURNING` promises no order.
+      - No migration. The lookup uses the existing `(sensor_id, at)` index and runs only for
+        recoveries and clears.
+
+      **Tests.**
+      - `held-recovery-scenario.test.ts` (new, `M-17` style): the real engine, scheduler and
+        dispatcher, with a recording transport, on a ping sensor whose Warning trigger carries
+        Probe Health's 300 s hold. It asserts the order and count of what the recipient gets:
+        - the rehearsal: three Warnings, back for good inside a 15-minute window. Nothing at
+          the hold's end, then one digest: Warning, then Up;
+        - recovery after the flush: the digest of the Warning, then *ping is up* on its own;
+        - a Down sent at once: the Down, then its Up;
+        - a Down that recovers inside its latency: nothing, and no request.
+      - `notification-summaries.test.ts`, 6 new:
+        - joins the held alarm, while another sensor's recovery is still the window's first Up;
+        - waits one pass when both are undecided;
+        - waits for another template's digest;
+        - does not wait on a disabled template;
+        - keeps the recovery with its alarm through a refused digest;
+        - a table of own recovery and clear against another sensor, another trigger, another
+          kind and another channel.
+      - Two existing tests now dispatch twice, because a recovery queued with its alarm is
+        decided a pass later.
+
+      Mutation 11/11:
+      - folding disabled;
+      - no wait on an undecided alarm;
+      - no wait on another template;
+      - waiting on a disabled template;
+      - `next_attempt_at` not copied;
+      - channel ignored;
+      - trigger kind ignored. This survived at first, and the table gained a channel-less case;
+      - trigger id ignored;
+      - sensor ignored;
+      - a sent alarm still blocking;
+      - digest order reversed.
 
 ## Phase 5 — Web UI
 

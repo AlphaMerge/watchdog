@@ -13,6 +13,18 @@ export interface UndecidedRequest {
   readonly method: string | null;
   readonly summarisation: string | null;
   readonly windowSeconds: number | null;
+  /**
+   * For a recovery or a clear, the digest still holding the alarm it recovers from (`N-20`), or
+   * null. When set, this request belongs in that digest beside its alarm and is decided no other
+   * way.
+   */
+  readonly alarmHeldIn: HeldAlarm | null;
+}
+
+/** Where a recovery's alarm is waiting: its window, and when the alarm is next due a try. */
+export interface HeldAlarm {
+  readonly windowId: number;
+  readonly nextAttemptAt: Date | null;
 }
 
 /** An open collection window, and what has already gone out immediately inside it. */
@@ -35,11 +47,28 @@ export interface ClosedWindow {
  * the two are put together is the dispatcher's.
  */
 export class SummaryRepository {
-  /** Requests still waiting for a decision, oldest first. */
+  /**
+   * Requests still waiting for a decision, oldest first.
+   *
+   * **A recovery is never told before its alarm** (`N-20`). The rehearsal's Probe Health went to
+   * Warning, which the default mode holds for the digest, and recovered inside the window: its
+   * recovery, the window's first Up, went out at once, and the Warning arrived eight minutes
+   * later in the digest. So a recovery or a clear looks for the alarm it recovers from, the same
+   * sensor, trigger and channel, still owed:
+   *
+   * - **held in a digest of its own template**: it is returned with that window, and joins it.
+   *   The digest lists the alarm and then its recovery, and the outage is one message.
+   * - **not decided yet, or held in another template's digest**: it is not returned at all, so
+   *   it waits, and is decided once the alarm has been. Left out here rather than skipped by the
+   *   caller, so a storm of waiting recoveries cannot fill the batch and hold up a new Down. The
+   *   other template has to be one this build can send, or the recovery would wait for a message
+   *   that is never coming.
+   */
   async undecided(
     q: Queryable,
     limit: number,
     suppressed: readonly number[] = [],
+    methods: readonly string[] = [],
   ): Promise<UndecidedRequest[]> {
     const rows = await q.query<{
       id: string;
@@ -49,25 +78,54 @@ export class SummaryRepository {
       method: string | null;
       summarisation: string | null;
       window_seconds: number | null;
+      alarm_window_id: string | null;
+      alarm_next_attempt_at: Date | null;
     }>(
       `
       SELECT r.id::text AS id, r.template_id::text AS template_id, r.reason, r.state,
-             t.method, t.summarisation, t.summary_window_seconds AS window_seconds
+             t.method, t.summarisation, t.summary_window_seconds AS window_seconds,
+             alarm.summary_id::text AS alarm_window_id,
+             alarm.next_attempt_at AS alarm_next_attempt_at
       FROM notification_request r
       -- LEFT, because a request whose template has been deleted still has to be decided: the
       -- dispatcher fails it with a reason an operator can act on rather than leaving it here
       -- undecided for ever.
       LEFT JOIN notification_template t ON t.id = r.template_id
+      -- The alarm a recovery or a clear recovers from, while it is still owed and not yet sent
+      -- (N-20). One that makes it wait sorts first, so a recovery joins a digest only when
+      -- nothing else of its outage is still to come.
+      LEFT JOIN LATERAL (
+        SELECT a.summary_id, a.next_attempt_at,
+               (a.disposition = 'undecided'
+                 OR a.template_id IS DISTINCT FROM r.template_id) AS waits
+        FROM notification_request a
+        LEFT JOIN notification_template tpl ON tpl.id = a.template_id
+        WHERE r.reason IN ('recovery', 'clear')
+          AND a.sensor_id = r.sensor_id
+          AND a.trigger_kind = r.trigger_kind
+          AND a.trigger_id IS NOT DISTINCT FROM r.trigger_id
+          AND a.channel_key IS NOT DISTINCT FROM r.channel_key
+          AND a.id < r.id
+          AND a.reason NOT IN ('recovery', 'clear')
+          AND a.status = 'pending'
+          AND (a.disposition = 'undecided'
+               OR (a.disposition = 'held' AND a.summary_id IS NOT NULL
+                   AND (a.template_id = r.template_id
+                        OR (tpl.enabled AND tpl.method = ANY($3::text[])))))
+        ORDER BY waits DESC, a.id DESC
+        LIMIT 1
+      ) alarm ON true
       WHERE r.disposition = 'undecided' AND r.status = 'pending'
         -- A template outside its activation schedule (N-12) is left undecided, so its backlog
         -- is summarised as one storm when the schedule reopens rather than in windows that
         -- opened and closed while nobody was listening.
         AND NOT (r.template_id = ANY($2::bigint[]))
+        AND alarm.waits IS NOT TRUE
       ORDER BY r.id
       LIMIT $1
       FOR UPDATE OF r SKIP LOCKED
       `,
-      [limit, [...suppressed]],
+      [limit, [...suppressed], [...methods]],
     );
     return rows.map((row) => ({
       id: Number(row.id),
@@ -77,6 +135,10 @@ export class SummaryRepository {
       method: row.method,
       summarisation: row.summarisation,
       windowSeconds: row.window_seconds,
+      alarmHeldIn:
+        row.alarm_window_id === null
+          ? null
+          : { windowId: Number(row.alarm_window_id), nextAttemptAt: row.alarm_next_attempt_at },
     }));
   }
 
@@ -132,6 +194,23 @@ export class SummaryRepository {
     await q.query(
       `UPDATE notification_request SET disposition = $2, summary_id = $3 WHERE id = $1`,
       [requestId, decision, windowId],
+    );
+  }
+
+  /**
+   * Holds a recovery in the digest its alarm is waiting in (`N-20`).
+   *
+   * The window may already be closed, its digest refused and waiting out a retry. So the
+   * recovery takes the alarm's next try as well: a digest claims only the members that are due,
+   * and one due before its alarm would go out alone, ahead of it, which is the order this exists
+   * to stop.
+   */
+  async holdBeside(q: Queryable, requestId: number, alarm: HeldAlarm): Promise<void> {
+    await q.query(
+      `UPDATE notification_request
+       SET disposition = 'held', summary_id = $2, next_attempt_at = $3
+       WHERE id = $1`,
+      [requestId, alarm.windowId, alarm.nextAttemptAt],
     );
   }
 
