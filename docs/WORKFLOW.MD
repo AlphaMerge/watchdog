@@ -269,7 +269,8 @@ Behaviours that must be right:
   additional messages). **A recovery is never told before its alarm** (`N-20`): one whose alarm
   is still held joins the same digest, listed after it, and one whose alarm is held for another
   template's digest waits for that digest to go. One whose alarm went at once and is waiting out
-  a delivery retry waits for that retry (`N-21`), and goes on its own if the alarm is given up on.
+  a delivery retry waits for that retry (`N-21`), and goes on its own if the alarm is given up on;
+  in the same way, a new alarm waits for the last outage's recovery that is still owed.
 - **Immediate-only channels.** Slack, Teams, HTTP action, script execution and ticket
   assignment are never summarised — they are cheap and often machine-consumed.
 - **Template schedules.** A template can be active only during business hours, with a choice

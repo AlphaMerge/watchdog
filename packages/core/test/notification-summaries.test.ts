@@ -540,11 +540,14 @@ describe(
       );
     });
 
-    it('keeps a recovery waiting only on an owed alarm that something will send', async () => {
+    it('keeps a request waiting only on an owed one of the other kind that will be sent', async () => {
       const summaries = new SummaryRepository();
+      type Kind = 'alarm' | 'recovery';
       interface Case {
         name: string;
-        /** Whether the alarm went to the recovery's own template or to another. */
+        /** What is queued first and what after it: an alarm and its recovery unless said. */
+        kinds?: readonly [Kind, Kind];
+        /** Whether the first went to the second's own template or to another. */
         own: boolean;
         disposition: 'immediate' | 'held';
         status: 'pending' | 'sent' | 'failed';
@@ -603,39 +606,124 @@ describe(
           disposition: 'held',
           waits: true,
         },
+        // The other direction: a Down queued while the last outage's recovery is still owed.
+        {
+          name: 'an alarm behind a recovery awaiting a retry',
+          kinds: ['recovery', 'alarm'],
+          own: true,
+          ...owed,
+          waits: true,
+        },
+        {
+          name: 'an alarm behind a delivered recovery',
+          kinds: ['recovery', 'alarm'],
+          own: true,
+          ...owed,
+          status: 'sent',
+          waits: false,
+        },
+        {
+          name: 'an alarm behind a recovery given up on',
+          kinds: ['recovery', 'alarm'],
+          own: true,
+          ...owed,
+          status: 'failed',
+          waits: false,
+        },
+        {
+          name: 'an alarm behind another template’s recovery, awaiting a retry',
+          kinds: ['recovery', 'alarm'],
+          own: false,
+          ...owed,
+          waits: true,
+        },
+        {
+          name: 'an alarm behind another template’s recovery, disabled',
+          kinds: ['recovery', 'alarm'],
+          own: false,
+          ...owed,
+          template: 'disabled',
+          waits: false,
+        },
+        {
+          // Alarms are not ordered among themselves by this.
+          name: 'an alarm behind another alarm',
+          kinds: ['alarm', 'alarm'],
+          own: true,
+          ...owed,
+          waits: false,
+        },
       ];
 
+      const queued = (templateId: number, kind: Kind): Promise<number> =>
+        queue(
+          templateId,
+          kind === 'alarm'
+            ? { sensor: sensorAt(0) }
+            : { sensor: sensorAt(0), reason: 'recovery', state: 'up' },
+        );
+
       for (const entry of cases) {
+        const [aheadKind, behindKind] = entry.kinds ?? ['alarm', 'recovery'];
         await db.query('DELETE FROM notification_request');
-        const recoveries = await template();
-        const alarms = entry.own ? recoveries : await template();
-        const alarm = await queue(alarms, { sensor: sensorAt(0) });
+        const behindTemplate = await template();
+        const aheadTemplate = entry.own ? behindTemplate : await template();
+        const ahead = await queued(aheadTemplate, aheadKind);
         await db.query(
           `UPDATE notification_request
            SET disposition = $2, status = $3, attempts = 1,
                next_attempt_at = now() + interval '1 minute'
            WHERE id = $1`,
-          [alarm, entry.disposition, entry.status],
+          [ahead, entry.disposition, entry.status],
         );
         if (entry.template === 'disabled') {
           await db.query('UPDATE notification_template SET enabled = false WHERE id = $1', [
-            alarms,
+            aheadTemplate,
           ]);
         }
-        const recovery = await queue(recoveries, {
-          sensor: sensorAt(0),
-          reason: 'recovery',
-          state: 'up',
-        });
-        const suppressed = entry.template === 'suppressed' ? [alarms] : [];
+        const behind = await queued(behindTemplate, behindKind);
+        const suppressed = entry.template === 'suppressed' ? [aheadTemplate] : [];
         const methods = entry.template === 'untransported' ? [] : ['email'];
         const decidable = await db.tx((q) => summaries.undecided(q, 100, suppressed, methods));
         assert.equal(
-          decidable.some((request) => request.id === recovery),
+          decidable.some((request) => request.id === behind),
           !entry.waits,
           entry.name,
         );
       }
+    });
+
+    it('holds a Down beside the recovery ahead of it, so the digest ends on the Down', async () => {
+      // The Warning is held for the digest and its recovery joins it (`N-20`). The sensor then
+      // goes Down: the window's first Down, which the mode would send at once — ahead of a digest
+      // that ends *up*. It joins the digest instead, after the recovery.
+      const templateId = await template();
+      const { seen, transport } = recorder();
+      const dispatcher = dispatcherWith(transport);
+
+      await queue(templateId, { sensor: sensorAt(0), state: 'warning' });
+      await dispatcher.dispatch();
+      await queue(templateId, { sensor: sensorAt(0), reason: 'recovery', state: 'up' });
+      await dispatcher.dispatch();
+      await queue(templateId, { sensor: sensorAt(0), state: 'down' });
+      await dispatcher.dispatch();
+      assert.equal(seen.length, 0, 'the Down is not sent ahead of the digest');
+      assert.deepEqual(
+        (await dispositions()).map((row) => `${row.disposition}/${row.status}`),
+        ['held/pending', 'held/pending', 'held/pending'],
+      );
+
+      await elapse();
+      await dispatcher.dispatch();
+      assert.equal(seen.length, 1);
+      const lines = seen[0]?.body.split('\n') ?? [];
+      assert.equal(lines.length, 3);
+      assert.ok(lines.includes('Ping on edge-router is up'), 'the recovery is in it');
+      assert.deepEqual(lines, [
+        'Ping on edge-router is warning',
+        'Ping on edge-router is up',
+        'Ping on edge-router is down',
+      ]);
     });
 
     // ---------------------------------------------------------------------------------------

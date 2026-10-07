@@ -68,8 +68,11 @@ describe(
     let attempts: string[];
     /** What reached the recipient, in the order it arrived. */
     let inbox: string[];
-    /** Whether to refuse this attempt, and how. Null delivers it. */
-    let refuse: (subject: string, attempt: number) => DeliveryResult | null;
+    /**
+     * Whether to refuse this attempt, and how. Null delivers it. `attempt` counts the attempts
+     * at this subject so far, this one included.
+     */
+    let refuse: (subject: string, attempt: number, requestId: number) => DeliveryResult | null;
     let sensor: number;
 
     /** A dispatcher of its own, which is what a core that has just started has. */
@@ -84,7 +87,7 @@ describe(
             send: (message: OutgoingMessage) => {
               attempts.push(message.subject);
               const tries = attempts.filter((subject) => subject === message.subject).length;
-              const refused = refuse(message.subject, tries);
+              const refused = refuse(message.subject, tries, message.requestId);
               if (refused !== null) return Promise.resolve(refused);
               inbox.push(message.subject);
               return Promise.resolve({ ok: true, detail: 'recorded' } as const);
@@ -160,8 +163,14 @@ describe(
       ).id;
     });
 
-    /** A template in the default mode, so the first Down and the first Up go at once. */
-    async function template(subject = '%sensor is %status'): Promise<number> {
+    /**
+     * A template in the default mode, so the first Down and the first Up go at once — or in
+     * `always-immediate`, which is what a method that is never summarised behaves as.
+     */
+    async function template(
+      subject = '%sensor is %status',
+      summarisation?: 'always-immediate',
+    ): Promise<number> {
       const created = await templates.create(testActor, {
         name: `On-call ${String(process.hrtime.bigint())}`,
         method: 'email',
@@ -169,8 +178,9 @@ describe(
         subject,
         body: subject,
         recipients: [{ kind: 'address', value: 'ops@example.test' }],
+        ...(summarisation === undefined ? {} : { summarisation }),
       });
-      assert.equal(created.summarisation, 'first-down-and-up', 'the default mode');
+      assert.equal(created.summarisation, summarisation ?? 'first-down-and-up');
       return created.id;
     }
 
@@ -343,6 +353,81 @@ describe(
         'initial/immediate/sent',
         'escalation/immediate/sent',
         'recovery/immediate/sent',
+      ]);
+    });
+
+    /**
+     * A Down refused, the sensor back, and Down again while the Up still waits for the first.
+     * Sent at once (`always-immediate`, as a method never summarised is), so nothing but the
+     * ordering stands between the second Down and the recipient.
+     */
+    async function downUpDownWhileTheFirstIsRefused(refusing: typeof refuse): Promise<void> {
+      const templateId = await template('%sensor is %status', 'always-immediate');
+      await trigger({
+        state: 'down',
+        initialLatencySeconds: 0,
+        initialTemplateId: templateId,
+        recoveryTemplateId: templateId,
+      });
+      refuse = refusing;
+
+      await scan(false, 0);
+      await scan(false, 60);
+      await tick(61); // the first Down, refused: its retry is due at +121
+      await scan(true, 90);
+      await tick(91);
+      await scan(false, 100);
+      await scan(false, 110);
+      await tick(111); // the second Down, never tried, and the relay is fine for it
+      assert.deepEqual(
+        await requests(),
+        ['initial/immediate/pending', 'recovery/undecided/pending', 'initial/undecided/pending'],
+        'the second Down is queued, and waits for the Up ahead of it',
+      );
+      assert.deepEqual(inbox, [], 'nothing has reached the recipient yet');
+    }
+
+    it('keeps a second Down behind the recovery that waits for the first', async () => {
+      await downUpDownWhileTheFirstIsRefused((subject, attempt) =>
+        subject === 'ping is down' && attempt === 1
+          ? { ok: false, retryable: true, error: '503 service unavailable' }
+          : null,
+      );
+
+      await tick(121);
+      // Presence first, so an order assertion cannot pass on a message that never came.
+      assert.equal(inbox.length, 3, 'two Downs and an Up');
+      assert.ok(inbox.includes('ping is up'), 'the Up arrived');
+      assert.equal(inbox.at(-1), 'ping is down', 'and the last word is that the sensor is Down');
+      assert.deepEqual(inbox, ['ping is down', 'ping is up', 'ping is down']);
+      assert.deepEqual(await requests(), [
+        'initial/immediate/sent',
+        'recovery/immediate/sent',
+        'initial/immediate/sent',
+      ]);
+    });
+
+    it('releases everything behind a Down once it is given up on', async () => {
+      let first: number | undefined;
+      await downUpDownWhileTheFirstIsRefused((subject, _attempt, requestId) => {
+        if (subject === 'ping is down') first ??= requestId;
+        return requestId === first
+          ? { ok: false, retryable: true, error: '554 message refused' }
+          : null;
+      });
+
+      await tick(121); // attempt 2, refused; the last is due at +241
+      // A length rather than a deepEqual to [], which would narrow `inbox` to `never[]`.
+      assert.equal(inbox.length, 0, 'still nothing while the first Down is being tried');
+
+      await tick(241); // attempt 3, the last: the first Down is given up on
+      assert.equal(inbox.length, 2, 'the Up and the second Down');
+      assert.ok(inbox.includes('ping is up'), 'the Up arrived');
+      assert.deepEqual(inbox, ['ping is up', 'ping is down']);
+      assert.deepEqual(await requests(), [
+        'initial/immediate/failed',
+        'recovery/immediate/sent',
+        'initial/immediate/sent',
       ]);
     });
   },

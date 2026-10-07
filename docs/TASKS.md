@@ -3295,6 +3295,40 @@ because each is a decision rather than a defect:
       **Not done.** A recovery is sent *after* its alarm, never *with* it. Folding the two into
       one message would need a two-line message that no transport has.
 
+      **Review, round 1: a second Down could overtake the waiting recovery.** The first fix
+      ordered a recovery after the alarms ahead of it, and nothing ordered a later alarm after
+      the recovery. Down1 is refused and Up1 waits behind it. The sensor goes Down again, and
+      Down2 is never tried, so the claim's `NULLS FIRST` puts it first. The recipient got Down2,
+      Down1, Up1, so the last word was *up* about a sensor that was Down. This hit
+      never-summarised methods, `always-immediate` and the downs-immediate modes.
+      - **The fix is the same lookup in the other direction.** The lateral now pairs a request
+        with an earlier owed request *of the other kind*: an alarm with a recovery or clear, a
+        recovery or clear with an alarm. So an alarm waits for the last outage's owed recovery
+        exactly as a recovery waits for its alarm. It joins that recovery's digest when the
+        recovery is held in one of its own template's. `alarmHeldIn` became `heldBehind`.
+      - **Chosen over refusing the claim behind any older pending request of the trigger.**
+        - That rule would have to except the members of the digest being claimed, which are all
+          pending at once.
+        - It would also hold an immediate request behind an open window for the window's length.
+        - It would order alarms among themselves, which nobody asked for. The `any kind`
+          mutation shows the cost: it breaks the overflowing-digest test.
+        - The lookup already existed, indexed and bounded, so this is one condition.
+      - **Still bounded.** A request only ever waits for an earlier one, so each chain starts at
+        a request waiting only for its own delivery, which `N-13`'s retries bound. When that
+        request is given up on, everything behind it is released in order.
+      - **Tests.**
+        - `retry-recovery-scenario.test.ts`, 2 new: Down1 refused once, Up1 and Down2 queued
+          inside the retry delay, on an `always-immediate` template. The recipient gets Down,
+          Up, Down. When Down1 is refused until it is given up on, the recipient gets Up, Down.
+        - `notification-summaries.test.ts`: the table grew 6 alarm-behind-recovery cases,
+          including an alarm behind another alarm, which does not wait. One new test: a Down
+          joins the digest after the recovery ahead of it.
+      - **Mutation 12/12.** The 8 above, plus:
+        - one direction only;
+        - any kind;
+        - the same kind;
+        - no digest join for an alarm.
+
 ## Phase 5 — Web UI
 
 - [x] **U-01 — Frontend scaffold** · M · F-01 · React 19 + TypeScript + Vite 8, routing, design

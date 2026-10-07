@@ -396,11 +396,12 @@ export class NotificationDispatcher {
       for (const request of pending) {
         // A recovery whose alarm is still in a digest goes in the same digest, after it
         // (`N-20`), whatever the mode would say about an Up. Sent at once, it told a recipient
-        // the probe was back eight minutes before telling them anything was wrong. One whose
-        // alarm is owed any other way — waiting out a retry, say (`N-21`) — is not in `pending`
-        // at all, and is decided on the pass after its alarm is delivered or given up on.
-        if (request.alarmHeldIn !== null) {
-          await this.#summaries.holdBeside(q, request.id, request.alarmHeldIn);
+        // the probe was back eight minutes before telling them anything was wrong. An alarm
+        // whose previous outage's recovery is still in a digest joins it the same way (`N-21`).
+        // One whose request ahead is owed any other way — waiting out a retry, say — is not in
+        // `pending` at all, and is decided on the pass after that one is delivered or given up on.
+        if (request.heldBehind !== null) {
+          await this.#summaries.holdBeside(q, request.id, request.heldBehind);
           held += 1;
           continue;
         }
