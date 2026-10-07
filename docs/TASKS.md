@@ -3428,6 +3428,20 @@ because each is a decision rather than a defect:
         - hold-back after a permanent refusal;
         - hold-back after the last attempt.
 
+- [ ] **N-22 — an Up on another template can arrive after a newer Down** · S · N-21 · Found
+      2026-10-07 in review of `N-21`. Since `N-21` an alarm waits only for a recovery on its own
+      template, so a Down is never late. The cost: a recovery on another template (other
+      recipients) that is still waiting for its own retry or digest can be delivered after the
+      newer Down, and its recipients hear "up" last while the sensor is Down. **Done when** such a
+      recovery is dropped or marked superseded once a newer alarm of the same sensor and trigger
+      has been sent, with a scenario test (`M-17`).
+
+- [ ] **N-23 — alarms of one trigger are not ordered among themselves** · S · N-21 · Found
+      2026-10-07 in `N-21`. An escalation queued while the initial alarm waits for a retry can be
+      delivered first. Ordering alarms among themselves breaks the overflowing-digest test, so
+      `N-21` left it. **Done when** decided: keep, or order a trigger's alarms (initial, escalation,
+      repeat) per template without delaying any past its mode's promise, with a scenario test.
+
 ## Phase 5 — Web UI
 
 - [x] **U-01 — Frontend scaffold** · M · F-01 · React 19 + TypeScript + Vite 8, routing, design
@@ -9054,6 +9068,50 @@ because each is a decision rather than a defect:
           fails on the name and names the earlier count. Each scan is bounded by `within`.
       - **Mutations 5/5:** the note removed from the silence failure; the helper rethrowing
         without the note; and each type's lookup given a batch with no earlier count.
+
+- [ ] **P-275 — the script groups a runner ended, refused or skipped are not on Probe Health** · S
+      · P-266 · Found 2026-10-07 in `P-266`. The runner counts `scriptGroupsEnded`,
+      `scriptGroupsRefused` and `scriptGroupsRecycled` and logs each, but they are in its stats
+      only. A refused or recycled group is either a forged line or a reused id, which an operator
+      should see. **Done when** the three counts are on the heartbeat and Probe Health (a protocol
+      number after 30, with the capability gate `P-260` used; `P-270` needs one too, so they can
+      share it), with core, metrics and report tests.
+
+- [ ] **P-276 — a probe running as root without `processUid` gives scripts the probe's power** ·
+      S · P-266 · Found 2026-10-07 in review of `P-266`. Every uid check `P-266` added protects
+      only when `probe.processUid` is set. Without it a root probe runs its scripts as root, so
+      a script author already is root. `administration.md` says to set it. **Done when** a probe
+      that starts as root with no `processUid` says so at start-up (a warn line and a Probe Health
+      notice, or `config check` refusing it with a way to opt out), with a test.
+
+- [ ] **P-277 — check every runner that acts on what a child process writes** · S · P-266 ·
+      Found 2026-10-07 in `P-266`. The P-266 review found the runner trusting a line on the check
+      process's stdout to choose what to kill. Only `process-runner.ts` was checked. **Done when**
+      every parent in `packages/probe` and `packages/core` that acts on a child's output (pool
+      workers' messages, check-child lines, ms-setup outcome files, any other) is listed with
+      why what it trusts is safe, and any that is not is fixed with a test.
+
+- [ ] **P-278 — a script leader that exits before the runner reads its line is never recorded**
+      · S · P-266 · Found 2026-10-07 in `P-266`. A script whose leader exits before the runner
+      reads its `started` line cannot be told from someone else's process once the leader is
+      reaped, so it is not recorded. If the check process then dies outright, what the script
+      left in its group keeps running. **Done when** the check process holds the leader unreaped
+      (or passes a pidfd) until the runner has acknowledged the group, or the gap is measured and
+      documented as accepted, with a test either way.
+
+- [ ] **P-279 — two SSH follow-ups from `P-259`** · S · P-259 · Found 2026-10-07 in `P-259`.
+      `ssh-sensors.test.ts` "return promptly when the check is aborted" still asserts
+      `Date.now() - started < 3_000`, a wall-clock upper bound. And no test resets a connection
+      while a check runs through the probe's worker pool to the result sink. **Done when** the
+      abort test waits with `within` for what it asserts, and a probe-level test drives an SSH
+      reset end to end and asserts the stored failure names phase `exec`.
+
+- [ ] **P-280 — an ssh2 upgrade could quietly break what `P-259` relies on** · S · P-259 · Found
+      2026-10-07 in `P-259`. `SshSession` reads the client channel's `incoming.state`, and the
+      simulator uses `_protocol.disconnect` and `_protocol.channelEOF` with `outgoing.id`. None
+      is public ssh2 API. **Done when** a test fails by name if any of them is missing or changes
+      meaning in the installed ssh2, and the dependency notes say to re-check them on upgrade.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -19661,6 +19719,12 @@ because each is a decision rather than a defect:
       long outage every held-back page resumes on the same sweep, N snapshot reads at once on
       a database that has just come back; spread them. **Done when** each is fixed with a
       test.
+
+- [ ] **U-29 — the add-sensor form guesses why a probe has no numbers** · S · P-255 · Found
+      2026-10-07 in `P-255`. `GET /probes/{id}/health` now says why a probe's numbers are missing
+      (`numbersUnavailable.reason`), but `listenerNotice` in
+      `packages/web/src/routes/add-sensor-model.ts` still infers it from `scheduled`. **Done when**
+      the form reads the reason and says "no heartbeat yet" apart from "too old", with a test.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
