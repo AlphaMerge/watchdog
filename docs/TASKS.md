@@ -8044,7 +8044,7 @@ because each is a decision rather than a defect:
         EXE/Script sensor with a 10 s timeout on a loaded probe can get 2 s of its own and report
         that it exceeded its timeout.
 
-- [ ] **P-259 — nothing tests a device that resets the connection mid-command** · S · A-65 ·
+- [x] **P-259 — nothing tests a device that resets the connection mid-command** · S · A-65 ·
       Found 2026-10-05 in `P-257`. Read from the code, an SSH device that drops the connection
       while a command runs cannot raise an uncaught exception in a probe — `SshSession` listens
       for the client's errors and ssh2 ends the channel — but the exec then resolves with
@@ -8052,6 +8052,44 @@ because each is a decision rather than a defect:
       every check failure to carry. No test covers it. **Done when** an `ssh-session` test has
       the simulator reset the connection mid-command, asserts the check fails (not succeeds
       on an empty result) with a message naming the phase, and the probe stays healthy.
+
+      **P-259 outcome. A command the connection took with it is an `SshError` in the `exec`
+      phase, and the simulator can reset a connection under a command.**
+      - **`SshSession.exec`**: a channel that closes with neither an exit code nor a signal
+        while the session's connection has gone (`#closed`, set by the client's `error`,
+        `end` or `close`, which `ssh2` emits before it closes the channels) rejects with
+        `phase: 'exec'`, the host and the command, the client's error as `cause`, and *the
+        connection to HOST was lost while running COMMAND, before the command reported an exit
+        status — what it wrote may be incomplete, so nothing of it is used: read ECONNRESET*.
+        What it wrote is dropped, not handed over. A channel closed with no exit status on a
+        connection that is **still up** stays a result with `code: null`, as before: some
+        servers never send one, and that command finished. `close()` records *this probe
+        closed the connection*, so a command cut off by `closeAll` is not blamed on the server.
+      - **Was it reachable as a wrong answer, not only a vague one?** Yes: `ssh.load` never
+        reads the exit code, so a reset after `/proc/loadavg`'s line and before `nproc`'s
+        reported the load with no processor count, as a success. `ssh.meminfo`, `ssh.diskfree`
+        and `ssh.script` read `code !== 0` and blamed the host (*this sensor is for a Linux
+        host*, *df could not read /*, *exited -1*). All four now let the `SshError` through
+        `sshCheck`, whose `withSsh` gives the lease back; none needed a change of its own.
+      - **The simulator** (`TestSshServer`) now owns its TCP listener and hands each socket to
+        `ssh2.Server.injectSocket`, keyed by the client's address and port so a connection can
+        find its socket (`ssh2` gives a handler none). `CommandResult.reset` writes `stdout`
+        and then sends a real RST (`resetAndDestroy`) a turn later; `noExitStatus` closes the
+        channel with no exit status on a live connection. `ssh2.d.ts` declares `injectSocket`
+        and the `connection` event's `info`.
+      - **Tests.** `ssh-session.test.ts`, *a device that resets the connection mid-command*:
+        the exec fails with the phase, host, command, message and `ECONNRESET`, the session
+        reads closed and refuses the next command; through a pool, the lease is back
+        (`inUse` 0), the next check reconnects (`stale` 1, `opened` 2, server connections 2)
+        and `uncaughtExceptionMonitor` heard nothing; a no-exit-status channel on a live
+        connection still resolves `code: null` with its output. `ssh-sensors.test.ts`: each
+        of the four types, given an answer it could read or misread and then a reset, fails
+        with the lost-connection message. Mutations: without the new branch three of the four
+        fail (the no-exit-status case passes); without the liveness condition only the
+        no-exit-status case fails.
+      - **Not done:** the probe-level path (worker pool, `result-sink`) was not exercised with
+        a reset; it carries a thrown check error as it carries any other, and the sensor id is
+        the runner's to add, as for every type.
 
 - [x] **P-260 — a check in a child process spends its timeout loading the catalogue** · S ·
       P-36 · Found 2026-10-05 in `P-258`. `check-child.ts` arms the check's abort timer, and
@@ -8459,12 +8497,32 @@ because each is a decision rather than a defect:
       it must contain (with `config check` saying why), or the worker is told the setting and
       fits its grace inside it; with a test.
 
-- [ ] **P-268 — two SSH session tests keep under a second of slack** · S · P-261 · Found
+- [x] **P-268 — two SSH session tests keep under a second of slack** · S · P-261 · Found
       2026-10-07 in `P-261`. `packages/probe/test/ssh-session.test.ts` asserts a wall-clock
       upper bound at :451 with about 450 ms to spare and at :440 with about 800 ms, the shape
       `P-261` took off `pinned-target.test.ts`. On the loaded VM either can read red with the
       code right. **Done when** both run on a fake clock or wait with `within` for what they
       assert, with no wall-clock upper bound left in the file.
+
+      **P-268 outcome. The two run on a fake clock, and the file has no wall-clock upper bound
+      left.** The file is `packages/sensors/test/ssh-session.test.ts`; the ticket named the
+      probe package.
+      - **`SshPoolOptions.monotonic`**: the clock the lookup before a handshake is timed on
+        (`A-65`), `process.hrtime.bigint` unless a test hands one. The A-65 cases give the pool
+        a clock the guard moves (1,200 ms of lookup without waiting for it) and spy on
+        `SshSession.open` with `t.mock.method`, asserting the timeout it was handed: exactly
+        800 of 2,000, and 1 of 600 after 900 of lookup. The handshake still runs for real
+        against `MuteSshServer`, inside `within`. *A handshake with no lookup* keeps its
+        lower bound (≥ 950 ms) and asserts it was handed the whole 1,000. Mutations: the
+        injected clock ignored, or the lookup's time not subtracted, each fail both cases
+        (handed 2,000 and 600).
+      - **The other five upper bounds in the file went too**: the command timeout (< 3 s) and
+        the abort (< 2 s) now wait with `within`, and their messages are the proof of which
+        ended them; three *long before the connect timeout* asserts (< 5 s) were redundant
+        with the `cancelled` predicate, which a connect timeout's *could not connect* fails, and
+        with the `within` bounds already on each wait. `within` moved to the top of the file.
+      - **Not done:** `ssh-sensors.test.ts` *return promptly when the check is aborted* still
+        asserts `Date.now() - started < 3_000`, outside this ticket's file.
 
 - [ ] **P-269 — a sensor new to a running probe misses what arrives before its first scan** ·
       S · P-254 · Found 2026-10-07 in `P-254`. A trap, syslog or flow sensor assigned to a probe

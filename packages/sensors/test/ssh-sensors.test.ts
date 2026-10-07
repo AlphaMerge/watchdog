@@ -311,6 +311,41 @@ describe('all four types', () => {
     assert.match(execution.message ?? '', /host key not checked/);
   });
 
+  it('fail when the device resets the connection mid-command, rather than reading half an answer (P-259)', async () => {
+    // Each answer is one the type could have read, or misread: `ssh.load` reported the load with
+    // no processor count, and the others blamed the host — "this sensor is for a Linux host",
+    // "df could not read /", "exited -1" — for a connection that went.
+    const cases: {
+      type: SensorType;
+      command: string;
+      stdout: string;
+      params?: Record<string, unknown>;
+    }[] = [
+      { type: sshLoad, command: LOAD_COMMAND, stdout: '0.50 0.40 0.30 1/123 4567\n' },
+      { type: sshMeminfo, command: 'cat /proc/meminfo', stdout: `${MEMINFO}\n` },
+      { type: sshDiskFree, command: "df -P -k '/'", stdout: `${DF}\n` },
+      {
+        type: sshScript,
+        command: './check.sh',
+        stdout: 'value:1\n',
+        params: { command: './check.sh', channels: [{ key: 'value' }] },
+      },
+    ];
+    for (const { type, command, stdout, params } of cases) {
+      server.answer(command, { stdout, reset: true });
+      await assert.rejects(
+        () => run(type, params),
+        (error: unknown) =>
+          error instanceof Error &&
+          error.message.startsWith(
+            `the connection to 127.0.0.1 was lost while running ${command}, before the command ` +
+              'reported an exit status',
+          ),
+        type.id,
+      );
+    }
+  });
+
   it('return promptly when the check is aborted', async () => {
     server.behave({ password: 'monitor', hang: true });
     const controller = new AbortController();

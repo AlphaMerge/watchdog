@@ -61,6 +61,11 @@ export interface SshPoolOptions {
    * because refusing would fail a check to protect a descriptor budget.
    */
   readonly maxConnections?: number;
+  /**
+   * The monotonic clock, in nanoseconds, that the lookup before a handshake is timed on
+   * (`A-65`). `process.hrtime.bigint` unless a test hands it one it can move (`P-268`).
+   */
+  readonly monotonic?: () => bigint;
 }
 
 const DEFAULT_IDLE_MS = 120_000;
@@ -124,6 +129,7 @@ export class SshSessionPool {
   readonly #opening = new Map<string, Opening>();
   readonly #idleMs: number;
   readonly #maxConnections: number;
+  readonly #monotonic: () => bigint;
   #sweeper: NodeJS.Timeout | undefined;
   readonly #stats: SshPoolStats = {
     connections: 0,
@@ -141,6 +147,7 @@ export class SshSessionPool {
   constructor(options: SshPoolOptions = {}) {
     this.#idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
     this.#maxConnections = options.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
+    this.#monotonic = options.monotonic ?? (() => process.hrtime.bigint());
   }
 
   /**
@@ -223,9 +230,9 @@ export class SshSessionPool {
       // **The lookup and the handshake share the one connect timeout** (`A-65`), as they did
       // when `ssh2`'s socket made the lookup: what the guard took is taken from what the
       // handshake has, so a connection is never opened in more than `connectTimeoutMs`.
-      const startedAt = process.hrtime.bigint();
+      const startedAt = this.#monotonic();
       const checked = await target.guard?.(signal);
-      const spentMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+      const spentMs = Number(this.#monotonic() - startedAt) / 1e6;
       const wholeMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
       return SshSession.open(
         checked === undefined ? target : { ...target, checked },

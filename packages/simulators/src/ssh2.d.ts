@@ -13,6 +13,7 @@
  */
 declare module 'ssh2' {
   import type { EventEmitter } from 'node:events';
+  import type { Socket } from 'node:net';
 
   export interface ServerConfig {
     hostKeys: (string | Buffer)[];
@@ -77,8 +78,20 @@ declare module 'ssh2' {
     listen(port: number, host: string, callback?: () => void): this;
     address(): { port: number; address: string } | null;
     close(callback?: (error?: Error) => void): this;
-    on(event: 'connection', listener: (connection: ServerConnection) => void): this;
+    /**
+     * `info` names the client's end of the socket, which is how the simulator finds the socket a
+     * connection runs on (`P-259`): `ssh2` hands a connection's handler nothing else of it.
+     */
+    on(
+      event: 'connection',
+      listener: (
+        connection: ServerConnection,
+        info: { readonly ip?: string; readonly port?: number },
+      ) => void,
+    ): this;
     on(event: string, listener: (...args: never[]) => void): this;
+    /** Serves a socket accepted elsewhere as though this server's own listener had accepted it. */
+    injectSocket(socket: Socket): void;
   }
 
   export const utils: {

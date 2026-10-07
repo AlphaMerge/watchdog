@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { after, before, beforeEach, describe, it } from 'node:test';
+import { after, before, beforeEach, describe, it, type TestContext } from 'node:test';
 import { createHash } from 'node:crypto';
 import { createServer, type Socket } from 'node:net';
 import { SshError, SshSession } from '../src/support/ssh/session.js';
@@ -49,6 +49,26 @@ function credentials(over: Partial<Record<string, unknown>> = {}): SshCredential
 }
 
 const signal = (): AbortSignal => new AbortController().signal;
+
+/**
+ * A wait of this file's own, so a case that hangs fails here and not at the suite's end — and
+ * the bound every wait on the server is given in place of a wall-clock assert (`P-268`).
+ */
+async function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${what} did not happen within ${String(ms)} ms`));
+        }, ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 describe('reading a stored SSH credential', () => {
   it('refuses one with no user name', () => {
@@ -284,12 +304,12 @@ describe('running a command', () => {
   it('gives up on a command that never finishes, naming it', async () => {
     server.behave({ password: 'monitor', hang: true });
     const session = await SshSession.open(target(), credentials(), { commandTimeoutMs: 300 });
-    const started = Date.now();
+    // The message is the proof it was the command timeout that ended it; `within` only stops a
+    // case that hangs from waiting out the suite (`P-268`).
     await assert.rejects(
-      () => session.exec('sleep 9999', signal()),
+      within(session.exec('sleep 9999', signal()), 5_000, 'the command timeout'),
       /sleep 9999 did not finish on 127\.0\.0\.1 within 300 ms/,
     );
-    assert.ok(Date.now() - started < 3_000);
     session.close();
   });
 
@@ -311,13 +331,15 @@ describe('running a command', () => {
     server.behave({ password: 'monitor', hang: true });
     const session = await SshSession.open(target(), credentials(), { commandTimeoutMs: 30_000 });
     const controller = new AbortController();
-    const started = Date.now();
     const pending = session.exec('sleep 9999', controller.signal);
     setTimeout(() => {
       controller.abort();
     }, 50);
-    await assert.rejects(() => pending, /cancelled while running a command/);
-    assert.ok(Date.now() - started < 2_000);
+    // Promptly: the command timeout is thirty seconds, and the message says it was the abort.
+    await assert.rejects(
+      within(pending, 5_000, 'the abort ending the command'),
+      /cancelled while running a command/,
+    );
 
     server.behave({ password: 'monitor' });
     server.answer('echo ok', { stdout: 'ok\n' });
@@ -330,6 +352,101 @@ describe('running a command', () => {
     const session = await SshSession.open(target(), credentials());
     session.close();
     await assert.rejects(() => session.exec('uptime', signal()), /connection to .* is closed/);
+  });
+});
+
+describe('a device that resets the connection mid-command (P-259)', () => {
+  // The simulator writes part of an answer and then resets the TCP connection under the
+  // command, before any exit status: a device rebooting, or a firewall dropping the session.
+  // `ssh2` closes the channel with no exit code when its socket goes, which used to resolve as
+  // `code: null` and reach a sensor as an empty answer, or as half of one.
+  const lost = (command: string) => (error: unknown) =>
+    error instanceof SshError &&
+    error.phase === 'exec' &&
+    error.host === '127.0.0.1' &&
+    error.command === command &&
+    error.message.startsWith(
+      `the connection to 127.0.0.1 was lost while running ${command}, before the command ` +
+        'reported an exit status',
+    ) &&
+    // The reset itself, as the socket reported it: the underlying error, not only ours.
+    /ECONNRESET/.test(error.message);
+
+  it('fails the command, naming the host, the command and the phase', async () => {
+    server.answer('cat /proc/loadavg', { stdout: '0.50 0.40 0.30 1/123 4567\n', reset: true });
+    const session = await SshSession.open(target(), credentials());
+    try {
+      await assert.rejects(
+        within(session.exec('cat /proc/loadavg', signal()), 5_000, 'the command ending'),
+        lost('cat /proc/loadavg'),
+      );
+      assert.equal(session.closed, true, 'the session knows its connection is gone');
+      // And says so to the next command, rather than hanging on a dead connection.
+      await assert.rejects(
+        within(session.exec('uptime', signal()), 5_000, 'the next command'),
+        /connection to 127\.0\.0\.1 is closed/,
+      );
+    } finally {
+      session.close();
+    }
+  });
+
+  it('leaves the probe healthy: nothing thrown elsewhere, the lease given back, the next check reconnects', async () => {
+    const uncaught: unknown[] = [];
+    const onUncaught = (error: unknown): void => {
+      uncaught.push(error);
+    };
+    process.on('uncaughtExceptionMonitor', onUncaught);
+    const pool = new SshSessionPool();
+    server.answer('./check.sh', { stdout: 'value:1\n', reset: true });
+    server.answer('uptime', { stdout: 'up\n' });
+    try {
+      await assert.rejects(
+        within(
+          withSsh(target(), credentials(), {}, (s) => s.exec('./check.sh', signal()), pool),
+          5_000,
+          'the check ending',
+        ),
+        lost('./check.sh'),
+      );
+      // The lease came back though the check threw: a connection held for ever would be counted
+      // busy for ever and never evicted.
+      assert.equal(pool.stats().inUse, 0);
+
+      const out = await within(
+        withSsh(target(), credentials(), {}, (s) => s.exec('uptime', signal()), pool),
+        5_000,
+        'the next check',
+      );
+      assert.equal(out.stdout, 'up\n');
+      const stats = pool.stats();
+      assert.equal(stats.stale, 1, 'the dead connection was found and replaced');
+      assert.equal(stats.opened, 2);
+      assert.equal(stats.connections, 1);
+      assert.equal(stats.inUse, 0);
+      assert.equal(server.connections, 2);
+
+      // A turn for anything the reset left behind to surface.
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(uncaught, [], 'the reset escaped as an uncaught exception');
+    } finally {
+      process.off('uncaughtExceptionMonitor', onUncaught);
+      pool.closeAll();
+    }
+  });
+
+  it('still answers a command whose channel closed with no exit status on a live connection', async () => {
+    // Not every server sends one. The connection is up, the command finished, and what it wrote
+    // is whole: that stays a result for the sensor type to read, as it always was.
+    server.answer('quiet', { stdout: 'ok\n', noExitStatus: true });
+    const session = await SshSession.open(target(), credentials());
+    try {
+      const result = await within(session.exec('quiet', signal()), 5_000, 'the command');
+      assert.deepEqual(result, { stdout: 'ok\n', stderr: '', code: null, signal: null });
+      assert.equal(session.closed, false);
+    } finally {
+      session.close();
+    }
   });
 });
 
@@ -402,53 +519,75 @@ describe('reusing connections', () => {
       await mute.stop();
     });
 
-    /** How long an open that cannot succeed took, behind a guard that takes `guardMs`. */
-    async function failedOpenMs(guardMs: number | null, connectTimeoutMs: number): Promise<number> {
-      const pool = new SshSessionPool();
+    /**
+     * An open that cannot succeed, behind a guard that takes `guardMs` of a clock the test moves
+     * (`P-268`): the connect timeout the handshake was handed, and how long the open took.
+     *
+     * The lookup's time is fake and the handshake's is real. Measuring both on the wall clock
+     * left these cases under a second of slack against an upper bound, which a loaded VM can
+     * spend; what the pool hands `SshSession.open` is the claim, and it is exact on a fake clock.
+     */
+    async function failedOpen(
+      t: TestContext,
+      guardMs: number | null,
+      connectTimeoutMs: number,
+    ): Promise<{ handedMs: number | undefined; tookMs: number }> {
+      let now = 0n;
+      const pool = new SshSessionPool({ monotonic: () => now });
+      const open = t.mock.method(SshSession, 'open');
       const startedAt = performance.now();
       try {
         await assert.rejects(
-          pool.acquire(
-            {
-              host: '127.0.0.1',
-              port: mute.port,
-              ...(guardMs === null
-                ? {}
-                : {
-                    guard: async () => {
-                      await new Promise((resolve) => setTimeout(resolve, guardMs));
-                      return undefined;
-                    },
-                  }),
-            },
-            credentials({ hostKeyPolicy: 'accept-any' }),
-            { connectTimeoutMs },
+          within(
+            pool.acquire(
+              {
+                host: '127.0.0.1',
+                port: mute.port,
+                ...(guardMs === null
+                  ? {}
+                  : {
+                      guard: () => {
+                        now += BigInt(guardMs) * 1_000_000n;
+                        return Promise.resolve(undefined);
+                      },
+                    }),
+              },
+              credentials({ hostKeyPolicy: 'accept-any' }),
+              { connectTimeoutMs },
+            ),
+            connectTimeoutMs + 5_000,
+            'the handshake timing out',
           ),
           /could not connect to 127\.0\.0\.1/,
         );
-        return performance.now() - startedAt;
+        assert.equal(open.mock.callCount(), 1, 'one handshake');
+        return {
+          handedMs: open.mock.calls[0]?.arguments[2]?.connectTimeoutMs,
+          tookMs: performance.now() - startedAt,
+        };
       } finally {
         pool.closeAll();
       }
     }
 
-    it('gives the lookup and the handshake one connect timeout between them', async () => {
+    it('gives the lookup and the handshake one connect timeout between them', async (t) => {
       // 1,200 ms of lookup and a 2,000 ms timeout. Started after the lookup, the handshake's
-      // clock ran to 3,200 ms; shared, the open ends at 2,000.
-      const took = await failedOpenMs(1_200, 2_000);
-      assert.ok(took >= 1_900, `ended early, at ${String(Math.round(took))} ms`);
-      assert.ok(took < 2_800, `the lookup was not counted: ${String(Math.round(took))} ms`);
+      // clock ran to 3,200 ms; shared, the handshake has the 800 left.
+      const { handedMs } = await failedOpen(t, 1_200, 2_000);
+      assert.equal(handedMs, 800, 'the lookup was not counted');
     });
 
-    it('still gives a handshake with no lookup before it the whole timeout', async () => {
-      const took = await failedOpenMs(null, 1_000);
-      assert.ok(took >= 950, `ended early, at ${String(Math.round(took))} ms`);
+    it('still gives a handshake with no lookup before it the whole timeout', async (t) => {
+      const { handedMs, tookMs } = await failedOpen(t, null, 1_000);
+      assert.equal(handedMs, 1_000);
+      // A lower bound only, which load cannot break: the handshake really was given the time.
+      assert.ok(tookMs >= 950, `ended early, at ${String(Math.round(tookMs))} ms`);
     });
 
-    it('leaves a handshake no time when the lookup used it all', async () => {
-      const took = await failedOpenMs(900, 600);
-      assert.ok(took >= 900);
-      assert.ok(took < 1_350, `the handshake was given time again: ${String(Math.round(took))} ms`);
+    it('leaves a handshake no time when the lookup used it all', async (t) => {
+      // The least `ssh2` is handed is a millisecond: none would read as no timeout at all.
+      const { handedMs } = await failedOpen(t, 900, 600);
+      assert.equal(handedMs, 1, 'the handshake was given time again');
     });
 
     it('opens a connection as before when the lookup is quick', async () => {
@@ -481,23 +620,6 @@ describe('reusing connections', () => {
       const anyKey = () => credentials({ hostKeyPolicy: 'accept-any' });
       const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-      /** A wait of this file's own, so a case that hangs fails here and not at the suite's end. */
-      async function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
-        let timer: NodeJS.Timeout | undefined;
-        try {
-          return await Promise.race([
-            promise,
-            new Promise<never>((_, reject) => {
-              timer = setTimeout(() => {
-                reject(new Error(`${what} did not happen within ${String(ms)} ms`));
-              }, ms);
-            }),
-          ]);
-        } finally {
-          clearTimeout(timer);
-        }
-      }
-
       /** The connection the listener accepts next, and a promise of its closing. */
       const nextAccepted = (): Promise<{ socket: Socket; closed: Promise<void> }> => mute.next();
 
@@ -526,19 +648,19 @@ describe('reusing connections', () => {
       it('SshSession.open ends when its signal does, and the far end sees it go', async () => {
         const controller = new AbortController();
         const arriving = nextAccepted();
-        const startedAt = performance.now();
         const opening = SshSession.open(
           mutely(),
           anyKey(),
           { connectTimeoutMs: LONG_MS },
           controller.signal,
         );
-        const seen = watched(opening);
+        watched(opening);
         const { closed } = await within(arriving, 5_000, 'the listener accepting');
         controller.abort();
+        // Long before the ten-second connect timeout: `cancelled` is the abort's own message,
+        // which the timeout's (`could not connect`) is not (`P-268`).
         await assert.rejects(within(opening, 2_000, 'the open ending'), cancelled);
         await within(closed, 2_000, 'the socket closing at the listener');
-        assert.ok(seen.at - startedAt < 5_000, 'and long before the connect timeout');
       });
 
       it('destroys the socket, where ending it would wait for a listener that never closes', async () => {
@@ -898,7 +1020,6 @@ describe('reusing connections', () => {
       it('an SSH check passes its own signal, so a cancelled check ends in the handshake', async () => {
         const controller = new AbortController();
         const arriving = nextAccepted();
-        const startedAt = performance.now();
         const check = sshCheck(
           {
             sensorId: 69,
@@ -914,7 +1035,6 @@ describe('reusing connections', () => {
         controller.abort();
         await assert.rejects(within(check, 2_000, 'the check ending'), cancelled);
         await within(closed, 2_000, 'the socket closing at the listener');
-        assert.ok(performance.now() - startedAt < 5_000);
       });
 
       it('a caller arriving as an open is abandoned starts its own, and is not told it was cancelled (A-73)', async () => {
@@ -966,20 +1086,18 @@ describe('reusing connections', () => {
         const before = mute.connections;
         const arriving = nextAccepted();
         const options = { connectTimeoutMs: LONG_MS };
-        const startedAt = performance.now();
         const lease = pool.acquire(mutely(), anyKey(), options);
         const joined = pool.acquire(mutely(), anyKey(), options, new AbortController().signal);
-        const seen = [watched(lease), watched(joined)];
+        watched(lease);
+        watched(joined);
         const { closed } = await within(arriving, 5_000, 'the listener accepting');
 
         pool.closeAll();
+        // Long before the timeout: both are told they were cancelled, which a connect timeout
+        // does not say (`P-268`).
         await assert.rejects(within(lease, 2_000, 'the acquire ending'), cancelled);
         await assert.rejects(within(joined, 2_000, 'the joined acquire ending'), cancelled);
         await within(closed, 2_000, 'the socket closing at the listener');
-        assert.ok(
-          seen.every((one) => one.at - startedAt < 5_000),
-          'long before the timeout',
-        );
         await sleep(50);
         const stats = pool.stats();
         assert.deepEqual(

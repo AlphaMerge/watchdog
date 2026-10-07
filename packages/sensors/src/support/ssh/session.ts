@@ -92,7 +92,11 @@ const DEFAULTS = {
 export interface SshExecResult {
   readonly stdout: string;
   readonly stderr: string;
-  /** Null when the command was killed by a signal rather than exiting. */
+  /**
+   * Null when the command was killed by a signal rather than exiting, or when a server that
+   * sends no exit status closed the channel. Never because the connection went: that is an
+   * `SshError` (`P-259`).
+   */
   readonly code: number | null;
   readonly signal: string | null;
 }
@@ -127,6 +131,8 @@ export class SshSession {
   readonly #options: Required<SshSessionOptions>;
   readonly #verdict: HostKeyVerdict;
   #closed = false;
+  /** What the connection reported as it went, for a command it took with it (`P-259`). */
+  #lost: Error | undefined;
 
   private constructor(
     client: Client,
@@ -140,8 +146,9 @@ export class SshSession {
     this.#verdict = verdict;
     // A client that emits 'error' with nothing listening throws on the next tick and takes the
     // worker down — one unreachable host would kill checks for hundreds of others.
-    client.on('error', () => {
+    client.on('error', (error: Error) => {
       this.#closed = true;
+      this.#lost ??= error;
     });
     client.on('close', () => {
       this.#closed = true;
@@ -434,6 +441,25 @@ export class SshSession {
           take(chunk, 'err');
         });
         stream.on('close', (code?: number | null, sig?: string | null) => {
+          // **A channel the connection took with it is a failure, not a result** (`P-259`).
+          // `ssh2` closes every channel when the socket goes, after telling the client, so a
+          // command that was running when the device reset the connection ends here with no
+          // exit status — which used to resolve as `code: null` and reach a sensor as an empty
+          // answer, or as half of one. A channel closed with no status on a connection that is
+          // still up is a server that does not send one, and stays a result.
+          if (typeof code !== 'number' && typeof sig !== 'string' && this.#closed) {
+            finish(() => {
+              reject(
+                new SshError(
+                  `the connection to ${this.#host} was lost while running ${command}, before ` +
+                    'the command reported an exit status — what it wrote may be incomplete, so ' +
+                    `nothing of it is used: ${this.#lost?.message ?? 'the server closed the connection'}`,
+                  { host: this.#host, phase: 'exec', command, cause: this.#lost },
+                ),
+              );
+            });
+            return;
+          }
           finish(() => {
             resolve({
               stdout,
@@ -450,6 +476,8 @@ export class SshSession {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    // So that a command still running on it is not reported as the server's doing.
+    this.#lost = new Error('this probe closed the connection');
     try {
       this.#client.end();
     } catch {

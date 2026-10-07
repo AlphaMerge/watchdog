@@ -1,6 +1,6 @@
 import { createServer, type Server as TcpServer, type Socket } from 'node:net';
 import ssh2 from 'ssh2';
-import type { Server, ServerChannel, ServerConnection } from 'ssh2';
+import type { ServerChannel, ServerConnection } from 'ssh2';
 
 /**
  * A real SSH server, on a real socket, that misbehaves on request.
@@ -38,6 +38,18 @@ export interface CommandResult {
   readonly code?: number;
   /** Bytes of `x` to write instead of `stdout`, for the output-bound test. */
   readonly bulkBytes?: number;
+  /**
+   * Write `stdout`, then reset the TCP connection under the command before it reports an exit
+   * status (`P-259`): a device that reboots, or a firewall that drops the session, mid-command.
+   * The reset is a real RST on the socket, not an SSH disconnect, so the client hears it the way
+   * it hears a device that went away.
+   */
+  readonly reset?: boolean;
+  /**
+   * Close the channel without sending an exit status, as some embedded servers do (`P-259`): a
+   * command that finished, on a connection that is still up, with nothing to say how.
+   */
+  readonly noExitStatus?: boolean;
 }
 
 /**
@@ -65,7 +77,14 @@ kmh/KuLpko4Y2Q2oT+He4lsvja1BTPALq1pYOefKVtBtAAAAAAECAwQF
 `;
 
 export class TestSshServer {
-  readonly #server: Server;
+  /**
+   * The listener, ours rather than `ssh2`'s (`P-259`): each socket it accepts is handed to the
+   * SSH server with `injectSocket`, and kept, so a command can reset the connection it runs on.
+   * `ssh2` gives a connection's handler no way to its socket.
+   */
+  readonly #listener: TcpServer;
+  /** Accepted sockets by the client's address and port, which is how a connection names its own. */
+  readonly #sockets = new Map<string, Socket>();
   /**
    * Live connections, so `stop()` can end them rather than give up on them (`P-70`).
    *
@@ -96,16 +115,27 @@ export class TestSshServer {
     readonly message: string;
   }[] = [];
 
-  private constructor(server: Server) {
-    this.#server = server;
+  private constructor(listener: TcpServer) {
+    this.#listener = listener;
   }
 
   static async start(hostKey?: string): Promise<TestSshServer> {
     const key = hostKey ?? SIMULATOR_HOST_KEY;
     const server = new ssh2.Server({ hostKeys: [key] });
-    const instance = new TestSshServer(server);
+    const listener = createServer();
+    const instance = new TestSshServer(listener);
 
-    server.on('connection', (connection) => {
+    listener.on('connection', (socket) => {
+      const name = `${String(socket.remoteAddress)}:${String(socket.remotePort)}`;
+      instance.#sockets.set(name, socket);
+      socket.once('close', () => {
+        if (instance.#sockets.get(name) === socket) instance.#sockets.delete(name);
+      });
+      server.injectSocket(socket);
+    });
+
+    server.on('connection', (connection, info) => {
+      const socket = instance.#sockets.get(`${String(info.ip)}:${String(info.port)}`);
       instance.connections += 1;
       instance.#connections.add(connection);
       connection.on('close', () => {
@@ -167,6 +197,22 @@ export class TestSshServer {
           }
           const result = instance.#commands.get(info.command) ?? instance.#fallback;
           const channel: ServerChannel = acceptExec();
+          if (result.reset === true) {
+            if (socket === undefined) {
+              // Said, rather than leaving the command to hang until the client gives up on it.
+              channel.stderr.write('the simulator could not find this connection to reset\n');
+              channel.exit(255);
+              channel.end();
+              return;
+            }
+            if (result.stdout !== undefined) channel.write(result.stdout);
+            // A turn later, so what was written is on the wire ahead of the reset. No exit
+            // status and no channel close: the connection goes out from under the command.
+            setImmediate(() => {
+              socket.resetAndDestroy();
+            });
+            return;
+          }
           if (result.bulkBytes !== undefined) {
             // Written in chunks so the client's bound is hit mid-stream, which is where it has
             // to work — a single write would be one `data` event and prove less.
@@ -180,6 +226,10 @@ export class TestSshServer {
             channel.write(result.stdout);
           }
           if (result.stderr !== undefined) channel.stderr.write(result.stderr);
+          if (result.noExitStatus === true) {
+            channel.close();
+            return;
+          }
           channel.exit(result.code ?? 0);
           channel.end();
         });
@@ -187,13 +237,14 @@ export class TestSshServer {
     });
 
     await new Promise<void>((resolve, reject) => {
-      server.on('error', reject);
+      listener.on('error', reject);
       // Port 0 so tests never collide; 127.0.0.1 so nothing leaves the machine.
-      server.listen(0, '127.0.0.1', () => {
+      listener.listen(0, '127.0.0.1', () => {
         resolve();
       });
     });
-    instance.#port = server.address()?.port ?? 0;
+    const at = listener.address();
+    instance.#port = typeof at === 'object' && at !== null ? at.port : 0;
     return instance;
   }
 
@@ -231,7 +282,7 @@ export class TestSshServer {
     for (const connection of this.#connections) connection.end();
     this.#connections.clear();
     await new Promise<void>((resolve) => {
-      this.#server.close(() => {
+      this.#listener.close(() => {
         resolve();
       });
     });
