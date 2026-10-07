@@ -693,19 +693,42 @@ describe('what a resuming first scan kept out, counted on Probe Health once (`P-
     assert.equal(h.ring.earlier, 41);
   });
 
+  /**
+   * Each episode is nine records: five sensor 1 names, one inside its window, three it reads. So
+   * after `n` episodes sensor 2's late scan names all but the last four, `9n - 4`, and each range
+   * the ring joined takes the four records between two of sensor 1's off that count.
+   */
+  const lateUnion = (episodes: number): number => 9 * episodes - 4;
+
+  it('keeps 32 ranges apart exactly: thirty-two cut pushes and a late scan count the union', () => {
+    // The control for the two below: at the cap, nothing is joined and the count is exact.
+    const { h, named } = parkedRepeatedly(32);
+    assert.equal(named, 160);
+    const late = h.ring.drain(2, TRAP, MINUTE);
+    assert.equal(late.earlier, lateUnion(32));
+    assert.equal(h.ring.earlier, lateUnion(32), 'every record some scan named, once');
+  });
+
+  it('joins the two lowest ranges at the thirty-third, and counts their gap as counted', () => {
+    // One range past the cap: the lowest two become one, so the four records sensor 1 read
+    // between them are taken as counted, and sensor 2's claim from 0 counts four fewer.
+    const { h, named } = parkedRepeatedly(33);
+    assert.equal(named, 165);
+    const late = h.ring.drain(2, TRAP, MINUTE);
+    assert.equal(late.earlier, lateUnion(33));
+    assert.equal(h.ring.earlier, lateUnion(33) - 4);
+  });
+
   it('keeps 32 ranges apart at most, and then counts less than it named, never more', () => {
-    // Forty episodes: forty ranges apart, so the lowest are joined, the records sensor 1 read
-    // between them taken as counted. Every claim above them is still exact; sensor 2's from 0
-    // reaches the joined gaps and counts less than the 356 it named.
+    // Forty episodes: forty ranges apart, so eight joins, each taking the four records sensor 1
+    // read between two of its ranges as counted. Every claim above them is still exact; sensor
+    // 2's from 0 reaches the eight joined gaps and counts 32 fewer than the 356 it named.
     const { h, named } = parkedRepeatedly(40);
     assert.equal(named, 200);
     const late = h.ring.drain(2, TRAP, MINUTE);
-    assert.equal(late.earlier, 356);
-    assert.ok(h.ring.earlier <= 356, `never more than the union: ${String(h.ring.earlier)}`);
-    assert.ok(
-      h.ring.earlier >= 356 - 4 * 8,
-      `less only by the joined gaps: ${String(h.ring.earlier)}`,
-    );
+    assert.equal(late.earlier, lateUnion(40));
+    assert.equal(lateUnion(40), 356);
+    assert.equal(h.ring.earlier, 356 - 8 * 4, 'less by exactly the joined gaps, never more');
   });
 });
 

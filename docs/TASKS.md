@@ -8977,6 +8977,12 @@ because each is a decision rather than a defect:
         `earlier` equals the distinct records some scan named. `listener-restart-scenario`: each
         listener's count after twenty restarted and twenty parked sensors, and the flow
         collector's after the silence case. Protocol, core, metrics and report tests as below.
+      - **Amended on review** (a second commit). The cap test asserted only a range, which the
+        uncapped ring also met, so nothing pinned the cap. Now: 32 cut pushes and a late restart
+        scan give exactly the union (284), the control; a 33rd joins the two lowest ranges and
+        counts exactly 4 fewer (289 of 293); forty count exactly 356 − 8 × 4. **Mutation 2/2
+        killed** (2 tests fail each): the cap loop never running; the cap raised to 40.
+        `ring.test.ts`: 36/36.
 
 - [ ] **P-271 — two more worker spawns are not counted as on their way** · S · P-263 · Found
       2026-10-07 in `P-263`. `#recycle` (a worker terminated for ignoring its abort) and
