@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   capabilitiesFor,
   CpuMeter,
@@ -85,6 +86,11 @@ export interface ProbeHealthSources {
    * Absent under `logPretty`, which writes through pino's own transport, so both channels gap.
    */
   log?: () => LogOutputStats;
+  /**
+   * This process's identifier on the heartbeat (`P-284` review). `PROCESS_INSTANCE` unless a test
+   * sets it.
+   */
+  instanceId?: string;
   /** Injectable so a test does not measure the test runner. */
   process?: {
     cpuUsage: () => NodeJS.CpuUsage;
@@ -130,6 +136,13 @@ interface Unacknowledged {
 const MAX_UNACKNOWLEDGED = 64;
 
 const MB = 1024 * 1024;
+
+/**
+ * Chosen once, when this process loaded the module (`P-284` review), so every reporter in it
+ * sends the same one and the next start sends another. The core reads each running total's
+ * growth against it, which tells a restart from growth however long the link was down.
+ */
+export const PROCESS_INSTANCE = randomUUID();
 
 export class ProbeHealthReporter {
   readonly #sources: ProbeHealthSources;
@@ -219,6 +232,8 @@ export class ProbeHealthReporter {
       // names the sensor. Sent only to a core at protocol 32.
       resultChannelsDropped:
         pool.channelsDropped + (children?.channelsDropped ?? 0) + (drain?.channelsDropped ?? 0),
+      // `P-284` review: which process these totals belong to. Sent only to a core at protocol 32.
+      instanceId: this.#sources.instanceId ?? PROCESS_INSTANCE,
       // Absent when no registry keeps session pools (`P-36`), so the channels gap rather than
       // reading a confident zero on a build that has nothing to report.
       ...(pool.sessions === undefined

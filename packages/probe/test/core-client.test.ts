@@ -415,6 +415,48 @@ describe(
       });
     });
 
+    it('sends a heartbeat the moment it is welcomed, before anything can see it connected (`P-283` review)', async () => {
+      // The core takes a probe it meets for the first time as a baseline from the first report of
+      // the session. The drain sends once the client is `connected`, so a report made before that
+      // holds nothing the drain has discarded on this link, and what it discards next is counted.
+      // A heartbeat interval of a minute, so the one that arrives is the one sent at the welcome.
+      const { core, port } = await TestCore.start(dir);
+      const connectedWhenReported: boolean[] = [];
+      const client: CoreClient = new CoreClient({
+        config: probeConfig(dir, port),
+        logger: silentLogger,
+        agentVersion: '0.1.0',
+        onConfig: () => 0,
+        health: {
+          report: () => {
+            connectedWhenReported.push(client.connected);
+            return { memoryMb: 1 };
+          },
+          acknowledged: () => undefined,
+        },
+      });
+      try {
+        client.start();
+        await core.waitFor((m) => m.type === 'hello');
+        core.send({
+          type: 'welcome',
+          protocolVersion: PROTOCOL_VERSION,
+          coreVersion: '9.9.9',
+          gid: 'probe-live',
+          heartbeatIntervalMs: 60_000,
+          approved: true,
+        });
+        const beat = await core.waitFor((m) => m.type === 'heartbeat');
+        assert.ok(beat.type === 'heartbeat');
+        assert.equal(beat.seq, 1);
+        assert.deepEqual(connectedWhenReported, [false], 'reported before the drain could send');
+        await waitUntil(() => client.connected, 'the client never said it was connected');
+      } finally {
+        await client.stop();
+        await core.stop();
+      }
+    });
+
     it('reports at the version the two ends speak, so a 19 core gets what it records (P-219)', async () => {
       await heartbeating(19, async (core, asked) => {
         await core.waitFor((m) => m.type === 'heartbeat');

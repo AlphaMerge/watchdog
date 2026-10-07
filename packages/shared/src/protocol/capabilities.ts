@@ -190,7 +190,8 @@ export interface ProbeCapabilities {
   scriptGroups: boolean;
   /**
    * Reports the readings it could not send (`P-283`): three fields, `resultChannelsDropped`,
-   * `spoolRejected` and `spoolOversized`, stripped below this together.
+   * `spoolRejected` and `spoolOversized`, and the `instanceId` the core reads every running total
+   * against (`P-284` review), stripped below this together.
    */
   unsendableReadings: boolean;
 }
@@ -333,6 +334,7 @@ export function healthForPeer(health: ProbeHealthReport, peerVersion: number): P
       resultChannelsDropped: _channels,
       spoolRejected: _rejected,
       spoolOversized: _oversized,
+      instanceId: _instance,
       ...older
     } = sent;
     sent = older;

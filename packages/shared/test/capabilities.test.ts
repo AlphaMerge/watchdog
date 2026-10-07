@@ -249,12 +249,14 @@ describe('the health a peer can be sent', () => {
     resultChannelsDropped: 17,
     spoolRejected: 40,
     spoolOversized: 2,
+    instanceId: '0b4c1f2e-7d3a-4e5b-9c6d-8a1f2e3d4c5b',
   };
-  /** `health` as a core at 31 is sent it: everything but 32's three fields (`P-283`). */
+  /** `health` as a core at 31 is sent it: everything but 32's four fields (`P-283`). */
   const {
     resultChannelsDropped: _unsendableChannels,
     spoolRejected: _spoolRejected,
     spoolOversized: _spoolOversized,
+    instanceId: _instanceId,
     ...withoutUnsendable
   } = health;
   /** `health` as a core at 30 is sent it: that, less 31's six fields (`P-270`, `P-275`). */
@@ -524,8 +526,8 @@ describe('the health a peer can be sent', () => {
   });
 
   it('leaves 32’s unsendable readings out for a core at 31, and keeps 31’s', () => {
-    // `P-283`: one capability, three fields, stripped together.
-    const fields = ['resultChannelsDropped', 'spoolRejected', 'spoolOversized'];
+    // `P-283`: one capability, four fields, stripped together.
+    const fields = ['resultChannelsDropped', 'spoolRejected', 'spoolOversized', 'instanceId'];
     for (const version of [16, 26, 29, 30, 31]) {
       const sent = healthForPeer(health, version);
       for (const field of fields) {
@@ -538,6 +540,7 @@ describe('the health a peer can be sent', () => {
     assert.equal(sent.resultChannelsDropped, 17);
     assert.equal(sent.spoolRejected, 40);
     assert.equal(sent.spoolOversized, 2);
+    assert.equal(sent.instanceId, '0b4c1f2e-7d3a-4e5b-9c6d-8a1f2e3d4c5b');
     // Alone, each is stripped below 32 and kept at it.
     for (const field of fields) {
       assert.deepEqual(healthForPeer({ memoryMb: 1, [field]: 3 }, 31), { memoryMb: 1 }, field);
@@ -547,6 +550,27 @@ describe('the health a peer can be sent', () => {
         field,
       );
     }
+  });
+
+  it('knows 32’s instance id in this build’s health schema, as a UUID and nothing else', () => {
+    // `P-284` review. Held per probe for as long as the core runs, so nothing longer is taken.
+    const read = (sent: unknown): unknown => {
+      const parsed = parseProbeToCore({
+        type: 'heartbeat',
+        seq: 1,
+        sentAt: 'now',
+        health: { memoryMb: 12, instanceId: sent },
+      });
+      if (parsed.type !== 'heartbeat') return 'not a heartbeat';
+      assert.equal(parsed.health?.memoryMb, 12, 'the id cost the heartbeat its health');
+      return parsed.health.instanceId;
+    };
+    const id = '0b4c1f2e-7d3a-4e5b-9c6d-8a1f2e3d4c5b';
+    assert.equal(read(id), id);
+    // Anything else is a gap, and the heartbeat is kept (`P-224`).
+    assert.equal(read('x'.repeat(10_000)), undefined);
+    assert.equal(read(id.toUpperCase()), undefined);
+    assert.equal(read(7), undefined);
   });
 
   it('knows 31’s six counts in this build’s health schema, as counts', () => {
@@ -676,6 +700,8 @@ describe('the health a peer can be sent', () => {
       resultChannelsDropped: 32,
       spoolRejected: 32,
       spoolOversized: 32,
+      // `P-284` review: the process the totals belong to, under the same capability.
+      instanceId: 32,
     };
     // The rest predate `P-178`, and a core older than that refuses a newer probe at the handshake,
     // in words, so it is never sent a heartbeat at all. Pinned by count, so that a new field is

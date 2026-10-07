@@ -48,8 +48,10 @@ import { fitResult, RESULT_LIMITS } from './result-fit.js';
  * because the wire could not carry them, and `spoolRejected` and `spoolOversized`, the spooled
  * results the drain discarded because the core refused their batch as invalid or because one was
  * larger than a frame. A core below 32 is sent none of them, and a probe below 32 sends none and
- * their channels gap. (`P-284` changed nothing on the wire: the core counts a probe's refused
- * script groups over five minutes from the running total protocol 31 already carries.)
+ * their channels gap. With them, `instanceId`: an identifier the probe process chose when it
+ * started, so the core can tell a restart from growth exactly when it counts a running total over
+ * five minutes (`P-284`, and its review) — a restart inside a link gap longer than the old
+ * process's uptime leaves both the total and the uptime higher, and only this says so.
  *
  * Version 31 adds six counters under two capabilities. `listenerEarlier` (`P-270`):
  * `trapEarlier`, `syslogEarlier` and `flowEarlier`, what each listener received that a sensor's
@@ -741,6 +743,13 @@ export interface ProbeHealthReport {
    * `P-283`). A running total, absent with the drain. Sent only to a core at protocol 32.
    */
   spoolOversized?: number;
+  /**
+   * A random identifier the probe process chose when it started, the same on every heartbeat it
+   * sends and different on every start (`P-284` review). The core reads a running total's growth
+   * against it: two readings with different ones are two processes, whatever the totals and the
+   * uptimes say. Sent only to a core at protocol 32, with the three above.
+   */
+  instanceId?: string;
   /** The probe process itself: percentage of one core, resident megabytes, seconds since start. */
   cpuPercent?: number;
   memoryMb?: number;
@@ -1132,6 +1141,11 @@ const PROBE_HEALTH_SCHEMA = {
     resultChannelsDropped: { type: 'integer', minimum: 0 },
     spoolRejected: { type: 'integer', minimum: 0 },
     spoolOversized: { type: 'integer', minimum: 0 },
+    // A UUID, and nothing longer: the core holds it per probe for as long as it runs.
+    instanceId: {
+      type: 'string',
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+    },
     cpuPercent: { type: 'number', minimum: 0 },
     memoryMb: { type: 'number', minimum: 0 },
     uptimeSeconds: { type: 'number', minimum: 0 },

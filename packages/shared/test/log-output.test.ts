@@ -195,4 +195,61 @@ describe('DeltaMeter (P-216 part 3)', () => {
     grew.take(10, 600, true);
     assert.equal(grew.take(50, 20, false), 50);
   });
+
+  // **A restart inside a gap longer than the old process's uptime** (`P-284` review). The old
+  // process was read at 100 s with a total of 2; the next reading is an hour later at 3,000 s, so
+  // the uptime rose whether or not it restarted, and only the instance can tell.
+  const GAP: readonly {
+    name: string;
+    total: number;
+    restarted: boolean;
+    withInstance: number;
+    inferred: number;
+  }[] = [
+    {
+      name: 'restarted, the new total equal',
+      total: 2,
+      restarted: true,
+      withInstance: 2,
+      inferred: 0,
+    },
+    {
+      name: 'restarted, the new total below',
+      total: 1,
+      restarted: true,
+      withInstance: 1,
+      inferred: 1,
+    },
+    {
+      name: 'restarted, the new total above',
+      total: 3,
+      restarted: true,
+      withInstance: 3,
+      inferred: 1,
+    },
+    { name: 'not restarted, grown', total: 5, restarted: false, withInstance: 3, inferred: 3 },
+    { name: 'not restarted, unchanged', total: 2, restarted: false, withInstance: 0, inferred: 0 },
+  ];
+  for (const one of GAP) {
+    it(`across a long gap: ${one.name}`, () => {
+      const exact = new DeltaMeter();
+      exact.take(2, 100, false, 'old-process');
+      assert.equal(
+        exact.take(one.total, 3_000, false, one.restarted ? 'new-process' : 'old-process'),
+        one.withInstance,
+        'told by the instance',
+      );
+      // The control: without an instance a restart is inferred, and these are what it infers.
+      const inferred = new DeltaMeter();
+      inferred.take(2, 100, false);
+      assert.equal(inferred.take(one.total, 3_000, false), one.inferred, 'inferred');
+    });
+  }
+
+  it('infers from the totals and uptimes when either reading has no instance', () => {
+    const upgraded = new DeltaMeter();
+    upgraded.take(10, 5_000, false);
+    assert.equal(upgraded.take(12, 5_030, false, 'first-with-one'), 2);
+    assert.equal(upgraded.take(13, 5_060, false, 'first-with-one'), 1);
+  });
 });

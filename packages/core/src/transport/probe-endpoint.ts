@@ -351,6 +351,13 @@ export type ProbeLink =
       clockOffsetMs: number | null;
       /** Absent from a probe below protocol 7, which cannot report its own numbers. */
       health?: ProbeHealthReport;
+      /**
+       * The first report of this session (`P-283`, `P-284` review), which a probe at protocol 32
+       * sends the moment it is welcomed and before its drain sends anything. Probe Health takes a
+       * probe it meets for the first time as a baseline from this, not from whatever the latest
+       * report says at its next sweep, so what moved in between is counted.
+       */
+      firstHealth?: ProbeHealthReport;
     };
 
 /**
@@ -399,6 +406,8 @@ interface ProbeSession {
   probeObjectId: number | null;
   /** The last health report this probe sent, or undefined if it has sent none (`P-13`). */
   health?: ProbeHealthReport;
+  /** The first this session, kept for Probe Health's baselines (`P-284` review). */
+  firstHealth?: ProbeHealthReport;
   /**
    * The configuration this session has been told to run, and its fingerprint.
    *
@@ -776,6 +785,7 @@ export class ProbeEndpoint {
           if (message.health !== undefined) {
             const before = reportShape(session.health);
             session.health = message.health;
+            session.firstHealth ??= message.health;
             this.#foldMemory(session, message.health);
             // The first report of a session, or one in which a listener came or went (`U-24`).
             // Only for a probe that has claimed its branch: before that `linkFor` answers
@@ -1753,6 +1763,7 @@ export class ProbeEndpoint {
         configurable: capabilitiesFor(session.protocolVersion).configPush,
         clockOffsetMs: session.clockOffset.minimum(),
         ...(session.health === undefined ? {} : { health: session.health }),
+        ...(session.firstHealth === undefined ? {} : { firstHealth: session.firstHealth }),
       };
     }
     return { connected: false };

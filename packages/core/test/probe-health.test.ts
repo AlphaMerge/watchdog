@@ -1287,10 +1287,10 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
 
     it('counts a refusal in the first record after a probe restart, which a rate cannot', async () => {
       // A probe running from before this core: its total may already have warned under the core
-      // before, so it is the baseline and counts nothing.
+      // before, so it is the baseline, and the record that took it gaps (`P-284` review).
       const c = counter(1_000);
       c.link.current = refusing(3, 5_000);
-      assert.equal(await refused(c), 0, 'a baseline is a reading, not a gap');
+      assert.equal(await refused(c), undefined, 'a baseline is a gap, not a zero');
       c.link.current = refusing(4, 5_030);
       assert.equal(await refused(c), 1);
       assert.match(c.message(), /1 process group a check process named as its own and was not/u);
@@ -1308,7 +1308,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
     it('counts one made while the link was down on the first record back, however long the gap', async () => {
       const c = counter(1_000);
       c.link.current = refusing(0, 5_000);
-      assert.equal(await refused(c), 0);
+      assert.equal(await refused(c), undefined, 'the baseline');
       c.link.current = { connected: false };
       for (let at = 0; at < 4; at += 1) await c.sweep();
       c.link.current = refusing(1, 5_150);
@@ -1335,21 +1335,79 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(await refused(c), 0, 'five minutes later');
     });
 
-    it('counts a probe that started after this core did in full, and one already running not at all', async () => {
+    it('counts a probe that started after this core did in full, and gaps one already running', async () => {
       const late = counter(10_000);
       late.link.current = refusing(2, 40);
       assert.equal(await refused(late), 2);
       const early = counter(1_000);
       early.link.current = refusing(2, 5_000);
-      assert.equal(await refused(early), 0);
+      assert.equal(await refused(early), undefined, 'it cannot know, and says nothing');
+      early.link.current = refusing(2, 5_030);
+      assert.equal(await refused(early), 0, 'and reads from the next record');
     });
+
+    // **The first report of a session is the baseline** (`P-283`, `P-284` review). A probe cut off
+    // across a core restart reconnects with whatever it discarded while cut off already in its
+    // first report, and the sweep after reads a later one. Taking the baseline at the sweep
+    // absorbed both; a zero then said nothing was lost.
+    it('gaps a discard already in the first report after a core restart, rather than reading 0', async () => {
+      const c = counter(1_000);
+      const report = { ...FULL, spoolRejected: 0, spoolOversized: 1, uptimeSeconds: 5_000 };
+      c.link.current = connected({ health: report, firstHealth: report });
+      assert.equal((await c.sweep())['resultsDiscarded'], undefined);
+    });
+
+    it('counts a discard made after the first report, on the sweep that meets the probe', async () => {
+      // The probe sends that report the moment it is welcomed, before its drain sends anything
+      // (`core-client.test.ts`), so a discard the drain makes after it is here.
+      const c = counter(1_000);
+      c.link.current = connected({
+        firstHealth: { ...FULL, spoolRejected: 0, spoolOversized: 1, uptimeSeconds: 5_000 },
+        health: { ...FULL, spoolRejected: 0, spoolOversized: 3, uptimeSeconds: 5_010 },
+      });
+      assert.equal((await c.sweep())['resultsDiscarded'], 2);
+    });
+
+    // **A restart inside a link gap longer than the old process's uptime** (`P-284` review). It
+    // refused 2 at 100 s; an hour later a new process reconnects at 3,000 s. Both the uptime and,
+    // in two of these, the total are higher, so only the `instanceId` says it restarted.
+    const RESTARTS: readonly {
+      name: string;
+      total: number;
+      instance: string;
+      counted: number;
+    }[] = [
+      { name: 'restarted, the new total equal to the old', total: 2, instance: 'b', counted: 2 },
+      { name: 'restarted, the new total below the old', total: 1, instance: 'b', counted: 1 },
+      { name: 'restarted, the new total above the old', total: 3, instance: 'b', counted: 3 },
+      { name: 'not restarted, and grown', total: 5, instance: 'a', counted: 3 },
+      { name: 'not restarted, and not grown', total: 2, instance: 'a', counted: 0 },
+    ];
+    for (const one of RESTARTS) {
+      it(`across an hour's link gap: ${one.name}`, async () => {
+        // A probe that started after this core, so it is counted from its first record.
+        const c = counter(10_000);
+        c.link.current = refusing(0, 70, { instanceId: 'a' });
+        assert.equal(await refused(c), 0);
+        c.link.current = refusing(2, 100, { instanceId: 'a' });
+        assert.equal(await refused(c), 2);
+        c.link.current = { connected: false };
+        for (let at = 0; at < 120; at += 1) await c.sweep();
+        // The uptime is higher either way: 3,700 s for the same process an hour on, 3,000 s for
+        // one started in the gap.
+        c.link.current = refusing(one.total, one.instance === 'a' ? 3_700 : 3_000, {
+          instanceId: one.instance,
+        });
+        assert.equal(await refused(c), one.counted);
+      });
+    }
 
     it('counts what the drain discarded, either way, as one count (`P-283`)', async () => {
       const c = counter(1_000);
       const discarding = (rejected: number, oversized: number, uptime: number): ProbeLink =>
         refusing(0, uptime, { spoolRejected: rejected, spoolOversized: oversized });
       c.link.current = discarding(0, 0, 5_000);
-      assert.equal((await c.sweep())['resultsDiscarded'], 0);
+      assert.equal((await c.sweep())['resultsDiscarded'], undefined, 'the baseline');
       c.link.current = discarding(40, 0, 5_030);
       assert.equal((await c.sweep())['resultsDiscarded'], 40);
       assert.match(c.message(), /40 results discarded unsent in the last 5 minutes/u);
@@ -1365,6 +1423,8 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       c.link.current = connected();
       assert.deepEqual(await c.sweep(), {}, 'a probe below 31 sends neither total');
       c.link.current = refusing(1, 5_000);
+      assert.deepEqual(await c.sweep(), {}, 'below 32, one, whose baseline gaps');
+      c.link.current = refusing(1, 5_030);
       assert.deepEqual(await c.sweep(), { scriptGroupsRefusedRecently: 0 }, 'below 32, one');
       c.link.current = { connected: false };
       assert.deepEqual(await c.sweep(), {});

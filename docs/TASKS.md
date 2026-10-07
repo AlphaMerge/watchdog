@@ -9824,10 +9824,13 @@ because each is a decision rather than a defect:
         other), on an injectable monotonic clock. No protocol change: the total is 31's.
       - **Why a second channel, not the counter turned into a count:** an existing channel's
         counter shape is stored on its row, and a channel is not removed.
-      - **What it does not see:** a refusal made while no core was running, by a probe already
-        running when this core started — the core before may have warned on it, and warning again
-        after every core restart would be the second alarm, so a probe met first is a baseline
-        unless it started after this core, as the log's rule is.
+      - **What it does not see** (corrected on review): when this core meets a probe for the
+        first time and the probe was already running, what it counted before the first heartbeat
+        of that connection is a baseline, and that record gaps rather than reading 0. So a refusal
+        or discard made while the probe was cut off from a core that restarted meanwhile is
+        missed. Once the core knows a probe, growth across any link gap counts, a restart at 32 is
+        told by `instanceId`, and from a probe at 31 a restart inside a gap longer than the old
+        process's uptime, with a total no lower, is not seen.
       - **One outage, one alarm:** a burst holds one warning (a rate warned, cleared and warned
         again between refusals a minute apart); the warning clears five minutes after the last.
       - **Tests (core `probe-health`):** across a counter reset (4 to 1 after a restart counts 1,
@@ -9841,6 +9844,35 @@ because each is a decision rather than a defect:
         on its existing `scriptGroupsRefused` channels: `applyDeclaredLimits` writes declared
         limits but never takes one away that a type stopped declaring. Harmless (it warns in a
         record the window also warns in); listed as a follow-up.
+      - **Amended on review** (a second commit). Two defects in the baseline.
+        - *The first sight of a probe absorbed what this core should have counted.* The baseline
+          was the total at the first sweep that read the probe, so a probe cut off across a core
+          restart that refused or discarded while cut off — or a drain that discarded in the
+          seconds after `welcome`, before the first heartbeat a heartbeat interval later — read 0
+          and stayed Up. Now the baseline sweep **gaps** unless it counted something; the endpoint
+          keeps each session's **first report** (`ProbeLink.firstHealth`) and a probe met first is
+          baselined from it, not from the latest; and the probe **sends a heartbeat on `welcome`,
+          before `setState('connected')`**, so before the drain can send. Its cost: one heartbeat
+          more per connection, and the CPU channel's first reading a heartbeat sooner. Still
+          missed: what the probe counted before that first report, as above.
+        - *A restart inside a link gap longer than the old process's uptime was growth.* Total and
+          uptime both rose (2 at 100 s, then 2 at 3,000 s after a restart counted 0). Chosen over
+          inferring from the implied start time (now less uptime, with slack for heartbeat age and
+          sweep interval): **`instanceId`**, a UUID the probe process picks at start
+          (`PROCESS_INSTANCE`), on every heartbeat at protocol 32 under `unsendableReadings`,
+          schema-bounded to a UUID. Exact where the inference needs a slack that misses short-lived
+          processes, and simpler; `DeltaMeter.take` takes it as an optional fourth argument and
+          falls back to the inference where either reading lacks one (a probe at 31).
+        - **Tests.** `log-output.test.ts`: a table across an hour's gap after 2 at 100 s — restarted
+          with 2, 1 or 3, and not restarted grown to 5 or unchanged — with the instance (2, 1, 3,
+          3, 0) and, as the control, without it (0, 1, 1, 3, 0); a reading without an instance
+          infers. Core `probe-health`: the same table through the sweep; a discard already in the
+          first report after a core restart gaps; one made after the first report is counted on
+          the first sweep; every baseline that read 0 now reads a gap and then 0.
+          `core-client.test.ts`: the heartbeat at `welcome` is seq 1 and was reported while the
+          client was not yet `connected`. `capabilities.test.ts`: `instanceId` stripped below 32,
+          in `SINCE`, the schema taking a UUID and gapping anything else.
+          `probe-health-report.test.ts`: `PROCESS_INSTANCE` on every report, injectable.
 
 - [ ] **P-285 — a check's failure phase reaches the stored result only as prose** · S · P-279 ·
       Found 2026-10-07 in `P-279`. `check-worker.ts` passes on only an error's message, so its

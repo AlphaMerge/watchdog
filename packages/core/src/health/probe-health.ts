@@ -190,8 +190,9 @@ const RECENT_WINDOW_MS = 5 * 60_000;
  * **A count over a window, not a counter's rate** (`P-284`), because a rate gaps on the first
  * record after the total restarts and after a gap longer than the rate allows — a probe restart,
  * a long link outage — and a warning on a rate missed what fell in that record. The window is
- * fed by a `DeltaMeter`, which takes a total that fell, or an uptime that did, as a new process
- * counting from zero, and growth across a link gap as growth.
+ * fed by a `DeltaMeter`, which takes another `instanceId` (or, from a probe at 31, a total that
+ * fell or an uptime that did) as a new process counting from zero, and growth across a link gap
+ * as growth.
  */
 const RECENT_TOTALS = {
   /** `P-284`: the refused script groups' running total, since protocol 31. */
@@ -325,7 +326,10 @@ export class ProbeHealthService {
    * probe refused while its link was down is still a refusal, and the first record after the
    * link returns is the one that has to say so.
    */
-  readonly #recent = new Map<number, Map<RecentKey, { meter: DeltaMeter; count: RecentCount }>>();
+  readonly #recent = new Map<
+    number,
+    Map<RecentKey, { meter: DeltaMeter; count: RecentCount; unknown: boolean }>
+  >();
   readonly #monotonicMs: (() => number) | undefined;
 
   #sweeps = 0;
@@ -828,8 +832,9 @@ export class ProbeHealthService {
   }
 
   /**
-   * One of the five-minute counts for a probe, or `null` when it sends no total to count from or
-   * no sweep has taken one yet (`P-283`, `P-284`). Read, never advanced: the sweep advances them.
+   * One of the five-minute counts for a probe, or `null` when it sends no total to count from, no
+   * sweep has taken one yet, or the last sweep could only take a baseline (`P-283`, `P-284`). Read,
+   * never advanced: the sweep advances them.
    */
   #recentCount(
     probeObjectId: number,
@@ -837,19 +842,30 @@ export class ProbeHealthService {
     key: RecentKey,
   ): number | null {
     if (health === undefined || RECENT_TOTALS[key](health) === undefined) return null;
-    return this.#recent.get(probeObjectId)?.get(key)?.count.count() ?? null;
+    const entry = this.#recent.get(probeObjectId)?.get(key);
+    if (entry === undefined || entry.unknown) return null;
+    return entry.count.count();
   }
 
   /**
    * Adds what each connected probe's running totals grew by since the last sweep to its
    * five-minute counts (`P-283`, `P-284`).
    *
-   * **A probe met for the first time counts in full only if it started after this core did**, as
-   * the log's does: otherwise the core before this one may already have warned on what it holds,
-   * and a core restart would warn again for something long over. That is the one case a refusal
-   * can go uncounted — made while no core was running, by a probe that started before this one.
-   * Everything else counts: a total that fell or an uptime that did is a restarted probe, and all
-   * of it is new; a total that grew across a link gap grew by that much.
+   * **Once a probe is known, everything counts.** The baseline outlives a session, so what grew
+   * across a link gap, however long, is counted on the first sweep after it. A restart is told by
+   * the probe's `instanceId` (protocol 32), so the restarted process's whole total is new whatever
+   * its uptime; from a probe at 31, which sends none, by a total or an uptime that fell, which
+   * misses a restart inside a gap longer than the old process's uptime with a total no lower.
+   *
+   * **A probe met for the first time** — the first sweep after this core started, or a probe it
+   * has never had — counts its whole total only if it started after this core did. Otherwise the
+   * core before this one may already have warned on what it holds, so the baseline is the first
+   * report of its session: from protocol 32, sent the moment it is welcomed and before its drain
+   * sends anything, so what it refused or discarded after that is counted. What is still not
+   * seen: what it refused or discarded **before that first report** while this core was running —
+   * a probe cut off across a core restart that refused while it was cut off. That sweep's reading
+   * is a gap rather than a zero, unless it already counted something since the first report: it
+   * does not know, and a zero would say nothing was refused.
    */
   #advanceRecent(): void {
     for (const probeId of this.#sources.connectedProbeIds?.() ?? []) {
@@ -866,19 +882,34 @@ export class ProbeHealthService {
           held = new Map();
           this.#recent.set(probeId, held);
         }
-        let entry = held.get(key);
-        const fresh = entry === undefined && uptime < this.#uptime();
-        if (entry === undefined) {
-          entry = {
-            meter: new DeltaMeter(),
-            count: new RecentCount(
-              RECENT_WINDOW_MS,
-              this.#monotonicMs === undefined ? {} : { monotonicMs: this.#monotonicMs },
-            ),
-          };
-          held.set(key, entry);
+        const known = held.get(key);
+        if (known !== undefined) {
+          known.unknown = false;
+          known.count.add(known.meter.take(total, uptime, false, health.instanceId) ?? 0);
+          continue;
         }
-        entry.count.add(entry.meter.take(total, uptime, fresh) ?? 0);
+        const entry = {
+          meter: new DeltaMeter(),
+          count: new RecentCount(
+            RECENT_WINDOW_MS,
+            this.#monotonicMs === undefined ? {} : { monotonicMs: this.#monotonicMs },
+          ),
+          unknown: false,
+        };
+        held.set(key, entry);
+        if (uptime < this.#uptime()) {
+          // Started after this core did: no core before this one can have counted any of it.
+          entry.count.add(entry.meter.take(total, uptime, true, health.instanceId) ?? 0);
+          continue;
+        }
+        const first = link.firstHealth;
+        const firstTotal = first === undefined ? undefined : RECENT_TOTALS[key](first);
+        if (first !== undefined && firstTotal !== undefined && first.uptimeSeconds !== undefined) {
+          entry.meter.take(firstTotal, first.uptimeSeconds, false, first.instanceId);
+        }
+        const grown = entry.meter.take(total, uptime, false, health.instanceId) ?? 0;
+        entry.count.add(grown);
+        entry.unknown = grown === 0;
       }
     }
   }

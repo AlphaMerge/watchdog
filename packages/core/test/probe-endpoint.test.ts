@@ -1854,6 +1854,45 @@ describe(
       }
     });
 
+    it('keeps the first report of a session beside the latest, for Probe Health’s baselines (`P-284` review)', async () => {
+      // A probe met for the first time is baselined from the report it sends at the welcome,
+      // before its drain sends anything, so what it discards after is counted. A new session
+      // keeps its own first report.
+      const source = new StubSource();
+      const endpoint = new ProbeEndpoint({
+        config: endpointConfig(dir),
+        logger: silentLogger,
+        coreVersion: '9.9.9',
+        probeConfig: source,
+      });
+      const address = await endpoint.start();
+      try {
+        for (const session of [0, 1]) {
+          const probe = await TestProbe.connect(dir, address.port);
+          probe.send(hello());
+          await probe.waitFor((m) => m.type === 'welcome');
+          await waitUntil(() => endpoint.linkFor(7).connected);
+          for (const seq of [1, 2, 3]) {
+            probe.send({
+              type: 'heartbeat',
+              seq,
+              sentAt: new Date().toISOString(),
+              health: { spoolOversized: 10 * session + seq, scheduled: 0 },
+            });
+            await probe.waitFor((m) => m.type === 'heartbeat-ack' && m.seq === seq);
+          }
+          const link = endpoint.linkFor(7);
+          assert.ok(link.connected);
+          assert.equal(link.firstHealth?.spoolOversized, 10 * session + 1, 'the first');
+          assert.equal(link.health?.spoolOversized, 10 * session + 3, 'and the latest');
+          probe.close();
+          await waitUntil(() => !endpoint.linkFor(7).connected);
+        }
+      } finally {
+        await endpoint.stop();
+      }
+    });
+
     describe('what it tells a watcher of the link (U-24)', () => {
       /** An endpoint that records each time it said a probe changed, and what `linkFor` said then. */
       async function watched(

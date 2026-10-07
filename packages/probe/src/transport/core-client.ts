@@ -465,6 +465,14 @@ export class CoreClient {
         // Arming the fallback again matters because the core can forget a key more than once —
         // a second re-approval, a second restored backup (`P-38`).
         this.#abandonedStoredKey = false;
+        // **A heartbeat now, before anything else on this link** (`P-283`, `P-284` review). The
+        // core takes a probe's running totals as a baseline from the first heartbeat of a session,
+        // and the drain starts sending the moment the link is `connected`, below: what it
+        // discarded in the interval's wait before the first timed heartbeat would have been in
+        // that baseline and never counted. Before `setState`, so nothing waiting on the state can
+        // send first. One heartbeat more per connection, and its report starts the CPU meter a
+        // heartbeat sooner, so the CPU channel's first reading arrives a heartbeat earlier.
+        this.#sendHeartbeat();
         this.#setState('connected');
         this.#logger.info(
           { gid: message.gid, coreVersion: message.coreVersion, approved: this.#approved },
@@ -627,31 +635,33 @@ export class CoreClient {
   #startHeartbeat(intervalMs: number): void {
     this.#clearHeartbeat();
     this.#heartbeatTimer = setInterval(() => {
-      const connection = this.#connection;
-      if (connection === undefined || connection.closed) return;
-      this.#heartbeatSeq += 1;
-      // Gathered here rather than on a timer of its own: the heartbeat is already the periodic
-      // "I am here and this is how I am", and a second cadence would be a second thing to keep
-      // in step with the first. Memory is the one exception (`P-218`): it is read every two
-      // seconds between heartbeats, and each heartbeat reports the lowest since the last one the
-      // core acknowledged — or, to a core older than protocol 20, of the last thirty seconds
-      // (`P-219`).
-      const health = this.#options.health?.report({
-        seq: this.#heartbeatSeq,
-        peerVersion: this.#coreProtocolVersion,
-      });
-      connection.send({
-        type: 'heartbeat',
-        seq: this.#heartbeatSeq,
-        sentAt: new Date().toISOString(),
-        // Gated since `P-208`: an older core's health schema refuses a field it does not know, and
-        // that would be every heartbeat rather than one.
-        ...(health === undefined
-          ? {}
-          : { health: healthForPeer(health, this.#coreProtocolVersion) }),
-      });
+      this.#sendHeartbeat();
     }, intervalMs);
     this.#heartbeatTimer.unref();
+  }
+
+  #sendHeartbeat(): void {
+    const connection = this.#connection;
+    if (connection === undefined || connection.closed) return;
+    this.#heartbeatSeq += 1;
+    // Gathered here rather than on a timer of its own: the heartbeat is already the periodic
+    // "I am here and this is how I am", and a second cadence would be a second thing to keep
+    // in step with the first. Memory is the one exception (`P-218`): it is read every two
+    // seconds between heartbeats, and each heartbeat reports the lowest since the last one the
+    // core acknowledged — or, to a core older than protocol 20, of the last thirty seconds
+    // (`P-219`).
+    const health = this.#options.health?.report({
+      seq: this.#heartbeatSeq,
+      peerVersion: this.#coreProtocolVersion,
+    });
+    connection.send({
+      type: 'heartbeat',
+      seq: this.#heartbeatSeq,
+      sentAt: new Date().toISOString(),
+      // Gated since `P-208`: an older core's health schema refuses a field it does not know, and
+      // that would be every heartbeat rather than one.
+      ...(health === undefined ? {} : { health: healthForPeer(health, this.#coreProtocolVersion) }),
+    });
   }
 
   get connected(): boolean {

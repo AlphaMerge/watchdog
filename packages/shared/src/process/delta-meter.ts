@@ -13,6 +13,7 @@
 export class DeltaMeter {
   #total: number | null = null;
   #uptime = 0;
+  #instance: string | undefined;
 
   /**
    * The growth since the last reading.
@@ -24,13 +25,25 @@ export class DeltaMeter {
    * meter did, so no earlier reading could have covered any of it. Otherwise it is `null`, a gap —
    * the total may already have been counted by whoever read it before this meter existed, and
    * counting it again would raise an alarm for something that ended before a restart.
+   *
+   * **`instance` makes a restart exact** (`P-284` review): an identifier the process keeping the
+   * total chose when it started. Two readings with different ones are two processes, whatever the
+   * totals and uptimes say. Without it a restart is inferred, and the inference misses one: a
+   * process that restarted while nobody was reading, and had run longer by the next reading than
+   * the old one had by the last, with a total no lower — its whole total counted as growth past
+   * the old one. Absent on either reading, the inference is all there is.
    */
-  take(total: number, uptime: number, fresh: boolean): number | null {
+  take(total: number, uptime: number, fresh: boolean, instance?: string): number | null {
     const previous = this.#total;
     const previousUptime = this.#uptime;
+    const previousInstance = this.#instance;
     this.#total = total;
     this.#uptime = uptime;
+    this.#instance = instance;
     if (previous === null) return fresh ? total : null;
+    if (instance !== undefined && previousInstance !== undefined && instance !== previousInstance) {
+      return total;
+    }
     if (total < previous || uptime < previousUptime) return total;
     return total - previous;
   }

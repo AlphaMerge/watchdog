@@ -8,7 +8,7 @@ import {
   PROTOCOL_VERSION,
   type AvailableMemoryLow,
 } from '@ms/shared';
-import { ProbeHealthReporter } from '../src/health/report.js';
+import { PROCESS_INSTANCE, ProbeHealthReporter } from '../src/health/report.js';
 import type { ProcessRunnerStats } from '../src/runner/process-runner.js';
 import type { PoolStats } from '../src/runner/pool.js';
 import type { DrainStats } from '../src/spool/drain.js';
@@ -231,6 +231,24 @@ describe('the probe’s own health report', () => {
       }).report().resultChannelsDropped,
       0,
     );
+  });
+
+  it('names this process on every report, the same in every reporter it makes (`P-284` review)', () => {
+    // The core reads each running total's growth against it: another one is a restart, however
+    // long the link was down and whatever the totals and the uptime say.
+    assert.match(
+      PROCESS_INSTANCE,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      'what the core’s schema takes',
+    );
+    assert.equal(reporter({}).report().instanceId, PROCESS_INSTANCE);
+    assert.equal(reporter({ children: false, drain: false }).report().instanceId, PROCESS_INSTANCE);
+    const told = new ProbeHealthReporter({
+      scheduler: () => WHEEL,
+      pool: () => POOL,
+      instanceId: 'another',
+    });
+    assert.equal(told.report().instanceId, 'another');
   });
 
   it('reports what the drain discarded, each its own count, and nothing with no drain (`P-283`)', () => {
