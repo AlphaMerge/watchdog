@@ -673,8 +673,10 @@ arguments and the variables — so treat both as untrusted input in every script
   process ended and left what it started running; this probe ended it* with the sensor's id. It
   first checks in `/proc` that the group is one the check's process started (its own session
   leader, that process's child, of the user checks run as) and that its id has not since passed to
-  another process; a group named by anything else is left alone and logged as *named process
-  groups that are not its own*. On a probe without `/proc` — macOS, used for development only —
+  another process — once the script itself has gone, that every process left in its group is in
+  its session and of that user; a group named by anything else is left alone and logged as *named
+  process groups that are not its own*, or *whose id now names another process or group*. On a
+  probe that runs as root, set `processUid`: without it the user check has nothing to compare. On a probe without `/proc` — macOS, used for development only —
   nothing is checked, so nothing is ended this way.
 
   **On Windows, today,** the script itself is ended at once with `TerminateProcess`, which it

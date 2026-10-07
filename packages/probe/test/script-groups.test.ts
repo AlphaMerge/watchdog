@@ -8,6 +8,7 @@ import {
   GroupLines,
   MAX_GROUPS_PER_CHECK,
   parseProc,
+  readGroup,
   readProc,
   ScriptGroups,
   type GroupSignal,
@@ -45,12 +46,14 @@ const own = (pid: number, starttime = '777', uid = 1000): ProcessEntry => ({
 function fakeView(
   table: Map<number, ProcessEntry | null>,
   groups: Map<number, GroupSignal> = new Map(),
+  members: ProcessEntry[] = [],
 ): { view: ProcessView; signals: [number, 0 | 'SIGKILL'][] } {
   const signals: [number, 0 | 'SIGKILL'][] = [];
   return {
     signals,
     view: {
       read: (pid) => table.get(pid) ?? null,
+      members: (pgid) => members.filter((member) => member.pgrp === pgid),
       signalGroup: (pgid, signal) => {
         signals.push([pgid, signal]);
         return groups.get(pgid) ?? 'gone';
@@ -148,6 +151,7 @@ describe('verifying a group at its start (`P-266`)', () => {
           reads += 1;
           return { ...own(pid), ppid: 1 };
         },
+        members: () => [],
         signalGroup: () => 'gone',
       },
       CHECK,
@@ -162,9 +166,10 @@ describe('ending what a check process left (`P-266`)', () => {
   function recorded(
     later: ProcessEntry | null,
     group: GroupSignal = 'sent',
+    members: ProcessEntry[] = [],
   ): ReturnType<typeof fakeView> & { groups: ScriptGroups } {
     const table = new Map<number, ProcessEntry | null>([[SCRIPT, own(SCRIPT, '777')]]);
-    const fake = fakeView(table, new Map([[SCRIPT, group]]));
+    const fake = fakeView(table, new Map([[SCRIPT, group]]), members);
     const groups = new ScriptGroups(fake.view, CHECK, 1000);
     groups.push(line('started', SCRIPT));
     assert.deepEqual(groups.open(), [SCRIPT], 'recorded to begin with');
@@ -186,19 +191,43 @@ describe('ending what a check process left (`P-266`)', () => {
     assert.deepEqual(signals, [], 'not even asked whether it lives');
   });
 
-  it('kills a group whose leader is gone while members hold its id', () => {
-    const { groups, signals } = recorded(null, 'sent');
+  /** A process the script started, still in its group and session once the script is gone. */
+  const helper = (pid: number, extra: Partial<ProcessEntry> = {}): ProcessEntry => ({
+    ...own(pid, '800'),
+    ppid: 1,
+    pgrp: SCRIPT,
+    session: SCRIPT,
+    ...extra,
+  });
+
+  it('kills a group whose leader is gone while every member is the script’s', () => {
+    const { groups, signals } = recorded(null, 'sent', [helper(6001), helper(6002)]);
     assert.deepEqual(groups.endLeftBehind(), { ended: [SCRIPT], recycled: [], failed: [] });
-    assert.deepEqual(signals, [
-      [SCRIPT, 0],
-      [SCRIPT, 'SIGKILL'],
+    assert.deepEqual(signals, [[SCRIPT, 'SIGKILL']]);
+  });
+
+  it('leaves alone a leaderless group with a member of another uid, and counts it', () => {
+    // The id passed to a root service's intermediate child, which ran `setsid`, forked its
+    // daemon and exited, while a check process that somebody else controlled kept back `ended`.
+    // Same session as the id, so only the uid gives it away.
+    const { groups, signals } = recorded(null, 'sent', [helper(6001), helper(6002, { uid: 0 })]);
+    assert.deepEqual(groups.endLeftBehind(), { ended: [], recycled: [SCRIPT], failed: [] });
+    assert.deepEqual(signals, [], 'no signal at all');
+  });
+
+  it('leaves alone a leaderless group with a member in another session, and counts it', () => {
+    const { groups, signals } = recorded(null, 'sent', [
+      helper(6001),
+      helper(6002, { session: 7000 }),
     ]);
+    assert.deepEqual(groups.endLeftBehind(), { ended: [], recycled: [SCRIPT], failed: [] });
+    assert.deepEqual(signals, []);
   });
 
   it('does nothing for a group that has gone entirely', () => {
-    const { groups, signals } = recorded(null, 'gone');
+    const { groups, signals } = recorded(null, 'sent', []);
     assert.deepEqual(groups.endLeftBehind(), { ended: [], recycled: [], failed: [] });
-    assert.deepEqual(signals, [[SCRIPT, 0]]);
+    assert.deepEqual(signals, []);
   });
 
   it('reports a kill it was refused', () => {
@@ -263,6 +292,11 @@ describe('reading /proc (`P-266`)', () => {
         assert.equal(entry.uid, process.getuid?.());
         assert.match(entry.starttime, /^\d+$/);
         assert.equal(readProc(process.pid)?.starttime, readProc(process.pid)?.starttime);
+        assert.deepEqual(
+          readGroup(pid).map((member) => member.pid),
+          [pid],
+          'its group, read from all of /proc, is itself',
+        );
       } finally {
         child.kill('SIGKILL');
         await rm(dir, { recursive: true, force: true });

@@ -85,8 +85,9 @@ export interface ProcessRunnerStats {
    */
   scriptGroupsRefused: number;
   /**
-   * Groups left open whose leader's pid named another process by the time the check process had
-   * gone (`P-266`). Never killed. Logged with the sensor.
+   * Groups left open whose id named something else by the time the check process had gone
+   * (`P-266`): the leader's pid another process, or, the leader reaped, a member outside the
+   * script's session or of another uid. Never killed. Logged with the sensor and the pgids.
    */
   scriptGroupsRecycled: number;
   waitMs: Percentiles;
@@ -595,7 +596,7 @@ export class ProcessRunner {
       this.#scriptGroupsRecycled += recycled.length;
       this.#logger.warn(
         { ...about, pgids: recycled },
-        'a check process left a group whose leader’s pid now names another process; this probe left it alone',
+        'a check process left a group whose id now names another process or group; this probe left it alone',
       );
     }
     for (const { pgid, code } of failed) {

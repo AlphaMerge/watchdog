@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { GROUP_MARKER } from './types.js';
 
 /**
@@ -39,6 +39,11 @@ export type GroupSignal = 'sent' | 'gone' | { readonly refused: string };
 export interface ProcessView {
   /** The process, or null when there is none by that pid or it cannot be read. */
   read(pid: number): ProcessEntry | null;
+  /**
+   * Every process whose group is `pgid`, read as `read` reads one. A scan of all of `/proc`, so it
+   * is asked only when a group's leader has gone, which is rare.
+   */
+  members(pgid: number): ProcessEntry[];
   /** `kill(-pgid, signal)`. */
   signalGroup(pgid: number, signal: 0 | 'SIGKILL'): GroupSignal;
 }
@@ -53,6 +58,7 @@ export function linuxProcessView(): ProcessView | null {
   }
   return {
     read: readProc,
+    members: readGroup,
     signalGroup: (pgid, signal) => {
       try {
         process.kill(-pgid, signal);
@@ -82,6 +88,34 @@ export function readProc(pid: number): ProcessEntry | null {
     return null;
   }
   return parseProc(stat, status);
+}
+
+/**
+ * The members of group `pgid`, from every `/proc/<pid>/stat`, and the `status` of those only.
+ * A process that ends during the scan is left out, as it would be a moment later anyway.
+ */
+export function readGroup(pgid: number): ProcessEntry[] {
+  let names: string[];
+  try {
+    names = readdirSync('/proc');
+  } catch {
+    return [];
+  }
+  const members: ProcessEntry[] = [];
+  for (const name of names) {
+    if (!/^[1-9][0-9]*$/.test(name)) continue;
+    let stat: string;
+    try {
+      stat = readFileSync(`/proc/${name}/stat`, 'latin1');
+    } catch {
+      continue;
+    }
+    // The group first, with a stand-in uid, so `status` is read only for the members.
+    if (parseProc(stat, 'Uid:\t0\n')?.pgrp !== pgid) continue;
+    const member = readProc(Number(name));
+    if (member !== null && member.pgrp === pgid) members.push(member);
+  }
+  return members;
 }
 
 /**
@@ -169,7 +203,10 @@ export const MAX_GROUPS_PER_CHECK = 16;
 export interface LeftBehind {
   /** Groups sent `SIGKILL`. */
   readonly ended: number[];
-  /** Groups not killed because their leader's pid now names another process. */
+  /**
+   * Groups not killed because their id now names something else: the leader's pid another
+   * process, or, the leader gone, a member outside the script's session or of another uid.
+   */
   readonly recycled: number[];
   /** Groups the kill was refused for, with the error's code. */
   readonly failed: { pgid: number; code: string }[];
@@ -193,11 +230,15 @@ export interface LeftBehind {
  *   reaped, so its group is the script's. Killed. A leader cannot leave its group or session.
  * - `/proc/<N>` there with another `starttime`: the leader is gone and `N` names a new process.
  *   Not killed; counted.
- * - `/proc/<N>` not there: the leader has been reaped. If `kill(-N, 0)` finds members, the group
- *   is still the script's, because a pid stays allocated while any process has it as its group
- *   or session, so `N` cannot have been reused while they live; and only the script's session
- *   can hold members of group `N`, since `setpgid` joins groups of the caller's own session.
- *   Killed. `ESRCH` means nothing is left.
+ * - `/proc/<N>` not there: the leader has been reaped, and `N` is only the script's while the
+ *   group has had a member all along — a pid stays allocated while any process has it as its
+ *   group or session id. Only an `ended` line says the group emptied, and the check process
+ *   writes that line: one controlled by somebody else can keep it back, let the group empty and
+ *   `N` pass to, say, a root service's intermediate child, which runs `setsid`, forks its daemon
+ *   and exits. So the members are read from all of `/proc`: killed only when every one is in
+ *   session `N` (the script's, which nothing outside it can join) and, with a uid set, has that
+ *   real uid. A group with a member that is not is left alone and counted as recycled, since
+ *   its id now names somebody else's group; one with no members is gone.
  */
 export class ScriptGroups {
   readonly #view: ProcessView;
@@ -255,7 +296,18 @@ export class ScriptGroups {
         result.recycled.push(pgid);
         continue;
       }
-      if (now === null && this.#view.signalGroup(pgid, 0) === 'gone') continue;
+      if (now === null) {
+        const members = this.#view.members(pgid);
+        if (members.length === 0) continue;
+        const ours = members.every(
+          (member) =>
+            member.session === pgid && (this.#uid === undefined || member.uid === this.#uid),
+        );
+        if (!ours) {
+          result.recycled.push(pgid);
+          continue;
+        }
+      }
       const sent = this.#view.signalGroup(pgid, 'SIGKILL');
       if (sent === 'sent') result.ended.push(pgid);
       else if (sent !== 'gone') result.failed.push({ pgid, code: sent.refused });

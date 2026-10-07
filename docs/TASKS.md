@@ -8843,6 +8843,38 @@ because each is a decision rather than a defect:
           `linuxProcessView()`'s platform gate, since the toolchain is Linux.
         - **Runs:** the same six files with `script-groups.test.ts`, in the toolchain (Linux),
           244/244, none skipped; the `P-266` tests twice more, 29/29 each.
+      - **Amended on second review** (a third commit). **A reaped leader's group is not taken on
+        `kill(-N, 0)` alone.** That argument holds only if the group had a member all along, and
+        only the `ended` line says it emptied, which the check process writes. One controlled by
+        somebody else could keep `ended` back, hold the runner's pipe open through a
+        `pidfd_getfd` copy, let `N` pass to a root `Type=forking` service's intermediate child
+        (which runs `setsid`, forks its daemon and exits), then let go: `/proc/N` gone, the
+        daemon in group `N`, and the probe would have killed it. The 250 ms watch in `run.ts`
+        left the same window, narrower, without an attacker. Now, the leader gone, the runner
+        reads the group's members from all of `/proc` (`readGroup`: every `stat`, and the
+        `status` of the members only) and kills only when every member is in session `N` and,
+        with a uid set, has that real uid. A group with any other member is left alone, counted
+        as `scriptGroupsRecycled` (its id names somebody else's group now) and logged; one with
+        no members is gone. The scan is a pass over `/proc`, in this branch only.
+        - **What it does not catch:** with no uid set, the daemon in the example is in session
+          `N` and passes. That is a probe running scripts as its own user: if it is root, the
+          script's author already is; if not, the kill is refused (`EPERM`) and logged. Set
+          `processUid` on a root probe.
+        - **Found writing the test:** a script whose leader exits before the runner reads its
+          `started` line is not recorded — a reaped leader cannot be told from a stranger's — so
+          what it left in its group is not ended if its check process then dies outright. On
+          every other path the check process ends the group itself.
+        - **Tests.** `script-groups.test.ts`: the leader gone, killed when every member is the
+          script's (session `N`, its uid); left alone and counted with one member of another uid
+          (in session `N`, as the daemon would be); left alone and counted with one in another
+          session; nothing for no members; `readGroup` on a real session leader reads itself
+          alone. `process-runner.test.ts` (Linux): a script that starts a helper keeping its
+          stdout and exits after 2 s; once it is reaped, the check process is killed and the
+          helper is ended through the member scan, counted, none recycled.
+        - **Mutation 5/5:** the members' session check, their uid check, the no-members skip,
+          the scan bypassed, and `readGroup`'s group filter each dropped.
+        - **Runs:** the same seven files in the toolchain (Linux), 247/247, none skipped; the
+          `P-266` tests twice more, 32/32 each.
 
 - [ ] **P-267 — `checkAbortGraceMs` below 1 s outruns PowerShell's kill** · S · P-262 · Found
       2026-10-05 in `P-262`. A pool worker running a Windows sensor ends PowerShell on the

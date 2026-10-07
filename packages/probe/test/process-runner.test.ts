@@ -794,6 +794,16 @@ describe('a script check in a process of its own (`P-262`)', () => {
         'sleep 60 &\necho "started a helper"\n' +
           'echo "$$ $! $PPID" > "$MS_VAR_PIDS.tmp" && mv "$MS_VAR_PIDS.tmp" "$MS_VAR_PIDS"\nwait',
       );
+      // Starts a helper that keeps its stdout, and goes: the group outlives its leader, and the
+      // pipes keep its check waiting. It stays two seconds first, because the runner records a
+      // group only while `/proc` can show its leader is the check process's child; a leader gone
+      // before its line is read cannot be told from a stranger's, and is not recorded.
+      await script(
+        'leaves.sh',
+        'sleep 60 &\n' +
+          'echo "$$ $! $PPID" > "$MS_VAR_PIDS.tmp" && mv "$MS_VAR_PIDS.tmp" "$MS_VAR_PIDS"\n' +
+          'sleep 2\nexit 0',
+      );
       // Starts a helper that is no longer its business and answers: it ends on its own.
       await script(
         'answers.sh',
@@ -851,6 +861,24 @@ describe('a script check in a process of its own (`P-262`)', () => {
       assert.equal(runner.stats().crashed, 1);
     });
 
+    it('ends a group whose script has gone, its helper the script’s own, when its check process dies', async () => {
+      // The branch that reads the group's members from /proc: the leader reaped, the helper still
+      // in its session, of its uid.
+      const { runner, seen } = scripts();
+      const { request: check, file } = scriptCheck(128, 'leaves.sh', 60_000);
+      runner.submit(check);
+      await until(() => existsSync(file), 'the script to start its helper', 40_000);
+      const [scriptPid = 0, helperPid = 0, checkPid = 0] = await numbersIn(file, 3);
+      await goneWithin(10_000, [scriptPid], `the script ${String(scriptPid)} to be reaped`);
+      assert.equal(gone(helperPid), false, 'its helper is running');
+
+      process.kill(checkPid, 'SIGKILL');
+      await until(() => seen.length === 1, 'the killed check to be reported', 20_000);
+      await goneWithin(5_000, [helperPid], `the helper ${String(helperPid)} to be gone`);
+      assert.equal(runner.stats().scriptGroupsEnded, 1, 'and counted');
+      assert.equal(runner.stats().scriptGroupsRecycled, 0);
+    });
+
     it('kills nothing a check process names that it did not start, and counts it', async () => {
       // The privilege a forged line would borrow: the runner may be root, running checks as
       // another user. The victim is a process of the test's own, its own session and group leader
@@ -889,6 +917,7 @@ describe('a script check in a process of its own (`P-262`)', () => {
           const entry = real.read(pid);
           return entry === null || !recycled ? entry : { ...entry, starttime: 'someone else' };
         },
+        members: (pgid) => real.members(pgid),
         signalGroup: (pgid, signal) => real.signalGroup(pgid, signal),
       };
       const { runner, seen } = runnerOf({
