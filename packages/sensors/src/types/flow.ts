@@ -5,7 +5,7 @@ import type {
   ReceivedNotification,
   SensorType,
 } from '../contract.js';
-import { earlierNote } from '../support/earlier.js';
+import { earlierNote, withEarlierNote } from '../support/earlier.js';
 
 /**
  * What the probe's flow collector received for this exporter since this sensor last looked
@@ -348,20 +348,25 @@ export const flowCollector: SensorType = {
     // with "no flows arrived" while they did. The name is resolved, and one that resolves to
     // nothing fails naming the host rather than blaming the exporter.
     const isDevice = onlyThisDevice
-      ? await (await import('../support/sender.js')).fromDevice(context.target.host, 'flows')
+      ? await withEarlierNote(batch, 'flow records', async () =>
+          (await import('../support/sender.js')).fromDevice(context.target.host, 'flows'),
+        )
       : null;
     const mine =
       isDevice === null ? batch.items : batch.items.filter((item) => isDevice(item.source));
 
     if (mine.length === 0 && context.params['silenceIsIdle'] !== true) {
       // **The decision this file exists to make.** See the note on the module: there is no
-      // heartbeat in NetFlow, so silence is unreadable rather than zero.
+      // heartbeat in NetFlow, so silence is unreadable rather than zero. After a restart, what
+      // came before the window is named too: flows until a few minutes ago say the exporter
+      // stopped recently, not that the link has been idle for hours (`P-274`).
       throw new Error(
         `no flows arrived from ${onlyThisDevice ? context.target.host : 'any exporter'} since ` +
           `${batch.since}. A flow exporter with nothing to report sends nothing at all, so ` +
           'this is either an idle link or an exporter that has stopped — and reporting zero ' +
           'would pick one of those silently. Set “Treat silence as an idle link” if this link ' +
-          'is quiet by nature',
+          'is quiet by nature' +
+          earlierNote(batch, 'flow records'),
       );
     }
 

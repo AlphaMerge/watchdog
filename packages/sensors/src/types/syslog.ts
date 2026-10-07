@@ -6,7 +6,7 @@ import type {
   SensorType,
 } from '../contract.js';
 import { SEVERITIES } from '../support/syslog/parse.js';
-import { earlierNote } from '../support/earlier.js';
+import { earlierNote, withEarlierNote } from '../support/earlier.js';
 
 /**
  * What arrived on the probe's syslog port since this sensor last looked (`T-20`).
@@ -225,7 +225,9 @@ export const syslogReceiver: SensorType = {
     // a device addressed by name counted nothing, for ever, and read Up at zero, where no limit
     // can fire. The name is resolved, and one that resolves to nothing fails the check.
     const isDevice = onlyThisDevice
-      ? await (await import('../support/sender.js')).fromDevice(context.target.host, 'messages')
+      ? await withEarlierNote(batch, 'messages', async () =>
+          (await import('../support/sender.js')).fromDevice(context.target.host, 'messages'),
+        )
       : null;
 
     const counts = new Map<string, number>(SEVERITIES.map((name) => [name, 0]));

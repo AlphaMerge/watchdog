@@ -8588,6 +8588,26 @@ because each is a decision rather than a defect:
 
       **Mutations 3/3.** With the note removed from any one type's throw, both cases fail on that
       type.
+
+      **Review, 2026-10-07: one more failure path, fixed in a second commit.**
+      - **The two missed paths.** A flow sensor's "no flows arrived" failure dropped the note.
+        After a two-hour wait whose last five minutes were quiet, the earlier count is what says
+        the exporter stopped recently. A search of the three types found one more: the `P-246`
+        failure for a device name that resolves to nothing, in all three. That failure is
+        thrown in `support/sender.ts`, after the listener has moved the cursor.
+      - **The fix.** The silence failure appends `earlierNote`. The name lookup in each type now
+        runs through `withEarlierNote` (`support/earlier.ts`), which keeps the lookup's own
+        message first, adds the note, and keeps the original error as `cause`.
+      - **Paths left without the note.** "No listener is running" has no batch. Trap's "handed a
+        batch from another listener" holds another listener's counts, which are not this
+        sensor's.
+      - **Tests** (`listener-restart-scenario.test.ts`):
+        - Flow traffic for 1 h 55 min, then five quiet minutes. The first scan fails on silence
+          under the default parameters and names the exact earlier count.
+        - All three types with "only this device" on, against `no-such-device.invalid`. Each
+          fails on the name and names the earlier count. Each scan is bounded by `within`.
+      - **Mutations 5/5:** the note removed from the silence failure; the helper rethrowing
+        without the note; and each type's lookup given a batch with no earlier count.
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer

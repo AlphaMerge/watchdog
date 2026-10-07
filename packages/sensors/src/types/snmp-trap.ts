@@ -7,7 +7,7 @@ import type {
   SensorType,
 } from '../contract.js';
 import { readRule, ruleMatches, type TrapRule } from '../support/snmp/trap.js';
-import { earlierNote } from '../support/earlier.js';
+import { earlierNote, withEarlierNote } from '../support/earlier.js';
 
 /**
  * SNMP traps and informs arriving at the probe (`T-06`).
@@ -172,7 +172,9 @@ export const snmpTrap: SensorType = {
     // and a name that will not resolve fails the check instead of reporting nothing. The
     // resolver is shared with the other listener types (`P-246`).
     const { canonicalAddress, fromDevice } = await import('../support/sender.js');
-    const isDevice = onlyDevice ? await fromDevice(host, 'notifications') : null;
+    const isDevice = onlyDevice
+      ? await withEarlierNote(batch, 'traps', () => fromDevice(host, 'notifications'))
+      : null;
 
     const mine: ReceivedNotification[] = [];
     let unmatched = 0;

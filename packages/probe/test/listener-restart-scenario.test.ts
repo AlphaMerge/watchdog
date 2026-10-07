@@ -14,6 +14,7 @@ import type { ReceivedSyslog, SyslogReceiverOptions } from '@ms/sensors/syslog';
 import { FlowListener } from '../src/listeners/flow-listener.js';
 import { TrapListener } from '../src/listeners/trap-listener.js';
 import { SyslogListener } from '../src/listeners/syslog-listener.js';
+import { within } from './support/probe-process.js';
 
 /**
  * One outage, one alarm, across a probe restart (`P-254`, `M-17`'s rule at the probe).
@@ -61,10 +62,11 @@ async function scan(
   sensorId: number,
   received: ReceivedBatch,
   params: Readonly<Record<string, unknown>> = {},
+  host = '192.0.2.7',
 ): Promise<{ primary: number; message: string; missed: number }> {
   const executed = await type.execute({
     sensorId,
-    target: { host: '192.0.2.7', ipVersion: 'auto' },
+    target: { host, ipVersion: 'auto' },
     params: { sourceIsDevice: false, ...params },
     credentials: {},
     signal: new AbortController().signal,
@@ -117,6 +119,8 @@ async function probeOf(
   advance: (ms: number) => void;
   /** `count` of each, all at once, as a device in trouble sends them. */
   burst: (count: number) => void;
+  /** The device stops sending; time still passes. */
+  silence: () => void;
   received: () => { traps: number; messages: number; flows: number };
 }> {
   let now = T0;
@@ -197,6 +201,9 @@ async function probeOf(
     }
     now = until;
   };
+  const silence = (): void => {
+    nextSend = Number.POSITIVE_INFINITY;
+  };
   const burst = (count: number): void => {
     for (let i = 0; i < count; i += 1) send();
   };
@@ -206,6 +213,7 @@ async function probeOf(
     flows,
     advance,
     burst,
+    silence,
     received: () => ({
       traps: traps.stats().received,
       messages: syslog.stats().received,
@@ -417,6 +425,9 @@ describe('a first scan that fails on what it missed still names what it did not 
 
   async function firstScans(
     probe: Awaited<ReturnType<typeof probeOf>>,
+    failure = /overwritten before this sensor read them/,
+    params: Readonly<Record<string, unknown>> = {},
+    host?: string,
   ): Promise<{ type: SensorType; noun: string; batch: ReceivedBatch; message: string }[]> {
     probe.traps.retain(all, true);
     probe.syslog.retain(all, true);
@@ -429,17 +440,18 @@ describe('a first scan that fails on what it missed still names what it did not 
       [flowType, 'flow records', FLOW_ID, probe.flows.drain(FLOW_ID, MINUTE)],
     ] as const) {
       let message: string | undefined;
-      await assert.rejects(scan(type, id, batch), (error: unknown) => {
+      const scanned = within(
+        10_000,
+        `${type.id}'s first scan`,
+        scan(type, id, batch, params, host),
+      );
+      await assert.rejects(scanned, (error: unknown) => {
         assert.ok(error instanceof Error);
         message = error.message;
         return true;
       });
       assert.ok(message !== undefined);
-      assert.match(
-        message,
-        /overwritten before this sensor read them/,
-        `${type.id}: the failure is still for what it missed`,
-      );
+      assert.match(message, failure, `${type.id}: the failure is still the one it was`);
       scans.push({ type, noun, batch, message });
     }
     return scans;
@@ -470,6 +482,65 @@ describe('a first scan that fails on what it missed still names what it did not 
       const earlier = batch.earlier ?? 0;
       assert.ok(earlier > 300, `${type.id}: two hours came before the window`);
       assert.ok(batch.dropped > 0, `${type.id}: and the burst overran the buffer`);
+      const said =
+        `; ${String(earlier)} ${noun} the probe received ` +
+        `before ${batch.since} are not in this reading`;
+      assert.ok(message.includes(said), `${type.id} does not name the earlier: ${message}`);
+    }
+  });
+
+  it('names the earlier when a flow sensor fails on silence: the exporter stopped recently', async () => {
+    // The exporter sent its ordinary three a minute for 1 h 55 min of the two hours the probe
+    // waited for its core, then stopped. The first scan's window is quiet, so the flow sensor
+    // fails on silence under its default parameters — and the earlier count is what tells the
+    // operator the exporter was sending until a few minutes ago.
+    const probe = await probeOf(EVERY, false, true);
+    probe.advance(OUTAGE - 5 * MINUTE);
+    probe.silence();
+    probe.advance(5 * MINUTE);
+    probe.flows.retain(all, true);
+    probe.advance(3_000);
+    const batch = probe.flows.drain(FLOW_ID, MINUTE);
+    assert.equal(batch.items.length, 0, 'nothing in the window');
+    assert.equal(batch.dropped, 0);
+    const earlier = batch.earlier ?? 0;
+    assert.equal(earlier, probe.received().flows, 'all of it came before the window');
+    assert.ok(earlier > 300);
+
+    let message: string | undefined;
+    await assert.rejects(
+      within(10_000, 'the flow sensor’s first scan', scan(flowType, FLOW_ID, batch)),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        message = error.message;
+        return true;
+      },
+    );
+    assert.ok(message !== undefined);
+    assert.match(
+      message,
+      /^no flows arrived from any exporter since /,
+      'still the silence failure',
+    );
+    const said =
+      `; ${String(earlier)} flow records the probe received before ${batch.since} are not in ` +
+      'this reading';
+    assert.ok(message.includes(said), `the silence failure does not name the earlier: ${message}`);
+  });
+
+  it('names the earlier when the device’s name resolves to nothing', async () => {
+    // Each type counts only its device's own messages by default, and a device name that resolves
+    // to nothing fails the scan (`P-246`) — after the listener has moved the cursor.
+    const probe = await probeOf(EVERY, true, true);
+    probe.advance(OUTAGE);
+    for (const { type, noun, batch, message } of await firstScans(
+      probe,
+      /that name did not resolve to any address/,
+      { sourceIsDevice: true },
+      'no-such-device.invalid',
+    )) {
+      const earlier = batch.earlier ?? 0;
+      assert.ok(earlier > 300, `${type.id}: two hours came before the window`);
       const said =
         `; ${String(earlier)} ${noun} the probe received ` +
         `before ${batch.since} are not in this reading`;
