@@ -370,6 +370,16 @@ done
 # text and that script must go on recognising the old one, which every installation so far has.
 PING_RANGE="${MS_SETUP_PING_RANGE:-/proc/sys/net/ipv4/ping_group_range}"
 SYSCTL_DIR="${MS_SETUP_SYSCTL_DIR:-/etc/sysctl.d}"
+write_ping_conf() {
+  install -d -m 0755 "${SYSCTL_DIR}"
+  cat >"${ping_conf}" <<SYSCTL
+# Written by ms-setup (MonitoringSystem). Lets the ms-probe group, and only it, open the
+# unprivileged ICMP sockets its ping sensors use; ms-probe.service gives the probe no
+# CAP_NET_RAW. See "Before you start" in /opt/ms/docs/installation.md.
+net.ipv4.ping_group_range = ${probe_gid} ${probe_gid}
+SYSCTL
+  chmod 0644 "${ping_conf}"
+}
 if has_component probe; then
   probe_gid="$(getent group ms-probe | cut -d: -f3 || true)"
   range_lo=''
@@ -379,16 +389,20 @@ if has_component probe; then
   if ! [[ "${probe_gid}" =~ ^[0-9]+$ && "${range_lo}" =~ ^[0-9]+$ && "${range_hi}" =~ ^[0-9]+$ ]]; then
     echo "==> warning: could not read net.ipv4.ping_group_range, so ICMP sensors may not work" >&2
   elif [ "${range_lo}" -le "${probe_gid}" ] && [ "${probe_gid}" -le "${range_hi}" ]; then
-    :
+    # **The probe's group alone, with no drop-in, is put back on disk** (`H-34`). Only this
+    # script sets the range to exactly that, and a purge or an erase removes the drop-in while
+    # leaving the running kernel's value as it is. A reinstall before the next boot used to find
+    # the group in range and write nothing, and that boot put `1 0` back: every ICMP sensor
+    # Down, and nothing said so. Any other range that includes the group is somebody else's,
+    # and a drop-in that is there, edited or not, is theirs too.
+    if [ "${range_lo}" -eq "${probe_gid}" ] && [ "${range_hi}" -eq "${probe_gid}" ] \
+      && [ ! -e "${ping_conf}" ] && [ ! -L "${ping_conf}" ]; then
+      write_ping_conf
+      echo "==> ICMP sockets are allowed for group ms-probe (gid ${probe_gid}) alone, as ms-setup"
+      echo "    sets them, and nothing kept that for the next boot: written again in ${ping_conf}"
+    fi
   elif [ "${range_lo}" -gt "${range_hi}" ]; then
-    install -d -m 0755 "${SYSCTL_DIR}"
-    cat >"${ping_conf}" <<SYSCTL
-# Written by ms-setup (MonitoringSystem). Lets the ms-probe group, and only it, open the
-# unprivileged ICMP sockets its ping sensors use; ms-probe.service gives the probe no
-# CAP_NET_RAW. See "Before you start" in /opt/ms/docs/installation.md.
-net.ipv4.ping_group_range = ${probe_gid} ${probe_gid}
-SYSCTL
-    chmod 0644 "${ping_conf}"
+    write_ping_conf
     if printf '%s\t%s\n' "${probe_gid}" "${probe_gid}" 2>/dev/null >"${PING_RANGE}"; then
       echo "==> ICMP sockets allowed for group ms-probe (gid ${probe_gid}), in ${ping_conf}"
     else
@@ -469,10 +483,8 @@ done
 # core that is not running, and log that every few seconds until somebody starts one. Both
 # services go together in the message, the way they will be started. A probe-only installation
 # has no core.json to create and starts as it always did.
-outcome=''
 if [ "${start_services}" -eq 1 ] && [ "${first_install}" -eq 1 ]; then
   start_services=0
-  outcome=first-install
   cat <<FIRST
 
 ==> ${CONFDIR}/core.json is new, so nothing was started.
@@ -589,9 +601,18 @@ fi
 # output would make every message above part of an interface. So one word, in a file the caller
 # names: `first-install`, `not-started` or `started`. Written only here, at the end of a run that
 # succeeded, so a caller that finds no word knows not to claim one.
+#
+# **`first-install` whenever core.json was created in this run, `--no-start` or not.** It is the
+# word that carries "core.json has no database password yet", and under `--no-start` this script
+# prints nothing about that (the message above is for a start it declined), so the caller's
+# summary is the only place left to say it. The caller knows whether it asked for `--no-start`.
 if [ -n "${outcome_file}" ]; then
-  if [ -z "${outcome}" ]; then
-    if [ "${start_services}" -eq 1 ]; then outcome=started; else outcome=not-started; fi
+  if [ "${first_install}" -eq 1 ]; then
+    outcome=first-install
+  elif [ "${start_services}" -eq 1 ]; then
+    outcome=started
+  else
+    outcome=not-started
   fi
   printf '%s\n' "${outcome}" >"${outcome_file}"
 fi

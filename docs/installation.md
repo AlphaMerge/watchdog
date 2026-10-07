@@ -168,7 +168,8 @@ either contains a core or it does not:
 
 It ends with a summary whose `services` line says what that run did — started them, started
 nothing because it was a first installation, or started nothing under `--no-start` — and, when
-nothing was started, the two commands that start them (`H-35`).
+nothing was started, the two commands that start them (`H-35`). A first installation says so,
+and that `core.json` has no database password yet, under `--no-start` as well.
 
 ### Why Node is not a package dependency
 
@@ -437,7 +438,12 @@ setup wrote it, and say so; one you have edited is left where it is, and named. 
 no such step, so an erase is the end. The running kernel's `net.ipv4.ping_group_range` is not
 changed by either: what it held before the setup opened it is not recorded, and something else may
 have set it since, so it stays until the next boot, which reads `/etc/sysctl.d` without the file.
-After a tarball install, remove the file yourself if the setup wrote one.
+Reinstalling before that boot is safe: the setup finds the range at the `ms-probe` group alone,
+which only it sets, and writes the file again. The file is kept, and named, while `/opt/ms` is
+still installed — after switching from `ms` to `ms-probe` or back, purging the old package leaves
+it to the new one's probe. If it cannot be removed (`chattr +i`, a read-only `/etc`), the purge
+says so and still completes; remove it yourself. After a tarball install, remove the file
+yourself if the setup wrote one.
 
 ---
 

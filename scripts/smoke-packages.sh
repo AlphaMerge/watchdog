@@ -460,14 +460,24 @@ ${dirty_json}) — a staged tree from another commit is rebuilt with MS_SMOKE_RE
   ${in} test -d /var/lib/ms-core || fail "removal deleted /var/lib/ms-core"
   echo "    configuration, PKI and state: left in place, as documented"
 
-  # **An edited drop-in is the operator's, and stays** (`H-34`). Installed again at the kernel's
-  # default, so that ms-setup writes the file anew, then edited the way an operator would, then
-  # removed for good again.
-  echo "==> asserting ${remove_cmd} keeps a ping drop-in somebody edited"
-  ${in} bash -c 'echo "1 0" > /proc/sys/net/ipv4/ping_group_range'
+  # **A reinstall before the next boot puts the drop-in back** (`H-34`). The removal left the
+  # running range at the probe's group alone and took the file; a setup that found the group in
+  # range and wrote nothing left the next boot to put `1 0` back. No reset of the range here:
+  # this is the host as the removal left it.
+  echo "==> asserting a reinstall before the next boot writes the ping drop-in again"
   ${in} bash -c "${reinstall_cmd/PKG/${pkg_name}}" >"${remove_log}" 2>&1 \
     || { cat "${remove_log}" >&2; fail "could not install the package again"; }
-  ${in} test -f "${ping_conf}" || fail "the reinstall wrote no ${ping_conf} to edit"
+  ${in} test -f "${ping_conf}" \
+    || fail "the reinstall left no ${ping_conf}: the next boot would put ping_group_range back to 1 0"
+  matches "^net.ipv4.ping_group_range = ${probe_gid} ${probe_gid}$" ${in} cat "${ping_conf}" \
+    || fail "the reinstall's ${ping_conf} does not name ms-probe (gid ${probe_gid})"
+  grep -qF -- "written again in ${ping_conf}" "${remove_log}" \
+    || fail "the reinstall did not say it wrote ${ping_conf} again: $(tr '\n' ' ' <"${remove_log}")"
+  echo "    ${reinstall_cmd/PKG/${pkg_name}}: ${ping_conf} written again for gid ${probe_gid}"
+
+  # **An edited drop-in is the operator's, and stays** (`H-34`): the one just written, edited the
+  # way an operator would, then removed for good again.
+  echo "==> asserting ${remove_cmd} keeps a ping drop-in somebody edited"
   ${in} bash -c "echo '# also for the backup host (an operator)' >> ${ping_conf}"
   local edited
   edited="$(${in} sha256sum "${ping_conf}" | cut -d' ' -f1)"

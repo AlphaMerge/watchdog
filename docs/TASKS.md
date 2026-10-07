@@ -23740,6 +23740,32 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
           branch; `setup.sh`'s first-install word and started/not-started choice; `install.sh`'s
           note arm and its trap). The range match's `\1` turned out to be redundant beside the
           whole-file comparison, so it was mutated to a form that changes the gid instead.
+        - **Review fixes (2026-10-07, second commit)**, three defects in the first:
+          - *A reinstall before the next boot lost the file.* The purge leaves the live range at
+            `gid gid`, so the reinstall's ms-setup found the group in range and wrote nothing,
+            and that boot put `1 0` back. `setup.sh` now writes the drop-in again, and says so,
+            when the range is exactly the probe's group alone (only ms-setup sets that) and no
+            drop-in is there; any other range, or a drop-in that exists, is left alone.
+          - *Purging `ms` after a switch to `ms-probe` (or back) took the other package's file.*
+            The fragment now keeps it, with a note, while `/opt/ms/libexec/ms-setup` exists. That
+            path is in both packages, which conflict and declare no `Replaces`: dpkg runs `postrm
+            purge` after the package's own files are gone, and rpm erases the old package after
+            installing the new one and keeps a path another package owns. So at that point the
+            file is there only if the other package (or a tarball) is installed. No smoke case,
+            which would need a second `package.sh --probe-only` build; the decision is tested
+            in `deploy-scripts.test.ts` with the path moved into the test's directory.
+          - *An `rm` that fails (`chattr +i`, read-only `/etc`) failed the postrm under `set -e`*
+            and left the package in `rc`. It is now a condition, with a note to remove the file
+            by hand; the fragment cannot change the scriptlet's exit status.
+          - Tests: ms-setup writes the file again after the fragment removed it (same bytes, 0644,
+            message), and not over an edited one or for `0 gid` or `gid gid+1`; the fragment keeps
+            both texts with a sibling installed and says nothing without a file; a stub `rm` that
+            fails leaves exit 0 and the note. `smoke-packages.sh` reinstalls after the first
+            purge/erase *without* resetting the range and asserts the file is back for the gid,
+            with *written again*; the edited-file case now edits that file.
+          - Mutation: 7/7 on the new branches (setup.sh's exact-range, no-drop-in and write; the
+            fragment's sibling check and guarded `rm`; `H-35`'s first-install word and
+            `install.sh`'s `--no-start` wording), each killed.
 
 - [x] **H-35 — `install.sh` prints its first-install note on every run** · S · H-30 · Found
       2026-10-04 in `H-30`. The closing summary, "On a first installation nothing was
@@ -23763,6 +23789,14 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
           `smoke-install.sh` asserts the first install's summary carries the note and the
           upgrade's does not, and says *ms-core ms-probe: started*.
         - Mutation: counted with `H-34`'s, 9/9 across both.
+        - **Review fix (2026-10-07, second commit)**: a first core install under `--no-start`
+          wrote `not-started`, so `install.sh` dropped the only note that `core.json` has no
+          database password (ms-setup prints its own only for a start it declined). The word is
+          now `first-install` whenever core.json was created in the run, `--no-start` or not; the
+          summary says *not started (--no-start), and a first installation (below)* and gives
+          the password note with the reset-failed/start lines. Tests: `--no-start` and
+          `MS_SETUP_NO_START` on a first install give `first-install`, and the `install.sh` case
+          for it. `installation.md` §2 says so.
 
 - [ ] **H-36 — two setup paths are proven only inside containers** · S · H-30, H-31 · Found
       2026-10-04 in `H-30`/`H-31`. Under Docker, systemd 252 and 255 leave a unit's credentials

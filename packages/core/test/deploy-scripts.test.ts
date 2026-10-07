@@ -11,6 +11,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
@@ -1735,6 +1736,45 @@ describe(
       assert.equal(readFileSync(range, 'utf8'), `${gid}\t${gid}\n`, 'the live range was touched');
     });
 
+    it('writes the drop-in again for a reinstall before the boot that would lose it (`H-34`)', () => {
+      // A purge took the file and left the running range at the probe's group alone. Without the
+      // file, the next boot puts `1 0` back and every ICMP sensor goes Down.
+      const box = sandbox();
+      const { prefix, conf } = installation(box, null);
+      const range = join(box.dir, 'ping_group_range');
+      writeFileSync(range, '1\t0\n');
+      const first = setup(box, prefix, conf, ['--components', 'core,probe', '--no-start']);
+      assert.equal(first.status, 0, `${first.stdout}${first.stderr}`);
+      const dropIn = join(box.dir, 'sysctl.d', '60-ms-probe-ping.conf');
+      const wrote = readFileSync(dropIn, 'utf8');
+      const purged = removePingConf(join(box.dir, 'sysctl.d'));
+      assert.ok(!existsSync(dropIn), purged.stderr);
+
+      const again = setup(box, prefix, conf, ['--components', 'core,probe', '--no-start']);
+      assert.equal(again.status, 0, `${again.stdout}${again.stderr}`);
+      assert.equal(readFileSync(dropIn, 'utf8'), wrote, 'not written again, or not the same');
+      assert.equal(mode(dropIn), 0o644);
+      assert.match(again.stdout, /nothing kept that for the next boot: written again in /);
+      const gid = probeGid();
+      assert.equal(readFileSync(range, 'utf8'), `${gid}\t${gid}\n`);
+
+      // A drop-in that is there is left as it is, edited or not, and so is any other range that
+      // includes the group: those are somebody's.
+      const edited = `${wrote}# and the backup host's\n`;
+      writeFileSync(dropIn, edited);
+      const kept = setup(box, prefix, conf, ['--components', 'core,probe', '--no-start']);
+      assert.equal(kept.status, 0, `${kept.stdout}${kept.stderr}`);
+      assert.equal(readFileSync(dropIn, 'utf8'), edited);
+      assert.doesNotMatch(kept.stdout, /written again/);
+      for (const other of [`0\t${gid}\n`, `${gid}\t${String(Number(gid) + 1)}\n`]) {
+        rmSync(dropIn, { force: true });
+        writeFileSync(range, other);
+        const theirs = setup(box, prefix, conf, ['--components', 'core,probe', '--no-start']);
+        assert.equal(theirs.status, 0, `${theirs.stdout}${theirs.stderr}`);
+        assert.ok(!existsSync(dropIn), `written for a range somebody set: ${other}`);
+      }
+    });
+
     // --- what it tells the installer that ran it (`H-35`) -----------------------------------
 
     it('tells its caller what it did with the services, and nothing when it failed (`H-35`)', () => {
@@ -1759,11 +1799,13 @@ describe(
       assert.equal(again.status, 0, `${again.stdout}${again.stderr}`);
       assert.equal(said(box), 'started\n');
 
-      // Asked not to start, on a first installation too, by the flag or by the variable.
-      for (const [args, extra, core] of [
-        [['--no-start'], {}, null],
-        [['--no-start'], {}, CONFIGURED],
-        [[], { MS_SETUP_NO_START: '1' }, CONFIGURED],
+      // Asked not to start, by the flag or by the variable: a first installation is still one,
+      // since its core.json has no password whatever stopped the start.
+      for (const [args, extra, core, expected] of [
+        [['--no-start'], {}, null, 'first-install\n'],
+        [[], { MS_SETUP_NO_START: '1' }, null, 'first-install\n'],
+        [['--no-start'], {}, CONFIGURED, 'not-started\n'],
+        [[], { MS_SETUP_NO_START: '1' }, CONFIGURED, 'not-started\n'],
       ] as const) {
         const staged = sandbox();
         const where = installation(staged, core);
@@ -1775,7 +1817,8 @@ describe(
           extra,
         );
         assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
-        assert.equal(said(staged), 'not-started\n', `${args.join(' ')} ${String(core)}`);
+        assert.equal(said(staged), expected, `${args.join(' ')} ${String(core)}`);
+        assert.ok(!staged.logged().includes('restart'), staged.logged());
       }
 
       // A refusal and a failed start say nothing, so no caller can claim a start.
@@ -1799,13 +1842,33 @@ describe(
   },
 );
 
-/** `remove-ping-conf.sh` as a postrm runs it: `/bin/sh`, `set -e`, the drop-in in `dir`. */
-function removePingConf(dir: string): SpawnSyncReturns<string> {
-  return spawnSync('sh', ['-e', script('remove-ping-conf.sh')], {
-    env: { PATH: process.env['PATH'] ?? '/usr/bin:/bin', MS_SETUP_SYSCTL_DIR: dir },
-    encoding: 'utf8',
-    timeout: 10_000,
-  });
+/** The one line in `remove-ping-conf.sh` that says where an installed probe's tree would be. */
+const PING_SETUP_LINE = 'ms_ping_setup=/opt/ms/libexec/ms-setup\n';
+
+/**
+ * `remove-ping-conf.sh` as a postrm runs it: `/bin/sh`, `set -e`, the drop-in in `dir`. Where it
+ * looks for an installed ms or ms-probe is moved into `dir` too, so that what the machine running
+ * the tests has under /opt/ms cannot decide the answer; `sibling` puts one there. `bin` goes on the
+ * front of PATH, for a stub.
+ */
+function removePingConf(
+  dir: string,
+  { sibling = false, bin }: { sibling?: boolean; bin?: string } = {},
+): SpawnSyncReturns<string> {
+  const text = readFileSync(script('remove-ping-conf.sh'), 'utf8');
+  assert.equal(count(text, PING_SETUP_LINE), 1, 'the fragment does not name /opt/ms once');
+  const setupPath = join(dir, 'opt-ms-libexec-ms-setup');
+  if (sibling) writeFileSync(setupPath, '#!/bin/sh\n', { mode: 0o755 });
+  const path = process.env['PATH'] ?? '/usr/bin:/bin';
+  return spawnSync(
+    'sh',
+    ['-e', '-c', text.replace(PING_SETUP_LINE, `ms_ping_setup=${setupPath}\n`)],
+    {
+      env: { PATH: bin === undefined ? path : `${bin}:${path}`, MS_SETUP_SYSCTL_DIR: dir },
+      encoding: 'utf8',
+      timeout: 10_000,
+    },
+  );
 }
 
 describe(
@@ -1886,6 +1949,43 @@ describe(
       assert.match(result.stderr, /left in place/);
     });
 
+    it('leaves the file for a probe still installed: ms purged after a switch to ms-probe', () => {
+      // dpkg: `ms` removed for `ms-probe`, left in `rc`, purged later. rpm: `dnf swap`, whose
+      // erase of `ms` comes after `ms-probe` is in. Either way /opt/ms is the other package's.
+      for (const text of [written(998), WRITTEN_BY_RC(998)]) {
+        const { dir, file } = withDropIn(text);
+        const result = removePingConf(dir, { sibling: true });
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(readFileSync(file, 'utf8'), text, 'the installed probe lost its drop-in');
+        assert.match(result.stderr, /was left in place: .*ms-setup is still installed/);
+        assert.match(result.stderr, /\(ms or ms-probe\), and the probe it runs needs the file/);
+      }
+      // And with no file, nothing to say.
+      const dir = mkdtempSync(join(tmpdir(), 'ms-sysctl-'));
+      const quiet = removePingConf(dir, { sibling: true });
+      assert.equal(quiet.status, 0, quiet.stderr);
+      assert.equal(quiet.stdout + quiet.stderr, '');
+    });
+
+    it('never fails the scriptlet when the file cannot be removed (chattr +i, read-only /etc)', () => {
+      const { dir, file } = withDropIn(WRITTEN_BY_RC(998));
+      const bin = mkdtempSync(join(tmpdir(), 'ms-stub-rm-'));
+      writeFileSync(
+        join(bin, 'rm'),
+        '#!/bin/sh\necho "rm: cannot remove \'$2\': Operation not permitted" >&2\nexit 1\n',
+        { mode: 0o755 },
+      );
+      const result = removePingConf(dir, { bin });
+      assert.equal(result.status, 0, `the postrm would have failed:\n${result.stderr}`);
+      assert.ok(existsSync(file));
+      assert.match(result.stderr, /Operation not permitted/);
+      assert.match(
+        result.stderr,
+        /could not remove .*60-ms-probe-ping\.conf, which ms-setup wrote/,
+      );
+      assert.doesNotMatch(result.stderr, /note: removed/);
+    });
+
     it('says nothing where there is no file: most hosts, every EL9 one', () => {
       const dir = mkdtempSync(join(tmpdir(), 'ms-sysctl-'));
       const result = removePingConf(dir);
@@ -1958,13 +2058,31 @@ describe('install.sh’s closing summary (`H-35`)', { skip: linux ? false : 'Lin
 
   const FIRST_NOTE = 'This is a first installation, so nothing was started';
 
+  const PASSWORD_NOTE = `${FIRST_NOTE}: /etc/ms/core.json is new and has\nno database password yet.`;
+
   it('gives the first-installation note to a first installation, and to nothing else', () => {
     const { result } = run([], 'first-install');
     assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
-    assert.ok(result.stdout.includes(`${FIRST_NOTE}: set the database connection`), result.stdout);
+    assert.ok(result.stdout.includes(PASSWORD_NOTE), result.stdout);
     assert.match(
       result.stdout,
       /^ {2}services {8}ms-core ms-probe: not started, a first installation/m,
+    );
+    assert.match(result.stdout, /^ {2}systemctl reset-failed ms-core ms-probe$/m);
+    assert.match(result.stdout, /^ {2}systemctl start ms-core ms-probe$/m);
+  });
+
+  it('gives a first installation under --no-start the password note as well', () => {
+    // ms-setup says nothing of the password under --no-start, so this is the only place it is said.
+    const { result, box } = run(['--no-start'], 'first-install');
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.match(box.logged(), /^ms-setup .* --no-start$/m);
+    assert.ok(result.stdout.includes(PASSWORD_NOTE), result.stdout);
+    assert.ok(
+      result.stdout.includes(
+        '  services        ms-core ms-probe: not started (--no-start), and a first installation (below)\n',
+      ),
+      result.stdout,
     );
     assert.match(result.stdout, /^ {2}systemctl reset-failed ms-core ms-probe$/m);
     assert.match(result.stdout, /^ {2}systemctl start ms-core ms-probe$/m);

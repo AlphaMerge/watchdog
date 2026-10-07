@@ -113,7 +113,13 @@ fi
 services="${components[*]/#/ms-}"
 case "${outcome}" in
   started)       said="${services}: started" ;;
-  first-install) said="${services}: not started, a first installation (below)" ;;
+  # Under `--no-start` too: core.json is new all the same, and has no password yet.
+  first-install)
+    if [ "${start_services}" -eq 1 ]; then
+      said="${services}: not started, a first installation (below)"
+    else
+      said="${services}: not started (--no-start), and a first installation (below)"
+    fi ;;
   not-started)   said="${services}: not started (--no-start)" ;;
   *)             said="as ms-setup said above" ;;
 esac
@@ -127,12 +133,13 @@ MonitoringSystem ${version} installed.
   services        ${said}
   logs            journalctl -u ms-core -u ms-probe -f
 SUMMARY
-# Only what this run left to do. `ms-setup` has already said why, above.
+# Only what this run left to do. On a first installation this is the one place that says the
+# password is missing whatever stopped the start: `ms-setup` says it only for a start it declined.
 case "${outcome}" in
   first-install) cat <<NEXT
 
-This is a first installation, so nothing was started: set the database connection in
-${CONFDIR}/core.json, then
+This is a first installation, so nothing was started: ${CONFDIR}/core.json is new and has
+no database password yet. Set the database connection in it, then
   systemctl reset-failed ${services}
   systemctl start ${services}
 NEXT
