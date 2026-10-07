@@ -457,6 +457,24 @@ const CHANNELS: readonly ChannelDef[] = [
         'results are being dropped because their time cannot be read: a probe is sending malformed timestamps',
     },
   },
+  // `P-290`. Results a probe sent that fitting cannot mend (a field missing or of the wrong type,
+  // an outcome that is not one), refused alone with the rest of the batch kept (`P-281`), and the
+  // readings fitting dropped from the results it could mend. Our probe has fitted its own since
+  // `P-277`, so anything here is an older build or not our probe. The fleet's total of what each
+  // Probe Health's `reportsRefused` counts per probe, which names it; so no limit, as there is
+  // none there: one result refused is one sensor going without it, and its own state says so.
+  {
+    key: 'resultsRefusedUnfit',
+    name: 'Results refused as unfit',
+    unit: 'results',
+    counter: { bits: 64 },
+  },
+  {
+    key: 'readingsDroppedUnfit',
+    name: 'Readings dropped fitting results',
+    unit: 'readings',
+    counter: { bits: 64 },
+  },
   // `P-247`. How far this core's clock is behind every remote probe's, when two or more are
   // connected: the smallest lead among them, 0 when any is not ahead, and a gap with fewer than two,
   // since one probe ahead cannot be told from one probe wrong. **The core's condition, not theirs**:

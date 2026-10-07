@@ -9979,7 +9979,7 @@ because each is a decision rather than a defect:
       of assert a loaded VM breaks. **Done when** each waits through `within` and asserts what
       happened, not how long it took.
 
-- [ ] **P-288 — a stored batch sent again counts its refused results again** · S · P-281 · Found
+- [x] **P-288 — a stored batch sent again counts its refused results again** · S · P-281 · Found
       2026-10-07 in `P-281`'s review. The core counts what it refused from a batch when it acks
       it. A batch whose ack was lost is sent again, stored idempotently (`ON CONFLICT DO NOTHING`)
       and acked again, so its refusals are counted twice on Reports refused; the core keeps no
@@ -9987,17 +9987,77 @@ because each is a decision rather than a defect:
       batch once, or accept the rare double count and say so, with a test that loses the first
       ack either way.
 
+      **P-288 outcome. Counted once, by the result rather than the batch.** In
+      `IngestionService.unfitResults` (`packages/core/src/ingestion/service.ts`). No protocol
+      change and no migration.
+      - **What decided it: a batch id cannot say the batch was seen.** The probe names a batch
+        `<gid>-<seq>` and numbers every send (`CoreClient.sendResults`), so a batch sent again
+        after a lost ack arrives under a new id; the drain peeks the spool again, so it may also
+        carry results queued since; and `seq` starts at 0 with the process, so a remembered id
+        would one day name a different batch and suppress a real count. Remembering batch ids
+        would have counted nothing once.
+      - **The store's own identity instead**: the same sensor at the same time is the same
+        result (it is what `ON CONFLICT DO NOTHING` goes by). The parser's report now carries a
+        refused result's `at` (a string of the schema's 1-64 characters, else null) and a fitted
+        one's, and ingestion remembers each counted one by probe GID, sensor and time in one
+        insertion-ordered `Set` across all probes, the oldest forgotten past
+        `UNFIT_RESULTS_REMEMBERED` = 10,000 (two full batches; a few MB at most, and empty while
+        every probe fits its own results). A result already remembered adds nothing to Reports
+        refused, `refusedUnfit` or `discardedUnfitReadings`; a fitted result is remembered only
+        when it lost readings. The size is in ingestion's stats as `unfitRemembered`.
+        `resultsReceived` / `readingsReceived` still count every arrival, as they do for a stored
+        batch sent again.
+      - **Not counted once: a refused result with no sensor id or no time**, which nothing can
+        name. Counted each time it arrives, so a resend of one counts twice; said in the code
+        and in `administration.md`. The warn line still fires for a batch sent again, with
+        `countedBefore` / `readingsCountedBefore` saying how much was counted already.
+      - **Not done.** The ownership refusals (`#refuse`: unknown, moved, foreign) and `A-41c`'s
+        unearned `withheld` count on Reports refused too and are counted again on a resend in
+        the same way; left, as outside this ticket (listed as a follow-up). No alarm volume
+        change: Reports refused has no limit, so no scenario test.
+      - **Tests.** `unfit-results.test.ts`: a batch of a good result, a refused one, one fitted
+        of a lone-surrogate key and one with no `at` is acked; the link drops with the ack; a
+        new connection sends the same results under a new batch id with one more queued since.
+        Reports refused and `refusedUnfit` go +2 then +1 (only the result with no time again),
+        `discardedUnfitReadings` +1 then +0, and the warn lines carry `countedBefore: 1` and
+        `readingsCountedBefore: 1`. A bound case on its own `IngestionService` with
+        `unfitRemembered: 2`: the same result counts once, a third forgets the first and the size
+        stays 2, the forgotten one counts again, another probe's same sensor and time is its
+        own, a fitted result that dropped nothing takes no place, and one that dropped readings
+        counts them once. `messages.test.ts` (shared): each refused result's `at`, and null for
+        a time of the wrong type, empty or past 64 characters.
+
 - [ ] **P-289 — a query result is still refused whole for one result that does not fit** · S ·
       P-281 · Found 2026-10-07 in `P-281`. `query-result` carries the same result schema, and the
       core still closes the link for one unfit result in it. It is not spooled, so it wedges
       nothing. **Done when** decided: fit and refuse alone as `P-281` does for `results`, or keep,
       with a test either way.
 
-- [ ] **P-290 — results the core refused or fitted are not on Core Health or `/metrics`** · S ·
+- [x] **P-290 — results the core refused or fitted are not on Core Health or `/metrics`** · S ·
       P-281 · Found 2026-10-07 in `P-281`. Ingestion's `refusedUnfit` and
       `discardedUnfitReadings` are seen only as Probe Health's Reports refused and in the log.
       **Done when** both are exported (Core Health channel or Prometheus counter) with a test, or
       the reason not to is written down.
+
+      **P-290 outcome. Both are Core Health channels, and so `/metrics` counters.** `/metrics`
+      reads the core's series from Core Health's reading and nowhere else (`P-14`), so a channel
+      is the one way to both.
+      - **`resultsRefusedUnfit`** (*Results refused as unfit*, results) and
+        **`readingsDroppedUnfit`** (*Readings dropped fitting results*, readings), 64-bit counters
+        made rates, from `IngestionService.stats()` through `ingestionDiscards`, beside
+        `resultsUnreadableTime`. Exported as `ms_core_results_refused_unfit_total` and
+        `ms_core_readings_dropped_unfit_total`. Counted once per result (`P-288`).
+      - **No limits.** Each probe's Probe Health already counts its refused results in
+        `reportsRefused`, which names the probe and has no limit either; a limit here would be a
+        second alarm for one cause, or the first for something already decided not to alarm.
+        Alarm volume unchanged, so no scenario test.
+      - **Docs.** `administration.md`: a Core Health row naming both and their `/metrics` names,
+        and the refusal table says a result is counted once and what is not.
+        `sensor-reference.md` regenerated (`scripts/docs/sensor-reference.mjs --check` current).
+      - **Tests.** `core-health.test.ts`: both carried from the source, 0 a reading and not a
+        gap, both declared counters (and in the named counter list). `metrics.test.ts`: both
+        exported with their values and `# TYPE … counter`. The `ingestionDiscards` stubs in three
+        scenario tests and `support/health.ts` carry the two fields.
 
 - [x] **P-291 — a limit a sensor type stops declaring stays on its channels** · S · P-284 · Found
       2026-10-07 in `P-284`. `applyDeclaredLimits` (`packages/core/src/state/declared-limits.ts`)

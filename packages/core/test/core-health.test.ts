@@ -74,6 +74,8 @@ function sources(
     resultsFutureDated: number;
     resultsPastDated: number;
     resultsUnreadableTime: number;
+    resultsRefusedUnfit: number;
+    readingsDroppedUnfit: number;
     credentialsToReenter: number;
     unboundedCredentials: number;
     credentialsWithheld: number;
@@ -130,6 +132,8 @@ function sources(
       discardedFutureTime: overrides.resultsFutureDated ?? 0,
       discardedPastTime: overrides.resultsPastDated ?? 0,
       discardedUnreadableTime: overrides.resultsUnreadableTime ?? 0,
+      refusedUnfit: overrides.resultsRefusedUnfit ?? 0,
+      discardedUnfitReadings: overrides.readingsDroppedUnfit ?? 0,
     }),
     probes: () => ({
       probesDown: overrides.probesDown ?? 0,
@@ -540,6 +544,20 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(reading['resultsPastDated'], 5);
     });
 
+    it('carries the results refused, and the readings dropped, for not fitting the protocol (`P-290`)', async () => {
+      // Seen only per probe on Probe Health's Reports refused, and in the log, before this. The
+      // fleet's total, as counters: a running count since the core started, made a rate.
+      const reading = await build({ resultsRefusedUnfit: 4, readingsDroppedUnfit: 9 }).read();
+      assert.equal(reading['resultsRefusedUnfit'], 4);
+      assert.equal(reading['readingsDroppedUnfit'], 9);
+      assert.ok(CORE_HEALTH_COUNTERS.has('resultsRefusedUnfit'));
+      assert.ok(CORE_HEALTH_COUNTERS.has('readingsDroppedUnfit'));
+      // None is a reading, not a gap: a core that refused nothing says so.
+      const none = await build({}).read();
+      assert.equal(none['resultsRefusedUnfit'], 0);
+      assert.equal(none['readingsDroppedUnfit'], 0);
+    });
+
     it('counts the credential sets holding keys their kind does not declare (A-43)', async () => {
       // Written before writes were checked against the kind: possibly a secret under a mistyped
       // name, in the clear. The vault counts them; this is where an operator sees the number.
@@ -915,6 +933,8 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
         dependencyPauses: 4,
         alarmsFired: 217,
         queriesRefused: 5,
+        resultsRefusedUnfit: 2,
+        readingsDroppedUnfit: 3,
         lateRefusalWritesGivenUp: 4,
         ingestQueue: 0,
       });
@@ -926,7 +946,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
           assert.equal(reading.counter, undefined, reading.key);
         }
       }
-      assert.equal(readings.length, 18);
+      assert.equal(readings.length, 20);
 
       // Named rather than left to the loop above, which agrees with whatever the declaration
       // says and would go on passing if a channel quietly stopped being a counter. These
@@ -952,6 +972,9 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
           'dependencyPauses',
           'alarmsFired',
           'queriesRefused',
+          // `P-290`: results refused, and readings dropped, for not fitting the protocol.
+          'resultsRefusedUnfit',
+          'readingsDroppedUnfit',
           'lateRefusalWritesGivenUp',
         ],
       );

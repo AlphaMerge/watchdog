@@ -1682,6 +1682,11 @@ export interface UnusableHealthField {
 export interface RefusedResult {
   /** The result's `sensorId` when it was a positive integer, or null. */
   readonly sensorId: number | null;
+  /**
+   * The result's `at` when it was a string the schema's length takes, or null: with the sensor's
+   * id, what names the result when it is sent again (`P-288`).
+   */
+  readonly at: string | null;
   /** The schema's words, relative to the result: `/outcome: must be equal to one of …`. */
   readonly reason: string;
 }
@@ -1689,6 +1694,8 @@ export interface RefusedResult {
 /** A result the core kept after fitting it, and what fitting changed that is worth saying. */
 export interface FittedReceivedResult {
   readonly sensorId: number;
+  /** The result's `at`, which with its sensor names it when it is sent again (`P-288`). */
+  readonly at: string;
   /** What the schema said of the result as sent, or `''` when it fitted the schema as sent. */
   readonly reason: string;
   /** `fitResult`'s problems: readings dropped, or fields of them left off. */
@@ -1826,6 +1833,13 @@ function sensorIdOf(raw: unknown): number | null {
   return typeof id === 'number' && Number.isInteger(id) && id >= 1 ? id : null;
 }
 
+/** A refused result's `at`, when it is a string of the length the schema takes; else null. */
+function atOf(raw: unknown): string | null {
+  if (!isRecord(raw)) return null;
+  const at = raw['at'];
+  return typeof at === 'string' && at.length >= 1 && at.length <= 64 ? at : null;
+}
+
 /**
  * A `results` batch, each result checked and fitted on its own (`P-281`).
  *
@@ -1874,7 +1888,7 @@ function parseResults(
     const errors = byIndex.get(index);
     const reason = errors === undefined ? '' : describeResultErrors(errors);
     if (errors !== undefined && !errors.every(({ error, within }) => fittable(error, within))) {
-      refused.push({ sensorId: sensorIdOf(raw), reason });
+      refused.push({ sensorId: sensorIdOf(raw), at: atOf(raw), reason });
       continue;
     }
     // A record: an index without errors passed the schema, and one whose errors are all
@@ -1884,6 +1898,7 @@ function parseResults(
       // Not expected: every error was one `fitResult` mends. Refused rather than trusted.
       refused.push({
         sensorId: sensorIdOf(raw),
+        at: atOf(raw),
         reason: `${reason}; and fitted it is still refused: ${describeErrors(validateCheckResult.errors)}`,
       });
       continue;
@@ -1893,6 +1908,7 @@ function parseResults(
       const sent = isRecord(raw) && Array.isArray(raw['channels']) ? raw['channels'].length : 0;
       fitted.push({
         sensorId: fit.result.sensorId,
+        at: fit.result.at,
         reason,
         problems: fit.problems,
         droppedChannels: sent - fit.result.channels.length,

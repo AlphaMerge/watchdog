@@ -323,6 +323,20 @@ const CORE_METRICS: readonly Metric[] = [
     help: 'Report formatting refused because every worker was busy and the queue was full.',
     counter: true,
   },
+  // `P-290`: what the core refused or cut down from results that do not fit the protocol. Per
+  // probe, the refused ones are in `ms_probe_reports_refused_total` with the rest of its refusals.
+  {
+    key: 'resultsRefusedUnfit',
+    name: 'ms_core_results_refused_unfit_total',
+    help: 'Results from any probe refused because they cannot be made to fit the protocol; the rest of each batch was kept. Each result counted once, however often it was sent.',
+    counter: true,
+  },
+  {
+    key: 'readingsDroppedUnfit',
+    name: 'ms_core_readings_dropped_unfit_total',
+    help: 'Readings dropped from probes’ results by fitting them to the protocol, as a current probe does before sending.',
+    counter: true,
+  },
   {
     key: 'lateRefusalWritesGivenUp',
     name: 'ms_core_late_refusal_writes_given_up_total',

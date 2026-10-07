@@ -109,6 +109,9 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       assert.equal(metrics.get('ms_core_db_statements_cancelled_total'), 4);
       assert.equal(metrics.get('ms_core_db_lock_waits_given_up_total'), 3);
       assert.ok((metrics.get('ms_core_db_oldest_statement_seconds') ?? -1) >= 0);
+      // `P-290`: results refused, and readings dropped, for not fitting the protocol.
+      assert.equal(metrics.get('ms_core_results_refused_unfit_total'), 3);
+      assert.equal(metrics.get('ms_core_readings_dropped_unfit_total'), 5);
     });
 
     it('carries each probe’s numbers, labelled by probe', async () => {
@@ -168,6 +171,8 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
         'ms_core_probe_queries_refused_total',
         'ms_core_db_statements_cancelled_total',
         'ms_core_db_lock_waits_given_up_total',
+        'ms_core_results_refused_unfit_total',
+        'ms_core_readings_dropped_unfit_total',
       ]) {
         assert.match(body, new RegExp(`# TYPE ${name} counter`), name);
       }

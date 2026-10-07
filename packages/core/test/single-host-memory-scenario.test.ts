@@ -215,6 +215,8 @@ describe(
         discardedFutureTime: 0,
         discardedPastTime: 0,
         discardedUnreadableTime: 0,
+        refusedUnfit: 0,
+        discardedUnfitReadings: 0,
       }),
       credentialsToReenter: () => Promise.resolve(0),
       database: () => ({ statements: 0, locks: 0 }),

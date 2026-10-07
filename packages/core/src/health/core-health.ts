@@ -101,17 +101,22 @@ export interface CoreHealthSources {
     formatsRefused: number;
   };
   /**
-   * `IngestionService.stats()` — results refused because their clock was implausible (`P-99`).
+   * `IngestionService.stats()` — results refused because their clock was implausible (`P-99`),
+   * and those refused or cut down because they do not fit the protocol (`P-290`).
    *
-   * The only one of that service's discard counters on this sensor, and deliberately: the others
-   * describe a batch that was rejected and will be re-offered, while this one describes data
-   * that is gone and a probe host that needs its clock fixed.
+   * Only these of that service's discard counters are on this sensor, and deliberately: the
+   * others describe a batch that was rejected and will be re-offered, while these describe data
+   * that is gone and a probe that needs looking at, its clock or its build.
    */
   ingestionDiscards: () => {
     discardedFutureTime: number;
     discardedPastTime: number;
     /** Results whose timestamp could not be read at all, dropped whole (`P-247`). */
     discardedUnreadableTime: number;
+    /** Results refused because fitting cannot mend them, counted once each (`P-281`, `P-288`). */
+    refusedUnfit: number;
+    /** Readings dropped from a probe's results by fitting them (`P-281`). */
+    discardedUnfitReadings: number;
   };
   /**
    * The clock offsets of the connected probes that are not the local one, in milliseconds as
@@ -447,6 +452,9 @@ export class CoreHealthService {
       resultsFutureDated: discards.discardedFutureTime,
       resultsPastDated: discards.discardedPastTime,
       resultsUnreadableTime: discards.discardedUnreadableTime,
+      // The fleet's total of what Probe Health's Reports refused counts per probe (`P-290`).
+      resultsRefusedUnfit: discards.refusedUnfit,
+      readingsDroppedUnfit: discards.discardedUnfitReadings,
       // Seconds behind every remote probe, two or more of them (`P-247`); a gap with fewer.
       clockBehind: coreClock.behindSeconds,
       reactionsDeferred: ingestion.deferredReactions,

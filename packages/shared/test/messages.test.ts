@@ -1030,10 +1030,28 @@ describe('a results batch holding a result that does not fit (`P-281`)', () => {
       assert.deepEqual(kept, [good(1), good(3)]);
       assert.equal(unfit?.refused.length, 1);
       assert.equal(unfit.refused[0]?.sensorId, sensorId);
+      // And its time, which with the sensor names the result when it is sent again (`P-288`):
+      // null when there is none to read, or the result is not an object at all.
+      assert.equal(
+        unfit.refused[0].at,
+        typeof bad === 'string' || bad['at'] === undefined ? null : '2026-10-07T09:00:00.000Z',
+      );
       assert.match(unfit.refused[0].reason, reason);
       assert.deepEqual(unfit.fitted, []);
     });
   }
+
+  it('names a refused result by a time only when it is one the schema could take (`P-288`)', () => {
+    // A time of the wrong type or past 64 characters names nothing: the core would remember a
+    // key as long as a peer cared to send.
+    for (const at of [7, '', 'x'.repeat(65)]) {
+      const { unfit } = taken([{ ...good(2), outcome: 'maybe', at }]);
+      assert.equal(unfit?.refused.length, 1);
+      assert.equal(unfit.refused[0]?.at, null, JSON.stringify(at));
+    }
+    const { unfit } = taken([{ ...good(2), outcome: 'maybe', at: 'x'.repeat(64) }]);
+    assert.equal(unfit?.refused[0]?.at, 'x'.repeat(64));
+  });
 
   it('says at most five of one result’s errors', () => {
     const channels = Array.from({ length: 8 }, () => ({ key: 'k', value: 'x' }));
@@ -1050,6 +1068,7 @@ describe('a results batch holding a result that does not fit (`P-281`)', () => {
     assert.deepEqual(unfit.fitted, [
       {
         sensorId: 2,
+        at: '2026-10-07T09:00:00.000Z',
         reason: '/message: must NOT have more than 2000 characters',
         problems: [],
         droppedChannels: 0,

@@ -70,6 +70,8 @@ export function fixedCoreHealth(
         discardedFutureTime: 0,
         discardedPastTime: 0,
         discardedUnreadableTime: 0,
+        refusedUnfit: 3,
+        discardedUnfitReadings: 5,
       }),
       delivery: () => Promise.resolve({ pending: 9, failed: 4, oldestPendingAgeMs: 125_000 }),
       credentialsToReenter: () => Promise.resolve(0),

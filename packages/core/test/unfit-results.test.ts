@@ -604,6 +604,126 @@ describe(
       }
     });
 
+    // `P-288`: a batch whose ack was lost is sent again and stored again without a second row,
+    // and its refusals were counted again. Not under the same batch id: the probe numbers every
+    // send, and its spool may put the results with others queued since.
+    it('counts a refusal once when the ack was lost and the results come again in a new batch', async () => {
+      const [nul, refused, surrogate, , plain] = sensors as [
+        number,
+        number,
+        number,
+        number,
+        number,
+      ];
+      const before = {
+        probe: refusals.countsFor(probeId).refused,
+        unfit: ingestion.stats().refusedUnfit,
+        dropped: ingestion.stats().discardedUnfitReadings,
+      };
+      const stamp = at();
+      // As the spool holds them: sent again, each is the same result.
+      const spooled = [
+        { ...good(plain, 1), at: stamp },
+        { ...good(refused, 2), at: stamp, outcome: 'maybe' },
+        {
+          ...good(surrogate, 3),
+          at: stamp,
+          channels: [
+            { key: 'lone\uDC00', value: 3 },
+            { key: 'rtt', value: 3 },
+          ],
+        },
+        // No time, so nothing names it: counted every time it arrives, a resend included.
+        Object.fromEntries(Object.entries(good(nul, 4)).filter(([key]) => key !== 'at')),
+      ];
+
+      const first = await peer();
+      try {
+        first.send({ type: 'results', batchId: 'old-probe-1', sentAt: at(), results: spooled });
+        const ack = await first.waitFor('the first answer', answerTo('old-probe-1'));
+        assert.equal(ack.type, 'results-ack', JSON.stringify(ack));
+        assert.equal(refusals.countsFor(probeId).refused, before.probe + 2);
+        assert.equal(ingestion.stats().refusedUnfit, before.unfit + 2);
+        assert.equal(ingestion.stats().discardedUnfitReadings, before.dropped + 1);
+      } finally {
+        // The link drops with the ack: as far as the probe knows, the batch was never answered.
+        first.close();
+      }
+
+      const again = await peer();
+      try {
+        const queuedSince = good(plain, 5);
+        again.send({
+          type: 'results',
+          batchId: 'old-probe-1-again',
+          sentAt: at(),
+          results: [...spooled, queuedSince],
+        });
+        const ack = await again.waitFor('the answer to the resend', answerTo('old-probe-1-again'));
+        assert.equal(ack.type, 'results-ack', JSON.stringify(ack));
+        // The refused result and the dropped reading once; the one with no time twice.
+        assert.equal(refusals.countsFor(probeId).refused, before.probe + 3);
+        assert.equal(ingestion.stats().refusedUnfit, before.unfit + 3);
+        assert.equal(ingestion.stats().discardedUnfitReadings, before.dropped + 1);
+        // And the log says what arrived, and how much of it was counted before.
+        const resent = logged.findLast((line) => 'refused' in line);
+        assert.ok(resent !== undefined, JSON.stringify(logged));
+        assert.equal(resent['results'], 2);
+        assert.equal(resent['countedBefore'], 1);
+        const refitted = logged.findLast((line) => 'fitted' in line);
+        assert.ok(refitted !== undefined, JSON.stringify(logged));
+        assert.equal(refitted['readingsCountedBefore'], 1);
+      } finally {
+        again.close();
+      }
+    });
+
+    it('remembers a bounded number of unfit results, the oldest forgotten first (`P-288`)', () => {
+      assert.ok(ingestor !== undefined);
+      const own = new ProbeRefusals();
+      const small = new IngestionService({
+        db,
+        logger: silent,
+        ingestor,
+        refusals: own,
+        unfitRemembered: 2,
+      });
+      const origin = { gid: 'bounded', probeObjectId: probeId };
+      const time = '2026-10-08T09:00:00.000Z';
+      const refusing = (sensorId: number) => ({
+        refused: [{ sensorId, at: time, reason: '/outcome: invalid' }],
+        fitted: [],
+      });
+      small.unfitResults(origin, refusing(1));
+      small.unfitResults(origin, refusing(2));
+      small.unfitResults(origin, refusing(1));
+      assert.equal(small.stats().refusedUnfit, 2, 'the same result counted once');
+      assert.equal(small.stats().unfitRemembered, 2);
+      // A third forgets the first, and the bound holds.
+      small.unfitResults(origin, refusing(3));
+      assert.equal(small.stats().unfitRemembered, 2);
+      small.unfitResults(origin, refusing(1));
+      assert.equal(small.stats().refusedUnfit, 4, 'forgotten, so counted again');
+      // Another probe's result for the same sensor at the same time is its own.
+      small.unfitResults({ gid: 'another', probeObjectId: null }, refusing(1));
+      assert.equal(small.stats().refusedUnfit, 5);
+      assert.equal(own.countsFor(probeId).refused, 4, 'Reports refused counts as ingestion does');
+
+      // A fitted result counts its dropped readings once; one that dropped none is not kept.
+      const fitting = (droppedChannels: number) => ({
+        refused: [],
+        fitted: [{ sensorId: 9, at: time, reason: '', problems: [], droppedChannels }],
+      });
+      small.unfitResults(origin, fitting(0));
+      assert.equal(small.stats().discardedUnfitReadings, 0);
+      // Had it taken a place, the oldest remembered, sensor 1 from this probe, would be gone.
+      small.unfitResults(origin, refusing(1));
+      assert.equal(small.stats().refusedUnfit, 5, 'still remembered');
+      small.unfitResults(origin, fitting(2));
+      small.unfitResults(origin, fitting(2));
+      assert.equal(small.stats().discardedUnfitReadings, 2);
+    });
+
     it('still closes on a batch that is wrong outside its results: that is the conversation', async () => {
       const probe = await peer();
       try {
