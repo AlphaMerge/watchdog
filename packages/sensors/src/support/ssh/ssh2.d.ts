@@ -55,6 +55,8 @@ declare module 'ssh2' {
     readonly incoming: { readonly state: string };
     close(): void;
     on(event: 'data', listener: (chunk: Buffer) => void): this;
+    /** An exit status or an exit signal arrived, as `ssh2` parsed it (`P-259`). */
+    on(event: 'exit', listener: (code: number | null, signal?: string) => void): this;
     on(event: 'close', listener: (code?: number | null, signal?: string | null) => void): this;
     on(event: string, listener: (...args: never[]) => void): this;
   }

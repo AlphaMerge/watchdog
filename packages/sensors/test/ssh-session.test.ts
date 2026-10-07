@@ -456,8 +456,64 @@ describe('a device that resets the connection mid-command (P-259)', () => {
     try {
       await assert.rejects(
         within(session.exec('df -P -k /', signal()), 5_000, 'the command ending'),
-        lost('df -P -k /'),
+        (error: unknown) =>
+          error instanceof SshError &&
+          error.phase === 'exec' &&
+          error.command === 'df -P -k /' &&
+          // The status did arrive, and the message does not say otherwise.
+          error.message.startsWith(
+            'the connection to 127.0.0.1 was lost while running df -P -k /, after the command ' +
+              'reported an exit status but before the server finished its output',
+          ) &&
+          /ECONNRESET/.test(error.message),
       );
+    } finally {
+      session.close();
+    }
+  });
+
+  /**
+   * An EOF is not the end of a channel while its exit status may still follow (`P-259`):
+   * Dropbear sends data, EOF, status, CLOSE. A connection lost between the EOF and the status
+   * took the status with it, and a command whose status never came is not one that exited.
+   */
+  const unfinished: {
+    readonly name: string;
+    readonly then: 'fin' | 'reset';
+    readonly cause: RegExp;
+  }[] = [
+    { name: 'EOF, then a FIN', then: 'fin', cause: /the server closed the connection$/ },
+    { name: 'EOF, then a reset', then: 'reset', cause: /ECONNRESET$/ },
+  ];
+  for (const { name, then, cause } of unfinished) {
+    it(`fails a command whose connection went between its EOF and its exit status: ${name}`, async () => {
+      server.answer('quiet', { stdout: 'ok\n', ending: 'eof', then });
+      const session = await SshSession.open(target(), credentials());
+      try {
+        await assert.rejects(
+          within(session.exec('quiet', signal()), 5_000, 'the command ending'),
+          (error: unknown) =>
+            error instanceof SshError &&
+            error.phase === 'exec' &&
+            error.message.startsWith(
+              'the connection to 127.0.0.1 was lost while running quiet, before the command ' +
+                'reported an exit status',
+            ) &&
+            cause.test(error.message),
+        );
+      } finally {
+        session.close();
+      }
+    });
+  }
+
+  it('answers a command whose EOF and exit status arrived, though the CLOSE never did', async () => {
+    // Dropbear's order with the CLOSE cut off by a FIN: the output and the status are both in.
+    server.answer('quiet', { stdout: 'ok\n', code: 3, ending: 'eof-then-exit', then: 'fin' });
+    const session = await SshSession.open(target(), credentials());
+    try {
+      const result = await within(session.exec('quiet', signal()), 5_000, 'the command');
+      assert.deepEqual(result, { stdout: 'ok\n', stderr: '', code: 3, signal: null });
     } finally {
       session.close();
     }
@@ -474,8 +530,8 @@ describe('a device that resets the connection mid-command (P-259)', () => {
    */
   const finished: {
     readonly name: string;
-    readonly ending: 'close' | 'eof';
-    readonly then: 'disconnect' | 'disconnect-lost' | 'fin' | undefined;
+    readonly ending: 'close';
+    readonly then: 'disconnect' | 'disconnect-lost' | undefined;
   }[] = [
     { name: 'EOF and CLOSE, on a connection that stays up', ending: 'close', then: undefined },
     { name: 'EOF and CLOSE, then a DISCONNECT', ending: 'close', then: 'disconnect' },
@@ -484,7 +540,6 @@ describe('a device that resets the connection mid-command (P-259)', () => {
       ending: 'close',
       then: 'disconnect-lost',
     },
-    { name: 'EOF and no CLOSE, then a FIN', ending: 'eof', then: 'fin' },
   ];
   for (const { name, ending, then } of finished) {
     it(`answers a command the server finished with no exit status: ${name}`, async () => {

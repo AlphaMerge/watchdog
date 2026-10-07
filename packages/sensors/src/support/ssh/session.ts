@@ -369,16 +369,24 @@ export class SshSession {
       // indirectly.
       const pending: { timer?: NodeJS.Timeout } = {};
       let channel: ClientChannel | undefined;
+      /** Whether an exit status or signal had arrived, from the channel's `exit` event. */
+      let exited = false;
       /**
-       * Whether the server had finished this channel — sent its EOF or its CLOSE — when the
-       * connection went (`P-259`). Read then, and only then: the exit status is no answer, since
-       * a server may send it before the last of the output (RFC 4254 does not order them, and
-       * OpenSSH sends it as soon as the command is reaped), and its absence is no answer either,
-       * since some servers never send one.
+       * Whether the server had finished this channel when the connection went (`P-259`). Read
+       * then, and only then: once `ssh2` has torn the channels down, every one looks closed.
+       *
+       * **Finished is a CLOSE, or an EOF with the exit status already in.** The exit status
+       * alone is no answer: a server may send it before the last of the output (RFC 4254 does
+       * not order them, and OpenSSH sends it as soon as the command is reaped). EOF alone is no
+       * answer either: the status may follow it — Dropbear sends data, EOF, exit status, CLOSE —
+       * and a command whose status was lost would reach a sensor as `code: null`, which
+       * `ssh.script` reads as the script's failure. A CLOSE with no status is a server that
+       * sends none, and its answer is whole.
        */
       let finishedByServer = false;
       const onGone = (): void => {
-        finishedByServer = channel !== undefined && channel.incoming.state !== 'open';
+        const state = channel?.incoming.state;
+        finishedByServer = state === 'closed' || (state === 'eof' && exited);
       };
       this.#running.add(onGone);
 
@@ -443,6 +451,9 @@ export class SshSession {
           return;
         }
         channel = stream;
+        stream.on('exit', () => {
+          exited = true;
+        });
 
         const take = (chunk: Buffer, onto: 'out' | 'err'): void => {
           bytes += chunk.length;
@@ -480,12 +491,17 @@ export class SshSession {
           // closed straight after one, or a server that sends no exit status, does not change
           // that.
           if (this.#closed && !finishedByServer) {
+            // Which of the two had not arrived, said as it was: a status can come first.
+            const when = exited
+              ? 'after the command reported an exit status but before the server finished ' +
+                'its output'
+              : 'before the command reported an exit status';
             finish(() => {
               reject(
                 new SshError(
-                  `the connection to ${this.#host} was lost while running ${command}, before ` +
-                    'the command reported an exit status — what it wrote may be incomplete, so ' +
-                    `nothing of it is used: ${this.#lost?.message ?? 'the server closed the connection'}`,
+                  `the connection to ${this.#host} was lost while running ${command}, ${when} ` +
+                    '— what it wrote may be incomplete, so nothing of it is used: ' +
+                    (this.#lost?.message ?? 'the server closed the connection'),
                   { host: this.#host, phase: 'exec', command, cause: this.#lost },
                 ),
               );

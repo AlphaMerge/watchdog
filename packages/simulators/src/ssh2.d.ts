@@ -36,6 +36,8 @@ declare module 'ssh2' {
     end(): void;
     /** Sends CHANNEL_EOF alone: the server's output is finished, and the channel stays open. */
     eof(): void;
+    /** The client's id for this channel, for a packet sent through `_protocol` (`P-259`). */
+    readonly outgoing: { readonly id: number };
     close(): void;
   }
 
@@ -74,12 +76,17 @@ declare module 'ssh2' {
     on(event: string, listener: (...args: never[]) => void): this;
     end(): void;
     /**
-     * **Private to `ssh2`**, declared for one call (`P-259`): `end()` always sends its DISCONNECT
-     * "by application", which a client takes as a goodbye, and nothing public sends another
-     * reason. A simulator that has to say "connection lost" the way an appliance going down
-     * does reaches past the public surface here, and nowhere else.
+     * **Private to `ssh2`**, declared for two calls (`P-259`). `end()` always sends its
+     * DISCONNECT "by application", which a client takes as a goodbye, and nothing public sends
+     * another reason; and a server channel refuses to send an exit status after its own EOF,
+     * which Dropbear does. A simulator that has to behave like either reaches past the public
+     * surface here, and nowhere else.
      */
-    readonly _protocol: { disconnect(reason: number): void };
+    readonly _protocol: {
+      disconnect(reason: number): void;
+      /** EOF on a channel, sent without the channel's own state hearing of it. */
+      channelEOF(recipient: number): void;
+    };
     /**
      * Asks the client to open a forwarded TCP channel. Used for its answer, not the channel
      * (`P-259`): a client that never asked for forwarding refuses it as it parses the request,

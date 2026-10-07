@@ -57,8 +57,12 @@ export interface CommandResult {
    * - `close`: EOF and CLOSE with no exit status, as some embedded servers do.
    * - `eof`: EOF and nothing more — no exit status and no CLOSE. Only useful with `then`, or
    *   the client waits for its command timeout.
+   * - `eof-then-exit`: EOF, then the exit status, and no CLOSE — Dropbear's order (data, EOF,
+   *   status, CLOSE) with the CLOSE left to `then`. `ssh2`'s server will not send a status
+   *   after its own EOF, so the EOF goes out through its private `_protocol` and the channel
+   *   still thinks itself open.
    */
-  readonly ending?: 'exit' | 'close' | 'eof';
+  readonly ending?: 'exit' | 'close' | 'eof' | 'eof-then-exit';
   /**
    * What the server does to the connection straight after finishing the channel, in the same
    * turn, so that it reaches the client in the same read where the loopback allows (`P-259`).
@@ -70,11 +74,10 @@ export interface CommandResult {
    *   packet, in the same read as the channel's EOF and CLOSE and before the channel's own
    *   `close` event.
    * - `fin`: FIN with no DISCONNECT.
-   *
-   * Not a reset: an RST in the same turn can overtake what was written before it, and `reset`
-   * above is the case for that.
+   * - `reset`: an RST once the client has read the rest, by the same round trip `reset` above
+   *   waits for — not in the same turn, where an RST can overtake what was written before it.
    */
-  readonly then?: 'disconnect' | 'disconnect-lost' | 'fin';
+  readonly then?: 'disconnect' | 'disconnect-lost' | 'fin' | 'reset';
 }
 
 /**
@@ -228,6 +231,7 @@ export class TestSshServer {
           const needsSocket =
             result.reset !== undefined ||
             result.then === 'fin' ||
+            result.then === 'reset' ||
             result.then === 'disconnect-lost';
           if (needsSocket && socket === undefined) {
             // Said, rather than leaving the command to hang until the client gives up on it.
@@ -276,6 +280,10 @@ export class TestSshServer {
             case 'eof':
               channel.eof();
               break;
+            case 'eof-then-exit':
+              connection._protocol.channelEOF(channel.outgoing.id);
+              channel.exit(result.code ?? 0);
+              break;
           }
           switch (result.then) {
             case 'disconnect':
@@ -287,6 +295,11 @@ export class TestSshServer {
               break;
             case 'fin':
               socket?.end();
+              break;
+            case 'reset':
+              connection.forwardOut('127.0.0.1', 0, '127.0.0.1', 0, () => {
+                socket?.resetAndDestroy();
+              });
               break;
             case undefined:
               break;
