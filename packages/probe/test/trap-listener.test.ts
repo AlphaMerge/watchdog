@@ -64,18 +64,37 @@ beforeEach(() => {
 });
 
 describe('handing each sensor what it has not seen', () => {
-  it('returns nothing on a sensor’s first drain, and says since when', async () => {
-    // The honest answer rather than a convenience: a sensor's first scan after a probe restart
-    // has genuinely received nothing, and `since` is how the type tells that apart from a quiet
-    // network instead of reporting a zero that looks the same.
+  it('hands a sensor held across a restart what arrived before its first scan (`P-254`)', async () => {
+    // `H-15`: three traps after the restart, counted in `trapReceived` and by no sensor, because
+    // the first scan made its cursor at the current sequence. The probe was told it holds sensor
+    // 1 (and a ping sensor, 9) before the traps came, and sensor 1 had not scanned yet.
     const trapListener = await listener();
+    trapListener.retain([1, 9]);
+    deliver(trap());
     deliver(trap());
     deliver(trap());
 
     const first = trapListener.drain(1);
-    assert.deepEqual(first.items, []);
+    assert.equal(first.items.length, 3);
     assert.equal(first.dropped, 0);
     assert.equal(first.listener, 'snmp-trap');
+    assert.equal(
+      first.since,
+      new Date(1_800_000_000_000).toISOString(),
+      'since the listener began',
+    );
+    assert.equal(trapListener.stats().received, 3);
+  });
+
+  it('counts what a sensor held across a restart lost before its first scan (`P-254`)', async () => {
+    const trapListener = await listener(4);
+    trapListener.retain([1]);
+    for (let at = 0; at < 10; at += 1) deliver(trap());
+
+    const first = trapListener.drain(1);
+    assert.equal(first.items.length, 4);
+    assert.equal(first.dropped, 6, 'received, lost to the buffer, and said so');
+    assert.equal(trapListener.stats().overwrittenUnread, 6, 'and on Probe Health');
   });
 
   it('returns what arrived since the last drain, and only that', async () => {
@@ -107,10 +126,12 @@ describe('handing each sensor what it has not seen', () => {
 
   it('lets a sensor that registered later miss what came before it', async () => {
     const trapListener = await listener();
+    trapListener.retain([1]);
     trapListener.drain(1);
     deliver(trap());
-    // Sensor 2 first drains here, so it starts from now rather than replaying history it was
-    // never configured to watch.
+    // Sensor 2 is new to a probe that was already running, and first drains here, so it starts
+    // from now rather than replaying history it was never configured to watch.
+    trapListener.retain([1, 2]);
     trapListener.drain(2);
     deliver(trap());
 
@@ -182,10 +203,12 @@ describe('the bound on memory, and what it costs', () => {
 
   it('counts a notification once however many sensors were behind, and none with no sensor (`B-14`)', async () => {
     const unread = await listener(4);
+    unread.retain([]); // the probe holds no trap sensor
     for (let at = 0; at < 10; at += 1) deliver(trap());
     assert.equal(unread.stats().overwritten, 6);
     assert.equal(unread.stats().overwrittenUnread, 0, 'nobody was waiting for them');
 
+    unread.retain([1, 2]); // two arrive on a running probe
     unread.drain(1);
     unread.drain(2);
     for (let at = 0; at < 7; at += 1) deliver(trap());

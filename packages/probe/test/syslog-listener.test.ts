@@ -56,9 +56,7 @@ describe('syslog listener', () => {
     const { listener, send } = listenerOf();
     await listener.start();
 
-    // The first drain registers the cursor and returns nothing: a sensor's first scan after a
-    // probe restart has genuinely received nothing, and `since` is how the type tells that apart
-    // from a quiet network.
+    // Nothing has arrived, so a first drain has nothing to hand.
     assert.equal(listener.drain(1).items.length, 0);
 
     send(line('one'));
@@ -71,11 +69,38 @@ describe('syslog listener', () => {
     await listener.stop();
   });
 
+  it('hands a sensor held across a restart what arrived before its first scan (`P-254`)', async () => {
+    // A device rebooting alongside the probe sends exactly then. The probe was told it holds
+    // sensor 1 and a ping sensor, 9; sensor 1 has not scanned.
+    const { listener, send } = listenerOf({ bufferSize: 4 });
+    await listener.start();
+    listener.retain([1, 9]);
+    send(line('one'));
+    send(line('two'));
+    send(line('three'));
+    assert.equal(listener.drain(1).items.length, 3);
+
+    // And one that scans before the probe has been told anything reads from the start too, with
+    // what the buffer could not hold counted.
+    const early = listenerOf({ bufferSize: 4 });
+    await early.listener.start();
+    for (let at = 0; at < 7; at += 1) early.send(line(`early ${String(at)}`));
+    const batch = early.listener.drain(1);
+    assert.equal(batch.items.length, 4);
+    assert.equal(batch.dropped, 3);
+    assert.equal(early.listener.stats().overwrittenUnread, 3);
+    await early.listener.stop();
+    await listener.stop();
+  });
+
   it('gives two sensors the same messages, each from its own cursor', async () => {
     const { listener, send } = listenerOf();
     await listener.start();
+    listener.retain([1]);
     listener.drain(1);
     send(line('shared'));
+    // New to a running probe, so it starts at its first scan.
+    listener.retain([1, 2]);
     listener.drain(2);
     send(line('only for one'));
 
@@ -124,10 +149,12 @@ describe('syslog listener', () => {
   it('counts a message once however many sensors were behind, and none with no sensor (`B-14`)', async () => {
     const { listener, send } = listenerOf({ bufferSize: 4 });
     await listener.start();
+    listener.retain([]); // the probe holds no syslog sensor
     for (let at = 0; at < 10; at += 1) send(line(`unwatched ${String(at)}`));
     assert.equal(listener.stats().overwritten, 6);
     assert.equal(listener.stats().overwrittenUnread, 0, 'nobody was waiting for them');
 
+    listener.retain([1, 2]); // two arrive on a running probe
     listener.drain(1);
     listener.drain(2);
     for (let at = 0; at < 7; at += 1) send(line(`watched ${String(at)}`));

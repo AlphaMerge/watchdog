@@ -117,6 +117,11 @@ export class FakeCore {
   readonly refused: string[] = [];
   /** What the next `welcome` says this core speaks. An older core is this, lowered. */
   protocolVersion = PROTOCOL_VERSION;
+  /**
+   * Welcome the probe and hand it nothing until `sendConfig` (`P-254`): a probe that restarted and
+   * has its listeners up, before it knows which sensors it holds.
+   */
+  holdConfig = false;
   readonly #sensors: readonly SensorAssignment[];
   #server: Server | undefined;
   #socket: TLSSocket | undefined;
@@ -175,7 +180,7 @@ export class FakeCore {
           heartbeatIntervalMs: 1_000,
           approved: true,
         });
-        this.#send({ type: 'config-set', version: 'v1', sensors: [...this.#sensors] });
+        if (!this.holdConfig) this.sendConfig();
         break;
       case 'heartbeat':
         this.#send({ type: 'heartbeat-ack', seq: message.seq });
@@ -196,6 +201,11 @@ export class FakeCore {
 
   #send(message: CoreToProbeMessage): void {
     this.#socket?.write(encodeFrame(message));
+  }
+
+  /** Hands the probe its sensors, as a whole set. */
+  sendConfig(): void {
+    this.#send({ type: 'config-set', version: 'v1', sensors: [...this.#sensors] });
   }
 
   /** Closes the link the way a core restart does. The probe dials again by itself. */

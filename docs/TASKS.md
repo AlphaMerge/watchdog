@@ -7682,7 +7682,7 @@ because each is a decision rather than a defect:
       `Queryable` and catch without a savepoint, safe only while every caller passes the pool.
       **Done when** each is fixed with a test or written down as accepted.
 
-- [ ] **P-254 — a trap or syslog message before a sensor's first scan is counted by nobody** ·
+- [x] **P-254 — a trap or syslog message before a sensor's first scan is counted by nobody** ·
       S · T-06, T-20 · Found 2026-10-04 by `H-15`
       (`findings/2026-10-04-field-test-dress-rehearsal.md`). After a probe restart, the
       listener starts receiving at once. Each sensor's cursor is registered only at its first
@@ -7698,6 +7698,51 @@ because each is a decision rather than a defect:
       **Done when** a sensor's first drain after a listener starts reads from the listener's
       start (or a message received before the first scan is counted as `dropped`), with a test
       that sends before the first drain and asserts the count.
+
+      **P-254 outcome (2026-10-07).** `NotificationRing` (`listeners/ring.ts`, shared by the trap,
+      syslog and flow listeners) now tells apart the three reasons a sensor has no cursor:
+      - **A probe restart.** The sensor is in the first set the probe hands `retain`, or it
+        drains before any set was handed. Its first drain reads from sequence 0, with `since` set
+        to the listener's start. Whatever the ring overwrote before then is that sensor's
+        `dropped`.
+      - **A sensor new to a running probe** (in a later set, not the first). It starts at its
+        first drain with nothing and nothing dropped, as before.
+      - **A cursor `retain` removed** (deleted, paused, moved). It leaves the restart set too, so
+        it returns as new, whether or not it had scanned before it left.
+
+      `retain` is handed every held sensor of every type, so the first set is kept as candidates,
+      not cursors. A ping sensor in it costs one number and claims nothing.
+
+      **Probe Health stays once a record.** An overwrite with no cursor behind it goes to an
+      unclaimed count rather than `unread`. The first restart sensor that drains moves it into
+      `unread`, so `trapOverwritten`/`syslogOverwritten` still equal what the slowest sensor
+      reports `dropped`, and that loss is added at the scan rather than as it happened. No new
+      channel and no message shape change, so no protocol bump. `docs/administration.md`'s row
+      says so.
+
+      Tests:
+      - **`ring.test.ts` (new).** Restart before the first set and after it (`H-15`'s two
+        sensors 9 s apart), a reconnect's re-push, overflow counted once across two sensors,
+        what one sensor read and the other had not, no double count after a sensor was behind;
+        new sensor before and after the sweep names it, with no loss claimed; a removed sensor
+        returning, having scanned or not.
+      - **The listener tests.** Trap, syslog and flow each send before the first drain and
+        assert the count. The older cases that meant "new sensor" now say so with `retain`.
+      - **`probe-listeners.test.ts`.** A case starts `ms-probe`, has `FakeCore` hold the config
+        (`holdConfig`/`sendConfig`), sends three traps and three syslog messages, then sends the
+        config. Each sensor's first scan reads 3.
+
+      **Mutations 10/10**, run against the six listener unit files, and the first one also
+      against the probe case: restart reads from now; every sensor new after the first set; no
+      sensor a restart one before it; the claim not moved into `unread`; moved twice; unclaimed
+      never kept; kept for counted records too; `since` now; every set treated as the first; a
+      sensor that left stays a restart candidate.
+
+      **Not done.** A sensor new to a running probe still misses what arrived between its
+      assignment and its first scan. Starting it at its assignment needs `retain` (or the
+      `AssignmentStore` `onAdd` wiring in `main.ts`) to tell each listener which held sensors are
+      its own. Without that, overwrites before its first drain could not be counted on Probe
+      Health as they happen.
 
 - [ ] **P-255 — Probe Health blames the protocol before a probe's first heartbeat** · S · R-06 ·
       Found 2026-10-04 by `H-15`. Four seconds after a restart,

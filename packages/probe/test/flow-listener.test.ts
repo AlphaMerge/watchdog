@@ -111,7 +111,8 @@ describe('the flow listener', () => {
 
     assert.equal(flow.stats().received, 3);
     assert.equal(flow.stats().buffered, 3);
-    assert.equal(flow.drain(1).items.length, 0, 'a first drain registers the cursor');
+    // A sensor held across the restart reads from the collector's start (`P-254`).
+    assert.equal(flow.drain(1).items.length, 3, 'a first drain reads what was buffered');
     deliver(datagram('192.0.2.1', 3, 2));
     assert.equal(flow.drain(1).items.length, 2);
   });
@@ -190,7 +191,9 @@ describe('the flow listener', () => {
 
     it('counts from a sensor’s first scan, and from exactly the record it is waiting at', async () => {
       const flow = await listener(4);
+      flow.retain([]); // the probe holds no flow sensor
       deliver(datagram('192.0.2.1', 0, 10)); // sequences 0..9, before any sensor
+      flow.retain([1]); // new to a running probe
       flow.drain(1); // waiting at 10
       deliver(datagram('192.0.2.1', 10, 4)); // 10..13 overwrite 6..9, which it never asked for
       assert.equal(flow.stats().overwrittenUnread, 0);

@@ -63,6 +63,7 @@ export interface TrapListenerStats {
    * Notifications the ring overwrote before a sensor that was following it had read them
    * (`B-14`): received and counted, and lost to `bufferSize`. Once a notification however many
    * sensors were behind, and nothing while no trap sensor is assigned. Since the listener started.
+   * What a sensor held across a restart lost before its first scan is added at that scan (`P-254`).
    */
   readonly overwrittenUnread: number;
 }

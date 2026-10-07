@@ -402,6 +402,100 @@ describe(
       },
     );
 
+    it(
+      'hands each sensor what arrived after a restart and before its first scan (`P-254`)',
+      { timeout: 180_000 },
+      async () => {
+        // `H-15`: a probe restarted, three traps came 41 s later, before either trap sensor's
+        // first scan, and `trapReceived` counted them while no sensor did. Here the probe is up,
+        // welcomed, and listening, and has not been told its sensors; three traps and three
+        // syslog messages arrive; then it is told, and each sensor's first scan has to read them.
+        const trapPort = await freeUdpPort();
+        const syslogPort = await freeTcpPort();
+        const { core, port } = await FakeCore.start(dir, [trapSensor, syslogSensor]);
+        cores.push(core);
+        core.holdConfig = true;
+        const probe = startProbe({
+          dir,
+          corePort: port,
+          config: {
+            trapListener: {
+              enabled: true,
+              port: trapPort,
+              address: '127.0.0.1',
+              bufferSize: BUFFER,
+            },
+            syslogListener: {
+              enabled: true,
+              port: syslogPort,
+              address: '127.0.0.1',
+              udp: false,
+              tcp: true,
+              bufferSize: BUFFER,
+            },
+          },
+          profile: 'full',
+        });
+        running.push(probe);
+        // A heartbeat means it was welcomed, and its listeners start before it dials.
+        await core.waitFor('a first heartbeat', healthOf);
+
+        const EARLY = 3;
+        const collector = { host: '127.0.0.1', port: trapPort };
+        for (let id = 0; id < EARLY; id += 1) await sendUdp(renderTrap(id), collector);
+        await within(
+          60_000,
+          'the early syslog messages to be sent',
+          sendTcp(
+            syslogPort,
+            Array.from({ length: EARLY }, (_unused, index) => ({
+              message: `early ${String(index)}`,
+            })),
+          ),
+        );
+        const heard = await core.waitFor('a heartbeat carrying all six', (message) => {
+          const health = healthOf(message);
+          return health !== undefined &&
+            health.trapReceived === EARLY &&
+            health.syslogReceived === EARLY
+            ? health
+            : undefined;
+        });
+        assert.equal(heard.trapOverwritten, 0);
+
+        const mark = core.received.length;
+        core.sendConfig();
+        await core.waitFor(
+          'the probe to take its sensors',
+          (message) => (message.type === 'config-ack' ? message : undefined),
+          { from: mark },
+        );
+        const syslogRead = await core.waitFor(
+          'a syslog scan that read the early messages',
+          resultFor(
+            SYSLOG_SENSOR,
+            (result) => result.outcome === 'ok' && channel(result, 'messages') > 0,
+          ),
+          { from: mark },
+        );
+        assert.equal(channel(syslogRead, 'messages'), EARLY, syslogRead.message);
+        const traps = await core.waitFor(
+          'the trap sensor to read the early traps',
+          () => {
+            const now = trapTotals(core);
+            return now.read > 0 ? now : undefined;
+          },
+          { from: mark },
+        );
+        assert.equal(traps.read, EARLY, 'the trap sensor counted what arrived before its scan');
+        assert.equal(traps.dropped, 0);
+        assert.equal(traps.failed, 0);
+
+        assert.deepEqual(core.refused, [], 'the probe sent something a core refuses');
+        assert.equal(await probe.stop(), 0, 'the probe did not stop cleanly');
+      },
+    );
+
     it('sends each field only for a listener the probe runs', { timeout: 180_000 }, async () => {
       // Syslog alone. A zero for the trap listener would say one is running and losing nothing.
       const syslogPort = await freeTcpPort();
