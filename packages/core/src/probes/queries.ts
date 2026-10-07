@@ -113,8 +113,10 @@ export interface ProbeQueryStats {
   /** Answers refused because a probe other than the one asked sent them (`P-228`). */
   foreign: number;
   /**
-   * Answers whose result could not be made to fit the protocol, refused and answered `too-old`
-   * (`P-289`). Counted on the probe's Reports refused as well.
+   * Answers whose result could not be made to fit the protocol, refused (`P-289`): answered
+   * `too-old` when someone was waiting, and dropped when nobody was any more (`P-300`). Counted on
+   * the probe's Reports refused as well, and on Core Health's `resultsRefusedUnfit` with the
+   * results refused from batches.
    */
   unfit: number;
 }
@@ -269,8 +271,16 @@ export class ProbeQueryService {
    * other query on it failed too. Every probe since `P-277` fits its results before sending, so
    * one that does not is a build before it (or not our probe), and an upgrade is what mends it:
    * `too-old` is the answer that says so, and puts an upgrade prompt where a retry would do the
-   * same again. Counted on Reports refused, as a refused result in a batch is (`P-281`). A result
-   * only fitted is the answer, and said in the log: nothing was stored, so nothing is counted.
+   * same again. Counted on Reports refused, as a refused result in a batch is (`P-281`), and in
+   * `unfit`, which Core Health adds to `resultsRefusedUnfit` (`P-300`). A result only fitted is
+   * the answer, and said in the log: nothing was stored, so nothing is counted.
+   *
+   * **An unfit answer that is late is counted too** (`P-300`). It used to be logged at debug with
+   * the rest of the late answers, so an older probe whose answers all came after their deadline
+   * was refused on no counter. It is refused the same, against the probe that sent it, and warned:
+   * there is nobody to answer `too-old` to, but the probe still needs upgrading. Counted once, as
+   * every answer is: a query's answer is not spooled, so nothing sends it again. A late answer
+   * that fits, or was only fitted, is still the debug line it was.
    */
   deliver(
     message: {
@@ -284,6 +294,17 @@ export class ProbeQueryService {
   ): void {
     const pending = this.#pending.get(message.queryId);
     if (pending === undefined) {
+      const late = unfit?.refused[0];
+      if (late !== undefined) {
+        this.#unfit += 1;
+        this.#refusals?.refused(from);
+        this.#logger.warn(
+          { queryId: message.queryId, probeObjectId: from, refused: late },
+          'a probe answered a query nobody awaits with a result that cannot be made to fit the ' +
+            'protocol; refused',
+        );
+        return;
+      }
       this.#logger.debug(
         { queryId: message.queryId, ...(unfit === undefined ? {} : { unfit }) },
         'a probe answered a query nobody awaits',

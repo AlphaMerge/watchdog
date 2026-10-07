@@ -65,7 +65,7 @@ export function fixedCoreHealth(
               formatsRefused: 1,
             }),
           }),
-      queries: () => ({ refused: 2 }),
+      queries: () => ({ refused: 2, unfit: 2 }),
       ingestionDiscards: () => ({
         discardedFutureTime: 0,
         discardedPastTime: 0,

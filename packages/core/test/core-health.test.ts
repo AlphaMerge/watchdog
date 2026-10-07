@@ -66,6 +66,7 @@ function sources(
     alarmsFired: number;
     alarmOverdueMs: number;
     queriesRefused: number;
+    queriesUnfit: number;
     reportsDeferred: number;
     reportsFailed: number;
     reportsUndelivered: number;
@@ -127,7 +128,10 @@ function sources(
       formatsWaiting: overrides.reportFormatsWaiting ?? 0,
       formatsRefused: overrides.reportFormatsRefused ?? 0,
     }),
-    queries: () => ({ refused: overrides.queriesRefused ?? 0 }),
+    queries: () => ({
+      refused: overrides.queriesRefused ?? 0,
+      unfit: overrides.queriesUnfit ?? 0,
+    }),
     ingestionDiscards: () => ({
       discardedFutureTime: overrides.resultsFutureDated ?? 0,
       discardedPastTime: overrides.resultsPastDated ?? 0,
@@ -556,6 +560,17 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       const none = await build({}).read();
       assert.equal(none['resultsRefusedUnfit'], 0);
       assert.equal(none['readingsDroppedUnfit'], 0);
+    });
+
+    it('adds the query answers refused for not fitting to the results refused (`P-300`)', async () => {
+      // A query's answer is a probe's result like a batch's, and refused for the same reason:
+      // the same older build, met through Check now. One counter for both, the sum of two that
+      // each run from the core's start.
+      const both = await build({ resultsRefusedUnfit: 4, queriesUnfit: 3 }).read();
+      assert.equal(both['resultsRefusedUnfit'], 7);
+      assert.equal(both['readingsDroppedUnfit'], 0, 'an answer refused drops no readings');
+      const answersOnly = await build({ queriesUnfit: 2 }).read();
+      assert.equal(answersOnly['resultsRefusedUnfit'], 2);
     });
 
     it('counts the credential sets holding keys their kind does not declare (A-43)', async () => {

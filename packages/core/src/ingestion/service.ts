@@ -69,10 +69,13 @@ export interface IngestionServiceOptions {
       readonly results: readonly CheckResult[];
       /** Marked withheld and not the probe's to mark, as sent: counted once each (`P-295`). */
       readonly unearned: readonly CheckResult[];
-      /** Refusals made under the configuration before the probe's last, and dropped (`A-53`). */
-      readonly late: number;
-      /** Results for a sensor withheld from the probe, and dropped (`A-72`). */
-      readonly withheldDropped: number;
+      /**
+       * Refusals made under the configuration before the probe's last, and dropped (`A-53`), as
+       * sent: counted once each (`P-299`).
+       */
+      readonly late: readonly CheckResult[];
+      /** Results for a sensor withheld from the probe, and dropped (`A-72`), as sent: once each. */
+      readonly withheldDropped: readonly CheckResult[];
       stored(landed: boolean): Promise<void>;
     }>;
   };
@@ -440,9 +443,7 @@ export class IngestionService {
           // they are and counted with what Probe Health counts as refused: a probe that marks
           // what it should not is one to look at. Once however often it is sent (`P-295`).
           const unearned = reported.unearned.length;
-          const counted = reported.unearned.filter((one) =>
-            this.#firstCount('refused', origin.gid, one.sensorId, one.at),
-          ).length;
+          const counted = this.#countedOnce(origin.gid, reported.unearned);
           this.#refusals?.refused(origin.probeObjectId, counted);
           this.#logger.warn(
             {
@@ -455,30 +456,42 @@ export class IngestionService {
               'not errors; taken as the results they are',
           );
         }
-        if (reported.late > 0) {
+        if (reported.late.length > 0) {
           // **Refused under the configuration before the one the probe has now** (`A-53`). Not
           // failed scans and not stored: dropped, and never silently. Counted on Probe Health
           // apart from what the core refused from the probe (`A-56`): the probe followed its
           // configuration, and a count shared with the refusals that mean a probe is marking
-          // what it should not would hide those behind every change to a set's targets.
-          this.#refusals?.late(origin.probeObjectId, reported.late);
-          this.#logger.info(
-            { source: origin.gid, probeObjectId: origin.probeObjectId, results: reported.late },
-            'a probe refused to scan sensors its configuration has since stopped leaving to ' +
-              'it; dropped, as neither a failed scan nor a reason to hold them',
-          );
-        }
-        if (reported.withheldDropped > 0) {
-          // **For a sensor the core is withholding from this probe** (`A-72`): made under a
-          // configuration before, whatever it says. Dropped, so the sensor does not open with a
-          // Down nobody can read when it is let go, and counted on Probe Health on its own, as
-          // late refusals are: the probe did nothing wrong.
-          this.#refusals?.withheld(origin.probeObjectId, reported.withheldDropped);
+          // what it should not would hide those behind every change to a set's targets. Once
+          // however often it is sent (`P-299`).
+          const late = reported.late.length;
+          const counted = this.#countedOnce(origin.gid, reported.late);
+          this.#refusals?.late(origin.probeObjectId, counted);
           this.#logger.info(
             {
               source: origin.gid,
               probeObjectId: origin.probeObjectId,
-              results: reported.withheldDropped,
+              results: late,
+              ...(counted < late ? { countedBefore: late - counted } : {}),
+            },
+            'a probe refused to scan sensors its configuration has since stopped leaving to ' +
+              'it; dropped, as neither a failed scan nor a reason to hold them',
+          );
+        }
+        if (reported.withheldDropped.length > 0) {
+          // **For a sensor the core is withholding from this probe** (`A-72`): made under a
+          // configuration before, whatever it says. Dropped, so the sensor does not open with a
+          // Down nobody can read when it is let go, and counted on Probe Health on its own, as
+          // late refusals are: the probe did nothing wrong. Once however often it is sent
+          // (`P-299`).
+          const withheld = reported.withheldDropped.length;
+          const counted = this.#countedOnce(origin.gid, reported.withheldDropped);
+          this.#refusals?.withheld(origin.probeObjectId, counted);
+          this.#logger.info(
+            {
+              source: origin.gid,
+              probeObjectId: origin.probeObjectId,
+              results: withheld,
+              ...(counted < withheld ? { countedBefore: withheld - counted } : {}),
             },
             'a probe reported on sensors its configuration withholds from it; dropped, as made ' +
               'under a configuration before',
@@ -599,6 +612,12 @@ export class IngestionService {
    * the same result whatever refused it: one refused as moved and sent again after its sensor was
    * deleted is not a second refusal.
    *
+   * **And for every result dropped as made under a configuration before** (`P-299`): `A-53`'s
+   * late refusals and `A-72`'s results for a withheld sensor. Each is counted on Probe Health
+   * apart from the refusals, but it is still one result the probe sent once: a late refusal sent
+   * again after its grace ran out, and judged an unearned mark then, is the refusal the probe
+   * made under the configuration before, counted already, and not a probe that marks what it
+   * should not.
    */
   #firstCount(
     kind: 'refused' | 'fitted',
@@ -609,6 +628,11 @@ export class IngestionService {
     if (sensorId === null || at === null) return true;
     // Unambiguous without quoting: a sensor id holds no space, and `at` is the rest.
     return this.#counted.first(gid, `${kind === 'refused' ? 'r' : 'f'}${String(sensorId)} ${at}`);
+  }
+
+  /** How many of these results are counted now: the ones not counted before (`#firstCount`). */
+  #countedOnce(gid: string, results: readonly CheckResult[]): number {
+    return results.filter((one) => this.#firstCount('refused', gid, one.sensorId, one.at)).length;
   }
 
   /**

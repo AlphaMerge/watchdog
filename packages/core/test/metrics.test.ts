@@ -109,8 +109,9 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       assert.equal(metrics.get('ms_core_db_statements_cancelled_total'), 4);
       assert.equal(metrics.get('ms_core_db_lock_waits_given_up_total'), 3);
       assert.ok((metrics.get('ms_core_db_oldest_statement_seconds') ?? -1) >= 0);
-      // `P-290`: results refused, and readings dropped, for not fitting the protocol.
-      assert.equal(metrics.get('ms_core_results_refused_unfit_total'), 3);
+      // `P-290`: results refused, and readings dropped, for not fitting the protocol. Three from
+      // batches and two from query answers (`P-300`).
+      assert.equal(metrics.get('ms_core_results_refused_unfit_total'), 5);
       assert.equal(metrics.get('ms_core_readings_dropped_unfit_total'), 5);
     });
 

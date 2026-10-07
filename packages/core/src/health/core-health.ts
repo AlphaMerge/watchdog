@@ -69,8 +69,11 @@ export interface CoreHealthSources {
    * measured on the monotonic clock its timer runs on (`P-247`).
    */
   alarms: () => { fired: number; overdueMs: number };
-  /** `ProbeQueryService.stats()` — on-demand checks turned away at the bound (`R-09`). */
-  queries: () => { refused: number };
+  /**
+   * `ProbeQueryService.stats()` — on-demand checks turned away at the bound (`R-09`), and answers
+   * whose result could not be made to fit the protocol, refused (`P-289`, `P-300`).
+   */
+  queries: () => { refused: number; unfit: number };
   /**
    * `ReportRunner.stats()` — the report sweep's queue and its failures (`E-08`).
    *
@@ -452,8 +455,10 @@ export class CoreHealthService {
       resultsFutureDated: discards.discardedFutureTime,
       resultsPastDated: discards.discardedPastTime,
       resultsUnreadableTime: discards.discardedUnreadableTime,
-      // The fleet's total of what Probe Health's Reports refused counts per probe (`P-290`).
-      resultsRefusedUnfit: discards.refusedUnfit,
+      // The fleet's total of what Probe Health's Reports refused counts per probe for not
+      // fitting (`P-290`): from batches, and from answers to queries, on time or late (`P-300`).
+      // Both run from this process's start, so the sum is the counter either is.
+      resultsRefusedUnfit: discards.refusedUnfit + queries.unfit,
       readingsDroppedUnfit: discards.discardedUnfitReadings,
       // Seconds behind every remote probe, two or more of them (`P-247`); a gap with fewer.
       clockBehind: coreClock.behindSeconds,

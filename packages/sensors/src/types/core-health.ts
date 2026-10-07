@@ -463,6 +463,8 @@ const CHANNELS: readonly ChannelDef[] = [
   // `P-277`, so anything here is an older build or not our probe. The fleet's total of what each
   // Probe Health's `reportsRefused` counts per probe, which names it; so no limit, as there is
   // none there: one result refused is one sensor going without it, and its own state says so.
+  // A query's answer refused for the same reason is counted here too, whether someone was still
+  // waiting for it or not (`P-300`): it is the same older build, met through **Check now**.
   {
     key: 'resultsRefusedUnfit',
     name: 'Results refused as unfit',

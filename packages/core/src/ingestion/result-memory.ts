@@ -1,7 +1,7 @@
 /**
- * Counted results remembered for each probe (`P-288`, `P-295`): two full batches of 5,000, so a
- * batch whose acknowledgement was lost is still remembered when it is sent again behind another
- * as large. **Per probe**, because between the lost acknowledgement and the resend there is a
+ * Counted results remembered for each probe (`P-288`, `P-295`, `P-299`): two full batches of
+ * 5,000, so a batch whose acknowledgement was lost is still remembered when it is sent again
+ * behind another as large. **Per probe**, because between the lost acknowledgement and the resend there is a
  * reconnect, and in a fleet-wide replay after an upgrade other probes send their own refusals
  * meanwhile: one set shared by all of them would forget the first probe's before it came back.
  *
@@ -34,10 +34,13 @@ export const RESULTS_REMEMBERED_SLACK = 0.1;
  * sent whole), so at most 82 characters, about 210 bytes with the string's header and the set's
  * entry where a character outside Latin-1 makes it two bytes a character. An ISO time makes it
  * about 35 characters and 80 bytes, some 28 MB for the same 352,000. **Only a refusal is
- * remembered**, or a result that lost readings to fitting: a result that did not fit, one for a
- * sensor not under the probe (`P-295`), or one marked withheld that was not the probe's to mark.
- * Empty while every probe fits its own results and reports only on its own sensors; a spool
- * draining after a delete or a move fills it for that probe, and no further than the bound.
+ * remembered**, or a result that lost readings to fitting or was dropped: a result that did not
+ * fit, one for a sensor not under the probe (`P-295`), one marked withheld that was not the
+ * probe's to mark, and one dropped as made under a configuration before, a late refusal or a
+ * result for a withheld sensor (`P-299`). Empty while every probe fits its own results and
+ * reports only on its own sensors under the configuration it has; a spool draining after a
+ * delete, a move or a change to what a probe is left fills it for that probe, and no further
+ * than the bound.
  */
 export const PROBES_REMEMBERED = 32;
 

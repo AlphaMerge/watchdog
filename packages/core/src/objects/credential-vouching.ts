@@ -1224,16 +1224,19 @@ export interface ReportedBatch {
   /**
    * Refusals for a sensor a configuration stopped leaving to this probe within the grace
    * (`A-53`): made under the configuration before, and delivered after. Not in `results`, and
-   * holding nothing: neither a failed scan nor a reason to stand Unknown. Counted by the caller.
+   * holding nothing: neither a failed scan nor a reason to stand Unknown. Counted by the caller,
+   * each as it was sent, so a batch sent again after a lost acknowledgement counts it once
+   * (`P-299`), as `unearned` is.
    */
-  readonly late: number;
+  readonly late: readonly CheckResult[];
   /**
    * Results of any kind for a sensor this probe's last configuration withheld (`A-72`): the core
    * is not sending it the sensor, so whatever it says of it was made under a configuration
    * before. Not in `results`: never a failed scan, so a sensor let go does not open with a Down
-   * nobody can read. Holding nothing and letting nothing go. Counted by the caller.
+   * nobody can read. Holding nothing and letting nothing go. Counted by the caller, each as it
+   * was sent and once (`P-299`).
    */
-  readonly withheldDropped: number;
+  readonly withheldDropped: readonly CheckResult[];
   /**
    * Says what became of `results`. Stored, a master among the sensors they let go settles what
    * depends on it. Not stored, the sensors are held again as they were: the probe sends the batch
@@ -2249,7 +2252,7 @@ export class CredentialVouching {
       withheldHere === undefined &&
       !results.some((result) => result.withheld === true)
     ) {
-      return { results, unearned: [], late: 0, withheldDropped: 0, stored: NOTHING_LET_GO };
+      return { results, unearned: [], late: [], withheldDropped: [], stored: NOTHING_LET_GO };
     }
 
     const held = this.#refusedByProbe.get(probeId);
@@ -2262,8 +2265,8 @@ export class CredentialVouching {
     /** When the first refusal that says something new was made, by the probe's clock. */
     let news: number | undefined;
     const unearned: CheckResult[] = [];
-    let late = 0;
-    let withheldDropped = 0;
+    const late: CheckResult[] = [];
+    const withheldDropped: CheckResult[] = [];
     const inOrder = [...results].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
     for (const result of inOrder) {
       const at = Date.parse(result.at);
@@ -2274,7 +2277,7 @@ export class CredentialVouching {
       const earned = refusal && left?.has(result.sensorId) === true;
       if (refusal && !earned && this.#stoppedWithinGrace(probeId, result.sensorId)) {
         // Made under the configuration before this one (`A-53`). Neither kept nor held.
-        late += 1;
+        late.push(result);
         continue;
       }
       if (withheldHere?.has(result.sensorId) === true) {
@@ -2283,7 +2286,7 @@ export class CredentialVouching {
         // Taken as a failed scan, two of them were a Down the sensor opened with when it was let
         // go, in words nobody could place. Dropped instead, and counted: it measures nothing,
         // holds nothing and lets nothing go, whatever it is, a reading included.
-        withheldDropped += 1;
+        withheldDropped.push(result);
         continue;
       }
       if (!earned) {

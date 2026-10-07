@@ -10497,18 +10497,80 @@ because each is a decision rather than a defect:
       `capabilitiesFor` repeats each number; a test catches drift across all 26. **Done when** it is
       built from the table, with the test kept.
 
-- [ ] **P-299 — late and dropped-withheld results are counted again when a batch is sent again**
+- [x] **P-299 — late and dropped-withheld results are counted again when a batch is sent again**
       · S · P-295 · Found 2026-10-08 in `P-295`. `A-53`'s `late` and `A-72`'s `withheldDropped`
       count on every arrival, so a resend after a lost ack counts them twice; `reported()` returns
       them as counts, so they cannot be named by sensor and time. **Done when** they go through the
       result memory as `unearned` now does, with a lost-ack test.
 
-- [ ] **P-300 — an unfit query answer is counted only when on time, and never on Core Health** ·
+      **P-299 outcome. Lists, through the same memory, under the same key.** No protocol change, no
+      migration, the bound unchanged.
+      - **`CredentialVouching.reported`** returns `late` and `withheldDropped` as the results as
+        sent (`ReportedBatch`), as `unearned` has been since `P-295`. `IngestionService` counts
+        each list through one helper, `#countedOnce`, which `unearned` now uses too:
+        `#firstCount('refused', gid, sensorId, at)` in `ResultMemory`. Probe Health's
+        `lateRefusals` and `resultsWithheld` (`ProbeRefusals.late` / `.withheld`) count a result
+        once however often it is sent; `resultsReceived` still counts every arrival.
+      - **One key for every result that is refused or dropped, not a kind each.** One arrival meets
+        at most one of unfit, unknown, moved, foreign, unearned, late or withheld. Across arrivals
+        the judgement can change, since the grace runs out between them: a late refusal whose ack
+        was lost, sent again past the ten minutes, is judged an unearned mark then. It is still
+        the refusal the probe made under the configuration before, counted already, and counting
+        it again on `reportsRefused` would call an honest probe one that marks what it should not.
+      - **Windows: none of these two feeds one, so nothing had to keep counting arrivals.**
+        `lateRefusals` and `resultsWithheld` are plain 64-bit counters with no limit, no lookup and
+        no state. The five-minute windows that exist: `ProbeRefusals`' `reportsForeign`
+        (`FOREIGN_WINDOW_MS`, warns; still counts every arrival, as `P-295` left it), ingestion's
+        `timeRefusals` past/future (`TIME_REFUSAL_WINDOW_MS`, results refused for their clock; not
+        routed through the memory, untouched), and Probe Health's `#recentCount` windows
+        (`scriptGroupsRefusedRecently`, `resultsDiscarded`), which take the probe's own counters
+        and never see a resend. Alarm volume unchanged, so no scenario test.
+      - **Memory.** Late and withheld results now take places in a probe's set, so a probe's
+        spool draining after a downgrade or a change to what it is left fills it too, to the same
+        bound (10,000 a probe and a tenth, 32 probes, about 75 MB worst case); `result-memory.ts`
+        says so. The log lines say what arrived, with `countedBefore` when some was counted.
+      - **Tests.** `credential-pinning.test.ts`, on the database with one ingestion service: a
+        probe left two named sensors comes back too old to pin, so one's refusal is late and the
+        other's reading withheld; acked (`lateRefusals` 1, `resultsWithheld` 1); the ack lost, the
+        same two again under a new batch id with one more of each queued since: 2 and 2, not 3
+        and 3, `reportsRefused` 0, `resultsReceived` 6, `resultsRemembered` 4. The unit cases on
+        `reported` read `.late.length` / `.withheldDropped.length`.
+
+- [x] **P-300 — an unfit query answer is counted only when on time, and never on Core Health** ·
       S · P-289 · Found 2026-10-08 in `P-289`. A query answer that arrives after its deadline with
       an unfit result is only debug-logged; refused query answers are on Probe Health's Reports
       refused and the query service's `unfit` stat, not on Core Health's `resultsRefusedUnfit` or
       `/metrics`. **Done when** both are counted where `P-290` counts results, or the reason not to
       is written down, with tests.
+
+      **P-300 outcome. Both counted, on the channel `P-290` made.** No protocol change, no new
+      channel, so `sensor-reference.md` is unchanged (`--check` current).
+      - **A late unfit answer** (`ProbeQueryService.deliver`, nobody awaiting the id) is refused
+        as an on-time one is: `unfit` +1, `reportsRefused` +1 on the probe that sent it (the
+        totals only, from a GID that owns no probe object), and warned with the sensor id and
+        reason, *answered a query nobody awaits with a result that cannot be made to fit*. There
+        is no caller to answer `too-old`, but the probe still needs upgrading. A late answer that
+        fits, or was only fitted, is the debug line it was. Counted once: a query's answer is not
+        spooled, so nothing sends it again, and no memory is needed.
+      - **Core Health's `resultsRefusedUnfit` is now batches plus query answers**
+        (`ingestionDiscards().refusedUnfit + queries().unfit`; the `queries` source gains
+        `unfit`), and so is `ms_core_results_refused_unfit_total` (help text says so). One
+        counter, not a second channel: the same older build met through **Check now**, and the
+        channel is already the fleet's total of what `reportsRefused` counts for not fitting,
+        which counted query answers since `P-289`. Both terms run from the process's start, so the
+        sum is a counter. No limit, as before; alarm volume unchanged, so no scenario test.
+      - **Docs.** `administration.md`'s Core Health row and refusal table (the line that said
+        query answers are not in `resultsRefusedUnfit` now says they are, late ones too); the
+        channel's comment in `packages/sensors`.
+      - **Tests.** `probe-queries.test.ts`: an unfit answer after the deadline counts `unfit` and
+        `reportsRefused`, settles nobody, and is warned naming the sensor; a late fitted or fitting
+        one counts and warns nothing; one from a null probe counts the totals only.
+        `unfit-results.test.ts` (real TLS endpoint): after the on-time refused and fitted answers,
+        a query left to expire (100 ms, the protocol's least) is answered with `outcome: 'maybe'`;
+        once the next answer on the link is taken, `unfit` is 2, `reportsRefused` +2, the link up,
+        the warn line there. `core-health.test.ts`: 4 from batches and 3 from answers read 7;
+        answers alone read. `metrics.test.ts`: the exported counter is the sum (3 + 2). The
+        `queries` stubs in three scenario tests and `support/health.ts` carry `unfit`.
 
 - [ ] **P-301 — a sensor that loses channels to fitting stays Up** · S · P-292 · Found 2026-10-08
       in `P-292`. The message now says how many channels could not be sent, but the state does not

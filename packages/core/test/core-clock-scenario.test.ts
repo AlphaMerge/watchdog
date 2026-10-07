@@ -211,7 +211,7 @@ describe(
       }),
       probes: () => ({ probesDown: 0, probesSilent: 0 }),
       alarms: () => ({ fired: 0, overdueMs: 0 }),
-      queries: () => ({ refused: 0 }),
+      queries: () => ({ refused: 0, unfit: 0 }),
       ingestionDiscards: () => ({
         discardedFutureTime: 0,
         discardedPastTime: 0,

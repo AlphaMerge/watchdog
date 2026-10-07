@@ -884,6 +884,34 @@ describe(
           assert.ok(!fitted.result.message.includes('\u0000'));
           assert.ok(probe.open, 'the link is up');
           assert.equal(refusals.countsFor(probeId).refused, before + 1, 'a fitted one is not');
+
+          // `P-300`: the same unfit answer after its deadline, which nobody awaits any more. It
+          // was a debug line; it is refused and counted against the probe as the one on time is.
+          // The shortest deadline the protocol takes.
+          const expiring = queries.ask(probeId, check, { timeoutMs: 100 });
+          const lateId = await nextQuery();
+          const expired = await within(10_000, 'the deadline', expiring);
+          assert.ok(expired.kind === 'failed' && expired.failure === 'timeout', expired.kind);
+          probe.send({
+            type: 'query-result',
+            queryId: lateId,
+            result: { ...good(sensorId, 3), outcome: 'maybe' },
+          });
+          // One link reads in order: once the next query's answer is taken, so was the late one.
+          const after = queries.ask(probeId, check, { timeoutMs: 10_000 });
+          probe.send({
+            type: 'query-result',
+            queryId: await nextQuery(),
+            result: good(sensorId, 4),
+          });
+          assert.equal((await within(10_000, 'the answer after', after)).kind, 'ok');
+          assert.equal(queries.stats().unfit, 2);
+          assert.equal(refusals.countsFor(probeId).refused, before + 2);
+          assert.ok(probe.open, 'the link is still up');
+          assert.ok(
+            said.some((line) => String(line['msg']).includes('nobody awaits') && 'refused' in line),
+            `the late one is warned: ${JSON.stringify(said)}`,
+          );
         } finally {
           probe.close();
         }
