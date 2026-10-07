@@ -758,6 +758,9 @@ export const probeHealth: SensorType = {
   channels(): readonly ChannelDef[] {
     return CHANNELS;
   },
+  // `probeId` chooses which probe, never which channels: every Probe Health sensor has the same
+  // ones, which is what lets it declare limits and a start keep them in step (`P-293`).
+  fixedChannels: true,
 
   execute(_context: CheckContext): Promise<CheckExecution> {
     // Unreachable unless the assignment filter has been broken, and the failure it would cause is

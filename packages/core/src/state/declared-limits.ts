@@ -84,69 +84,30 @@ export function declaredLimitsLookup(
 interface Declarations {
   /** Every (type, channel) a registered type declares limits for, keyed `type key`. */
   readonly declared: Map<string, ChannelLimits>;
-  /**
-   * Every (type, channel) the parameterless read names *without* limits, keyed `type key`.
-   *
-   * The type has answered for that key, and the answer is "none" (`P-291`): whatever its
-   * parameters, a key it names with `{}` is a key it knows, and it did not declare a limit.
-   */
-  readonly bare: ReadonlySet<string>;
-  /**
-   * Every registered type whose parameters schema admits no parameter at all (`P-291`).
-   *
-   * The only types for which the parameterless read *is* every sensor's read, so the only ones
-   * whose silence about a key it does not name means anything. Decided from the schema rather
-   * than from whether `channels({})` throws, because no shipped type throws: the catalogue asks
-   * every type for `{}` at registration, and a type whose channels come from its parameters
-   * answers with a placeholder (`ssh-script`'s `value`) that says nothing about the keys a
-   * real sensor of it has — or the limits declared on them at creation.
-   */
-  readonly fixed: readonly string[];
-}
-
-/** What the catalogue declares, built once and read many times. */
-function declarationsIn(catalogue: SensorCatalogue): Declarations {
-  const declared = new Map<string, ChannelLimits>();
-  const bare = new Set<string>();
-  const fixed: string[] = [];
-  for (const id of catalogue.ids()) {
-    let defs;
-    try {
-      defs = catalogue.channelsFor(id, {});
-    } catch {
-      // `channels()` may need parameters. Such a type's channels vary per sensor and cannot be
-      // matched by key across an installation anyway.
-      continue;
-    }
-    if (admitsNoParameters(catalogue.declaration(id).paramsSchema)) fixed.push(id);
-    for (const def of defs) {
-      if (def.limits === undefined) {
-        bare.add(`${id} ${def.key}`);
-        continue;
-      }
-      declared.set(`${id} ${def.key}`, limitsFromDeclaration(def.limits));
-    }
-  }
-  return { declared, bare, fixed };
+  /** Every type this build registers: the ones whose declarations it can speak for. */
+  readonly registered: readonly string[];
 }
 
 /**
- * Whether a parameters schema validates nothing but `{}` (`P-291`).
+ * What the catalogue declares, built once and read many times.
  *
- * `additionalProperties: false` with no `properties` and no `patternProperties` leaves no
- * property an object may carry, whatever else the schema says — so every sensor of the type is
- * handed `{}` and gets the parameterless channel set. Anything less certain is treated as
- * parameter-dependent, which errs towards leaving a limit rather than wiping one.
+ * **Only a `fixedChannels` type is read, and its `{}` answer is every sensor's** (`P-293`). The
+ * catalogue refuses `limits` from any other type — at registration on a channel `{}` names, and
+ * at `channelsFor` on one only real parameters produce — so such a type declares none, and its
+ * `{}`, a placeholder, is never asked about one. That is what leaves `clearWithdrawn` nothing to
+ * guess: a key no fixed answer declares is a key no sensor of this build has a limit on.
  */
-function admitsNoParameters(schema: Readonly<Record<string, unknown>>): boolean {
-  const none = (value: unknown): boolean =>
-    value === undefined ||
-    (typeof value === 'object' && value !== null && Object.keys(value).length === 0);
-  return (
-    schema['additionalProperties'] === false &&
-    none(schema['properties']) &&
-    none(schema['patternProperties'])
-  );
+function declarationsIn(catalogue: SensorCatalogue): Declarations {
+  const declared = new Map<string, ChannelLimits>();
+  for (const id of catalogue.ids()) {
+    if (catalogue.declaration(id).fixedChannels !== true) continue;
+    // Cannot throw: the catalogue refuses a fixed type whose `channels({})` does.
+    for (const def of catalogue.channelsFor(id, {})) {
+      if (def.limits === undefined) continue;
+      declared.set(`${id} ${def.key}`, limitsFromDeclaration(def.limits));
+    }
+  }
+  return { declared, registered: catalogue.ids() };
 }
 
 export interface DeclaredLimitsOptions {
@@ -264,30 +225,26 @@ export async function applyDeclaredLimits(
  * created by this build holds, and `unset` is what lets a later build declare a limit for it
  * again. `declared` with nothing in it would be a claim about a declaration that does not exist.
  *
- * **Only where the type's answer covers the key.** That is either (a) a key the parameterless
- * read names and declares nothing for, or (b) any undeclared key of a type in `fixed`, whose
- * parameterless read is every sensor's read — which is how a channel the type dropped outright
- * is cleared. Anything else is left: a type whose channels come from its parameters may have
- * declared a limit at creation on a key `{}` never names (a column, a banner channel), and a
- * type this build does not register says nothing either way. Clearing on their behalf would be
- * guessing, and the guess would silently end an alarm.
+ * **Every key of a registered type that `declared` does not hold** (`P-293`). For a
+ * `fixedChannels` type, `{}` is every sensor's answer, so a key it does not declare — named bare,
+ * or gone outright, as Probe Health's dropped keys are — has no limit on any sensor of this
+ * build. Any other type declares no limit anywhere, which the catalogue holds it to, so every
+ * declared row of it is an earlier build's. A type this build does not register is left alone:
+ * it says nothing either way, and a build profile that leaves a type out is not withdrawing what
+ * the type declares.
  */
 async function clearWithdrawn(
   options: DeclaredLimitsOptions,
-  { declared, bare, fixed }: Declarations,
+  { declared, registered }: Declarations,
 ): Promise<number> {
-  if (bare.size === 0 && fixed.length === 0) return 0;
-  const split = (keys: Iterable<string>): { types: string[]; keys: string[] } => {
-    const out = { types: [] as string[], keys: [] as string[] };
-    for (const one of keys) {
-      const space = one.indexOf(' ');
-      out.types.push(one.slice(0, space));
-      out.keys.push(one.slice(space + 1));
-    }
-    return out;
-  };
-  const named = split(bare);
-  const kept = split(declared.keys());
+  if (registered.length === 0) return 0;
+  const types: string[] = [];
+  const keys: string[] = [];
+  for (const one of declared.keys()) {
+    const space = one.indexOf(' ');
+    types.push(one.slice(0, space));
+    keys.push(one.slice(space + 1));
+  }
   // `limits_source = 'declared'` is the whole guard: an operator's row is `operator`, whatever
   // it holds and however it came to hold it, and an `unset` row has nothing to clear. Like the
   // pass above, this reads no values: who wrote the row decides, not what is in it.
@@ -297,21 +254,13 @@ async function clearWithdrawn(
      FROM sensor_config sc
      WHERE sc.object_id = c.sensor_id
        AND c.limits_source = 'declared'
-       AND (
-         EXISTS (
-           SELECT 1 FROM unnest($1::text[], $2::text[]) AS b(type, key)
-           WHERE b.type = sc.type AND b.key = c.key
-         )
-         OR (
-           sc.type = ANY($3::text[])
-           AND NOT EXISTS (
-             SELECT 1 FROM unnest($4::text[], $5::text[]) AS d(type, key)
-             WHERE d.type = sc.type AND d.key = c.key
-           )
-         )
+       AND sc.type = ANY($1::text[])
+       AND NOT EXISTS (
+         SELECT 1 FROM unnest($2::text[], $3::text[]) AS d(type, key)
+         WHERE d.type = sc.type AND d.key = c.key
        )
      RETURNING c.id`,
-    [named.types, named.keys, fixed, kept.types, kept.keys],
+    [registered, types, keys],
   );
   return rows.length;
 }

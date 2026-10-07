@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { SensorCatalogue, SensorTypeError } from '../src/catalogue.js';
-import type { SensorType } from '../src/contract.js';
+import type { ChannelDef, SensorType } from '../src/contract.js';
 import {
   sensorTypesFor,
   standardCatalogue,
@@ -198,9 +198,213 @@ describe('registration', () => {
     // push every such channel into inventing numbers to satisfy a shape.
     assert.doesNotThrow(() =>
       new SensorCatalogue().register(
-        variant({ channels: () => [{ key: 'a', name: 'A', limits: { upperError: 0.000_01 } }] }),
+        variant({
+          fixedChannels: true,
+          channels: () => [{ key: 'a', name: 'A', limits: { upperError: 0.000_01 } }],
+        }),
       ),
     );
+  });
+
+  /**
+   * Declared limits only where `{}` answers for every sensor (`P-293`).
+   *
+   * The start-up pass keeps declared limits in step from a type's `channels({})`, which is every
+   * sensor's answer only for a type whose channels do not depend on its parameters. So that is
+   * the only kind of type allowed to declare them, and it is held to the promise as far as the
+   * catalogue can see: at registration with `{}` and the schema's defaults, and at every
+   * `channelsFor` after.
+   */
+  describe('limits and fixed channels (P-293)', () => {
+    const LIMITED = { key: 'a', name: 'A', isPrimary: true, limits: { upperError: 1 } } as const;
+    const PLAIN = { key: 'a', name: 'A', isPrimary: true } as const;
+    /** A schema with a parameter, and one with a default, for the cases that need them. */
+    const WITH_PARAM = {
+      type: 'object',
+      additionalProperties: false,
+      properties: { extra: { type: 'boolean' } },
+    } as const;
+    const WITH_DEFAULT = {
+      type: 'object',
+      additionalProperties: false,
+      properties: { extra: { type: 'boolean', default: true } },
+    } as const;
+    /** `extra: true` adds a channel, with limits on it or not. */
+    const growing =
+      (limited: boolean) =>
+      (params: Readonly<Record<string, unknown>>): readonly ChannelDef[] => [
+        PLAIN,
+        ...(params['extra'] === true
+          ? [{ key: 'b', name: 'B', ...(limited ? { limits: { upperError: 2 } } : {}) }]
+          : []),
+      ];
+
+    interface Registration {
+      readonly name: string;
+      readonly type: Partial<SensorType>;
+      /** The refusal, or null for a type that registers. */
+      readonly refused: RegExp | null;
+    }
+
+    const registrations: readonly Registration[] = [
+      {
+        name: 'limits on a channel `{}` names, without the flag',
+        type: { channels: () => [LIMITED] },
+        refused: /declares limits on channel "a" without `fixedChannels`/,
+      },
+      {
+        name: 'limits on a channel `{}` names, with a parameter and without the flag',
+        type: { paramsSchema: WITH_PARAM, channels: () => [LIMITED] },
+        refused: /without `fixedChannels`/,
+      },
+      {
+        name: 'the flag, with `channels({})` throwing',
+        type: {
+          fixedChannels: true,
+          channels: () => {
+            throw new Error('needs a table');
+          },
+        },
+        refused: /`channels\(\{\}\)` threw: Error: needs a table/,
+      },
+      {
+        name: 'the flag, with the defaults giving other channels',
+        type: { fixedChannels: true, paramsSchema: WITH_DEFAULT, channels: growing(false) },
+        refused: /its schema’s defaults give it other channels/,
+      },
+      {
+        name: 'the flag and limits',
+        type: { fixedChannels: true, channels: () => [LIMITED] },
+        refused: null,
+      },
+      {
+        name: 'the flag and limits, with a parameter that chooses no channel',
+        type: { fixedChannels: true, paramsSchema: WITH_PARAM, channels: () => [LIMITED] },
+        refused: null,
+      },
+      {
+        name: 'the flag and no limits',
+        type: { fixedChannels: true, channels: () => [PLAIN] },
+        refused: null,
+      },
+      {
+        name: 'no flag, no limits, channels from parameters',
+        type: { paramsSchema: WITH_PARAM, channels: growing(false) },
+        refused: null,
+      },
+      {
+        // Seen only at `channelsFor`: registration cannot reach a channel `{}` does not name.
+        name: 'no flag, limits only real parameters produce',
+        type: { paramsSchema: WITH_PARAM, channels: growing(true) },
+        refused: null,
+      },
+      {
+        name: 'no flag, `channels({})` throwing',
+        type: {
+          channels: () => {
+            throw new Error('needs a table');
+          },
+        },
+        refused: null,
+      },
+    ];
+
+    for (const one of registrations) {
+      it(`at registration: ${one.name}`, () => {
+        const register = (): unknown => new SensorCatalogue().register(variant(one.type));
+        if (one.refused === null) {
+          assert.doesNotThrow(register);
+        } else {
+          assert.throws(
+            register,
+            (error: unknown) =>
+              error instanceof SensorTypeError &&
+              error.code === 'BAD_SENSOR_TYPE' &&
+              one.refused !== null &&
+              one.refused.test(error.message),
+          );
+        }
+      });
+    }
+
+    interface Lookup {
+      readonly name: string;
+      readonly type: Partial<SensorType>;
+      readonly params: Readonly<Record<string, unknown>>;
+      /** The refusal, or the keys of the channels answered. */
+      readonly answer: RegExp | readonly string[];
+    }
+
+    const lookups: readonly Lookup[] = [
+      {
+        // The case registration cannot see, and the one the pass would have got wrong.
+        name: 'no flag, limits on a channel only real parameters produce',
+        type: { paramsSchema: WITH_PARAM, channels: growing(true) },
+        params: { extra: true },
+        answer: /declares limits on channel "b" without `fixedChannels`/,
+      },
+      {
+        name: 'no flag, the same type with parameters that produce no limit',
+        type: { paramsSchema: WITH_PARAM, channels: growing(true) },
+        params: {},
+        answer: ['a'],
+      },
+      {
+        name: 'no flag, no limits, a channel from parameters',
+        type: { paramsSchema: WITH_PARAM, channels: growing(false) },
+        params: { extra: true },
+        answer: ['a', 'b'],
+      },
+      {
+        // Past what registration could check: no default sets `extra`, a sensor does.
+        name: 'the flag, with parameters that give other channels',
+        type: { fixedChannels: true, paramsSchema: WITH_PARAM, channels: growing(false) },
+        params: { extra: true },
+        answer: /says its channels do not depend on its parameters/,
+      },
+      {
+        name: 'the flag, with parameters that give the same channels',
+        type: { fixedChannels: true, paramsSchema: WITH_PARAM, channels: growing(false) },
+        params: { extra: false },
+        answer: ['a'],
+      },
+    ];
+
+    for (const one of lookups) {
+      it(`at channelsFor: ${one.name}`, () => {
+        const c = new SensorCatalogue().register(variant(one.type));
+        const lookup = (): readonly ChannelDef[] => c.channelsFor(pingType.id, one.params);
+        if (one.answer instanceof RegExp) {
+          const refusal = one.answer;
+          assert.throws(
+            lookup,
+            (error: unknown) =>
+              error instanceof SensorTypeError &&
+              error.code === 'BAD_SENSOR_TYPE' &&
+              refusal.test(error.message),
+          );
+        } else {
+          assert.deepEqual(
+            lookup().map((def) => def.key),
+            one.answer,
+          );
+        }
+      });
+    }
+
+    it('marks the two shipped types that declare limits, and Probe Health keeps its channels', () => {
+      const c = standardCatalogue(sensorTypesFor('full'));
+      const limited = c
+        .ids()
+        .filter((id) => c.channelsFor(id, {}).some((def) => def.limits !== undefined));
+      assert.deepEqual(limited, ['ms.core.health', 'ms.probe.health']);
+      for (const id of limited) assert.equal(c.declaration(id).fixedChannels, true, id);
+      // `probeId` chooses the probe, never the channels.
+      assert.deepEqual(
+        c.channelsFor('ms.probe.health', { probeId: 7 }),
+        c.channelsFor('ms.probe.health', {}),
+      );
+    });
   });
 
   it('refuses a paramsSchema Ajv cannot compile', () => {

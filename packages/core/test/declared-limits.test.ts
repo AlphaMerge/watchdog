@@ -34,6 +34,8 @@ const watched: SensorType = {
   id: 'test.watched',
   category: 'System',
   costHint: 'light',
+  // What lets it declare limits at all (`P-293`): `{}` is every sensor's answer.
+  fixedChannels: true,
   paramsSchema: { type: 'object', additionalProperties: false, properties: {} },
   channels: () => [
     {
@@ -77,7 +79,8 @@ const watchedLater = (channels: readonly ChannelDef[]): SensorType => ({
  *
  * `{}` answers with a placeholder — the catalogue asks every type for it at registration, so no
  * shipped type throws there (`ssh-script`'s `value` is the model) — and real parameters add a
- * channel with a declared limit, which a sensor gets at creation and `{}` never names.
+ * channel `{}` never names. It declares no limits: without `fixedChannels` the catalogue refuses
+ * them (`P-293`), so a declared limit on any of its channels is an earlier build's.
  */
 const shaped: SensorType = {
   id: 'test.shaped',
@@ -90,11 +93,23 @@ const shaped: SensorType = {
   },
   channels: (params) => [
     { key: 'value', name: 'Value', isPrimary: true },
-    ...(params['banner'] === true
-      ? [{ key: 'banner', name: 'Banner', limits: { upperError: 10 } }]
-      : []),
+    ...(params['banner'] === true ? [{ key: 'banner', name: 'Banner' }] : []),
   ],
   execute: () => Promise.resolve({ channels: [] }),
+};
+
+/**
+ * Fixed channels and a parameter, the shape of Probe Health (`P-293`): `target` chooses what a
+ * sensor reports on, never which channels it has, so `{}` still answers for every sensor.
+ */
+const tuned: SensorType = {
+  ...watched,
+  id: 'test.tuned',
+  paramsSchema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: { target: { type: 'integer', minimum: 1 } },
+  },
 };
 
 const LAG: ChannelDef = { key: 'lag', name: 'Lag', unit: 'ms', isPrimary: true };
@@ -121,7 +136,7 @@ describe(
       scratch = await createScratchDatabase('declaredlimits');
       db = scratch.db;
       // Builds the schema as well as the service, so nothing may read a table before this.
-      h = await buildHarness(db, { types: [watched, shaped] });
+      h = await buildHarness(db, { types: [watched, shaped, tuned] });
     });
 
     after(async () => {
@@ -340,6 +355,24 @@ describe(
         assert.deepEqual(report.unmatched, ['test.absent.nothing']);
       });
 
+      it('does not ask a type without fixed channels what it declares (P-293)', async () => {
+        // Its `{}` is a placeholder at best, and the catalogue lets it throw there: a type whose
+        // channels need parameters may. Asking would end the start on a type that declares
+        // nothing, which the catalogue already holds it to.
+        const needy: SensorType = {
+          ...shaped,
+          id: 'test.needy',
+          channels: (params) => {
+            if (params['banner'] === undefined) throw new Error('needs a banner');
+            return [{ key: 'value', name: 'Value', isPrimary: true }];
+          },
+        };
+        const c = new SensorCatalogue().register(needy).register(watched).seal();
+        const report = await applyDeclaredLimits({ db, logger: silent, catalogue: c });
+        assert.deepEqual(report, { applied: 0, cleared: 0, operatorOwned: 0, unmatched: [] });
+        assert.equal(declaredLimitsLookup(c)('test.watched', 'lag')?.upperError, 5_000);
+      });
+
       it('does nothing at all when no registered type declares any limit', async () => {
         const bare: SensorType = {
           ...watched,
@@ -486,70 +519,174 @@ describe(
         });
       }
 
-      describe('a type whose channels come from its parameters', () => {
-        let shapedId: number;
-        const read = async (key: string): Promise<{ limits: unknown; source: string }> => {
-          const rows = await db.query<{ limits: unknown; limits_source: string }>(
-            'SELECT limits, limits_source FROM channel WHERE sensor_id = $1 AND key = $2',
-            [shapedId, key],
-          );
-          const row = rows[0];
-          assert.ok(row !== undefined, `no channel ${key}`);
-          return { limits: row.limits, source: row.limits_source };
-        };
+      describe('which keys a start speaks for (P-293)', () => {
+        /**
+         * One declared row, on one key of one sensor, and whether a start clears it.
+         *
+         * **The table the flag exists for.** Before it the pass took `{}` as the authority for
+         * each key `{}` named, whatever the type — so a placeholder spoke for keys real sensors
+         * had different declarations on — and cleared a key `{}` did not name only for a type
+         * whose schema admitted no parameter, which left Probe Health's dropped keys their limits.
+         * Now a fixed type's `{}` speaks for every key of every sensor of it, and any other type
+         * declares nothing, so every declared row of a registered type that the fixed answers do
+         * not declare is an earlier build's.
+         */
+        interface Row {
+          readonly name: string;
+          readonly type: 'test.watched' | 'test.tuned' | 'test.shaped';
+          readonly params?: Readonly<Record<string, unknown>>;
+          readonly key: string;
+          readonly owner?: 'operator';
+          /** The build the core restarts into. All three types unless the case says. */
+          readonly types?: readonly SensorType[];
+          readonly after: 'declared' | 'unset' | 'operator';
+        }
 
-        beforeEach(async () => {
-          const rows = await db.query<{ parent_id: number }>(
-            'SELECT parent_id FROM object WHERE id = $1',
-            [sensorId],
-          );
-          const sensor = await h.service.create(testActor, {
-            kind: 'sensor',
-            parentId: Number(rows[0]?.parent_id),
-            name: 'Shaped sensor',
-            sensorType: 'test.shaped',
+        const rows: readonly Row[] = [
+          {
+            name: 'fixed, no parameters: a key it declares',
+            type: 'test.watched',
+            key: 'lag',
+            after: 'declared',
+          },
+          {
+            name: 'fixed, no parameters: a key it names bare',
+            type: 'test.watched',
+            key: 'plain',
+            after: 'unset',
+          },
+          {
+            name: 'fixed, no parameters: a key it dropped',
+            type: 'test.watched',
+            key: 'gone',
+            after: 'unset',
+          },
+          {
+            name: 'fixed with a parameter: a key it declares',
+            type: 'test.tuned',
+            params: { target: 3 },
+            key: 'lag',
+            after: 'declared',
+          },
+          {
+            name: 'fixed with a parameter: a key it names bare',
+            type: 'test.tuned',
+            params: { target: 3 },
+            key: 'plain',
+            after: 'unset',
+          },
+          // What `P-291` left: a type with any parameter kept a dropped key's limit.
+          {
+            name: 'fixed with a parameter: a key it dropped',
+            type: 'test.tuned',
+            params: { target: 3 },
+            key: 'gone',
+            after: 'unset',
+          },
+          {
+            name: 'parameter-made: a key `{}` names',
+            type: 'test.shaped',
             params: { banner: true },
+            key: 'value',
+            after: 'unset',
+          },
+          {
+            name: 'parameter-made: a key only its parameters produce',
+            type: 'test.shaped',
+            params: { banner: true },
+            key: 'banner',
+            after: 'unset',
+          },
+          {
+            name: 'parameter-made: a key it no longer has',
+            type: 'test.shaped',
+            params: { banner: true },
+            key: 'gone',
+            after: 'unset',
+          },
+          {
+            name: 'a type this build does not register',
+            type: 'test.shaped',
+            params: { banner: true },
+            key: 'banner',
+            types: [watched, tuned],
+            after: 'declared',
+          },
+          {
+            name: 'an operator owns it',
+            type: 'test.tuned',
+            params: { target: 3 },
+            key: 'gone',
+            owner: 'operator',
+            after: 'operator',
+          },
+        ];
+
+        /** What an earlier build declared on the row: not what any type here declares. */
+        const EARLIER: ChannelLimits = limitsFromDeclaration({ upperWarning: 1 });
+
+        for (const row of rows) {
+          it(`when ${row.name}`, async () => {
+            const parent = await db.query<{ parent_id: number }>(
+              'SELECT parent_id FROM object WHERE id = $1',
+              [sensorId],
+            );
+            const sensor =
+              row.type === 'test.watched'
+                ? { id: sensorId }
+                : await h.service.create(testActor, {
+                    kind: 'sensor',
+                    parentId: Number(parent[0]?.parent_id),
+                    name: `A ${row.type} sensor`,
+                    sensorType: row.type,
+                    params: row.params ?? {},
+                  });
+            // The row an earlier build left: on a key the sensor has, or one it no longer does.
+            await db.query(
+              `INSERT INTO channel (sensor_id, key, name, limits, limits_source)
+               VALUES ($1, $2, $2, $3::jsonb, $4)
+               ON CONFLICT (sensor_id, key)
+               DO UPDATE SET limits = EXCLUDED.limits, limits_source = EXCLUDED.limits_source`,
+              [sensor.id, row.key, JSON.stringify(EARLIER), row.owner ?? 'declared'],
+            );
+            const read = async (): Promise<{ limits: unknown; source: string }> => {
+              const found = await db.query<{ limits: unknown; limits_source: string }>(
+                'SELECT limits, limits_source FROM channel WHERE sensor_id = $1 AND key = $2',
+                [sensor.id, row.key],
+              );
+              const one = found[0];
+              assert.ok(one !== undefined, `no channel ${row.key}`);
+              return { limits: one.limits, source: one.limits_source };
+            };
+            const catalogue = (): SensorCatalogue => {
+              const c = new SensorCatalogue();
+              for (const type of row.types ?? [watched, tuned, shaped]) c.register(type);
+              return c.seal();
+            };
+
+            const report = await applyDeclaredLimits({
+              db,
+              logger: silent,
+              catalogue: catalogue(),
+            });
+
+            const now = await read();
+            assert.equal(now.source, row.after);
+            if (row.after === 'unset') {
+              assert.equal(report.cleared, 1, 'this row, and no other');
+              assert.deepEqual(now.limits, {});
+            } else {
+              assert.equal(report.cleared, 0, 'nothing cleared');
+              // A key the type declares is brought up to the declaration; anything else is
+              // exactly as the earlier build or the person left it.
+              assert.deepEqual(parseLimits(now.limits), row.key === 'lag' ? LAG_DECLARED : EARLIER);
+            }
+
+            const again = await applyDeclaredLimits({ db, logger: silent, catalogue: catalogue() });
+            assert.equal(again.cleared, 0, 'nothing left to clear');
+            assert.equal(again.applied, 0, 'nothing left to apply');
           });
-          shapedId = sensor.id;
-          const banner = await read('banner');
-          assert.equal(banner.source, 'declared', 'created with the real parameters’ limit');
-        });
-
-        it('keeps a limit declared on a channel the parameterless read never names', async () => {
-          // **The defect review found.** `{}` names only `value`, so "absent from `{}`" said
-          // nothing about `banner` — and treating it as withdrawn would end its alarm at the
-          // next start, silently, on every sensor of the type.
-          const before = await read('banner');
-          const report = await applyDeclaredLimits({
-            db,
-            logger: silent,
-            catalogue: catalogueOf(shaped),
-          });
-          assert.equal(report.cleared, 0);
-          assert.deepEqual(await read('banner'), before);
-          assert.deepEqual(parseLimits(before.limits), { ...NO_LIMITS, upperError: 10 });
-        });
-
-        it('still clears a key the parameterless read names without a limit', async () => {
-          // `{}` does speak for `value`: the type names it, whatever the parameters, and
-          // declares nothing for it. So a limit an earlier build declared there is withdrawn.
-          await db.query(
-            `UPDATE channel SET limits = $3::jsonb, limits_source = 'declared'
-             WHERE sensor_id = $1 AND key = $2`,
-            [shapedId, 'value', JSON.stringify(limitsFromDeclaration({ upperWarning: 1 }))],
-          );
-          const banner = await read('banner');
-
-          const report = await applyDeclaredLimits({
-            db,
-            logger: silent,
-            catalogue: catalogueOf(shaped),
-          });
-
-          assert.equal(report.cleared, 1, '`value`, and not `banner`');
-          assert.deepEqual(await read('value'), { limits: {}, source: 'unset' });
-          assert.deepEqual(await read('banner'), banner);
-        });
+        }
       });
 
       it('gives a cleared channel back to a later build that declares it again', async () => {
@@ -627,6 +764,62 @@ describe(
         assert.equal(total.source, 'unset');
         assert.deepEqual(total.limits, {});
         assert.deepEqual(await read('scriptGroupsRefusedRecently'), recently, 'kept as it was');
+      });
+    });
+
+    describe('Probe Health', () => {
+      it('clears a declared limit on a key it no longer has, although it takes a parameter', async () => {
+        // `P-293`'s concrete case. `probeId` kept Probe Health out of `P-291`'s schema rule, so a
+        // channel it dropped outright kept the limit an earlier build declared on it.
+        const probe = await h.service.create(testActor, {
+          kind: 'probe',
+          parentId: h.rootId,
+          name: 'Upgraded probe',
+        });
+        const device = await h.service.create(testActor, {
+          kind: 'device',
+          parentId: probe.id,
+          name: 'Upgraded probe device',
+          host: '192.0.2.42',
+        });
+        const health = await h.service.create(testActor, {
+          kind: 'sensor',
+          parentId: device.id,
+          name: 'Probe Health',
+          sensorType: 'ms.probe.health',
+          params: { probeId: probe.id },
+        });
+        await db.query(
+          `INSERT INTO channel (sensor_id, key, name, limits, limits_source)
+           VALUES ($1, 'retiredChannel', 'Retired', $2::jsonb, 'declared')`,
+          [health.id, JSON.stringify(limitsFromDeclaration({ upperError: 1 }))],
+        );
+        const declaredBefore = await db.query<{ key: string; limits: unknown }>(
+          `SELECT key, limits FROM channel
+           WHERE sensor_id = $1 AND limits_source = 'declared' AND key <> 'retiredChannel'
+           ORDER BY key`,
+          [health.id],
+        );
+        assert.ok(declaredBefore.length > 0, 'Probe Health declares limits of its own');
+
+        const report = await applyDeclaredLimits({
+          db,
+          logger: silent,
+          catalogue: catalogueOf(probeHealth),
+        });
+
+        assert.equal(report.cleared, 1, 'the retired channel, and nothing Probe Health declares');
+        const retired = await db.query<{ limits: unknown; limits_source: string }>(
+          `SELECT limits, limits_source FROM channel WHERE sensor_id = $1 AND key = 'retiredChannel'`,
+          [health.id],
+        );
+        assert.deepEqual(retired, [{ limits: {}, limits_source: 'unset' }]);
+        const declaredAfter = await db.query<{ key: string; limits: unknown }>(
+          `SELECT key, limits FROM channel
+           WHERE sensor_id = $1 AND limits_source = 'declared' ORDER BY key`,
+          [health.id],
+        );
+        assert.deepEqual(declaredAfter, declaredBefore, 'every declared channel kept as it was');
       });
     });
 

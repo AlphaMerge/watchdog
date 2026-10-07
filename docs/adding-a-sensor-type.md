@@ -240,13 +240,31 @@ channel the sensor is judged by.
   build declares: a changed declaration replaces the old one, and a withdrawn one — the key
   declares no `limits` any more — is cleared (`P-291`). An operator who changes or clears them owns
   them from then on, and no start touches them again, because a default that came back after
-  somebody removed it is worse than no default. The start-up pass reads `channels({})`, so for a
-  type whose channels come from its parameters it only reaches the keys `{}` names: a limit
-  declared on a channel only real parameters produce is written at creation and never cleared,
-  because `{}` not naming that key says nothing about it. A key is cleared when it is gone
-  outright only for a type whose `paramsSchema` admits no parameter at all. The catalogue refuses a declaration with no bound in it, one that is not a
-  number, and one whose warning sits outside its error, at registration rather than at the first
-  reading.
+  somebody removed it is worse than no default. **Only a type with `fixedChannels: true` may
+  declare them** (`P-293`): see below. The catalogue refuses a declaration with no bound in it,
+  one that is not a number, and one whose warning sits outside its error, at registration rather
+  than at the first reading.
+
+### `fixedChannels` (optional)
+
+`true` says every sensor of this type has the same channels whatever its parameters, so
+`channels({})` answers for all of them, declarations included. Set it on a type that declares
+`limits`, and the catalogue refuses `limits` from a type that does not.
+
+The reason is the start-up pass. It cannot ask a type with every sensor's parameters, so it asks
+with `{}`, writes what that answer declares over every existing channel of the type, and clears a
+declared limit on any key it does not declare. A type whose channels come from its parameters
+answers `{}` with a placeholder (`ssh-script`'s `value`), so a limit it declared on a channel only
+some parameters produce would be overwritten or cleared at the next start, and its alarm would
+end without a word. Such a type declares none, which also tells the pass that any declared limit
+on one of its channels is left over from an earlier build and can go.
+
+A parameter that chooses *what* a sensor reports on and not *which* channels it has does not stop
+a type being fixed: Probe Health's `probeId` is one. The catalogue holds the promise where it can.
+At registration a fixed type must answer `{}`, and answer the same once its schema's defaults are
+filled in. Each `channelsFor` after that, which is how every sensor gets its channels, throws if
+the answer differs from `{}`'s. For a type without the flag, it throws on a channel with `limits`
+that only real parameters produce, the one place such a channel is ever seen.
 
 ### `execute(context)`
 
@@ -467,6 +485,7 @@ All of these fail at startup, loudly, rather than at runtime:
 | every kind in `credentialKinds` has a `kind:<id>` entry, and no other kind does | an inherited set goes only where somebody vouched (`A-41`) |
 | every kind in `pinnedKinds` is one of `credentialKinds` | a promise about a set the type is never sent is a typo (`A-41c`) |
 | at most one `isPrimary` channel                | the one-primary-per-sensor index                                |
+| `limits` only on a `fixedChannels` type, which answers `{}` and the same with its defaults | a start keeps declared limits in step from `{}`, which speaks for every sensor only then (`P-293`) |
 | no repeated channel key                        | `(sensor_id, key)` is unique                                    |
 | the schema validates its own declared defaults | a `default` a `pattern` rejects is a field nobody can fill in   |
 | `evaluatedBy: 'core'` declares `references` or `requires` | its readings are the core's own data, republished (`A-29`) |

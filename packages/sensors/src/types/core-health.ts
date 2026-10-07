@@ -680,6 +680,8 @@ export const coreHealth: SensorType = {
   channels(): readonly ChannelDef[] {
     return CHANNELS;
   },
+  // No parameters at all, so nothing to depend on — and it declares limits (`P-293`).
+  fixedChannels: true,
 
   execute(_context: CheckContext): Promise<CheckExecution> {
     // Unreachable unless the assignment filter has been broken. Loud rather than silent: a Core

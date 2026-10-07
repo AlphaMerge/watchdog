@@ -100,6 +100,11 @@ export class SensorCatalogue {
   readonly #writeOnly = new Map<string, readonly string[]>();
   /** Each type's `secretDestinations`, checked against its `writeOnly` paths (`A-40`). */
   readonly #destinations = new Map<string, Readonly<Record<string, readonly string[]>>>();
+  /**
+   * Each `fixedChannels` type's answer to `{}`, as JSON (`P-293`): what every later
+   * `channelsFor` of it must answer too.
+   */
+  readonly #fixed = new Map<string, string>();
   readonly #ajv: Ajv;
   /** How `execute` resolves a name it has to check against a set's address targets (`A-41c`). */
   readonly #resolve: ResolveHost;
@@ -161,10 +166,12 @@ export class SensorCatalogue {
     assertSecretsSayWhereTheyGo(type, writeOnly);
     assertPinsWhatItUses(type);
     assertOnePrimaryChannel(type);
+    const fixed = limitsOnlyOnFixedChannels(type, validate);
     assertSaysWhatItReads(type);
     assertHoldIsADuration(type);
 
     this.#types.set(type.id, type);
+    if (fixed !== null) this.#fixed.set(type.id, fixed);
     this.#validators.set(type.id, validate);
     this.#writeOnly.set(type.id, writeOnly);
     this.#destinations.set(type.id, type.secretDestinations ?? {});
@@ -315,8 +322,30 @@ export class SensorCatalogue {
     };
   }
 
+  /**
+   * A sensor's channels, held to what its type said about them at registration (`P-293`).
+   *
+   * A `fixedChannels` type must answer what it answered `{}`, and any other type must declare no
+   * `limits`: the channels a type's real parameters produce are seen here and nowhere at
+   * registration, so this is the one place the second rule can be held. Both throw rather than
+   * repair, since either is a type that says one thing and does another.
+   */
   channelsFor(id: string, params: Readonly<Record<string, unknown>>): readonly ChannelDef[] {
-    return this.#require(id).channels(params);
+    const defs = this.#require(id).channels(params);
+    const fixed = this.#fixed.get(id);
+    if (fixed !== undefined) {
+      if (JSON.stringify(defs) !== fixed) {
+        throw new SensorTypeError(
+          'BAD_SENSOR_TYPE',
+          `sensor type "${id}" says its channels do not depend on its parameters ` +
+            '(`fixedChannels`), but these parameters gave it other channels than `{}` did',
+        );
+      }
+      return defs;
+    }
+    const limited = defs.find((def) => def.limits !== undefined);
+    if (limited !== undefined) throw limitsNeedFixedChannels(id, limited.key);
+    return defs;
   }
 
   /** Dotted paths of every parameter a type marked `writeOnly`. */
@@ -678,6 +707,70 @@ function assertOnePrimaryChannel(type: SensorType): void {
     keys.add(def.key);
     if (def.limits !== undefined) assertUsableLimits(type.id, def);
   }
+}
+
+/**
+ * Declared limits only where every sensor's channels are the type's `{}` answer (`P-293`).
+ *
+ * **The start-up pass asks a type with `{}`** (`P-291`): it writes what that answer declares over
+ * every existing channel of the type, and clears a declared limit it no longer names. That is
+ * right only for a type whose channels do not depend on parameters. Any other answers `{}` with a
+ * placeholder, so a limit it declared on a key some parameters produce would be overwritten or
+ * cleared at the next start. Such a type therefore declares none, and that leaves the pass with
+ * nothing to guess: a declared limit on one of its channels is one an earlier build put there.
+ *
+ * A type without the flag is refused here for a limit on a channel `{}` names, and by
+ * `channelsFor` for one on a channel only its real parameters produce. A type with it must answer
+ * `{}`, and answer the same with its schema's defaults filled in — what can be checked before
+ * any sensor exists; `channelsFor` holds it to the same answer for every sensor after. Returns
+ * that answer as JSON for a type with the flag, and null for one without.
+ */
+function limitsOnlyOnFixedChannels(type: SensorType, validate: ValidateFunction): string | null {
+  const fixed = type.fixedChannels === true;
+  let bare: readonly ChannelDef[];
+  try {
+    bare = type.channels({});
+  } catch (cause) {
+    if (!fixed) return null; // its channels need parameters, and it declares no limits on `{}`
+    throw new SensorTypeError(
+      'BAD_SENSOR_TYPE',
+      `sensor type "${type.id}" says its channels do not depend on its parameters ` +
+        `(\`fixedChannels\`), but \`channels({})\` threw: ${String(cause)}`,
+    );
+  }
+  if (!fixed) {
+    const limited = bare.find((def) => def.limits !== undefined);
+    if (limited !== undefined) throw limitsNeedFixedChannels(type.id, limited.key);
+    return null;
+  }
+  const answer = JSON.stringify(bare);
+  // Validated for its defaults, as a sensor created with no parameters would be.
+  const defaulted: Record<string, unknown> = {};
+  if (validate(defaulted)) {
+    let filled: string;
+    try {
+      filled = JSON.stringify(type.channels(defaulted));
+    } catch (cause) {
+      filled = `threw: ${String(cause)}`;
+    }
+    if (filled !== answer) {
+      throw new SensorTypeError(
+        'BAD_SENSOR_TYPE',
+        `sensor type "${type.id}" says its channels do not depend on its parameters ` +
+          '(`fixedChannels`), but its schema’s defaults give it other channels than `{}` does',
+      );
+    }
+  }
+  return answer;
+}
+
+function limitsNeedFixedChannels(id: string, key: string): SensorTypeError {
+  return new SensorTypeError(
+    'BAD_SENSOR_TYPE',
+    `sensor type "${id}" declares limits on channel "${key}" without \`fixedChannels\`: a ` +
+      'declared limit is kept in step at each start from the type’s answer to `{}`, which is ' +
+      'every sensor’s answer only when its channels do not depend on its parameters',
+  );
 }
 
 /**

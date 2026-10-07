@@ -10151,7 +10151,7 @@ because each is a decision rather than a defect:
       appears only on Probe Health and in the probe's log; the sensor's own message is silent.
       **Done when** decided: say it in the sensor's message (or a warning), or keep, with a test.
 
-- [ ] **P-293 — the start-up limits pass cannot tell a type's fixed channels from its
+- [x] **P-293 — the start-up limits pass cannot tell a type's fixed channels from its
       parameter-made ones** · S · P-291 · Found 2026-10-08 in `P-291`'s review. The pass reads
       `channels({})`, and every shipped type answers it with a placeholder, so it treats `{}` as
       the authority for each key `{}` names: a limit a type declares on such a key only for some
@@ -10162,6 +10162,54 @@ because each is a decision rather than a defect:
       **Done when** decided: an explicit `SensorType` flag for channels that do not depend on
       parameters (the catalogue refusing `limits` on a parameter-made channel otherwise), or
       per-sensor evaluation from stored parameters, with tests.
+
+      **P-293 outcome. An explicit flag, `SensorType.fixedChannels`, and only a type with it may
+      declare `limits`.** It says `channels({})` is every sensor's answer, declarations included.
+      Core Health and Probe Health set it (Probe Health's `probeId` chooses the probe, never the
+      channels); no other shipped type declares limits, so no other needs it.
+      - **The catalogue holds it** (`catalogue.ts`). At registration: a type without the flag that
+        declares `limits` on a channel `{}` names is refused; a type with it must answer `{}` (not
+        throw), and answer the same with its schema's defaults filled in. At `channelsFor`, which
+        is how every sensor gets its channels and the one place a channel only real parameters
+        produce is ever seen: a fixed type answering anything but its `{}` answer throws, and so
+        does a type without the flag answering a channel with `limits`. Both throw
+        `BAD_SENSOR_TYPE` rather than repair, since either is a type saying one thing and doing
+        another. Usable-limits checks now cover every declared limit, since all of them are in a
+        fixed `{}` answer.
+      - **The pass gets simpler, not cleverer** (`declared-limits.ts`). Declarations are read from
+        fixed types only, and a `declared` row is cleared on any registered type whose key no fixed
+        answer declares. For a fixed type `{}` speaks for every sensor; any other type declares
+        nothing, so a declared row on it can only be an earlier build's. `bare`, `fixed` and
+        `admitsNoParameters` are gone. Probe Health's dropped keys are now cleared. A type this
+        build does not register is still left alone: a build profile that leaves a type out is not
+        withdrawing its declarations, and a cleared row would be put back the next time it was
+        registered anyway.
+      - **Why not per-sensor evaluation.** It would let limits depend on parameters, which nothing
+        needs (`S-18` limits are for channels about this system, which do not vary per sensor). It
+        would also need every sensor's stored parameters read and evaluated at each start, and a
+        rule for what an edit that changes a sensor's channels does to their limits. The flag makes
+        the case the pass cannot answer impossible to write, at registration where the catalogue can see it.
+      - **Docs.** `adding-a-sensor-type.md`: a `fixedChannels` section, the `limits` bullet says only
+        such a type may declare them, and the registration table has the row. The `ChannelDef.limits`
+        and `ChannelLimitDefaults` comments no longer say "never re-applied".
+      - **No scenario test.** Clearing a limit can only make a channel's outcome less severe, as in
+        `P-291`, and no shipped type's limits change.
+      - **Tests.** `catalogue.test.ts` (sensors), 16 new: a table of 10 registrations (limits without
+        the flag, with and without a parameter; the flag with `{}` throwing; the flag with defaults
+        that change the channels; four accepted shapes; the two cases only `channelsFor` can see)
+        and a table of 5 `channelsFor` lookups (limits on a parameter-made channel refused; the
+        same type with parameters that make none; a parameter-made channel without limits; a fixed
+        type whose real parameters change its channels refused, and one whose do not). Plus the
+        shipped catalogue: exactly the two health types declare limits, both flagged, and Probe
+        Health with a `probeId` answers as `{}` does. `declared-limits.test.ts` (core): a table of
+        11 rows across a fixed type with no parameter, a fixed type with one, a parameter-made type,
+        an unregistered type and an operator-owned row, for a key the type declares, names bare,
+        dropped, or only real parameters produce, each checking a second start does nothing; and
+        the real Probe Health type clearing a declared limit on a key it no longer has while its
+        own declared channels stay as they were; and a start with a registered type whose
+        `channels({})` throws, which the pass no longer asks. The P-291 `shaped` tests that relied on a
+        parameter-made channel declaring a limit were replaced by the table, since the catalogue
+        now refuses that type.
 
 - [ ] **P-294 — syslog and trap counters' protocol 13 is named by no capability** · XS · U-30 ·
       Found 2026-10-08 in `U-30`. The form's minimum for those counters comes from a comment on

@@ -31,9 +31,10 @@ export type CostHint = 'light' | 'medium' | 'heavy';
  * itself should judge it and fail the check; this is for the ones where the fault is "too high"
  * or "too low" and the boundary is a matter of degree — scheduler lag, queue depth, rollup lag.
  *
- * They are a **default, not a policy**: written once when the channel is created, and never
- * again. An operator who changes or clears them owns them from then on, because a default that
- * reappeared after somebody deliberately removed it is worse than no default at all.
+ * They are a **default, not a policy**: written when the channel is created, and moved or cleared
+ * at a start only while they are still the type's (`P-291`). An operator who changes or clears
+ * them owns them from then on, because a default that reappeared after somebody deliberately
+ * removed it is worse than no default at all.
  *
  * At least one bound is required — a declaration with none would be a value that reads as
  * configured and does nothing — and the catalogue refuses one whose bounds contradict each other
@@ -93,7 +94,9 @@ export interface ChannelDef {
    * means the same thing on every installation — which is nearly always a channel about *this
    * system* rather than about a monitored device.
    *
-   * Applied when the channel is created and never re-applied. See `ChannelLimitDefaults`.
+   * Applied when the channel is created, and brought up to this build's declaration at each
+   * start (`P-291`). Only a type with `SensorType.fixedChannels` may declare one (`P-293`). See
+   * `ChannelLimitDefaults`.
    */
   readonly limits?: ChannelLimitDefaults;
 }
@@ -508,6 +511,23 @@ export interface SensorType {
   ): readonly { readonly path: string; readonly message: string }[];
   /** Called with already-validated params. Must be pure — it runs in the core, not the probe. */
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[];
+  /**
+   * Every sensor of this type has the same channels, whatever its parameters (`P-293`):
+   * `channels({})` is what `channels(params)` answers for every `params`, declarations included.
+   *
+   * **Required for a type that declares `limits` on any channel.** Each start brings existing
+   * channels up to what their type declares and clears what it no longer does (`P-291`), and the
+   * core asks a type that with `{}`, since it cannot ask with every sensor's parameters. That is
+   * only every sensor's answer when the channels do not depend on them. For any other type `{}`
+   * is a placeholder (`ssh-script`'s `value`), and a limit declared on a channel only some
+   * parameters produce would be one the next start overwrote or cleared, ending its alarm.
+   *
+   * The catalogue holds a type to it: one that sets it must answer `{}`, and answer the same with
+   * its schema's defaults filled in, at registration; every later `channelsFor` that answers
+   * differently throws. A type without it that declares `limits` is refused — at registration on
+   * a channel `{}` names, and at `channelsFor` on one only real parameters produce.
+   */
+  readonly fixedChannels?: boolean;
   execute(context: CheckContext): Promise<CheckExecution>;
   /**
    * A dry run against a pasted document (`U-13`), for types with a mapping language.
