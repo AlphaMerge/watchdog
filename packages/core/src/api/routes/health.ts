@@ -4,7 +4,7 @@ import { CORE_HEALTH_CHANNELS, PROBE_HEALTH_CHANNELS } from '@ms/sensors';
 import { AppError, versionFor } from '@ms/shared';
 import type { FastifyInstance } from 'fastify';
 import type { CoreHealthService } from '../../health/core-health.js';
-import type { ProbeHealthService } from '../../health/probe-health.js';
+import { PROBE_NUMBERS_UNAVAILABLE, type ProbeHealthService } from '../../health/probe-health.js';
 import { toHttpError } from '../errors.js';
 import { INSTALLATION, onObject } from '../authorization.js';
 
@@ -113,7 +113,12 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
           'zero, they are unknown, and a scheduler lag of 0 ms from a probe that is gone would ' +
           'be the most misleading reading this system could produce. A probe below protocol ' +
           `${String(versionFor('healthReporting'))} cannot send its own numbers either; the ` +
-          'message says so in words rather than leaving the channels silently absent.',
+          'message says so in words rather than leaving the channels silently absent. ' +
+          '`numbersUnavailable` says why the probe’s own numbers are gaps, as a value: ' +
+          '`not-connected`; `protocol`, the only reason that is about versions, with the ' +
+          'version it speaks and the one its numbers need; `no-heartbeat`, connected and none ' +
+          'arrived yet, with how long it has been connected; `not-reported`, heartbeats that ' +
+          'carry none. `null` when it reported them.',
         params: {
           type: 'object',
           additionalProperties: false,
@@ -124,11 +129,24 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
           200: {
             type: 'object',
             additionalProperties: false,
-            required: ['at', 'probeId', 'message', 'channels'],
+            required: ['at', 'probeId', 'message', 'numbersUnavailable', 'channels'],
             properties: {
               at: { type: 'string' },
               probeId: { type: 'integer' },
               message: { type: 'string' },
+              // `P-255`. Flat rather than a `oneOf` per reason: each field below belongs to one
+              // reason and is absent from the others, which the type in `probe-health.ts` says.
+              numbersUnavailable: {
+                type: ['object', 'null'],
+                additionalProperties: false,
+                required: ['reason'],
+                properties: {
+                  reason: { type: 'string', enum: [...PROBE_NUMBERS_UNAVAILABLE] },
+                  protocolVersion: { type: 'integer' },
+                  requiredVersion: { type: 'integer' },
+                  connectedSeconds: { type: 'integer' },
+                },
+              },
               channels: {
                 type: 'object',
                 additionalProperties: false,
@@ -150,11 +168,12 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
         await reply.status(503).send(mapped.body);
         return reply;
       }
-      const { reading, message } = service.read(request.params.id);
+      const { reading, message, unavailable } = service.read(request.params.id);
       return {
         at: new Date().toISOString(),
         probeId: request.params.id,
         message,
+        numbersUnavailable: unavailable,
         channels: reading,
       };
     },

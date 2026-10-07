@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
+import type { FastifyInstance } from 'fastify';
 import { PROBE_HEALTH_CHANNELS, PROBE_HEALTH_COUNTERS } from '@ms/sensors';
 import {
   MIN_PROTOCOL_VERSION,
@@ -15,6 +16,16 @@ import {
   type ProbeHealthServiceOptions,
   type ProbeHealthSources,
 } from '../src/health/probe-health.js';
+import { ApiServer } from '../src/api/server.js';
+import { AccessService } from '../src/auth/access.js';
+import { AccountService } from '../src/auth/accounts.js';
+import { GroupService } from '../src/auth/groups.js';
+import { SessionService } from '../src/auth/sessions.js';
+import { LoginThrottle } from '../src/auth/throttle.js';
+import { TokenService } from '../src/auth/tokens.js';
+import { TotpService } from '../src/auth/totp.js';
+import { AuditRepository, DatabaseAuditSink } from '../src/audit/store.js';
+import { HistoryService } from '../src/timeseries/history.js';
 import { ChannelResolver } from '../src/ingestion/channels.js';
 import { Ingestor } from '../src/ingestion/ingestor.js';
 import { IngestionService } from '../src/ingestion/service.js';
@@ -29,6 +40,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { testCatalogue } from './support/sensor-types.js';
 import type { SensorToVouchFor } from '../src/objects/vouching.js';
 import { everyVoucherHolds } from './support/vouching.js';
 
@@ -1268,6 +1280,9 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       const { reading, message } = build(() => ({ connected: false })).read(probeId);
       assert.equal(reading['connected'], 0);
       assert.equal(message, 'not connected to the core');
+      assert.deepEqual(build(() => ({ connected: false })).read(probeId).unavailable, {
+        reason: 'not-connected',
+      });
       for (const key of PROBE_HEALTH_CHANNELS) {
         if (key === 'connected') continue;
         assert.equal(reading[key], null, `${key} should be a gap, not a zero`);
@@ -1315,6 +1330,11 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
       assert.equal(reading['schedulerLag'], null);
       assert.match(message, /its own numbers are unavailable/);
       assert.match(message, /speaks protocol 3/);
+      assert.deepEqual(build(() => old).read(probeId).unavailable, {
+        reason: 'protocol',
+        protocolVersion: 3,
+        requiredVersion: 7,
+      });
     });
 
     it('calls a version below the minimum incompatible rather than merely old', () => {
@@ -1342,6 +1362,148 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
         connected({ protocolVersion: MIN_PROTOCOL_VERSION - 1 }),
       ).read(probeId);
       assert.equal(reading['protocol'], 2, 'there is no shared language to negotiate down to');
+    });
+  });
+
+  describe('why a connected probe’s own numbers are missing (`P-255`)', () => {
+    // Four seconds after a restart the field test read "its own numbers are unavailable — it
+    // speaks protocol 28, the same as this build": the protocol given as the reason when the
+    // reason was that no heartbeat had arrived yet, which sent an operator looking at versions.
+    // Each case below is one the code tells apart, and only `protocol` may name a version.
+    // Connected 4.2 s ago, with no heartbeat and so no numbers yet.
+    const fresh = (overrides: Partial<Extract<ProbeLink, { connected: true }>> = {}): ProbeLink => {
+      const link = connected({ lastHeartbeatAt: null, connectedForMs: 4_200, ...overrides });
+      if (link.connected) delete link.health;
+      return link;
+    };
+
+    /** The real API, with authentication off: the question here is the shape, not who asks. */
+    const serve = async (service: ProbeHealthService): Promise<FastifyInstance> => {
+      const server = new ApiServer({
+        config: {
+          host: '127.0.0.1',
+          port: 0,
+          webRoot: '',
+          allowedOrigins: [],
+          requireAuthentication: false,
+        },
+        logger: silent,
+        version: '9.9.9',
+        service: harness.service,
+        history: new HistoryService({ db, logger: silent }),
+        db,
+        audit: new AuditRepository(),
+        catalogue: testCatalogue(),
+        // Declared only so the health routes register; this route never reads it.
+        coreHealth: () => undefined,
+        probeHealth: () => service,
+        auth: {
+          accounts: new AccountService({ audit: new DatabaseAuditSink(), db, logger: silent }),
+          sessions: new SessionService({ db, logger: silent }),
+          throttle: new LoginThrottle({ db, logger: silent, sleep: () => Promise.resolve() }),
+          groups: new GroupService({ audit: new DatabaseAuditSink(), db, logger: silent }),
+          access: new AccessService({ db, audit: new DatabaseAuditSink(), logger: silent }),
+          tokens: new TokenService({ audit: new DatabaseAuditSink(), db, logger: silent }),
+          totp: new TotpService({ audit: new DatabaseAuditSink(), db, logger: silent }),
+          required: false,
+        },
+      });
+      await server.build('9.9.9', harness.service);
+      return server.app;
+    };
+
+    it('says a probe with no heartbeat yet has none yet, and names no protocol', () => {
+      const { reading, message, unavailable } = build(() => fresh()).read(probeId);
+      assert.equal(reading['connected'], 1);
+      assert.equal(reading['protocol'], 0, 'the same version as this build');
+      assert.equal(reading['heartbeatAge'], null);
+      assert.equal(reading['schedulerLag'], null);
+      assert.deepEqual(unavailable, { reason: 'no-heartbeat', connectedSeconds: 4 });
+      assert.equal(
+        message,
+        'connected; its own numbers are not in yet — no heartbeat has arrived in the 4 s since ' +
+          'it connected',
+      );
+      assert.doesNotMatch(message, /protocol/);
+    });
+
+    it('gives a long wait for the first heartbeat in minutes', () => {
+      const { message } = build(() => fresh({ connectedForMs: 610_000 })).read(probeId);
+      assert.match(message, /no heartbeat has arrived in the 11 minutes since it connected/);
+    });
+
+    it('names the protocol when it is older than the numbers need, heartbeat or none', () => {
+      // First, because a probe too old to carry its numbers will not carry them on its first
+      // heartbeat either: waiting for one is not the answer, upgrading it is.
+      const { message, unavailable } = build(() => fresh({ protocolVersion: 6 })).read(probeId);
+      assert.deepEqual(unavailable, { reason: 'protocol', protocolVersion: 6, requiredVersion: 7 });
+      assert.match(message, /its own numbers are unavailable — it speaks protocol 6, this build/);
+      assert.match(message, /report its own scheduler and pool health/);
+      assert.doesNotMatch(message, /heartbeat/);
+    });
+
+    it('names a protocol below the floor as the reason too', () => {
+      const { unavailable, message } = build(() =>
+        fresh({ protocolVersion: MIN_PROTOCOL_VERSION - 1 }),
+      ).read(probeId);
+      assert.equal(unavailable?.reason, 'protocol');
+      assert.match(message, /older than the oldest this build understands/);
+    });
+
+    it('names a real skew as a skew beside a missing heartbeat, not as its reason', () => {
+      // Protocol 7 reports its numbers and lacks later things: the skew is worth a sentence, as
+      // it is on a probe that reports, and the reason is still the heartbeat.
+      const behind = build(() => fresh({ protocolVersion: 7 })).read(probeId);
+      assert.equal(behind.unavailable?.reason, 'no-heartbeat');
+      assert.match(behind.message, /^connected; its own numbers are not in yet — no heartbeat/);
+      assert.match(behind.message, /; speaks protocol 7, this build speaks /);
+
+      const ahead = build(() => fresh({ protocolVersion: PROTOCOL_VERSION + 1 })).read(probeId);
+      assert.equal(ahead.unavailable?.reason, 'no-heartbeat');
+      assert.match(ahead.message, /no heartbeat has arrived/);
+      assert.match(ahead.message, /newer than this build/);
+    });
+
+    it('says heartbeats that carry no numbers do, and names no protocol', () => {
+      const { message, unavailable } = build(() =>
+        fresh({ lastHeartbeatAt: new Date('2026-08-28T00:00:20Z') }),
+      ).read(probeId);
+      assert.deepEqual(unavailable, { reason: 'not-reported' });
+      assert.equal(
+        message,
+        'connected; its own numbers are unavailable — its heartbeats arrive without them',
+      );
+    });
+
+    it('has no reason at all for a probe that reported', () => {
+      const { unavailable, message } = build(() => connected()).read(probeId);
+      assert.equal(unavailable, null);
+      assert.doesNotMatch(message, /unavailable|not in yet/);
+    });
+
+    it('serves the reason on the route as a value, beside the sentence', async () => {
+      // The schema has `additionalProperties: false`, so a field it does not declare is dropped
+      // on the way out without an error: only a request through the route shows it arrives.
+      for (const [link, expected] of [
+        [fresh(), { reason: 'no-heartbeat', connectedSeconds: 4 }],
+        [
+          fresh({ protocolVersion: 6 }),
+          { reason: 'protocol', protocolVersion: 6, requiredVersion: 7 },
+        ],
+        [fresh({ lastHeartbeatAt: new Date() }), { reason: 'not-reported' }],
+        [{ connected: false }, { reason: 'not-connected' }],
+        [connected(), null],
+      ] as const) {
+        const app = await serve(build(() => link));
+        const response = await app.inject({
+          method: 'GET',
+          url: `/api/v1/probes/${String(probeId)}/health`,
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        const body = response.json<{ message: string; numbersUnavailable: unknown }>();
+        assert.deepEqual(body.numbersUnavailable, expected, body.message);
+        await app.close();
+      }
     });
   });
 

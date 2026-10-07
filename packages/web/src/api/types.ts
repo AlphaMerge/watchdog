@@ -127,6 +127,18 @@ export interface ProbeHealthView {
   at: string;
   probeId: number;
   message: string;
+  /**
+   * Why the probe's own numbers are gaps, or `null` when it reported them (`P-255`).
+   *
+   * Only `protocol` is about versions; a probe that has connected and not yet sent a heartbeat is
+   * `no-heartbeat`, whatever it speaks.
+   */
+  numbersUnavailable:
+    | { reason: 'not-connected' }
+    | { reason: 'protocol'; protocolVersion: number; requiredVersion: number }
+    | { reason: 'no-heartbeat'; connectedSeconds: number }
+    | { reason: 'not-reported' }
+    | null;
   channels: Record<string, number | null>;
 }
 

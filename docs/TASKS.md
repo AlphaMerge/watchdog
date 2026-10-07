@@ -7884,7 +7884,7 @@ because each is a decision rather than a defect:
       its own. Without that, overwrites before its first drain could not be counted on Probe
       Health as they happen.
 
-- [ ] **P-255 — Probe Health blames the protocol before a probe's first heartbeat** · S · R-06 ·
+- [x] **P-255 — Probe Health blames the protocol before a probe's first heartbeat** · S · R-06 ·
       Found 2026-10-04 by `H-15`. Four seconds after a restart,
       `GET /probes/<id>/health` read *connected; its own numbers are unavailable — it speaks
       protocol 28, the same as this build*. The numbers were unavailable because no heartbeat
@@ -7892,6 +7892,39 @@ because each is a decision rather than a defect:
       sends an operator looking at versions. **Done when** a connected probe with no heartbeat
       yet is described as that, and the protocol is named only when it is the reason, with a
       test for each.
+
+      **P-255 outcome (2026-10-07). Probe Health says why a probe's numbers are missing, and
+      names a protocol only when the protocol is why.** `describe` used to take one boolean,
+      "reported or not", and gave `explainSkew` as the reason for every "not". `ProbeHealthService.read`
+      now works out a reason (`whyUnavailable`) and returns it beside the sentence:
+      - **`protocol`**: the probe is below protocol 7, which carries its numbers. The sentence
+        is the old one, naming both versions and the missing capability. Checked first: a probe
+        that old sends no numbers on any heartbeat, so its first heartbeat changes nothing.
+      - **`no-heartbeat`**: connected, new enough, none arrived on this session.
+        *connected; its own numbers are not in yet — no heartbeat has arrived in the 4 s since it
+        connected* (minutes after two). The time is the link's monotonic `connectedForMs`.
+      - **`not-reported`**: heartbeats arrive without numbers from a probe new enough to send
+        them (a build with no health reporter). *its heartbeats arrive without them.*
+      - **`not-connected`**, unchanged text.
+
+      Beside `no-heartbeat` and `not-reported`, a real skew (`outdated` or `ahead`) is still
+      named, after the reason, as a probe that reports has it named.
+      `GET /probes/{id}/health` carries the reason as **`numbersUnavailable`**: `null` when the
+      probe reported, otherwise `{ reason, … }` with `protocolVersion`/`requiredVersion` for
+      `protocol` and `connectedSeconds` for `no-heartbeat`. The reasons are
+      `PROBE_NUMBERS_UNAVAILABLE` in `probe-health.ts`, which the route's schema enumerates;
+      `docs/api-reference.md` is regenerated. Channels, codes and states are unchanged, so no
+      alarm volume moves. Tests in `probe-health.test.ts` cover each reason, the ordering
+      (protocol 6 with no heartbeat is `protocol`), a skew beside a missing heartbeat, a version
+      below the floor, and one request per reason through the real route, because the schema's
+      `additionalProperties: false` would drop an undeclared field silently.
+
+      **The web UI renders neither the sentence nor a reason.** Only the add-sensor form reads this
+      route, to decide whether a listener is off, and it keys on `scheduled` being a number,
+      which is still right. `ProbeHealthView` gains the field and the two test fixtures fill it.
+      Not done: that form could read `numbersUnavailable` instead of inferring from
+      `scheduled`; and the Probe Health sensor's stored message is still prose only, as every
+      sensor's is.
 
 - [ ] **P-256 — a device that hung and recovered leaves the probe holding more sessions** · S ·
       P-36 · Found 2026-10-04 by `H-15`. One device, with three SSH sensors and five SNMP

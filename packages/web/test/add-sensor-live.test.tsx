@@ -24,6 +24,13 @@ const health = (channels: Record<string, number | null>): ProbeHealthView => ({
   at: '2026-10-02T10:00:00.000Z',
   probeId: 2,
   message: 'connected',
+  // What the core says beside these channels (`P-255`): a report is what fills `scheduled`.
+  numbersUnavailable:
+    channels['connected'] !== 1
+      ? { reason: 'not-connected' }
+      : typeof channels['scheduled'] === 'number'
+        ? null
+        : { reason: 'no-heartbeat', connectedSeconds: 4 },
   channels,
 });
 

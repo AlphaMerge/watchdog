@@ -5,6 +5,7 @@ import {
   describeError,
   describeSkew,
   explainSkew,
+  versionFor,
   type ChannelReading,
   type CheckResult,
   type Logger,
@@ -32,6 +33,37 @@ import { judgeCoreClock, remoteClockOffsets } from './core-clock.js';
  * spool depth — rides on the heartbeat from protocol 7, and when it is missing the channels
  * **gap** and the message says why, rather than reading zero.
  */
+
+/**
+ * Every reason a probe's own numbers can be missing (`P-255`), for the API's schema.
+ *
+ * - `not-connected`: no link, so nothing but `connected` has a value.
+ * - `protocol`: the probe speaks a protocol older than the one that carries its numbers. The
+ *   only reason that is about versions, and the only one whose sentence names one.
+ * - `no-heartbeat`: connected, new enough, and no heartbeat has arrived on this session yet —
+ *   the first seconds after either end restarts.
+ * - `not-reported`: heartbeats arrive and carry no numbers, from a probe new enough to send them.
+ */
+export const PROBE_NUMBERS_UNAVAILABLE = [
+  'not-connected',
+  'protocol',
+  'no-heartbeat',
+  'not-reported',
+] as const;
+
+/**
+ * Why Probe Health has none of the probe's own numbers, or `null` when it has them (`P-255`).
+ *
+ * **A value, not only a sentence.** The message used to give the protocol as the reason whatever
+ * the reason was — "it speaks protocol 28, the same as this build" four seconds after a restart,
+ * when the reason was that no heartbeat had arrived yet — and sent an operator looking at
+ * versions. A caller that acts on the reason reads this; the sentence is for a person.
+ */
+export type ProbeNumbersUnavailable =
+  | { reason: 'not-connected' }
+  | { reason: 'protocol'; protocolVersion: number; requiredVersion: number }
+  | { reason: 'no-heartbeat'; connectedSeconds: number }
+  | { reason: 'not-reported' };
 
 /** Everything the service needs to know about one probe, from wherever it comes. */
 export interface ProbeHealthSources {
@@ -307,7 +339,12 @@ export class ProbeHealthService {
       readonly link?: ProbeLink;
       readonly coreClockOwned?: boolean;
     } = {},
-  ): { reading: ProbeHealthReading; message: string } {
+  ): {
+    reading: ProbeHealthReading;
+    message: string;
+    /** Why the probe's own numbers are gaps, or `null` when it reported them (`P-255`). */
+    unavailable: ProbeNumbersUnavailable | null;
+  } {
     const link = options.link ?? this.#sources.link(probeObjectId);
     if (!link.connected) {
       // **The whole reason this is core-evaluated.** Everything else is a gap rather than a zero:
@@ -316,11 +353,13 @@ export class ProbeHealthService {
       return {
         reading: { ...blank(), connected: 0 },
         message: 'not connected to the core',
+        unavailable: { reason: 'not-connected' },
       };
     }
 
     const skew = describeSkew(link.protocolVersion);
     const health = link.health;
+    const unavailable = whyUnavailable(link);
     const heartbeatAge =
       link.lastHeartbeatAt === null
         ? null
@@ -485,10 +524,11 @@ export class ProbeHealthService {
 
     return {
       reading,
+      unavailable,
       message: describe(
         reading,
         skew,
-        health !== undefined,
+        unavailable,
         health?.poolSize,
         { local: options.local === true, machineAvailablePercent: health?.memoryAvailablePercent },
         options.coreClockOwned === true && link.clockOffsetMs !== null
@@ -822,7 +862,8 @@ function poolUsage(busy: number | undefined, size: number | undefined): number |
 function describe(
   reading: ProbeHealthReading,
   skew: ReturnType<typeof describeSkew>,
-  reporting: boolean,
+  /** `null` when the probe reported its own numbers. */
+  unavailable: ProbeNumbersUnavailable | null,
   /**
    * Workers the probe is currently holding.
    *
@@ -883,10 +924,31 @@ function describe(
         "probe's does, which Core Health reports as the core's clock",
     );
   }
-  if (!reporting) {
+  if (unavailable !== null) {
     // **Said in words, never as an absent channel.** `R-06`'s rule: a probe that connects and
     // quietly does less than it should is the failure worth making visible.
-    parts.push(`its own numbers are unavailable — it ${explainSkew(skew)}`);
+    //
+    // **And the reason it is, not a protocol by default** (`P-255`). Only `protocol` names a
+    // version as the cause; the others say what is actually missing, and a real skew beside them
+    // is named as a skew, as it is on a probe that reports.
+    switch (unavailable.reason) {
+      case 'protocol':
+        parts.push(`its own numbers are unavailable — it ${explainSkew(skew)}`);
+        return parts.join('; ');
+      case 'no-heartbeat':
+        parts.push(
+          'its own numbers are not in yet — no heartbeat has arrived in the ' +
+            `${span(unavailable.connectedSeconds)} since it connected`,
+        );
+        break;
+      case 'not-reported':
+        parts.push('its own numbers are unavailable — its heartbeats arrive without them');
+        break;
+      // Unreachable: `read` answers a lost probe before it describes anything.
+      case 'not-connected':
+        return 'not connected to the core';
+    }
+    if (skew.kind === 'outdated' || skew.kind === 'ahead') parts.push(explainSkew(skew));
     return parts.join('; ');
   }
 
@@ -927,6 +989,37 @@ function describe(
   // sentence: `outdated` says upgrade the probe, `ahead` says upgrade this core (`P-178`).
   if (skew.kind === 'outdated' || skew.kind === 'ahead') parts.push(explainSkew(skew));
   return parts.join(', ');
+}
+
+/**
+ * Why a connected probe's own numbers are missing, or `null` when they are not (`P-255`).
+ *
+ * **The protocol first**, because a probe too old to carry its numbers will not carry them on any
+ * heartbeat, so its first one arriving changes nothing. Then whether one has arrived on this
+ * session — `lastHeartbeatAt` belongs to the session and starts null on each — and only then the
+ * probe that sends heartbeats and leaves its numbers out.
+ */
+function whyUnavailable(
+  link: Extract<ProbeLink, { connected: true }>,
+): ProbeNumbersUnavailable | null {
+  if (link.health !== undefined) return null;
+  if (!capabilitiesFor(link.protocolVersion).healthReporting) {
+    return {
+      reason: 'protocol',
+      protocolVersion: link.protocolVersion,
+      requiredVersion: versionFor('healthReporting'),
+    };
+  }
+  if (link.lastHeartbeatAt === null) {
+    // The monotonic age, not `connectedAt` against the wall clock: a duration is arithmetic.
+    return { reason: 'no-heartbeat', connectedSeconds: Math.round(link.connectedForMs / 1_000) };
+  }
+  return { reason: 'not-reported' };
+}
+
+/** Seconds as a sentence reads them: seconds under two minutes, whole minutes after. */
+function span(seconds: number): string {
+  return seconds < 120 ? `${String(seconds)} s` : minutes(seconds * 1_000);
 }
 
 /** A span as an operator reads it in a sentence: whole minutes, rounded up, never none. */
