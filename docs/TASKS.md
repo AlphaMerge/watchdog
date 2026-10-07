@@ -3698,6 +3698,11 @@ because each is a decision rather than a defect:
       tested rollback that need not restore the raw text), or they are left to age out with the
       request rows, said in the outcome.
 
+- [ ] **N-29 — variation selectors can carry text nobody sees** · S · N-27 · Found 2026-10-08 in
+      `N-27`. `legible()` keeps U+FE00–FE0F and U+E0100–E01EF so emoji survive, but a run of them
+      on one visible character can hold hidden text. **Done when** decided: escape runs, or those
+      not after an emoji base, or keep, said in `legible.ts`, with tests.
+
 ## Phase 5 — Web UI
 
 - [x] **U-01 — Frontend scaffold** · M · F-01 · React 19 + TypeScript + Vite 8, routing, design
@@ -10474,6 +10479,42 @@ because each is a decision rather than a defect:
           `unfit-results.test.ts`'s bound cases, at a bound of 2 and so a slack of 1, now step
           past the slack to see the trim. Mutation: the slack set to nothing (per-key eviction)
           fails the perf budget and two of the five memory tests.
+
+- [ ] **P-296 — a type that breaks its fixed-channels promise fails a sensor create as a 500** ·
+      XS · P-293 · Found 2026-10-08 in `P-293`. Registration checks a `fixedChannels` type only
+      against `{}` and its defaults; a type whose answer differs for real parameters is caught in
+      `channelsFor`, which throws `BAD_SENSOR_TYPE` into the create. **Done when** the create
+      refuses it as a client-visible error naming the type (`sensor-type-gate.ts`), with a test.
+
+- [ ] **P-297 — the declared lookup and counter bits still read every type's `{}`** · S · P-293 ·
+      Found 2026-10-08 in `P-293`. `declaredChannelLookup` reads `channels({})` for every type,
+      the placeholder problem `P-293` closed for limits: a lookup or counter bit declared only on a
+      channel real parameters produce is not seen. **Done when** decided: use `fixedChannels` the
+      same way, or say why lookups differ, with a test.
+
+- [ ] **P-298 — `capabilitiesFor` writes each version a second time** · XS · P-294 · Found
+      2026-10-08 in `P-294`. The version table now lives in `capability-versions.ts`, but
+      `capabilitiesFor` repeats each number; a test catches drift across all 26. **Done when** it is
+      built from the table, with the test kept.
+
+- [ ] **P-299 — late and dropped-withheld results are counted again when a batch is sent again**
+      · S · P-295 · Found 2026-10-08 in `P-295`. `A-53`'s `late` and `A-72`'s `withheldDropped`
+      count on every arrival, so a resend after a lost ack counts them twice; `reported()` returns
+      them as counts, so they cannot be named by sensor and time. **Done when** they go through the
+      result memory as `unearned` now does, with a lost-ack test.
+
+- [ ] **P-300 — an unfit query answer is counted only when on time, and never on Core Health** ·
+      S · P-289 · Found 2026-10-08 in `P-289`. A query answer that arrives after its deadline with
+      an unfit result is only debug-logged; refused query answers are on Probe Health's Reports
+      refused and the query service's `unfit` stat, not on Core Health's `resultsRefusedUnfit` or
+      `/metrics`. **Done when** both are counted where `P-290` counts results, or the reason not to
+      is written down, with tests.
+
+- [ ] **P-301 — a sensor that loses channels to fitting stays Up** · S · P-292 · Found 2026-10-08
+      in `P-292`. The message now says how many channels could not be sent, but the state does not
+      change, and a limit's or lookup's message replaces the note. **Done when** decided: keep, or
+      Warning with a scenario test (`M-17`) showing it does not hold a sensor in Warning for good,
+      as `P-283` found for the probe.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
@@ -21252,6 +21293,12 @@ because each is a decision rather than a defect:
       - **Not done:** the form does not say when the version was recorded. The row has
         `last_seen_at`, which is touched by refused hellos too, so it is not the time of the
         recorded version.
+
+- [ ] **U-32 — the add-sensor form does not say when a probe last spoke its version** · S · U-31 ·
+      Found 2026-10-08 in `U-31`. The form says a probe that is down was too old when it last
+      connected, without saying when; `last_seen_at` is also touched by refused hellos, so it is not
+      that time. **Done when** decided: record the handshake time (a migration) and show it, or
+      keep, with a test.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
