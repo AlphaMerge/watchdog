@@ -232,6 +232,10 @@ channel the sensor is judged by.
   display labels; `name` is.
 - **Must be pure.** It runs in the core, which has no network access to your target and no
   business doing I/O to answer "what channels does this type have".
+- **`lookup` and `counter` may depend on parameters.** A channel the core first sees in a reading
+  (a key a later build added, or one an edit added) gets them from `channels()` asked with that
+  sensor's own stored parameters, not `{}` (`P-297`), so a column-per-channel type like
+  `snmp.table` needs nothing more.
 - **`limits` on a channel declares default thresholds** (`S-18`). Almost no channel should have
   one: a threshold on a monitored device's response time depends on that device and belongs to the
   operator. Declare one only where the number means the same thing on every installation, which in
@@ -264,7 +268,8 @@ a type being fixed: Probe Health's `probeId` is one. The catalogue holds the pro
 At registration a fixed type must answer `{}`, and answer the same once its schema's defaults are
 filled in. Each `channelsFor` after that, which is how every sensor gets its channels, throws if
 the answer differs from `{}`'s. For a type without the flag, it throws on a channel with `limits`
-that only real parameters produce, the one place such a channel is ever seen.
+that only real parameters produce, the one place such a channel is ever seen. Either refuses that
+sensor's create with a 400 naming the type, and logs a warning for you (`P-296`).
 
 ### `execute(context)`
 

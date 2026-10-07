@@ -1,4 +1,10 @@
-import type { ChannelLimitDefaults, SensorCatalogue, SensorReference } from '@ms/sensors';
+import {
+  SensorTypeError,
+  type ChannelDef,
+  type ChannelLimitDefaults,
+  type SensorCatalogue,
+  type SensorReference,
+} from '@ms/sensors';
 import type { Logger } from '@ms/shared';
 import { ObjectError } from './errors.js';
 import type { ChannelRecord } from './types.js';
@@ -183,8 +189,17 @@ function assertStructurallySane(sensorType: string, params: Record<string, unkno
   }
 }
 
-/** The real gate: a `SensorCatalogue` behind the interface the object service uses. */
-export function catalogueSensorTypeGate(catalogue: SensorCatalogue): SensorTypeGate {
+/**
+ * The real gate: a `SensorCatalogue` behind the interface the object service uses.
+ *
+ * `logger` hears about a type that broke its own declaration (`P-296`), which the caller is told
+ * about with a 400 and nobody else would be: the fault is the type's, and whoever ships it
+ * reads the log, not the operator's screen.
+ */
+export function catalogueSensorTypeGate(
+  catalogue: SensorCatalogue,
+  options: { readonly logger?: Logger } = {},
+): SensorTypeGate {
   // Fixed once the catalogue is sealed, which is before anything writes; worked out again until
   // then, so a type registered after the gate was made is not missed.
   let sealedReadingTypes: readonly string[] | undefined;
@@ -243,7 +258,34 @@ export function catalogueSensorTypeGate(catalogue: SensorCatalogue): SensorTypeG
     },
 
     channelsFor(sensorType: string, params: Record<string, unknown>): readonly ChannelDraft[] {
-      return catalogue.channelsFor(sensorType, params).map((def) => ({
+      let defs: readonly ChannelDef[];
+      try {
+        defs = catalogue.channelsFor(sensorType, params);
+      } catch (cause) {
+        // **A type breaking what it said at registration** (`P-296`): a `fixedChannels` type whose
+        // channels these parameters change, or one without the flag putting `limits` on a channel
+        // only these parameters make (`P-293`). Only `channelsFor` can see either, so it reaches
+        // a create rather than a start. Refused like every other sensor this gate will not
+        // write — a 400 naming the type, rather than a 500 that says nothing — and not created,
+        // because its channels would be ones the start-up limits pass reads wrongly. Any other
+        // throw is a fault of ours, and stays one.
+        if (!(cause instanceof SensorTypeError)) throw cause;
+        options.logger?.warn(
+          { sensorType, err: { code: cause.code, message: cause.message } },
+          'a sensor type broke its own channel declaration, and a sensor of it was refused',
+        );
+        throw new ObjectError(
+          'OBJECT_INVALID',
+          `a sensor of type "${sensorType}" cannot be created with these parameters, because ` +
+            `the type does not keep to its own declaration: ${cause.message}`,
+          {
+            context: { sensorType, phase: 'declare-channels' },
+            details: { sensorType, reason: cause.code },
+            cause,
+          },
+        );
+      }
+      return defs.map((def) => ({
         key: def.key,
         name: def.name,
         ...(def.unit === undefined ? {} : { unit: def.unit }),

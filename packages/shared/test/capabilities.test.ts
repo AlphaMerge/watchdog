@@ -99,22 +99,58 @@ describe('what a protocol version can do', () => {
     assert.equal(capabilitiesFor(Number.NaN).configPush, false);
   });
 
-  it('agrees with the version each capability says it needs, for every capability', () => {
-    // Every one, not the first five (`P-294`): `capabilitiesFor` writes each number a second
-    // time, and the form and every gate read `versionFor`, so the two must not drift.
-    const names = Object.keys(capabilitiesFor(PROTOCOL_VERSION)) as (keyof ProbeCapabilities)[];
-    for (const name of names) {
-      const needed = versionFor(name);
-      assert.equal(
-        capabilitiesFor(needed)[name],
-        true,
-        `${name} should exist at ${String(needed)}`,
-      );
-      assert.equal(
-        capabilitiesFor(needed - 1)[name],
-        false,
-        `${name} should not exist at ${String(needed - 1)}`,
-      );
+  it('keeps every capability at the version it arrived in', () => {
+    // **The second writing of each number, kept on purpose** (`P-298`). `capabilitiesFor` is now
+    // built from `capability-versions.ts`, so comparing the two would compare the table with
+    // itself. A capability's version is a wire contract: moved down, a core sends a field to a
+    // probe that rejects it; moved up, it withholds a feature from one that has it. So it is
+    // written here once more, and changing one means changing both, on purpose.
+    const ARRIVED: Readonly<Record<keyof ProbeCapabilities, number>> = {
+      configPush: 3,
+      discoverySweep: 4,
+      identification: 5,
+      approval: 6,
+      healthReporting: 7,
+      onDemandQuery: 8,
+      listenerCounters: 13,
+      chunkedPushFinal: 16,
+      resultSendTime: 16,
+      machineMemory: 17,
+      memoryLimit: 18,
+      poolMemory: 19,
+      memorySinceLastReport: 20,
+      logOutput: 21,
+      credentialHostKeys: 22,
+      flowCounters: 23,
+      credentialAddressPinning: 24,
+      flowOverwritten: 25,
+      listenerOverwritten: 26,
+      databaseAddressPinning: 27,
+      targetPolicyException: 28,
+      childStartup: 29,
+      workerStartup: 30,
+      listenerEarlier: 31,
+      scriptGroups: 31,
+      unsendableReadings: 32,
+    };
+    const names = Object.keys(ARRIVED) as (keyof ProbeCapabilities)[];
+    assert.deepEqual(
+      Object.keys(capabilitiesFor(PROTOCOL_VERSION)).sort(),
+      [...names].sort(),
+      'every capability, and nothing else',
+    );
+    // Every version either side of every arrival, not just the arrival: a gate written `>` where
+    // `>=` was meant is wrong at exactly one version.
+    for (let version = 0; version <= PROTOCOL_VERSION + 1; version += 1) {
+      const capabilities = capabilitiesFor(version);
+      for (const name of names) {
+        assert.equal(versionFor(name), ARRIVED[name], `${name}'s version moved`);
+        assert.equal(
+          capabilities[name],
+          version >= ARRIVED[name],
+          `${name} at protocol ${String(version)}`,
+        );
+      }
     }
   });
 

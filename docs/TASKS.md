@@ -10480,22 +10480,110 @@ because each is a decision rather than a defect:
           past the slack to see the trim. Mutation: the slack set to nothing (per-key eviction)
           fails the perf budget and two of the five memory tests.
 
-- [ ] **P-296 — a type that breaks its fixed-channels promise fails a sensor create as a 500** ·
+- [x] **P-296 — a type that breaks its fixed-channels promise fails a sensor create as a 500** ·
       XS · P-293 · Found 2026-10-08 in `P-293`. Registration checks a `fixedChannels` type only
       against `{}` and its defaults; a type whose answer differs for real parameters is caught in
       `channelsFor`, which throws `BAD_SENSOR_TYPE` into the create. **Done when** the create
       refuses it as a client-visible error naming the type (`sensor-type-gate.ts`), with a test.
 
-- [ ] **P-297 — the declared lookup and counter bits still read every type's `{}`** · S · P-293 ·
+      **P-296 outcome. A 400 `OBJECT_INVALID` naming the type, and nothing written.** It was a
+      500: `SensorTypeError` is not an `ObjectError`, so `toHttpError` replaced its message with
+      "the request could not be completed".
+      - **Where.** `catalogueSensorTypeGate`'s `channelsFor` catches a `SensorTypeError` from
+        `catalogue.channelsFor` and throws `ObjectError('OBJECT_INVALID')`, shaped like the gate's
+        other refusals: context `{ sensorType, phase: 'declare-channels' }`, details
+        `{ sensorType, reason: 'BAD_SENSOR_TYPE' }`, a message naming the type and quoting what the
+        catalogue said. Both `P-293` breaches land there: a fixed type whose real parameters change
+        its channels, and a type without the flag putting `limits` on a channel only its parameters
+        make. One place covers `POST /objects` and `POST /objects/tree`, whose transactions roll
+        back, so neither writes the sensor (nor, for a tree, any of it).
+      - **Why a 400 and not a 5xx.** The gate already answers an unregistered type and params its
+        schema refuses with `OBJECT_INVALID`, and this is the same kind of answer: these
+        parameters, with this type, in this build, will always be refused, and the caller can act
+        on it (other parameters work, as the tests show). A 500 says the opposite.
+      - **A warning in the log.** A 400 is not logged, and the 500 was, so the gate takes an
+        optional `logger` (`main.ts` passes it) and warns with the type and the catalogue's
+        message: the fault is the type's, and whoever ships it reads the log.
+      - **Not changed.** Any other throw from a type's `channels()` stays a 500, a fault of ours,
+        and is tested as such.
+      - **Tests.** `broken-sensor-type.test.ts` (core, through the API): for each breach, a create
+        answering 400 with the code, the type in the message, `details` and `phase`, no sensor
+        written, then the same type with parameters that keep its promise answering 201; and a
+        subtree create with a device, a good sensor and the bad one answering 400 and writing none
+        of it. The gate alone: a warning with the type, and a `RangeError` from a type left alone.
+        Mutation: the `SensorTypeError` passed through fails 5 of the 6.
+
+- [x] **P-297 — the declared lookup and counter bits still read every type's `{}`** · S · P-293 ·
       Found 2026-10-08 in `P-293`. `declaredChannelLookup` reads `channels({})` for every type,
       the placeholder problem `P-293` closed for limits: a lookup or counter bit declared only on a
       channel real parameters produce is not seen. **Done when** decided: use `fixedChannels` the
       same way, or say why lookups differ, with a test.
 
-- [ ] **P-298 — `capabilitiesFor` writes each version a second time** · XS · P-294 · Found
+      **P-297 outcome. Neither: each sensor is asked with its own stored parameters.** Lookups
+      differ from limits because parameters choose them, and because this path already reads the
+      sensor's row.
+      - **Who reads it.** Only `ChannelResolver` (`declaredShape`), for a channel ingestion creates
+        on first sight: a key a later build added to a type, or a key an edit added, since an
+        update replaces `params` and declares no channels (only create, tree create and clone write
+        `channel` rows). There is no start-up pass for lookups or counters, so nothing rewrites
+        existing rows from `{}`, which is what made the placeholder dangerous for limits.
+      - **What shipped types do.** Surveyed with the shipped catalogue: besides the two health types,
+        only `snmp.traffic` declares a lookup or a counter on a key `{}` names (`in`, `out`, `total`
+        counters at 64 and the `status` lookup), and it is not `fixedChannels`. Three types declare
+        them only on parameters: `snmp.custom` is a counter only in `counter` mode,
+        `snmp.custom.string` carries the lookup its parameters name, and `snmp.table` makes each
+        column a channel with its own (its `{}` is a placeholder `value` with neither). And
+        `snmp.traffic` with `counterWidth: '32'` is 32, where `{}` says 64.
+      - **Why not `fixedChannels`.** It would take `snmp.traffic`'s counters and lookup away from
+        exactly the upgrade case `P-80` was written for (`total` reaching an existing sensor), and
+        a lazily created counter without `counter_bits` stores cumulative totals.
+      - **Why not keep `{}`.** A counter or lookup column added to an `snmp.table` sensor by an
+        edit reaches the table here, and `{}` answers with neither: the counter stored totals and
+        the status column was judged by nothing. The same for `snmp.custom` and
+        `snmp.custom.string` if their channel is ever created this way.
+      - **The change.** `declaredChannelLookup(catalogue)` now answers `(sensorType, params)` with
+        every channel that sensor declares, keyed by channel key; a key its answer does not name has
+        neither. Only if `channelsFor` throws for the stored parameters (a type's own error, or a
+        `P-296` breach on a sensor stored before `P-293`) does it fall back to the type's `{}`
+        answer, which is what every sensor got before; with no such answer, nothing. The resolver's
+        one query reads `params` beside `type` and asks once per sensor, however many of its
+        channels are new. Limits still come from fixed types only (`P-293`). A counter's width was
+        never the risk (the reading's `counterBits` wins), only whether the channel is a counter.
+      - **Tests.** `channel-provisioning.test.ts` (core): a sensor of a table-like test type created
+        with one column and edited to add a counter column and a lookup column, the edit shown to
+        write no channel, then a first reading of all three plus `value`: `counter_bits` 64,
+        `lookup_id` set, and `value` with neither though `{}` names it. A table over the shipped
+        catalogue, each row asserting the type is registered and not fixed, the sensor's answer and
+        `{}`'s: `snmp.custom` counter mode, `snmp.custom.string` lookup, `snmp.table` counter and
+        lookup columns and its placeholder, `snmp.traffic` at 32 and its status. An unregistered
+        type answers nothing; the fallback to `{}` for a type throwing on stored parameters and for
+        a `P-293` breach, and nothing for a type with no `{}` answer. Mutations: asking `{}` in
+        `declaredChannelLookup` fails 8 of 11; the resolver passing `{}` fails the edit test.
+      - **Not done.** An edit that changes a channel's lookup or counter mode on a key the sensor
+        already has (`snmp.custom`'s `mode`, `snmp.custom.string`'s `lookup`) still leaves the stored
+        row as created, since an update declares no channels; and a clone copies no `lookup_id` or
+        `counter_bits`. Listed as follow-ups.
+
+- [x] **P-298 — `capabilitiesFor` writes each version a second time** · XS · P-294 · Found
       2026-10-08 in `P-294`. The version table now lives in `capability-versions.ts`, but
       `capabilitiesFor` repeats each number; a test catches drift across all 26. **Done when** it is
       built from the table, with the test kept.
+
+      **P-298 outcome. Built from `INTRODUCED`, and the test holds the numbers instead.**
+      - **`capabilitiesFor`** maps `INTRODUCED` to `whole && peerVersion >= since`, so a version
+        that is not a whole number still has nothing. Completeness comes from the table's
+        `satisfies Record<keyof ProbeCapabilities, number>`. No version moved; the protocol stays
+        at 32.
+      - **The drift test kept its point.** Compared with `versionFor`, it would now compare the
+        table with itself. A capability's version is a wire contract, so the test writes all 26
+        once more in its own record (`ARRIVED`), checks `capabilitiesFor` names exactly those, and,
+        for every version from 0 to `PROTOCOL_VERSION + 1` and every capability, that `versionFor`
+        equals the written number and the capability is granted exactly from it. Changing one
+        means changing both, on purpose. The "grants nothing at 1" `deepEqual` listing every
+        capability is unchanged.
+      - **Mutations** (each restored byte for byte, with `dist` rebuilt): `credentialHostKeys` at
+        21 in the table fails this test and one other; `>` for `>=` in `capabilitiesFor` fails 27
+        of the 54 shared capability tests.
 
 - [x] **P-299 — late and dropped-withheld results are counted again when a batch is sent again**
       · S · P-295 · Found 2026-10-08 in `P-295`. `A-53`'s `late` and `A-72`'s `withheldDropped`

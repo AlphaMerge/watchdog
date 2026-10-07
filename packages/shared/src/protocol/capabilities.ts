@@ -251,36 +251,22 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
     'report the readings it dropped because they could not be sent, and the results its spool discarded',
 };
 
+/**
+ * What a peer at `peerVersion` can do, read from the one table of versions (`P-298`).
+ *
+ * Built from `INTRODUCED` rather than written out: each number used to appear here and in
+ * `capability-versions.ts`, and the form and every gate read the table, so a number changed in
+ * one place and not the other would have the form promising what the gates refused. The table's
+ * `satisfies` is what makes this complete — a capability it leaves out does not compile there —
+ * and `capabilities.test.ts` holds every number to a list of its own.
+ */
 export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
-  const has = (since: number): boolean => Number.isInteger(peerVersion) && peerVersion >= since;
-  return {
-    configPush: has(3),
-    discoverySweep: has(4),
-    identification: has(5),
-    approval: has(6),
-    healthReporting: has(7),
-    onDemandQuery: has(8),
-    listenerCounters: has(13),
-    chunkedPushFinal: has(16),
-    resultSendTime: has(16),
-    machineMemory: has(17),
-    memoryLimit: has(18),
-    poolMemory: has(19),
-    memorySinceLastReport: has(20),
-    logOutput: has(21),
-    credentialHostKeys: has(22),
-    flowCounters: has(23),
-    credentialAddressPinning: has(24),
-    flowOverwritten: has(25),
-    listenerOverwritten: has(26),
-    databaseAddressPinning: has(27),
-    targetPolicyException: has(28),
-    childStartup: has(29),
-    workerStartup: has(30),
-    listenerEarlier: has(31),
-    scriptGroups: has(31),
-    unsendableReadings: has(32),
-  };
+  // A version that is not a whole number has none: the wire schema says integer, so this is a
+  // peer that lied or a value nothing validated, and `3.5 >= 3` is the wrong way to be wrong.
+  const whole = Number.isInteger(peerVersion);
+  return Object.fromEntries(
+    INTRODUCED.map(([name, since]) => [name, whole && peerVersion >= since]),
+  ) as Record<keyof ProbeCapabilities, boolean>;
 }
 
 /** The capabilities that say a probe connects one credential kind to an address it checked. */

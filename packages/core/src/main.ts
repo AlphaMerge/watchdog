@@ -580,7 +580,7 @@ async function serve(): Promise<void> {
   });
   // One gate, so the write that records a voucher and the sweep that re-checks it ask each type
   // the same question about what it reads (`A-29`).
-  const sensorTypeGate = catalogueSensorTypeGate(catalogue);
+  const sensorTypeGate = catalogueSensorTypeGate(catalogue, { logger });
   const vouching = new SensorVouching({
     db,
     logger,

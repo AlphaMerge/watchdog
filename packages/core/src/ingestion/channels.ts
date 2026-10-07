@@ -2,6 +2,7 @@ import type { CheckResult, Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
 import type { LookupCatalogue } from '../lookups/catalogue.js';
 import type { LookupDefinition } from '../lookups/definition.js';
+import type { ChannelShape } from '../state/declared-limits.js';
 import { parseLimits, type ChannelLimits } from '../state/limits.js';
 import { parseTransform, type ReadingTransform } from './scaling.js';
 
@@ -69,12 +70,23 @@ export interface ChannelResolverOptions {
    * `lookup_id` and no limits falls through every branch of `evaluateChannel`) and a counter is
    * stored as a cumulative total rather than a rate. Both were silent on exactly the
    * installations that matter: the ones that existed before the channel was declared.
+   *
+   * Given the sensor's stored parameters and answering for each channel key that sensor declares
+   * (`P-297`), since a lookup or a counter is often what a parameter chose.
    */
   declaredShape?: (
     sensorType: string,
-    channelKey: string,
-  ) => { lookup: string | null; counterBits: number | null };
+    params: Readonly<Record<string, unknown>>,
+  ) => ReadonlyMap<string, ChannelShape>;
 }
+
+/** A sensor's row, as far as what its type declares for a new channel goes. */
+interface SensorDeclaring {
+  readonly type: string;
+  readonly params: Readonly<Record<string, unknown>>;
+}
+
+const NO_SHAPE: ChannelShape = { lookup: null, counterBits: null };
 
 const DEFAULT_MAX_CACHED = 50_000;
 
@@ -164,16 +176,16 @@ export class ChannelResolver {
    * short of the probe sending a type it has no reason to know the core cares about.
    */
   #declaredFor(
-    types: ReadonlyMap<string, string>,
+    sensors: ReadonlyMap<string, SensorDeclaring>,
     wanted: readonly { sensorId: number; key: string }[],
   ): (string | null)[] {
     const declared = this.#declaredLimits;
     if (declared === undefined) return wanted.map(() => null);
 
     return wanted.map((one) => {
-      const type = types.get(String(one.sensorId));
-      if (type === undefined) return null;
-      const limits = declared(type, one.key);
+      const sensor = sensors.get(String(one.sensorId));
+      if (sensor === undefined) return null;
+      const limits = declared(sensor.type, one.key);
       return limits === null ? null : JSON.stringify(limits);
     });
   }
@@ -181,33 +193,53 @@ export class ChannelResolver {
   /**
    * The lookup and counter width each wanted channel declares, in the same order.
    *
-   * Takes the type map rather than reading it, so the one query that answers both this and
+   * Takes the sensors read rather than reading them, so the one query that answers both this and
    * `#declaredFor` is made once by the caller. It said it shared the query before and did not:
-   * each of them awaited `#typesFor` separately, which is two identical round trips on the
+   * each of them awaited the read separately, which is two identical round trips on the
    * first-sighting path and a comment that was simply untrue.
    */
   #shapesFor(
-    types: ReadonlyMap<string, string>,
+    sensors: ReadonlyMap<string, SensorDeclaring>,
     wanted: readonly { sensorId: number; key: string }[],
-  ): { lookup: string | null; counterBits: number | null }[] {
+  ): ChannelShape[] {
     const declared = this.#declaredShape;
-    if (declared === undefined) return wanted.map(() => ({ lookup: null, counterBits: null }));
+    if (declared === undefined) return wanted.map(() => NO_SHAPE);
+    // Once a sensor, however many of its channels are new: a table sensor's first scan is all of
+    // them at once.
+    const bySensor = new Map<string, ReadonlyMap<string, ChannelShape>>();
     return wanted.map((one) => {
-      const type = types.get(String(one.sensorId));
-      if (type === undefined) return { lookup: null, counterBits: null };
-      return declared(type, one.key);
+      const id = String(one.sensorId);
+      const sensor = sensors.get(id);
+      if (sensor === undefined) return NO_SHAPE;
+      let shapes = bySensor.get(id);
+      if (shapes === undefined) {
+        shapes = declared(sensor.type, sensor.params);
+        bySensor.set(id, shapes);
+      }
+      return shapes.get(one.key) ?? NO_SHAPE;
     });
   }
 
-  async #typesFor(
+  async #sensorsFor(
     q: Queryable,
     wanted: readonly { sensorId: number; key: string }[],
-  ): Promise<Map<string, string>> {
-    const rows = await q.query<{ object_id: string; type: string }>(
-      'SELECT object_id::text, type FROM sensor_config WHERE object_id = ANY($1::bigint[])',
+  ): Promise<Map<string, SensorDeclaring>> {
+    const rows = await q.query<{ object_id: string; type: string; params: unknown }>(
+      'SELECT object_id::text, type, params FROM sensor_config WHERE object_id = ANY($1::bigint[])',
       [[...new Set(wanted.map((one) => one.sensorId))]],
     );
-    return new Map(rows.map((row) => [row.object_id, row.type]));
+    return new Map(
+      rows.map((row) => [
+        row.object_id,
+        {
+          type: row.type,
+          params:
+            typeof row.params === 'object' && row.params !== null && !Array.isArray(row.params)
+              ? (row.params as Record<string, unknown>)
+              : {},
+        },
+      ]),
+    );
   }
 
   async resolve(q: Queryable, results: readonly CheckResult[]): Promise<ResolvedChannels> {
@@ -244,13 +276,14 @@ export class ChannelResolver {
     const wanted = [...missing.values()];
     const sensorIds = wanted.map((row) => row.sensorId);
     const keys = wanted.map((row) => row.key);
-    // One query for both: the sensor's *type* is what carries every part of the declaration.
-    const types =
+    // One query for both: the sensor's type carries the declaration, and its parameters choose
+    // the lookups and counters in it (`P-297`).
+    const sensors =
       this.#declaredLimits === undefined && this.#declaredShape === undefined
-        ? new Map<string, string>()
-        : await this.#typesFor(q, wanted);
-    const limits = this.#declaredFor(types, wanted);
-    const shapes = this.#shapesFor(types, wanted);
+        ? new Map<string, SensorDeclaring>()
+        : await this.#sensorsFor(q, wanted);
+    const limits = this.#declaredFor(sensors, wanted);
+    const shapes = this.#shapesFor(sensors, wanted);
 
     // Guarded by EXISTS rather than by the foreign key. A probe replaying a spool for a sensor
     // that has since been deleted is ordinary, not exceptional, and letting the foreign key

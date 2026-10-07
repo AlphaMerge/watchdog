@@ -1,4 +1,4 @@
-import type { SensorCatalogue } from '@ms/sensors';
+import type { ChannelDef, SensorCatalogue } from '@ms/sensors';
 import type { Logger } from '@ms/shared';
 import type { Database } from '../db/pool.js';
 import { limitsFromDeclaration, type ChannelLimits } from './limits.js';
@@ -29,13 +29,12 @@ import { limitsFromDeclaration, type ChannelLimits } from './limits.js';
  * the query matches nothing, which is cheap enough to keep it there.
  */
 
-/**
- * What a type declares for one channel, or null (`S-18`).
- *
- * The same question the start-up pass asks, in the shape the channel resolver needs — so a
- * channel created lazily by ingestion and one created with its sensor get the same answer from
- * the same place. Two lookups would eventually disagree, and the disagreement would be invisible.
- */
+/** A channel's lookup and counter width, as its sensor's type declares them (`P-80`). */
+export interface ChannelShape {
+  readonly lookup: string | null;
+  readonly counterBits: number | null;
+}
+
 /**
  * The rest of a channel's declaration, for channels the ingestion path creates (`P-80`).
  *
@@ -48,32 +47,61 @@ import { limitsFromDeclaration, type ChannelLimits } from './limits.js';
  * existed only on installations created by that build. A counter with no `counter_bits` is the
  * same shape of wrong: the rate conversion is skipped, the stored sample is a cumulative total,
  * and a limit written for a rate latches Down for the life of the probe process.
+ *
+ * **Asked with the sensor's own stored parameters, not with `{}`** (`P-297`). Unlike limits,
+ * which only a `fixedChannels` type may declare (`P-293`), lookups and counters are what
+ * parameters choose: `snmp.custom` is a counter only in `counter` mode, `snmp.custom.string`
+ * carries the lookup its parameters name, and each `snmp.table` column is a channel with its own.
+ * `{}` answers those with a placeholder that declares neither, and a column added by editing a
+ * table sensor reaches the `channel` table only through this path. Reading the fixed types alone
+ * would be worse: `snmp.traffic` is not one, and its counters and its status lookup do not depend
+ * on parameters, so they would be lost. And the resolver already reads the sensor's row to learn
+ * its type, so the parameters cost a column, on a path that runs when a channel is first seen.
+ *
+ * Every channel the sensor's answer declares, keyed by channel key; a key it does not name has
+ * neither. Only when that answer cannot be had — a type that throws for these stored parameters,
+ * or breaks its own declaration with them (`P-296`) — is the type's `{}` answer used, which is
+ * what every sensor got before.
  */
 export function declaredChannelLookup(
   catalogue: SensorCatalogue,
 ): (
   sensorType: string,
-  channelKey: string,
-) => { lookup: string | null; counterBits: number | null } {
-  const shapes = new Map<string, { lookup: string | null; counterBits: number | null }>();
+  params: Readonly<Record<string, unknown>>,
+) => ReadonlyMap<string, ChannelShape> {
+  const shapesOf = (defs: readonly ChannelDef[]): ReadonlyMap<string, ChannelShape> =>
+    new Map(
+      defs.map((def) => [
+        def.key,
+        { lookup: def.lookup ?? null, counterBits: def.counter?.bits ?? null },
+      ]),
+    );
+  const none: ReadonlyMap<string, ChannelShape> = new Map();
+  const bare = new Map<string, ReadonlyMap<string, ChannelShape>>();
   for (const id of catalogue.ids()) {
-    let defs;
     try {
-      defs = catalogue.channelsFor(id, {});
+      bare.set(id, shapesOf(catalogue.channelsFor(id, {})));
     } catch {
-      continue;
-    }
-    for (const def of defs) {
-      shapes.set(`${id} ${def.key}`, {
-        lookup: def.lookup ?? null,
-        counterBits: def.counter?.bits ?? null,
-      });
+      // A type whose channels need parameters: it has no answer to fall back on.
     }
   }
-  return (sensorType, channelKey) =>
-    shapes.get(`${sensorType} ${channelKey}`) ?? { lookup: null, counterBits: null };
+  return (sensorType, params) => {
+    if (!catalogue.has(sensorType)) return none;
+    try {
+      return shapesOf(catalogue.channelsFor(sensorType, params));
+    } catch {
+      return bare.get(sensorType) ?? none;
+    }
+  };
 }
 
+/**
+ * What a type declares for one channel, or null (`S-18`).
+ *
+ * The same question the start-up pass asks, in the shape the channel resolver needs — so a
+ * channel created lazily by ingestion and one created with its sensor get the same answer from
+ * the same place. Two lookups would eventually disagree, and the disagreement would be invisible.
+ */
 export function declaredLimitsLookup(
   catalogue: SensorCatalogue,
 ): (sensorType: string, channelKey: string) => ChannelLimits | null {
