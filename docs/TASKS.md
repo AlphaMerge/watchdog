@@ -3856,6 +3856,12 @@ because each is a decision rather than a defect:
           - VS16 kept after a bare digit: failed 3;
           - the VS15/VS16 base back to `\p{Emoji}`: failed 3.
 
+- [ ] **N-30 — runs of the combining grapheme joiner or Khmer's inherent vowels can still hide
+      text** · XS · N-29 · Found 2026-10-08 in `N-29`. U+034F and U+17B4/U+17B5 are marks, so
+      `legible()` keeps them, and a run of them on one visible character carries bits nobody sees,
+      as variation selectors did before `N-29`. **Done when** decided: escape them (or runs of
+      them), or keep, said in `legible.ts`, with the idempotency property kept.
+
 ## Phase 5 — Web UI
 
 - [x] **U-01 — Frontend scaffold** · M · F-01 · React 19 + TypeScript + Vite 8, routing, design
@@ -10862,6 +10868,45 @@ because each is a decision rather than a defect:
       change, and a limit's or lookup's message replaces the note. **Done when** decided: keep, or
       Warning with a scenario test (`M-17`) showing it does not hold a sensor in Warning for good,
       as `P-283` found for the probe.
+
+- [ ] **P-302 — a cloned sensor's channels lose their lookup, counter width and limit source** ·
+      S · P-297 · Found 2026-10-08 in `P-297`. The clone path in `repository.ts` (about line 1812)
+      copies channels without `lookup_id`, `counter_bits` and `limits_source`. A cloned
+      `snmp.traffic` sensor stores cumulative octets as values on `in`/`out`/`total` and judges
+      `status` by nothing; the channels already exist, so ingestion never declares them again and
+      nothing repairs them. **Done when** a clone copies every declared property of a channel (or
+      re-declares from the type), existing broken clones are repaired or said, with a test over the
+      shipped types that declare lookups or counters.
+
+- [ ] **P-303 — an edit that changes a channel's mode or lookup does not redeclare it** · S ·
+      P-297 · Found 2026-10-08 in `P-297`. An update replaces `params` and declares no channels, so
+      `snmp.custom`'s `mode` or `snmp.custom.string`'s `lookup` changed by an edit leaves the stored
+      row with what the create wrote. **Done when** an edit re-declares the channels it changes (or
+      refuses the change and says why), with tests.
+
+- [ ] **P-304 — a tree create asks for channels with the raw parameters** · XS · P-296 · Found
+      2026-10-08 in `P-296`. `createTree` (`service.ts`, about line 2100) passes
+      `node.input.params`, where a single create passes the parameters with defaults filled, so a
+      type whose channels depend on a defaulted parameter gets different channels by route.
+      **Done when** both use the normalised parameters, with a test.
+
+- [ ] **P-305 — a type's `channels()` that throws on valid parameters is still a 500** · XS ·
+      P-296 · Found 2026-10-08 in `P-296`. Only `SensorTypeError` is turned into a 400 naming the
+      type. **Done when** decided: any throw from a type's `channels()` for schema-valid
+      parameters is a 400 naming the type (logged as the type's fault), or keep, with a test.
+
+- [ ] **P-306 — a channel created without its declared shape is counted nowhere** · S · P-297 ·
+      Found 2026-10-08 in `P-297`'s review. When a type cannot answer for a sensor's stored
+      parameters, ingestion warns once and creates the channel from `{}`'s answer; nothing an
+      operator watches counts it. **Done when** Core Health (and `/metrics`) carries the count,
+      with a test.
+
+- [ ] **P-307 — an awaited query answer from a session with no probe is counted as foreign on the
+      totals only** · S · P-300 · Found 2026-10-08 in `P-300`'s review. An answer to a query still
+      awaited, from a session whose probe is not resolved (or not approved), reaches
+      `refusals.foreign(null)` and raises the fleet totals without any probe's Probe Health.
+      **Done when** it is gated as `P-300`'s late count is (behind `pending`, approved only), with
+      a test.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
@@ -21715,6 +21760,13 @@ because each is a decision rather than a defect:
         - no `<time>` element fails 1.
       - **Not done:** `GET /probes` (admin) does not show the time; `ProbeRegistration` is
         unchanged.
+
+- [ ] **U-33 — `/probes` does not show when the version was accepted, and a refused version reads
+      as a connection** · S · U-32 · Found 2026-10-08 in `U-32`. The admin list shows
+      `protocolVersion` beside `lastSeenAt`, which is touched by refused hellos too, so the two are
+      easy to confuse; and a probe refused over its version shows that version with no time while
+      the form still says "when it last connected". **Done when** `/probes` carries
+      `protocolAcceptedAt` and the form says a refused hello was refused, with tests.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
