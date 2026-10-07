@@ -4,6 +4,9 @@ import {
   type CheckResult,
   type ProbeHealthReport,
 } from './messages.js';
+import { INTRODUCED, versionFor } from './capability-versions.js';
+
+export { versionFor };
 
 /**
  * What a peer at a given protocol version can actually be asked to do (`R-06`).
@@ -46,6 +49,19 @@ export interface ProbeCapabilities {
    * identical to a device that will not answer.
    */
   onDemandQuery: boolean;
+  /**
+   * Reports what its SNMP-trap and syslog listeners received, turned away and could not read
+   * (`P-64`): `trapReceived`, `trapRejected`, `trapMalformed` and their three `syslog*` siblings,
+   * each present exactly while its listener runs.
+   *
+   * **Named after the fact** (`P-294`). Protocol 13 added the six fields when a newer probe was
+   * still refused at the handshake by an older core, so no gate needed the number and only a
+   * comment on `P-64` held it. The add-sensor form needs it: a probe that reports below 13 leaves
+   * both counters out whether its listeners run or not. Nothing is stripped for it, as for every
+   * health field before `P-178`: a core below 16 refuses a newer probe in words at the handshake,
+   * so it is never sent a heartbeat at all. No version, field or behaviour on the wire changes.
+   */
+  listenerCounters: boolean;
   /**
    * Understands `final` on a chunked configuration push, and stamps its version only on the
    * message that carries it (`P-168`).
@@ -196,41 +212,6 @@ export interface ProbeCapabilities {
   unsendableReadings: boolean;
 }
 
-/**
- * The version each capability arrived in.
- *
- * Ordered oldest first, and the order is load-bearing: `missingCapabilities` reports in this
- * order so an operator reads "cannot be sent sensors" before "cannot run discovery", which is
- * the order in which they would care.
- */
-const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[] = [
-  ['configPush', 3],
-  ['discoverySweep', 4],
-  ['identification', 5],
-  ['approval', 6],
-  ['healthReporting', 7],
-  ['onDemandQuery', 8],
-  ['chunkedPushFinal', 16],
-  ['resultSendTime', 16],
-  ['machineMemory', 17],
-  ['memoryLimit', 18],
-  ['poolMemory', 19],
-  ['memorySinceLastReport', 20],
-  ['logOutput', 21],
-  ['credentialHostKeys', 22],
-  ['flowCounters', 23],
-  ['credentialAddressPinning', 24],
-  ['flowOverwritten', 25],
-  ['listenerOverwritten', 26],
-  ['databaseAddressPinning', 27],
-  ['targetPolicyException', 28],
-  ['childStartup', 29],
-  ['workerStartup', 30],
-  ['listenerEarlier', 31],
-  ['scriptGroups', 31],
-  ['unsendableReadings', 32],
-];
-
 /** Plain English for each capability, for a message an operator reads rather than greps. */
 const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   configPush: 'be sent sensors to scan',
@@ -239,6 +220,7 @@ const DESCRIPTION: Readonly<Record<keyof ProbeCapabilities, string>> = {
   approval: 'be held for approval before it scans',
   healthReporting: 'report its own scheduler and pool health',
   onDemandQuery: 'run a check on demand',
+  listenerCounters: 'report what its SNMP trap and syslog listeners received and turned away',
   chunkedPushFinal: 'be told which message completes a configuration push',
   resultSendTime: 'say when it sent a batch, so a replay can be told from live data',
   machineMemory: 'report how much memory its machine has left',
@@ -278,6 +260,7 @@ export function capabilitiesFor(peerVersion: number): ProbeCapabilities {
     approval: has(6),
     healthReporting: has(7),
     onDemandQuery: has(8),
+    listenerCounters: has(13),
     chunkedPushFinal: has(16),
     resultSendTime: has(16),
     machineMemory: has(17),
@@ -412,14 +395,6 @@ export function resultForPeer(result: CheckResult, peerVersion: number): CheckRe
   if (capabilitiesFor(peerVersion).credentialAddressPinning) return result;
   const { withheld: _withheld, ...older } = result;
   return older;
-}
-
-/** The version a peer must speak for one capability — the number the gates used to inline. */
-export function versionFor(capability: keyof ProbeCapabilities): number {
-  const found = INTRODUCED.find(([name]) => name === capability);
-  // Unreachable while INTRODUCED covers the interface, which the type system enforces at the
-  // point of the table rather than here.
-  return found?.[1] ?? PROTOCOL_VERSION;
 }
 
 /** Everything this peer cannot do, oldest capability first, in words rather than numbers. */

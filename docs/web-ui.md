@@ -271,7 +271,10 @@ numbers. The first two say the sentence updates when that changes; the last two 
 setting to check by hand. A probe that has reported, but speaks a protocol older than the one its
 listener's counter arrived in (23 for flows, 13 for syslog and SNMP traps), is too old in the same
 words, with its protocol and the one needed, rather than called off (`U-30`): it leaves the
-counter out whether the listener runs or not. When the core does not answer the question, because it is starting,
+counter out whether the listener runs or not. Both numbers come from the protocol's own table
+(`P-294`). A probe that is not connected, and spoke a protocol older than its listener's when it
+last connected, gets that said beside "not connected", as a fact about that connection: unless it
+has been upgraded since, it will not say when it reconnects either (`U-31`). When the core does not answer the question, because it is starting,
 it failed, or it cannot be reached, the sentence says the form could not ask. Nothing is shown
 to an account the core refuses the probe to (403 or 404). Otherwise, no sentence means the
 listener is running.

@@ -624,6 +624,40 @@ export class ProbeHealthService {
   }
 
   /**
+   * The protocol version this probe declared at the last handshake the registry recorded, kept
+   * after it disconnects (`U-31`), or `null` when none is.
+   *
+   * **The one integer, read by the probe object's id, and nothing else from the row.** The row is
+   * `GET /probes`' and holds the probe's address, its address filter and its key's hash, which is
+   * why that route is the installation's; this is answered under the probe's own `read` right
+   * beside `protocolVersion`, which a connected probe's reader already has. The live identity
+   * only: a revoked one no longer holds the probe (`probe_registration_object_idx`). Zero is what
+   * the `R-01` upgrade left for a probe that has not connected since, an absence and not a
+   * version, as `skewFor` reads it.
+   *
+   * **A database that cannot be asked is `null` too**, logged, rather than a refused answer: the
+   * rest of the health answer needs no database, and a probe that is down is the moment it is
+   * read (`P-126`).
+   */
+  async lastProtocolVersion(probeObjectId: number): Promise<number | null> {
+    try {
+      const rows = await this.#db.query<{ protocol_version: number }>(
+        `SELECT protocol_version FROM probe_registration
+         WHERE object_id = $1 AND status <> 'revoked'`,
+        [probeObjectId],
+      );
+      const recorded = rows[0]?.protocol_version;
+      return recorded === undefined || recorded === 0 ? null : recorded;
+    } catch (error: unknown) {
+      this.#logger.warn(
+        { ...describeError(error), probeId: probeObjectId },
+        'could not read the protocol version a probe last connected with',
+      );
+      return null;
+    }
+  }
+
+  /**
    * One sweep: every Probe Health sensor, each about the probe it names or the one it sits under.
    *
    * The probe is resolved in SQL by walking up from the sensor, because "the probe this sensor is

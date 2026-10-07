@@ -145,6 +145,13 @@ export interface ProbeHealthView {
    * leaves them out whether the listener runs or not.
    */
   protocolVersion: number | null;
+  /**
+   * The protocol version the probe declared at the last handshake the core recorded, kept after
+   * it disconnects (`U-31`): the version `GET /probes` shows an administrator. `null` when none is
+   * recorded, or when the core could not read it. Said of the last connection, not of the probe
+   * now: it may have been upgraded since.
+   */
+  lastProtocolVersion: number | null;
   channels: Record<string, number | null>;
 }
 

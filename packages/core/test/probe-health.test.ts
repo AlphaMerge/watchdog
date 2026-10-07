@@ -1813,6 +1813,132 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
         await app.close();
       }
     });
+
+    describe('the version a probe last connected with (U-31)', () => {
+      // A probe that is down gave the form no version, while the one recorded at its last
+      // handshake already said whether it could report a listener. `GET /probes` has it, and is
+      // the installation's because the row also holds the probe's address, its filter and its
+      // key's hash: only the integer comes here, under the probe's own `read` right.
+      const ADDRESS = '203.0.113.77';
+      const HASH = 'f'.repeat(64);
+      const register = async (
+        gid: string,
+        objectId: number,
+        status: 'approved' | 'revoked',
+        protocolVersion: number,
+      ): Promise<void> => {
+        await db.query(
+          `INSERT INTO probe_registration
+             (gid, status, display_name, protocol_version, last_address, allow_from,
+              access_key_hash, object_id, note)
+           VALUES ($1, $2, 'u31-probe', $3, $4, ARRAY['203.0.113.0/24'], $5, $6, 'u31-note')`,
+          [gid, status, protocolVersion, ADDRESS, HASH, objectId],
+        );
+      };
+      const ask = async (
+        service: ProbeHealthService,
+        id: number,
+      ): Promise<{ status: number; body: string; json: Record<string, unknown> }> => {
+        const app = await serve(service);
+        try {
+          const response = await app.inject({
+            method: 'GET',
+            url: `/api/v1/probes/${String(id)}/health`,
+          });
+          return {
+            status: response.statusCode,
+            body: response.body,
+            json: response.json<Record<string, unknown>>(),
+          };
+        } finally {
+          await app.close();
+        }
+      };
+
+      before(async () => {
+        // A revoked identity beside the live one: it no longer holds the probe, so its version
+        // is not the probe's. The watcher has only a revoked one.
+        await register('u31-revoked', probeId, 'revoked', 5);
+        await register('u31-live', probeId, 'approved', 12);
+        await register('u31-watcher-revoked', watcherId, 'revoked', 9);
+      });
+      after(async () => {
+        await db.query("DELETE FROM probe_registration WHERE gid LIKE 'u31-%'");
+      });
+
+      it('serves the recorded version for a probe that is not connected, and nothing else of the row', async () => {
+        const service = build(() => ({ connected: false }));
+        assert.equal(await service.lastProtocolVersion(probeId), 12);
+        const answer = await ask(service, probeId);
+        assert.equal(answer.status, 200, answer.body);
+        assert.equal(answer.json['protocolVersion'], null, 'not connected: no live version');
+        assert.equal(answer.json['lastProtocolVersion'], 12, answer.body);
+        assert.deepEqual(
+          Object.keys(answer.json).sort(),
+          [
+            'at',
+            'channels',
+            'lastProtocolVersion',
+            'message',
+            'numbersUnavailable',
+            'probeId',
+            'protocolVersion',
+          ],
+          answer.body,
+        );
+        for (const secret of [ADDRESS, '203.0.113.0/24', HASH, 'u31-live', 'u31-note']) {
+          assert.ok(!answer.body.includes(secret), `${secret} reached the answer: ${answer.body}`);
+        }
+      });
+
+      it('serves it beside the live version for a connected probe, each as it is', async () => {
+        // The live one decides for a connected probe; the recorded one is the handshake's word.
+        const answer = await ask(
+          build(() => connected({ protocolVersion: 22 })),
+          probeId,
+        );
+        assert.equal(answer.json['protocolVersion'], 22, answer.body);
+        assert.equal(answer.json['lastProtocolVersion'], 12, answer.body);
+      });
+
+      it('serves null where nothing is recorded: a revoked identity, or zero', async () => {
+        const service = build(() => ({ connected: false }));
+        assert.equal(await service.lastProtocolVersion(watcherId), null, 'only a revoked one');
+        const watcher = await ask(service, watcherId);
+        assert.equal(watcher.status, 200, watcher.body);
+        assert.equal(watcher.json['lastProtocolVersion'], null, watcher.body);
+
+        // Zero is what the `R-01` upgrade left for a probe that has not connected since.
+        await db.query("UPDATE probe_registration SET protocol_version = 0 WHERE gid = 'u31-live'");
+        try {
+          assert.equal(await service.lastProtocolVersion(probeId), null);
+          assert.equal((await ask(service, probeId)).json['lastProtocolVersion'], null);
+        } finally {
+          await db.query(
+            "UPDATE probe_registration SET protocol_version = 12 WHERE gid = 'u31-live'",
+          );
+        }
+      });
+
+      it('answers null rather than refusing when the database cannot be asked', async () => {
+        // The rest of the answer needs no database (`P-126`); a probe that is down is when this
+        // is read.
+        const down = new ProbeHealthService({
+          vouching: everyVoucherHolds,
+          db: {
+            query: () => Promise.reject(new Error('connection terminated')),
+          } as unknown as Database,
+          logger: silent,
+          sources: { link: () => ({ connected: false }) },
+          ingest: () => Promise.resolve(),
+        });
+        assert.equal(await down.lastProtocolVersion(probeId), null);
+        const answer = await ask(down, probeId);
+        assert.equal(answer.status, 200, answer.body);
+        assert.equal(answer.json['lastProtocolVersion'], null, answer.body);
+        assert.equal(answer.json['message'], 'not connected to the core');
+      });
+    });
   });
 
   describe('turning a reading into channel readings', () => {

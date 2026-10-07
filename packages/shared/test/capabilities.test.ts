@@ -14,6 +14,7 @@ import {
   PROTOCOL_VERSION,
   pinningCapabilityFor,
   versionFor,
+  type ProbeCapabilities,
   type ProbeHealthReport,
   type UnfitResults,
 } from '../src/index.js';
@@ -43,6 +44,7 @@ describe('what a protocol version can do', () => {
       approval: false,
       healthReporting: false,
       onDemandQuery: false,
+      listenerCounters: false,
       chunkedPushFinal: false,
       resultSendTime: false,
       machineMemory: false,
@@ -97,14 +99,11 @@ describe('what a protocol version can do', () => {
     assert.equal(capabilitiesFor(Number.NaN).configPush, false);
   });
 
-  it('agrees with the version each capability says it needs', () => {
-    for (const name of [
-      'configPush',
-      'discoverySweep',
-      'identification',
-      'approval',
-      'healthReporting',
-    ] as const) {
+  it('agrees with the version each capability says it needs, for every capability', () => {
+    // Every one, not the first five (`P-294`): `capabilitiesFor` writes each number a second
+    // time, and the form and every gate read `versionFor`, so the two must not drift.
+    const names = Object.keys(capabilitiesFor(PROTOCOL_VERSION)) as (keyof ProbeCapabilities)[];
+    for (const name of names) {
       const needed = versionFor(name);
       assert.equal(
         capabilitiesFor(needed)[name],
@@ -664,6 +663,15 @@ describe('the health a peer can be sent', () => {
     // added to the schema without a gate would cost every heartbeat and the link with it. This
     // fails for that field: add it to `SINCE` at its version, and gate it.
     const SINCE: Readonly<Record<string, number>> = {
+      // `P-64`, named `listenerCounters` by `P-294`. Older than `P-178`, so never stripped: a
+      // core below 16 is never sent a heartbeat by a newer probe. Here so the number is the
+      // capability's and is checked against it below.
+      trapReceived: 13,
+      trapRejected: 13,
+      trapMalformed: 13,
+      syslogReceived: 13,
+      syslogRejected: 13,
+      syslogMalformed: 13,
       memoryAvailablePercent: 17,
       memoryAvailableMb: 17,
       memoryLimitUsagePercent: 18,
@@ -708,7 +716,7 @@ describe('the health a peer can be sent', () => {
     // not quietly taken for one of them.
     assert.equal(
       PROBE_HEALTH_FIELDS.filter((field) => SINCE[field] === undefined).length,
-      44,
+      38,
       'a new health field: give it a version in SINCE, and gate it in healthForPeer',
     );
     const knownAt = (version: number): Set<string> =>
@@ -721,6 +729,49 @@ describe('the health a peer can be sent', () => {
         (field) => !knownAt(version).has(field),
       );
       assert.deepEqual(unknown, [], `sent to a core at protocol ${String(version)}`);
+    }
+    // The table's 13 is the capability's (`P-294`), so neither can move without the other.
+    for (const field of ['trapReceived', 'syslogReceived']) {
+      assert.equal(SINCE[field], versionFor('listenerCounters'), field);
+    }
+  });
+
+  it('names the listeners’ counters at 13, and strips them for no core it can meet (P-294)', () => {
+    // Named after the fact: protocol 13 added them, and only a comment on `P-64` held the number
+    // until the add-sensor form needed it. Nothing on the wire changes for the name.
+    assert.equal(PROTOCOL_VERSION, 32, 'naming an old version does not bump the protocol');
+    assert.equal(versionFor('listenerCounters'), 13);
+    assert.equal(capabilitiesFor(12).listenerCounters, false);
+    assert.equal(capabilitiesFor(13).listenerCounters, true);
+    assert.ok(
+      missingCapabilities(12).includes(
+        'report what its SNMP trap and syslog listeners received and turned away',
+      ),
+    );
+    assert.equal(
+      missingCapabilities(13).some((said) => said.includes('syslog listeners received')),
+      false,
+    );
+    // In the order they arrived: after on-demand queries at 8, before 16's.
+    const order = missingCapabilities(1);
+    const listeners = order.indexOf(
+      'report what its SNMP trap and syslog listeners received and turned away',
+    );
+    const onDemand = order.indexOf('run a check on demand');
+    assert.ok(listeners >= 0 && onDemand >= 0, order.join(' | '));
+    assert.equal(listeners, onDemand + 1);
+    // Sent to every core a newer probe can meet: from 16, where `P-178` began serving it.
+    const counters = {
+      memoryMb: 1,
+      trapReceived: 900,
+      trapRejected: 412,
+      trapMalformed: 3,
+      syslogReceived: 40_000,
+      syslogRejected: 0,
+      syslogMalformed: 17,
+    };
+    for (let version = 16; version <= PROTOCOL_VERSION; version++) {
+      assert.deepEqual(healthForPeer(counters, version), counters, String(version));
     }
   });
 

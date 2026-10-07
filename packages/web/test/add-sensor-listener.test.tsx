@@ -34,6 +34,8 @@ const health = (channels: Record<string, number | null>): ProbeHealthView => ({
         : { reason: 'no-heartbeat', connectedSeconds: 4 },
   // A current probe, so the version decides nothing here (`U-30`); none when it is not connected.
   protocolVersion: channels['connected'] === 1 ? 32 : null,
+  // And current when it last connected too, so that decides nothing either (`U-31`).
+  lastProtocolVersion: 32,
   channels,
 });
 
@@ -64,8 +66,17 @@ const unavailable = (
   numbersUnavailable,
   // The core gives the version beside the reason, and they agree.
   ...(numbersUnavailable?.reason === 'protocol'
-    ? { protocolVersion: numbersUnavailable.protocolVersion }
+    ? {
+        protocolVersion: numbersUnavailable.protocolVersion,
+        lastProtocolVersion: numbersUnavailable.protocolVersion,
+      }
     : {}),
+});
+
+/** A probe that is not connected, which declared `lastProtocolVersion` when it last was (`U-31`). */
+const downAt = (lastProtocolVersion: number | null): ProbeHealthView => ({
+  ...unavailable({ reason: 'not-connected' }, 0),
+  lastProtocolVersion,
 });
 
 /** A probe that reported, at `protocolVersion`, with `channels` as its report left them. */
@@ -259,6 +270,65 @@ describe('whether a probe’s listener is running', () => {
     expect(said).not.toContain('heartbeat');
     // Not connected: no version to judge, and the sentence is the connection's.
     expect(text('flow', unavailable({ reason: 'not-connected' }, 0))).toContain('is not connected');
+  });
+
+  it('reads each listener’s version from the protocol’s own table (P-294)', () => {
+    // The form's numbers are `@ms/shared`'s, so they cannot drift from the gates the core reads.
+    expect(versionFor('listenerCounters')).toBe(13);
+    expect(versionFor('flowCounters')).toBe(23);
+    for (const listener of ['syslog', 'snmp-trap']) {
+      const below = versionFor('listenerCounters') - 1;
+      expect(text(listener, reportedAt(below, {}))).toContain(
+        `it speaks protocol ${String(below)}, and reporting it needs protocol ` +
+          `${String(versionFor('listenerCounters'))}.`,
+      );
+      expect(say(listener, reportedAt(versionFor('listenerCounters'), {}))?.kind).toBe('off');
+    }
+  });
+
+  it('says a probe that is down was too old when it last connected (U-31)', () => {
+    const syslog = say('syslog', downAt(12));
+    expect(syslog?.kind).toBe('unknown');
+    expect(syslog?.text).toBe(
+      'Probe “Berlin” is not connected, so whether its syslog listener is running cannot be ' +
+        'checked. When it last connected it spoke protocol 12, and reporting it needs protocol ' +
+        '13, so unless it has been upgraded since, it will not say when it reconnects either. ' +
+        'Check that syslogListener.enabled is true in that probe’s configuration file.',
+    );
+    expect(text('snmp-trap', downAt(12))).toContain('Check that trapListener.enabled is true');
+    // Flow's own number, and its caveat.
+    const flow = text('flow', downAt(22));
+    expect(flow).toContain(
+      'When it last connected it spoke protocol 22, and reporting it needs protocol ' +
+        String(versionFor('flowCounters')),
+    );
+    expect(flow).toContain('A probe on the v1 build has no flow collector');
+    // Never "off", never the warning's instruction: it may have been upgraded while away.
+    for (const said of [syslog?.text ?? '', flow]) {
+      expect(said).not.toContain('is not running');
+      expect(said).not.toContain('Set ');
+    }
+  });
+
+  it('keeps the connection’s own sentence when the last version was new enough, or unknown (U-31)', () => {
+    const plain =
+      'Probe “Berlin” is not connected, so whether its syslog listener is running cannot be ' +
+      'checked. This updates when it connects.';
+    // At the listener's version, above it, and none recorded: nothing more to say than before.
+    expect(text('syslog', downAt(13))).toBe(plain);
+    expect(text('syslog', downAt(22))).toBe(plain);
+    expect(text('syslog', downAt(null))).toBe(plain);
+    // 22 is new enough for syslog and too old for flow: each listener asks its own number.
+    expect(text('flow', downAt(22))).toContain('When it last connected it spoke protocol 22');
+  });
+
+  it('judges a connected probe by the version it speaks now, not the one it last declared (U-31)', () => {
+    // Upgraded since it was last recorded: the live version is the probe's.
+    const upgraded: ProbeHealthView = { ...RUNNING, lastProtocolVersion: 12 };
+    expect(say('syslog', upgraded)).toBeNull();
+    expect(say('flow', upgraded)).toBeNull();
+    const off: ProbeHealthView = { ...OFF, lastProtocolVersion: 12 };
+    expect(say('syslog', off)?.kind).toBe('off');
   });
 
   it('says nothing for a type that reads no listener, or one this form does not know', () => {
@@ -646,5 +716,44 @@ describe('the add-sensor form on a probe too old to report its flow collector (U
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(screen.getByLabelText('Sensor type').getAttribute('aria-describedby')).toBeNull();
     expect(notice().textContent).toBe('');
+  });
+});
+
+describe('the add-sensor form on a probe that was too old when it last connected (U-31)', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal('WebSocket', QuietSocket);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('says so beside "not connected", as text the field is described by, and not as a caution', async () => {
+    await open({ health: downAt(22) });
+    pick('flow.netflow');
+    await waitFor(() => {
+      expect(notice().textContent).toContain(
+        'When it last connected it spoke protocol 22, and reporting it needs protocol 23',
+      );
+    });
+    expect(notice().textContent).toContain('Probe “Berlin” is not connected');
+    expect(notice().textContent).not.toContain('is not running');
+    // WCAG 1.3.1 and 4.1.3: tied to the field and announced. Not a caution, so the muted colour
+    // that passes 4.5:1 in both themes (1.4.3), and the sentence carries the meaning (1.4.1).
+    expect(notice().getAttribute('role')).toBe('status');
+    expect(screen.getByLabelText('Sensor type').getAttribute('aria-describedby')).toBe(
+      'sensor-type-listener',
+    );
+    expect(notice().className).toContain('text-text-muted');
+    expect(notice().className).not.toContain('text-warning-fg');
+  });
+
+  it('keeps the plain "not connected" sentence for a probe that was new enough', async () => {
+    await open({ health: downAt(23) });
+    pick('flow.netflow');
+    await waitFor(() => {
+      expect(notice().textContent).toContain('This updates when it connects.');
+    });
+    expect(notice().textContent).not.toContain('When it last connected');
   });
 });

@@ -163,7 +163,7 @@ import { fitResult, RESULT_LIMITS } from './result-fit.js';
  *
  * Version 15 adds `spoolUnwritten` (`P-78`), version 14 `checksCompleting` and
  * `checksBehind` (`P-76`), version 13 the listeners'
- * throughput counters (`P-64`), version 12 the worker pool's
+ * throughput counters (`P-64`, named `listenerCounters` since `P-294`), version 12 the worker pool's
  * `discarded` count and `poolState` (`P-62`), version 11 the child-process runner's counters
  * (`P-61`), version 10 the session-pool counters (`P-36`), and version 9 `spoolStalledMs`
  * (`H-01`). **The bump is required by `additionalProperties: false` on
@@ -608,6 +608,7 @@ export interface ProbeHealthReport {
   scriptGroupsRecycled?: number;
   /**
    * The SNMP-trap and syslog listeners (`P-64`), each absent unless this probe runs that one.
+   * From protocol 13, the `listenerCounters` capability (`P-294`).
    *
    * **`rejected` is the one worth having.** A message turned away by the community or sender
    * allow-list never reaches the ring, so it produces no batch, no `dropped` and no `unmatched` —

@@ -33,6 +33,8 @@ const health = (channels: Record<string, number | null>): ProbeHealthView => ({
         : { reason: 'no-heartbeat', connectedSeconds: 4 },
   // A current probe, so the version decides nothing here (`U-30`); none when it is not connected.
   protocolVersion: channels['connected'] === 1 ? 32 : null,
+  // And current when it last connected too, so that decides nothing either (`U-31`).
+  lastProtocolVersion: 32,
   channels,
 });
 

@@ -10211,11 +10211,41 @@ because each is a decision rather than a defect:
         parameter-made channel declaring a limit were replaced by the table, since the catalogue
         now refuses that type.
 
-- [ ] **P-294 — syslog and trap counters' protocol 13 is named by no capability** · XS · U-30 ·
+- [x] **P-294 — syslog and trap counters' protocol 13 is named by no capability** · XS · U-30 ·
       Found 2026-10-08 in `U-30`. The form's minimum for those counters comes from a comment on
       `P-64` in `messages.ts`; `capabilities.ts` names flow's 23 but not this one, so the web test
       cannot hold the number to a shared constant. **Done when** a capability names it and the
       form and its test read it from `@ms/shared`.
+
+      **P-294 outcome. `listenerCounters` names 13, and the form reads it.**
+      - **A new name for an old version.** No capability named it. `listenerCounters` arrives at
+        13 and covers the six `trap*`/`syslog*` received, rejected and malformed fields. The
+        protocol stays at 32: no field, gate or wire behaviour changes.
+      - **`healthForPeer` strips nothing for it.** It matches every health field from before
+        `P-178`: a core below 16 refuses a newer probe at the handshake, so a newer probe never
+        sends it a heartbeat. The capabilities test's `SINCE` table now lists the six fields at
+        13, the count of unlisted fields drops from 44 to 38, and the table's 13 is checked
+        against `versionFor('listenerCounters')`. A new case checks two things: every version
+        from 16 to 32 gets the six fields unchanged, and the description sits right after
+        on-demand queries in `missingCapabilities`. As a result, a probe at 8 to 12 now also hears
+        it "cannot report what its SNMP trap and syslog listeners received and turned away".
+      - **The table moved so the browser can read it.** `capabilities.ts` reads the message
+        schemas, which load `ajv`, so the web app could not import it. The version table and
+        `versionFor` are now in `protocol/capability-versions.ts`, published as
+        `@ms/shared/capability-versions`. That file has only a type import. It is a record
+        checked with `satisfies Record<keyof ProbeCapabilities, number>`, so a missing or
+        unknown capability fails to compile, and the old `?? PROTOCOL_VERSION` fallback is
+        gone. `capabilities.ts` re-exports `versionFor` and builds `missingCapabilities` from the
+        same table. `capability-versions.test.ts` checks that the compiled file imports nothing,
+        that the subpath points at it, and that the table has every capability once, oldest
+        first. The "agrees with the version each capability says it needs" case now covers all
+        26 capabilities, not just the first five.
+      - **The form** takes `since` from `versionFor('flowCounters')` and
+        `versionFor('listenerCounters')`. Its test pins both to 13 and 23 and checks the
+        sentence at 12 and at 13 for syslog and SNMP traps.
+      - **Mutations** (each restored byte for byte, with `dist` rebuilt):
+        - `listenerCounters` at 12 fails 3 shared and 3 web;
+        - syslog reading flow's version fails 4 web.
 
 - [ ] **P-295 — ownership refusals are counted again when a batch is sent again** · S · P-288 ·
       Found 2026-10-08 in `P-288`. `#refuse` (unknown, moved, foreign) and `A-41c`'s unearned
@@ -20945,12 +20975,62 @@ because each is a decision rather than a defect:
         The health answer gives `null` then, and the version recorded at its last handshake is
         `ADMIN` only. Whether it was too old will be known when it connects.
 
-- [ ] **U-31 — a probe that is not connected gives the add-sensor form no version** · S · U-30 ·
+- [x] **U-31 — a probe that is not connected gives the add-sensor form no version** · S · U-30 ·
       Found 2026-10-08 in `U-30`. `/probes/{id}/health` carries `protocolVersion` only for a live
       connection; the version recorded at the last handshake is on `/probes`, which is admin-only.
       A probe that is down is just "not connected", even when its last version already rules a
       listener out. **Done when** decided: give readers of the probe the last recorded version
       (and say it is the last one), or keep, with a test.
+
+      **U-31 outcome. Decided: give it, labelled as the last one.**
+      - **Why give it.** A reader of the probe already sees the live version, and a connected
+        probe's message names it. The registration row's version is the same kind of fact,
+        recorded at the last handshake. `/probes` is `ADMIN` because of what else is in that row:
+        the address, the address filter and the key hash. None of those come with the version.
+      - **`GET /probes/{id}/health` gains `lastProtocolVersion`.** It is the version the probe
+        declared at the last handshake the registry recorded, the same number `/probes` shows,
+        and it is kept after the probe disconnects. It is read-only and served under the route's
+        existing `onObject('read')`. `ProbeHealthService.lastProtocolVersion` reads that one
+        column by `object_id`, from the live identity only: a revoked row no longer holds the
+        probe (`probe_registration_object_idx`). It is `null` when no version is recorded, which
+        includes a stored 0 (the `R-01` upgrade's "nothing recorded", as `skewFor` reads it). It is
+        also `null`, with a warning logged, when the database cannot be asked. That follows
+        `P-126`: the rest of the answer needs no database, so it is not refused. It is served
+        for a connected probe too, beside the live `protocolVersion`, which is the one the form
+        decides by. The route description says it describes the last connection, not the probe
+        now. No new route, so the runbook appendix is unchanged. `docs/api-reference.md` is
+        regenerated.
+      - **What the form says.** For a probe that is not connected and last spoke a version below
+        its listener's: *Probe "Berlin" is not connected, so whether its syslog listener is
+        running cannot be checked. When it last connected it spoke protocol 12, and reporting it
+        needs protocol 13, so unless it has been upgraded since, it will not say when it
+        reconnects either*, followed by the setting to check by hand (and flow's v1 caveat). It
+        is still `unknown` and never "off", because the probe may have been upgraded while it
+        was away. A last version at or above the listener's, or none at all, keeps the old
+        "This updates when it connects" sentence. It uses the same muted `role="status"` region
+        as the other notices (WCAG 1.3.1, 1.4.1, 1.4.3, 4.1.3).
+      - **Tests.**
+        - `probe-health.test.ts`, through the route: the following cases each serve the
+          recorded 12:
+          - not connected: `protocolVersion` null, the answer's keys exact, and none of the row's
+            address, filter, hash, gid or note in the body;
+          - connected at 22: live 22 beside the recorded 12.
+        - `null` for an object whose only identity is revoked, for a stored 0, and for a
+          database that throws, where the route still answers 200.
+        - `add-sensor-listener.test.tsx`, model:
+          - down at 12 (syslog, the sentence word for word, and SNMP traps);
+          - down at 22 (flow, its number from `@ms/shared`);
+          - down at 13, 22 and none (the plain sentence);
+          - connected and running with a last version of 12 (judged by the live version).
+        - Rendered: down at 22 for flow (named, muted, described by the field); down at 23
+          (plain).
+      - **Mutations** (each restored byte for byte, with `dist` rebuilt for the core ones):
+        - no last-version check in the form fails 3;
+        - the route serving `null` fails 2;
+        - a revoked identity read as the probe's fails 1.
+      - **Not done:** the form does not say when the version was recorded. The row has
+        `last_seen_at`, which is touched by refused hellos too, so it is not the time of the
+        recorded version.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

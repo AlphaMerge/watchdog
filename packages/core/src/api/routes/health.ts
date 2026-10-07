@@ -121,7 +121,11 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
           'carry none. `null` when it reported them. `protocolVersion` is the version the probe ' +
           'speaks on its current connection, `null` when it is not connected: a probe that ' +
           'reports, below the version a channel arrived in, leaves that channel a gap whether ' +
-          'or not what it counts is running.',
+          'or not what it counts is running. `lastProtocolVersion` is the version the probe ' +
+          'declared at the last handshake the core recorded, kept after it disconnects: the ' +
+          'one `GET /probes` shows, said of that connection and not of the probe now, which may ' +
+          'have been upgraded since. `null` when none is recorded or the database could not be ' +
+          'asked.',
         params: {
           type: 'object',
           additionalProperties: false,
@@ -138,6 +142,7 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
               'message',
               'numbersUnavailable',
               'protocolVersion',
+              'lastProtocolVersion',
               'channels',
             ],
             properties: {
@@ -162,6 +167,10 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
               // `protocol` channel and the message already turn on it, and a skewed probe's
               // message names it. Nothing else about the link comes with it.
               protocolVersion: { type: ['integer', 'null'] },
+              // `U-31`. What a probe that is down last spoke, so the form can say it was too old
+              // for a listener then. The one integer from the registration row, under the same
+              // `read` right: never its address, its filter or its key (`lastProtocolVersion`).
+              lastProtocolVersion: { type: ['integer', 'null'] },
               channels: {
                 type: 'object',
                 additionalProperties: false,
@@ -184,12 +193,14 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
         return reply;
       }
       const { reading, message, unavailable, protocolVersion } = service.read(request.params.id);
+      const lastProtocolVersion = await service.lastProtocolVersion(request.params.id);
       return {
         at: new Date().toISOString(),
         probeId: request.params.id,
         message,
         numbersUnavailable: unavailable,
         protocolVersion,
+        lastProtocolVersion,
         channels: reading,
       };
     },

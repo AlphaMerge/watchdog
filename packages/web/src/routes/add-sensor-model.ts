@@ -1,3 +1,4 @@
+import { versionFor } from '@ms/shared/capability-versions';
 import type { ObjectRef, ProbeHealthView } from '../api/types';
 
 /**
@@ -22,6 +23,11 @@ import type { ObjectRef, ProbeHealthView } from '../api/types';
  * listener's counter arrived in a protocol version of its own, and a probe below it reports
  * everything else and leaves the counter out whether the listener runs or not. So the version the
  * probe speaks, which the core answers beside the channels, comes before the counter.
+ *
+ * **Not connected is not the end of what can be said** (`U-31`). The core also answers the version
+ * the probe declared when it last connected. A probe that was below a listener's version then
+ * will be below it when it comes back, unless somebody upgrades it meanwhile, so the form says
+ * that as well, as a fact about the last connection and not about the probe now.
  */
 
 interface ListenerSpec {
@@ -35,8 +41,8 @@ interface ListenerSpec {
   readonly caveat?: string;
   /**
    * The protocol version the channel arrived in. Below it a probe that reports leaves the channel
-   * out whatever the listener is doing (`U-30`). A shipped version never changes what it carries,
-   * so the number is fixed; `add-sensor-listener.test.tsx` holds it to the protocol's own table.
+   * out whatever the listener is doing (`U-30`). Read from the protocol's own table (`P-294`), so
+   * the form cannot name a number the core's gates do not.
    */
   readonly since: number;
 }
@@ -49,21 +55,21 @@ const LISTENERS: Readonly<Record<string, ListenerSpec>> = {
     setting: 'flowListener.enabled',
     // `H-12`: a v1 probe warns and binds nothing whatever the setting says (`B-07`).
     caveat: 'A probe on the v1 build has no flow collector, whatever that setting says.',
-    // `flowCounters` (`B-07`): the first version whose heartbeat may carry `flowReceived`.
-    since: 23,
+    // `B-07`: the first version whose heartbeat may carry `flowReceived`.
+    since: versionFor('flowCounters'),
   },
-  // Both at 13, with the listeners' throughput counters (`P-64`), which no capability names.
+  // Both with the listeners' throughput counters (`P-64`), named by `P-294`.
   syslog: {
     channel: 'syslogReceived',
     name: 'syslog listener',
     setting: 'syslogListener.enabled',
-    since: 13,
+    since: versionFor('listenerCounters'),
   },
   'snmp-trap': {
     channel: 'trapReceived',
     name: 'SNMP trap listener',
     setting: 'trapListener.enabled',
-    since: 13,
+    since: versionFor('listenerCounters'),
   },
 };
 
@@ -159,6 +165,14 @@ export function listenerNotice(
   if (speaks !== null && speaks < spec.since) {
     return { kind: 'unknown', text: tooOld(spec, probeName, speaks, spec.since) };
   }
+  // **Not connected, and too old when it last was** (`U-31`). Still `unknown`: the probe may have
+  // been upgraded while it was away, so this is said of the last connection, beside the reason
+  // nothing can be checked now. A version recorded at or above the listener's says nothing new,
+  // and the sentence stays the connection's.
+  const spoke = health.lastProtocolVersion;
+  if (speaks === null && typeof spoke === 'number' && spoke < spec.since) {
+    return { kind: 'unknown', text: tooOldWhenLastConnected(spec, probeName, spoke) };
+  }
 
   // **Read, not inferred** (`U-29`). The core says why a probe's numbers are missing, and a probe
   // that has not reported has said nothing about its listener: the sentence is why.
@@ -230,6 +244,19 @@ function tooOld(spec: ListenerSpec, probeName: string, speaks: number, needs: nu
     `Probe “${probeName}” is too old to report whether its ${spec.name} is running: it speaks ` +
     `protocol ${String(speaks)}, and reporting it needs protocol ${String(needs)}. ` +
     checkByHand(spec)
+  );
+}
+
+/**
+ * A probe that is not connected, and spoke a version too old for the listener's counter when it
+ * last was (`U-31`). Said of then, not now: an upgrade while it was away would answer it.
+ */
+function tooOldWhenLastConnected(spec: ListenerSpec, probeName: string, spoke: number): string {
+  return (
+    `Probe “${probeName}” is not connected, so whether its ${spec.name} is running cannot be ` +
+    `checked. When it last connected it spoke protocol ${String(spoke)}, and reporting it ` +
+    `needs protocol ${String(spec.since)}, so unless it has been upgraded since, it will not ` +
+    `say when it reconnects either. ${checkByHand(spec)}`
   );
 }
 

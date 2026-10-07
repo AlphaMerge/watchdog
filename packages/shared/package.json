@@ -14,6 +14,10 @@
       "types": "./dist/src/charts/index.d.ts",
       "default": "./dist/src/charts/index.js"
     },
+    "./capability-versions": {
+      "types": "./dist/src/protocol/capability-versions.d.ts",
+      "default": "./dist/src/protocol/capability-versions.js"
+    },
     "./process-group": {
       "types": "./dist/src/process/group-channel.d.ts",
       "default": "./dist/src/process/group-channel.js"

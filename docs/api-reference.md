@@ -786,13 +786,13 @@ The same numbers the Core Health sensor records, read live. **A `null` is a gap 
 
 How one probe is doing, right now
 
-**Answers for a probe that is not connected**, which is the whole reason Probe Health is evaluated by the core: a probe cannot report its own absence. `connected` is 0 then and every other channel is `null` — a gap, because the probe’s numbers are not zero, they are unknown, and a scheduler lag of 0 ms from a probe that is gone would be the most misleading reading this system could produce. A probe below protocol 7 cannot send its own numbers either; the message says so in words rather than leaving the channels silently absent. `numbersUnavailable` says why the probe’s own numbers are gaps, as a value: `not-connected`; `protocol`, the only reason that is about versions, with the version it speaks and the one its numbers need; `no-heartbeat`, connected and none arrived yet, with how long it has been connected; `not-reported`, heartbeats that carry none. `null` when it reported them. `protocolVersion` is the version the probe speaks on its current connection, `null` when it is not connected: a probe that reports, below the version a channel arrived in, leaves that channel a gap whether or not what it counts is running.
+**Answers for a probe that is not connected**, which is the whole reason Probe Health is evaluated by the core: a probe cannot report its own absence. `connected` is 0 then and every other channel is `null` — a gap, because the probe’s numbers are not zero, they are unknown, and a scheduler lag of 0 ms from a probe that is gone would be the most misleading reading this system could produce. A probe below protocol 7 cannot send its own numbers either; the message says so in words rather than leaving the channels silently absent. `numbersUnavailable` says why the probe’s own numbers are gaps, as a value: `not-connected`; `protocol`, the only reason that is about versions, with the version it speaks and the one its numbers need; `no-heartbeat`, connected and none arrived yet, with how long it has been connected; `not-reported`, heartbeats that carry none. `null` when it reported them. `protocolVersion` is the version the probe speaks on its current connection, `null` when it is not connected: a probe that reports, below the version a channel arrived in, leaves that channel a gap whether or not what it counts is running. `lastProtocolVersion` is the version the probe declared at the last handshake the core recorded, kept after it disconnects: the one `GET /probes` shows, said of that connection and not of the probe now, which may have been upgraded since. `null` when none is recorded or the database could not be asked.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
 | `id` | path | integer | **required** |
 
-**200** { at, probeId, message, numbersUnavailable, protocolVersion, channels } · **503** { error }
+**200** { at, probeId, message, numbersUnavailable, protocolVersion, lastProtocolVersion, channels } · **503** { error }
 
 ## libraries
 
