@@ -1,9 +1,15 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ObjectRef, ProbeHealthView, SensorTypeSummary } from '../src/api/types';
 import { AddSensor } from '../src/routes/AddSensor';
-import { listenerNotice, probeAbove, readsListener } from '../src/routes/add-sensor-model';
+import {
+  listenerNotice,
+  probeAbove,
+  readsListener,
+  refusesProbe,
+  type HealthAnswer,
+} from '../src/routes/add-sensor-model';
 
 /**
  * The add-sensor form saying a probe's listener is off (`B-08`).
@@ -42,7 +48,7 @@ const OFF = health({
 /** What the form would write under the type, or `null`. */
 const say = (
   listener: string | undefined,
-  given: ProbeHealthView | null,
+  given: HealthAnswer,
 ): ReturnType<typeof listenerNotice> => listenerNotice(listener, 'Berlin', given);
 const text = (listener: string, given: ProbeHealthView): string => say(listener, given)?.text ?? '';
 
@@ -159,6 +165,20 @@ describe('whether a probe’s listener is running', () => {
     expect(all.size).toBe(4);
   });
 
+  it('says it could not ask when the question went unanswered, and only a refusal is silence (U-29)', () => {
+    const unanswered = say('flow', 'unanswered');
+    expect(unanswered?.kind).toBe('unknown');
+    expect(unanswered?.text).toContain(
+      'Could not ask whether the flow collector on probe “Berlin”',
+    );
+    expect(unanswered?.text).not.toContain('is not running');
+    expect(refusesProbe(403)).toBe(true);
+    expect(refusesProbe(404)).toBe(true);
+    // A core that is starting, any other server failure, and a core the browser cannot reach.
+    for (const status of [503, 500, 502, 0])
+      expect(refusesProbe(status), String(status)).toBe(false);
+  });
+
   it('reads the reason rather than inferring it from `scheduled` (U-29)', () => {
     // A report in which `scheduled` is a gap is still a report: the listener is judged on its
     // own counter. And the reason decides "cannot tell" even when `scheduled` has a value.
@@ -239,7 +259,8 @@ const ANCESTORS: ObjectRef[] = [
 
 interface Core {
   ancestors?: ObjectRef[] | number;
-  health?: ProbeHealthView | number;
+  /** A number is a failure with that status; `'network'` is a fetch that rejects outright. */
+  health?: ProbeHealthView | number | 'network';
 }
 
 /** A core that answers the four reads this form makes, and records which were asked. */
@@ -252,7 +273,19 @@ function stubCore(core: Core): { asked: string[] } {
     });
   const refuse = (status: number): Response =>
     answer(
-      { error: { code: status === 403 ? 'FORBIDDEN' : 'OBJECT_NOT_FOUND', message: 'no' } },
+      {
+        error: {
+          code:
+            status === 403
+              ? 'FORBIDDEN'
+              : status === 503
+                ? 'CORE_STARTING'
+                : status >= 500
+                  ? 'INTERNAL'
+                  : 'OBJECT_NOT_FOUND',
+          message: 'no',
+        },
+      },
       status,
     );
 
@@ -267,6 +300,7 @@ function stubCore(core: Core): { asked: string[] } {
     }
     if (path === '/probes/2/health') {
       const given = core.health ?? OFF;
+      if (given === 'network') return Promise.reject(new TypeError('Failed to fetch'));
       return Promise.resolve(typeof given === 'number' ? refuse(given) : answer(given));
     }
     return Promise.resolve(refuse(404));
@@ -388,14 +422,61 @@ describe('the add-sensor form on a probe whose flow collector is off', () => {
   });
 
   it('says nothing when the probe’s health is refused', async () => {
-    const refused = await open({ health: 403 });
+    // 403 and 404 alike: both are the core telling this reader the probe is not theirs to see.
+    for (const status of [403, 404]) {
+      const refused = await open({ health: status });
+      pick('flow.netflow');
+      await waitFor(() => {
+        expect(refused.asked).toContain('/probes/2/health');
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(notice().textContent, String(status)).toBe('');
+      expect(screen.getByLabelText('Sensor type').getAttribute('aria-describedby')).toBeNull();
+      cleanup();
+    }
+  });
+
+  it('says it could not ask when the core is starting, rather than reading as "running" (U-29)', async () => {
+    // A `503 CORE_STARTING` is not a refusal. Silence would mean the collector runs, and that
+    // is what a core restart used to make of an "off" caution.
+    const starting = await open({ health: 503 });
     pick('flow.netflow');
     await waitFor(() => {
-      expect(refused.asked).toContain('/probes/2/health');
+      expect(starting.asked).toContain('/probes/2/health');
     });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(notice().textContent).toBe('');
-    expect(screen.getByLabelText('Sensor type').getAttribute('aria-describedby')).toBeNull();
+    await waitFor(() => {
+      expect(notice().textContent).toBe(
+        'Could not ask whether the flow collector on probe “Berlin” is running: the core did ' +
+          'not answer, so nothing is known about it either way.',
+      );
+    });
+    expect(notice().getAttribute('role')).toBe('status');
+    expect(screen.getByLabelText('Sensor type').getAttribute('aria-describedby')).toBe(
+      'sensor-type-listener',
+    );
+    expect(notice().className).toContain('text-text-muted');
+  });
+
+  it('says it could not ask when the core cannot be reached at all (U-29)', async () => {
+    const unreachable = await open({ health: 'network' });
+    pick('flow.netflow');
+    await waitFor(() => {
+      expect(unreachable.asked).toContain('/probes/2/health');
+    });
+    await waitFor(() => {
+      expect(notice().textContent).toContain('Could not ask whether the flow collector');
+    });
+    expect(screen.getByLabelText('Sensor type').getAttribute('aria-describedby')).toBe(
+      'sensor-type-listener',
+    );
+  });
+
+  it('treats any other server failure the same way (U-29)', async () => {
+    await open({ health: 500 });
+    pick('flow.netflow');
+    await waitFor(() => {
+      expect(notice().textContent).toContain('Could not ask whether the flow collector');
+    });
   });
 });
 

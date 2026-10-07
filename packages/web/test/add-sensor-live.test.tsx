@@ -96,8 +96,11 @@ const changed = (): unknown => ({ type: 'probe', probeId: 2 });
 const WATCH = JSON.stringify({ subscribe: { probeId: 2 } });
 
 interface Core {
-  /** What `GET /probes/2/health` answers now; a number is a refusal with that status. */
-  health: ProbeHealthView | number;
+  /**
+   * What `GET /probes/2/health` answers now: a number is a failure with that status, and
+   * `'network'` a fetch that rejects outright.
+   */
+  health: ProbeHealthView | number | 'network';
   /** Set to hold the next health answer back until `release` is called. */
   hold: boolean;
   release: () => void;
@@ -133,12 +136,15 @@ function stubCore(first: ProbeHealthView, ancestors: ObjectRef[] = ANCESTORS): C
     if (path === '/objects/4/ancestors') return Promise.resolve(answer({ items: core.ancestors }));
     if (path === '/probes/2/health') {
       const given = core.health;
-      const response = (): Response => (typeof given === 'number' ? refuse(given) : answer(given));
-      if (!core.hold) return Promise.resolve(response());
+      const response = (): Promise<Response> =>
+        given === 'network'
+          ? Promise.reject(new TypeError('Failed to fetch'))
+          : Promise.resolve(typeof given === 'number' ? refuse(given) : answer(given));
+      if (!core.hold) return response();
       core.hold = false;
-      return new Promise<Response>((resolve) => {
+      return new Promise<Response>((resolve, reject) => {
         core.release = () => {
-          resolve(response());
+          response().then(resolve, reject);
         };
       });
     }
@@ -405,6 +411,56 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     });
     await settled();
     expect(core.healthAsked(), 'one request for forty frames').toBe(3);
+  });
+
+  it('keeps a caution through a core restart: a 503 or no core at all is said, not silence (U-29)', async () => {
+    // The review's case. Every failed request used to be silence, which reads as "running", so
+    // the "off" caution vanished while the core was starting and came back after it.
+    const core = stubCore(OFF);
+    const socket = await watching(core);
+    await waitFor(() => {
+      expect(notice().textContent).toContain('is not running');
+    });
+
+    core.health = 503;
+    socket.deliver(changed());
+    await waitFor(() => {
+      expect(notice().textContent).toContain(
+        'Could not ask whether the flow collector on probe “Berlin” is running',
+      );
+    });
+    expect(describedBy()).toBe('sensor-type-listener');
+
+    // Held while the next request is on its way, as any answer is: not emptied and written back.
+    const written: string[] = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records) written.push(record.type);
+    });
+    observer.observe(notice(), { childList: true, characterData: true, subtree: true });
+    core.health = 'network';
+    core.hold = true;
+    const before = core.healthAsked();
+    socket.deliver(changed());
+    await waitFor(() => {
+      expect(core.healthAsked()).toBe(before + 1);
+    });
+    expect(notice().textContent).toContain('Could not ask whether the flow collector');
+    await act(async () => {
+      core.release();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    observer.disconnect();
+    expect(notice().textContent, 'no core at all reads the same').toContain(
+      'Could not ask whether the flow collector',
+    );
+    expect(written, 'the same sentence was written again').toEqual([]);
+
+    // The core answers again, and the caution is back.
+    core.health = OFF;
+    socket.deliver(changed());
+    await waitFor(() => {
+      expect(notice().textContent).toContain('is not running');
+    });
   });
 
   it('says nothing once the probe’s health is refused', async () => {

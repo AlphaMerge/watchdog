@@ -83,23 +83,53 @@ export interface ListenerNotice {
 type NumbersUnavailable = NonNullable<ProbeHealthView['numbersUnavailable']>;
 
 /**
+ * What the form has from `GET /probes/{id}/health`: the answer, `'unanswered'` when it asked
+ * and got none, or `null` when it has nothing to say (still loading, or refused).
+ */
+export type HealthAnswer = ProbeHealthView | 'unanswered' | null;
+
+/**
+ * Whether a failed `GET /probes/{id}/health` was the core refusing this reader the probe.
+ *
+ * **Only a refusal is silence** (`U-29` review). A 403 or 404 is the core saying this reader may
+ * not see the probe, and the form tells them nothing about it, including that there was
+ * something to learn. Everything else, such as a core that is starting (`503 CORE_STARTING`),
+ * any other 5xx, or a core the browser cannot reach (status 0), is a question that went
+ * unanswered. Silence there would read as "running", and an "off" caution would vanish for the
+ * length of a core restart.
+ */
+export function refusesProbe(status: number): boolean {
+  return status === 403 || status === 404;
+}
+
+/**
  * What to say under the type, or `null` to say nothing.
  *
  * `health` is `null` while it is loading and when it was refused: a reader who may not see the
  * probe learns nothing about it here, including that there was something to learn.
  *
- * **Silence means the listener is running**, and only that. Until `U-29` the form inferred a
- * report from `scheduled` being a number and said nothing for a probe that had not reported, so
- * silence meant "running" or "cannot tell", and the reader could not know which.
+ * **Silence means the listener is running**, or that the reader may not see the probe, and
+ * nothing else. Until `U-29` the form inferred a report from `scheduled` being a number and said
+ * nothing for a probe that had not reported, so silence also meant "cannot tell", and the
+ * reader could not know which.
  */
 export function listenerNotice(
   listener: string | undefined,
   probeName: string,
-  health: ProbeHealthView | null,
+  health: HealthAnswer,
 ): ListenerNotice | null {
   if (listener === undefined || health === null) return null;
   const spec = Object.hasOwn(LISTENERS, listener) ? LISTENERS[listener] : undefined;
   if (spec === undefined) return null;
+
+  if (health === 'unanswered') {
+    return {
+      kind: 'unknown',
+      text:
+        `Could not ask whether the ${spec.name} on probe “${probeName}” is running: the core ` +
+        'did not answer, so nothing is known about it either way.',
+    };
+  }
 
   // **Read, not inferred** (`U-29`). The core says why a probe's numbers are missing, and a probe
   // that has not reported has said nothing about its listener: the sentence is why.

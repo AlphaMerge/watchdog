@@ -9,7 +9,13 @@ import { SchemaForm } from '../forms/SchemaForm';
 import { fieldsOf, readAt, seedDefaults, type JsonSchema } from '../forms/schema';
 import { allProblems, type FieldProblem } from '../forms/validate';
 import { PageTitle } from '../components/PageTitle';
-import { listenerNotice, probeAbove, readsListener } from './add-sensor-model';
+import {
+  listenerNotice,
+  probeAbove,
+  readsListener,
+  refusesProbe,
+  type HealthAnswer,
+} from './add-sensor-model';
 
 /**
  * Adding a sensor (`U-08`).
@@ -67,19 +73,35 @@ export function AddSensor(): React.JSX.Element {
   // announces what is written into it: one sentence read out again for every time the probe's
   // link moved. A refusal is not held over — a reader who may no longer see the probe is
   // told nothing about it, as before.
+  //
+  // **A request that failed for any other reason is said, not held** (`U-29` review). A 503 from
+  // a core that is starting, any other 5xx and a network failure all used to read as silence,
+  // which means "running": an "off" caution vanished for the length of a core restart. Holding
+  // the last answer through the failure instead was the other way to fix that. It was not taken,
+  // for two reasons. It would show an old reading as current for as long as the core stays away.
+  // And a first request that fails has no answer to hold, so silence would still mean
+  // "running". So the form says it could not ask, and that sentence is held while the next
+  // request is on its way, like any other.
   const probeId = probe?.id ?? null;
-  const held = useRef<{ probeId: number; health: ProbeHealthView } | null>(null);
-  useEffect(() => {
-    if (probeId === null) return;
-    if (probeHealth.status === 'ready') held.current = { probeId, health: probeHealth.data };
-    else if (probeHealth.status === 'error') held.current = null;
-  }, [probeId, probeHealth]);
-  const last = held.current;
-  const health =
+  const answered: HealthAnswer | undefined =
     probeHealth.status === 'ready'
       ? probeHealth.data
-      : probeHealth.status === 'loading' && last !== null && last.probeId === probeId
-        ? last.health
+      : probeHealth.status === 'error'
+        ? refusesProbe(probeHealth.error.status)
+          ? null
+          : 'unanswered'
+        : undefined;
+  const held = useRef<{ probeId: number; answer: HealthAnswer } | null>(null);
+  useEffect(() => {
+    if (probeId === null || answered === undefined) return;
+    held.current = answered === null ? null : { probeId, answer: answered };
+  }, [probeId, answered]);
+  const last = held.current;
+  const health: HealthAnswer =
+    answered !== undefined
+      ? answered
+      : last !== null && last.probeId === probeId
+        ? last.answer
         : null;
   const listenerSays = probe === null ? null : listenerNotice(chosen?.listener, probe.name, health);
 

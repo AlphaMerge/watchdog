@@ -19994,6 +19994,25 @@ because each is a decision rather than a defect:
         - inferring from `scheduled` again fails 10 tests;
         - sending `no-heartbeat` to the generic sentence fails 4;
         - the warning colour for every notice fails 2.
+      - **Review (`80ce7594`): silence was also a failed request.** `AddSensor` read every
+        failed `GET /probes/{id}/health` as "refused" and said nothing. That covers a 503
+        `CORE_STARTING`, any other 5xx and a network failure, so a core restart took an "off"
+        caution away and the form read as "running".
+        - Now only a 403 or 404 (`refusesProbe`) is silence. Any other failure is
+          `'unanswered'`, an `unknown` notice: *Could not ask whether the flow collector on
+          probe "Berlin" is running: the core did not answer, so nothing is known about it either
+          way.*
+        - **Saying it, rather than holding the last answer**, because holding would show an old
+          reading as current for as long as the core is away, and a first request that fails has
+          nothing to hold. The sentence itself is held while the next request is on its way,
+          like any answer.
+        - Tests: a 503, a network failure and a 500 each give the sentence, and 403 and 404 stay
+          silent. A live case keeps the form open through "off", a 503, then no core while a
+          request is held (asserting nothing is rewritten), then "off" again.
+        - Mutations, each restored byte for byte:
+          - every failure silent again fails 4;
+          - refusals not silent fails 3;
+          - not holding the sentence fails 1.
       - **Not done:** a probe that reports but is below the `flowCounters` capability (protocol 23)
         has `flowReceived` stripped, and the form still calls its flow collector off and points
         at the setting, as it did before `U-29`, where it is the version that is short.
