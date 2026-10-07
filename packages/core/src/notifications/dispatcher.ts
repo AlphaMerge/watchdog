@@ -536,9 +536,24 @@ export class NotificationDispatcher {
 
     const parts = splitDigest(entries);
     let covered = 0;
+    // The wait of a part refused and coming back, once one has been (`N-21`). The parts after it
+    // are not sent: a digest lists its members in the order they were queued, so a recovery in
+    // part 1 and the Down after it in part 2 would arrive Down first. They wait out the same
+    // delay instead, untried, and the next pass claims the whole digest together and sends it in
+    // order.
+    let heldBackMs: number | null = null;
     for (const [index, part] of parts.entries()) {
       const [lead] = part.members;
       if (lead === undefined) continue;
+      if (heldBackMs !== null) {
+        await this.#holdBack(
+          part.members.map((entry) => Number(entry.row.id)),
+          now,
+          heldBackMs,
+        );
+        covered += part.members.length;
+        continue;
+      }
       const counts = countKinds(part.members.map((entry) => kindOf(entry.row)));
       const subject = digestSubject({
         siteName: lead.context.siteName,
@@ -587,8 +602,33 @@ export class NotificationDispatcher {
         await this.#record(Number(entry.row.id), entry.row.attempts + 1, result, now, delayMs);
         covered += 1;
       }
+      // Refused and to be tried again. A part given up on is not coming, so it has no order to
+      // keep, and the parts after it still go.
+      if (!result.ok && result.retryable && !exhausted(this.#retry, lead.row.attempts + 1)) {
+        heldBackMs = delayMs;
+      }
     }
     return covered;
+  }
+
+  /**
+   * Puts digest members back, untried, to fall due with the part refused ahead of them.
+   *
+   * The claim counted an attempt for each of them; none was made, so it is taken back. A member
+   * that was never sent must not be given up on for attempts it never had, and Core Health's
+   * "being retried" must not count messages nothing has refused.
+   */
+  async #holdBack(requestIds: readonly number[], now: Date, delayMs: number): Promise<void> {
+    await this.#db.query(
+      `UPDATE notification_request
+       SET attempts = GREATEST(attempts - 1, 0), next_attempt_at = $2
+       WHERE id = ANY($1::bigint[])`,
+      [[...requestIds], new Date(now.getTime() + delayMs)],
+    );
+    this.#logger.warn(
+      { held: requestIds.length, retryInMs: delayMs },
+      'digest parts held back behind a refused part, to be sent with it in order',
+    );
   }
 
   async #record(

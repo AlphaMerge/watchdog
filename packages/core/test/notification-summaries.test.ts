@@ -815,6 +815,151 @@ describe(
       assert.ok(!again.some((request) => request.id === down), 'then the Down waits');
     });
 
+    it('keeps an alarm behind a decided recovery after another template reopens', async () => {
+      // The recovery was decided while the other template's alarm was outside its schedule, so
+      // it waited for nothing. That template reopening afterwards does not make it a recovery
+      // that is waiting for another template: it waits only for its own digest or retry, and the
+      // next Down still follows it.
+      const onCall = await template();
+      const businessHours = await template();
+      const summaries = new SummaryRepository();
+      await queue(businessHours, { sensor: sensorAt(0) });
+      const recovery = await queue(onCall, {
+        sensor: sensorAt(0),
+        reason: 'recovery',
+        state: 'up',
+      });
+
+      const closedHours = await db.tx((q) =>
+        summaries.undecided(q, 100, [businessHours], ['email']),
+      );
+      assert.ok(
+        closedHours.some((request) => request.id === recovery),
+        'decided while the other template is suppressed',
+      );
+      const window = await db.tx(async (q) => {
+        const opened = await summaries.openWindow(q, onCall, new Date(), 900);
+        await summaries.decide(q, recovery, 'held', opened.id);
+        return opened;
+      });
+
+      // The schedule reopens, and the sensor goes Down again.
+      const down = await queue(onCall, { sensor: sensorAt(0) });
+      const reopened = await db.tx((q) => summaries.undecided(q, 100, [], ['email']));
+      const decided = reopened.find((request) => request.id === down);
+      assert.ok(decided !== undefined, 'the Down is decided, beside the recovery');
+      assert.equal(decided.heldBehind?.windowId, window.id, 'in the recovery’s digest');
+
+      // And behind a recovery that is retrying, it waits.
+      await db.query(
+        `UPDATE notification_request
+         SET disposition = 'immediate', summary_id = NULL, attempts = 1,
+             next_attempt_at = now() + interval '1 minute'
+         WHERE id = $1`,
+        [recovery],
+      );
+      const retrying = await db.tx((q) => summaries.undecided(q, 100, [], ['email']));
+      assert.ok(!retrying.some((request) => request.id === down), 'the Down waits for the retry');
+    });
+
+    it('does not send a later part of a digest ahead of a refused earlier one', async () => {
+      // Thirty requests are two parts, 25 and 5. Part 1 is refused once: part 2 must not go
+      // ahead of it, because a recovery at the end of part 1 and the Down after it at the start
+      // of part 2 would then arrive Down first.
+      const templateId = await template({ summarisation: 'always-summarise' });
+      for (let index = 0; index < 30; index += 1) {
+        await queue(templateId, { sensor: sensorAt(index % sensors.length) });
+      }
+      let calls = 0;
+      const { seen, transport } = recorder(() => {
+        calls += 1;
+        return { ok: calls > 1, retryable: true };
+      });
+      const dispatcher = new NotificationDispatcher({
+        db,
+        logger: silent,
+        contexts,
+        transports: [transport],
+        retry: { firstDelayMs: 60_000, maxDelayMs: 60_000, jitter: 0 },
+        leaseMs: 0,
+      });
+      await dispatcher.dispatch();
+      await elapse();
+      await dispatcher.dispatch();
+      assert.deepEqual(
+        seen.map((message) => message.subject),
+        ['Acme production: 25 notifications — 25 down (1 of 2)'],
+        'part 1 was refused, and part 2 was not sent after it',
+      );
+      const held = await db.query<{ attempts: number; next_attempt_at: Date | null }>(
+        `SELECT attempts, next_attempt_at FROM notification_request ORDER BY id`,
+      );
+      assert.equal(held.length, 30);
+      assert.deepEqual(
+        held.slice(25).map((row) => row.attempts),
+        [0, 0, 0, 0, 0],
+        'part 2 was never tried, so it has no attempt counted',
+      );
+      const due = new Set(held.map((row) => row.next_attempt_at?.getTime() ?? 0));
+      assert.equal(due.size, 1, 'both parts fall due together');
+
+      await dispatcher.dispatch(new Date(Date.now() + 60 * 60 * 1000));
+      const subjects = seen.map((message) => message.subject);
+      // Presence first, then the order.
+      assert.ok(subjects.includes('Acme production: 5 notifications — 5 down (2 of 2)'));
+      assert.deepEqual(subjects, [
+        'Acme production: 25 notifications — 25 down (1 of 2)',
+        'Acme production: 25 notifications — 25 down (1 of 2)',
+        'Acme production: 5 notifications — 5 down (2 of 2)',
+      ]);
+      assert.ok(
+        (await dispositions()).every((row) => row.status === 'sent'),
+        'and all thirty were delivered',
+      );
+    });
+
+    it('still sends the later parts once an earlier part is given up on', async () => {
+      // A part that is never coming has no order to keep: refused for good, or refused on its
+      // last attempt, it must not take the rest of the digest down with it.
+      const cases = [
+        { name: 'refused for good', retryable: false, maxAttempts: 10 },
+        { name: 'refused on its last attempt', retryable: true, maxAttempts: 1 },
+      ];
+      for (const entry of cases) {
+        await db.query('DELETE FROM notification_request');
+        await db.query('DELETE FROM notification_summary');
+        const templateId = await template({ summarisation: 'always-summarise' });
+        for (let index = 0; index < 30; index += 1) {
+          await queue(templateId, { sensor: sensorAt(index % sensors.length) });
+        }
+        let calls = 0;
+        const { seen, transport } = recorder(() => {
+          calls += 1;
+          return { ok: calls > 1, retryable: entry.retryable };
+        });
+        const dispatcher = new NotificationDispatcher({
+          db,
+          logger: silent,
+          contexts,
+          transports: [transport],
+          retry: { firstDelayMs: 60_000, maxDelayMs: 60_000, jitter: 0 },
+          maxAttempts: entry.maxAttempts,
+          leaseMs: 0,
+        });
+        await dispatcher.dispatch();
+        await elapse();
+        await dispatcher.dispatch();
+        assert.deepEqual(
+          seen.map((message) => message.subject),
+          [
+            'Acme production: 25 notifications — 25 down (1 of 2)',
+            'Acme production: 5 notifications — 5 down (2 of 2)',
+          ],
+          entry.name,
+        );
+      }
+    });
+
     // ---------------------------------------------------------------------------------------
     // The other five modes, where they differ.
     // ---------------------------------------------------------------------------------------

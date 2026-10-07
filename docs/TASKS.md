@@ -3389,6 +3389,45 @@ because each is a decision rather than a defect:
       - a successor without the alarm's kind;
       - a successor due now.
 
+      **Review, round 3.** Two confirmed findings. A third was rejected: a Down still waits out
+      a retrying same-template recovery's backoff after the transport recovers. That is the
+      same-template retry wait, accepted.
+      - **The transitive guard skipped decided recoveries.** The round-2 guard dropped a
+        same-template recovery whenever an older sendable alarm on another template was pending,
+        without asking whether the recovery was still waiting for it. A recovery decided while
+        that template was suppressed (collect mode), or disabled, waits only for its own
+        delivery. Once that template reopened, the next Down went at once, ahead of the digest
+        that ends *up*. The guard now applies only to an undecided recovery
+        (`OR a.disposition <> 'undecided'`).
+      - **The parts of a split digest could overtake each other.** Parts were sent in turn even
+        after an earlier one was refused, so a recovery at the end of part 1 could arrive after
+        the Down at the start of part 2. Every flush now relies on this. Once a part is refused
+        and will be retried, the later parts are not sent. `#holdBack` gives them the same retry
+        time, so the next pass claims and sends the whole digest in order. It also takes back
+        the attempt the claim counted, because a message never tried must not be given up on
+        for attempts it never had, or count as "being retried" on Core Health. A part given up
+        on, refused for good or on its last attempt, still lets the later parts go: it has no
+        order left to keep.
+      - **N-20's digest tests are unchanged** and still pass. They are single-part digests, and
+        the "no hold-back" mutation fails only the new split test, so they neither depend on
+        this change nor hide a regression in it.
+      - **Tests**, all in `notification-summaries.test.ts`:
+        - a recovery decided while the other template is suppressed, then that template
+          reopened: the next Down joins the recovery's digest, and waits while the recovery
+          retries;
+        - a 30-request digest, two parts, with part 1 refused once. Only part 1 is attempted.
+          Part 2 keeps zero attempts and falls due with part 1. The recipient then gets part 1
+          and then part 2, presence checked before order;
+        - the later parts are still sent after a part refused for good, and after one refused
+          on its last attempt.
+      - **Mutation 26/26.** The 20 above, plus:
+        - the decided-recovery exception removed;
+        - no hold-back;
+        - a held-back part keeps its counted attempt;
+        - a held-back part due now;
+        - hold-back after a permanent refusal;
+        - hold-back after the last attempt.
+
 ## Phase 5 — Web UI
 
 - [x] **U-01 — Frontend scaffold** · M · F-01 · React 19 + TypeScript + Vite 8, routing, design

@@ -151,7 +151,9 @@ export class SummaryRepository {
                    AND NOT (a.template_id = ANY($2::bigint[]))))
           -- Nor through a recovery of its own template that is itself waiting for another
           -- template's alarm, an escalation say: that would be the same wait, one step removed.
-          AND (r.reason IN ('recovery', 'clear') OR NOT EXISTS (
+          -- Only an undecided one is waiting for anything: once decided, held or retrying, it
+          -- waits for its own delivery alone, whatever another template has since reopened.
+          AND (r.reason IN ('recovery', 'clear') OR a.disposition <> 'undecided' OR NOT EXISTS (
                 SELECT 1
                 FROM notification_request b
                 JOIN notification_template bt ON bt.id = b.template_id
