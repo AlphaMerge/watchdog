@@ -1,7 +1,7 @@
 // Default import, not named: `ssh2` is CommonJS, and Node's ESM loader cannot see named
 // exports through it at runtime even though TypeScript resolves them. Same as `net-snmp`.
 import ssh2 from 'ssh2';
-import type { Client } from 'ssh2';
+import type { Client, ClientChannel } from 'ssh2';
 import { connect as netConnect, type Socket } from 'node:net';
 import { checkedLookup } from '../checked-target.js';
 import type { PinnedAddress } from '../pinned-target.js';
@@ -133,6 +133,12 @@ export class SshSession {
   #closed = false;
   /** What the connection reported as it went, for a command it took with it (`P-259`). */
   #lost: Error | undefined;
+  /**
+   * The commands running now, each told the moment the connection goes (`P-259`), so it can
+   * note whether the server had already finished its channel. Only that moment can tell:
+   * once `ssh2` has torn the channels down, every one looks closed.
+   */
+  readonly #running = new Set<() => void>();
 
   private constructor(
     client: Client,
@@ -147,15 +153,26 @@ export class SshSession {
     // A client that emits 'error' with nothing listening throws on the next tick and takes the
     // worker down — one unreachable host would kill checks for hundreds of others.
     client.on('error', (error: Error) => {
-      this.#closed = true;
       this.#lost ??= error;
+      this.#gone();
     });
     client.on('close', () => {
-      this.#closed = true;
+      this.#gone();
     });
     client.on('end', () => {
-      this.#closed = true;
+      this.#gone();
     });
+  }
+
+  /**
+   * The connection has gone, by whichever event said so first. Synchronous with that event,
+   * which `ssh2` emits after parsing everything the server sent before it and before it tears
+   * the channels down (`P-259`).
+   */
+  #gone(): void {
+    this.#closed = true;
+    for (const told of [...this.#running]) told();
+    this.#running.clear();
   }
 
   get closed(): boolean {
@@ -351,13 +368,26 @@ export class SshSession {
       // and `finish` needs to clear the timeout, so one of the three has to be reached
       // indirectly.
       const pending: { timer?: NodeJS.Timeout } = {};
-      let channel: { close(): void } | undefined;
+      let channel: ClientChannel | undefined;
+      /**
+       * Whether the server had finished this channel — sent its EOF or its CLOSE — when the
+       * connection went (`P-259`). Read then, and only then: the exit status is no answer, since
+       * a server may send it before the last of the output (RFC 4254 does not order them, and
+       * OpenSSH sends it as soon as the command is reaped), and its absence is no answer either,
+       * since some servers never send one.
+       */
+      let finishedByServer = false;
+      const onGone = (): void => {
+        finishedByServer = channel !== undefined && channel.incoming.state !== 'open';
+      };
+      this.#running.add(onGone);
 
       const finish = (outcome: () => void): void => {
         if (settled) return;
         settled = true;
         if (pending.timer !== undefined) clearTimeout(pending.timer);
         signal.removeEventListener('abort', onAbort);
+        this.#running.delete(onGone);
         outcome();
       };
 
@@ -442,12 +472,14 @@ export class SshSession {
         });
         stream.on('close', (code?: number | null, sig?: string | null) => {
           // **A channel the connection took with it is a failure, not a result** (`P-259`).
-          // `ssh2` closes every channel when the socket goes, after telling the client, so a
-          // command that was running when the device reset the connection ends here with no
-          // exit status — which used to resolve as `code: null` and reach a sensor as an empty
-          // answer, or as half of one. A channel closed with no status on a connection that is
-          // still up is a server that does not send one, and stays a result.
-          if (typeof code !== 'number' && typeof sig !== 'string' && this.#closed) {
+          // `ssh2` closes every channel when the socket goes, with whatever exit status had
+          // arrived, so a command running when the device reset the connection used to resolve
+          // here — as `code: null` and an empty answer, or as `code: 0` and half of one. What
+          // decides is whether the server finished the channel before the connection went,
+          // whatever the code says: a channel it finished is a whole answer, and a connection
+          // closed straight after one, or a server that sends no exit status, does not change
+          // that.
+          if (this.#closed && !finishedByServer) {
             finish(() => {
               reject(
                 new SshError(
@@ -475,9 +507,9 @@ export class SshSession {
 
   close(): void {
     if (this.#closed) return;
-    this.#closed = true;
     // So that a command still running on it is not reported as the server's doing.
     this.#lost = new Error('this probe closed the connection');
+    this.#gone();
     try {
       this.#client.end();
     } catch {

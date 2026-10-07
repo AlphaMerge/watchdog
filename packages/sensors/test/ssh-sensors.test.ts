@@ -332,7 +332,7 @@ describe('all four types', () => {
       },
     ];
     for (const { type, command, stdout, params } of cases) {
-      server.answer(command, { stdout, reset: true });
+      server.answer(command, { stdout, reset: 'before-exit-status' });
       await assert.rejects(
         () => run(type, params),
         (error: unknown) =>
@@ -344,6 +344,40 @@ describe('all four types', () => {
         type.id,
       );
     }
+  });
+
+  it('fail when the exit status arrived before the rest of the output and then the connection went (P-259)', async () => {
+    // `ssh.script` read `code: 0` and the first of two lines as a success with a channel
+    // missing — a reading built on half an answer.
+    server.answer('./check.sh', {
+      code: 0,
+      stdout: 'queue:12\n',
+      reset: 'after-exit-status',
+    });
+    await assert.rejects(
+      () =>
+        run(sshScript, {
+          command: './check.sh',
+          channels: [
+            { key: 'queue', name: 'Queue depth', unit: 'jobs' },
+            { key: 'temperature', name: 'Inlet temperature', unit: '°C' },
+          ],
+        }),
+      /the connection to 127\.0\.0\.1 was lost while running \.\/check\.sh/,
+    );
+  });
+
+  it('read an appliance that sends no exit status and disconnects straight after (P-259)', async () => {
+    // `ssh.load` ignores the code, so a whole answer from such a device is a reading, and the
+    // DISCONNECT that follows it in the same read must not turn it into a failure.
+    server.answer(LOAD_COMMAND, {
+      stdout: '0.50 0.40 0.30 1/123 4567\n4\n',
+      ending: 'close',
+      then: 'disconnect-lost',
+    });
+    const execution = await run(sshLoad);
+    assert.equal(valueOf(execution, 'load1'), 0.5);
+    assert.equal(valueOf(execution, 'processors'), 4);
   });
 
   it('return promptly when the check is aborted', async () => {

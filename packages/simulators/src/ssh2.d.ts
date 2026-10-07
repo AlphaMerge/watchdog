@@ -34,6 +34,8 @@ declare module 'ssh2' {
     stderr: { write(chunk: string | Buffer): boolean };
     exit(code: number | string): void;
     end(): void;
+    /** Sends CHANNEL_EOF alone: the server's output is finished, and the channel stays open. */
+    eof(): void;
     close(): void;
   }
 
@@ -71,6 +73,25 @@ declare module 'ssh2' {
     on(event: 'session', listener: (accept: () => Session, reject: () => void) => void): this;
     on(event: string, listener: (...args: never[]) => void): this;
     end(): void;
+    /**
+     * **Private to `ssh2`**, declared for one call (`P-259`): `end()` always sends its DISCONNECT
+     * "by application", which a client takes as a goodbye, and nothing public sends another
+     * reason. A simulator that has to say "connection lost" the way an appliance going down
+     * does reaches past the public surface here, and nowhere else.
+     */
+    readonly _protocol: { disconnect(reason: number): void };
+    /**
+     * Asks the client to open a forwarded TCP channel. Used for its answer, not the channel
+     * (`P-259`): a client that never asked for forwarding refuses it as it parses the request,
+     * and the callback hears the refusal — proof the client has read everything sent before.
+     */
+    forwardOut(
+      boundAddr: string,
+      boundPort: number,
+      remoteAddr: string,
+      remotePort: number,
+      callback: (error: Error | undefined) => void,
+    ): this;
   }
 
   export class Server extends EventEmitter {

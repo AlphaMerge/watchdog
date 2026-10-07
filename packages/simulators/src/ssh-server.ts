@@ -39,17 +39,42 @@ export interface CommandResult {
   /** Bytes of `x` to write instead of `stdout`, for the output-bound test. */
   readonly bulkBytes?: number;
   /**
-   * Write `stdout`, then reset the TCP connection under the command before it reports an exit
-   * status (`P-259`): a device that reboots, or a firewall that drops the session, mid-command.
-   * The reset is a real RST on the socket, not an SSH disconnect, so the client hears it the way
-   * it hears a device that went away.
+   * Reset the TCP connection under the command, a turn after writing `stdout` and before the
+   * channel is finished (`P-259`): a device that reboots, or a firewall that drops the session,
+   * mid-command. A real RST on the socket, not an SSH disconnect, so the client hears it the
+   * way it hears a device that went away.
+   *
+   * - `before-exit-status`: `stdout`, then the reset. No exit status ever arrives.
+   * - `after-exit-status`: the exit status (`code`, or 0) first, then `stdout`, then the reset —
+   *   the order RFC 4254 allows and OpenSSH uses when the command is reaped before its output
+   *   has all gone. `stdout` is the part that arrives; the rest never does.
    */
-  readonly reset?: boolean;
+  readonly reset?: 'before-exit-status' | 'after-exit-status';
   /**
-   * Close the channel without sending an exit status, as some embedded servers do (`P-259`): a
-   * command that finished, on a connection that is still up, with nothing to say how.
+   * How the server finishes the channel once the output is written (`P-259`).
+   *
+   * - `exit` (the default): the exit status, EOF and CLOSE.
+   * - `close`: EOF and CLOSE with no exit status, as some embedded servers do.
+   * - `eof`: EOF and nothing more — no exit status and no CLOSE. Only useful with `then`, or
+   *   the client waits for its command timeout.
    */
-  readonly noExitStatus?: boolean;
+  readonly ending?: 'exit' | 'close' | 'eof';
+  /**
+   * What the server does to the connection straight after finishing the channel, in the same
+   * turn, so that it reaches the client in the same read where the loopback allows (`P-259`).
+   *
+   * - `disconnect`: an SSH DISCONNECT "by application", then FIN. `ssh2` reads that reason as a
+   *   goodbye and raises no error, so the client hears the connection go only at the FIN.
+   * - `disconnect-lost`: a DISCONNECT giving "connection lost" as its reason, then FIN — what
+   *   an appliance going down sends. `ssh2` raises that reason as an error while it parses the
+   *   packet, in the same read as the channel's EOF and CLOSE and before the channel's own
+   *   `close` event.
+   * - `fin`: FIN with no DISCONNECT.
+   *
+   * Not a reset: an RST in the same turn can overtake what was written before it, and `reset`
+   * above is the case for that.
+   */
+  readonly then?: 'disconnect' | 'disconnect-lost' | 'fin';
 }
 
 /**
@@ -75,6 +100,9 @@ QUzwC6taWDnnylbQbQAAAEAsKSM2JV6B10rca+MOmWSiJARTGMh5PfGrIeBvBja0
 kmh/KuLpko4Y2Q2oT+He4lsvja1BTPALq1pYOefKVtBtAAAAAAECAwQF
 -----END OPENSSH PRIVATE KEY-----
 `;
+
+/** RFC 4253 §11.1's SSH_DISCONNECT_CONNECTION_LOST. */
+const SSH_DISCONNECT_CONNECTION_LOST = 10;
 
 export class TestSshServer {
   /**
@@ -197,19 +225,29 @@ export class TestSshServer {
           }
           const result = instance.#commands.get(info.command) ?? instance.#fallback;
           const channel: ServerChannel = acceptExec();
-          if (result.reset === true) {
-            if (socket === undefined) {
-              // Said, rather than leaving the command to hang until the client gives up on it.
-              channel.stderr.write('the simulator could not find this connection to reset\n');
-              channel.exit(255);
-              channel.end();
-              return;
-            }
+          const needsSocket =
+            result.reset !== undefined ||
+            result.then === 'fin' ||
+            result.then === 'disconnect-lost';
+          if (needsSocket && socket === undefined) {
+            // Said, rather than leaving the command to hang until the client gives up on it.
+            channel.stderr.write('the simulator could not find this connection to reset\n');
+            channel.exit(255);
+            channel.end();
+            return;
+          }
+          if (result.reset !== undefined) {
+            if (result.reset === 'after-exit-status') channel.exit(result.code ?? 0);
             if (result.stdout !== undefined) channel.write(result.stdout);
-            // A turn later, so what was written is on the wire ahead of the reset. No exit
-            // status and no channel close: the connection goes out from under the command.
-            setImmediate(() => {
-              socket.resetAndDestroy();
+            // **Once the client has read what was written, and not before.** An RST overtakes
+            // data the far end has not read — Linux drops it — and a reset a turn or two later
+            // was measured to arrive first: the client saw the channel open and nothing after.
+            // So the server asks the client something it must answer, after the output and on
+            // the same connection, and resets when the answer comes: a forwarded channel nobody
+            // asked for, which `ssh2` refuses as it parses it. Packets are read in order, so a
+            // refusal means everything written before the request has been read.
+            connection.forwardOut('127.0.0.1', 0, '127.0.0.1', 0, () => {
+              socket?.resetAndDestroy();
             });
             return;
           }
@@ -226,12 +264,33 @@ export class TestSshServer {
             channel.write(result.stdout);
           }
           if (result.stderr !== undefined) channel.stderr.write(result.stderr);
-          if (result.noExitStatus === true) {
-            channel.close();
-            return;
+          switch (result.ending ?? 'exit') {
+            case 'exit':
+              channel.exit(result.code ?? 0);
+              channel.end();
+              break;
+            case 'close':
+              channel.eof();
+              channel.close();
+              break;
+            case 'eof':
+              channel.eof();
+              break;
           }
-          channel.exit(result.code ?? 0);
-          channel.end();
+          switch (result.then) {
+            case 'disconnect':
+              connection.end();
+              break;
+            case 'disconnect-lost':
+              connection._protocol.disconnect(SSH_DISCONNECT_CONNECTION_LOST);
+              socket?.end();
+              break;
+            case 'fin':
+              socket?.end();
+              break;
+            case undefined:
+              break;
+          }
         });
       });
     });

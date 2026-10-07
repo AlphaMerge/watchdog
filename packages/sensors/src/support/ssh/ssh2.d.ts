@@ -44,6 +44,15 @@ declare module 'ssh2' {
   /** One `exec` channel. `stderr` is a separate stream, as it is on the wire. */
   export interface ClientChannel extends Readable {
     readonly stderr: Readable;
+    /**
+     * The server's half of the channel: `'open'` until it sends EOF (`'eof'`) or CLOSE
+     * (`'closed'`), set as `ssh2` parses those messages. Described in `ssh2`'s own `Channel.js`
+     * rather than its README, and read for one thing (`P-259`): whether the server had finished
+     * the channel when the connection went, which no event says — the stream's `end` and
+     * `close` follow the server's EOF and `ssh2`'s teardown alike. When the socket goes `ssh2`
+     * sets it to `'closed'` too, but only after the client's own `error`, `end` or `close`.
+     */
+    readonly incoming: { readonly state: string };
     close(): void;
     on(event: 'data', listener: (chunk: Buffer) => void): this;
     on(event: 'close', listener: (code?: number | null, signal?: string | null) => void): this;

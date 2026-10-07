@@ -50,6 +50,11 @@ function credentials(over: Partial<Record<string, unknown>> = {}): SshCredential
 
 const signal = (): AbortSignal => new AbortController().signal;
 
+/** Resolves once `ready` holds, looking every 10 ms. Bounded by the `within` around it. */
+async function waitFor(ready: () => boolean): Promise<void> {
+  while (!ready()) await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
 /**
  * A wait of this file's own, so a case that hangs fails here and not at the suite's end — and
  * the bound every wait on the server is given in place of a wall-clock assert (`P-268`).
@@ -373,7 +378,10 @@ describe('a device that resets the connection mid-command (P-259)', () => {
     /ECONNRESET/.test(error.message);
 
   it('fails the command, naming the host, the command and the phase', async () => {
-    server.answer('cat /proc/loadavg', { stdout: '0.50 0.40 0.30 1/123 4567\n', reset: true });
+    server.answer('cat /proc/loadavg', {
+      stdout: '0.50 0.40 0.30 1/123 4567\n',
+      reset: 'before-exit-status',
+    });
     const session = await SshSession.open(target(), credentials());
     try {
       await assert.rejects(
@@ -398,7 +406,7 @@ describe('a device that resets the connection mid-command (P-259)', () => {
     };
     process.on('uncaughtExceptionMonitor', onUncaught);
     const pool = new SshSessionPool();
-    server.answer('./check.sh', { stdout: 'value:1\n', reset: true });
+    server.answer('./check.sh', { stdout: 'value:1\n', reset: 'before-exit-status' });
     server.answer('uptime', { stdout: 'up\n' });
     try {
       await assert.rejects(
@@ -435,17 +443,111 @@ describe('a device that resets the connection mid-command (P-259)', () => {
     }
   });
 
-  it('still answers a command whose channel closed with no exit status on a live connection', async () => {
-    // Not every server sends one. The connection is up, the command finished, and what it wrote
-    // is whole: that stays a result for the sensor type to read, as it always was.
-    server.answer('quiet', { stdout: 'ok\n', noExitStatus: true });
+  it('fails a command whose exit status arrived before the rest of its output', async () => {
+    // RFC 4254 does not order the two, and OpenSSH sends the status as soon as the command is
+    // reaped. `ssh2` keeps the code and hands it to the channel's close when the socket goes,
+    // so this used to resolve as `code: 0` with the first half of a `df`.
+    server.answer('df -P -k /', {
+      code: 0,
+      stdout: 'Filesystem     1024-blocks      Used Available Capacity Mounted on\n',
+      reset: 'after-exit-status',
+    });
     const session = await SshSession.open(target(), credentials());
     try {
-      const result = await within(session.exec('quiet', signal()), 5_000, 'the command');
-      assert.deepEqual(result, { stdout: 'ok\n', stderr: '', code: null, signal: null });
-      assert.equal(session.closed, false);
+      await assert.rejects(
+        within(session.exec('df -P -k /', signal()), 5_000, 'the command ending'),
+        lost('df -P -k /'),
+      );
     } finally {
       session.close();
+    }
+  });
+
+  /**
+   * Channels the server finished, on connections that went straight after (`P-259`). Each is a
+   * whole answer, and was one before the connection went, so each is a result: with no exit
+   * status, as some appliances send none, and with the connection's end in the same turn —
+   * in the same read, where the loopback delivers it so.
+   *
+   * Not a reset in the same turn: an RST can overtake what was written just before it, and
+   * then the client never hears the server finish — which is the failure above, correctly.
+   */
+  const finished: {
+    readonly name: string;
+    readonly ending: 'close' | 'eof';
+    readonly then: 'disconnect' | 'disconnect-lost' | 'fin' | undefined;
+  }[] = [
+    { name: 'EOF and CLOSE, on a connection that stays up', ending: 'close', then: undefined },
+    { name: 'EOF and CLOSE, then a DISCONNECT', ending: 'close', then: 'disconnect' },
+    {
+      name: 'EOF and CLOSE, then a DISCONNECT for a lost connection',
+      ending: 'close',
+      then: 'disconnect-lost',
+    },
+    { name: 'EOF and no CLOSE, then a FIN', ending: 'eof', then: 'fin' },
+  ];
+  for (const { name, ending, then } of finished) {
+    it(`answers a command the server finished with no exit status: ${name}`, async () => {
+      server.answer('quiet', {
+        stdout: 'ok\n',
+        ending,
+        ...(then === undefined ? {} : { then }),
+      });
+      const session = await SshSession.open(target(), credentials());
+      try {
+        const result = await within(session.exec('quiet', signal()), 5_000, 'the command');
+        assert.deepEqual(result, { stdout: 'ok\n', stderr: '', code: null, signal: null });
+        if (then === undefined) assert.equal(session.closed, false);
+      } finally {
+        session.close();
+      }
+    });
+  }
+
+  /** A command still running when the probe itself closes the connection. */
+  const closedByProbe = (error: unknown): boolean =>
+    error instanceof SshError &&
+    error.phase === 'exec' &&
+    error.command === 'sleep 9999' &&
+    error.message.startsWith(
+      'the connection to 127.0.0.1 was lost while running sleep 9999, before the command',
+    ) &&
+    error.message.endsWith('this probe closed the connection') &&
+    !/server closed|ECONNRESET/.test(error.message);
+
+  it('says the probe closed the connection when it did, not the server', async () => {
+    server.behave({ password: 'monitor', hang: true });
+    const session = await SshSession.open(target(), credentials(), { commandTimeoutMs: 30_000 });
+    const running = session.exec('sleep 9999', signal());
+    await within(
+      waitFor(() => server.seen.includes('sleep 9999')),
+      5_000,
+      'the command',
+    );
+    session.close();
+    await assert.rejects(within(running, 5_000, 'the command ending'), closedByProbe);
+  });
+
+  it('says so for a command cut off by closeAll as well', async () => {
+    server.behave({ password: 'monitor', hang: true });
+    const pool = new SshSessionPool();
+    const lease = await within(
+      pool.acquire(target(), credentials(), { commandTimeoutMs: 30_000 }),
+      5_000,
+      'the connection',
+    );
+    const running = lease.session.exec('sleep 9999', signal());
+    try {
+      await within(
+        waitFor(() => server.seen.includes('sleep 9999')),
+        5_000,
+        'the command',
+      );
+      pool.closeAll();
+      await assert.rejects(within(running, 5_000, 'the command ending'), closedByProbe);
+    } finally {
+      lease.release();
+      pool.closeAll();
     }
   });
 });

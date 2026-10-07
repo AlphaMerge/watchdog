@@ -8055,16 +8055,25 @@ because each is a decision rather than a defect:
 
       **P-259 outcome. A command the connection took with it is an `SshError` in the `exec`
       phase, and the simulator can reset a connection under a command.**
-      - **`SshSession.exec`**: a channel that closes with neither an exit code nor a signal
-        while the session's connection has gone (`#closed`, set by the client's `error`,
-        `end` or `close`, which `ssh2` emits before it closes the channels) rejects with
-        `phase: 'exec'`, the host and the command, the client's error as `cause`, and *the
-        connection to HOST was lost while running COMMAND, before the command reported an exit
-        status — what it wrote may be incomplete, so nothing of it is used: read ECONNRESET*.
-        What it wrote is dropped, not handed over. A channel closed with no exit status on a
-        connection that is **still up** stays a result with `code: null`, as before: some
-        servers never send one, and that command finished. `close()` records *this probe
-        closed the connection*, so a command cut off by `closeAll` is not blamed on the server.
+      - **`SshSession.exec`**: when the connection goes (the client's first `error`, `end` or
+        `close`, which `ssh2` emits after parsing everything the server sent before it and
+        before it tears the channels down), each running command notes whether the server had
+        finished its channel — sent EOF or CLOSE (`ssh2`'s `channel.incoming.state`, declared
+        in `ssh2.d.ts`; no event says it). On the channel's `close`, a command whose connection
+        went before the server finished it rejects with `phase: 'exec'`, the host and the
+        command, the client's error as `cause`, and *the connection to HOST was lost while
+        running COMMAND, before the command reported an exit status — what it wrote may be
+        incomplete, so nothing of it is used: read ECONNRESET*, **whatever exit code had
+        arrived**. A channel the server finished stays a result, with `code: null` if it sent
+        no status, even when the connection went in the same read. `close()` records *this
+        probe closed the connection*, so a command cut off by `closeAll` is not blamed on the
+        server.
+      - **Review (`cff2e592`):** the first guard asked whether a code had arrived. That passed
+        a reset after an early exit status (RFC 4254 does not order it after the data, OpenSSH
+        sends it on reaping, and `ssh2` hands the saved code to the teardown's `close`) as
+        `code: 0` with half the output, and failed an appliance that sends no status and
+        disconnects in the same read, or sends EOF and then FIN — `ssh.load` readings went
+        Down. Untested too: the probe-closed wording.
       - **Was it reachable as a wrong answer, not only a vague one?** Yes: `ssh.load` never
         reads the exit code, so a reset after `/proc/loadavg`'s line and before `nproc`'s
         reported the load with no processor count, as a success. `ssh.meminfo`, `ssh.diskfree`
@@ -8073,20 +8082,34 @@ because each is a decision rather than a defect:
         `sshCheck`, whose `withSsh` gives the lease back; none needed a change of its own.
       - **The simulator** (`TestSshServer`) now owns its TCP listener and hands each socket to
         `ssh2.Server.injectSocket`, keyed by the client's address and port so a connection can
-        find its socket (`ssh2` gives a handler none). `CommandResult.reset` writes `stdout`
-        and then sends a real RST (`resetAndDestroy`) a turn later; `noExitStatus` closes the
-        channel with no exit status on a live connection. `ssh2.d.ts` declares `injectSocket`
-        and the `connection` event's `info`.
+        find its socket (`ssh2` gives a handler none). `CommandResult.reset` is
+        `before-exit-status` (`stdout`, then a real RST) or `after-exit-status` (the status,
+        then `stdout`, then the RST). The RST waits for the client to refuse a forwarded channel
+        (`forwardOut`) sent after the output, because a reset one or two turns later was seen to
+        overtake the output, which the client then never read. `ending` is `exit`, `close`
+        (EOF and CLOSE, no status) or `eof` (EOF only); `then` is `disconnect` (by
+        application), `disconnect-lost` (reason 10, through `ssh2`'s private `_protocol`, the
+        one reason the client raises as an error while parsing) or `fin`. A reset in the same
+        turn is not offered: it can overtake the output, and the client then rightly fails.
       - **Tests.** `ssh-session.test.ts`, *a device that resets the connection mid-command*:
         the exec fails with the phase, host, command, message and `ECONNRESET`, the session
         reads closed and refuses the next command; through a pool, the lease is back
         (`inUse` 0), the next check reconnects (`stale` 1, `opened` 2, server connections 2)
-        and `uncaughtExceptionMonitor` heard nothing; a no-exit-status channel on a live
-        connection still resolves `code: null` with its output. `ssh-sensors.test.ts`: each
-        of the four types, given an answer it could read or misread and then a reset, fails
-        with the lost-connection message. Mutations: without the new branch three of the four
-        fail (the no-exit-status case passes); without the liveness condition only the
-        no-exit-status case fails.
+        and `uncaughtExceptionMonitor` heard nothing; a reset after an early exit status fails;
+        channels the server finished with no status (connection up, then `disconnect`,
+        `disconnect-lost`, EOF then `fin`) resolve `code: null` with their output; a hanging
+        command ended by `session.close()` and by `pool.closeAll()` ends in *this probe closed
+        the connection* and never says *server closed* or `ECONNRESET`. `ssh-sensors.test.ts`:
+        each of the four types fails on a mid-command reset; `ssh.script` fails on a reset after
+        an early `0`; `ssh.load` reads an appliance that disconnects with reason 10 straight
+        after its answer.
+      - **Mutations** (each restored byte for byte, `dist` rebuilt): the first commit's guard
+        fails 5/5 of the review's cases; reading the channel's state at `close` instead of when
+        the connection went fails 7 (every reset and both probe-closed cases); ignoring whether
+        the server finished fails 3 (`disconnect-lost` twice, EOF then FIN); without the
+        probe-closed line the 2 attribution cases fail. The DISCONNECT "by application" case
+        passes under the first guard: `ssh2` emits the channel's `close` before it reads the
+        FIN, so it guards against a regression rather than reproducing one.
       - **Not done:** the probe-level path (worker pool, `result-sink`) was not exercised with
         a reset; it carries a thrown check error as it carries any other, and the sensor id is
         the runner's to add, as for every type.
