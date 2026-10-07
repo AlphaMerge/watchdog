@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -8,14 +9,14 @@ import { pino } from 'pino';
 import type { CheckResult } from '@ms/shared';
 import { SCRIPT_DIR_ENV, SCRIPT_GRACE_MS } from '@ms/sensors/script';
 import {
-  GroupLines,
   KILL_MARGIN_MS,
   leftOf,
   ProcessRunner,
   ReadyLine,
   STARTUP_TIMEOUT_MS,
 } from '../src/runner/process-runner.js';
-import { GROUP_MARKER, READY_MARKER, type ResultMeta } from '../src/runner/types.js';
+import { linuxProcessView, type ProcessView } from '../src/runner/script-groups.js';
+import { READY_MARKER, type ResultMeta } from '../src/runner/types.js';
 import { within } from './support/probe-process.js';
 
 /**
@@ -49,6 +50,7 @@ function runnerOf(
     registryModule?: string;
     startupTimeoutMs?: number;
     childEnv?: Record<string, string>;
+    processView?: ProcessView | null;
   } = {},
 ): {
   runner: ProcessRunner;
@@ -64,6 +66,7 @@ function runnerOf(
       ? {}
       : { startupTimeoutMs: options.startupTimeoutMs }),
     ...(options.childEnv === undefined ? {} : { childEnv: options.childEnv }),
+    ...(options.processView === undefined ? {} : { processView: options.processView }),
     onResult: (result, meta) => seen.push({ result, meta }),
   });
   runners.push(runner);
@@ -775,7 +778,11 @@ describe('a script check in a process of its own (`P-262`)', () => {
     assert.equal(runner.stats().scriptGroupsEnded, 0);
   });
 
-  describe('a check process that dies outright (`P-266`)', () => {
+  // Linux only: the runner verifies a group in `/proc` before it kills it, and kills nothing where
+  // there is none (macOS, a development machine).
+  const procfs = process.platform === 'linux' ? false : 'the runner needs /proc (Linux)';
+
+  describe('a check process that dies outright (`P-266`)', { skip: procfs }, () => {
     // The script's group is its own, so the runner's kill of the check process's group never
     // reached it, and a check process that died without hearing its cancel left it running.
 
@@ -840,7 +847,75 @@ describe('a script check in a process of its own (`P-262`)', () => {
         `${String(scriptPid)} and ${String(helperPid)} to be gone`,
       );
       assert.equal(runner.stats().scriptGroupsEnded, 1, 'and counted');
+      assert.equal(runner.stats().scriptGroupsRefused, 0);
       assert.equal(runner.stats().crashed, 1);
+    });
+
+    it('kills nothing a check process names that it did not start, and counts it', async () => {
+      // The privilege a forged line would borrow: the runner may be root, running checks as
+      // another user. The victim is a process of the test's own, its own session and group leader
+      // as a service's main process is, but no child of the check process. The line comes from
+      // the check process itself, standing for whatever controls its stdout: Node's pipes are
+      // socket pairs, which a script cannot reopen through `/proc/$PPID/fd/1`, but one that may
+      // `ptrace` its parent (Yama's scope 0) or take the descriptor with `pidfd_getfd` can write.
+      const victim = spawn('sleep', ['60'], { detached: true, stdio: 'ignore' });
+      const pid = victim.pid ?? 0;
+      try {
+        assert.ok(pid > 1, 'the victim started');
+        const { runner, seen } = runnerOf();
+        runner.submit(request(126, 'test.forge-group', { target: pid }));
+        await until(() => seen.length === 1, 'the check to answer', 40_000);
+        assert.equal(seen[0]?.result.outcome, 'ok', seen[0]?.result.message);
+        assert.equal(seen[0].result.message, 'forged');
+        await until(() => runner.stats().running === 0, 'its process to be ended', 10_000);
+
+        assert.equal(gone(pid), false, 'the process it named is still running');
+        assert.equal(runner.stats().scriptGroupsRefused, 1, 'and the forgery is counted');
+        assert.equal(runner.stats().scriptGroupsEnded, 0);
+      } finally {
+        victim.kill('SIGKILL');
+      }
+      await goneWithin(5_000, [pid], `the test's own ${String(pid)} to be cleaned up`);
+    });
+
+    it('leaves alone a group whose leader’s pid names another process by then', async () => {
+      // A recycled pid, as an injected `/proc` tells it: the leader's start time is not the one
+      // recorded. The real one is still the script, so it survives to show it was not killed.
+      const real = linuxProcessView();
+      assert.ok(real !== null);
+      let recycled = false;
+      const view: ProcessView = {
+        read: (pid) => {
+          const entry = real.read(pid);
+          return entry === null || !recycled ? entry : { ...entry, starttime: 'someone else' };
+        },
+        signalGroup: (pgid, signal) => real.signalGroup(pgid, signal),
+      };
+      const { runner, seen } = runnerOf({
+        registryModule: CATALOGUE,
+        childEnv: { [SCRIPT_DIR_ENV]: dir },
+        processView: view,
+      });
+      const { request: check, file } = scriptCheck(127, 'orphaned.sh', 60_000);
+      runner.submit(check);
+      await until(() => existsSync(file), 'the script to start its helper', 40_000);
+      const [scriptPid = 0, helperPid = 0, checkPid = 0] = await numbersIn(file, 3);
+      try {
+        recycled = true;
+        process.kill(checkPid, 'SIGKILL');
+        await until(() => seen.length === 1, 'the killed check to be reported', 20_000);
+        assert.equal(runner.stats().scriptGroupsRecycled, 1, 'counted');
+        assert.equal(runner.stats().scriptGroupsEnded, 0);
+        assert.equal(gone(scriptPid), false, 'the script was not killed');
+        assert.equal(gone(helperPid), false, 'nor its helper');
+      } finally {
+        try {
+          process.kill(-scriptPid, 'SIGKILL');
+        } catch {
+          // Gone already, which the assertions above have said.
+        }
+      }
+      await goneWithin(5_000, [scriptPid, helperPid], 'the test’s cleanup');
     });
 
     it('leaves alone what a script that answered started and left', async () => {
@@ -855,6 +930,7 @@ describe('a script check in a process of its own (`P-262`)', () => {
       try {
         await until(() => runner.stats().running === 0, 'its process to be ended', 10_000);
         assert.equal(runner.stats().scriptGroupsEnded, 0);
+        assert.equal(runner.stats().scriptGroupsRefused, 0, 'its own group was its own');
         assert.equal(gone(helperPid), false, 'the helper it left is still running');
       } finally {
         try {
@@ -865,45 +941,5 @@ describe('a script check in a process of its own (`P-262`)', () => {
       }
       await goneWithin(5_000, [helperPid], `the helper ${String(helperPid)} to be cleaned up`);
     });
-  });
-});
-
-describe('the group lines (`P-266`)', () => {
-  it('keeps a group from its start to its end, however the chunks fall', () => {
-    const lines = new GroupLines();
-    lines.push(`${GROUP_MARKER}started 4242\n`);
-    lines.push(`${GROUP_MARKER}sta`);
-    lines.push('rted 4343');
-    assert.deepEqual(lines.open(), [4242], 'not before its line ends');
-    lines.push(`\n${GROUP_MARKER}ended 4242\n`);
-    assert.deepEqual(lines.open(), [4343]);
-    lines.push(`banner\n${GROUP_MARKER}ended 4343\nmore`);
-    assert.deepEqual(lines.open(), []);
-  });
-
-  it('names nothing it would be wrong to kill', () => {
-    const lines = new GroupLines();
-    for (const said of [
-      'started 0',
-      'started 1',
-      `started ${String(process.pid)}`,
-      'started -4242',
-      'started +4242',
-      'started 04242',
-      'started 4242 ',
-      'started 4242x',
-      'started  4242',
-      'started 12345678901',
-      'begun 4242',
-    ]) {
-      lines.push(`${GROUP_MARKER}${said}\n`);
-    }
-    lines.push(`said ${GROUP_MARKER}started 4242\n`);
-    // A long line that ends in a group line is still the end of a long line.
-    lines.push('x'.repeat(80));
-    lines.push(`${GROUP_MARKER}started 4242\n`);
-    assert.deepEqual(lines.open(), []);
-    lines.push(`${GROUP_MARKER}started 4242\n`);
-    assert.deepEqual(lines.open(), [4242], 'the next line starts afresh');
   });
 });

@@ -1,5 +1,10 @@
 import { resourceLimits } from 'node:worker_threads';
-import type { CheckContext, CheckExecution, CheckRegistry } from '../../src/runner/types.js';
+import {
+  GROUP_MARKER,
+  type CheckContext,
+  type CheckExecution,
+  type CheckRegistry,
+} from '../../src/runner/types.js';
 
 /**
  * Checks that behave badly on purpose.
@@ -137,6 +142,12 @@ const registry: CheckRegistry = {
         // control, and the runner must take the *last* marker rather than the first.
         process.stdout.write('ms-check-result:{"ok":true,"durationMs":0,"message":"spoofed"}\n');
         return { channels: [{ key: 'value', value: 2 }], message: 'the real answer' };
+
+      case 'test.forge-group':
+        // Names a process group it did not start, on the line the runner reads for its script
+        // groups (`P-266`): what anything that controls a check process's stdout can say.
+        process.stdout.write(`${GROUP_MARKER}started ${String(context.params['target'])}\n`);
+        return { channels: [{ key: 'value', value: 3 }], message: 'forged' };
 
       case 'test.echo':
         // Hands back what the check was given, so a test can prove credentials arrived without

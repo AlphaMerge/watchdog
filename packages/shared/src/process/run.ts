@@ -42,6 +42,12 @@ export interface ProgramRunOptions {
    * there. Called past `maxOutputBytes` as well, because the bound is on keeping, not reading.
    */
   readonly onStdout?: (chunk: Buffer) => void;
+  /**
+   * The program's pid, as soon as it has one (`P-266`). The probe's runner checks that a script
+   * group its check process names really is that process's child, and the parent's pid is the
+   * one thing it must take from its own spawn and never from what the child says.
+   */
+  readonly onSpawn?: (pid: number) => void;
 }
 
 interface ProgramOutput {
@@ -133,6 +139,7 @@ export async function runProgram(options: ProgramRunOptions): Promise<ProgramRun
   // already named the group. No pid means the spawn failed, and there is no group.
   const group = process.platform !== 'win32' ? child.pid : undefined;
   if (group !== undefined) announce('started', group);
+  if (child.pid !== undefined) options.onSpawn?.(child.pid);
 
   const stdout = new BoundedSink(options.maxOutputBytes);
   const stderr = new BoundedSink(options.maxOutputBytes);
@@ -158,6 +165,36 @@ export async function runProgram(options: ProgramRunOptions): Promise<ProgramRun
     let endedBy: 'deadline' | 'signal' = 'deadline';
     let endedAfterMs = 0;
 
+    // **When the group has ended, not only its leader** (`P-266`). `close` waits for the pipes,
+    // and something that left the group with `setsid` can hold them for as long as it likes, after
+    // the program itself has been reaped and its pid freed. Once the group is empty its id can be
+    // reused, so from then on it is never signalled, and anyone listening is told at once rather
+    // than at a `close` that may be minutes away. Checked at `exit`, and every 250 ms after it
+    // while members remain; a group with members keeps its id, so until then it is still this one.
+    let groupGone = false;
+    let endedSaid = false;
+    let watch: NodeJS.Timeout | undefined;
+    const sayEnded = (): void => {
+      if (endedSaid || group === undefined) return;
+      endedSaid = true;
+      announce('ended', group);
+    };
+    const groupHasGone = (): boolean => {
+      if (group === undefined || groupGone) return true;
+      try {
+        process.kill(-group, 0);
+        return false;
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return false;
+        groupGone = true;
+        sayEnded();
+        return true;
+      }
+    };
+    const stop = (signal: NodeJS.Signals): void => {
+      if (!groupGone) terminate(child, signal);
+    };
+
     const grace = options.graceMs ?? DEFAULT_GRACE_MS;
     let hardTimer: NodeJS.Timeout | undefined;
     const end = (by: 'deadline' | 'signal'): void => {
@@ -165,12 +202,12 @@ export async function runProgram(options: ProgramRunOptions): Promise<ProgramRun
       timedOut = true;
       endedBy = by;
       endedAfterMs = elapsed();
-      terminate(child, 'SIGTERM');
+      stop('SIGTERM');
       // Asked to stop, then made to. A program that ignores SIGTERM is exactly the one a hard
       // timeout exists for.
       hardTimer = setTimeout(() => {
         hardKilled = true;
-        terminate(child, 'SIGKILL');
+        stop('SIGKILL');
       }, grace);
     };
     const deadline = setTimeout(() => {
@@ -187,6 +224,7 @@ export async function runProgram(options: ProgramRunOptions): Promise<ProgramRun
       settled = true;
       clearTimeout(deadline);
       if (hardTimer !== undefined) clearTimeout(hardTimer);
+      clearInterval(watch);
       options.signal?.removeEventListener('abort', aborted);
       resolve(run);
     };
@@ -202,11 +240,19 @@ export async function runProgram(options: ProgramRunOptions): Promise<ProgramRun
       finish({ outcome: 'failed', ...describeSpawnError(error), ...output() });
     });
 
+    child.on('exit', () => {
+      if (settled || groupHasGone()) return;
+      watch = setInterval(() => {
+        if (groupHasGone()) clearInterval(watch);
+      }, 250);
+      watch.unref();
+    });
+
     // `close` rather than `exit`: the process has ended *and* its pipes have been read to the
     // end. Resolving on `exit` loses whatever the program wrote just before it finished, which
     // is usually the line explaining why it failed.
     child.on('close', (code: number | null, signal: string | null) => {
-      if (group !== undefined) announce('ended', group);
+      sayEnded();
       if (timedOut) {
         finish({ outcome: 'timeout', hardKilled, endedBy, endedAfterMs, ...output() });
         return;

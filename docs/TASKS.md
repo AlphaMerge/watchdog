@@ -8745,9 +8745,7 @@ because each is a decision rather than a defect:
       - **Strict, because the runner sends `SIGKILL` to what it is told.** `started` or `ended`, a
         space, and a pid of one to ten digits with no sign or leading zero; never 0, never 1
         (`kill(-1)` is every process the probe's user may signal), and never the probe's own pid.
-        Only the probe's own code writes to the check process's stdout: a script's output is
-        captured on pipes of its own and reaches the runner only inside the JSON of the result
-        line, which cannot hold a newline.
+        The syntax was not enough, and the review's amendment below has `/proc` decide.
       - **The normal path ends nothing.** A script that ended, on its own or at either limit,
         said `ended` before its check answered, so the runner forgets its group. What a script
         started and left running after it ended on its own stays running, as it always has: the
@@ -8785,6 +8783,66 @@ because each is a decision rather than a defect:
       - **Runs:** run-program, process-runner, probe-health-report, exe-script,
         windows-transport and core's `build-hygiene` whole, 222/222; the `P-266` tests twice
         more, 7/7 each.
+      - **Amended on review** (a second commit). Two findings, both about killing a group the
+        runner has only been told of:
+        - **A line is a claim, and `/proc` decides** (`script-groups.ts`). The runner was root
+          and the check process ran as `processUid`, so anything able to write a `started` line on
+          the check process's stdout could have the probe `SIGKILL` the database or `sshd`. Node's
+          stdio pipes are socket pairs, which `/proc/$PPID/fd/1` cannot reopen (`ENXIO`, found
+          writing the test), but a script that may `ptrace` its parent (Yama scope 0, the default
+          on Debian and RHEL) or take the descriptor with `pidfd_getfd` can write there. Now, at
+          `started`, `/proc/<N>/stat` must show `pid == pgrp == session` (what `runProgram`'s
+          `setsid` makes), a `ppid` that is the check process's pid as the runner's own spawn gave
+          it (`runProgram`'s new `onSpawn`), and, with a uid set, that real uid in
+          `/proc/<N>/status`; its `starttime` (field 22, counted from the last `)` of the command
+          name) is recorded. The kernel sets a parent at `fork` and nothing can choose to be
+          another's child, so a forged line can name only what the check process itself spawned.
+          A named process that fails is refused, counted (`scriptGroupsRefused`) and logged; one
+          not there is passed over, uncounted (a script that ended at once). At most 16 lines a
+          check process are checked (`MAX_GROUPS_PER_CHECK`), so a flood costs nothing. The
+          reads are synchronous on the main thread: `/proc` is kernel memory, never a disk.
+        - **A pid can be reused, a live group's id cannot.** At the end, for each recorded group:
+          `/proc/<N>` with the recorded `starttime` is the same leader (alive, or a zombie not yet
+          reaped), and a leader cannot leave its group or session: killed. Another `starttime`:
+          the pid names a new process, likeliest another sensor's check process, which
+          `runProgram` also makes a group leader: not killed, counted (`scriptGroupsRecycled`) and
+          logged. `/proc/<N>` gone: `kill(-N, 0)`; a pid stays allocated while any process has it
+          as its group or session id, so a group with members is still the script's, and only its
+          session can hold members of it: killed. `ESRCH`: nothing left.
+        - **`ended` when the group empties, not only at `close`** (`run.ts`). A `setsid cmd &`
+          holding the pipes kept `close` away for as long as it ran, after the script was reaped
+          and its pid freed. At `exit`, and every 250 ms after it while members remain,
+          `kill(-pid, 0)`; on `ESRCH` the group is said to have ended and is never signalled
+          again, which also stops `runProgram`'s own deadline from signalling a reused id.
+        - **No `/proc`, no killing.** `linuxProcessView()` is null off Linux (macOS, development),
+          and then nothing is recorded or ended; `administration.md` says so.
+        - **Left:** a group recorded, whose members all end and whose id is then reused by a
+          process that makes itself a group leader and exits leaving members, all inside 250 ms
+          and before the check process dies, would be killed. A check process killed between its
+          script's spawn and the runner reading the line leaves an orphan the check refuses
+          (`ppid` is then 1), counted as a refusal, not ended.
+        - **Tests.** `script-groups.test.ts`: the group lines; a group recorded and forgotten; five
+          forgeries refused and counted (a service's leader, not group leader, not session leader,
+          another pid's stat, another uid), no uid asked when none is set, a missing process
+          passed over, the 16-line bound; at the end killed when the leader is the recorded one,
+          not killed and reported when the `starttime` differs (an injected `/proc`), killed when
+          the leader is gone and members remain, nothing when all are gone, a refused kill
+          reported, nothing after `ended`; `parseProc` on a command name holding `) (` and
+          spaces, and on stats it cannot read; `readProc` on a real session leader named
+          `a) (b c` on Linux. `process-runner.test.ts` (Linux): a check process naming a sleeping
+          session leader the test started survives, refused and counted (`test.forge-group`);
+          a recycled leader through an injected `/proc`, the script and its helper left running
+          and counted; the orphan and the answered-script tests as before. `run-program.test.ts`
+          (Linux): `ended` said when the group empties while a `setsid` program holds the pipes,
+          before the run ends, and once; no `SIGTERM` or `SIGKILL` to a group found gone at
+          `exit`, its deadline coming while the pipes were held.
+        - **Mutation 14/14:** `ppid`, `pgrp`, `session`, `pid` and uid checks each dropped; the
+          `starttime` comparison dropped; `kill(-N, 0)` skipped; the 16-line bound dropped; the
+          `exit` check skipped; the 250 ms watch stopping after one look; signalling a gone group;
+          `onSpawn` not called; refusals and recycled pids not counted. Not mutation-tested:
+          `linuxProcessView()`'s platform gate, since the toolchain is Linux.
+        - **Runs:** the same six files with `script-groups.test.ts`, in the toolchain (Linux),
+          244/244, none skipped; the `P-266` tests twice more, 29/29 each.
 
 - [ ] **P-267 — `checkAbortGraceMs` below 1 s outruns PowerShell's kill** · S · P-262 · Found
       2026-10-05 in `P-262`. A pool worker running a Windows sensor ends PowerShell on the

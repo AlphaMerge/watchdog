@@ -2,7 +2,8 @@ import { join } from 'node:path';
 import { runProgram, type CheckResult, type Logger } from '@ms/shared';
 // From `types.js`, never from `check-child.js`: that module is an entry point with top-level
 // `await` on stdin, and importing it here once made the probe sit waiting for its own stdin.
-import { GROUP_MARKER, READY_MARKER, RESULT_MARKER } from './types.js';
+import { READY_MARKER, RESULT_MARKER } from './types.js';
+import { linuxProcessView, ScriptGroups, type ProcessView } from './script-groups.js';
 import { RefusalLog } from './refusal-log.js';
 import type { CheckPhase, CheckRequest, ResultMeta, SubmitOutcome } from './index.js';
 
@@ -77,6 +78,17 @@ export interface ProcessRunnerStats {
    * there needs a protocol version.
    */
   scriptGroupsEnded: number;
+  /**
+   * Groups a check process named that `/proc` did not show to be its own (`P-266`): a forged
+   * line, or a check process killed so soon after its spawn that its script was orphaned before
+   * the line was read. Never killed. Logged with the sensor.
+   */
+  scriptGroupsRefused: number;
+  /**
+   * Groups left open whose leader's pid named another process by the time the check process had
+   * gone (`P-266`). Never killed. Logged with the sensor.
+   */
+  scriptGroupsRecycled: number;
   waitMs: Percentiles;
   runMs: Percentiles;
   /**
@@ -110,6 +122,11 @@ export interface ProcessRunnerOptions {
   registryModule?: string;
   /** Overridable so tests can drive a child that misbehaves on purpose. */
   childModule?: string;
+  /**
+   * How the runner verifies and ends the script groups a check process leaves (`P-266`).
+   * `/proc` on Linux; null — nothing verified, nothing ended — anywhere else. Injectable for tests.
+   */
+  processView?: ProcessView | null;
   /**
    * How long a check's process may take to load the probe's sensor types before it is ended and
    * the check reported as never started (`P-260`). `STARTUP_TIMEOUT_MS` unless a test sets it.
@@ -196,6 +213,7 @@ export class ProcessRunner {
   readonly #registryModule: string;
   readonly #childModule: string;
   readonly #startupTimeoutMs: number;
+  readonly #processView: ProcessView | null;
   readonly #onResult: (result: CheckResult, meta: ResultMeta) => void;
 
   readonly #queue: Job[] = [];
@@ -216,6 +234,8 @@ export class ProcessRunner {
   #crashed = 0;
   #startupFailed = 0;
   #scriptGroupsEnded = 0;
+  #scriptGroupsRefused = 0;
+  #scriptGroupsRecycled = 0;
   readonly #waits: number[] = [];
   readonly #runs: number[] = [];
   readonly #startups: number[] = [];
@@ -233,6 +253,8 @@ export class ProcessRunner {
       options.registryModule ?? join(import.meta.dirname, 'catalogue-registry.js');
     this.#childModule = options.childModule ?? join(import.meta.dirname, 'check-child.js');
     this.#startupTimeoutMs = Math.max(1, options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS);
+    this.#processView =
+      options.processView === undefined ? linuxProcessView() : options.processView;
     this.#onResult = options.onResult;
     this.#refusals = new RefusalLog(
       this.#logger,
@@ -353,12 +375,17 @@ export class ProcessRunner {
       deadline.abort();
     };
     let clock = setTimeout(giveUp, this.#startupTimeoutMs);
-    const groups = new GroupLines();
+    // Made at the spawn, when the check process's pid is known: it is what a script's parent must
+    // be. From the runner's own spawn, never from anything the check process says.
+    let groups: ScriptGroups | undefined;
+    const onSpawn = (pid: number): void => {
+      if (this.#processView !== null) groups = new ScriptGroups(this.#processView, pid, this.#uid);
+    };
     const onStdout = (chunk: Buffer): void => {
       // latin1 maps each byte to one character, so a marker split across two chunks, or a
       // multi-byte character a library printed before it, cannot hide it.
       const text = chunk.toString('latin1');
-      groups.push(text);
+      groups?.push(text);
       if (readyAt !== undefined || gaveUpAfterMs !== undefined) return;
       if (!ready.push(text)) return;
       readyAt = process.hrtime.bigint();
@@ -392,6 +419,7 @@ export class ProcessRunner {
       timeoutMs: this.#startupTimeoutMs + job.request.timeoutMs + KILL_MARGIN_MS,
       signal: AbortSignal.any([job.abort.signal, deadline.signal]),
       onStdout,
+      onSpawn,
       maxOutputBytes: this.#maxOutputBytes,
       stdin: payload,
       ...(this.#uid === undefined ? {} : { uid: this.#uid }),
@@ -401,7 +429,7 @@ export class ProcessRunner {
     if (gaveUpAfterMs !== undefined) record(this.#startups, gaveUpAfterMs);
     // Before anything else, a check abandoned by `stop` included: the check process has gone, and
     // whatever it started and did not end has nobody else to end it.
-    this.#endLeftBehind(job, groups.open());
+    if (groups !== undefined) this.#endLeftBehind(job, groups);
 
     // Abandoned by `stop` while it ran, and answered there.
     if (job.settled) return;
@@ -546,37 +574,40 @@ export class ProcessRunner {
   }
 
   /**
-   * Ends the process groups a check process had started and not seen end, once it has gone
-   * (`P-266`).
+   * Ends the script groups a check process had started and not seen end, once it has gone
+   * (`P-266`), verified against `/proc` as `ScriptGroups` says, and logs what it refused.
    *
    * **`SIGKILL`, at once.** The check process that would have read the script's output and given
    * it its grace is gone, and the pipes the script writes to went with it; a `SIGTERM` would buy a
-   * script nothing but a write that fails. A group that has already gone is passed over and not
-   * counted: a script that ended between the check process's last line and its death.
-   *
-   * POSIX only, as the announcements are: on Windows a script has no group of its own, and what a
-   * check process leaves there is `H-38`'s.
+   * script nothing but a write that fails.
    */
-  #endLeftBehind(job: Job, open: readonly number[]): void {
-    if (open.length === 0 || process.platform === 'win32') return;
-    const ended: number[] = [];
-    for (const pgid of open) {
-      try {
-        process.kill(-pgid, 'SIGKILL');
-        ended.push(pgid);
-      } catch (error: unknown) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code === 'ESRCH') continue;
-        this.#logger.error(
-          { sensorId: job.request.sensorId, sensorType: job.request.sensorType, pgid, code },
-          'a check process left a process group running that this probe could not end',
-        );
-      }
+  #endLeftBehind(job: Job, groups: ScriptGroups): void {
+    const about = { sensorId: job.request.sensorId, sensorType: job.request.sensorType };
+    if (groups.refused.length > 0) {
+      this.#scriptGroupsRefused += groups.refused.length;
+      this.#logger.warn(
+        { ...about, count: groups.refused.length, pgids: groups.refused.slice(0, 8) },
+        'a check process named process groups that are not its own; this probe left them alone',
+      );
+    }
+    const { ended, recycled, failed } = groups.endLeftBehind();
+    if (recycled.length > 0) {
+      this.#scriptGroupsRecycled += recycled.length;
+      this.#logger.warn(
+        { ...about, pgids: recycled },
+        'a check process left a group whose leader’s pid now names another process; this probe left it alone',
+      );
+    }
+    for (const { pgid, code } of failed) {
+      this.#logger.error(
+        { ...about, pgid, code },
+        'a check process left a process group running that this probe could not end',
+      );
     }
     if (ended.length === 0) return;
     this.#scriptGroupsEnded += ended.length;
     this.#logger.warn(
-      { sensorId: job.request.sensorId, sensorType: job.request.sensorType, pgids: ended },
+      { ...about, pgids: ended },
       'a check process ended and left what it started running; this probe ended it',
     );
   }
@@ -632,6 +663,8 @@ export class ProcessRunner {
       crashed: this.#crashed,
       startupFailed: this.#startupFailed,
       scriptGroupsEnded: this.#scriptGroupsEnded,
+      scriptGroupsRefused: this.#scriptGroupsRefused,
+      scriptGroupsRecycled: this.#scriptGroupsRecycled,
       waitMs: percentiles(this.#waits),
       runMs: percentiles(this.#runs),
       startupMs: this.#startups.length === 0 ? null : percentiles(this.#startups),
@@ -748,57 +781,6 @@ export class ReadyLine {
       this.#overlong = false;
       rest = rest.slice(end + 1);
     }
-  }
-}
-
-/**
- * Reads a check process's group lines (`GROUP_MARKER`, `P-266`) and keeps the groups it has
- * started and not yet seen end.
- *
- * **Strict, because the runner sends `SIGKILL` to what this names.** A whole line, from its
- * start, `started` or `ended`, a space and a pid of at most ten digits with no sign or leading
- * zero; anything else is not a group line. Never 0 or 1, and never this process: `kill(-1)` is
- * every process the probe's user may signal, and the probe's own group would be the probe.
- * Holds at most one such line's length, however much the child writes, as `ReadyLine` does.
- */
-export class GroupLines {
-  static readonly #longest = GROUP_MARKER.length + 'started '.length + 10;
-  readonly #open = new Set<number>();
-  #line = '';
-  #overlong = false;
-
-  push(text: string): void {
-    let rest = text;
-    for (;;) {
-      const end = rest.indexOf('\n');
-      if (!this.#overlong) {
-        this.#line += end === -1 ? rest : rest.slice(0, end);
-        if (this.#line.length > GroupLines.#longest) {
-          this.#overlong = true;
-          this.#line = '';
-        }
-      }
-      if (end === -1) return;
-      if (!this.#overlong) this.#read(this.#line);
-      this.#line = '';
-      this.#overlong = false;
-      rest = rest.slice(end + 1);
-    }
-  }
-
-  /** The groups started and not seen to end, oldest first. */
-  open(): number[] {
-    return [...this.#open];
-  }
-
-  #read(line: string): void {
-    if (!line.startsWith(GROUP_MARKER)) return;
-    const said = /^(started|ended) ([1-9][0-9]{0,9})$/.exec(line.slice(GROUP_MARKER.length));
-    if (said === null) return;
-    const pgid = Number(said[2]);
-    if (pgid <= 1 || pgid === process.pid) return;
-    if (said[1] === 'started') this.#open.add(pgid);
-    else this.#open.delete(pgid);
   }
 }
 

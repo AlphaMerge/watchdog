@@ -670,7 +670,12 @@ arguments and the variables — so treat both as untrusted input in every script
   stops while a script runs, the script and what it started are ended the same way. If the
   check's own process dies before it can — killed, out of memory, crashed — the probe ends the
   script and what it started with `SIGKILL` as soon as that process has gone, and logs *a check
-  process ended and left what it started running; this probe ended it* with the sensor's id.
+  process ended and left what it started running; this probe ended it* with the sensor's id. It
+  first checks in `/proc` that the group is one the check's process started (its own session
+  leader, that process's child, of the user checks run as) and that its id has not since passed to
+  another process; a group named by anything else is left alone and logged as *named process
+  groups that are not its own*. On a probe without `/proc` — macOS, used for development only —
+  nothing is checked, so nothing is ended this way.
 
   **On Windows, today,** the script itself is ended at once with `TerminateProcess`, which it
   cannot catch, and what it started is not ended: a script that started another program leaves

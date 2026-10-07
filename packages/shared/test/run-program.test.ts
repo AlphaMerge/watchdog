@@ -6,6 +6,7 @@ import { subscribe, unsubscribe } from 'node:diagnostics_channel';
 import { after, before, describe, it } from 'node:test';
 import { PROGRAM_GROUP_CHANNEL, type ProgramGroupEvent } from '../src/process/group-channel.js';
 import { runProgram } from '../src/process/run.js';
+import { within } from './support/within.js';
 
 /**
  * The runner drives real programs, and on POSIX those are shell scripts. Windows would need its
@@ -262,6 +263,80 @@ describe('running a program', { skip: posix ? false : 'POSIX only' }, () => {
       );
       assert.ok(heard.every((one) => one.pgid === pid));
     });
+
+    // `setsid`, the util-linux program, is how a script lets something leave its group and keep
+    // its pipes; the toolchain is Linux.
+    const linux = process.platform === 'linux' ? false : 'needs setsid(1), Linux';
+
+    it(
+      'says it ended when the group empties, not when something outside it lets go of the pipes',
+      { skip: linux },
+      async () => {
+        heard.length = 0;
+        // The program goes at once; a helper in its group goes after a second; something that
+        // left the group holds stdout for five.
+        const file = await script(
+          'escapes.sh',
+          'sleep 1 >/dev/null 2>&1 </dev/null &\nsetsid sleep 5 &\necho $$',
+        );
+        let settled = false;
+        const running = run(file, { timeoutMs: 20_000 }).finally(() => {
+          settled = true;
+        });
+        const ended = new Promise<void>((done) => {
+          const look = (): void => {
+            if (heard.some((one) => one.event === 'ended') || settled) done();
+            else setTimeout(look, 20);
+          };
+          look();
+        });
+        await within(10_000, 'the group to be said to have ended', ended);
+        assert.equal(settled, false, 'said before the run ended, at the group and not the pipes');
+        assert.deepEqual(
+          heard.map((one) => one.event),
+          ['started', 'ended'],
+        );
+        const result = await within(20_000, 'the run to end', running);
+        assert.ok(result.outcome === 'exited');
+        assert.equal(heard.length, 2, 'and said once');
+      },
+    );
+
+    it(
+      'never signals a group that has gone, since its id may be another’s',
+      { skip: linux },
+      async () => {
+        heard.length = 0;
+        const file = await script('gone.sh', 'setsid sleep 3 &\necho $$');
+        const signalled: [number, string | number | undefined][] = [];
+        const real = process.kill.bind(process);
+        process.kill = (pid: number, signal?: string | number) => {
+          signalled.push([pid, signal]);
+          return real(pid, signal);
+        };
+        try {
+          const result = await within(
+            20_000,
+            'the run to end',
+            run(file, { timeoutMs: 1_000, graceMs: 200 }),
+          );
+          assert.ok(result.outcome === 'timeout', 'its deadline came while the pipes were held');
+          const pid = Number(result.stdout.trim());
+          assert.ok(pid > 1);
+          assert.deepEqual(
+            signalled.filter(([to, signal]) => to === -pid && signal !== 0),
+            [],
+            'no SIGTERM or SIGKILL to a group already empty',
+          );
+          assert.ok(
+            signalled.some(([to, signal]) => to === -pid && signal === 0),
+            'it looked, and found it gone',
+          );
+        } finally {
+          process.kill = real;
+        }
+      },
+    );
 
     it('names nothing for a program that never started', async () => {
       heard.length = 0;
