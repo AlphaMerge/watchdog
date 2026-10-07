@@ -39,13 +39,30 @@ const OFF = health({
   trapReceived: null,
 });
 
+/** What the form would write under the type, or `null`. */
+const say = (
+  listener: string | undefined,
+  given: ProbeHealthView | null,
+): ReturnType<typeof listenerNotice> => listenerNotice(listener, 'Berlin', given);
+const text = (listener: string, given: ProbeHealthView): string => say(listener, given)?.text ?? '';
+
+/** Every channel a gap, with the reason the core gives for it (`P-255`). */
+const unavailable = (
+  numbersUnavailable: ProbeHealthView['numbersUnavailable'],
+  connected = 1,
+): ProbeHealthView => ({
+  ...health({ connected, scheduled: null, flowReceived: null, syslogReceived: null }),
+  numbersUnavailable,
+});
+
 describe('whether a probe’s listener is running', () => {
   it('says nothing while a running listener has heard nothing: zero is not off', () => {
-    expect(listenerNotice('flow', 'Berlin', RUNNING)).toBeNull();
+    expect(say('flow', RUNNING)).toBeNull();
   });
 
   it('names the listener, the probe and the setting when the counter is a gap', () => {
-    const notice = listenerNotice('flow', 'Berlin', OFF) ?? '';
+    expect(say('flow', OFF)?.kind).toBe('off');
+    const notice = text('flow', OFF);
     expect(notice).toContain('The flow collector on probe “Berlin” is not running');
     expect(notice).toContain('Set flowListener.enabled to true');
     expect(notice).toContain('A probe on the v1 build has no flow collector');
@@ -53,34 +70,108 @@ describe('whether a probe’s listener is running', () => {
   });
 
   it('asks each listener’s own channel and names its own setting', () => {
-    expect(listenerNotice('syslog', 'Berlin', OFF)).toContain('Set syslogListener.enabled to true');
-    expect(listenerNotice('snmp-trap', 'Berlin', OFF)).toContain(
-      'Set trapListener.enabled to true',
-    );
+    expect(text('syslog', OFF)).toContain('Set syslogListener.enabled to true');
+    expect(text('snmp-trap', OFF)).toContain('Set trapListener.enabled to true');
     // Only flow has a build without it.
-    expect(listenerNotice('syslog', 'Berlin', OFF)).not.toContain('v1');
+    expect(text('syslog', OFF)).not.toContain('v1');
 
     // One on and the others off, so a listener cannot be judged by another's counter.
     const onlyTraps = health({ connected: 1, scheduled: 3, trapReceived: 0, flowReceived: null });
-    expect(listenerNotice('snmp-trap', 'Berlin', onlyTraps)).toBeNull();
-    expect(listenerNotice('flow', 'Berlin', onlyTraps)).not.toBeNull();
+    expect(say('snmp-trap', onlyTraps)).toBeNull();
+    expect(say('flow', onlyTraps)?.kind).toBe('off');
   });
 
-  it('does not call a listener off on a probe that has told the core nothing', () => {
-    // Not connected: every channel is a gap, the listener's included.
+  it('never calls a listener off on a probe that has told the core nothing (B-08)', () => {
+    for (const reason of [
+      { reason: 'not-connected' as const },
+      { reason: 'no-heartbeat' as const, connectedSeconds: 4 },
+      { reason: 'protocol' as const, protocolVersion: 6, requiredVersion: 7 },
+      { reason: 'not-reported' as const },
+    ]) {
+      const notice = say('flow', unavailable(reason, reason.reason === 'not-connected' ? 0 : 1));
+      expect(notice?.kind, reason.reason).toBe('unknown');
+      expect(notice?.text, reason.reason).not.toContain('is not running');
+      expect(notice?.text, reason.reason).not.toContain('Set flowListener.enabled to true');
+    }
+    // Refused, or still loading: nothing at all, not even that there was something to learn.
+    expect(say('flow', null)).toBeNull();
+  });
+
+  it('says "no heartbeat yet" apart from "too old", from the reason the core gives (U-29)', () => {
+    // The first seconds of a link: an answer is on its way, and the sentence says it will come.
+    const waiting = text('flow', unavailable({ reason: 'no-heartbeat', connectedSeconds: 4 }));
+    expect(waiting).toBe(
+      'Probe “Berlin” has connected and has not sent its first heartbeat yet, so whether its ' +
+        'flow collector is running is not known yet. This updates when the heartbeat arrives.',
+    );
+    // No count of seconds: the form asks again on every change of the probe, and a sentence
+    // that moved would be read out again each time (`B-12`).
     expect(
-      listenerNotice('flow', 'Berlin', health({ connected: 0, flowReceived: null })),
-    ).toBeNull();
-    // Connected, and no report yet — or a probe too old to send one.
-    expect(
-      listenerNotice(
-        'flow',
-        'Berlin',
-        health({ connected: 1, scheduled: null, flowReceived: null }),
-      ),
-    ).toBeNull();
-    // Refused, or still loading.
-    expect(listenerNotice('flow', 'Berlin', null)).toBeNull();
+      text('flow', unavailable({ reason: 'no-heartbeat', connectedSeconds: 61 })),
+      'the same sentence however long it has been',
+    ).toBe(waiting);
+
+    // Too old to report at all: no answer is coming, so the setting is named to check by hand.
+    const old = text(
+      'flow',
+      unavailable({ reason: 'protocol', protocolVersion: 6, requiredVersion: 7 }),
+    );
+    expect(old).toContain(
+      'Probe “Berlin” is too old to report whether its flow collector is running',
+    );
+    expect(old).toContain('it speaks protocol 6, and reporting it needs protocol 7');
+    expect(old).toContain('Check that flowListener.enabled is true');
+    expect(old).toContain('A probe on the v1 build has no flow collector');
+    expect(old).not.toContain('heartbeat');
+    expect(waiting).not.toContain('too old');
+    expect(waiting).not.toContain('protocol');
+  });
+
+  it('says why for the other reasons too, each in its own words (U-29)', () => {
+    const gone = text('syslog', unavailable({ reason: 'not-connected' }, 0));
+    expect(gone).toBe(
+      'Probe “Berlin” is not connected, so whether its syslog listener is running cannot be ' +
+        'checked. This updates when it connects.',
+    );
+    const silent = text('syslog', unavailable({ reason: 'not-reported' }));
+    expect(silent).toBe(
+      'Probe “Berlin” sends heartbeats without its own numbers, so whether its syslog listener ' +
+        'is running cannot be checked. Check that syslogListener.enabled is true in that ' +
+        'probe’s configuration file.',
+    );
+    // A reason a newer core gives that this build does not know: still no claim either way.
+    const unheard = text('syslog', {
+      ...unavailable(null),
+      numbersUnavailable: {
+        reason: 'sleeping',
+      } as unknown as ProbeHealthView['numbersUnavailable'],
+    });
+    expect(unheard).toContain('has not reported its own numbers (sleeping)');
+    expect(unheard).toContain('Check that syslogListener.enabled is true');
+
+    // Four reasons, four sentences: none reads as another.
+    const all = new Set([
+      gone,
+      silent,
+      text('syslog', unavailable({ reason: 'no-heartbeat', connectedSeconds: 4 })),
+      text('syslog', unavailable({ reason: 'protocol', protocolVersion: 6, requiredVersion: 7 })),
+    ]);
+    expect(all.size).toBe(4);
+  });
+
+  it('reads the reason rather than inferring it from `scheduled` (U-29)', () => {
+    // A report in which `scheduled` is a gap is still a report: the listener is judged on its
+    // own counter. And the reason decides "cannot tell" even when `scheduled` has a value.
+    const reportedWithoutScheduled: ProbeHealthView = {
+      ...health({ connected: 1, scheduled: null, flowReceived: null }),
+      numbersUnavailable: null,
+    };
+    expect(say('flow', reportedWithoutScheduled)?.kind).toBe('off');
+    const notYet: ProbeHealthView = {
+      ...health({ connected: 1, scheduled: 12, flowReceived: null }),
+      numbersUnavailable: { reason: 'no-heartbeat', connectedSeconds: 2 },
+    };
+    expect(say('flow', notYet)?.kind).toBe('unknown');
   });
 
   it('says nothing for a type that reads no listener, or one this form does not know', () => {
@@ -305,5 +396,54 @@ describe('the add-sensor form on a probe whose flow collector is off', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(notice().textContent).toBe('');
     expect(screen.getByLabelText('Sensor type').getAttribute('aria-describedby')).toBeNull();
+  });
+});
+
+describe('the add-sensor form on a probe that has not reported (U-29)', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal('WebSocket', QuietSocket);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('says the probe has sent no heartbeat yet, as text the field is described by', async () => {
+    await open({ health: unavailable({ reason: 'no-heartbeat', connectedSeconds: 4 }) });
+    pick('flow.netflow');
+    await waitFor(() => {
+      expect(notice().textContent).toContain('has not sent its first heartbeat yet');
+    });
+    expect(notice().textContent).not.toContain('is not running');
+    // WCAG 1.3.1 and 4.1.3, as for "off": tied to the field and announced when it appears.
+    expect(notice().getAttribute('role')).toBe('status');
+    expect(screen.getByLabelText('Sensor type').getAttribute('aria-describedby')).toBe(
+      'sensor-type-listener',
+    );
+    // Not dressed as the caution "off" is, because it is not one; the sentence carries it all
+    // (1.4.1), in the muted text colour that passes 4.5:1 in both themes (1.4.3).
+    expect(notice().className).toContain('text-text-muted');
+    expect(notice().className).not.toContain('text-warning-fg');
+  });
+
+  it('says a probe too old to report is that, and not that its heartbeat is late', async () => {
+    await open({
+      health: unavailable({ reason: 'protocol', protocolVersion: 6, requiredVersion: 7 }),
+    });
+    pick('flow.netflow');
+    await waitFor(() => {
+      expect(notice().textContent).toContain('is too old to report whether its flow collector');
+    });
+    expect(notice().textContent).not.toContain('heartbeat');
+    expect(notice().className).toContain('text-text-muted');
+  });
+
+  it('dresses "off" as the caution it is', async () => {
+    await open({ health: OFF });
+    pick('flow.netflow');
+    await waitFor(() => {
+      expect(notice().textContent).toContain('is not running');
+    });
+    expect(notice().className).toContain('text-warning-fg');
   });
 });

@@ -263,8 +263,13 @@ the probe it would run on as soon as it is chosen (`B-08`). If that probe has re
 listener is not running, a sentence under **Sensor type** says so, naming the probe and the
 setting in its configuration file that turns the listener on; the sensor can still be created,
 and fails its scans until the probe is fixed. The sentence is text tied to the field and
-announced when it appears, not a colour. It is not shown for a probe that is not connected, and
-not to an account that cannot read the probe.
+announced when it appears, not a colour. A probe that has not reported cannot be said to have
+its listener off, and the sentence says why instead, from the reason Probe Health gives
+(`U-29`): the probe is not connected, it has connected and not sent its first heartbeat yet, it
+is too old to report (naming its protocol and the one needed), or its heartbeats carry no
+numbers. The first two say the sentence updates when that changes; the last two name the
+setting to check by hand. No sentence means the listener is running. Nothing is shown to an
+account that cannot read the probe.
 
 A save that would send a group's inherited credentials somewhere new — a device's host, an SNMP
 sensor's port, a device moved under the group — needs `write` on the group, and is otherwise

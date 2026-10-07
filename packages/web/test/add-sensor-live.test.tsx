@@ -309,7 +309,9 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     expect(written, 'the sentence that was taken back was written again').toEqual([]);
   });
 
-  it('takes the notice back when the probe drops: nothing can be said of a probe that is gone', async () => {
+  it('takes "off" back when the probe drops, and says it cannot tell instead (U-29)', async () => {
+    // Nothing can be said of a listener on a probe that is gone. Until `U-29` the form said
+    // nothing at all, which read the same as a listener that runs.
     const core = stubCore(OFF);
     const socket = await watching(core);
     await waitFor(() => {
@@ -319,9 +321,12 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     core.health = DROPPED;
     socket.deliver(changed());
     await waitFor(() => {
-      expect(notice().textContent).toBe('');
+      expect(notice().textContent).toBe(
+        'Probe “Berlin” is not connected, so whether its flow collector is running cannot be ' +
+          'checked. This updates when it connects.',
+      );
     });
-    expect(describedBy()).toBeNull();
+    expect(describedBy()).toBe('sensor-type-listener');
   });
 
   it('puts the notice up when the probe comes back with its collector off, and leaves focus alone', async () => {
@@ -396,7 +401,7 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
     core.health = DROPPED;
     for (let edge = 1; edge <= 40; edge += 1) socket.deliver(changed());
     await waitFor(() => {
-      expect(notice().textContent).toBe('');
+      expect(notice().textContent).toContain('is not connected');
     });
     await settled();
     expect(core.healthAsked(), 'one request for forty frames').toBe(3);
@@ -517,14 +522,18 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
       expect(core.healthAsked()).toBe(3);
     });
     await waitFor(() => {
-      expect(notice().textContent).toBe('');
+      expect(notice().textContent).toContain('is not connected');
     });
-    // …comes back, and the probe reports with its collector running.
+    // …comes back, and has not reported yet (`U-29`)…
     core.health = CONNECTED;
     socket.deliver(changed());
     await waitFor(() => {
       expect(core.healthAsked()).toBe(4);
     });
+    await waitFor(() => {
+      expect(notice().textContent).toContain('has not sent its first heartbeat yet');
+    });
+    // …and reports with its collector running.
     core.health = RUNNING;
     socket.deliver(changed());
     await waitFor(() => {
@@ -548,17 +557,20 @@ describe('the add-sensor form’s listener notice while the form is open', () =>
 
     // The probe restarts with its collector still off. The link drops and comes back, and the
     // form asks before the probe has reported: connected, and nothing can be said of a listener
-    // yet, so the sentence goes — correctly.
+    // yet, so "off" goes — correctly — and the form says why it cannot tell (`U-29`).
     core.health = DROPPED;
     socket.deliver(changed());
     core.health = CONNECTED;
     socket.deliver(changed());
     await waitFor(() => {
-      expect(notice().textContent).toBe('');
+      expect(notice().textContent).toContain('has not sent its first heartbeat yet');
     });
     await settled();
     const askedBeforeTheReport = core.healthAsked();
-    expect(notice().textContent, 'nothing is said of a probe that has not reported').toBe('');
+    expect(
+      notice().textContent,
+      '"off" is not said of a probe that has not reported',
+    ).not.toContain('is not running');
 
     // Its first report arrives, without the collector. `B-12` had nothing to prompt it here.
     core.health = OFF;

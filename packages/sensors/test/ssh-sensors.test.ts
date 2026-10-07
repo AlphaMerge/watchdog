@@ -7,6 +7,7 @@ import { sshScript } from '../src/types/ssh-script.js';
 import { standardCatalogue } from '../src/index.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
 import { TestSshServer } from '@ms/simulators';
+import { until, within } from './support/within.js';
 
 let server: TestSshServer;
 
@@ -381,14 +382,30 @@ describe('all four types', () => {
   });
 
   it('return promptly when the check is aborted', async () => {
+    // **"Promptly" means the abort ends it, not the 30 s command timeout** (`P-279`). It used to
+    // abort on a 100 ms timer and then assert `Date.now() - started < 3_000`: a wall-clock bound a
+    // loaded machine can break, with an abort that could land before the command was ever sent.
+    // Now the abort comes once the device holds the command and is saying nothing, and the wait
+    // for the check to give up is bounded by `within`, well inside that timeout.
     server.behave({ password: 'monitor', hang: true });
     const controller = new AbortController();
-    const started = Date.now();
     const pending = run(sshMeminfo, { commandTimeoutMs: 30_000 }, { signal: controller.signal });
-    setTimeout(() => {
-      controller.abort();
-    }, 100);
-    await assert.rejects(() => pending, /cancelled/);
-    assert.ok(Date.now() - started < 3_000);
+    // Taken now, so that a check which fails before the abort is a failed assertion below and
+    // not an unhandled rejection while the test is still waiting.
+    const ended = pending.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await until(10_000, 'the device to be holding the command', () =>
+      server.seen.includes('cat /proc/meminfo'),
+    );
+    controller.abort();
+    const error = await within(10_000, 'the aborted check to give up', ended);
+    assert.ok(error instanceof Error, 'the check failed rather than returning a reading');
+    assert.equal(
+      error.message,
+      'the check was cancelled while running a command on 127.0.0.1',
+      'cancelled in the command, which is what was aborted',
+    );
   });
 });

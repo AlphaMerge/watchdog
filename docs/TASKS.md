@@ -9296,12 +9296,47 @@ because each is a decision rather than a defect:
       (or passes a pidfd) until the runner has acknowledged the group, or the gap is measured and
       documented as accepted, with a test either way.
 
-- [ ] **P-279 — two SSH follow-ups from `P-259`** · S · P-259 · Found 2026-10-07 in `P-259`.
+- [x] **P-279 — two SSH follow-ups from `P-259`** · S · P-259 · Found 2026-10-07 in `P-259`.
       `ssh-sensors.test.ts` "return promptly when the check is aborted" still asserts
       `Date.now() - started < 3_000`, a wall-clock upper bound. And no test resets a connection
       while a check runs through the probe's worker pool to the result sink. **Done when** the
       abort test waits with `within` for what it asserts, and a probe-level test drives an SSH
       reset end to end and asserts the stored failure names phase `exec`.
+
+      **P-279 outcome. The abort test waits for the abort, and a probe test stores a reset.**
+      - **The abort test** used to abort on a 100 ms timer, which could land before the command
+        was sent, and then read the clock. Now it waits (`until`, bounded) for the simulator to
+        hold the command, aborts, and waits with `within` for the check to give up. The bound,
+        10 s, sits well inside the 30 s command timeout, so a check that ignores the abort fails
+        by name instead of passing on the timeout. It asserts the whole message, *the check was
+        cancelled while running a command on 127.0.0.1*. `@ms/sensors` had no `within`, so
+        `test/support/within.ts` copies the core's and adds `until`, whose polling stops when the
+        wait gives up.
+      - **`packages/probe/test/ssh-reset.test.ts`** runs the shipped path: `CheckPool` with its
+        default registry (what `main.ts` builds), the real `resultSink` and a real `ResultSpool`
+        on disk. Only the device is the simulator. One worker runs three checks: `ssh.load` with
+        a reset before the exit status, `ssh.script` with status 0, half its output, then a
+        reset, and `ssh.load` answered whole. Read back off the spool: error, error, ok. Each
+        failure's message is the exec phase's sentence, *the connection to 127.0.0.1 was lost
+        while running COMMAND, before / after the command reported an exit status*, ending in
+        `ECONNRESET`. Neither carries channel values. The third reads 4 processors.
+        - The pool and sink stayed healthy: phase `execute` all three times, one worker id, no
+          crash, failed start or timeout; the pool is not disabled, `failed` 2, `completed` 1,
+          `busy` 0.
+        - Every result reached the disk and the drain: three completions to the watchdog,
+          nothing abandoned or unspooled, `unwritten` 0, the drain woken three times.
+        - Each reset cost its connection: three server connections, `sessions.opened` 3 and
+          `open` 1.
+      - **The phase is in the sentence, not a field.** `SshError.phase` does not cross the
+        worker: `check-worker.ts` posts an error's message, so no error's `phase`, host or
+        `cause` reaches a `CheckResult`. The result has no field for them, and adding one is a
+        protocol change. So the stored failure names `exec` the only way it can: the exec
+        phase's sentence, which no connect, authentication or host-key failure uses.
+      - **Mutations** (each restored byte for byte, `dist` rebuilt): not listening for the abort
+        in `SshSession.exec` fails the abort test, *timed out after 10000 ms waiting for the
+        aborted check to give up*. Disabling `P-259`'s guard (the lost-connection reject on the
+        channel's `close`) fails the probe test, which then stores `[1,'ok'],[2,'ok'],[3,'ok']`.
+      - **Not done:** a structured phase on a stored check failure (protocol).
 
 - [ ] **P-280 — an ssh2 upgrade could quietly break what `P-259` relies on** · S · P-259 · Found
       2026-10-07 in `P-259`. `SshSession` reads the client channel's `incoming.state`, and the
@@ -19917,11 +19952,51 @@ because each is a decision rather than a defect:
       a database that has just come back; spread them. **Done when** each is fixed with a
       test.
 
-- [ ] **U-29 — the add-sensor form guesses why a probe has no numbers** · S · P-255 · Found
+- [x] **U-29 — the add-sensor form guesses why a probe has no numbers** · S · P-255 · Found
       2026-10-07 in `P-255`. `GET /probes/{id}/health` now says why a probe's numbers are missing
       (`numbersUnavailable.reason`), but `listenerNotice` in
       `packages/web/src/routes/add-sensor-model.ts` still infers it from `scheduled`. **Done when**
       the form reads the reason and says "no heartbeat yet" apart from "too old", with a test.
+
+      **U-29 outcome. The form reads the reason, and says why it cannot tell.**
+      - **What it says.** `listenerNotice` now returns `{ kind, text }`. `numbersUnavailable` is
+        `null` when the probe reported, and only then is the listener judged on its own counter:
+        a gap is `off`, the `B-08` sentence unchanged. Any other value is `unknown`, with one
+        sentence a reason:
+        - `no-heartbeat`: *has connected and has not sent its first heartbeat yet … This updates
+          when the heartbeat arrives.*
+        - `protocol`: *is too old to report whether its flow collector is running: it speaks
+          protocol 6, and reporting it needs protocol 7*, then the setting to check by hand.
+        - `not-connected`: *is not connected … This updates when it connects.*
+        - `not-reported`: *sends heartbeats without its own numbers*, then the setting.
+        - A reason this build does not know gets a generic sentence naming it. That still makes
+          no claim either way.
+      - **The form used to say nothing in all four cases**, so silence meant "running" or
+        "cannot tell". Now silence means running.
+      - **The seconds are left out** of the `no-heartbeat` sentence. The form asks again whenever
+        the probe changes, and a moving count would be new text in the live region at each ask,
+        read out again (`B-12`). The probe's first report is a stream event (`U-24`), so the
+        sentence is replaced when the heartbeat comes.
+      - **Accessibility.** The same `role="status"` region and `aria-describedby` as `off`
+        (WCAG 1.3.1, 4.1.3). The text colour is `text-text-muted` (4.70:1 light, 5.67:1 dark,
+        1.4.3), not the warning colour, because it is not a caution. The sentence carries the
+        meaning (1.4.1).
+      - **Docs and tests.** `docs/web-ui.md` says so.
+        - `add-sensor-listener.test.tsx`: every reason is `unknown` and never says "is not
+          running"; "no heartbeat yet" and "too old" read apart, and the no-heartbeat sentence
+          does not change with the seconds; each reason has its own sentence, the unknown reason
+          included; the reason is read, not inferred from `scheduled` either way; the form
+          describes the field with the no-heartbeat and too-old sentences, in the muted colour,
+          and keeps the warning colour for `off`.
+        - `add-sensor-live.test.tsx`: the four cases that expected an empty notice for a dropped
+          or not-yet-reported probe now expect the sentence for that reason.
+      - **Mutations** (each restored byte for byte):
+        - inferring from `scheduled` again fails 10 tests;
+        - sending `no-heartbeat` to the generic sentence fails 4;
+        - the warning colour for every notice fails 2.
+      - **Not done:** a probe that reports but is below the `flowCounters` capability (protocol 23)
+        has `flowReceived` stripped, and the form still calls its flow collector off and points
+        at the setting, as it did before `U-29`, where it is the version that is short.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

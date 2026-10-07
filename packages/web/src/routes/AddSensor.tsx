@@ -81,7 +81,7 @@ export function AddSensor(): React.JSX.Element {
       : probeHealth.status === 'loading' && last !== null && last.probeId === probeId
         ? last.health
         : null;
-  const listenerOff = probe === null ? null : listenerNotice(chosen?.listener, probe.name, health);
+  const listenerSays = probe === null ? null : listenerNotice(chosen?.listener, probe.name, health);
 
   /** Picking a type replaces the parameters entirely — they belong to the type, not the form. */
   const pickType = useCallback(
@@ -184,7 +184,7 @@ export function AddSensor(): React.JSX.Element {
               id="sensor-type"
               value={typeId}
               disabled={saving}
-              aria-describedby={listenerOff === null ? undefined : 'sensor-type-listener'}
+              aria-describedby={listenerSays === null ? undefined : 'sensor-type-listener'}
               onChange={(event) => {
                 pickType(event.target.value);
               }}
@@ -199,13 +199,20 @@ export function AddSensor(): React.JSX.Element {
             </select>
             {/* Always in the document, so that what appears in it is announced: a live region
                 added together with its text is one a screen reader may never have been watching.
-                The sentence is the notice; the colour only matches the form's other cautions. */}
+                The sentence is the notice; the colour only matches the form's other cautions, and
+                "cannot tell" (`U-29`) is plain text because it is not one. */}
             <p
               id="sensor-type-listener"
               role="status"
-              className={listenerOff === null ? 'sr-only' : 'max-w-2xl text-xs text-warning-fg'}
+              className={
+                listenerSays === null
+                  ? 'sr-only'
+                  : listenerSays.kind === 'off'
+                    ? 'max-w-2xl text-xs text-warning-fg'
+                    : 'max-w-2xl text-xs text-text-muted'
+              }
             >
-              {listenerOff}
+              {listenerSays?.text}
             </p>
             {probe !== null && <ProbeWatch probeId={probe.id} onNews={probeHealth.reload} />}
             {catalogue.length === 0 && (
