@@ -3,6 +3,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { MessageContextLoader } from '../src/notifications/context.js';
 import type { OutgoingMessage } from '../src/notifications/delivery/transport.js';
 import { NotificationDispatcher } from '../src/notifications/dispatcher.js';
+import { SummaryRepository } from '../src/notifications/summaries.js';
 import { TemplateService } from '../src/notifications/templates.js';
 import { DatabaseAuditSink } from '../src/audit/store.js';
 import { writeRuntimes, writeStateHistory } from '../src/state/runtime.js';
@@ -494,6 +495,144 @@ describe(
         assert.deepEqual(
           (await dispositions()).map((row) => row.disposition),
           ['immediate', 'held', entry.expected],
+          entry.name,
+        );
+      }
+    });
+
+    // ---------------------------------------------------------------------------------------
+    // A recovery is not told before an alarm that is waiting out a retry (`N-21`).
+    // ---------------------------------------------------------------------------------------
+
+    it('keeps a recovery behind its immediate alarm while that alarm waits out a refusal', async () => {
+      const templateId = await template();
+      let succeed = false;
+      const { seen, transport } = recorder(() => ({ ok: succeed, retryable: true }));
+      const dispatcher = new NotificationDispatcher({
+        db,
+        logger: silent,
+        contexts,
+        transports: [transport],
+        retry: { firstDelayMs: 60_000, maxDelayMs: 60_000, jitter: 0 },
+        leaseMs: 0,
+      });
+
+      await queue(templateId, { sensor: sensorAt(0) });
+      await dispatcher.dispatch();
+      assert.equal(seen.length, 1, 'the Down, sent at once and refused');
+
+      await queue(templateId, { sensor: sensorAt(0), reason: 'recovery', state: 'up' });
+      succeed = true;
+      await dispatcher.dispatch();
+      await dispatcher.dispatch();
+      assert.equal(seen.length, 1, 'the Up is not sent inside the Down’s retry delay');
+      assert.deepEqual(
+        (await dispositions()).map((row) => `${row.disposition}/${row.status}`),
+        ['immediate/pending', 'undecided/pending'],
+      );
+
+      const later = new Date(Date.now() + 60 * 60 * 1000);
+      await dispatcher.dispatch(later);
+      await dispatcher.dispatch(later);
+      assert.deepEqual(
+        seen.map((message) => message.subject),
+        ['Ping on edge-router is down', 'Ping on edge-router is down', 'Ping on edge-router is up'],
+      );
+    });
+
+    it('keeps a recovery waiting only on an owed alarm that something will send', async () => {
+      const summaries = new SummaryRepository();
+      interface Case {
+        name: string;
+        /** Whether the alarm went to the recovery's own template or to another. */
+        own: boolean;
+        disposition: 'immediate' | 'held';
+        status: 'pending' | 'sent' | 'failed';
+        /** What has happened to the alarm's template. */
+        template?: 'disabled' | 'suppressed' | 'untransported';
+        waits: boolean;
+      }
+      const owed = { disposition: 'immediate', status: 'pending' } as const;
+      const cases: Case[] = [
+        { name: 'awaiting a retry', own: true, ...owed, waits: true },
+        { name: 'delivered', own: true, ...owed, status: 'sent', waits: false },
+        { name: 'given up on', own: true, ...owed, status: 'failed', waits: false },
+        { name: 'another template’s, awaiting a retry', own: false, ...owed, waits: true },
+        {
+          name: 'another template’s, given up on',
+          own: false,
+          ...owed,
+          status: 'failed',
+          waits: false,
+        },
+        {
+          name: 'another template’s, disabled',
+          own: false,
+          ...owed,
+          template: 'disabled',
+          waits: false,
+        },
+        {
+          name: 'another template’s, outside its activation schedule',
+          own: false,
+          ...owed,
+          template: 'suppressed',
+          waits: false,
+        },
+        {
+          name: 'another template’s, with no transport in this build',
+          own: false,
+          ...owed,
+          template: 'untransported',
+          waits: false,
+        },
+        {
+          // Nothing will send the recovery either until the template is enabled again, and
+          // then the alarm goes first.
+          name: 'its own template’s, disabled',
+          own: true,
+          ...owed,
+          template: 'disabled',
+          waits: true,
+        },
+        {
+          // A held request whose window has gone is sent as a message of its own.
+          name: 'held with no window',
+          own: true,
+          ...owed,
+          disposition: 'held',
+          waits: true,
+        },
+      ];
+
+      for (const entry of cases) {
+        await db.query('DELETE FROM notification_request');
+        const recoveries = await template();
+        const alarms = entry.own ? recoveries : await template();
+        const alarm = await queue(alarms, { sensor: sensorAt(0) });
+        await db.query(
+          `UPDATE notification_request
+           SET disposition = $2, status = $3, attempts = 1,
+               next_attempt_at = now() + interval '1 minute'
+           WHERE id = $1`,
+          [alarm, entry.disposition, entry.status],
+        );
+        if (entry.template === 'disabled') {
+          await db.query('UPDATE notification_template SET enabled = false WHERE id = $1', [
+            alarms,
+          ]);
+        }
+        const recovery = await queue(recoveries, {
+          sensor: sensorAt(0),
+          reason: 'recovery',
+          state: 'up',
+        });
+        const suppressed = entry.template === 'suppressed' ? [alarms] : [];
+        const methods = entry.template === 'untransported' ? [] : ['email'];
+        const decidable = await db.tx((q) => summaries.undecided(q, 100, suppressed, methods));
+        assert.equal(
+          decidable.some((request) => request.id === recovery),
+          !entry.waits,
           entry.name,
         );
       }

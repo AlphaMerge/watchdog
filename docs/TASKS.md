@@ -3227,13 +3227,73 @@ because each is a decision rather than a defect:
       - a sent alarm still blocking;
       - digest order reversed.
 
-- [ ] **N-21 — an immediate alarm awaiting its retry can be overtaken by its recovery** · S ·
+- [x] **N-21 — an immediate alarm awaiting its retry can be overtaken by its recovery** · S ·
       N-13, N-20 · Found 2026-10-07 in `N-20`. `N-20` keeps a held alarm's recovery behind it in
       the digest. An alarm sent at once whose delivery failed waits for its retry; its recovery,
       sent at once, can be delivered first, so the recipient hears "up" before "down" — the order
       `N-20` fixed for the digest. **Done when** a recovery whose alarm is awaiting a retry goes
       out after it (or with it), with a scenario test (`M-17`) of a failed first delivery and a
       recovery inside the retry delay.
+
+      **N-21 outcome.** A recovery or a clear whose alarm went at once and is not delivered yet —
+      waiting out `N-13`'s backoff, or claimed under a lease — is left undecided until the alarm
+      is delivered or given up on. It is then decided as before, on the next pass, so the
+      recipient gets the Down and then the Up. A refused first delivery adds no message: one
+      outage is still one alarm and one recovery.
+
+      **How.** One condition in `SummaryRepository.undecided`, the query `N-20` added. `N-20`
+      waited only on an alarm that was undecided or held. Now every owed alarm of the trigger
+      makes the recovery wait, except one held in a digest of the recovery's own template, which
+      the recovery joins as before. "Owed" is `status = 'pending'`, read from the queue, so:
+      - **Bounded by the alarm's own retries.** Once the alarm is given up on (refused for good,
+        or out of attempts: 45 to 90 minutes under the default policy), it is no longer pending.
+        The recovery is then sent on its own. It is not dropped: losing a notification is worse
+        than an Up without its Down, and the given-up alarm already puts Core Health Down.
+      - **A restart changes nothing.** Nothing is in memory, so no new persistence was needed.
+      - **Every alarm of the trigger counts**: initial, escalation and repeat, on whichever
+        template each went. The recovery waits for all of them.
+
+      **Per sensor, not per recipient, which follows `N-20`.** The initial, escalation and
+      recovery templates of one trigger can differ, and nothing says who is on which. Waiting
+      across templates keeps the order for a recipient on both. The cost: a recovery on a working
+      transport can wait out another template's failing one, within the bound above. Another
+      template's alarm is waited for only while something will send it: enabled, with a transport
+      in this build, and inside its activation schedule (`N-12`). This tightened `N-20`, whose
+      undecided case waited on a suppressed template's alarm until the schedule reopened. An alarm
+      on the recovery's *own* disabled template still holds the recovery; nothing could send the
+      recovery either, and on re-enabling the alarm goes first.
+
+      **Tests.**
+      - `retry-recovery-scenario.test.ts` (new, `M-17` style): the real engine, scheduler and
+        dispatcher, with a recording transport that refuses on command and an unjittered
+        backoff. It asserts what the recipient gets, in order:
+        - a Down refused once, back inside the retry minute: nothing until the retry, then Down,
+          then Up, and nothing more;
+        - the same with a fresh dispatcher after the refusal and again before the retry, which
+          stands in for a core restart;
+        - a Down refused every time: nothing while it is being tried, then only the Up, once the
+          third attempt gives it up;
+        - initial and recovery to one template, escalation to another, the escalation refused
+          once: Down, escalation, Up.
+      - `notification-summaries.test.ts`, 2 new: the dispatcher-level case, and a table of
+        alarm states and template conditions:
+        - awaiting a retry, delivered, given up on;
+        - another template's: pending, given up on, disabled, suppressed, no transport;
+        - its own template disabled;
+        - held with no window.
+
+      Mutation 8/8:
+      - immediate alarms not waited on;
+      - status ignored;
+      - suppression ignored;
+      - enabled ignored;
+      - method ignored;
+      - the template ignored in the join;
+      - the window ignored in the join;
+      - the own-template exception removed.
+
+      **Not done.** A recovery is sent *after* its alarm, never *with* it. Folding the two into
+      one message would need a two-line message that no transport has.
 
 ## Phase 5 — Web UI
 

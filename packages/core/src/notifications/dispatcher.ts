@@ -396,7 +396,9 @@ export class NotificationDispatcher {
       for (const request of pending) {
         // A recovery whose alarm is still in a digest goes in the same digest, after it
         // (`N-20`), whatever the mode would say about an Up. Sent at once, it told a recipient
-        // the probe was back eight minutes before telling them anything was wrong.
+        // the probe was back eight minutes before telling them anything was wrong. One whose
+        // alarm is owed any other way — waiting out a retry, say (`N-21`) — is not in `pending`
+        // at all, and is decided on the pass after its alarm is delivered or given up on.
         if (request.alarmHeldIn !== null) {
           await this.#summaries.holdBeside(q, request.id, request.alarmHeldIn);
           held += 1;

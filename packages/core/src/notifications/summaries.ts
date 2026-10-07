@@ -16,7 +16,7 @@ export interface UndecidedRequest {
   /**
    * For a recovery or a clear, the digest still holding the alarm it recovers from (`N-20`), or
    * null. When set, this request belongs in that digest beside its alarm and is decided no other
-   * way.
+   * way. A recovery whose alarm is owed in any other way is not returned at all (`N-21`).
    */
   readonly alarmHeldIn: HeldAlarm | null;
 }
@@ -61,8 +61,22 @@ export class SummaryRepository {
    * - **not decided yet, or held in another template's digest**: it is not returned at all, so
    *   it waits, and is decided once the alarm has been. Left out here rather than skipped by the
    *   caller, so a storm of waiting recoveries cannot fill the batch and hold up a new Down. The
-   *   other template has to be one this build can send, or the recovery would wait for a message
-   *   that is never coming.
+   *   other template has to be one this build can send, enabled and inside its activation
+   *   schedule, or the recovery would wait for a message that is never coming, or not coming
+   *   until the schedule reopens.
+   * - **sent at once and not delivered yet** (`N-21`): its first try was refused and it is
+   *   waiting out the backoff, or a pass has it claimed. Not returned either, for the same reason:
+   *   decided now, the recovery is claimed now, and an Up delivered inside the alarm's retry delay
+   *   reaches the recipient before the Down. Any alarm of the trigger counts — an initial, an
+   *   escalation or a repeat, on whichever template — so a recovery waits for every one of them.
+   *
+   * **The wait is bounded by the alarm's own retries.** An alarm that is delivered releases its
+   * recovery to the next pass, behind it. One that is given up on (`N-13`: refused permanently,
+   * or out of attempts, 45 to 90 minutes under the default policy) is no longer pending, and
+   * its recovery is then decided and sent on its own: a recovery is never dropped because its
+   * alarm was, and the alarm given up on is what Core Health goes Down for. None of this is held
+   * in memory — it is read from the queue — so a core that restarts while an alarm is waiting
+   * for its retry keeps the recovery behind it.
    */
   async undecided(
     q: Queryable,
@@ -91,13 +105,15 @@ export class SummaryRepository {
       -- dispatcher fails it with a reason an operator can act on rather than leaving it here
       -- undecided for ever.
       LEFT JOIN notification_template t ON t.id = r.template_id
-      -- The alarm a recovery or a clear recovers from, while it is still owed and not yet sent
-      -- (N-20). One that makes it wait sorts first, so a recovery joins a digest only when
-      -- nothing else of its outage is still to come.
+      -- The alarm a recovery or a clear recovers from, while it is still owed and not yet sent:
+      -- undecided, held for a digest (N-20), or sent at once and waiting out a retry or a lease
+      -- (N-21). Only joining its alarm's digest lets a recovery be decided beside it; every
+      -- other owed alarm makes it wait, and one that does sorts first, so a recovery joins a
+      -- digest only when nothing else of its outage is still to come.
       LEFT JOIN LATERAL (
         SELECT a.summary_id, a.next_attempt_at,
-               (a.disposition = 'undecided'
-                 OR a.template_id IS DISTINCT FROM r.template_id) AS waits
+               NOT (a.disposition = 'held' AND a.summary_id IS NOT NULL
+                    AND a.template_id = r.template_id) AS waits
         FROM notification_request a
         LEFT JOIN notification_template tpl ON tpl.id = a.template_id
         WHERE r.reason IN ('recovery', 'clear')
@@ -108,10 +124,12 @@ export class SummaryRepository {
           AND a.id < r.id
           AND a.reason NOT IN ('recovery', 'clear')
           AND a.status = 'pending'
-          AND (a.disposition = 'undecided'
-               OR (a.disposition = 'held' AND a.summary_id IS NOT NULL
-                   AND (a.template_id = r.template_id
-                        OR (tpl.enabled AND tpl.method = ANY($3::text[])))))
+          -- Another template's alarm is waited for only while something will send it: enabled,
+          -- with a transport in this build, and inside its activation schedule. Otherwise the
+          -- recovery would wait on a message that is not coming, or not until the morning.
+          AND (a.template_id = r.template_id
+               OR (tpl.enabled AND tpl.method = ANY($3::text[])
+                   AND NOT (a.template_id = ANY($2::bigint[]))))
         ORDER BY waits DESC, a.id DESC
         LIMIT 1
       ) alarm ON true
