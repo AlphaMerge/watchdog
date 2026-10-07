@@ -22,7 +22,11 @@ import { IngestionService } from '../src/ingestion/service.js';
 import { EMPTY_ASSIGNMENTS } from '../src/probes/config.js';
 import { ProbeQueryService } from '../src/probes/queries.js';
 import { ProbeRefusals } from '../src/probes/refusals.js';
-import { ProbeEndpoint, type ResultReceiver } from '../src/transport/probe-endpoint.js';
+import {
+  ProbeEndpoint,
+  type ProbeAdmission,
+  type ResultReceiver,
+} from '../src/transport/probe-endpoint.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -241,6 +245,8 @@ describe(
         probeObjectFor?: () => Promise<number | null>;
         results?: ResultReceiver;
         queries?: ProbeQueryService;
+        /** Who is let in; absent, every probe is. */
+        registry?: ProbeAdmission;
       } = {},
     ): Promise<{ endpoint: ProbeEndpoint; port: number }> {
       assert.ok(dir !== undefined);
@@ -261,6 +267,7 @@ describe(
         coreVersion: '9.9.9',
         results: options.results ?? ingestion,
         ...(options.queries === undefined ? {} : { queries: options.queries }),
+        ...(options.registry === undefined ? {} : { registry: options.registry }),
         probeConfig: {
           probeObjectFor: options.probeObjectFor ?? (() => Promise.resolve(probeId)),
           assignmentsFor: () => Promise.resolve(EMPTY_ASSIGNMENTS),
@@ -912,6 +919,133 @@ describe(
             said.some((line) => String(line['msg']).includes('nobody awaits') && 'refused' in line),
             `the late one is warned: ${JSON.stringify(said)}`,
           );
+        } finally {
+          probe.close();
+        }
+      } finally {
+        await started.endpoint.stop();
+      }
+    });
+
+    // `P-300` review: a late unfit answer was counted as it arrived, against the session's probe
+    // object, which a reconnect has not resolved yet; and late answers come just then, since a
+    // probe's query runner goes on across a disconnect and answers on the new connection. Core
+    // Health's total rose and the probe's Reports refused did not.
+    it('counts a late unfit answer sent before the branch is known on that probe, once it is', async () => {
+      const gate = { open: (): void => undefined };
+      const opened = new Promise<void>((resolve) => {
+        gate.open = resolve;
+      });
+      const queries = new ProbeQueryService({
+        logger: silent,
+        refusals,
+        sender: { sendQuery: () => ({ kind: 'offline' }) },
+      });
+      const started = await startEndpoint({
+        queries,
+        probeObjectFor: async () => {
+          await opened;
+          return probeId;
+        },
+      });
+      try {
+        assert.ok(dir !== undefined);
+        const probe = await RawPeer.connect(dir, started.port);
+        try {
+          probe.send({
+            type: 'hello',
+            protocolVersion: PROTOCOL_VERSION,
+            gid: 'old-probe',
+            displayName: 'Old probe',
+            agentVersion: '1.0.0-rc.2',
+            accessKey: '',
+          });
+          await probe.waitFor('the welcome', (m) => (m.type === 'welcome' ? m : undefined));
+          const before = refusals.countsFor(probeId).refused;
+          const totals = refusals.stats().refused;
+          const fromBatches = ingestion.stats().refusedUnfit;
+          // The answer to a query the last connection was asked, and nobody awaits now.
+          probe.send({
+            type: 'query-result',
+            queryId: 'asked-before-the-reconnect',
+            result: { ...good(sensors[1] ?? 0, 1), outcome: 'maybe' },
+          });
+          // Answered at once and behind nothing: once its ack is here, the answer sent before it
+          // has been taken, while the branch is still being looked up.
+          probe.send({ type: 'heartbeat', seq: 1, sentAt: at() });
+          await probe.waitFor('the heartbeat’s ack', (m) =>
+            m.type === 'heartbeat-ack' ? m : undefined,
+          );
+          assert.equal(queries.stats().unfit, 0, 'not counted before the probe is known');
+          assert.equal(refusals.stats().refused, totals);
+
+          gate.open();
+          // Chained behind the same admission and lookup, and after the answer: once its ack is
+          // here, the answer has been counted.
+          probe.send({
+            type: 'results',
+            batchId: 'after',
+            sentAt: at(),
+            results: [good(sensors[4] ?? 0, 2)],
+          });
+          const answer = await probe.waitFor('the answer to the batch', answerTo('after'));
+          assert.equal(answer.type, 'results-ack', JSON.stringify(answer));
+          assert.equal(refusals.countsFor(probeId).refused, before + 1, 'counted on this probe');
+          assert.equal(refusals.stats().refused, totals + 1, 'and nowhere else');
+          // Core Health's `resultsRefusedUnfit` is ingestion's count plus the query service's:
+          // it moves by the one this probe's Reports refused moved by.
+          assert.equal(queries.stats().unfit, 1);
+          assert.equal(ingestion.stats().refusedUnfit, fromBatches);
+          assert.ok(probe.open, 'the link is up');
+        } finally {
+          probe.close();
+        }
+      } finally {
+        gate.open();
+        await started.endpoint.stop();
+      }
+    });
+
+    it('does not count a late unfit answer from a probe that has not been approved', async () => {
+      const queries = new ProbeQueryService({
+        logger: silent,
+        refusals,
+        sender: { sendQuery: () => ({ kind: 'offline' }) },
+      });
+      const started = await startEndpoint({
+        queries,
+        registry: { admit: () => Promise.resolve({ kind: 'pending' as const, gid: 'waiting' }) },
+      });
+      try {
+        assert.ok(dir !== undefined);
+        const probe = await RawPeer.connect(dir, started.port);
+        try {
+          probe.send({
+            type: 'hello',
+            protocolVersion: PROTOCOL_VERSION,
+            gid: 'waiting',
+            displayName: 'Waiting',
+            agentVersion: '1.0.0-rc.2',
+            accessKey: '',
+          });
+          await probe.waitFor('the welcome', (m) => (m.type === 'welcome' ? m : undefined));
+          const totals = refusals.stats().refused;
+          probe.send({
+            type: 'query-result',
+            queryId: 'never-asked',
+            result: { ...good(sensors[1] ?? 0, 1), outcome: 'maybe' },
+          });
+          // Its batch is refused behind the same admission, after the answer.
+          probe.send({
+            type: 'results',
+            batchId: 'unapproved',
+            sentAt: at(),
+            results: [good(sensors[4] ?? 0, 3)],
+          });
+          const answer = await probe.waitFor('the answer to the batch', answerTo('unapproved'));
+          assert.equal(answer.type, 'results-nack', JSON.stringify(answer));
+          assert.equal(queries.stats().unfit, 0, 'a peer nobody let in moves no counter');
+          assert.equal(refusals.stats().refused, totals);
         } finally {
           probe.close();
         }

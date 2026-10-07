@@ -10571,6 +10571,26 @@ because each is a decision rather than a defect:
         the warn line there. `core-health.test.ts`: 4 from batches and 3 from answers read 7;
         answers alone read. `metrics.test.ts`: the exported counter is the sum (3 + 2). The
         `queries` stubs in three scenario tests and `support/health.ts` carry `unfit`.
+      - **Amended on review** (a second commit). **A late unfit answer was counted as it
+        arrived, against a probe the session might not know yet, and from any peer.** The
+        endpoint hands a `query-result` straight to the query service, not behind `pending`, and
+        a session's probe object is resolved after the welcome (`#queueConfig`); late answers
+        come exactly then, since a probe's query runner goes on across a disconnect and answers
+        on the new connection. So Core Health's total rose and the probe's `reportsRefused` did
+        not, and a peer nobody approved could move `ms_core_results_refused_unfit_total`. Now
+        `deliver` counts nothing for a late answer and hands its refused result back; the
+        endpoint (`#countLateUnfit`) chains the count behind `session.pending`, as `#queueResults`
+        does a batch's, and calls the new `ProbeQuerySink.refusedLate` with the resolved probe
+        object, or logs and counts nothing for a session that was not approved. An answer
+        someone awaits is still delivered and counted at once. Tests: `unfit-results.test.ts`, a
+        late unfit answer sent after the welcome while `probeObjectFor` is held is not counted;
+        once the lookup is let go and a batch sent after it is acked, the probe's
+        `reportsRefused` and the totals are +1, `unfit` 1 and ingestion's `refusedUnfit`
+        unchanged, so Core Health's sum moves with the probe's count; from an unapproved session
+        (its batch nacked behind the same admission) nothing is counted. `probe-queries.test.ts`:
+        `deliver` hands the late refused result back uncounted, `refusedLate` counts it (and the
+        totals only for a null probe), an awaited answer hands back nothing. The endpoint test
+        sinks gain `refusedLate`.
 
 - [ ] **P-301 — a sensor that loses channels to fitting stays Up** · S · P-292 · Found 2026-10-08
       in `P-292`. The message now says how many channels could not be sent, but the state does not

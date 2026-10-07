@@ -6,6 +6,7 @@ import {
   type Logger,
   type ProbeQuery,
   type QueryFailure,
+  type RefusedResult,
   type UnfitResults,
 } from '@ms/shared';
 import type { ProbeRefusals } from './refusals.js';
@@ -275,12 +276,15 @@ export class ProbeQueryService {
    * `unfit`, which Core Health adds to `resultsRefusedUnfit` (`P-300`). A result only fitted is
    * the answer, and said in the log: nothing was stored, so nothing is counted.
    *
-   * **An unfit answer that is late is counted too** (`P-300`). It used to be logged at debug with
-   * the rest of the late answers, so an older probe whose answers all came after their deadline
-   * was refused on no counter. It is refused the same, against the probe that sent it, and warned:
-   * there is nobody to answer `too-old` to, but the probe still needs upgrading. Counted once, as
-   * every answer is: a query's answer is not spooled, so nothing sends it again. A late answer
-   * that fits, or was only fitted, is still the debug line it was.
+   * **An unfit answer that is late is handed back, not counted here** (`P-300` review). Nobody
+   * awaits it, so nothing here needs it settled now, and the probe that sent it may not be known
+   * yet: a probe's query runner goes on across a disconnect and answers on the new connection,
+   * whose probe object is resolved after the welcome. The endpoint counts it with
+   * `refusedLate` once its session has resolved that, and not at all for a session that was not
+   * approved, as it counts a batch's (`P-281` review). A late answer that fits, or was only
+   * fitted, is the debug line it was, and nothing is handed back.
+   *
+   * @returns The refused result of a late answer, for `refusedLate`; otherwise undefined.
    */
   deliver(
     message: {
@@ -291,25 +295,16 @@ export class ProbeQueryService {
     },
     from: number | null,
     unfit?: UnfitResults,
-  ): void {
+  ): RefusedResult | undefined {
     const pending = this.#pending.get(message.queryId);
     if (pending === undefined) {
       const late = unfit?.refused[0];
-      if (late !== undefined) {
-        this.#unfit += 1;
-        this.#refusals?.refused(from);
-        this.#logger.warn(
-          { queryId: message.queryId, probeObjectId: from, refused: late },
-          'a probe answered a query nobody awaits with a result that cannot be made to fit the ' +
-            'protocol; refused',
-        );
-        return;
-      }
+      if (late !== undefined) return late;
       this.#logger.debug(
         { queryId: message.queryId, ...(unfit === undefined ? {} : { unfit }) },
         'a probe answered a query nobody awaits',
       );
-      return;
+      return undefined;
     }
     if (pending.probeObjectId !== from) {
       this.#foreign += 1;
@@ -318,7 +313,7 @@ export class ProbeQueryService {
         { queryId: message.queryId, askedProbe: pending.probeObjectId, answeredBy: from },
         'a probe answered a query that was put to another probe; refused',
       );
-      return;
+      return undefined;
     }
     this.#pending.delete(message.queryId);
     this.#timer.clear(pending.timer);
@@ -340,7 +335,7 @@ export class ProbeQueryService {
           `the probe answered with a result that does not fit the protocol (${refused.reason}); ` +
           'a current probe fits its results before sending them — upgrade the probe',
       });
-      return;
+      return undefined;
     }
     const fitted = unfit?.fitted[0];
     if (fitted !== undefined) {
@@ -353,7 +348,7 @@ export class ProbeQueryService {
 
     if (message.result !== undefined) {
       pending.settle({ kind: 'ok', result: message.result });
-      return;
+      return undefined;
     }
     pending.settle({
       kind: 'failed',
@@ -362,6 +357,24 @@ export class ProbeQueryService {
       failure: message.failure ?? 'unsupported',
       message: message.message ?? 'the probe answered without a result',
     });
+    return undefined;
+  }
+
+  /**
+   * A late answer whose result could not be made to fit (`deliver` handed it back), counted once
+   * the endpoint knows which probe sent it (`P-300` review): `unfit`, and Reports refused on that
+   * probe, or the totals only for a GID no probe object has claimed, as a batch's are. Warned:
+   * there is nobody to answer `too-old` to, but the probe still needs upgrading. Counted once, as
+   * every answer is: a query's answer is not spooled, so nothing sends it again.
+   */
+  refusedLate(queryId: string, from: number | null, refused: RefusedResult): void {
+    this.#unfit += 1;
+    this.#refusals?.refused(from);
+    this.#logger.warn(
+      { queryId, probeObjectId: from, refused },
+      'a probe answered a query nobody awaits with a result that cannot be made to fit the ' +
+        'protocol; refused',
+    );
   }
 
   /**

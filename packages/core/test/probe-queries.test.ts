@@ -269,8 +269,9 @@ describe('on-demand probe queries', { timeout: 20_000 }, () => {
   });
 
   // `P-300`: an unfit answer that came after its deadline was a debug line and nothing else, so
-  // an older probe whose answers were all late was refused on no counter at all.
-  it('counts an unfit answer that arrives after its deadline, against the probe that sent it', async () => {
+  // an older probe whose answers were all late was refused on no counter at all. Its review: the
+  // count waits for the endpoint to know the probe, so `deliver` hands it back uncounted.
+  it('hands back an unfit answer that arrives after its deadline, and counts it when told the probe', async () => {
     const refusals = new ProbeRefusals();
     const said: Record<string, unknown>[] = [];
     const sender = new StubSender();
@@ -293,11 +294,21 @@ describe('on-demand probe queries', { timeout: 20_000 }, () => {
     const queryId = sender.asked[0] ?? '';
     clock.fire();
     assert.equal((await waiting).kind, 'failed');
+    const lines = said.length;
 
     const refused = { sensorId: 42, at: RESULT.at, reason: '/outcome: must be equal to one of' };
-    service.deliver({ queryId, message: 'from the probe' }, 1, { refused: [refused], fitted: [] });
-    assert.equal(service.stats().unfit, 1);
+    const late = service.deliver({ queryId, message: 'from the probe' }, null, {
+      refused: [refused],
+      fitted: [],
+    });
+    assert.deepEqual(late, refused, 'handed back');
+    assert.equal(service.stats().unfit, 0, 'and not counted against a probe not yet known');
     assert.equal(service.stats().answered, 0, 'a late answer still settles nobody');
+    assert.deepEqual(refusals.stats(), { refused: 0, foreign: 0 });
+    assert.equal(said.length, lines);
+
+    service.refusedLate(queryId, 1, refused);
+    assert.equal(service.stats().unfit, 1);
     assert.deepEqual(refusals.countsFor(1), { refused: 1, foreignRecently: 0 });
     assert.deepEqual(refusals.stats(), { refused: 1, foreign: 0 });
     const warned = said.find((line) => 'refused' in line);
@@ -306,23 +317,37 @@ describe('on-demand probe queries', { timeout: 20_000 }, () => {
     assert.equal(warned['probeObjectId'], 1);
 
     // A late answer that fits, or was only fitted, is the ordinary late answer it was.
-    const lines = said.length;
-    service.deliver({ queryId, result: RESULT }, 1, {
+    const before = said.length;
+    const fitted = service.deliver({ queryId, result: RESULT }, 1, {
       refused: [],
       fitted: [
         { sensorId: 42, at: RESULT.at, reason: '', problems: ['dropped'], droppedChannels: 1 },
       ],
     });
-    service.deliver({ queryId, result: RESULT }, 1);
+    assert.equal(fitted, undefined);
+    assert.equal(service.deliver({ queryId, result: RESULT }, 1), undefined);
     assert.equal(service.stats().unfit, 1);
-    assert.deepEqual(refusals.countsFor(1), { refused: 1, foreignRecently: 0 });
-    assert.equal(said.length, lines, 'and is not warned');
+    assert.equal(said.length, before, 'and is not warned');
 
-    // From a GID that owns no probe object: counted in the totals only, as any refusal is.
-    service.deliver({ queryId: 'nobody-asked' }, null, { refused: [refused], fitted: [] });
+    // For a GID that owns no probe object: counted in the totals only, as any refusal is.
+    service.refusedLate('nobody-asked', null, refused);
     assert.equal(service.stats().unfit, 2);
     assert.deepEqual(refusals.stats(), { refused: 2, foreign: 0 });
     assert.deepEqual(refusals.countsFor(1), { refused: 1, foreignRecently: 0 });
+  });
+
+  it('hands back nothing for an answer someone awaits: an unfit one on time is counted at once', async () => {
+    const refusals = new ProbeRefusals();
+    const { service, sender } = build({ refusals });
+    const waiting = service.ask(1, QUERY);
+    await Promise.resolve();
+    const handed = service.deliver({ queryId: sender.asked[0] ?? '' }, 1, {
+      refused: [{ sensorId: 42, at: RESULT.at, reason: '/outcome: invalid' }],
+      fitted: [],
+    });
+    assert.equal(handed, undefined);
+    assert.equal((await waiting).kind, 'failed');
+    assert.equal(service.stats().unfit, 1);
   });
 
   it('names a probe that answered with nothing at all', async () => {

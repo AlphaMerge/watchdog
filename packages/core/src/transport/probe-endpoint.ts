@@ -30,6 +30,7 @@ import {
   type SweepEnding,
   type SweepHost,
   type SweepJob,
+  type RefusedResult,
   type UnfitResults,
   type WithdrawnCode,
 } from '@ms/shared';
@@ -256,7 +257,12 @@ export interface ProbeQuerySink {
     from: number | null,
     /** What the parser refused or fitted of the answer's result (`P-289`), when it did. */
     unfit?: UnfitResults,
-  ): void;
+  ): RefusedResult | undefined;
+  /**
+   * A late answer's refused result, which `deliver` handed back, counted against the probe the
+   * session has resolved (`P-300` review). Called only for an approved session.
+   */
+  refusedLate(queryId: string, from: number | null, refused: RefusedResult): void;
   probeDisconnected(probeObjectId: number): void;
 }
 
@@ -815,13 +821,19 @@ export class ProbeEndpoint {
         case 'results':
           this.#queueResults(message, connection, logger, session);
           return session;
-        case 'query-result':
+        case 'query-result': {
           // Straight through, and never queued behind `pending`: a query has a caller holding a
           // deadline, and chaining it behind a results batch that is mid-write would spend that
           // deadline waiting for work nobody is watching. With what the parser refused or fitted
           // of its result (`P-289`), so the caller is told why there is none.
-          this.#options.queries?.deliver(message, session.probeObjectId, this.#unfit.get(message));
+          const late = this.#options.queries?.deliver(
+            message,
+            session.probeObjectId,
+            this.#unfit.get(message),
+          );
+          if (late !== undefined) this.#countLateUnfit(message.queryId, late, logger, session);
           return session;
+        }
         case 'config-ack':
           if (message.version !== session.sentVersion) {
             // Not fatal — the next push corrects it — but a probe running a configuration the
@@ -1047,6 +1059,42 @@ export class ProbeEndpoint {
       session.configSentAt = new Date();
       session.configSentAtNs = process.hrtime.bigint();
     }
+  }
+
+  /**
+   * A late answer to a query whose result could not be made to fit, counted behind `pending` as
+   * a batch's refused results are (`P-300` review). Nobody awaits it, so the wait costs no caller
+   * anything; counted at arrival, it was counted before the session had resolved its probe
+   * object, which is when late answers come (a probe's query runner goes on across a disconnect
+   * and answers on the new connection), so Core Health's total rose and that probe's Reports
+   * refused did not. **Never for a session that was not approved**: logged and not counted, as
+   * its batches are refused, so a peer nobody let in cannot move `resultsRefusedUnfit`.
+   */
+  #countLateUnfit(
+    queryId: string,
+    refused: RefusedResult,
+    logger: Logger,
+    session: ProbeSession,
+  ): void {
+    const queries = this.#options.queries;
+    if (queries === undefined) return;
+    session.pending = session.pending.then(() => {
+      if (!session.approved) {
+        logger.warn(
+          { queryId, refused },
+          'an answer to a query arrived from a probe that has not been approved; not counted',
+        );
+        return;
+      }
+      try {
+        queries.refusedLate(queryId, session.probeObjectId, refused);
+      } catch (error: unknown) {
+        logger.error(
+          { err: describeError(error), queryId },
+          'counting a late answer that does not fit failed',
+        );
+      }
+    });
   }
 
   #queueResults(

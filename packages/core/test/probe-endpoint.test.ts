@@ -2530,7 +2530,14 @@ describe(
             assert.equal(answered[0]?.queryId, 'q1');
           },
           {},
-          { deliver: (m) => answered.push(m), probeDisconnected: () => undefined },
+          {
+            deliver: (m) => {
+              answered.push(m);
+              return undefined;
+            },
+            refusedLate: () => undefined,
+            probeDisconnected: () => undefined,
+          },
         );
       });
 
@@ -2578,7 +2585,11 @@ describe(
             await waitUntil(() => gone.length === 1);
           },
           {},
-          { deliver: () => undefined, probeDisconnected: (id) => gone.push(id) },
+          {
+            deliver: () => undefined,
+            refusedLate: () => undefined,
+            probeDisconnected: (id) => gone.push(id),
+          },
         );
         assert.deepEqual(gone, [7]);
       });
@@ -2664,7 +2675,11 @@ describe(
           },
         },
         queries: {
-          deliver: (message, from) => heard.answers.push({ queryId: message.queryId, from }),
+          deliver: (message, from) => {
+            heard.answers.push({ queryId: message.queryId, from });
+            return undefined;
+          },
+          refusedLate: () => undefined,
           probeDisconnected: () => undefined,
         },
         discovery: {
