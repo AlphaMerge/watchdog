@@ -7783,9 +7783,60 @@ because each is a decision rather than a defect:
       start; a cut push swept; `final` ignored in the handlers; or in the client (process case);
       dispatch with no window; the note never said. No protocol change.
 
+      **Re-review, 2026-10-07: three more, fixed in a third commit.**
+      - **A flood the ring cannot date is `dropped`, not `earlier`.** The search over the
+        last 2 × `bufferSize` arrivals clamped at its lower end. When every known arrival was
+        inside the window, it called everything older `earlier`, though it may have arrived
+        inside it too. The note then said "before" a `since` that was the listener's start.
+        - Now, when the oldest arrival the ring can date is inside the window, the read starts
+          where the sensor resumes, and the whole loss is `dropped`. That also covers a window
+          reaching past the listener's start.
+        - Probe Health takes what a resume lost from a running total of overwrites not counted
+          at push time. The flags count the dated part; the total counts the rest. So it no
+          longer depends on the side array.
+        - Tests: 1,000 in a buffer of 100 inside the window gives `dropped` 900 and `unread`
+          900, once across two sensors. A window reaching the listener's start counts all six
+          lost as dropped, with `earlier` 0.
+      - **The window is measured on a monotonic clock.** Arrivals, the listener's start and
+        each cursor's last drain are stamped with `performance.now` (injectable as `monotonic`
+        on each listener). The wall clock is read only for `at`, `since` and `until`, and
+        `since` is now less monotonic elapsed time, so it never falls after `until`. The test
+        steps the wall clock back an hour between arrivals; the scan reads the three in the
+        interval, names the two before, and covers exactly one monotonic minute.
+      - **A cut push parks, rather than keeps, the cursors it leaves off the wheel.**
+        `retain(ids, complete)` is now required on `CursorSweeper`, and `core-handlers` sweeps
+        every settle and says which kind it was. A complete push sweeps as before. A cut one
+        parks each absent sensor's cursor with where it stood and when it last scanned, and
+        those parked sensors stop counting what they miss. When the whole push brings a sensor
+        back, it reads one interval back from its own position, and what came before since its
+        last scan is `earlier`. A whole push that leaves it out makes it new.
+        - Tests: four ring cases.
+        - One core-handlers case: an hour down gives 0 read, 60 earlier, 0 dropped.
+        - A scenario case: 40 sensors scanning, a full push cut after the ping sensor's chunk,
+          two hours down with the buffers wrapped. Their first scans give 0 failures and 0
+          limit breaches, and each reads + earlier + dropped equals what arrived since its last
+          scan.
+
+      **Mutations 18/18**:
+      - Flood: undated called earlier; undated not counted; the running total not kept; not
+        decremented by the dated claim; or by the undated one; the dated arrivals unused.
+      - Clock: arrivals on the wall clock; now on the wall clock; `since` not from monotonic
+        time; the start on the wall clock; `since` the window rather than the resume point; the
+        window ignored.
+      - Parking: a cut push forgets; or keeps cursors; a complete push keeps parked sensors; a
+        parked sensor resumes from the listener's start; or forgets its last scan; the handlers
+        call every push complete.
+
+      One more was equivalent: clamping the window at the resume point. The search already
+      answers it, so that clamp was removed. No protocol change.
+
       **Not done.** `earlier` has no Probe Health counter. It is in the listener's received
       count and in one message; a counter would need a protocol number. A sensor new to a
-      running probe still misses what arrived between its assignment and its first scan. Starting it at its assignment needs `retain` (or the
+      running probe still misses what arrived between its assignment and its first scan. A
+      parked sensor that comes back after a flood the ring cannot date may be credited, on
+      Probe Health, with records older than its own position. The running total is not split
+      by position, so `unread` can overcount there, though never by more than that sensor's
+      `dropped`. Starting it at its assignment needs `retain` (or the
       `AssignmentStore` `onAdd` wiring in `main.ts`) to tell each listener which held sensors are
       its own. Without that, overwrites before its first drain could not be counted on Probe
       Health as they happen.

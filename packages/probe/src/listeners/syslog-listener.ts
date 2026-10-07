@@ -39,6 +39,11 @@ export interface SyslogListenerOptions {
    */
   readonly senders: readonly string[];
   readonly bufferSize: number;
+  /**
+   * The monotonic clock, in milliseconds, that the buffer measures a resuming sensor's window on
+   * (`P-254`). Defaults to `performance.now`; injectable so a test can step the wall clock alone.
+   */
+  readonly monotonic?: () => number;
   readonly now?: () => Date;
   /** Injectable, so the ring, the cursors and the counters are testable without a port. */
   readonly open?: (options: SyslogReceiverOptions) => SyslogReceiver | Promise<SyslogReceiver>;
@@ -77,7 +82,7 @@ export class SyslogListener {
     this.#options = options;
     this.#logger = options.logger.child({ component: 'syslog-listener' });
     this.#now = options.now ?? ((): Date => new Date());
-    this.#ring = new NotificationRing(options.bufferSize, this.#now);
+    this.#ring = new NotificationRing(options.bufferSize, this.#now, options.monotonic);
   }
 
   get running(): boolean {
@@ -140,8 +145,8 @@ export class SyslogListener {
     return this.#ring.drain(sensorId, LISTENER_ID, windowMs);
   }
 
-  retain(sensorIds: Iterable<number>): void {
-    this.#ring.retain(sensorIds);
+  retain(sensorIds: Iterable<number>, complete?: boolean): void {
+    this.#ring.retain(sensorIds, complete);
   }
 
   stats(): SyslogListenerStats {

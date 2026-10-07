@@ -37,6 +37,11 @@ export interface TrapListenerOptions {
   /** Injectable so a test can drive the ring without waiting on a clock. */
   readonly now?: () => Date;
   /**
+   * The monotonic clock, in milliseconds, that the buffer measures a resuming sensor's window on
+   * (`P-254`). Defaults to `performance.now`; injectable so a test can step the wall clock alone.
+   */
+  readonly monotonic?: () => number;
+  /**
    * How the socket is opened. Defaults to the real receiver in `@ms/sensors/snmp`.
    *
    * The seam this class is tested through, and it is the honest one: everything here is about
@@ -83,7 +88,7 @@ export class TrapListener {
     this.#options = options;
     this.#logger = options.logger.child({ component: 'trap-listener' });
     this.#now = options.now ?? ((): Date => new Date());
-    this.#ring = new NotificationRing(options.bufferSize, this.#now);
+    this.#ring = new NotificationRing(options.bufferSize, this.#now, options.monotonic);
   }
 
   get running(): boolean {
@@ -151,8 +156,8 @@ export class TrapListener {
   }
 
   /** Keeps only the cursors for sensors the probe still holds, so a deleted one stops costing. */
-  retain(sensorIds: Iterable<number>): void {
-    this.#ring.retain(sensorIds);
+  retain(sensorIds: Iterable<number>, complete?: boolean): void {
+    this.#ring.retain(sensorIds, complete);
   }
 
   stats(): TrapListenerStats {

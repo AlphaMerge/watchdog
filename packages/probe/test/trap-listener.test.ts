@@ -42,6 +42,7 @@ async function listener(bufferSize = 4, communities: string[] = []): Promise<Tra
     communities,
     bufferSize,
     now: () => new Date(1_800_000_000_000 + clock++ * 1_000),
+    monotonic: () => clock * 1_000,
     open: fakeReceiver,
   });
   await instance.start();

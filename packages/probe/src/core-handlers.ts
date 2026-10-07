@@ -30,7 +30,11 @@ export interface Assignments {
 
 /** Anything holding ring cursors keyed by sensor: `TrapListener` and `SyslogListener` both do. */
 export interface CursorSweeper {
-  retain(sensorIds: Iterable<number>): void;
+  /**
+   * `complete` is whether the push that settled finished, or a dropped link cut it (`P-254`).
+   * Required, so a sweeper cannot take chunk one for everything the probe holds by omission.
+   */
+  retain(sensorIds: Iterable<number>, complete: boolean): void;
 }
 
 /** `SweepRunner` and `IdentifyRunner` share this shape; the job type is what differs. */
@@ -115,21 +119,22 @@ export function coreHandlers(deps: CoreHandlerDeps): CoreHandlers {
    * **And a push that stopped arriving is not one that finished** (`P-254`). Two seconds of quiet
    * also follows a link that dropped between chunks, leaving the store holding chunk one. A sweep
    * then would delete the cursors of every sensor in the chunks never delivered — `P-42` again —
-   * and the listeners take the first set they are swept with as what the probe held across a
-   * restart, so those sensors would come back on the reconnect's push as new and miss what
-   * arrived before their first scan. So the sweep waits for a message that completes its push;
-   * the reconnect sends the whole set again, because the cut push was never stamped (`R18`).
+   * and the listeners take the first complete set they are swept with as what the probe held
+   * across a restart, so those sensors would come back on the reconnect's push as new and miss
+   * what arrived before their first scan. So the listeners are told which it was. A complete push
+   * sweeps as it always did. A cut one *parks* the sensors it left off the wheel: their cursors
+   * stop counting what they miss, and when the reconnect's whole push brings them back — it does,
+   * because the cut push was never stamped (`R18`) — each resumes one interval back, so an hour
+   * the link was down is not one reading, and does not alarm every sensor at once.
    * Sizing the pool is not deferred: it reads the workload the scheduler is actually running.
    */
   const settle = (): void => {
     if (settling !== undefined) clearTimeout(settling);
     settling = setTimeout(() => {
       settling = undefined;
-      if (complete) {
-        // One sorted copy of up to five thousand ids, not one per listener.
-        const held = deps.assignments.ids();
-        for (const listener of deps.listeners) listener.retain(held);
-      }
+      // One sorted copy of up to five thousand ids, not one per listener.
+      const held = deps.assignments.ids();
+      for (const listener of deps.listeners) listener.retain(held, complete);
       deps.sizePool();
     }, settleMs);
     settling.unref();

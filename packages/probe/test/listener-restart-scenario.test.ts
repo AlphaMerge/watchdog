@@ -89,6 +89,7 @@ async function probeOf(): Promise<{
     communities: [],
     bufferSize: 100,
     now: clock,
+    monotonic: () => now - T0,
     open: (options: TrapReceiverOptions) => {
       deliverTrap = options.onTrap;
       return { close: () => Promise.resolve() };
@@ -104,6 +105,7 @@ async function probeOf(): Promise<{
     senders: [],
     bufferSize: 100,
     now: clock,
+    monotonic: () => now - T0,
     open: (options: SyslogReceiverOptions) => {
       deliverSyslog = options.onMessage;
       return { close: () => Promise.resolve() };
@@ -190,6 +192,71 @@ describe('a probe restart after a long wait for its core (`P-254`)', () => {
     const last = trapIds[SENSORS - 1] ?? 0;
     const next = await scan(trapType, last, probe.traps.drain(last, MINUTE));
     assert.ok(next.primary >= 2 && next.primary <= 4, `a minute read ${String(next.primary)}`);
+  });
+
+  it('raises no alarm when a cut push kept the sensors off the wheel for two hours', async () => {
+    // The probe has run, its sensors scanning each minute, when the core sends a full push and
+    // the link drops after chunk one — which holds only the ping sensor. The scheduler stops
+    // scanning the other forty; the link stays down two hours and the buffers wrap. The whole push
+    // then brings them back. Kept cursors would hand each two hours as one reading and a loss.
+    const probe = await probeOf();
+    probe.traps.retain(held, true);
+    probe.syslog.retain(held, true);
+    const lastRead = new Map<number, number>();
+    for (let minute = 0; minute < 3; minute += 1) {
+      probe.advance(MINUTE);
+      const total = probe.received();
+      for (const id of trapIds) {
+        probe.traps.drain(id, MINUTE);
+        lastRead.set(id, total.traps);
+      }
+      for (const id of syslogIds) {
+        probe.syslog.drain(id, MINUTE);
+        lastRead.set(id, total.messages);
+      }
+    }
+
+    probe.traps.retain([999], false);
+    probe.syslog.retain([999], false);
+    probe.advance(OUTAGE);
+    probe.traps.retain(held, true);
+    probe.syslog.retain(held, true);
+
+    let breaches = 0;
+    let failures = 0;
+    for (let index = 0; index < SENSORS; index += 1) {
+      probe.advance(3_000);
+      const total = probe.received();
+      for (const [type, id, batch, received] of [
+        [
+          trapType,
+          trapIds[index] ?? 0,
+          probe.traps.drain(trapIds[index] ?? 0, MINUTE),
+          total.traps,
+        ],
+        [
+          syslogType,
+          syslogIds[index] ?? 0,
+          probe.syslog.drain(syslogIds[index] ?? 0, MINUTE),
+          total.messages,
+        ],
+      ] as const) {
+        assert.equal(
+          batch.items.length + (batch.earlier ?? 0) + batch.dropped,
+          received - (lastRead.get(id) ?? 0),
+          `sensor ${String(id)} cannot account for what arrived since its last scan`,
+        );
+        assert.ok((batch.earlier ?? 0) > 300, 'two hours came before the window');
+        try {
+          const { primary } = await scan(type, id, batch);
+          if (primary > LIMIT) breaches += 1;
+        } catch {
+          failures += 1;
+        }
+      }
+    }
+    assert.equal(failures, 0, 'a first scan after the cut failed: an alarm for the outage');
+    assert.equal(breaches, 0, 'a first scan after the cut crossed its limit');
   });
 
   it('would have alarmed on every sensor, read back to the listener’s start', async () => {

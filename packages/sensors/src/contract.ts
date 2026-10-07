@@ -238,14 +238,16 @@ export interface ReceivedBatch {
    */
   readonly dropped: number;
   /**
-   * On a sensor's first scan after a probe restart only: what the listener received since it
-   * started and before this batch's window, which reaches one interval back (`P-254`).
+   * On a sensor's first scan after a probe restart, or after a cut configuration push took it off
+   * the scheduler, only: what the listener received before this batch's window, which reaches
+   * one interval back, and after the sensor's last scan or the listener's start (`P-254`).
    *
    * Neither this sensor's count nor its loss. No scan of it was there to cover that time — the
-   * probe had just started, or could not yet reach its core — so a count of it would be several
-   * intervals as one reading, and every limit set per interval would alarm on the one outage; and
-   * calling it `dropped` would fail every sensor that does not tolerate a loss, the same storm by
-   * another channel. A type names it in its message, so it is not lost silently. Absent on every
+   * probe had just started, could not yet reach its core, or was not scanning it — so a count of
+   * it would be several intervals as one reading, and every limit set per interval would alarm on
+   * the one outage; and calling it `dropped` would fail every sensor that does not tolerate a
+   * loss, the same storm by another channel. What the buffer overwrote inside the window, or
+   * cannot date, is `dropped` and never this. A type names it in its message, so it is not lost silently. Absent on every
    * other scan.
    */
   readonly earlier?: number;

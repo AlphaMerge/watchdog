@@ -31,12 +31,15 @@ const delta = (sensors: SensorAssignment[]): ConfigUpdate => ({
 });
 
 /** Records what it was told to keep, so a test can assert on *when* as well as on what. */
-function sweeper(): CursorSweeper & { sweeps: number[][] } {
+function sweeper(): CursorSweeper & { sweeps: number[][]; complete: boolean[] } {
   const sweeps: number[][] = [];
+  const complete: boolean[] = [];
   return {
     sweeps,
-    retain: (ids) => {
+    complete,
+    retain: (ids, whole) => {
       sweeps.push([...ids]);
+      complete.push(whole);
     },
   };
 }
@@ -181,17 +184,20 @@ describe('config push handling (P-41, P-42, P-43)', () => {
 describe('a config push cut short (P-254)', () => {
   const all = [assignment(1), assignment(2), assignment(3)];
 
-  it('sweeps nothing until a push completes, and still sizes the pool', async () => {
+  it('tells the listeners a cut push is incomplete, and still sizes the pool', async () => {
     const h = harness();
     h.handlers.onConfig(set(all.slice(0, 1)), false);
     await settled();
-    assert.equal(h.traps.sweeps.length, 0, 'chunk one is not what the probe holds');
+    assert.deepEqual(h.traps.sweeps, [[1]]);
+    assert.deepEqual(h.traps.complete, [false], 'chunk one is not what the probe holds');
+    assert.deepEqual(h.syslog.complete, [false]);
     assert.equal(h.sized(), 1, 'the pool is sized for what is running');
 
     // The reconnect's push, whole, because the cut one was never stamped (`R18`).
     h.handlers.onConfig(set(all), true);
     await settled();
-    assert.deepEqual(h.traps.sweeps, [[1, 2, 3]]);
+    assert.deepEqual(h.traps.sweeps[1], [1, 2, 3]);
+    assert.deepEqual(h.traps.complete, [false, true]);
   });
 
   it('sweeps a complete push that came as chunks, once its last arrives', async () => {
@@ -200,6 +206,7 @@ describe('a config push cut short (P-254)', () => {
     h.handlers.onConfig(delta(all.slice(1)), true);
     await settled();
     assert.deepEqual(h.traps.sweeps, [[1, 2, 3]]);
+    assert.deepEqual(h.traps.complete, [true]);
   });
 
   it('takes an older core’s push, which has no flag, as complete', async () => {
@@ -207,16 +214,21 @@ describe('a config push cut short (P-254)', () => {
     h.handlers.onConfig(set(all));
     await settled();
     assert.deepEqual(h.traps.sweeps, [[1, 2, 3]]);
+    assert.deepEqual(h.traps.complete, [true]);
   });
 
   it('leaves a sensor in a chunk never delivered reading what came before its first scan', async () => {
     let now = 1_800_000_000_000;
-    const ring = new NotificationRing(100, () => new Date(now));
+    const ring = new NotificationRing(
+      100,
+      () => new Date(now),
+      () => now,
+    );
     const h = harness({
       listeners: [
         {
-          retain: (ids) => {
-            ring.retain(ids);
+          retain: (ids, complete) => {
+            ring.retain(ids, complete);
           },
         },
       ],
@@ -234,13 +246,20 @@ describe('a config push cut short (P-254)', () => {
     assert.equal(ring.drain(3, 'snmp-trap', 60_000).items.length, 3, 'sensor 3 read nothing');
   });
 
-  it('keeps every cursor through a later push that was cut', async () => {
-    const ring = new NotificationRing(100);
+  it('parks the sensors a later cut push left off, and resumes them one interval back', async () => {
+    // The link stays down an hour after chunk one. Kept cursors would hand sensors 2 and 3 the
+    // hour as one reading; dropped ones would make them new and lose their place.
+    let now = 0;
+    const ring = new NotificationRing(
+      1_000,
+      () => new Date(1_800_000_000_000 + now),
+      () => now,
+    );
     const h = harness({
       listeners: [
         {
-          retain: (ids) => {
-            ring.retain(ids);
+          retain: (ids, complete) => {
+            ring.retain(ids, complete);
           },
         },
       ],
@@ -251,7 +270,19 @@ describe('a config push cut short (P-254)', () => {
 
     h.handlers.onConfig(set(all.slice(0, 1)), false);
     await settled();
-    assert.equal(ring.cursors, 3, 'two sensors lost their cursors to a chunk boundary');
+    assert.equal(ring.cursors, 1, 'sensors 2 and 3 are off the wheel and not followed');
+    for (let minute = 0; minute < 60; minute += 1) {
+      ring.push({ at: new Date().toISOString(), source: '192.0.2.3', text: 'trap', detail: {} });
+      now += 60_000;
+    }
+
+    h.handlers.onConfig(set(all), true);
+    await settled();
+    now += 1_000;
+    const back = ring.drain(2, 'snmp-trap', 60_000);
+    assert.equal(back.items.length, 0, 'one interval, and nothing arrived in it');
+    assert.equal(back.earlier, 60, 'the hour is named, not read');
+    assert.equal(back.dropped, 0);
   });
 });
 
