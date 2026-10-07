@@ -3227,6 +3227,14 @@ because each is a decision rather than a defect:
       - a sent alarm still blocking;
       - digest order reversed.
 
+- [ ] **N-21 — an immediate alarm awaiting its retry can be overtaken by its recovery** · S ·
+      N-13, N-20 · Found 2026-10-07 in `N-20`. `N-20` keeps a held alarm's recovery behind it in
+      the digest. An alarm sent at once whose delivery failed waits for its retry; its recovery,
+      sent at once, can be delivered first, so the recipient hears "up" before "down" — the order
+      `N-20` fixed for the digest. **Done when** a recovery whose alarm is awaiting a retry goes
+      out after it (or with it), with a scenario test (`M-17`) of a failed first delivery and a
+      recovery inside the retry delay.
+
 ## Phase 5 — Web UI
 
 - [x] **U-01 — Frontend scaffold** · M · F-01 · React 19 + TypeScript + Vite 8, routing, design
@@ -8417,6 +8425,63 @@ because each is a decision rather than a defect:
       ignored SIGTERM running. **Done when** the setting refuses a value below the program grace
       it must contain (with `config check` saying why), or the worker is told the setting and
       fits its grace inside it; with a test.
+
+- [ ] **P-268 — two SSH session tests keep under a second of slack** · S · P-261 · Found
+      2026-10-07 in `P-261`. `packages/probe/test/ssh-session.test.ts` asserts a wall-clock
+      upper bound at :451 with about 450 ms to spare and at :440 with about 800 ms, the shape
+      `P-261` took off `pinned-target.test.ts`. On the loaded VM either can read red with the
+      code right. **Done when** both run on a fake clock or wait with `within` for what they
+      assert, with no wall-clock upper bound left in the file.
+
+- [ ] **P-269 — a sensor new to a running probe misses what arrives before its first scan** ·
+      S · P-254 · Found 2026-10-07 in `P-254`. A trap, syslog or flow sensor assigned to a probe
+      that is already running gets a cursor at the ring's head when it is assigned, and its first
+      scan comes one phase later; what the listener heard for it in between, from the device the
+      operator has just added, is in no reading. **Done when** a new sensor's first scan reads one
+      interval back like a restarted one (`earlier` for the rest), with a ring test and the
+      listener-restart scenario extended.
+
+- [ ] **P-270 — `earlier` and `undated` listener records have no Probe Health count** · S ·
+      P-254 · Found 2026-10-07 in `P-254`. A resuming sensor names what it did not read in its
+      message (`earlier`, `undated`), and the overwritten total counts the undated ones, but
+      Probe Health has no channel for records a restart or a cut push kept out of every reading.
+      **Done when** Probe Health counts them (a heartbeat field, so a protocol number after 30,
+      with the capability gate `P-260` and `P-263` used), with core, metrics and report tests.
+
+- [ ] **P-271 — two more worker spawns are not counted as on their way** · S · P-263 · Found
+      2026-10-07 in `P-263`. `#recycle` (a worker terminated for ignoring its abort) and
+      `start()`'s own spawns are not in `#growing` while they wait for a loading turn, so `#grow`
+      can start a worker for the same gap — the shape `P-263` fixed for the retry and the crash
+      replacement. **Done when** both are counted until their spawn settles, each with a test that
+      fails with the count removed.
+
+- [ ] **P-272 — should a pool whose registry always hangs give up?** · S · P-263 · Found
+      2026-10-07 in `P-263`. **Needs the user.** Since `P-263` a hang never latches the pool: a
+      hang may be load, and a latch lasts until a restart. So a registry that always hangs retries
+      once a minute per slot for ever, and accepted checks wait in the queue until it fills and
+      are then refused (counted), not settled at once as `pool-disabled`. **Done when** decided:
+      keep it, or latch (or settle the queue) after a long streak of hangs with nothing ever
+      ready — with the streak length, a test and the administration note.
+
+- [ ] **P-273 — a parked sensor resuming inside its window can overcount Probe Health** · S ·
+      P-254 · Found 2026-10-07 in review of `P-254`. `NotificationRing.#countLostFrom` draws from
+      the running total of overwrites not counted at push time whenever the read starts below the
+      oldest datable record. That total is fungible: when another live cursor sat at or before a
+      parked sensor's floor, the records it covers were already counted, and a parked sensor that
+      resumes inside its window (`#place`'s first branch, `undated` 0) adds them again. Traced:
+      buffer 10, two sensors, 30 arrivals within an interval of the parked one's last scan,
+      `overwrittenUnread` 30 where 20 were lost. **Done when** a parked resume draws at most the
+      growth of that total since it was parked (or the draw is limited to restart resumes), with
+      the traced case as a ring test.
+
+- [ ] **P-274 — a failing first scan never names what the ring could not date** · S · P-254 ·
+      Found 2026-10-07 in review of `P-254`. A batch with `undated` always has `dropped` equal to
+      the buffer size, and syslog (always), and trap and flow under the default `warnOnDropped`,
+      throw on `dropped` before `earlierNote` runs. So the message names the 100 overwritten and
+      not the hundreds of thousands the ring could not date; only Probe Health's total has them.
+      The scenario test covers the one setup that reaches the note (trap, `warnOnDropped: false`).
+      **Done when** the dropped failure of all three types carries the `earlier`/`undated` note,
+      with the scenario extended to syslog and the default trap and flow parameters.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
@@ -24420,6 +24485,20 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       first step with `taskkill /T` (or a job object), or the cancel sent to the check process
       over its pipe — with a test on a Windows runner, and the documentation's Windows paragraph
       is removed.
+
+- [ ] **H-39 — the tarball's uninstall leaves the probe's ping drop-in** · S · H-34 · Found
+      2026-10-07 in `H-34`. The `.deb` purge and the `.rpm` erase remove
+      `/etc/sysctl.d/60-ms-probe-ping.conf` while it is still ms-setup's
+      (`deploy/remove-ping-conf.sh`), but a tarball install has no uninstall step that does, and
+      `installation.md`'s tarball removal does not mention it. **Done when** the tarball's
+      uninstall path runs the same fragment (or the guide names the file), with a smoke step.
+
+- [ ] **H-40 — removing `ms` in a swap to `ms-probe` stops the new package's probe** · S · H-34 ·
+      Found 2026-10-07 in `H-34`. `ms`'s rpm `%preun` with `$1=0` (and the `.deb`'s `prerm` on
+      removal) stops and disables `ms-probe.service`. In `dnf swap ms ms-probe` that runs after
+      `ms-probe` is installed, so the swap leaves the new package's probe stopped and disabled.
+      **Done when** the scriptlets skip the probe unit while `/opt/ms/libexec/ms-setup` still
+      exists (the check `H-34`'s fragment uses), with a smoke case for the swap.
 
 ---
 
