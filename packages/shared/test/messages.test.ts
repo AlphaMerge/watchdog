@@ -1146,7 +1146,9 @@ describe('a results batch holding a result that does not fit (`P-281`)', () => {
         ],
       },
     ]);
-    assert.equal(kept[0]?.message, 'half � pair');
+    // Fitted on the core as a probe fits it, so the sensor's message says what was dropped
+    // (`P-292`) as well as the lone surrogate made what PostgreSQL stores.
+    assert.equal(kept[0]?.message, 'half � pair (2 channels could not be sent)');
     assert.deepEqual(kept[0].channels, [{ key: 'pair😀', value: 3 }]);
     assert.deepEqual(unfit?.refused, []);
     assert.equal(unfit.fitted[0]?.reason, '', 'the schema took it as sent');

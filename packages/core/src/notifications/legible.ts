@@ -1,21 +1,53 @@
 /**
  * CRLF first, so it is taken as one; then every control, every format character (which holds
- * every bidirectional control) and the two Unicode line and paragraph separators.
+ * every bidirectional control), the two Unicode line and paragraph separators, and every other
+ * default-ignorable code point that is not a mark (`N-27` review).
  */
-const UNSAFE = /\r\n|[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+const UNSAFE = /\r\n|[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]|(?!\p{Mn})\p{Default_Ignorable_Code_Point}/gu;
 
-/** The two joiners, kept between letters of scripts and emoji that need them (`N-27`). */
-const JOINERS = new Set(['\u200c', '\u200d']);
+/** The two joiners, kept only where they join (`N-27`). */
+const ZWNJ = '\u200c';
+const ZWJ = '\u200d';
 
-/** A neighbour a joiner may join: not ASCII, and visible — not escaped here, not a space. */
-const JOINABLE = /^[^\p{ASCII}\p{Cc}\p{Cf}\p{Cs}\p{Z}]$/u;
+/**
+ * The scripts whose letters a joiner changes, by `Script_Extensions` so that a vowel sign or a
+ * virama counts with its letters. The cursive ones — Arabic (Persian, Urdu), Syriac, N'Ko,
+ * Mongolian, Adlam, Hanifi Rohingya, Mandaic — and the Brahmic ones whose conjuncts ZWJ and ZWNJ
+ * shape: Devanagari, Bengali, Gurmukhi, Gujarati, Oriya, Tamil, Telugu, Kannada, Malayalam and
+ * Sinhala. A joiner is kept between two characters of the same one of these.
+ */
+const JOINING_SCRIPTS: readonly RegExp[] = [
+  /^\p{scx=Arab}$/u,
+  /^\p{scx=Syrc}$/u,
+  /^\p{scx=Nkoo}$/u,
+  /^\p{scx=Mong}$/u,
+  /^\p{scx=Adlm}$/u,
+  /^\p{scx=Rohg}$/u,
+  /^\p{scx=Mand}$/u,
+  /^\p{scx=Deva}$/u,
+  /^\p{scx=Beng}$/u,
+  /^\p{scx=Guru}$/u,
+  /^\p{scx=Gujr}$/u,
+  /^\p{scx=Orya}$/u,
+  /^\p{scx=Taml}$/u,
+  /^\p{scx=Telu}$/u,
+  /^\p{scx=Knda}$/u,
+  /^\p{scx=Mlym}$/u,
+  /^\p{scx=Sinh}$/u,
+];
+
+/** What an emoji ZWJ sequence joins: the pictures. */
+const PICTURE = /^\p{Extended_Pictographic}$/u;
+
+/** What may stand between a picture and the ZWJ after it: a skin tone, or the emoji selector. */
+const PICTURE_SUFFIX = /^[\p{Emoji_Modifier}\ufe0f]$/u;
 
 /**
  * A delivery error fit to store as `last_error` and to show to whoever reads it (`N-24`), and to
  * hand back to whoever sent a test notification (`N-27`).
  *
  * An error quotes the far end — a webhook's response body, a program's last line, a relay's
- * reply — and the far end can say anything. Four things in what it says do harm:
+ * reply — and the far end can say anything. These things in what it says do harm:
  *
  * - **U+0000**, which PostgreSQL text cannot hold (`22021`). The write recording the attempt
  *   failed, the request kept its claim's lease, and it was sent again every time that ran out
@@ -36,17 +68,27 @@ const JOINABLE = /^[^\p{ASCII}\p{Cc}\p{Cf}\p{Cs}\p{Z}]$/u;
  *   that nobody can tell apart on screen. Escaped for the reason the controls are: a reader
  *   should see that something was there.
  *
- * **Except the two joiners between characters that use them.** ZWNJ (U+200C) and ZWJ (U+200D)
- * are format characters too, and they are how Persian, Arabic and Indic text is written and how
- * an emoji sequence is one picture: escaped everywhere, a Persian relay's refusal would read
- * broken. Each is kept where both its neighbours are visible characters other than ASCII —
- * the only place either does its job — and escaped anywhere else, where it does nothing but
- * hide: between two Latin letters, at either end, or beside a space or another escape.
+ * - **Other default-ignorable code points that are not marks** (`N-27` review). The Hangul
+ *   fillers U+115F, U+1160, U+3164 and U+FFA0 are letters (`\p{Lo}`) that draw nothing, and the
+ *   unassigned default-ignorables (U+2065, U+FFF0–U+FFF8, U+E0000, U+E0002–U+E001F,
+ *   U+E0080–U+E0FFF) are drawn as nothing by every renderer that follows Unicode, so each of
+ *   them hides as a zero-width space does: "re" U+115F "fused" reads as "refused".
  *
- * **Not the variation selectors**, nor the rest of `\p{Default_Ignorable_Code_Point}`. They are
- * marks (`\p{Mn}`), not format characters, and an emoji's U+FE0F is one; escaping them would
- * break the emoji to catch the rare text that hides behind them. A diagnosis for a person needs
- * the visible text to be the text, and they attach to a visible character without changing it.
+ * **Except the two joiners where they join.** ZWNJ (U+200C) and ZWJ (U+200D) are format
+ * characters too, and they are how Persian, Arabic and Indic text is written and how an emoji
+ * sequence is one picture: escaped everywhere, a Persian relay's refusal would read broken. So a
+ * joiner is kept between two characters of the same joining script (`JOINING_SCRIPTS`), and a
+ * ZWJ is kept before a picture that follows a picture, alone or with a skin tone or U+FE0F.
+ * Everywhere else it does nothing but hide, and is escaped: between Latin, Cyrillic, Greek,
+ * Hebrew or CJK letters, which no joiner changes ("от" ZWJ "казано" reads as "отказано"),
+ * between two scripts, at either end, or beside a space, a mark of another script or an escape.
+ * A combining mark alone does not admit one: a Latin letter with an accent is still Latin, and
+ * an Indic virama is already its script's.
+ *
+ * **Not the variation selectors**, nor the other default-ignorable marks (`\p{Mn}`: U+034F, the
+ * Mongolian and Khmer ones). An emoji's U+FE0F is one, and escaping them would break the emoji to
+ * catch the rare text that hides behind them; they attach to a visible character without
+ * changing what it says.
  *
  * **Escaped, not removed.** Each becomes `\uXXXX`, or `\u{XXXXX}` beyond the BMP so that a tag
  * character is not read as four hex digits and a letter. A reader sees *something was there* —
@@ -76,19 +118,37 @@ export function legible(text: string): string {
   return text.replace(UNSAFE, (found: string, at: number) => {
     if (found === '\r\n') return '\n';
     if (found === '\n' || found === '\t') return found;
-    if (JOINERS.has(found) && joins(text, at)) return found;
+    if ((found === ZWNJ || found === ZWJ) && joins(found, text, at)) return found;
     const point = found.codePointAt(0) ?? 0;
     const hex = point.toString(16);
     return point > 0xffff ? `\\u{${hex}}` : `\\u${hex.padStart(4, '0')}`;
   });
 }
 
-/** Whether the joiner at `at` stands between two characters it can join. */
-function joins(text: string, at: number): boolean {
-  const low = at >= 2 ? text.charCodeAt(at - 1) : -1;
-  const before =
-    low >= 0xdc00 && low <= 0xdfff ? text.slice(at - 2, at) : text.slice(Math.max(0, at - 1), at);
-  const next = text.codePointAt(at + 1);
-  const after = next === undefined ? '' : String.fromCodePoint(next);
-  return JOINABLE.test(before) && JOINABLE.test(after);
+/** Whether the joiner at `at` stands where it joins: in a joining script, or in an emoji. */
+function joins(joiner: string, text: string, at: number): boolean {
+  const before = pointBefore(text, at);
+  const after = pointAt(text, at + 1);
+  if (JOINING_SCRIPTS.some((script) => script.test(before) && script.test(after))) return true;
+  if (joiner !== ZWJ || !PICTURE.test(after)) return false;
+  if (PICTURE.test(before)) return true;
+  // A skin tone or U+FE0F only where it follows a picture itself: after a letter it is drawn as
+  // nothing, and would carry a ZWJ in with it.
+  return PICTURE_SUFFIX.test(before) && PICTURE.test(pointBefore(text, at - before.length));
+}
+
+/** The whole code point that ends at `end`, or '' at the start. */
+function pointBefore(text: string, end: number): string {
+  if (end <= 0) return '';
+  const low = text.charCodeAt(end - 1);
+  const high = end >= 2 ? text.charCodeAt(end - 2) : -1;
+  return low >= 0xdc00 && low <= 0xdfff && high >= 0xd800 && high <= 0xdbff
+    ? text.slice(end - 2, end)
+    : text.slice(end - 1, end);
+}
+
+/** The whole code point that starts at `start`, or '' at the end. */
+function pointAt(text: string, start: number): string {
+  const point = text.codePointAt(start);
+  return point === undefined ? '' : String.fromCodePoint(point);
 }

@@ -3648,21 +3648,47 @@ because each is a decision rather than a defect:
         text, but each can make "refused" and "re\u200Bfused" two errors nobody can tell apart.
         A reader should see that something was there, as with the controls. A code point beyond
         the BMP is escaped as `\u{e0041}`, so it does not read as four hex digits and a letter.
-      - **ZWNJ and ZWJ are kept only between two visible non-ASCII characters.** Persian, Arabic
-        and Indic text and emoji sequences need them, and escaping them everywhere would break a
-        Persian relay's refusal. Anywhere else they only hide, so they are escaped there: between
-        Latin letters, at either end, or beside a space, a surrogate half or another escape.
-      - **Not escaped:** variation selectors and the rest of `\p{Default_Ignorable_Code_Point}`.
-        They are marks attached to a visible character, and U+FE0F is part of an emoji.
+      - **ZWNJ and ZWJ are kept only where they join** (narrowed on review). A joiner is kept
+        when both of its neighbours are in the same joining script. The scripts are matched by
+        `Script_Extensions`, so a vowel sign or a virama counts with its letters:
+        - the cursive scripts: Arabic, Syriac, N'Ko, Mongolian, Adlam, Hanifi Rohingya and Mandaic;
+        - the Brahmic scripts: Devanagari, Bengali, Gurmukhi, Gujarati, Oriya, Tamil, Telugu,
+          Kannada, Malayalam and Sinhala.
+
+        A ZWJ is also kept before a picture (`\p{Extended_Pictographic}`) when the character before
+        it is a picture, or a skin tone or U+FE0F that itself follows a picture. Everywhere else
+        the joiner is escaped. That includes Latin, Cyrillic, Greek, Hebrew and CJK letters,
+        where a joiner changes nothing. The first rule (keep it between any two visible
+        non-ASCII characters) kept "от" ZWJ "казано" looking exactly like "отказано". A combining
+        mark on its own does not let a joiner through, because an accented Latin letter is still
+        Latin.
+      - **Default-ignorables that are not marks are escaped** (review). These are
+        `\p{Default_Ignorable_Code_Point}` minus `\p{Mn}`:
+        - the Hangul fillers U+115F, U+1160, U+3164 and U+FFA0, which are letters that draw nothing;
+        - the unassigned default-ignorables U+2065, U+FFF0–FFF8, U+E0000, U+E0002–E001F and
+          U+E0080–E0FFF.
+
+        The first version wrongly said all the rest were marks.
+      - **Not escaped:** the default-ignorable marks, which are the variation selectors, U+034F,
+        and the Mongolian and Khmer ones. Each attaches to a visible character, and U+FE0F is
+        part of an emoji.
       - **Tests.** `legible.test.ts` gains a row for each new class and each joiner case, kept and
-        escaped. N-24's sweep now covers every code point, not only the BMP, since the tag
-        characters are astral. It checks that no control, format character or separator except
-        newline and tab survives. `test-send.test.ts` sends a refusal and a success that both
+        escaped. That includes Cyrillic, CJK, Greek, Hebrew and accented Latin, which are escaped,
+        and emoji, Persian and Devanagari, which are kept. There are also rows for the Hangul
+        fillers, the unassigned default-ignorables, and the marks that stay. N-24's sweep now
+        covers every code point, not only the BMP, because the tag characters are above it.
+        - It checks each code point on its own, exactly: escaped (as `\uXXXX` or `\u{...}`)
+          when it is a control, a format character, a separator, or a default-ignorable that is
+          not a mark, and otherwise unchanged.
+        - It also checks a text holding every code point, where nothing of that set survives
+          except newline and tab. `test-send.test.ts` sends a refusal and a success that both
         quote ESC, a lone CR, an override, a zero-width space and a tag character, and checks
         the report's `error`, `detail` and logged `said`. N-24's existing tests pass unchanged.
         Mutations, each failing the tests: no `legible` on the error, the detail and the log line
         in turn; the pattern back to N-24's; joiners never kept; joiners always kept; and astral
-        code points escaped without braces.
+        code points escaped without braces. The review fixes were checked the same way: the
+        joiner rule widened back to any two non-ASCII characters, and default-ignorables
+        unescaped.
       - **Not done.** Stored rows are still `N-28`'s.
 
 - [ ] **N-28 — delivery errors stored before `N-24` keep their control characters** · S · N-24 ·
@@ -10268,6 +10294,8 @@ because each is a decision rather than a defect:
         sent)" at exactly the bound (`support/fits.ts`). `spool-drain` checks the note on a
         refitted old record, and the same single note on all three offers of a retried batch.
         `unfit-results` (core, real database) stores "3 ms (1 channel could not be sent)".
+        `messages.test.ts` (review fix) checks that a result the core's own `parseProbeToCore`
+        fitted carries "(2 channels could not be sent)".
         Mutations, each failing the tests: no note at all, and the note added after a full-length
         clip, which cuts it off.
       - **Not done.** A limit's or a lookup's message replaces the check's on the core, and the
