@@ -3442,6 +3442,12 @@ because each is a decision rather than a defect:
       `N-21` left it. **Done when** decided: keep, or order a trigger's alarms (initial, escalation,
       repeat) per template without delaying any past its mode's promise, with a scenario test.
 
+- [ ] **N-24 — control characters other than NUL still reach a delivery's last error** · S ·
+      P-277 · Found 2026-10-07 in `P-277`. `P-277` removes NUL from `last_error` because it breaks
+      the database write; other control characters from a program's output or a webhook's body
+      still reach the UI. **Done when** they are escaped or removed where `last_error` is shown,
+      with a test.
+
 ## Phase 5 — Web UI
 
 - [x] **U-01 — Frontend scaffold** · M · F-01 · React 19 + TypeScript + Vite 8, routing, design
@@ -9499,6 +9505,49 @@ because each is a decision rather than a defect:
       simulator uses `_protocol.disconnect` and `_protocol.channelEOF` with `outgoing.id`. None
       is public ssh2 API. **Done when** a test fails by name if any of them is missing or changes
       meaning in the installed ssh2, and the dependency notes say to re-check them on upgrade.
+
+- [ ] **P-281 — the core refuses a whole results batch for one result that does not fit** · S
+      · P-277 · Found 2026-10-07 in `P-277`. **Take first.** Since `P-277` a probe fits every
+      result before it leaves, but the core still checks a `results` batch as a whole: one result
+      that fails the schema closes the connection, and one with a NUL in a text column fails the
+      INSERT (22021) and nacks the batch. Either way the probe resends the same batch for ever and
+      every sensor on it goes stale. A probe still on `v1.0.0-rc.2`, or any peer that skips
+      `fitResult`, can still wedge itself this way. **Done when** the core refuses only the result
+      that does not fit (counted, logged with the sensor id) and drops NULs from what it stores,
+      with a test from a peer that skips `fitResult`.
+
+- [ ] **P-282 — ping counts duplicate replies as replies** · S · P-277 · Found 2026-10-07 in
+      `P-277`. `(DUP!)` lines from the system `ping` are counted as replies, which hides packet
+      loss and skews jitter. **Done when** duplicates are left out of the reply count and the
+      timing figures (and counted on their own if useful), with parser tests for Linux and
+      macOS `ping` output.
+
+- [ ] **P-283 — readings the probe dropped or the drain discarded are not on Probe Health** · S ·
+      P-277 · Found 2026-10-07 in `P-277`. `fitResult` drops channels that cannot be sent and the
+      drain discards a result larger than a frame (`DrainStats.oversized`, like `rejected`); both
+      are logged, neither is counted where an operator looks. **Done when** both are heartbeat
+      fields and Probe Health channels (a protocol number after 31, behind a capability, as
+      `P-275` did), with tests.
+
+- [ ] **P-284 — a refused script group warns only while its rate can be computed** · S · P-275 ·
+      Found 2026-10-07 in `P-275`. The refused-group warning is a rate limit, so a refusal in the
+      first record after a probe restart or a long link gap has no rate: it is counted and logged
+      but does not warn. **Done when** a refusal warns however it falls (for example a five-minute
+      count on the core, as `reportsForeign` does), with a test across a counter reset.
+
+- [ ] **P-285 — a check's failure phase reaches the stored result only as prose** · S · P-279 ·
+      Found 2026-10-07 in `P-279`. `check-worker.ts` passes on only an error's message, so its
+      `phase`, target and cause never reach the stored result, which has no field for them.
+      `CLAUDE.md` asks every failure to carry its phase. **Done when** a result carries a
+      structured failure phase (and target) end to end, shown in the UI, with a protocol number
+      and tests.
+
+- [ ] **P-286 — two small pool and test leftovers from `P-271`** · S · P-271 · Found 2026-10-07 in
+      `P-271`. `#recycle` does not count its worker in `#terminating` while the thread exits, as
+      `#retire` and `#startTimedOut` do, so a memory reading during a slow terminate treats that
+      worker's memory as someone else's. And `windows-transport.test.ts` "kills a PowerShell that
+      ignores SIGTERM" asserts `tookMs < 2_000`, a wall-clock upper bound. **Done when** both are
+      fixed, with a test for the first.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
@@ -20173,6 +20222,12 @@ because each is a decision rather than a defect:
         has `flowReceived` stripped, and the form still calls its flow collector off and points
         at the setting, as it did before `U-29`, where it is the version that is short.
 
+- [ ] **U-30 — the add-sensor form blames the setting when the probe is too old for flows** ·
+      S · U-29 · Found 2026-10-07 in `U-29`. A probe that reports but is below protocol 23 has
+      `flowReceived` stripped, so the form calls its flow collector off and points at the setting,
+      when the cause is the probe's version. **Done when** the form names the probe's protocol in
+      that case, with a test.
+
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
       siblings are substituted into any text a step sends: the path, every header and the body.
@@ -25581,6 +25636,13 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       `ms-probe` is installed, so the swap leaves the new package's probe stopped and disabled.
       **Done when** the scriptlets skip the probe unit while `/opt/ms/libexec/ms-setup` still
       exists (the check `H-34`'s fragment uses), with a smoke case for the swap.
+
+- [ ] **H-41 — a probe under a `User=root` drop-in is refused only at the restart** · S · P-276
+      · Found 2026-10-07 in `P-276`. Since `P-276` a root probe with scripts and no
+      `processUid`/`processGid` refuses to start, but the installer's `config check` runs as root
+      for a unit that normally runs as `ms-probe`, so it cannot tell. A host with a `User=root`
+      drop-in finds out when the upgraded probe exits 78. **Done when** `setup.sh` reads the unit's
+      user (`systemctl show -p User ms-probe`) and says so before restarting, with a smoke step.
 
 ---
 
