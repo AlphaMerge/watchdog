@@ -8154,13 +8154,39 @@ because each is a decision rather than a defect:
         (62/62 each) beside the probe suite on loop, in one `dev.sh` started at VM count 0: 13
         suite runs, all 512/512, at load 3.2–14.1.
       - **Found, not fixed:**
-        - A worker that crashes after it was ready is replaced at once through `#spawn`. While
-          that spawn waits for a loading turn it is in no count either, so `#grow` can over-start
-          for that gap. The window is short (a turn), and the ticket did not ask for it.
+        - (Fixed on review, below: a crashed worker's replacement waiting for a loading turn.)
         - A pool whose registry always hangs never latches. Accepted checks then sit in the queue
           until it fills, and are refused and counted from then on. They are not settled as
           `pool-disabled` the way a broken registry's are. Whether a long run of hangs with
           nothing working should latch, perhaps after a longer streak, is a decision.
+      - **Amended on review** (a second commit):
+        - **Hangs counted towards the latch after all.** `#startFailures` took hangs as well, and
+          the latch skipped only a hang's own failure. So hang, hang, then one death with nothing
+          ready latched the pool until a restart, and with eight hangs in flight a single death
+          did. The latch now counts `#startDeaths`, the starts that died since a worker last said
+          ready. The combined count still sets the backoff. **A hang does not reset the death
+          streak:** only a ready proves the registry loads, and a hang proves nothing either way,
+          so the deaths before it stand. A ready that arrives after its bound is still ignored and
+          ends neither streak. Table test, one worker so nothing is ready: hang, hang, death and
+          hang ×3, death ×2 do not latch, and the next start runs a check; death ×3 and death,
+          hang, death, death do latch.
+        - **The `#growing` fix had no test that failed without it.** The new test queues two checks
+          inside the 2 s delay after four hangs in a row on one slot. It asserts nothing grew and
+          the pool never held more than its size. A crashed worker's replacement waiting for a
+          loading turn had the same gap (the follow-up above); it is now counted in `#growing` too.
+          Its test crashes a ready worker in a pool of ten whose eight loading turns are all held
+          by hangs, then queues a check: nothing grows.
+        - **The default bound was not asserted.** The pool now reports the bound it arms
+          (`startupTimeoutMs`), and the test reads it from a pool given none and from one given
+          1,234 ms. The 10 s default-bound test measures from before `start` and asserts nothing
+          was counted only while less than the bound minus 2 s has passed. Its comment had the
+          direction of load backwards.
+        - **Mutation 6/6 killed**, the `#growing` ones by reverting only the fix: the latch on the
+          pre-review condition; a hang counted as a death; a hang resetting the death streak; the
+          retry's replacement uncounted (the pre-P-263 spawn); the crash's replacement uncounted;
+          the default bound an hour.
+        - **Runs:** check-pool, core probe-health and metrics, probe-health-report, health-types,
+          capabilities and `build-hygiene` whole, 297/297, at VM count 1.
 
 - [ ] **P-264 — two more tests read red on a loaded machine** · S · P-258 · Found 2026-10-05
       in `P-260`, each once while a probe suite ran on loop beside it at load up to 28:

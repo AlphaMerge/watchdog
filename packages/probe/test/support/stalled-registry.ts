@@ -25,17 +25,21 @@ import registry from './check-fixtures.js';
  * And for a pool's workers (`P-263`), which share the probe's environment, so a test needs some of
  * them to hang and not others:
  *
- * - `MS_TEST_REGISTRY_HANG_DIR` and `MS_TEST_REGISTRY_HANG_COUNT`: the first that many loads hang
- *   for ever and the rest load as usual. A load claims a ticket by creating `<dir>/<n>`, which only
- *   one thread can do, so exactly that many hang however the starts interleave.
+ * - `MS_TEST_REGISTRY_HANG_DIR` and `MS_TEST_REGISTRY_SCRIPT`: what each load does, in the order
+ *   the loads begin, as a comma-separated list of `hang` (for ever), `throw` (the import fails) and
+ *   `load` (as usual). Loads past the end of the list load as usual. A load claims its place by
+ *   creating `<dir>/<n>`, which only one thread can do, so each entry is taken exactly once however
+ *   the starts interleave.
  * - `MS_TEST_REGISTRY_CHANNEL`: a `BroadcastChannel` a hanging load posts `{ ticket, at }` on when
  *   it starts to hang and every 100 ms after, so a test can see when one began and that it ended.
  */
 const hangDir = process.env['MS_TEST_REGISTRY_HANG_DIR'];
 if (hangDir !== undefined) {
-  const tickets = Number(process.env['MS_TEST_REGISTRY_HANG_COUNT'] ?? '0');
-  const ticket = claim(hangDir, tickets);
-  if (ticket !== undefined) {
+  const script = (process.env['MS_TEST_REGISTRY_SCRIPT'] ?? '').split(',').filter(Boolean);
+  const ticket = claim(hangDir, script.length);
+  const action = ticket === undefined ? 'load' : script[ticket];
+  if (action === 'throw') throw new Error('this registry fails to load on purpose');
+  if (action === 'hang' && ticket !== undefined) {
     const name = process.env['MS_TEST_REGISTRY_CHANNEL'];
     const channel = name === undefined ? undefined : new BroadcastChannel(name);
     const beat = (): void => {
