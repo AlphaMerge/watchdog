@@ -23705,7 +23705,7 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
         host. Likewise an empty `heloName` is the hostname only when it has a dot, and
         `[127.0.0.1]` otherwise, which `administration.md` now says.
 
-- [ ] **H-34 — removing the package leaves the probe's ping setting behind** · S · H-31 · Found
+- [x] **H-34 — removing the package leaves the probe's ping setting behind** · S · H-31 · Found
       2026-10-04 in `H-31`. `ms-setup` writes `/etc/sysctl.d/60-ms-probe-ping.conf` when the
       host's `net.ipv4.ping_group_range` was still the kernel default, opening it to the
       `ms-probe` group. Neither `apt remove`, `apt purge` nor `dnf remove` removes the file, so
@@ -23714,14 +23714,55 @@ areas nobody had looked at and those were run and verified at the same bar. 27 +
       service users do. **Done when** a purge (`.deb`) and an erase (`.rpm`) remove the file if
       it is still the one `ms-setup` wrote, leave an edited one alone with a line saying so,
       and `smoke-packages.sh` asserts both.
+      - **Outcome (2026-10-07)**: `deploy/remove-ping-conf.sh`, one POSIX-sh fragment that
+        `package-deb.sh` puts into the `.deb`'s `postrm` under `purge` and `package-rpm.sh` into
+        the `.rpm`'s `%postun` under `$1 = 0` (ms-setup is gone by then, so the text travels in
+        the scriptlets). It removes the drop-in only while it reads byte for byte as `setup.sh`
+        writes it, with the gid read back out of the file: **by content, no marker**, so every
+        file the release candidates wrote is recognised as it stands. An edited file (a line
+        added, the range changed, a link) stays, with *is not as ms-setup wrote it, so it was
+        left in place*. `apt remove`/`dpkg -r` keep it, as dpkg keeps a conffile until purge;
+        rpm has no such step. **The live sysctl is not reset**: what it held before is not
+        recorded and something else may have set it since, so writing `1 0` back would be a
+        guess that can close ICMP sockets on a running host; it names only the ms-probe group,
+        which removal leaves, and the next boot drops it. `installation.md` *Uninstalling* says
+        all of this; `setup.sh`'s heredoc says its text is what the remover recognises.
+        - **Tests**: `deploy-scripts.test.ts` — the file setup.sh writes (as root, then the
+          fragment under `sh -e`) is removed and the range file untouched; today's text (taken
+          from setup.sh's heredoc) and the release candidates' literal text, at four gids, are
+          removed; nine edits are kept and named; a symlink is kept with its target; no file is
+          silent; the fragment has no `%` and each packager embeds it once, in the right branch.
+          `smoke-packages.sh` (deb, rpm): `dpkg -r` keeps the file, `dpkg -P`/`rpm -e` removes
+          it and says so, the live range stays `gid gid`; then a reinstall at `1 0`, an appended
+          line, and the second purge/erase keeps it byte for byte and names it.
+        - Mutation: 9/9 single-line mutants across both tickets killed by the unit tests (the
+          remover's link check, empty-gid check, range match and comparison; the deb's purge
+          branch; `setup.sh`'s first-install word and started/not-started choice; `install.sh`'s
+          note arm and its trap). The range match's `\1` turned out to be redundant beside the
+          whole-file comparison, so it was mutated to a form that changes the gid instead.
 
-- [ ] **H-35 — `install.sh` prints its first-install note on every run** · S · H-30 · Found
+- [x] **H-35 — `install.sh` prints its first-install note on every run** · S · H-30 · Found
       2026-10-04 in `H-30`. The closing summary, "On a first installation nothing was
       started…", is printed whenever the components include a core, after an upgrade that has
       just restarted both services as well. It is accurate and reads as if the upgrade had
       left them stopped. **Done when** the summary follows what `ms-setup` did on that run
       (first install, started, or `--no-start`), and `smoke-install.sh` asserts the upgrade's
       summary does not carry the first-install note.
+      - **Outcome (2026-10-07)**: `ms-setup --outcome FILE` writes one word at the end of a run
+        that succeeded — `first-install`, `not-started` or `started` — and nothing on a refusal
+        or a failed start. Not the exit status (0 is all three) and not a line of its output (that
+        would make every message an interface). `install.sh` passes a `mktemp` file, removed on
+        exit, and its summary gains a `services` line (*ms-core ms-probe: started*, *not
+        started, a first installation*, *not started (--no-start)*, or *as ms-setup said above*
+        when there is no word); the reset-failed/start lines follow only a first installation
+        and `--no-start`. The packages' scriptlets pass no `--outcome` and are unchanged.
+        - **Tests**: `deploy-scripts.test.ts` — ms-setup's word for a first install, the run
+          after, `--no-start` (first install and not) and `MS_SETUP_NO_START`, and none on a
+          refusal or a failed start; `install.sh` run whole against a stub `ms-setup` for each
+          word, `--core-only` and `--probe-only` included, and the outcome file removed after.
+          `smoke-install.sh` asserts the first install's summary carries the note and the
+          upgrade's does not, and says *ms-core ms-probe: started*.
+        - Mutation: counted with `H-34`'s, 9/9 across both.
 
 - [ ] **H-36 — two setup paths are proven only inside containers** · S · H-30, H-31 · Found
       2026-10-04 in `H-30`/`H-31`. Under Docker, systemd 252 and 255 leave a unit's credentials

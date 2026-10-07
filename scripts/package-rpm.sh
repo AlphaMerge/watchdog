@@ -206,9 +206,12 @@ fi
 # they hold the configuration, the credential-vault key and every reading ever taken, and the
 # vault key is unrecoverable — removing it as a side effect of removing the application would
 # destroy every stored credential with it. The units are package files and go with it; an
-# operator's drop-ins are theirs, and stay.
+# operator's drop-ins are theirs, and stay. The probe's ping drop-in is a setting for this
+# package, not data, and goes with an erase while it is still as ms-setup wrote it (\`H-34\`): rpm
+# has no purge, so the erase is the end. The text is deploy/remove-ping-conf.sh, as in the .deb.
 if [ "\$1" -eq 0 ]; then
   systemctl daemon-reload >/dev/null 2>&1 || :
+$(cat "${repo_root}/deploy/remove-ping-conf.sh")
   echo "note: /etc/ms and /var/lib/ms-* were left in place." >&2
 fi
 SPEC

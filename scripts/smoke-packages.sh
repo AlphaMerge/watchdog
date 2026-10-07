@@ -101,7 +101,7 @@ fi
 
 one_format() {
   local format="$1" image container pkg install_cmd upgrade_cmd remove_cmd query_cmd
-  local unping_cmd requires_cmd ping_pkg_cmd
+  local unping_cmd requires_cmd ping_pkg_cmd reinstall_cmd
   case "${format}" in
     deb)
       image=ms-smoke:bookworm
@@ -117,6 +117,8 @@ one_format() {
       requires_cmd='dpkg-deb -f /pkg/PKG Depends'
       ping_pkg_cmd='dpkg -s iputils-ping'
       upgrade_cmd='dpkg -i /pkg/PKG'
+      # After a purge, with iputils-ping still there from the first install.
+      reinstall_cmd='dpkg -i /pkg/PKG'
       remove_cmd='dpkg -P ms'
       query_cmd='dpkg -s ms'
       ;;
@@ -134,6 +136,7 @@ one_format() {
       # Re-installing the same version is how the upgrade path is exercised without cutting a
       # second release; rpm calls that a conflict unless told otherwise, dpkg does not.
       upgrade_cmd='rpm -U --force /pkg/PKG'
+      reinstall_cmd='rpm -i /pkg/PKG'
       remove_cmd='rpm -e ms'
       query_cmd='rpm -q ms'
       ;;
@@ -421,8 +424,29 @@ ${dirty_json}) — a staged tree from another commit is rebuilt with MS_SMOKE_RE
   echo "    units: the earlier release's is gone, and the operator's drop-in applies"
 
   # --- removal -------------------------------------------------------------------------------
+  local ping_conf=/etc/sysctl.d/60-ms-probe-ping.conf remove_log
+  remove_log="$(mktemp)"
+  ${in} test -f "${ping_conf}" || fail "there is no ${ping_conf} to see removed"
+  if [ "${format}" = deb ]; then
+    # **A plain remove keeps the probe's ping drop-in** (`H-34`), as dpkg keeps a conffile: the
+    # package's files go, and the settings wait for a purge.
+    echo "==> asserting a remove keeps the ping drop-in, which a purge then takes"
+    ${in} dpkg -r ms >"${remove_log}" 2>&1 || { cat "${remove_log}" >&2; fail "could not remove the package"; }
+    ${in} test -f "${ping_conf}" || fail "a plain remove took ${ping_conf}; only a purge may"
+    echo "    dpkg -r: ${ping_conf} kept"
+  fi
   echo "==> asserting removal stops the services and keeps the data"
-  ${in} bash -c "${remove_cmd}" >/dev/null 2>&1 || fail "could not remove the package"
+  ${in} bash -c "${remove_cmd}" >"${remove_log}" 2>&1 \
+    || { cat "${remove_log}" >&2; fail "could not remove the package"; }
+  # **The drop-in goes with the package while it is still ms-setup's** (`H-34`), and the running
+  # kernel's value stays as it is: what it should go back to is not something a removal knows.
+  ${in} test ! -e "${ping_conf}" || fail "${remove_cmd} left ${ping_conf}, which ms-setup wrote"
+  grep -qF -- "removed ${ping_conf}, which ms-setup wrote" "${remove_log}" \
+    || fail "${remove_cmd} did not say it removed ${ping_conf}: $(tr '\n' ' ' <"${remove_log}")"
+  range="$(${in} cat /proc/sys/net/ipv4/ping_group_range | tr -s '[:space:]' ' ' | sed 's/ $//')"
+  [ "${range}" = "${probe_gid} ${probe_gid}" ] \
+    || fail "${remove_cmd} changed the live ping_group_range to '${range}'"
+  echo "    ${remove_cmd}: ${ping_conf} removed, and the live range left at ${range}"
   ${in} test ! -f /usr/lib/systemd/system/ms-core.service || fail "the unit file survived removal"
   ${in} test -f /etc/systemd/system/ms-probe.service.d/h21.conf \
     || fail "removal deleted the operator's drop-in"
@@ -435,6 +459,26 @@ ${dirty_json}) — a staged tree from another commit is rebuilt with MS_SMOKE_RE
   ${in} test -f /etc/ms/tls/ca.crt || fail "removal deleted the probe-channel CA"
   ${in} test -d /var/lib/ms-core || fail "removal deleted /var/lib/ms-core"
   echo "    configuration, PKI and state: left in place, as documented"
+
+  # **An edited drop-in is the operator's, and stays** (`H-34`). Installed again at the kernel's
+  # default, so that ms-setup writes the file anew, then edited the way an operator would, then
+  # removed for good again.
+  echo "==> asserting ${remove_cmd} keeps a ping drop-in somebody edited"
+  ${in} bash -c 'echo "1 0" > /proc/sys/net/ipv4/ping_group_range'
+  ${in} bash -c "${reinstall_cmd/PKG/${pkg_name}}" >"${remove_log}" 2>&1 \
+    || { cat "${remove_log}" >&2; fail "could not install the package again"; }
+  ${in} test -f "${ping_conf}" || fail "the reinstall wrote no ${ping_conf} to edit"
+  ${in} bash -c "echo '# also for the backup host (an operator)' >> ${ping_conf}"
+  local edited
+  edited="$(${in} sha256sum "${ping_conf}" | cut -d' ' -f1)"
+  ${in} bash -c "${remove_cmd}" >"${remove_log}" 2>&1 \
+    || { cat "${remove_log}" >&2; fail "could not remove the package again"; }
+  [ "$(${in} sha256sum "${ping_conf}" 2>/dev/null | cut -d' ' -f1)" = "${edited}" ] \
+    || fail "${remove_cmd} removed or changed an edited ${ping_conf}"
+  grep -qF -- "${ping_conf} is not as ms-setup wrote it, so it was left in place" "${remove_log}" \
+    || fail "${remove_cmd} kept the edited file without saying so: $(tr '\n' ' ' <"${remove_log}")"
+  echo "    ${remove_cmd}: the edited ${ping_conf} kept, and named"
+  rm -f "${remove_log}"
 
   docker rm -f "${container}" >/dev/null 2>&1 || true
   box=''

@@ -233,8 +233,8 @@ for svc in ms-core ms-probe; do
   printf '    %-9s %s\n' "${svc}:" "${state}"
   [ "${state}" = "inactive" ] || { echo "    FAILED — ${svc} is ${state} after a first install" >&2; failed_early=1; }
 done
-# **Only ms-setup's message, from its heading to its last line.** install.sh ends every run that
-# has a core with its own `reset-failed` and `start` lines, so the whole log would say those
+# **Only ms-setup's message, from its heading to its last line.** install.sh ends a first
+# installation with its own `reset-failed` and `start` lines, so the whole log would say those
 # whether or not ms-setup said anything.
 sed -n '/core\.json is new, so nothing was started/,/the lines are in the comments of ms-core\.service/p' \
   "${logs}/first.log" >"${logs}/first-message.log"
@@ -243,6 +243,14 @@ for said in 'core.json is new, so nothing was started' 'database.password' \
   'systemctl start ms-core ms-probe' 'the lines are in the comments of ms-core.service'; do
   grep -qF -- "${said}" "${logs}/first-message.log" || {
     echo "    FAILED — the first install did not say '${said}'" >&2
+    failed_early=1
+  }
+done
+# **And install.sh's own summary says the same, because ms-setup told it so** (`H-35`).
+for said in 'ms-core ms-probe: not started, a first installation' \
+  'This is a first installation, so nothing was started'; do
+  grep -qF -- "${said}" "${logs}/first.log" || {
+    echo "    FAILED — install.sh's summary of a first install did not say '${said}'" >&2
     failed_early=1
   }
 done
@@ -600,6 +608,19 @@ docker exec "${container}" bash -c 'cd /tmp/unpacked/ms-* && ./install.sh' >"${l
   sed 's/^/      /' "${logs}/rerun.log" >&2
   failed=1
 }
+# **An upgrade's summary says it started them, and nothing about a first installation** (`H-35`):
+# the note used to close every run with a core, this one included, just after both restarted.
+if grep -qi 'first installation' "${logs}/rerun.log"; then
+  echo "    FAILED — the upgrade's summary carries the first-installation note:" >&2
+  sed 's/^/      /' "${logs}/rerun.log" >&2
+  failed=1
+elif ! grep -qF '  services        ms-core ms-probe: started' "${logs}/rerun.log"; then
+  echo "    FAILED — the upgrade's summary does not say both services were started:" >&2
+  sed 's/^/      /' "${logs}/rerun.log" >&2
+  failed=1
+else
+  echo "    summary: $(grep -F '  services  ' "${logs}/rerun.log" | sed 's/^ *//'), no first-installation note"
+fi
 if [ "${expected_profile}" = "v1" ]; then
   # The warning itself, under the installer's heading for it, in what the operator was shown —
   # and the upgrade went ahead all the same, which the assertions below are about. The probe

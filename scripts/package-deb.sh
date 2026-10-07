@@ -215,6 +215,11 @@ PRERM
 # the application would destroy data nobody asked to destroy — and the vault key in particular is
 # unrecoverable, so every stored credential would go with it. The units are package files and go
 # with the package; an operator's drop-ins under /etc/systemd/system are theirs, and stay.
+#
+# **The probe's ping drop-in goes with a purge, and only while it is still ms-setup's** (`H-34`):
+# it is a setting for this package, not data, and left behind it names a group id that a later
+# account may reuse. A plain remove keeps it, as dpkg keeps a conffile. The text is
+# `deploy/remove-ping-conf.sh`, which the .rpm's %postun carries too.
 cat > "${root}/DEBIAN/postrm" <<POSTRM
 #!/bin/sh
 set -e
@@ -224,6 +229,7 @@ case "\$1" in
     ;;
 esac
 if [ "\$1" = purge ]; then
+$(cat "${repo_root}/deploy/remove-ping-conf.sh")
   echo "note: /etc/ms, /var/lib/ms-core and /var/lib/ms-probe were left in place." >&2
   echo "      They hold the configuration, the credential-vault key and the spool." >&2
 fi

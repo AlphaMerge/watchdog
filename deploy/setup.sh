@@ -2,7 +2,7 @@
 # Everything an installation needs after its files are on disk (TASKS.md H-05).
 #
 #     ms-setup [--components core,probe] [--confdir /etc/ms] [--prefix /opt/ms]
-#              [--examples DIR] [--units DIR] [--no-start]
+#              [--examples DIR] [--units DIR] [--no-start] [--outcome FILE]
 #              [--enrolment FILE [--name NAME]]      # a remote probe (install-probe.sh)
 #
 # **Three installers, one setup.** The tarball's `install.sh`, the `.deb`'s `postinst` and the
@@ -33,6 +33,7 @@ components=()
 start_services=1
 enrolment=''
 display_name=''
+outcome_file=''
 # Where the units go, and where releases before H-21 put them. The variables exist for
 # `deploy-scripts.test.ts`, which runs this in a throwaway container; nothing else sets them.
 UNIT_DIR="${MS_SETUP_UNIT_DIR:-/usr/lib/systemd/system}"
@@ -48,6 +49,7 @@ while [ "$#" -gt 0 ]; do
     --no-start)   start_services=0 ;;
     --enrolment)  enrolment="$2"; shift ;;
     --name)       display_name="$2"; shift ;;
+    --outcome)    outcome_file="$2"; shift ;;
     -h|--help)    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -362,6 +364,10 @@ done
 # a copy of the host's IP traffic, which this project does not take (CAPABILITIES §15). A range
 # somebody has set is theirs and is never narrowed or moved; one that leaves the probe out is
 # named instead. The variables exist for `deploy-scripts.test.ts`, as the unit directories do.
+#
+# **The file's text is what a purge or an erase recognises** (`H-34`): `remove-ping-conf.sh`
+# removes it only while it reads exactly as written here, and keeps one that does not. Change the
+# text and that script must go on recognising the old one, which every installation so far has.
 PING_RANGE="${MS_SETUP_PING_RANGE:-/proc/sys/net/ipv4/ping_group_range}"
 SYSCTL_DIR="${MS_SETUP_SYSCTL_DIR:-/etc/sysctl.d}"
 if has_component probe; then
@@ -463,8 +469,10 @@ done
 # core that is not running, and log that every few seconds until somebody starts one. Both
 # services go together in the message, the way they will be started. A probe-only installation
 # has no core.json to create and starts as it always did.
+outcome=''
 if [ "${start_services}" -eq 1 ] && [ "${first_install}" -eq 1 ]; then
   start_services=0
+  outcome=first-install
   cat <<FIRST
 
 ==> ${CONFDIR}/core.json is new, so nothing was started.
@@ -570,4 +578,20 @@ if [ "${start_services}" -eq 1 ]; then
     [ "${state}" = "active" ] || failed=1
   done
   [ "${failed}" -eq 0 ] || die "one or more services failed to start; see journalctl -u ms-core -u ms-probe"
+fi
+
+# --- what this run did, for the installer that ran it (`H-35`) --------------------------------
+#
+# `install.sh` ends with a summary, and what it should say depends on what happened here: a first
+# installation started nothing and needs a password, `--no-start` started nothing because it was
+# asked not to, and anything else started the services. The exit status cannot carry that — 0 is
+# all three, and a refusal or a failed start is 1 — and reading it back out of this script's
+# output would make every message above part of an interface. So one word, in a file the caller
+# names: `first-install`, `not-started` or `started`. Written only here, at the end of a run that
+# succeeded, so a caller that finds no word knows not to claim one.
+if [ -n "${outcome_file}" ]; then
+  if [ -z "${outcome}" ]; then
+    if [ "${start_services}" -eq 1 ]; then outcome=started; else outcome=not-started; fi
+  fi
+  printf '%s\n' "${outcome}" >"${outcome_file}"
 fi

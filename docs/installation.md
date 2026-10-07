@@ -36,7 +36,8 @@ may open. RHEL 9 and its rebuilds open it to every group already. Debian and Ubu
 kernel's default, `1 0`: nobody — and a container does not show it, because Docker opens the range
 inside every container, which is how the dress rehearsal pinged (`H-15`). When the range is still that default,
 the setup sets it to the `ms-probe` group alone and writes the same to
-`/etc/sysctl.d/60-ms-probe-ping.conf`, so a boot keeps it. A range somebody has set is left as it
+`/etc/sysctl.d/60-ms-probe-ping.conf`, so a boot keeps it, and a purge removes it again
+(*Uninstalling*). A range somebody has set is left as it
 is; if it leaves `ms-probe` out, the setup says so, and you widen it to include that group's id.
 Not `CAP_NET_RAW` in the unit instead: a raw socket would give the probe, and every script sensor
 it runs, a copy of the host's IP traffic.
@@ -164,6 +165,10 @@ either contains a core or it does not:
 - `--core-only` where the probe is somewhere else entirely.
 - `--no-start` to stage a machine that is not meant to come up yet. `MS_SETUP_NO_START=1` does
   the same for a package install, which is what baking a golden image wants.
+
+It ends with a summary whose `services` line says what that run did — started them, started
+nothing because it was a first installation, or started nothing under `--no-start` — and, when
+nothing was started, the two commands that start them (`H-35`).
 
 ### Why Node is not a package dependency
 
@@ -423,8 +428,16 @@ sudo systemctl daemon-reload
 `/etc/ms`, `/var/lib/ms-*`, the database and your drop-ins under
 `/etc/systemd/system/ms-*.service.d` are left alone deliberately — they hold the
 configuration, the credential-vault key and every reading ever taken. Remove them when you mean
-to, not as a side effect of removing the application. The service users stay too, and so does
-`/etc/sysctl.d/60-ms-probe-ping.conf` if the setup wrote one (*Before you start*).
+to, not as a side effect of removing the application. The service users stay too.
+
+**The probe's ping setting goes with a purge** (`H-34`). `dpkg -P` (or `apt purge`) and `rpm -e`
+remove `/etc/sysctl.d/60-ms-probe-ping.conf` (*Before you start*) while it is still exactly as the
+setup wrote it, and say so; one you have edited is left where it is, and named. A plain
+`apt remove` or `dpkg -r` keeps it, as dpkg keeps a configuration file until the purge — rpm has
+no such step, so an erase is the end. The running kernel's `net.ipv4.ping_group_range` is not
+changed by either: what it held before the setup opened it is not recorded, and something else may
+have set it since, so it stays until the next boot, which reads `/etc/sysctl.d` without the file.
+After a tarball install, remove the file yourself if the setup wrote one.
 
 ---
 

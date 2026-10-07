@@ -7,10 +7,10 @@
 #     sudo ./install.sh --no-start      # install but do not start
 #
 # Creates the service users, lays out /opt/ms, /etc/ms and /var/lib, installs the units and
-# starts the services — except on a first installation of a core, whose core.json has no database
-# password yet, which starts nothing and says what to set. Re-running upgrades in place: configuration under /etc/ms is never
-# overwritten, the new build is asked whether it can read that configuration before anything
-# running is stopped, and the release it replaces is kept at /opt/ms/previous.
+# starts the services — except on a first installation of a core, whose core.json has no
+# database password yet, which starts nothing and says what to set. Re-running upgrades in place:
+# configuration under /etc/ms is never overwritten, the new build is asked whether it can read
+# that configuration before anything running is stopped, and the release it replaces is kept.
 #
 # `--no-start` installs and leaves both services stopped — including ones that were running.
 set -euo pipefail
@@ -88,9 +88,19 @@ place_args=(--from "${here}" --prefix "${PREFIX}" --confdir "${CONFDIR}"
 # probe-channel PKI, the access key, the configuration that survives an upgrade, the units, and
 # the `config check` that runs before anything is restarted. Three installers that each did this
 # their own way would be three chances for the one nobody smoke-tests to be wrong.
-setup_args=(--prefix "${PREFIX}" --confdir "${CONFDIR}" --components "$(IFS=,; echo "${components[*]}")")
+#
+# **And it says what it did with the services** (`H-35`), in one word in a file, because the
+# summary below has to follow it: a first installation started nothing and needs a password, an
+# upgrade restarted both, and `--no-start` left them as asked. The summary used to give the
+# first-installation note to every run that had a core, an upgrade that had just restarted both
+# included.
+outcome_file="$(mktemp "${TMPDIR:-/tmp}/ms-setup-outcome.XXXXXX")"
+trap 'rm -f "${outcome_file}"' EXIT
+setup_args=(--prefix "${PREFIX}" --confdir "${CONFDIR}" --components "$(IFS=,; echo "${components[*]}")"
+            --outcome "${outcome_file}")
 [ "${start_services}" -eq 1 ] || setup_args+=(--no-start)
 "${PREFIX}/libexec/ms-setup" "${setup_args[@]}"
+outcome="$(cat "${outcome_file}")"
 
 if [ "${start_services}" -eq 1 ]; then
   for svc in ${was_running[@]+"${was_running[@]}"}; do
@@ -100,22 +110,38 @@ if [ "${start_services}" -eq 1 ]; then
   done
 fi
 
+services="${components[*]/#/ms-}"
+case "${outcome}" in
+  started)       said="${services}: started" ;;
+  first-install) said="${services}: not started, a first installation (below)" ;;
+  not-started)   said="${services}: not started (--no-start)" ;;
+  *)             said="as ms-setup said above" ;;
+esac
+
 cat <<SUMMARY
 
 MonitoringSystem ${version} installed.
 
   configuration   ${CONFDIR}/{$(IFS=,; echo "${components[*]}")}.json
   application     ${PREFIX}
+  services        ${said}
   logs            journalctl -u ms-core -u ms-probe -f
 SUMMARY
-# `ms-setup` starts nothing on a first installation of a core (`H-30`), and has said why above.
-case " ${components[*]} " in
-  *" core "*) cat <<NEXT
+# Only what this run left to do. `ms-setup` has already said why, above.
+case "${outcome}" in
+  first-install) cat <<NEXT
 
-On a first installation nothing was started: set the database connection in
+This is a first installation, so nothing was started: set the database connection in
 ${CONFDIR}/core.json, then
-  systemctl reset-failed $(printf 'ms-%s ' "${components[@]}")
-  systemctl start $(printf 'ms-%s ' "${components[@]}")
+  systemctl reset-failed ${services}
+  systemctl start ${services}
+NEXT
+    ;;
+  not-started) cat <<NEXT
+
+When this machine is meant to come up:
+  systemctl reset-failed ${services}
+  systemctl start ${services}
 NEXT
     ;;
 esac
