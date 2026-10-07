@@ -9624,7 +9624,7 @@ because each is a decision rather than a defect:
       is public ssh2 API. **Done when** a test fails by name if any of them is missing or changes
       meaning in the installed ssh2, and the dependency notes say to re-check them on upgrade.
 
-- [ ] **P-281 — the core refuses a whole results batch for one result that does not fit** · S
+- [x] **P-281 — the core refuses a whole results batch for one result that does not fit** · S
       · P-277 · Found 2026-10-07 in `P-277`. **Take first.** Since `P-277` a probe fits every
       result before it leaves, but the core still checks a `results` batch as a whole: one result
       that fails the schema closes the connection, and one with a NUL in a text column fails the
@@ -9633,6 +9633,77 @@ because each is a decision rather than a defect:
       `fitResult`, can still wedge itself this way. **Done when** the core refuses only the result
       that does not fit (counted, logged with the sensor id) and drops NULs from what it stores,
       with a test from a peer that skips `fitResult`.
+
+      **P-281 outcome. The core fits every result it receives with the probe's own `fitResult`,
+      refuses alone a result fitting cannot mend, and acknowledges the batch.** In
+      `parseProbeToCore` (`@ms/shared`), beside `P-224`'s forgiveness of a health value, so the
+      boundary is still one function and the batch that reaches ingestion is already what is
+      stored. No protocol number and no new probe-facing field: nothing a probe may send changed,
+      and the counts are the core's own.
+      - **What decides it.** The batch is validated whole as before. An error outside
+        `results[i]` (no `batchId`, a field the message does not have, more than 5,000 results,
+        `results` not a list) is still a protocol violation: that is the conversation. Errors
+        inside one result are judged by what they name. **Fitted** when every one is something
+        `fitResult` mends by the probe's rules: anything inside a channel, too many channels, a
+        message too long, a negative duration. The core then takes from an older probe exactly
+        what a current probe would have sent of the same result. **Refused** when any is not: a
+        field missing or of the wrong type, `sensorId`, `at`, `outcome`, `withheld`, a field a
+        result does not have, or `A-41c`'s rule that a withheld result is an error without
+        readings (reported at the result itself, so fitting cannot slip past it). Mending a
+        missing field would be inventing a result, not fitting one. A result fitted from errors is
+        checked again on its own and refused if it still fails (unreachable while the list above
+        matches `fitResult`; kept as the guard against the two drifting). **Every result is
+        fitted, the ones the schema took as well**: NULs out of the message, a name and a unit,
+        lone surrogates replaced by U+FFFD as PostgreSQL would store them, and a channel whose key
+        holds either dropped (`P-277` review's reason: `pg` stores it under another key).
+      - **Counted where an operator looks.** A refused result is counted on Probe Health's
+        **Reports refused** (`ProbeRefusals.refused`), the core's own number, so it reads on a
+        probe of any version, which is the point: what sends one is an old probe or not our
+        probe. No limit, like the rest of that channel; the sensor going without results is what
+        its own state says. Ingestion's stats gain `refusedUnfit` and `discardedUnfitReadings`
+        (readings dropped by fitting), and `resultsReceived` / `readingsReceived` still count
+        what arrived. Warned once a batch, as `#refuse` does, naming the sensor ids (first 20)
+        and up to five results' reasons (*a probe sent results that cannot be made to fit the
+        protocol; refused, and the rest of the batch kept*); a batch the core had to fit is
+        warned too, with the readings dropped. The endpoint hands the parser's report to
+        `ResultReceiver.unfitResults` with the session's origin; before the handshake it is only
+        logged, since the batch is refused whole a moment later. The `ms_probe_reports_refused_total`
+        help and `docs/administration.md`'s refusal table say so.
+      - **A NUL removed alone is not said**, as `fitResult` does not list it: nothing else is lost.
+      - **Not done.** `query-result` carries the same result schema and is still refused whole,
+        closing the link once; it is not spooled, so it does not wedge anything and was left.
+        Nothing about alarm volume changed beyond a refused result's sensor going without that
+        result, which is what a wedged probe did to every sensor, so no scenario test.
+      - **Tests.** `unfit-results.test.ts` (core, database, real TLS endpoint and ingestion): a
+        peer that speaks only the framing sends one batch with a NUL in a message and in a
+        channel's name and unit, an outcome that is not one, a lone-surrogate key beside a good
+        channel, a 5,000-character message and a plain result. It is acked with 4 samples; the
+        NULs are gone from `sensor_runtime.message` and `channel`, the refused sensor has
+        nothing, the surrogate's channel is not created, the message is clipped to 2,000; Reports
+        refused reads 1 and not foreign, `refusedUnfit` 1, `discardedUnfitReadings` 1, the warn
+        lines carry the sensor ids; the link is up and the next batch is acked with every sensor,
+        the refused one included. A batch every result of which is refused is acked; a batch with
+        no `batchId` still closes the link and refuses nothing. `messages.test.ts` (shared): nine
+        unmendable results each refused alone with its sensor id (or null) and its reason, the
+        rest kept in order; at most five errors said; a long message, unsendable channels and 503
+        channels fitted with the dropped count; NULs taken out of a result the schema took,
+        silently; NUL and lone-surrogate keys dropped; five frame-level faults still refused
+        whole and nothing said. Changed: `A-41c`'s and the counter tests, which asserted a
+        `ProtocolError` for one result, now assert it refused alone (withheld) or fitted
+        (counter left off, reading kept); `capabilities.test.ts` likewise. `result-fit.test.ts`'s
+        property, `probe/test/support/fits.ts` and `spool-drain.test.ts` now assert the core had
+        nothing to fit, since not throwing no longer says the probe fitted; the probe's
+        `FakeCore` records a batch it had to fit as a refusal.
+      - **Mutation 6/7 killed, one equivalent.** Not fitting results the schema took (the NUL
+        cases and the wire test fail); throwing for an unmendable result as before (15 shared
+        tests, the wire test); every error fittable (`withheld: false` kept, wrong types
+        mended); ingestion not counting on Reports refused; the endpoint not handing the report
+        to ingestion; the five-error cap. Survived: the re-check of a fitted result, the guard
+        described above.
+      - **Runs** (toolchain, Linux): shared `messages`, `result-fit`, `capabilities`, 172/172;
+        core `unfit-results`, `probe-endpoint`, `ingestion`, `probe-ownership`,
+        `probe-ownership-scenario`, `metrics`, `probe-refusals`, 154/154; probe `spool-drain`,
+        `process-runner`, `check-pool`, 132/132. None skipped.
 
 - [x] **P-282 — ping counts duplicate replies as replies** · S · P-277 · Found 2026-10-07 in
       `P-277`. `(DUP!)` lines from the system `ping` are counted as replies, which hides packet

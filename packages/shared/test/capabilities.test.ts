@@ -824,7 +824,14 @@ describe('the check result a peer can be sent (`A-41c`)', () => {
     });
     assert.doesNotThrow(() => parseProbeToCore(batch({ ...plain, withheld: true })));
     assert.doesNotThrow(() => parseProbeToCore(batch(plain)));
-    assert.throws(() => parseProbeToCore(batch({ ...plain, withheld: false })));
-    assert.throws(() => parseProbeToCore(batch({ ...plain, withheld: 'yes' })));
+    // Refused alone since `P-281`, the batch kept: it used to be refused whole.
+    for (const withheld of [false, 'yes']) {
+      let refused = 0;
+      const parsed = parseProbeToCore(batch({ ...plain, withheld }), {
+        onUnfitResults: (unfit) => (refused += unfit.refused.length),
+      });
+      assert.ok(parsed.type === 'results' && parsed.results.length === 0, String(withheld));
+      assert.equal(refused, 1, String(withheld));
+    }
   });
 });

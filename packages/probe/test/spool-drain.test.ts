@@ -4,10 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { pino, type Logger } from 'pino';
-import { encodeFrame, parseProbeToCore, type CheckResult } from '@ms/shared';
+import { encodeFrame, type CheckResult } from '@ms/shared';
 import { SpoolDrain, type ResultSender } from '../src/spool/drain.js';
 import { ResultSpool } from '../src/spool/spool.js';
 import type { ResultsOutcome } from '../src/transport/core-client.js';
+import { assertCoreTakesAsSent } from './support/fits.js';
 
 const silent = pino({ level: 'silent' });
 const dirs: string[] = [];
@@ -441,7 +442,7 @@ describe('what leaves the spool (`P-277` review)', () => {
     assert.ok(sent !== undefined);
     assert.equal(sent.message, 'said so');
     assert.deepEqual(sent.channels, [{ key: 'kept', value: 3, name: 'half \uFFFD a pair' }]);
-    assert.doesNotThrow(() => parseProbeToCore({ type: 'results', batchId: 'b', results: [sent] }));
+    assertCoreTakesAsSent(sent);
   });
 
   it('splits a backlog of large results into batches that each fit a frame', async () => {

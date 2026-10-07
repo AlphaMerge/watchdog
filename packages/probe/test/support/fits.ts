@@ -1,5 +1,20 @@
 import { strict as assert } from 'node:assert';
-import { parseProbeToCore, RESULT_LIMITS, type CheckResult } from '@ms/shared';
+import { parseProbeToCore, RESULT_LIMITS, type CheckResult, type UnfitResults } from '@ms/shared';
+
+/**
+ * That the core's own parser takes a batch holding this result **as it was sent**. Since `P-281`
+ * the core fits a result itself and refuses alone one it cannot, so not throwing says nothing:
+ * what says the probe fitted it is that the core had nothing to fit or refuse.
+ */
+export function assertCoreTakesAsSent(result: CheckResult): void {
+  let unfit: UnfitResults | undefined;
+  const parsed = parseProbeToCore(
+    { type: 'results', batchId: 'fits-1', results: [result] },
+    { onUnfitResults: (told) => (unfit = told) },
+  );
+  assert.equal(unfit, undefined, `the core had to fit or refuse it: ${JSON.stringify(unfit)}`);
+  assert.ok(parsed.type === 'results' && parsed.results.length === 1);
+}
 
 /**
  * That a runner made `test.unfit`'s readings fit the wire (`P-277`): the core's own parser takes
@@ -9,9 +24,7 @@ import { parseProbeToCore, RESULT_LIMITS, type CheckResult } from '@ms/shared';
 export function assertFits(result: CheckResult | undefined): void {
   assert.ok(result !== undefined);
   assert.equal(result.outcome, 'ok');
-  assert.doesNotThrow(() =>
-    parseProbeToCore({ type: 'results', batchId: 'fits-1', results: [result] }),
-  );
+  assertCoreTakesAsSent(result);
   assert.ok(!JSON.stringify(result).includes('\\u0000'), 'no NUL anywhere');
   assert.ok(result.message.startsWith('saidmmm'), result.message.slice(0, 20));
   assert.ok(result.message.endsWith('…'));

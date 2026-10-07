@@ -94,6 +94,10 @@ const CHANNELS: readonly ChannelDef[] = [
   // while this one's spool still held results for it is the probe lagging a change the core has
   // already made, and a warning on it would turn every move into an alarm on the probe it moved
   // away from.
+  //
+  // And a result that cannot be made to fit the protocol (`P-281`): a field missing or of the
+  // wrong type, an outcome or sensor id that is not one. Refused alone, the rest of its batch
+  // kept. A probe since `P-277` sends none; an older one, or a peer that is not our probe, can.
   { key: 'reportsRefused', name: 'Reports refused', unit: 'reports', counter: { bits: 64 } },
   // The ones no correct probe sends: a sensor that was never under it, a query put to another
   // probe, another probe's discovery run. **A count over the last five minutes, not a counter**,

@@ -30,6 +30,7 @@ import {
   type SweepEnding,
   type SweepHost,
   type SweepJob,
+  type UnfitResults,
   type WithdrawnCode,
 } from '@ms/shared';
 import { diffAssignments, EMPTY_ASSIGNMENTS, type ProbeAssignments } from '../probes/config.js';
@@ -62,6 +63,11 @@ export interface ResultReceiver {
     origin: ProbeOrigin,
     message: Extract<ProbeToCoreMessage, { type: 'results' }>,
   ): Promise<CoreToProbeMessage>;
+  /**
+   * Told, as a batch arrives, what the parser refused from it or fitted (`P-281`), to count and
+   * log. The batch that follows to `acceptProbeResults` holds what was kept.
+   */
+  unfitResults?(origin: ProbeOrigin, unfit: UnfitResults): void;
 }
 
 /**
@@ -698,6 +704,27 @@ export class ProbeEndpoint {
                 { probeGid: session?.info.gid, fields: fresh },
                 'probe sent health readings the core cannot use; their channels gap, the ' +
                   'heartbeat is kept, and this is said once per field for this connection',
+              );
+            },
+            // `P-281`: a result that does not fit is refused alone, and the rest of its batch
+            // kept. Counted and logged by ingestion, against the probe that sent it. Results
+            // before the handshake are refused whole a moment later, so only said here.
+            onUnfitResults: (unfit) => {
+              const receiver = this.#options.results;
+              if (session === undefined || receiver?.unfitResults === undefined) {
+                connectionLogger.warn(
+                  {
+                    probeGid: session?.info.gid,
+                    refused: unfit.refused.slice(0, 20),
+                    fitted: unfit.fitted.slice(0, 20),
+                  },
+                  'probe sent results that do not fit; those that cannot be fitted are refused',
+                );
+                return;
+              }
+              receiver.unfitResults(
+                { gid: session.info.gid, probeObjectId: session.probeObjectId },
+                unfit,
               );
             },
           }),

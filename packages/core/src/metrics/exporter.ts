@@ -350,7 +350,7 @@ const PROBE_METRICS: readonly Metric[] = [
   {
     key: 'reportsRefused',
     name: 'ms_probe_reports_refused_total',
-    help: 'Results, query answers and discovery messages the core refused from this probe as not its to report.',
+    help: 'Results, query answers and discovery messages the core refused from this probe as not its to report, and results that cannot be made to fit the protocol.',
     counter: true,
   },
   {

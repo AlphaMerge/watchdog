@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import fc from 'fast-check';
-import { parseProbeToCore, type CheckResult } from '../src/protocol/messages.js';
+import { parseProbeToCore, type CheckResult, type UnfitResults } from '../src/protocol/messages.js';
 import { fitResult, RESULT_LIMITS } from '../src/protocol/result-fit.js';
 
 /**
@@ -19,9 +19,19 @@ const base: CheckResult = {
   channels: [{ key: 'value', value: 42, name: 'Value', unit: 'ms' }],
 };
 
-/** What the core does with a batch holding this one result: throws if it would refuse it. */
+/**
+ * What the core does with a batch holding this one result: throws unless its schema takes the
+ * result as sent. Since `P-281` the core fits and refuses results itself, so a result it took is
+ * not enough: it must not have had to change it.
+ */
 function coreTakes(result: CheckResult): void {
-  parseProbeToCore({ type: 'results', batchId: 'fit-1', results: [result] });
+  let unfit: UnfitResults | undefined;
+  const parsed = parseProbeToCore(
+    { type: 'results', batchId: 'fit-1', results: [result] },
+    { onUnfitResults: (told) => (unfit = told) },
+  );
+  assert.equal(unfit, undefined, `the core had to fit it: ${JSON.stringify(unfit)}`);
+  assert.ok(parsed.type === 'results' && parsed.results.length === 1);
 }
 
 const codePoints = (text: string): number => Array.from(text).length;

@@ -14,11 +14,14 @@ import {
   PROTOCOL_VERSION,
   ProtocolError,
   rejectionStopsMonitoring,
+  type CheckResult,
   type ProbeToCoreMessage,
   type RejectCode,
+  type UnfitResults,
   type UnusableHealthField,
   type WithdrawnCode,
 } from '../src/protocol/messages.js';
+import { RESULT_LIMITS } from '../src/protocol/result-fit.js';
 
 const hello = {
   type: 'hello',
@@ -28,6 +31,31 @@ const hello = {
   agentVersion: '0.1.0',
   accessKey: 'secret',
 };
+
+/**
+ * What the core keeps of a `results` batch, and what it said it refused or fitted (`P-281`).
+ * Throws, as `parseProbeToCore` does, for a batch it refuses whole.
+ */
+function taken(results: readonly unknown[]): {
+  kept: CheckResult[];
+  unfit: UnfitResults | undefined;
+} {
+  let unfit: UnfitResults | undefined;
+  const parsed = parseProbeToCore(
+    { type: 'results', batchId: 'b1', results },
+    { onUnfitResults: (told) => (unfit = told) },
+  );
+  assert.ok(parsed.type === 'results');
+  return { kept: parsed.results, unfit };
+}
+
+/** Asserts the core refuses this one result alone, and returns why it said it did. */
+function refusedAlone(result: unknown): string {
+  const { kept, unfit } = taken([result]);
+  assert.deepEqual(kept, [], 'the result was kept');
+  assert.equal(unfit?.refused.length, 1, `not refused: ${JSON.stringify(unfit)}`);
+  return unfit.refused[0]?.reason ?? '';
+}
 
 describe('protocol message validation', () => {
   it('accepts a well-formed hello', () => {
@@ -231,21 +259,22 @@ describe('protocol message validation', () => {
       );
     });
 
+    // Refused alone since `P-281`, the rest of its batch kept: it used to refuse the batch.
     it('is refused beside an outcome that is not an error', () => {
       // The mark takes a result out of the batch before the state machine sees it: on a result
       // that measured something it would drop the reading and hold the sensor Unknown.
-      assert.throws(() => parseProbeToCore(batch({ ...result, outcome: 'ok' })), ProtocolError);
+      assert.match(refusedAlone({ ...result, outcome: 'ok' }), /\(result\): must match "then"/);
     });
 
-    it('is refused beside readings', () => {
-      assert.throws(
-        () => parseProbeToCore(batch({ ...result, channels: [{ key: 'rtt', value: 1.2 }] })),
-        ProtocolError,
+    it('is refused beside readings, which fitting does not take out', () => {
+      assert.match(
+        refusedAlone({ ...result, channels: [{ key: 'rtt', value: 1.2 }] }),
+        /\/channels: must NOT have more than 0 items/,
       );
     });
 
     it('is refused as anything but true, and in a query’s answer under the same rule', () => {
-      assert.throws(() => parseProbeToCore(batch({ ...result, withheld: false })), ProtocolError);
+      assert.match(refusedAlone({ ...result, withheld: false }), /\/withheld: must be equal to/);
       const answer = (one: Record<string, unknown>): Record<string, unknown> => ({
         type: 'query-result',
         queryId: 'q1',
@@ -516,46 +545,36 @@ describe('the wire carries every field the types declare', () => {
     assert.equal(parsed.results[0]?.channels[0]?.counter, '18014398509482000');
   });
 
-  it('refuses a counter that is not an unsigned integer', () => {
-    const withCounter = (counter: string) => () =>
-      parseProbeToCore({
-        type: 'results',
-        batchId: 'b1',
-        results: [
-          {
-            sensorId: 1,
-            at: '2026-08-27T10:00:00.000Z',
-            outcome: 'ok',
-            message: '',
-            durationMs: 1,
-            channels: [{ key: 'in', value: 1, counter }],
-          },
-        ],
-      });
-    assert.throws(withCounter('-1'), ProtocolError);
-    assert.throws(withCounter('1.5'), ProtocolError);
-    assert.throws(withCounter('123456789012345678901'), ProtocolError);
+  // **Left off, the reading kept** (`P-281`): the core fits a result as the probe does
+  // (`fitResult`, `P-277`). It used to refuse the whole batch over one counter.
+  const withCounter = (channel: Record<string, unknown>) =>
+    taken([
+      {
+        sensorId: 1,
+        at: '2026-08-27T10:00:00.000Z',
+        outcome: 'ok',
+        message: '',
+        durationMs: 1,
+        channels: [{ key: 'in', value: 1, ...channel }],
+      },
+    ]);
+
+  it('leaves off a counter that is not an unsigned integer, and keeps the reading', () => {
+    for (const counter of ['-1', '1.5', '123456789012345678901']) {
+      const { kept, unfit } = withCounter({ counter });
+      assert.deepEqual(kept[0]?.channels, [{ key: 'in', value: 1 }], counter);
+      assert.match(unfit?.fitted[0]?.reason ?? '', /\/channels\/0\/counter: must match pattern/);
+      assert.deepEqual(unfit?.fitted[0]?.problems, [
+        `channel "in"'s counter is not decimal text and was left off`,
+      ]);
+      assert.equal(unfit.fitted[0].droppedChannels, 0);
+    }
   });
 
-  it('refuses a counter width the core does not understand', () => {
-    assert.throws(
-      () =>
-        parseProbeToCore({
-          type: 'results',
-          batchId: 'b1',
-          results: [
-            {
-              sensorId: 1,
-              at: '2026-08-27T10:00:00.000Z',
-              outcome: 'ok',
-              message: '',
-              durationMs: 1,
-              channels: [{ key: 'in', value: 1, counter: '1', counterBits: 16 }],
-            },
-          ],
-        }),
-      ProtocolError,
-    );
+  it('leaves off a counter width the core does not understand', () => {
+    const { kept, unfit } = withCounter({ counter: '1', counterBits: 16 });
+    assert.deepEqual(kept[0]?.channels, [{ key: 'in', value: 1, counter: '1' }]);
+    assert.equal(unfit?.refused.length, 0);
   });
 });
 
@@ -957,5 +976,173 @@ describe('what a rejection means for a probe that is running', () => {
     for (const code of every) {
       assert.equal(typeof rejectionStopsMonitoring(code), 'boolean', code);
     }
+  });
+});
+
+/**
+ * A `results` batch from a peer that does not fit its results (`P-281`).
+ *
+ * The core validated a batch whole, so one result its schema refused closed the connection, and
+ * the probe sent the same batch again on reconnecting, for ever. Now each result is fitted by
+ * `fitResult`, as a current probe fits it, and one that fitting cannot mend is refused alone.
+ */
+describe('a results batch holding a result that does not fit (`P-281`)', () => {
+  const good = (sensorId: number): CheckResult => ({
+    sensorId,
+    at: '2026-10-07T09:00:00.000Z',
+    outcome: 'ok',
+    message: `reading ${String(sensorId)}`,
+    durationMs: 4,
+    channels: [{ key: 'rtt', value: sensorId, name: 'Round trip', unit: 'ms' }],
+  });
+
+  it('takes a batch that fits as it was sent, and says nothing', () => {
+    const sent: CheckResult[] = [
+      good(1),
+      good(2),
+      { ...good(3), outcome: 'error', channels: [], withheld: true },
+    ];
+    const { kept, unfit } = taken(sent);
+    assert.deepEqual(kept, sent);
+    assert.equal(unfit, undefined);
+  });
+
+  const unmendable: readonly [string, Record<string, unknown> | string, RegExp, number | null][] = [
+    ['an outcome that is not one', { outcome: 'maybe' }, /^\/outcome: must be equal to/, 2],
+    ['a sensor id that is not one', { sensorId: 0 }, /^\/sensorId: must be >= 1/, null],
+    ['a sensor id of the wrong type', { sensorId: '2' }, /^\/sensorId: must be integer/, null],
+    ['a time missing', { at: undefined }, /^\(result\): must have required property 'at'/, 2],
+    ['a message of the wrong type', { message: 7 }, /^\/message: must be string/, 2],
+    ['a duration of the wrong type', { durationMs: '4' }, /^\/durationMs: must be number/, 2],
+    ['channels that are not a list', { channels: {} }, /^\/channels: must be array/, 2],
+    ['a field results do not have', { extra: 1 }, /must NOT have additional properties/, 2],
+    ['not an object at all', 'reading', /^\(result\): must be object/, null],
+  ];
+
+  for (const [name, change, reason, sensorId] of unmendable) {
+    it(`refuses ${name} alone, and keeps the rest in order`, () => {
+      const bad =
+        typeof change === 'string'
+          ? change
+          : Object.fromEntries(
+              Object.entries({ ...good(2), ...change } as Record<string, unknown>).filter(
+                ([, value]) => value !== undefined,
+              ),
+            );
+      const { kept, unfit } = taken([good(1), bad, good(3)]);
+      assert.deepEqual(kept, [good(1), good(3)]);
+      assert.equal(unfit?.refused.length, 1);
+      assert.equal(unfit.refused[0]?.sensorId, sensorId);
+      assert.match(unfit.refused[0].reason, reason);
+      assert.deepEqual(unfit.fitted, []);
+    });
+  }
+
+  it('says at most five of one result’s errors', () => {
+    const channels = Array.from({ length: 8 }, () => ({ key: 'k', value: 'x' }));
+    const reason = refusedAlone({ ...good(2), outcome: 'maybe', channels });
+    assert.match(reason, /; and 4 more$/);
+  });
+
+  it('fits a message too long, as the probe would have, and says what the schema said', () => {
+    const { kept, unfit } = taken([good(1), { ...good(2), message: 'x'.repeat(5_000) }]);
+    assert.equal(kept.length, 2);
+    assert.equal(kept[1]?.message.length, RESULT_LIMITS.message);
+    assert.ok(kept[1].message.endsWith('…'));
+    assert.deepEqual(unfit?.refused, []);
+    assert.deepEqual(unfit.fitted, [
+      {
+        sensorId: 2,
+        reason: '/message: must NOT have more than 2000 characters',
+        problems: [],
+        droppedChannels: 0,
+      },
+    ]);
+  });
+
+  it('drops channels no core takes, keeps the others, and counts what it dropped', () => {
+    const channels = [
+      { key: 'rtt', value: 1, name: 'n'.repeat(300), unit: 'u'.repeat(80), colour: 'red' },
+      { key: '', value: 2 },
+      { key: 'k'.repeat(101), value: 3 },
+      { key: 'text', value: 'four' },
+      { key: 'loss', value: 0 },
+    ];
+    const { kept, unfit } = taken([{ ...good(2), channels }]);
+    assert.deepEqual(
+      kept[0]?.channels.map((one) => [one.key, one.name?.length, one.unit?.length]),
+      [
+        ['rtt', RESULT_LIMITS.name, RESULT_LIMITS.unit],
+        ['loss', undefined, undefined],
+      ],
+    );
+    assert.equal(unfit?.fitted[0]?.droppedChannels, 3);
+    assert.equal(unfit.fitted[0].problems.length, 3);
+  });
+
+  it('drops the channels past the five hundredth', () => {
+    const channels = Array.from({ length: 503 }, (_, at) => ({ key: `c${String(at)}`, value: at }));
+    const { kept, unfit } = taken([{ ...good(2), channels }]);
+    assert.equal(kept[0]?.channels.length, RESULT_LIMITS.channels);
+    assert.equal(unfit?.fitted[0]?.droppedChannels, 3);
+  });
+
+  it('takes the NULs out of a result the schema took, which PostgreSQL text cannot hold', () => {
+    const { kept, unfit } = taken([
+      good(1),
+      {
+        ...good(2),
+        message: 'line one\u0000line two',
+        channels: [{ key: 'rtt', value: 1, name: 'Round\u0000trip', unit: 'm\u0000s' }],
+      },
+    ]);
+    assert.equal(kept[1]?.message, 'line oneline two');
+    assert.deepEqual(kept[1].channels, [{ key: 'rtt', value: 1, name: 'Roundtrip', unit: 'ms' }]);
+    // Nothing was lost but the NULs, which is not worth a line: `fitResult` says the same.
+    assert.equal(unfit, undefined);
+  });
+
+  it('drops a channel whose key holds a NUL or a lone surrogate, and says so', () => {
+    const { kept, unfit } = taken([
+      {
+        ...good(2),
+        message: 'half \uD83D pair',
+        channels: [
+          { key: 'r\u0000tt', value: 1 },
+          { key: 'lone\uDC00', value: 2 },
+          { key: 'pair😀', value: 3 },
+        ],
+      },
+    ]);
+    assert.equal(kept[0]?.message, 'half � pair');
+    assert.deepEqual(kept[0].channels, [{ key: 'pair😀', value: 3 }]);
+    assert.deepEqual(unfit?.refused, []);
+    assert.equal(unfit.fitted[0]?.reason, '', 'the schema took it as sent');
+    assert.equal(unfit.fitted[0].droppedChannels, 2);
+  });
+
+  it('still refuses a batch whole for what is wrong outside its results', () => {
+    const bad = { ...good(2), outcome: 'maybe' };
+    const told: UnfitResults[] = [];
+    const parse = (message: Record<string, unknown>) => () =>
+      parseProbeToCore(message, { onUnfitResults: (unfit) => told.push(unfit) });
+    assert.throws(parse({ type: 'results', results: [good(1), bad] }), ProtocolError);
+    assert.throws(parse({ type: 'results', batchId: '', results: [good(1)] }), ProtocolError);
+    assert.throws(
+      parse({ type: 'results', batchId: 'b', results: [good(1)], replay: true }),
+      ProtocolError,
+    );
+    assert.throws(parse({ type: 'results', batchId: 'b', results: 'none' }), ProtocolError);
+    assert.throws(
+      parse({ type: 'results', batchId: 'b', results: Array.from({ length: 5_001 }, () => bad) }),
+      /\/results: must NOT have more than 5000 items/,
+    );
+    assert.deepEqual(told, [], 'nothing is said of a batch that was refused');
+  });
+
+  it('takes a batch every result of which is refused, empty, so the probe can move on', () => {
+    const { kept, unfit } = taken([{ ...good(1), outcome: 'maybe' }]);
+    assert.deepEqual(kept, []);
+    assert.equal(unfit?.refused.length, 1);
   });
 });

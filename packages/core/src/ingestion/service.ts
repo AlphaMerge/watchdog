@@ -4,6 +4,7 @@ import type {
   HousekeepingConfig,
   Logger,
   ProbeToCoreMessage,
+  UnfitResults,
 } from '@ms/shared';
 import type { Database } from '../db/pool.js';
 import { RecentCount } from '../health/recent-count.js';
@@ -172,6 +173,18 @@ export interface ResultStats {
   refusedUnknown: number;
   refusedMoved: number;
   refusedForeign: number;
+  /**
+   * A probe's results refused because they cannot be made to fit the wire schema (`P-281`): a
+   * field missing or of the wrong type, an outcome or a sensor id that is not one. Taken out of
+   * the batch alone; the rest is stored and the batch acknowledged.
+   */
+  refusedUnfit: number;
+  /**
+   * Readings dropped from a probe's results by fitting them (`P-281`): a key that is empty, too
+   * long, or holds a NUL or a lone surrogate, a value that is not a number, channels past the
+   * five hundredth. A probe since `P-277` drops these before it sends, and logs them itself.
+   */
+  discardedUnfitReadings: number;
   /** Sensors whose owning probe is cached. */
   cachedOwners: number;
   /**
@@ -250,6 +263,8 @@ export class IngestionService {
   #refusedUnknown = 0;
   #refusedMoved = 0;
   #refusedForeign = 0;
+  #refusedUnfit = 0;
+  #discardedUnfitReadings = 0;
   readonly #counters = new CounterStore();
   #discardedReadings = 0;
   #discardedSpike = 0;
@@ -291,6 +306,8 @@ export class IngestionService {
       refusedUnknown: this.#refusedUnknown,
       refusedMoved: this.#refusedMoved,
       refusedForeign: this.#refusedForeign,
+      refusedUnfit: this.#refusedUnfit,
+      discardedUnfitReadings: this.#discardedUnfitReadings,
       cachedOwners: this.#ownership.cached,
       discardedReadings: this.#discardedReadings,
       discardedSpike: this.#discardedSpike,
@@ -457,6 +474,58 @@ export class IngestionService {
     // probe sends a refused batch again, and it is let go then.
     await batch?.stored(reply.type === 'results-ack');
     return reply;
+  }
+
+  /**
+   * What the parser refused from a probe's batch, or fitted, as it arrived (`P-281`). Counted and
+   * said here; the batch that follows holds only what was kept.
+   *
+   * **Refused results are counted with what Probe Health counts as refused** (`reportsRefused`),
+   * the core's own number, so it reads on a probe of any version, which is the point: what sends
+   * a result that cannot be fitted is a probe built before `P-277`, or something that is not our
+   * probe. No warning on it there, as there is none on the rest of `reportsRefused`: the sensor
+   * whose results are refused goes without results, and that is what its own state says.
+   *
+   * **Warned once a batch, naming the sensors**, as `#refuse` does: a probe replaying an hour of
+   * spool would otherwise write a line for every result in it.
+   */
+  unfitResults(origin: ProbeOrigin, unfit: UnfitResults): void {
+    const refused = unfit.refused.length;
+    const dropped = unfit.fitted.reduce((sum, one) => sum + one.droppedChannels, 0);
+    // Received, though refused: the counter is what arrived, and the refusals say what became of
+    // it. What was kept is counted when it is accepted.
+    this.#resultsReceived += refused;
+    this.#readingsReceived += dropped;
+    this.#refusedUnfit += refused;
+    this.#discardedUnfitReadings += dropped;
+    this.#refusals?.refused(origin.probeObjectId, refused);
+    if (refused > 0) {
+      this.#logger.warn(
+        {
+          source: origin.gid,
+          probeObjectId: origin.probeObjectId,
+          results: refused,
+          sensorIds: [...new Set(unfit.refused.map((one) => one.sensorId))].slice(0, 20),
+          refused: unfit.refused.slice(0, 5),
+        },
+        'a probe sent results that cannot be made to fit the protocol; refused, and the rest ' +
+          'of the batch kept',
+      );
+    }
+    if (unfit.fitted.length > 0) {
+      this.#logger.warn(
+        {
+          source: origin.gid,
+          probeObjectId: origin.probeObjectId,
+          results: unfit.fitted.length,
+          readingsDropped: dropped,
+          sensorIds: [...new Set(unfit.fitted.map((one) => one.sensorId))].slice(0, 20),
+          fitted: unfit.fitted.slice(0, 5),
+        },
+        'a probe sent results that do not fit the protocol as they are; fitted as a current ' +
+          'probe fits them before sending, and kept',
+      );
+    }
   }
 
   /** Counts what `admit` refused, here and per probe. Returns how many results that was. */

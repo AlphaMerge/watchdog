@@ -132,6 +132,9 @@ export type {
   SweepHost,
   SweepJob,
   UnusableHealthField,
+  UnfitResults,
+  RefusedResult,
+  FittedReceivedResult,
 } from './protocol/messages.js';
 export { CpuMeter } from './process/cpu-meter.js';
 export { DeltaMeter } from './process/delta-meter.js';

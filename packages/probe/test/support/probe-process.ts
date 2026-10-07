@@ -158,7 +158,15 @@ export class FakeCore {
           // Through the validator the real endpoint uses, so a message this build's own core
           // would refuse is a failure here rather than something a lenient stub let past.
           try {
-            core.#take(parseProbeToCore(value));
+            core.#take(
+              parseProbeToCore(value, {
+                // The real core fits a result itself and refuses alone one it cannot (`P-281`).
+                // A probe since `P-277` sends none it has to, so here one is a refusal too.
+                onUnfitResults: (unfit) => {
+                  core.refused.push(`results did not fit as sent: ${JSON.stringify(unfit)}`);
+                },
+              }),
+            );
           } catch (error) {
             core.refused.push(error instanceof Error ? error.message : String(error));
           }

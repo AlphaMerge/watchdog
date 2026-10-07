@@ -1,7 +1,7 @@
 import { Ajv, type ErrorObject } from 'ajv';
 import { AppError } from '../errors/app-error.js';
 import { MAX_EXCEPTION_ADDRESSES } from '../net/target-policy.js';
-import { RESULT_LIMITS } from './result-fit.js';
+import { fitResult, RESULT_LIMITS } from './result-fit.js';
 
 /**
  * The core↔probe wire protocol.
@@ -1635,9 +1635,39 @@ export interface UnusableHealthField {
   readonly reason: string;
 }
 
+/** A result the core took out of a `results` batch because it cannot be made to fit (`P-281`). */
+export interface RefusedResult {
+  /** The result's `sensorId` when it was a positive integer, or null. */
+  readonly sensorId: number | null;
+  /** The schema's words, relative to the result: `/outcome: must be equal to one of …`. */
+  readonly reason: string;
+}
+
+/** A result the core kept after fitting it, and what fitting changed that is worth saying. */
+export interface FittedReceivedResult {
+  readonly sensorId: number;
+  /** What the schema said of the result as sent, or `''` when it fitted the schema as sent. */
+  readonly reason: string;
+  /** `fitResult`'s problems: readings dropped, or fields of them left off. */
+  readonly problems: readonly string[];
+  /** Readings dropped, of those the result carried. */
+  readonly droppedChannels: number;
+}
+
+/** What `parseProbeToCore` did to a `results` batch's results to take the rest (`P-281`). */
+export interface UnfitResults {
+  readonly refused: readonly RefusedResult[];
+  readonly fitted: readonly FittedReceivedResult[];
+}
+
 export interface ParseProbeToCoreOptions {
   /** Told of every heartbeat that lost a health field. The heartbeat itself was kept. */
   readonly onUnusableHealth?: (fields: readonly UnusableHealthField[]) => void;
+  /**
+   * Told of every `results` batch from which a result was refused, or in which one was changed
+   * by more than the removal of NULs and lone surrogates (`P-281`). The batch itself was kept.
+   */
+  readonly onUnfitResults?: (unfit: UnfitResults) => void;
 }
 
 /**
@@ -1655,11 +1685,17 @@ export interface ParseProbeToCoreOptions {
  * Only a *value* is forgiven, and only of a field the schema declares. A field it does not know is
  * still refused: that is a protocol skew, which `healthForPeer` exists to prevent, and silence
  * about it is how a skew becomes lost data. So is anything wrong outside `health`.
+ *
+ * **And except a result in a `results` batch, which is fitted or refused alone** (`P-281`):
+ * `parseResults` says why.
  */
 export function parseProbeToCore(
   value: unknown,
   options: ParseProbeToCoreOptions = {},
 ): ProbeToCoreMessage {
+  if (isRecord(value) && value['type'] === 'results' && Array.isArray(value['results'])) {
+    return parseResults(value, value['results'], options);
+  }
   if (validateProbeToCore(value)) return value;
   const errors = validateProbeToCore.errors ?? [];
   const usable = withoutUnusableHealth(value, errors);
@@ -1703,6 +1739,128 @@ function withoutUnusableHealth(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** One result alone, for a result the batch's validation found wrong and `fitResult` changed. */
+const validateCheckResult = ajv.compile<CheckResult>(CHECK_RESULT_SCHEMA);
+
+/** `/results/3/channels/0/key`: the result's index, and the path within it. */
+const RESULT_ERROR = /^\/results\/(\d+)(\/.*)?$/;
+
+/**
+ * Whether `fitResult` makes what this error names fit by the same rules a probe applies before it
+ * sends (`P-277`): anything inside a channel (a key or value that cannot be sent drops the
+ * channel; a counter, width, name or unit is left off or clipped; an unknown field is not
+ * copied), too many channels, a message too long, a negative duration. **Not** a field missing,
+ * a field of the wrong type, or anything about the result's identity: `sensorId`, `at`,
+ * `outcome`, `withheld`, a field the schema does not know, or the `withheld` rule, which is
+ * reported at the result itself. Fitting those would be inventing a result rather than fitting
+ * one, so a result with any of them is refused.
+ */
+function fittable(error: ErrorObject, within: string): boolean {
+  if (within.startsWith('/channels/')) return true;
+  if (within === '/channels') return error.keyword === 'maxItems';
+  if (within === '/message') return error.keyword === 'maxLength';
+  if (within === '/durationMs') return error.keyword === 'minimum';
+  return false;
+}
+
+/** Errors under one result, at most five of them, by their path within it. */
+function describeResultErrors(errors: readonly { error: ErrorObject; within: string }[]): string {
+  const shown = errors
+    .slice(0, 5)
+    .map(
+      ({ error, within }) =>
+        `${within === '' ? '(result)' : within}: ${error.message ?? 'invalid'}`,
+    );
+  const more = errors.length - shown.length;
+  return shown.join('; ') + (more > 0 ? `; and ${String(more)} more` : '');
+}
+
+function sensorIdOf(raw: unknown): number | null {
+  if (!isRecord(raw)) return null;
+  const id = raw['sensorId'];
+  return typeof id === 'number' && Number.isInteger(id) && id >= 1 ? id : null;
+}
+
+/**
+ * A `results` batch, each result checked and fitted on its own (`P-281`).
+ *
+ * **One result that does not fit costs that result, not the batch.** A batch the schema refused
+ * whole was a protocol violation: the connection closed, the probe reconnected and sent the same
+ * batch from its spool, and was closed on again, for ever, with every sensor on it going stale.
+ * A probe has fitted every result since `P-277`, but one built before it (`v1.0.0-rc.2`), or any
+ * peer that does not, could still wedge itself on one script's message. Now:
+ *
+ * - **What is wrong outside the results is still a protocol violation**, as the boundary has it:
+ *   a missing `batchId`, a field the message does not have, more results than a batch holds.
+ *   Those are the conversation, and a peer that gets them wrong is refused.
+ * - **A result is fitted by `fitResult`**, the one the probe runs, so the core takes from an
+ *   older probe what a current one would have sent of the same result: a message clipped, a
+ *   channel that cannot be sent dropped. Every result, the ones the schema took as well: text
+ *   PostgreSQL cannot hold is taken out of what is stored (U+0000, which failed the write with
+ *   `22021` and had the batch retried for ever) or replaced as it would store it (a lone
+ *   surrogate), and a key holding either is dropped with its channel.
+ * - **A result fitting cannot mend is refused**, alone: the rest of the batch is kept and the
+ *   batch is acknowledged, so the probe's spool moves on. Said through `onUnfitResults`, which
+ *   the core counts and logs with the sensor's id.
+ */
+function parseResults(
+  value: Record<string, unknown>,
+  given: readonly unknown[],
+  options: ParseProbeToCoreOptions,
+): ProbeToCoreMessage {
+  const byIndex = new Map<number, { error: ErrorObject; within: string }[]>();
+  if (!validateProbeToCore(value)) {
+    const errors = validateProbeToCore.errors ?? [];
+    for (const error of errors) {
+      const at = RESULT_ERROR.exec(error.instancePath);
+      if (at === null) {
+        throw new ProtocolError(`unrecognised message from probe: ${describeErrors(errors)}`);
+      }
+      const index = Number(at[1]);
+      const list = byIndex.get(index) ?? [];
+      list.push({ error, within: at[2] ?? '' });
+      byIndex.set(index, list);
+    }
+  }
+  const results: CheckResult[] = [];
+  const refused: RefusedResult[] = [];
+  const fitted: FittedReceivedResult[] = [];
+  for (const [index, raw] of given.entries()) {
+    const errors = byIndex.get(index);
+    const reason = errors === undefined ? '' : describeResultErrors(errors);
+    if (errors !== undefined && !errors.every(({ error, within }) => fittable(error, within))) {
+      refused.push({ sensorId: sensorIdOf(raw), reason });
+      continue;
+    }
+    // A record: an index without errors passed the schema, and one whose errors are all
+    // fittable has none at the result itself, where "not an object" would be reported.
+    const fit = fitResult(raw as CheckResult);
+    if (errors !== undefined && !validateCheckResult(fit.result)) {
+      // Not expected: every error was one `fitResult` mends. Refused rather than trusted.
+      refused.push({
+        sensorId: sensorIdOf(raw),
+        reason: `${reason}; and fitted it is still refused: ${describeErrors(validateCheckResult.errors)}`,
+      });
+      continue;
+    }
+    results.push(fit.result);
+    if (errors !== undefined || fit.problems.length > 0) {
+      const sent = isRecord(raw) && Array.isArray(raw['channels']) ? raw['channels'].length : 0;
+      fitted.push({
+        sensorId: fit.result.sensorId,
+        reason,
+        problems: fit.problems,
+        droppedChannels: sent - fit.result.channels.length,
+      });
+    }
+  }
+  if (refused.length > 0 || fitted.length > 0) options.onUnfitResults?.({ refused, fitted });
+  // Everything outside `results` passed the schema (any error there threw above), and every
+  // result kept either passed it as sent or was checked again once fitted; `fitResult` of a
+  // result the schema takes is one it takes too, which `result-fit.test.ts` holds by property.
+  return { ...value, results } as ProbeToCoreMessage;
 }
 
 /** Parses a decoded frame from the core. */

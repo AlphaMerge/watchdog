@@ -36,14 +36,19 @@ export interface FittedResult {
  * One check result, made to fit the wire schema and the database before it leaves the runner
  * that settled it (`P-277`).
  *
- * **One result that does not fit costs every sensor on the probe.** The core validates a
- * `results` batch as a whole, and a batch that fails is a protocol violation: the core closes the
- * connection, the probe reconnects and offers the same batch from its spool, and is closed on
- * again, for ever. A result that fits the schema but holds U+0000 fails differently and as
- * completely: PostgreSQL text cannot hold it (`22021`), the write fails, the core asks for the
- * batch again, and it fails again. What a result holds comes from a sensor's words, a device's
+ * **One result that did not fit cost every sensor on the probe.** The core validated a
+ * `results` batch as a whole, and a batch that failed was a protocol violation: the core closed
+ * the connection, the probe reconnected and offered the same batch from its spool, and was closed
+ * on again, for ever. A result that fits the schema but holds U+0000 failed differently and as
+ * completely: PostgreSQL text cannot hold it (`22021`), the write failed, the core asked for the
+ * batch again, and it failed again. What a result holds comes from a sensor's words, a device's
  * and a script's — a script's JSON names its own channels and writes its own message — so none
  * of it is assumed to fit.
+ *
+ * **The core runs this too, on every result it receives** (`P-281`, `parseProbeToCore`), so a
+ * peer that does not fit its results (a probe built before `P-277`) loses only what this drops,
+ * and a result this cannot mend is refused alone. The probe still fits before it spools: what it
+ * sends is then what is stored, and it is the probe that logs what was dropped, by sensor.
  *
  * **What is changed, and why that much and no more.** The message, a name and a unit lose their
  * NULs and have each lone surrogate replaced by U+FFFD, as PostgreSQL would store it; the message
