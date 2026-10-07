@@ -9999,12 +9999,43 @@ because each is a decision rather than a defect:
       **Done when** both are exported (Core Health channel or Prometheus counter) with a test, or
       the reason not to is written down.
 
-- [ ] **P-291 — a limit a sensor type stops declaring stays on its channels** · S · P-284 · Found
+- [x] **P-291 — a limit a sensor type stops declaring stays on its channels** · S · P-284 · Found
       2026-10-07 in `P-284`. `applyDeclaredLimits` (`packages/core/src/state/declared-limits.ts`)
       writes declared limits but never removes one the type no longer declares. An install that
       ran protocol 31 keeps `scriptGroupsRefused`'s old 0.00001 rate warning although the docs say
       it has none. **Done when** a `declared` limit for a key the type no longer declares is
       cleared at start-up, an operator-set one is left, with a test.
+
+      **P-291 outcome.** The start-up pass now also clears: a channel whose `limits_source` is
+      `declared`, on a sensor whose type declares no `limits` for that key any more, goes back to
+      `limits = '{}'` and `limits_source = 'unset'` — what a channel created by this build holds,
+      and what lets a later build declare a limit for it again. `operator` rows are never read or
+      written, whatever they hold. It runs before the pass's early return, so a type that dropped
+      its last declaration is cleared too. The report gains `cleared`, logged at info when
+      non-zero; a second start clears nothing, so no ETag churns.
+      - **Per channel, not per bound, and no migration.** `limits_source` is one column per
+        channel; there is no per-field source. A type that still declares a channel but dropped
+        one bound needed nothing new: the existing pass writes the whole declaration over the
+        whole column, so the dropped bound goes with it (now pinned by a test). Limits are not
+        inherited — they live on the channel row and the resolver never sees them — so nothing
+        there moves.
+      - **Only types the catalogue can read without parameters.** A type whose `channels({})`
+        throws may declare limits on keys the parameterless call never names, and a sensor whose
+        type this build does not register says nothing either way, so both are left alone.
+        `adding-a-sensor-type.md` no longer says declarations are "never re-applied", which had
+        been untrue since the start-up pass, and says what a start does now.
+      - **No scenario test, deliberately.** Clearing a limit can only remove a bound, so a
+        channel's outcome can only get less severe: the next reading turns a stale Warning to Up,
+        and no new Warning or Down can come of it. That is one transition per affected sensor,
+        the same one the condition clearing would have made, so nothing can multiply. The
+        concrete case barely moves state at all: the total's old rate warning fired only when a
+        refusal arrived, which `scriptGroupsRefusedRecently` already warns on.
+      - **Tests.** `declared-limits.test.ts` 10 new: a table of 8 (declares nothing any more;
+        moved to another channel; channel gone from the type; one bound fewer; unchanged;
+        operator-owned; type not registered; type needs parameters), each also checking a second
+        start does nothing; a cleared channel taking a later re-declaration; and the real
+        Probe Health type clearing protocol 31's `upperWarning: 0.00001` from
+        `scriptGroupsRefused` while `scriptGroupsRefusedRecently` keeps its own.
 
 - [ ] **P-292 — a sensor whose channels were dropped says nothing in its own result** · S · P-283
       · Found 2026-10-07 in `P-283`. When `fitResult` drops channels that cannot be sent, the count

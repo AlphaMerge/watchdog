@@ -12,6 +12,12 @@ import { limitsFromDeclaration, type ChannelLimits } from './limits.js';
  * screen says why. Every upgrade path in this project is "the schema moves forward"; this is the
  * same idea for a value the schema cannot express.
  *
+ * **A declaration taken away is the same upgrade in the other direction** (`P-291`). A build
+ * that stops declaring a channel's limits clears the ones an earlier build put there, and hands
+ * the channel back to `unset`: otherwise an install that ran the older build alarms on a
+ * threshold the documentation says is gone, and a fresh one does not. Only a `declared` row is
+ * cleared, so an operator's limit stays whatever it holds.
+ *
  * **What it will not touch is the point.** `limits_source = 'operator'` is a decision somebody
  * made, and that includes deciding to clear a threshold — which writes `{}`, indistinguishable
  * from a channel nobody has configured, and the reason `S-18` needed a column rather than a look
@@ -71,13 +77,28 @@ export function declaredChannelLookup(
 export function declaredLimitsLookup(
   catalogue: SensorCatalogue,
 ): (sensorType: string, channelKey: string) => ChannelLimits | null {
-  const declared = declarationsIn(catalogue);
+  const { declared } = declarationsIn(catalogue);
   return (sensorType, channelKey) => declared.get(`${sensorType} ${channelKey}`) ?? null;
 }
 
-/** Every (type, channel) a registered type declares limits for. Built once, read many times. */
-function declarationsIn(catalogue: SensorCatalogue): Map<string, ChannelLimits> {
+interface Declarations {
+  /** Every (type, channel) a registered type declares limits for, keyed `type key`. */
+  readonly declared: Map<string, ChannelLimits>;
+  /**
+   * Every registered type whose channels could be read without parameters, declaring or not.
+   *
+   * The only types whose silence about a channel means something: a type that declares nothing
+   * is still in here, because a type that dropped its last declaration is exactly the case
+   * `P-291` is about. A type whose `channels()` needs parameters is not, and neither is a type
+   * this build does not register at all — nothing here can say what either declares.
+   */
+  readonly readable: readonly string[];
+}
+
+/** What the catalogue declares, built once and read many times. */
+function declarationsIn(catalogue: SensorCatalogue): Declarations {
   const declared = new Map<string, ChannelLimits>();
+  const readable: string[] = [];
   for (const id of catalogue.ids()) {
     let defs;
     try {
@@ -87,12 +108,13 @@ function declarationsIn(catalogue: SensorCatalogue): Map<string, ChannelLimits> 
       // matched by key across an installation anyway.
       continue;
     }
+    readable.push(id);
     for (const def of defs) {
       if (def.limits === undefined) continue;
       declared.set(`${id} ${def.key}`, limitsFromDeclaration(def.limits));
     }
   }
-  return declared;
+  return { declared, readable };
 }
 
 export interface DeclaredLimitsOptions {
@@ -104,6 +126,11 @@ export interface DeclaredLimitsOptions {
 export interface DeclaredLimitsReport {
   /** Channels whose limits this pass wrote. Zero on every start after the first. */
   readonly applied: number;
+  /**
+   * Channels whose declared limits this pass cleared because their type no longer declares any
+   * for that key (`P-291`). Zero on every start after the first, since a cleared row is `unset`.
+   */
+  readonly cleared: number;
   /** Channels left alone because a person had decided about them. */
   readonly operatorOwned: number;
   /** Sensor types with declarations that no channel in this installation matched. */
@@ -124,8 +151,19 @@ export async function applyDeclaredLimits(
   // Built from the catalogue rather than from a list here, so a type that gains a declaration
   // needs no change on this side — the rule in `CLAUDE.md` that adding a sensor type is a
   // one-file job.
-  const declared = declarationsIn(options.catalogue);
-  if (declared.size === 0) return { applied: 0, operatorOwned: 0, unmatched: [] };
+  const { declared, readable } = declarationsIn(options.catalogue);
+
+  // Before the early return below: a catalogue that declares nothing at all may be one whose
+  // last declaration was just removed, and that is a clearing to do, not nothing to do.
+  const cleared = await clearWithdrawn(options, declared, readable);
+  if (cleared > 0) {
+    logger.info(
+      { cleared },
+      'cleared declared channel limits their sensor types no longer declare',
+    );
+  }
+
+  if (declared.size === 0) return { applied: 0, cleared, operatorOwned: 0, unmatched: [] };
 
   const types = [...new Set([...declared.keys()].map((one) => one.split(' ')[0] ?? ''))];
 
@@ -178,7 +216,53 @@ export async function applyDeclaredLimits(
       'applied the sensor types’ declared channel limits to existing channels',
     );
   }
-  return { applied, operatorOwned, unmatched };
+  return { applied, cleared, operatorOwned, unmatched };
+}
+
+/**
+ * Takes away a declared limit whose type stopped declaring it (`P-291`).
+ *
+ * **Per channel, not per bound.** A type that still declares a channel's limits but dropped one
+ * of its bounds needs nothing here: the pass above writes the whole declaration over the whole
+ * column, so the dropped bound goes with the rewrite. What it cannot reach is a key with no
+ * declaration left at all, because it only ever looks a key *up*.
+ *
+ * Back to `{}` and `unset` rather than to `{}` and `declared`: `{}` and `unset` is what a channel
+ * created by this build holds, and `unset` is what lets a later build declare a limit for it
+ * again. `declared` with nothing in it would be a claim about a declaration that does not exist.
+ *
+ * Only for types in `readable`. A type whose `channels()` needs parameters may declare a limit
+ * on a key the parameterless call never names, and a type this build does not register says
+ * nothing either way — clearing on their behalf would be guessing.
+ */
+async function clearWithdrawn(
+  options: DeclaredLimitsOptions,
+  declared: ReadonlyMap<string, ChannelLimits>,
+  readable: readonly string[],
+): Promise<number> {
+  if (readable.length === 0) return 0;
+  const pairs = [...declared.keys()].map((key) => {
+    const space = key.indexOf(' ');
+    return { type: key.slice(0, space), key: key.slice(space + 1) };
+  });
+  // `limits_source = 'declared'` is the whole guard: an operator's row is `operator`, whatever
+  // it holds and however it came to hold it, and an `unset` row has nothing to clear. Like the
+  // pass above, this reads no values: who wrote the row decides, not what is in it.
+  const rows = await options.db.query<{ id: number }>(
+    `UPDATE channel AS c
+     SET limits = '{}'::jsonb, limits_source = 'unset'
+     FROM sensor_config sc
+     WHERE sc.object_id = c.sensor_id
+       AND c.limits_source = 'declared'
+       AND sc.type = ANY($1::text[])
+       AND NOT EXISTS (
+         SELECT 1 FROM unnest($2::text[], $3::text[]) AS d(type, key)
+         WHERE d.type = sc.type AND d.key = c.key
+       )
+     RETURNING c.id`,
+    [readable, pairs.map((pair) => pair.type), pairs.map((pair) => pair.key)],
+  );
+  return rows.length;
 }
 
 /** How many channels a person owns the thresholds of — reported, never acted on. */

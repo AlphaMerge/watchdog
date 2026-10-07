@@ -1,10 +1,15 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
-import { SensorCatalogue, type SensorType } from '@ms/sensors';
+import { probeHealth, SensorCatalogue, type ChannelDef, type SensorType } from '@ms/sensors';
 import type { Database } from '../src/db/pool.js';
 import { ChannelResolver } from '../src/ingestion/channels.js';
 import { applyDeclaredLimits, declaredLimitsLookup } from '../src/state/declared-limits.js';
-import { limitsFromDeclaration, NO_LIMITS, parseLimits } from '../src/state/limits.js';
+import {
+  limitsFromDeclaration,
+  NO_LIMITS,
+  parseLimits,
+  type ChannelLimits,
+} from '../src/state/limits.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -60,6 +65,23 @@ const revised: SensorType = {
 
 const catalogueOf = (type: SensorType): SensorCatalogue =>
   new SensorCatalogue().register(type).seal();
+
+/** `test.watched` at a later build, declaring `channels` instead (`P-291`). */
+const watchedLater = (channels: readonly ChannelDef[]): SensorType => ({
+  ...watched,
+  channels: () => channels,
+});
+
+const LAG: ChannelDef = { key: 'lag', name: 'Lag', unit: 'ms', isPrimary: true };
+const PLAIN: ChannelDef = { key: 'plain', name: 'Plain', unit: '' };
+
+/** What `lag` holds when the type's first declaration put it there. */
+const LAG_DECLARED: ChannelLimits = {
+  ...NO_LIMITS,
+  upperWarning: 1_000,
+  upperError: 5_000,
+  errorMessage: 'far too late',
+};
 
 describe(
   'declared channel limits',
@@ -304,7 +326,232 @@ describe(
           logger: silent,
           catalogue: new SensorCatalogue().register(bare).seal(),
         });
-        assert.deepEqual(report, { applied: 0, operatorOwned: 0, unmatched: [] });
+        assert.deepEqual(report, { applied: 0, cleared: 0, operatorOwned: 0, unmatched: [] });
+      });
+    });
+
+    describe('a declaration taken away (P-291)', () => {
+      interface Withdrawal {
+        readonly name: string;
+        /** The build the core restarts into. */
+        readonly catalogue: () => SensorCatalogue;
+        /** Who owns `lag` before the restart: as created, or after a person set a bound. */
+        readonly owner: 'declared' | 'operator';
+        readonly cleared: number;
+        readonly applied: number;
+        readonly lag: { readonly source: string; readonly limits: ChannelLimits };
+        readonly plain?: { readonly source: string; readonly limits: ChannelLimits };
+      }
+
+      const cases: readonly Withdrawal[] = [
+        {
+          // The `P-284` shape, and the early return's: a type left declaring nothing at all.
+          name: 'the type declares no limit anywhere any more',
+          catalogue: () => catalogueOf(watchedLater([LAG, PLAIN])),
+          owner: 'declared',
+          cleared: 1,
+          applied: 0,
+          lag: { source: 'unset', limits: NO_LIMITS },
+        },
+        {
+          // The type still declares limits, for another channel: per key, not per type.
+          name: 'the type moved its declaration to another channel',
+          catalogue: () =>
+            catalogueOf(watchedLater([LAG, { ...PLAIN, limits: { upperError: 3 } }])),
+          owner: 'declared',
+          cleared: 1,
+          applied: 1,
+          lag: { source: 'unset', limits: NO_LIMITS },
+          plain: { source: 'declared', limits: { ...NO_LIMITS, upperError: 3 } },
+        },
+        {
+          // A channel the type no longer has at all still has its row and its readings.
+          name: 'the type no longer has the channel',
+          catalogue: () => catalogueOf(watchedLater([{ ...PLAIN, isPrimary: true }])),
+          owner: 'declared',
+          cleared: 1,
+          applied: 0,
+          lag: { source: 'unset', limits: NO_LIMITS },
+        },
+        {
+          // Some bounds kept and one dropped: the rewrite of the whole declaration takes the
+          // dropped one with it, and the channel stays the type's.
+          name: 'the type still declares the channel, with one bound fewer',
+          catalogue: () =>
+            catalogueOf(
+              watchedLater([
+                { ...LAG, limits: { upperError: 5_000, errorMessage: 'far too late' } },
+                PLAIN,
+              ]),
+            ),
+          owner: 'declared',
+          cleared: 0,
+          applied: 1,
+          lag: { source: 'declared', limits: { ...LAG_DECLARED, upperWarning: null } },
+        },
+        {
+          name: 'the declaration has not moved',
+          catalogue: () => catalogueOf(watched),
+          owner: 'declared',
+          cleared: 0,
+          applied: 0,
+          lag: { source: 'declared', limits: LAG_DECLARED },
+        },
+        {
+          // **The rule the pass exists under.** A person's limit outlives the declaration it
+          // started from, including the bounds they did not touch.
+          name: 'an operator owns the channel',
+          catalogue: () => catalogueOf(watchedLater([LAG, PLAIN])),
+          owner: 'operator',
+          cleared: 0,
+          applied: 0,
+          lag: { source: 'operator', limits: { ...LAG_DECLARED, upperError: 8_000 } },
+        },
+        {
+          // A build that does not register the type says nothing about what it declares.
+          name: 'the type is not registered',
+          catalogue: () => catalogueOf({ ...watched, id: 'test.other', channels: () => [PLAIN] }),
+          owner: 'declared',
+          cleared: 0,
+          applied: 0,
+          lag: { source: 'declared', limits: LAG_DECLARED },
+        },
+        {
+          // Its channels vary per sensor, so a parameterless read cannot speak for this one.
+          name: 'the type needs parameters to name its channels',
+          catalogue: () =>
+            catalogueOf({
+              ...watched,
+              channels: (params) => {
+                if (params['shape'] === undefined) throw new Error('needs a shape');
+                return [LAG, PLAIN];
+              },
+            }),
+          owner: 'declared',
+          cleared: 0,
+          applied: 0,
+          lag: { source: 'declared', limits: LAG_DECLARED },
+        },
+      ];
+
+      for (const one of cases) {
+        it(`when ${one.name}`, async () => {
+          if (one.owner === 'operator') {
+            await h.service.patchChannel(testActor, sensorId, 'lag', {
+              limits: { upperError: 8_000 },
+            });
+          }
+          assert.equal((await channel('lag')).source, one.owner, 'the row starts as the case says');
+
+          const report = await applyDeclaredLimits({
+            db,
+            logger: silent,
+            catalogue: one.catalogue(),
+          });
+
+          assert.equal(report.cleared, one.cleared, 'cleared');
+          assert.equal(report.applied, one.applied, 'applied');
+          const lag = await channel('lag');
+          assert.equal(lag.source, one.lag.source);
+          assert.deepEqual(parseLimits(lag.limits), one.lag.limits);
+          if (one.lag.source === 'unset') {
+            // The value a channel created by this build holds, not a row of nulls that only
+            // parses the same: an `unset` row is meant to be indistinguishable from a new one.
+            assert.deepEqual(lag.limits, {});
+          }
+          if (one.plain !== undefined) {
+            const plain = await channel('plain');
+            assert.equal(plain.source, one.plain.source);
+            assert.deepEqual(parseLimits(plain.limits), one.plain.limits);
+          }
+
+          // And a second start finds nothing: a cleared row is `unset`, so writing it again would
+          // only bump the sensor's version and break every open ETag (`S-13`).
+          const again = await applyDeclaredLimits({
+            db,
+            logger: silent,
+            catalogue: one.catalogue(),
+          });
+          assert.equal(again.cleared, 0, 'nothing left to clear');
+          assert.equal(again.applied, 0, 'nothing left to apply');
+        });
+      }
+
+      it('gives a cleared channel back to a later build that declares it again', async () => {
+        await applyDeclaredLimits({
+          db,
+          logger: silent,
+          catalogue: catalogueOf(watchedLater([LAG, PLAIN])),
+        });
+        assert.equal((await channel('lag')).source, 'unset');
+
+        const report = await applyDeclaredLimits({
+          db,
+          logger: silent,
+          catalogue: catalogueOf(watched),
+        });
+        assert.equal(report.applied, 1);
+        const lag = await channel('lag');
+        assert.equal(lag.source, 'declared');
+        assert.deepEqual(parseLimits(lag.limits), LAG_DECLARED);
+      });
+
+      it('takes protocol 31’s rate warning off Probe Health’s script-groups total', async () => {
+        // The case that found the ticket. `P-270` declared `upperWarning: 0.000_01` on the
+        // running total; `P-284` moved the warning to the five-minute count and declared nothing
+        // on the total — so an install that ran the earlier build kept a threshold nothing
+        // declares and the documentation says is gone.
+        const probe = await h.service.create(testActor, {
+          kind: 'probe',
+          parentId: h.rootId,
+          name: 'Upgraded probe',
+        });
+        const device = await h.service.create(testActor, {
+          kind: 'device',
+          parentId: probe.id,
+          name: 'Upgraded probe device',
+          host: '192.0.2.41',
+        });
+        const health = await h.service.create(testActor, {
+          kind: 'sensor',
+          parentId: device.id,
+          name: 'Probe Health',
+          sensorType: 'ms.probe.health',
+        });
+        const read = async (key: string): Promise<{ limits: unknown; source: string }> => {
+          const rows = await db.query<{ limits: unknown; limits_source: string }>(
+            'SELECT limits, limits_source FROM channel WHERE sensor_id = $1 AND key = $2',
+            [health.id, key],
+          );
+          const row = rows[0];
+          assert.ok(row !== undefined, `no channel ${key}`);
+          return { limits: row.limits, source: row.limits_source };
+        };
+
+        // What protocol 31's build left on the row.
+        await db.query(
+          `UPDATE channel SET limits = $3::jsonb, limits_source = 'declared'
+           WHERE sensor_id = $1 AND key = $2`,
+          [
+            health.id,
+            'scriptGroupsRefused',
+            JSON.stringify(limitsFromDeclaration({ upperWarning: 0.000_01 })),
+          ],
+        );
+        const recently = await read('scriptGroupsRefusedRecently');
+        assert.equal(recently.source, 'declared', 'the channel that carries the warning now');
+
+        const report = await applyDeclaredLimits({
+          db,
+          logger: silent,
+          catalogue: catalogueOf(probeHealth),
+        });
+
+        assert.equal(report.cleared, 1, 'the total, and nothing else on Probe Health');
+        const total = await read('scriptGroupsRefused');
+        assert.equal(total.source, 'unset');
+        assert.deepEqual(total.limits, {});
+        assert.deepEqual(await read('scriptGroupsRefusedRecently'), recently, 'kept as it was');
       });
     });
 

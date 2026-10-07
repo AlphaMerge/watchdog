@@ -236,9 +236,12 @@ channel the sensor is judged by.
   one: a threshold on a monitored device's response time depends on that device and belongs to the
   operator. Declare one only where the number means the same thing on every installation, which in
   practice means a channel about *this system* rather than about somebody's network. They are
-  written when the channel is created and never re-applied — an operator who changes or clears
-  them owns them from then on, because a default that came back after somebody removed it is worse
-  than no default. The catalogue refuses a declaration with no bound in it, one that is not a
+  written when the channel is created, and each start brings existing channels up to what this
+  build declares: a changed declaration replaces the old one, and a withdrawn one — the key
+  declares no `limits` any more — is cleared (`P-291`). An operator who changes or clears them owns
+  them from then on, and no start touches them again, because a default that came back after
+  somebody removed it is worse than no default. The start-up pass reads `channels({})`, so a type
+  whose channels need parameters gets its declarations at creation only. The catalogue refuses a declaration with no bound in it, one that is not a
   number, and one whose warning sits outside its error, at registration rather than at the first
   reading.
 
