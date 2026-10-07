@@ -9516,11 +9516,38 @@ because each is a decision rather than a defect:
       that does not fit (counted, logged with the sensor id) and drops NULs from what it stores,
       with a test from a peer that skips `fitResult`.
 
-- [ ] **P-282 — ping counts duplicate replies as replies** · S · P-277 · Found 2026-10-07 in
+- [x] **P-282 — ping counts duplicate replies as replies** · S · P-277 · Found 2026-10-07 in
       `P-277`. `(DUP!)` lines from the system `ping` are counted as replies, which hides packet
       loss and skews jitter. **Done when** duplicates are left out of the reply count and the
       timing figures (and counted on their own if useful), with parser tests for Linux and
       macOS `ping` output.
+
+      **P-282 outcome. A second answer to the same request is a duplicate, not a reply.**
+      - **One parser, so one fix.** `parsePingOutput` in `packages/sensors/src/support/ping.ts` is
+        what `icmp.ping`, `icmp.jitter`, the discovery sweep's `pingOnce` and the `P-07` perf
+        test all read ping through. There is no raw-socket path to check: `P-07`'s fast path was
+        never built, and every ICMP check runs the system binary.
+      - **It reads line by line now**, where it used to take every `time=` in the output. A timed
+        line is a duplicate if ping marks it `(DUP!)` (iputils, BSD and BusyBox all do), or if
+        its `icmp_seq` has already been answered. The second rule catches the same fact with no
+        marker, which is what the last line of a flood looks like when `P-277`'s 64 KiB bound
+        cuts it short. Duplicates go into `outcome.duplicates` and nowhere else: not `times`, so
+        not the loss, the averages, min/max or the jitter. Windows prints neither a sequence nor
+        a marker, and nothing changes there.
+      - **Counted where a count already goes: the message.** Both sensors append *N duplicates
+        not counted* to the message when there were any (`duplicatesNote`). A device that answers
+        twice is worth knowing about (a loop or a shared address), but it is not a channel: no
+        limit on it would mean anything. There is no new heartbeat field and no protocol change.
+      - **Tests** (`ping.test.ts`): iputils output (two of four answered, each twice) parses to
+        two replies, 50% loss and an average of 0.405 ms, not 0% and 2.9 ms. macOS output parses
+        the same, with its 24.95 ms copy not taken as the slowest reply. The jitter equals the
+        jitter of the first answers alone. BusyBox (`seq=`, so the marker is all there is) parses
+        to one duplicate. A cut-off unmarked copy is caught by its sequence number. Distinct
+        sequences are never merged, and Windows has no duplicates.
+      - **Mutations** (each restored byte for byte, `dist` rebuilt): with no duplicate check at
+        all, the iputils, macOS, jitter and cut-line tests fail. With no sequence rule, the cut-line
+        test fails. With no marker rule, the BusyBox test fails. A `duplicatesNote` that never
+        speaks fails its own test.
 
 - [ ] **P-283 — readings the probe dropped or the drain discarded are not on Probe Health** · S ·
       P-277 · Found 2026-10-07 in `P-277`. `fitResult` drops channels that cannot be sent and the
@@ -9542,12 +9569,37 @@ because each is a decision rather than a defect:
       structured failure phase (and target) end to end, shown in the UI, with a protocol number
       and tests.
 
-- [ ] **P-286 — two small pool and test leftovers from `P-271`** · S · P-271 · Found 2026-10-07 in
+- [x] **P-286 — two small pool and test leftovers from `P-271`** · S · P-271 · Found 2026-10-07 in
       `P-271`. `#recycle` does not count its worker in `#terminating` while the thread exits, as
       `#retire` and `#startTimedOut` do, so a memory reading during a slow terminate treats that
       worker's memory as someone else's. And `windows-transport.test.ts` "kills a PowerShell that
       ignores SIGTERM" asserts `tookMs < 2_000`, a wall-clock upper bound. **Done when** both are
       fixed, with a test for the first.
+
+      **P-286 outcome. A recycled worker is resident until it exits, and the test waits.**
+      - **`#recycle`** now adds its worker to `#terminating` for the length of the terminate and
+        takes it off in a `finally`, as `#retire` and `#startTimedOut` do. A memory reading taken
+        in that window is asked with the held workers plus this one, so it no longer reads the
+        exiting worker's memory as taken by something else. The replacement is still counted in
+        `#growing`, as `P-271` left it.
+      - **The test** (`pool-memory-cap.test.ts`, "a worker recycled for ignoring its abort") uses
+        `test.block`, `P-271`'s fixture, which holds the thread in native code for 5 s. With a
+        pool of two, it waits (bounded) for the worker to leave `#slots`, takes a reading, then
+        checks the thread was still blocked. The reading is asked with 2 (one held, one exiting).
+        Once the replacement is in, the reading is asked with 2 again, not 3.
+      - **The PowerShell test** waits for the fake with `until` and for the kill with `within`
+        (15 s), not a hand-rolled deadline loop and `tookMs < 2_000`. That the kill lands inside
+        the pool's grace is a structural fact: `POWERSHELL_GRACE_MS` is under the probe's floor,
+        which the next test (`P-267`) holds. The asserted message, *killed with SIGKILL, having
+        ignored SIGTERM for 1000 ms*, says the kill came from that timer. The lower bound
+        (`tookMs >= POWERSHELL_GRACE_MS - 5`) stays, because load can only make it easier to
+        meet.
+      - **Mutations** (each restored byte for byte, `dist` rebuilt): with no count in
+        `#recycle`, the reading inside the terminate is asked with 1, not 2. With a count that is
+        never taken off, the reading after the replacement is asked with 3.
+      - **Not done:** two other tests in `windows-transport.test.ts` ("kills a script that will
+        not finish", "ends PowerShell on the check's cancel") still assert `< 15_000` on the wall
+        clock. That bound is generous, but it is the same kind of assert.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then

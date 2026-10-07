@@ -1,5 +1,6 @@
 import type { CheckContext, CheckExecution, SensorType } from '../contract.js';
 import {
+  duplicatesNote,
   parsePingOutput,
   pingCommand,
   pingPlatform,
@@ -118,7 +119,7 @@ export const icmpPing: SensorType = {
       message:
         `${String(outcome.times.length)}/${String(outcome.transmitted)} replies, ` +
         `min ${stats.minMs.toFixed(3)} ms, avg ${stats.rttMs.toFixed(3)} ms, ` +
-        `max ${stats.maxMs.toFixed(3)} ms`,
+        `max ${stats.maxMs.toFixed(3)} ms${duplicatesNote(outcome)}`,
     };
   },
 };

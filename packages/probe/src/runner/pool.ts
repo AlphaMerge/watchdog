@@ -1435,6 +1435,11 @@ export class CheckPool {
    * thread blocked in native code stops only when that returns — and through the wait for a
    * loading turn. Uncounted, a check queuing in that time made `#grow` start a worker for the same
    * gap, and the replacement then made a pool of two hold three.
+   *
+   * **And the worker itself is counted as still resident through the same terminate** (`P-286`),
+   * as `#retire` and `#startTimedOut` count theirs: out of `#slots` and not yet exited, its memory
+   * is in any reading taken meanwhile, and uncounted it was read as memory taken by something
+   * else.
    */
   async #recycle(slot: Slot): Promise<void> {
     slot.retired = true;
@@ -1445,7 +1450,12 @@ export class CheckPool {
     slot.idleSince = process.hrtime.bigint();
     this.#growing += 1;
     try {
-      await slot.worker.terminate();
+      this.#terminating += 1;
+      try {
+        await slot.worker.terminate();
+      } finally {
+        this.#terminating -= 1;
+      }
       if (this.#stopped) return;
       await this.#spawn();
     } finally {

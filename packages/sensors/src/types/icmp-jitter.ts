@@ -80,8 +80,15 @@ export const icmpJitter: SensorType = {
   },
 
   async execute(context: CheckContext): Promise<CheckExecution> {
-    const { pingCommand, pingPlatform, parsePingOutput, summarise, jitterOf, runPing } =
-      await import('../support/ping.js');
+    const {
+      duplicatesNote,
+      pingCommand,
+      pingPlatform,
+      parsePingOutput,
+      summarise,
+      jitterOf,
+      runPing,
+    } = await import('../support/ping.js');
 
     const host = context.target.host;
     if (host === '') throw new Error('the device has no host to ping');
@@ -127,7 +134,8 @@ export const icmpJitter: SensorType = {
       ],
       message:
         `${String(jitter)} ms jitter over ${String(outcome.times.length)} replies ` +
-        `(${String(stats.minMs)}–${String(stats.maxMs)} ms, ${String(stats.lossPercent)}% loss)`,
+        `(${String(stats.minMs)}–${String(stats.maxMs)} ms, ${String(stats.lossPercent)}% loss` +
+        `${duplicatesNote(outcome)})`,
     };
   },
 };

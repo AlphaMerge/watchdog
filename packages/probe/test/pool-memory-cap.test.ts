@@ -1,4 +1,7 @@
 import { strict as assert } from 'node:assert';
+import { existsSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
 import { after, describe, it } from 'node:test';
@@ -411,6 +414,66 @@ describe('a pool bounded by memory (P-236)', () => {
       lines.some((line) => line.msg.startsWith('nothing is waiting for a worker')),
       'and one when it ends',
     );
+  });
+});
+
+describe('a worker recycled for ignoring its abort (P-286)', () => {
+  it('is in the memory reading until its thread has exited, as a retired one is', async () => {
+    // A check that ignores its abort while its thread is in native code (`test.block`): the
+    // worker leaves `#slots` at the end of the abort grace, and its terminate lasts until the
+    // native call returns. Its memory is resident all that time, so a reading taken then has to
+    // be asked with it counted, or the pool reads that memory as someone else's.
+    const scratch = await mkdtemp(join(tmpdir(), 'ms-recycle-memory-'));
+    const unblocked = join(scratch, 'unblocked');
+    const asked: number[] = [];
+    const inner = fixedCap(() => 8);
+    const pool = new CheckPool({
+      logger: silent,
+      size: 2,
+      minSize: 2,
+      abortGraceMs: 100,
+      registryModule: FIXTURES,
+      memoryCap: {
+        read: (held) => {
+          asked.push(held);
+          return inner.read(held);
+        },
+      },
+      onResult: () => undefined,
+    });
+    pools.push(pool);
+    try {
+      await pool.start();
+      pool.submit({
+        sensorId: 1,
+        sensorType: 'test.block',
+        target: { host: '192.0.2.1', ipVersion: 'auto' as const },
+        params: { delayMs: 5_000, marker: unblocked },
+        timeoutMs: 100,
+      });
+      await until(() => pool.stats().size === 1, 'the blocked worker taken out', 20_000);
+
+      asked.length = 0;
+      pool.stats();
+      // Only a reading taken while the thread was still blocked says anything, so presence of
+      // the window is checked after the reading, not assumed.
+      assert.equal(existsSync(unblocked), false, 'the reading was taken inside the terminate');
+      assert.deepEqual([...asked], [2], 'one worker held and one still exiting, both resident');
+
+      // The replacement starts only after the terminate has finished, so by the time it is in
+      // the pool the exited worker is out of the reading: two, not three.
+      await until(
+        () => existsSync(unblocked) && pool.stats().size === 2,
+        'the thread unblocked and the replacement started',
+        60_000,
+      );
+      asked.length = 0;
+      pool.stats();
+      assert.deepEqual([...asked], [2], 'the exited worker is no longer counted');
+    } finally {
+      await pool.stop();
+      await rm(scratch, { recursive: true, force: true });
+    }
   });
 });
 

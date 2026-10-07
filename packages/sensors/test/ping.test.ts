@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import type { CheckTarget } from '../src/contract.js';
 import {
+  duplicatesNote,
   jitterOf,
   parsePingOutput,
   PING_OUTPUT_CHARS,
@@ -70,6 +71,48 @@ Ping statistics for 127.0.0.1:
     Packets: Sent = 4, Received = 3, Lost = 1 (25% loss),
 Approximate round trip times in milli-seconds:
     Minimum = 0ms, Maximum = 2ms, Average = 1ms
+`;
+
+/**
+ * Two of four requests answered, each of them twice (`P-282`) — a broadcast address, or a loop.
+ * iputils marks the second answer `(DUP!)` and leaves it out of its own received count.
+ */
+const LINUX_DUPLICATES = `PING 192.0.2.255 (192.0.2.255) 32(60) bytes of data.
+40 bytes from 192.0.2.10: icmp_seq=1 ttl=64 time=0.412 ms
+40 bytes from 192.0.2.11: icmp_seq=1 ttl=64 time=0.913 ms (DUP!)
+40 bytes from 192.0.2.10: icmp_seq=3 ttl=64 time=0.398 ms
+40 bytes from 192.0.2.11: icmp_seq=3 ttl=64 time=9.877 ms (DUP!)
+
+--- 192.0.2.255 ping statistics ---
+4 packets transmitted, 2 received, +2 duplicates, 50% packet loss, time 3004ms
+rtt min/avg/max/mdev = 0.398/2.900/9.877/3.996 ms
+`;
+
+/** The same on macOS, where BSD ping marks it the same way and numbers from zero. */
+const MACOS_DUPLICATES = `PING 192.0.2.1 (192.0.2.1): 32 data bytes
+40 bytes from 192.0.2.1: icmp_seq=0 ttl=64 time=1.204 ms
+40 bytes from 192.0.2.1: icmp_seq=0 ttl=64 time=1.391 ms (DUP!)
+Request timeout for icmp_seq 1
+40 bytes from 192.0.2.1: icmp_seq=2 ttl=64 time=1.188 ms
+40 bytes from 192.0.2.1: icmp_seq=2 ttl=64 time=24.950 ms (DUP!)
+
+--- 192.0.2.1 ping statistics ---
+4 packets transmitted, 2 packets received, +2 duplicates, 50.0% packet loss
+round-trip min/avg/max/stddev = 1.188/7.183/24.950/10.256 ms
+`;
+
+/**
+ * BusyBox, which a probe in a minimal image may have for `ping`: `seq=`, not `icmp_seq=`, so its
+ * own marker is the only thing that says a line is a second answer.
+ */
+const BUSYBOX_DUPLICATES = `PING 192.0.2.1 (192.0.2.1): 32 data bytes
+40 bytes from 192.0.2.1: seq=0 ttl=64 time=0.517 ms
+40 bytes from 192.0.2.1: seq=0 ttl=64 time=3.902 ms (DUP!)
+40 bytes from 192.0.2.1: seq=1 ttl=64 time=0.533 ms
+
+--- 192.0.2.1 ping statistics ---
+2 packets transmitted, 2 packets received, 1 duplicates, 0% packet loss
+round-trip min/avg/max = 0.517/1.650/3.902 ms
 `;
 
 /** Windows counts an ICMP error as a *received packet*. This is the trap. */
@@ -256,6 +299,77 @@ describe('parsing', () => {
     for (const output of ['', 'ping: unknown host nope.invalid\n', 'garbage']) {
       assert.deepEqual([...parsePingOutput(output, 4).times], []);
     }
+  });
+});
+
+describe('duplicate replies (`P-282`)', () => {
+  it('leaves them out of the replies, the loss and the times on Linux, and counts them', () => {
+    // Counted as replies, two answered of four read as four of four: no loss, and a 9.9 ms copy
+    // of a 0.4 ms reply in the average.
+    const outcome = parsePingOutput(LINUX_DUPLICATES, 4);
+    assert.equal(outcome.transmitted, 4);
+    assert.deepEqual([...outcome.times], [0.412, 0.398]);
+    assert.equal(outcome.duplicates, 2);
+    assert.deepEqual(summarise(outcome), {
+      lossPercent: 50,
+      rttMs: 0.405,
+      minMs: 0.398,
+      maxMs: 0.412,
+    });
+  });
+
+  it('does the same with macOS output', () => {
+    const outcome = parsePingOutput(MACOS_DUPLICATES, 4);
+    assert.equal(outcome.transmitted, 4);
+    assert.deepEqual([...outcome.times], [1.204, 1.188]);
+    assert.equal(outcome.duplicates, 2);
+    assert.equal(summarise(outcome).lossPercent, 50);
+    assert.equal(summarise(outcome).maxMs, 1.204, 'the 24.95 ms copy is not the slowest reply');
+  });
+
+  it('keeps them out of the jitter, which is a property of the gaps between replies', () => {
+    // A late copy between two replies makes two gaps that the link never had.
+    for (const [name, output, replies] of [
+      ['linux', LINUX_DUPLICATES, [0.412, 0.398]],
+      ['macos', MACOS_DUPLICATES, [1.204, 1.188]],
+    ] as const) {
+      const outcome = parsePingOutput(output, 4);
+      assert.equal(jitterOf(outcome.times), jitterOf(replies), `${name} jitter`);
+    }
+  });
+
+  it('believes the marker where there is no sequence number to go by', () => {
+    const outcome = parsePingOutput(BUSYBOX_DUPLICATES, 2);
+    assert.equal(outcome.transmitted, 2);
+    assert.deepEqual([...outcome.times], [0.517, 0.533]);
+    assert.equal(outcome.duplicates, 1);
+  });
+
+  it('knows a second answer by its sequence number when the marker is not on the line', () => {
+    // The last line of a flood cut off at `PING_OUTPUT_CHARS`, before " (DUP!)" was printed.
+    const cut = LINUX_DUPLICATES.split('\n--- ')[0]?.replace(/ \(DUP!\)\n$/, '\n') ?? '';
+    assert.match(cut, /time=9\.877 ms\n$/, 'the fixture ends on an unmarked second answer');
+    const outcome = parsePingOutput(cut, 4);
+    assert.deepEqual([...outcome.times], [0.412, 0.398]);
+    assert.equal(outcome.duplicates, 2);
+  });
+
+  it('counts each sequence once, so distinct replies are never taken for copies', () => {
+    const outcome = parsePingOutput(LINUX_OK, 4);
+    assert.equal(outcome.times.length, 4);
+    assert.equal(outcome.duplicates, 0);
+  });
+
+  it('has none on Windows, whose ping prints neither a sequence nor a marker', () => {
+    // Four identical lines are four replies there: nothing in them says otherwise.
+    assert.equal(parsePingOutput(WINDOWS_PARTIAL, 4).duplicates, 0);
+    assert.equal(parsePingOutput(WINDOWS_PARTIAL, 4).times.length, 3);
+  });
+
+  it('says how many were left out, and nothing when there were none', () => {
+    assert.equal(duplicatesNote({ duplicates: 0 }), '');
+    assert.equal(duplicatesNote({ duplicates: 1 }), ', 1 duplicate not counted');
+    assert.equal(duplicatesNote({ duplicates: 2 }), ', 2 duplicates not counted');
   });
 });
 

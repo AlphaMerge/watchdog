@@ -162,8 +162,15 @@ export function pingCommand(
 
 export interface PingOutcome {
   readonly transmitted: number;
-  /** Round-trip times, in milliseconds, one per echo reply. Its length is the received count. */
+  /**
+   * Round-trip times, in milliseconds, one per echo reply. Its length is the received count.
+   *
+   * **First answers only** (`P-282`): a duplicate is not another reply, so it is in neither this
+   * nor anything worked out from it — loss, the averages, jitter.
+   */
   readonly times: readonly number[];
+  /** Answers to an echo request that had already been answered, left out of `times`. */
+  readonly duplicates: number;
 }
 
 /**
@@ -173,7 +180,16 @@ export interface PingOutcome {
  * 192.0.2.1: Destination host unreachable." carries no time and is correctly not counted, which
  * is the trap in trusting the words "Reply from".
  */
-const REPLY = /\btime\s*[<=]\s*([0-9]+(?:\.[0-9]+)?)\s*ms/gi;
+const REPLY = /\btime\s*[<=]\s*([0-9]+(?:\.[0-9]+)?)\s*ms/i;
+
+/** iputils, BSD and BusyBox all mark a second answer to the same request so (`P-282`). */
+const DUPLICATE = /\(DUP!\)/;
+
+/**
+ * iputils and BSD: `icmp_seq=3`. Windows prints no sequence and reports no duplicates; BusyBox
+ * prints `seq=3`, which this leaves alone, so there the marker is the whole of it.
+ */
+const SEQUENCE = /\bicmp_seq=(\d+)/;
 
 /** iputils: `4 packets transmitted, 4 received`. BSD: `4 packets transmitted, 4 packets received`. */
 const UNIX_SUMMARY = /(\d+)\s+packets transmitted,\s*(\d+)\s+(?:packets\s+)?received/i;
@@ -191,12 +207,30 @@ const WINDOWS_SUMMARY = /Sent\s*=\s*(\d+),\s*Received\s*=\s*(\d+)/i;
  *
  * `transmitted` comes from the summary when there is one: ping can stop early, and using the
  * requested count as the denominator would report loss that never happened.
+ *
+ * **A duplicate is not a reply** (`P-282`). A device, a loop or a broadcast address can answer
+ * one request more than once, and ping prints every answer with a time. Counted, four requests
+ * with two lost and two answered twice read as no loss at all, and the second answers went into
+ * the averages and the jitter. A line ping marks `(DUP!)` is counted on its own instead; so is a
+ * timed line for a sequence already answered, which is the same fact without the marker — and
+ * what the last line of a flood looks like when `PING_OUTPUT_CHARS` cuts it before the marker.
  */
 export function parsePingOutput(output: string, requested: number): PingOutcome {
   const times: number[] = [];
-  for (const match of output.matchAll(REPLY)) {
-    const value = Number(match[1]);
-    if (Number.isFinite(value)) times.push(value);
+  const answered = new Set<string>();
+  let duplicates = 0;
+  for (const line of output.split(/\r?\n/)) {
+    const reply = REPLY.exec(line);
+    if (reply === null) continue;
+    const value = Number(reply[1]);
+    if (!Number.isFinite(value)) continue;
+    const sequence = SEQUENCE.exec(line)?.[1];
+    if (DUPLICATE.test(line) || (sequence !== undefined && answered.has(sequence))) {
+      duplicates += 1;
+      continue;
+    }
+    if (sequence !== undefined) answered.add(sequence);
+    times.push(value);
   }
 
   const summary = UNIX_SUMMARY.exec(output) ?? WINDOWS_SUMMARY.exec(output);
@@ -210,7 +244,21 @@ export function parsePingOutput(output: string, requested: number): PingOutcome 
   return {
     transmitted: Number.isFinite(transmitted) && transmitted > 0 ? transmitted : requested,
     times,
+    duplicates,
   };
+}
+
+/**
+ * What a check's message adds about duplicates: nothing when there were none (`P-282`).
+ *
+ * Said rather than dropped silently, because a device answering twice is worth knowing in itself
+ * — a routing loop or a shared address looks like this — and the message is where a check
+ * already gives its counts. Not a channel: no limit set on it would mean anything.
+ */
+export function duplicatesNote(outcome: Pick<PingOutcome, 'duplicates'>): string {
+  if (outcome.duplicates <= 0) return '';
+  const noun = outcome.duplicates === 1 ? 'duplicate' : 'duplicates';
+  return `, ${String(outcome.duplicates)} ${noun} not counted`;
 }
 
 export interface PingStatistics {
@@ -221,7 +269,7 @@ export interface PingStatistics {
 }
 
 /** Throws for an outcome with no replies: there is no round-trip time to report. */
-export function summarise(outcome: PingOutcome): PingStatistics {
+export function summarise(outcome: Pick<PingOutcome, 'transmitted' | 'times'>): PingStatistics {
   if (outcome.times.length === 0) {
     throw new Error('no replies to summarise');
   }

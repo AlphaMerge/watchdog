@@ -24,6 +24,7 @@ import { queryCim, whereOf } from '../src/types/windows-shared.js';
 import { windowsService } from '../src/types/windows-service.js';
 import { CHECK_ABORT_GRACE_MIN_MS, WORKER_PROGRAM_GRACE_MAX_MS } from '@ms/shared';
 import { installFakePowerShell } from '@ms/simulators';
+import { until, within } from './support/within.js';
 
 /**
  * The Windows transport (`T-09`).
@@ -289,16 +290,20 @@ describe('running it', () => {
       timeoutMs: 60_000,
       signal: controller.signal,
     });
-    const deadline = Date.now() + 20_000;
-    while (!existsSync(ready)) {
-      if (Date.now() > deadline) throw new Error('the fake never said it ignores SIGTERM');
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+    await until(20_000, 'the fake to say it ignores SIGTERM', () => existsSync(ready));
     const abortedAt = performance.now();
     controller.abort(new Error('the check exceeded its timeout'));
-    const error = await running.then(
-      () => assert.fail('PowerShell was not ended'),
-      (failure: unknown) => failure,
+    // **Bounded by what it waits for, not timed against the pool** (`P-286`). That the kill
+    // lands inside the pool's grace is the SIGKILL timer's grace being under the probe's floor,
+    // which the next test holds structurally, and the message below says the kill came from that
+    // timer. A wall-clock bound on top of both was one a loaded VM could break.
+    const error = await within(
+      15_000,
+      'PowerShell to be killed after ignoring SIGTERM',
+      running.then(
+        () => assert.fail('PowerShell was not ended'),
+        (failure: unknown) => failure,
+      ),
     );
     const tookMs = performance.now() - abortedAt;
     rmSync(dirname(ready), { recursive: true, force: true });
@@ -318,8 +323,8 @@ describe('running it', () => {
       said <= abortedAt - calledAt + 50,
       `said ${String(said)} ms for an abort ${String(Math.round(abortedAt - calledAt))} ms in`,
     );
+    // A lower bound, which load can only make easier to meet: SIGTERM was given its grace.
     assert.ok(tookMs >= POWERSHELL_GRACE_MS - 5, `killed ${String(Math.round(tookMs))} ms after`);
-    assert.ok(tookMs < 2_000, `killed ${String(Math.round(tookMs))} ms after, past the pool's 2 s`);
   });
 
   it('gives PowerShell no more than the probe’s abort grace is held to contain (`P-267`)', () => {
