@@ -10026,6 +10026,23 @@ because each is a decision rather than a defect:
         own, a fitted result that dropped nothing takes no place, and one that dropped readings
         counts them once. `messages.test.ts` (shared): each refused result's `at`, and null for
         a time of the wrong type, empty or past 64 characters.
+      - **Amended on review** (a second commit). **The bound was one probe's, and one set served
+        them all.** 10,000 is two batches of one probe, but every probe's results shared one
+        set, and a lost acknowledgement is followed by a reconnect: in a fleet-wide replay after
+        an upgrade, when these counts matter, other probes' 10,000 unfit results meanwhile
+        forgot the first probe's, and its resend was counted again. Now a `Map` from GID to its
+        own set of 10,000 (`UNFIT_RESULTS_REMEMBERED`), at most `UNFIT_PROBES_REMEMBERED` = 32
+        probes (v1 is under 30 remote probes, and the local one), the probe heard from least
+        recently forgotten first. A result seen again moves to the newest end, and its probe
+        too, so a batch sent a third time is still remembered. The key is now
+        `<r|f><sensorId> <at>`, at most 82 characters: about 210 bytes worst case, so about
+        70 MB with all 32 probes full, some 25 MB with ISO times, and nothing while every
+        probe fits its own (the old comment's 230 characters left out JSON escapes). Stats:
+        `unfitRemembered` is the total across probes, `unfitProbesRemembered` the probes.
+        Tests (`unfit-results.test.ts`, bounds of 2 results and 2 probes): another probe sending
+        more than the bound does not forget the first's; a result sent a third time stays
+        remembered while its probe's other one is forgotten; the probe heard from least
+        recently is the one forgotten.
 
 - [ ] **P-289 — a query result is still refused whole for one result that does not fit** · S ·
       P-281 · Found 2026-10-07 in `P-281`. `query-result` carries the same result schema, and the

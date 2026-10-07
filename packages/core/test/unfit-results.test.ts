@@ -678,50 +678,111 @@ describe(
       }
     });
 
-    it('remembers a bounded number of unfit results, the oldest forgotten first (`P-288`)', () => {
-      assert.ok(ingestor !== undefined);
-      const own = new ProbeRefusals();
-      const small = new IngestionService({
-        db,
-        logger: silent,
-        ingestor,
-        refusals: own,
-        unfitRemembered: 2,
-      });
-      const origin = { gid: 'bounded', probeObjectId: probeId };
+    describe('what is remembered to count an unfit result once (`P-288`)', () => {
       const time = '2026-10-08T09:00:00.000Z';
       const refusing = (sensorId: number) => ({
         refused: [{ sensorId, at: time, reason: '/outcome: invalid' }],
         fitted: [],
       });
-      small.unfitResults(origin, refusing(1));
-      small.unfitResults(origin, refusing(2));
-      small.unfitResults(origin, refusing(1));
-      assert.equal(small.stats().refusedUnfit, 2, 'the same result counted once');
-      assert.equal(small.stats().unfitRemembered, 2);
-      // A third forgets the first, and the bound holds.
-      small.unfitResults(origin, refusing(3));
-      assert.equal(small.stats().unfitRemembered, 2);
-      small.unfitResults(origin, refusing(1));
-      assert.equal(small.stats().refusedUnfit, 4, 'forgotten, so counted again');
-      // Another probe's result for the same sensor at the same time is its own.
-      small.unfitResults({ gid: 'another', probeObjectId: null }, refusing(1));
-      assert.equal(small.stats().refusedUnfit, 5);
-      assert.equal(own.countsFor(probeId).refused, 4, 'Reports refused counts as ingestion does');
-
-      // A fitted result counts its dropped readings once; one that dropped none is not kept.
       const fitting = (droppedChannels: number) => ({
         refused: [],
         fitted: [{ sensorId: 9, at: time, reason: '', problems: [], droppedChannels }],
       });
-      small.unfitResults(origin, fitting(0));
-      assert.equal(small.stats().discardedUnfitReadings, 0);
-      // Had it taken a place, the oldest remembered, sensor 1 from this probe, would be gone.
-      small.unfitResults(origin, refusing(1));
-      assert.equal(small.stats().refusedUnfit, 5, 'still remembered');
-      small.unfitResults(origin, fitting(2));
-      small.unfitResults(origin, fitting(2));
-      assert.equal(small.stats().discardedUnfitReadings, 2);
+      const a = { gid: 'probe-a', probeObjectId: null };
+      const b = { gid: 'probe-b', probeObjectId: null };
+      const c = { gid: 'probe-c', probeObjectId: null };
+      /** Two results a probe, two probes: small enough to step past either bound. */
+      const small = (): IngestionService => {
+        assert.ok(ingestor !== undefined);
+        return new IngestionService({
+          db,
+          logger: silent,
+          ingestor,
+          unfitRemembered: 2,
+          unfitProbesRemembered: 2,
+        });
+      };
+      const counted = (service: IngestionService): number => service.stats().refusedUnfit;
+
+      it('counts the same result once, and forgets its probe’s oldest past the bound', () => {
+        const service = small();
+        service.unfitResults(a, refusing(1));
+        service.unfitResults(a, refusing(2));
+        service.unfitResults(a, refusing(2));
+        assert.equal(counted(service), 2, 'the same result counted once');
+        service.unfitResults(a, refusing(3));
+        assert.equal(service.stats().unfitRemembered, 2, 'the bound holds');
+        service.unfitResults(a, refusing(1));
+        assert.equal(counted(service), 4, 'the oldest forgotten, so counted again');
+      });
+
+      it('keeps a result sent a third time, though its probe sent more than the bound since', () => {
+        const service = small();
+        service.unfitResults(a, refusing(1));
+        service.unfitResults(a, refusing(2));
+        // Sent again: it moves to the newest end, so the next result forgets 2, not 1.
+        service.unfitResults(a, refusing(1));
+        service.unfitResults(a, refusing(3));
+        service.unfitResults(a, refusing(1));
+        assert.equal(counted(service), 3, 'the result sent three times counted once');
+        service.unfitResults(a, refusing(2));
+        assert.equal(counted(service), 4, 'and the other was the one forgotten');
+      });
+
+      it('does not forget one probe’s results for another probe’s, however many', () => {
+        const service = small();
+        service.unfitResults(a, refusing(1));
+        // More than a probe's bound, all from another probe while the first reconnects.
+        for (const sensorId of [10, 11, 12, 13]) service.unfitResults(b, refusing(sensorId));
+        service.unfitResults(a, refusing(1));
+        assert.equal(counted(service), 5, 'the first probe’s result still remembered');
+        // And the same sensor at the same time from another probe is that probe's own.
+        service.unfitResults(b, refusing(1));
+        assert.equal(counted(service), 6);
+        assert.equal(service.stats().unfitProbesRemembered, 2);
+        assert.equal(service.stats().unfitRemembered, 3);
+      });
+
+      it('forgets the probe heard from least recently past the bound on probes', () => {
+        const service = small();
+        service.unfitResults(a, refusing(1));
+        service.unfitResults(b, refusing(1));
+        // A again, so B is now the least recent.
+        service.unfitResults(a, refusing(1));
+        service.unfitResults(c, refusing(1));
+        assert.equal(service.stats().unfitProbesRemembered, 2);
+        assert.equal(counted(service), 3);
+        service.unfitResults(a, refusing(1));
+        assert.equal(counted(service), 3, 'A kept');
+        service.unfitResults(b, refusing(1));
+        assert.equal(counted(service), 4, 'B forgotten, so counted again');
+      });
+
+      it('counts Reports refused as ingestion counts, and a fitted result’s readings once', () => {
+        assert.ok(ingestor !== undefined);
+        const own = new ProbeRefusals();
+        const service = new IngestionService({
+          db,
+          logger: silent,
+          ingestor,
+          refusals: own,
+          unfitRemembered: 2,
+        });
+        const origin = { gid: 'bounded', probeObjectId: probeId };
+        service.unfitResults(origin, refusing(1));
+        service.unfitResults(origin, refusing(1));
+        assert.equal(own.countsFor(probeId).refused, 1);
+        // One that dropped nothing takes no place: had it, sensor 1 would be the oldest of
+        // three, and forgotten.
+        service.unfitResults(origin, fitting(0));
+        service.unfitResults(origin, refusing(2));
+        service.unfitResults(origin, refusing(1));
+        assert.equal(counted(service), 2, 'still remembered');
+        assert.equal(service.stats().discardedUnfitReadings, 0);
+        service.unfitResults(origin, fitting(2));
+        service.unfitResults(origin, fitting(2));
+        assert.equal(service.stats().discardedUnfitReadings, 2);
+      });
     });
 
     it('still closes on a batch that is wrong outside its results: that is the conversation', async () => {

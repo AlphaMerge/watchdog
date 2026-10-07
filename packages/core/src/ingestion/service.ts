@@ -107,19 +107,39 @@ export interface IngestionServiceOptions {
   /** A monotonic clock in milliseconds, for the refusal windows. Injectable for the same reason. */
   monotonicMs?: () => number;
   /**
-   * How many unfit results are remembered so one sent again is counted once (`P-288`).
-   * `UNFIT_RESULTS_REMEMBERED` unless a test states a smaller bound.
+   * How many unfit results are remembered for each probe, so one sent again is counted once
+   * (`P-288`). `UNFIT_RESULTS_REMEMBERED` unless a test states a smaller bound.
    */
   unfitRemembered?: number;
+  /**
+   * How many probes' unfit results are remembered at once. `UNFIT_PROBES_REMEMBERED` unless a test
+   * states a smaller bound.
+   */
+  unfitProbesRemembered?: number;
 }
 
 /**
- * Unfit results remembered across every probe (`P-288`): two full batches of 5,000, so a batch
- * whose acknowledgement was lost is still remembered when it is sent again behind another as
- * large. A key is at most about 230 characters, so a few megabytes at most; and nothing at all
- * while every probe fits its own results, as every probe since `P-277` does.
+ * Unfit results remembered for each probe (`P-288`): two full batches of 5,000, so a batch whose
+ * acknowledgement was lost is still remembered when it is sent again behind another as large.
+ * **Per probe**, because between the lost acknowledgement and the resend there is a reconnect,
+ * and in a fleet-wide replay after an upgrade other probes send their own unfit results
+ * meanwhile: one set shared by all of them would forget the first probe's before it came back.
  */
 export const UNFIT_RESULTS_REMEMBERED = 10_000;
+
+/**
+ * Probes whose unfit results are remembered at once (`P-288`); the one heard from least recently
+ * is forgotten first. v1 is sized for fewer than 30 remote probes (`CAPABILITIES.MD`), and the
+ * local one makes 30 at most.
+ *
+ * **Worst case about 70 MB**, all 32 probes each holding 10,000: a key is the kind, the sensor id
+ * and the result's `at` (at most 64 characters as the schema takes it, sent whole), so at most 82
+ * characters, about 210 bytes with the string's header and the set's entry where a character
+ * outside Latin-1 makes it two bytes a character. An ISO time makes it about 35 characters and
+ * 80 bytes, some 25 MB for the same 320,000. **Empty** while every probe fits its own results, as
+ * every probe since `P-277` does: only a result that did not fit is ever remembered.
+ */
+export const UNFIT_PROBES_REMEMBERED = 32;
 
 /** Fifteen minutes. See `maxFutureSkewMs`. */
 export const DEFAULT_MAX_FUTURE_SKEW_MS = 15 * 60_000;
@@ -199,10 +219,12 @@ export interface ResultStats {
    */
   discardedUnfitReadings: number;
   /**
-   * Unfit results remembered so that one sent again is counted once (`P-288`); at most
-   * `UNFIT_RESULTS_REMEMBERED`.
+   * Unfit results remembered so that one sent again is counted once (`P-288`), across every
+   * probe: at most `UNFIT_RESULTS_REMEMBERED` for each of `UNFIT_PROBES_REMEMBERED` probes.
    */
   unfitRemembered: number;
+  /** Probes whose unfit results are remembered, at most `UNFIT_PROBES_REMEMBERED`. */
+  unfitProbesRemembered: number;
   /** Sensors whose owning probe is cached. */
   cachedOwners: number;
   /**
@@ -284,11 +306,13 @@ export class IngestionService {
   #refusedUnfit = 0;
   #discardedUnfitReadings = 0;
   /**
-   * The unfit results already counted, by probe, sensor and time, oldest first (`P-288`). Bounded
-   * by `#unfitBound`: the oldest is forgotten first.
+   * The unfit results already counted, by probe GID and then by kind, sensor and time (`P-288`).
+   * Both levels in order of use, the least recent first and the first forgotten: a probe past
+   * `#unfitProbeBound`, a result past `#unfitBound` of its probe's.
    */
-  readonly #unfitCounted = new Set<string>();
+  readonly #unfitCounted = new Map<string, Set<string>>();
   readonly #unfitBound: number;
+  readonly #unfitProbeBound: number;
   readonly #counters = new CounterStore();
   #discardedReadings = 0;
   #discardedSpike = 0;
@@ -315,6 +339,7 @@ export class IngestionService {
       options.monotonicMs === undefined ? {} : { monotonicMs: options.monotonicMs };
     this.#now = options.now ?? (() => new Date());
     this.#unfitBound = options.unfitRemembered ?? UNFIT_RESULTS_REMEMBERED;
+    this.#unfitProbeBound = options.unfitProbesRemembered ?? UNFIT_PROBES_REMEMBERED;
   }
 
   stats(): ResultStats {
@@ -333,7 +358,8 @@ export class IngestionService {
       refusedForeign: this.#refusedForeign,
       refusedUnfit: this.#refusedUnfit,
       discardedUnfitReadings: this.#discardedUnfitReadings,
-      unfitRemembered: this.#unfitCounted.size,
+      unfitRemembered: [...this.#unfitCounted.values()].reduce((sum, one) => sum + one.size, 0),
+      unfitProbesRemembered: this.#unfitCounted.size,
       cachedOwners: this.#ownership.cached,
       discardedReadings: this.#discardedReadings,
       discardedSpike: this.#discardedSpike,
@@ -519,8 +545,8 @@ export class IngestionService {
    * again has a new one, its spool may group it with results queued since, and the numbering
    * starts again with the process, so an id remembered would one day name another batch. A
    * result is what the store itself goes by: the same sensor at the same time is the same result,
-   * so its probe, sensor and time are remembered once counted (`UNFIT_RESULTS_REMEMBERED` of
-   * them) and it is not counted again. A refused result with no sensor id or no time cannot be
+   * so its probe, sensor and time are remembered once counted (`UNFIT_RESULTS_REMEMBERED` for
+   * each of `UNFIT_PROBES_REMEMBERED` probes) and it is not counted again. A refused result with no sensor id or no time cannot be
    * named, and is counted every time it arrives: a resend of one of those counts twice.
    *
    * **Warned once a batch, naming the sensors**, as `#refuse` does: a probe replaying an hour of
@@ -581,7 +607,12 @@ export class IngestionService {
 
   /**
    * Whether this unfit result is to be counted: true the first time it is seen, and every time
-   * for one that cannot be named (`P-288`). Remembers it, forgetting the oldest past the bound.
+   * for one that cannot be named (`P-288`). Remembers it, forgetting the least recent past either
+   * bound.
+   *
+   * **A result seen again moves to the newest end**, and so does its probe: a batch sent a third
+   * time, after a second link lost its acknowledgement too, is still remembered, however many
+   * results the probe has sent since the first.
    */
   #firstCount(
     kind: 'refused' | 'fitted',
@@ -590,14 +621,16 @@ export class IngestionService {
     at: string | null,
   ): boolean {
     if (sensorId === null || at === null) return true;
-    const key = JSON.stringify([kind, gid, sensorId, at]);
-    if (this.#unfitCounted.has(key)) return false;
-    this.#unfitCounted.add(key);
-    while (this.#unfitCounted.size > this.#unfitBound) {
-      const oldest = this.#unfitCounted.values().next();
-      if (oldest.done === true) break;
-      this.#unfitCounted.delete(oldest.value);
-    }
+    const seen = this.#unfitCounted.get(gid) ?? new Set<string>();
+    this.#unfitCounted.delete(gid);
+    this.#unfitCounted.set(gid, seen);
+    forgetOldest(this.#unfitCounted, this.#unfitProbeBound);
+    // Unambiguous without quoting: a sensor id holds no space, and `at` is the rest.
+    const key = `${kind === 'refused' ? 'r' : 'f'}${String(sensorId)} ${at}`;
+    const again = seen.delete(key);
+    seen.add(key);
+    if (again) return false;
+    forgetOldest(seen, this.#unfitBound);
     return true;
   }
 
@@ -1041,5 +1074,13 @@ class Refused {
       earliest: new Date(this.earliest).toISOString(),
       latest: new Date(this.latest).toISOString(),
     };
+  }
+}
+
+/** Deletes the first-inserted entries of a set or map until it holds no more than `bound`. */
+function forgetOldest(entries: Set<string> | Map<string, unknown>, bound: number): void {
+  for (const key of entries.keys()) {
+    if (entries.size <= bound) return;
+    entries.delete(key);
   }
 }
