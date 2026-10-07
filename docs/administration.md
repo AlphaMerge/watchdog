@@ -695,8 +695,8 @@ arguments and the variables — so treat both as untrusted input in every script
   process groups that are not its own*, or *whose id now names another process or group*. Probe
   Health counts all three — `scriptGroupsEnded`, `scriptGroupsRefused` and `scriptGroupsRecycled`
   — and warns on a refusal, which a correct check process never causes. On a probe that runs as
-  root, set `processUid`: without it the user check has nothing to compare, which is why such a
-  probe does not start without `allowScriptsAsRoot` (above). On a probe without `/proc` — macOS,
+  root, set `processUid` and `processGid`: without them the user check has nothing to compare, which
+  is why such a probe does not start without `allowScriptsAsRoot` (above). On a probe without `/proc` — macOS,
   used for development only —
   nothing is checked, so nothing is ended this way.
 
