@@ -1,4 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { channel } from 'node:diagnostics_channel';
+import { PROGRAM_GROUP_CHANNEL, type ProgramGroupEvent } from './group-channel.js';
+
+const programGroups = channel(PROGRAM_GROUP_CHANNEL);
 
 export interface ProgramRunOptions {
   /** An absolute path to the program. Resolving and containing it is the caller's job. */
@@ -125,6 +129,10 @@ export async function runProgram(options: ProgramRunOptions): Promise<ProgramRun
     // `spawn` throws synchronously for an invalid uid or gid, and emits an error for the rest.
     return { outcome: 'failed', ...describeSpawnError(error), ...empty(elapsed()) };
   }
+  // Said before anything else can happen to the child, so a caller that dies a moment later has
+  // already named the group. No pid means the spawn failed, and there is no group.
+  const group = process.platform !== 'win32' ? child.pid : undefined;
+  if (group !== undefined) announce('started', group);
 
   const stdout = new BoundedSink(options.maxOutputBytes);
   const stderr = new BoundedSink(options.maxOutputBytes);
@@ -198,6 +206,7 @@ export async function runProgram(options: ProgramRunOptions): Promise<ProgramRun
     // end. Resolving on `exit` loses whatever the program wrote just before it finished, which
     // is usually the line explaining why it failed.
     child.on('close', (code: number | null, signal: string | null) => {
+      if (group !== undefined) announce('ended', group);
       if (timedOut) {
         finish({ outcome: 'timeout', hardKilled, endedBy, endedAfterMs, ...output() });
         return;
@@ -209,6 +218,12 @@ export async function runProgram(options: ProgramRunOptions): Promise<ProgramRun
       finish({ outcome: 'exited', code: code ?? 0, ...output() });
     });
   });
+}
+
+function announce(event: ProgramGroupEvent['event'], pgid: number): void {
+  if (!programGroups.hasSubscribers) return;
+  const message: ProgramGroupEvent = { event, pgid };
+  programGroups.publish(message);
 }
 
 /** Ends the program and anything it started. */

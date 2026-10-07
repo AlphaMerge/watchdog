@@ -1,4 +1,7 @@
+import { subscribe } from 'node:diagnostics_channel';
+import { PROGRAM_GROUP_CHANNEL, type ProgramGroupEvent } from '@ms/shared/process-group';
 import {
+  GROUP_MARKER,
   READY_MARKER,
   RESULT_MARKER,
   CREDENTIALS_WITHHELD,
@@ -79,6 +82,14 @@ async function main(): Promise<void> {
   // say which; after the check's own timeout the controller has already aborted with that.
   process.on('SIGTERM', () => {
     controller.abort(new Error('the probe ended the check’s process'));
+  });
+  // **And for a check process that dies without hearing it** (`P-266`): the runner's `SIGKILL`
+  // after its grace, a heap exhausted, a crash. The runner is told each group the check starts and
+  // each that ends, as it happens, and ends any still open once this process has gone. Written
+  // in the same turn as the spawn, so a process killed a moment later has already said it.
+  subscribe(PROGRAM_GROUP_CHANNEL, (message) => {
+    const { event, pgid } = message as ProgramGroupEvent;
+    process.stdout.write(`${GROUP_MARKER}${event} ${String(pgid)}\n`);
   });
 
   try {

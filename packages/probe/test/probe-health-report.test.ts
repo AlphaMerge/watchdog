@@ -69,6 +69,7 @@ const CHILDREN: ProcessRunnerStats = {
   refused: 5,
   crashed: 1,
   startupFailed: 4,
+  scriptGroupsEnded: 0,
   waitMs: { p50: 30, p95: 400, p99: 900, max: 3_000 },
   runMs: { p50: 200, p95: 2_000, p99: 4_000, max: 9_000 },
   startupMs: { p50: 25, p95: 9_400, p99: 14_800, max: 30_000 },

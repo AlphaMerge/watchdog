@@ -8,13 +8,15 @@ import { pino } from 'pino';
 import type { CheckResult } from '@ms/shared';
 import { SCRIPT_DIR_ENV, SCRIPT_GRACE_MS } from '@ms/sensors/script';
 import {
+  GroupLines,
   KILL_MARGIN_MS,
   leftOf,
   ProcessRunner,
   ReadyLine,
   STARTUP_TIMEOUT_MS,
 } from '../src/runner/process-runner.js';
-import { READY_MARKER, type ResultMeta } from '../src/runner/types.js';
+import { GROUP_MARKER, READY_MARKER, type ResultMeta } from '../src/runner/types.js';
+import { within } from './support/probe-process.js';
 
 /**
  * The child-process runner (`P-03`), against checks that misbehave on purpose.
@@ -769,5 +771,139 @@ describe('a script check in a process of its own (`P-262`)', () => {
     await until(() => pids.every(gone), `${pids.join(' and ')} to be gone`, 10_000);
     await until(() => runner.stats().running === 0, 'its process to be ended', 10_000);
     assert.equal(seen.length, 1, 'and the ended process reports nothing more');
+    // The check process ended its own script, so the runner had nothing left to end (`P-266`).
+    assert.equal(runner.stats().scriptGroupsEnded, 0);
+  });
+
+  describe('a check process that dies outright (`P-266`)', () => {
+    // The script's group is its own, so the runner's kill of the check process's group never
+    // reached it, and a check process that died without hearing its cancel left it running.
+
+    before(async () => {
+      // Its helper, then its witness: its own pid, the helper's, and its parent's, which is the
+      // check process. Waits for the helper, so it runs until something ends it.
+      await script(
+        'orphaned.sh',
+        'sleep 60 &\necho "started a helper"\n' +
+          'echo "$$ $! $PPID" > "$MS_VAR_PIDS.tmp" && mv "$MS_VAR_PIDS.tmp" "$MS_VAR_PIDS"\nwait',
+      );
+      // Starts a helper that is no longer its business and answers: it ends on its own.
+      await script(
+        'answers.sh',
+        'sleep 60 >/dev/null 2>&1 </dev/null &\n' +
+          'echo "$$ $!" > "$MS_VAR_PIDS.tmp" && mv "$MS_VAR_PIDS.tmp" "$MS_VAR_PIDS"\necho "0:7:fine"',
+      );
+    });
+
+    async function numbersIn(file: string, count: number): Promise<number[]> {
+      const pids = (await readFile(file, 'utf8')).trim().split(/\s+/).map(Number);
+      assert.equal(pids.length, count, `the script wrote ${String(count)} pids: ${pids.join(' ')}`);
+      for (const pid of pids) assert.ok(Number.isInteger(pid) && pid > 1, `a pid: ${String(pid)}`);
+      return pids;
+    }
+
+    /** Resolves once every one of `pids` has gone; stops looking when `stop` is aborted. */
+    async function allGone(pids: readonly number[], stop: AbortSignal): Promise<void> {
+      while (!pids.every(gone) && !stop.aborted) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+
+    async function goneWithin(ms: number, pids: readonly number[], what: string): Promise<void> {
+      const stop = new AbortController();
+      try {
+        await within(ms, what, allGone(pids, stop.signal));
+      } finally {
+        stop.abort();
+      }
+    }
+
+    it('ends the script and its helper when its check process is killed mid-script', async () => {
+      const { runner, seen } = scripts();
+      const { request: check, file } = scriptCheck(124, 'orphaned.sh', 60_000);
+      runner.submit(check);
+      await until(() => existsSync(file), 'the script to start its helper', 40_000);
+      const [scriptPid = 0, helperPid = 0, checkPid = 0] = await numbersIn(file, 3);
+      for (const pid of [scriptPid, helperPid, checkPid])
+        assert.equal(gone(pid), false, `${String(pid)} is running to begin with`);
+
+      // What the runner's own SIGKILL does after its grace, or a heap exhausted: no cancel heard.
+      process.kill(checkPid, 'SIGKILL');
+      await until(() => seen.length === 1, 'the killed check to be reported', 20_000);
+      assert.equal(seen[0]?.meta.phase, 'worker-crash');
+      assert.match(seen[0].result.message, /killed by SIGKILL/);
+
+      // Ended once the check process had gone: the script and the helper it started.
+      await goneWithin(
+        5_000,
+        [scriptPid, helperPid],
+        `${String(scriptPid)} and ${String(helperPid)} to be gone`,
+      );
+      assert.equal(runner.stats().scriptGroupsEnded, 1, 'and counted');
+      assert.equal(runner.stats().crashed, 1);
+    });
+
+    it('leaves alone what a script that answered started and left', async () => {
+      // The script ended on its own and its check answered, so its group was the check's to end
+      // and nobody's to end now: the runner ends groups only a dead check process left open.
+      const { runner, seen } = scripts();
+      const { request: check, file } = scriptCheck(125, 'answers.sh', 20_000);
+      runner.submit(check);
+      await until(() => seen.length === 1, 'the check to answer', 40_000);
+      assert.equal(seen[0]?.result.outcome, 'ok', seen[0]?.result.message);
+      const [scriptPid = 0, helperPid = 0] = await numbersIn(file, 2);
+      try {
+        await until(() => runner.stats().running === 0, 'its process to be ended', 10_000);
+        assert.equal(runner.stats().scriptGroupsEnded, 0);
+        assert.equal(gone(helperPid), false, 'the helper it left is still running');
+      } finally {
+        try {
+          process.kill(-scriptPid, 'SIGKILL');
+        } catch {
+          // Already gone, which the assertion above has said.
+        }
+      }
+      await goneWithin(5_000, [helperPid], `the helper ${String(helperPid)} to be cleaned up`);
+    });
+  });
+});
+
+describe('the group lines (`P-266`)', () => {
+  it('keeps a group from its start to its end, however the chunks fall', () => {
+    const lines = new GroupLines();
+    lines.push(`${GROUP_MARKER}started 4242\n`);
+    lines.push(`${GROUP_MARKER}sta`);
+    lines.push('rted 4343');
+    assert.deepEqual(lines.open(), [4242], 'not before its line ends');
+    lines.push(`\n${GROUP_MARKER}ended 4242\n`);
+    assert.deepEqual(lines.open(), [4343]);
+    lines.push(`banner\n${GROUP_MARKER}ended 4343\nmore`);
+    assert.deepEqual(lines.open(), []);
+  });
+
+  it('names nothing it would be wrong to kill', () => {
+    const lines = new GroupLines();
+    for (const said of [
+      'started 0',
+      'started 1',
+      `started ${String(process.pid)}`,
+      'started -4242',
+      'started +4242',
+      'started 04242',
+      'started 4242 ',
+      'started 4242x',
+      'started  4242',
+      'started 12345678901',
+      'begun 4242',
+    ]) {
+      lines.push(`${GROUP_MARKER}${said}\n`);
+    }
+    lines.push(`said ${GROUP_MARKER}started 4242\n`);
+    // A long line that ends in a group line is still the end of a long line.
+    lines.push('x'.repeat(80));
+    lines.push(`${GROUP_MARKER}started 4242\n`);
+    assert.deepEqual(lines.open(), []);
+    lines.push(`${GROUP_MARKER}started 4242\n`);
+    assert.deepEqual(lines.open(), [4242], 'the next line starts afresh');
   });
 });

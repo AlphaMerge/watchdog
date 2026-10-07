@@ -248,9 +248,10 @@ channel the sensor is judged by.
   which costs strictly more than returning. If your work is a promise, race it against the
   signal; if it is a socket, close it on abort. If it is a program, pass the signal to
   `runProgram` (`@ms/shared`) as `signal`, with a `graceMs` under the 2 s the runner gives a
-  check after its abort: on Linux it ends the program's whole process group, which nothing else
-  will — a terminated worker or a killed check process leaves a program in a group of its own
-  running. The run then reads `outcome: 'timeout'` with `endedBy: 'signal'` and `endedAfterMs`,
+  check after its abort: on Linux it ends the program's whole process group. Nothing else will
+  in a pool worker — a terminated worker leaves a program in a group of its own running. A
+  check process that dies outright has its groups ended by the runner afterwards (`P-266`), but
+  with `SIGKILL` and no output, so the signal is still the path that says anything. The run then reads `outcome: 'timeout'` with `endedBy: 'signal'` and `endedAfterMs`,
   and `abortReason` and `endedHow` (`support/program-ended.ts`) say why and how, so the message
   can say which limit the program ran into and when (`P-262`; `exe-script-shared.ts` is the
   example). On Windows `runProgram` ends the program alone, not what it started.

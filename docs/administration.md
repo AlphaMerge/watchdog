@@ -667,7 +667,10 @@ arguments and the variables — so treat both as untrusted input in every script
   check and the script starts a few milliseconds into it. Set the Timeout parameter below the
   scan timeout to have the script's own message; at the defaults (both 30 s) the scan timeout
   comes first. A script that cleans up on `SIGTERM` has one second to do it. When the probe
-  stops while a script runs, the script and what it started are ended the same way.
+  stops while a script runs, the script and what it started are ended the same way. If the
+  check's own process dies before it can — killed, out of memory, crashed — the probe ends the
+  script and what it started with `SIGKILL` as soon as that process has gone, and logs *a check
+  process ended and left what it started running; this probe ended it* with the sensor's id.
 
   **On Windows, today,** the script itself is ended at once with `TerminateProcess`, which it
   cannot catch, and what it started is not ended: a script that started another program leaves

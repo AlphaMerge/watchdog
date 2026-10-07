@@ -8708,7 +8708,7 @@ because each is a decision rather than a defect:
       test `M-17` asks for: a probe whose child starts all time out raises one alarm, on Probe
       Health, not one per sensor.
 
-- [ ] **P-266 — a check process that dies outright leaves its script running** · S · P-262 ·
+- [x] **P-266 — a check process that dies outright leaves its script running** · S · P-262 ·
       Found 2026-10-05 in `P-262`. A script runs in a process group of its own, so the runner's
       kill of the check process's group does not reach it. Since `P-262` the check process ends
       its script when it is sent SIGTERM, but a check process that dies without that — the
@@ -8717,6 +8717,74 @@ because each is a decision rather than a defect:
       life is tied to the check process's (the runner tracks the script's group and ends it when
       the check process goes, or the script is started so that it dies with its parent), and a
       test that SIGKILLs a check process mid-script asserts the script's pids are gone.
+
+      **P-266 outcome. The runner is told each script group as it starts and ends, and ends what
+      a dead check process left open.**
+      - **The first of the two ways, not the second.** Dying with the parent is
+        `PR_SET_PDEATHSIG`, which Node cannot reach without a native module or a wrapper such as
+        `setpriv --pdeathsig` (util-linux, Linux only), and it signals the script alone: the
+        script's own children, which are what the ticket is about, would survive it. Keeping the
+        script in the check process's group instead would undo the group `runProgram` kills on a
+        timeout. So the runner tracks the groups.
+      - **How it hears of them.** `runProgram` publishes `started` (at spawn, with the pid, which
+        is the group's id) and `ended` (at `close`) on a `node:diagnostics_channel`,
+        `PROGRAM_GROUP_CHANNEL`, defined in `@ms/shared/process-group`, a subpath of its own so
+        the check process reads it before its ready line without loading the package's index
+        (Ajv and the schemas) into its start-up (`P-260`). Publishing only when someone
+        subscribes, so the pool workers and the core's execute-program notification pay nothing.
+        `check-child.ts` subscribes after its ready line and writes each as a line,
+        `GROUP_MARKER` (`ms-check-group:started 4242`), in the same turn as the spawn.
+      - **What the runner does.** `GroupLines` reads those lines out of every stdout chunk (a
+        whole line from its start, holding at most one such line however much the child writes,
+        as `ReadyLine` does) and keeps the groups started and not ended. Once `runProgram` for
+        the check process returns, whatever ended it and before anything else (a check abandoned
+        by `stop` included), `#endLeftBehind` sends `SIGKILL` to each such group. `SIGKILL` and
+        not `SIGTERM`, because the process that would have read the script's output and given it
+        its grace is gone, and so are the pipes it writes to. A group already gone (`ESRCH`) is
+        passed over; any other refusal is logged as an error.
+      - **Strict, because the runner sends `SIGKILL` to what it is told.** `started` or `ended`, a
+        space, and a pid of one to ten digits with no sign or leading zero; never 0, never 1
+        (`kill(-1)` is every process the probe's user may signal), and never the probe's own pid.
+        Only the probe's own code writes to the check process's stdout: a script's output is
+        captured on pipes of its own and reaches the runner only inside the JSON of the result
+        line, which cannot hold a newline.
+      - **The normal path ends nothing.** A script that ended, on its own or at either limit,
+        said `ended` before its check answered, so the runner forgets its group. What a script
+        started and left running after it ended on its own stays running, as it always has: the
+        runner acts only for a check process that died with a group still open.
+      - **Visible:** `ProcessRunnerStats.scriptGroupsEnded`, and a warning per check process,
+        *a check process ended and left what it started running; this probe ended it*, with the
+        sensor's id, type and the groups. **Not on the heartbeat:** no existing Probe Health
+        channel means this (`childCrashes` counts check processes that died without answering,
+        which includes the case but also every crash with no script; `childTimedOut` counts the
+        runner's kill without saying whether a script survived it), and the health schema is
+        `additionalProperties: false`, so a channel needs a protocol version. Left as a
+        follow-up.
+      - **Windows unchanged.** `runProgram` publishes nothing on win32, where a script has no
+        group of its own, and `#endLeftBehind` returns there too. What a Windows check process
+        leaves behind is still `H-38`'s.
+      - **Not covered:** a script descendant that leaves the group (`setsid`, a daemon that
+        double-forks) escapes this as it escapes `runProgram`'s own kill. A check process killed
+        while a `started` line it wrote is still in an unread pipe buffer is not a gap: the
+        runner reads the pipe to its end before `close`. One killed between the spawn and the
+        write, in the same turn, is.
+      - **Tests.** `process-runner.test.ts`, through the probe's real catalogue: a script that
+        starts a helper and writes its own pid, the helper's and `$PPID` (the check process); the
+        test `SIGKILL`s the check process, reads phase `worker-crash`, and asserts the script and
+        the helper gone within 5 s (`within`), `scriptGroupsEnded` 1. A script that leaves a
+        helper and answers: `ok`, `scriptGroupsEnded` 0, the helper still running (then ended by
+        the test). The `P-262` stop test now asserts `scriptGroupsEnded` 0 as well: the check
+        process ended its own script. `GroupLines`: chunks, start and end, and eleven lines it
+        must not take for a group (0, 1, its own pid, signs, leading zero, trailing space or
+        text, two spaces, eleven digits, another verb), mid-line and after an overlong line.
+        `run-program.test.ts`: `started` then `ended` with the program's pid, for a run that
+        exits and one that is ended at its deadline, and nothing for a spawn that fails.
+      - **Mutation: 7/7 killed.** The runner's kill skipped; `ended` ignored; the check process
+        not writing its lines; `started` and `ended` each not published; the pid guard dropped;
+        the count not kept.
+      - **Runs:** run-program, process-runner, probe-health-report, exe-script,
+        windows-transport and core's `build-hygiene` whole, 222/222; the `P-266` tests twice
+        more, 7/7 each.
 
 - [ ] **P-267 — `checkAbortGraceMs` below 1 s outruns PowerShell's kill** · S · P-262 · Found
       2026-10-05 in `P-262`. A pool worker running a Windows sensor ends PowerShell on the

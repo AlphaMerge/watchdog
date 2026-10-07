@@ -13,6 +13,10 @@
     "./charts": {
       "types": "./dist/src/charts/index.d.ts",
       "default": "./dist/src/charts/index.js"
+    },
+    "./process-group": {
+      "types": "./dist/src/process/group-channel.d.ts",
+      "default": "./dist/src/process/group-channel.js"
     }
   },
   "scripts": {

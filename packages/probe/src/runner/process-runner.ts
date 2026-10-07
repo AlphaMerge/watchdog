@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { runProgram, type CheckResult, type Logger } from '@ms/shared';
 // From `types.js`, never from `check-child.js`: that module is an entry point with top-level
 // `await` on stdin, and importing it here once made the probe sit waiting for its own stdin.
-import { READY_MARKER, RESULT_MARKER } from './types.js';
+import { GROUP_MARKER, READY_MARKER, RESULT_MARKER } from './types.js';
 import { RefusalLog } from './refusal-log.js';
 import type { CheckPhase, CheckRequest, ResultMeta, SubmitOutcome } from './index.js';
 
@@ -37,7 +37,8 @@ import type { CheckPhase, CheckRequest, ResultMeta, SubmitOutcome } from './inde
  * **What is bounded, and what is not.** Bounded: wall-clock time (a start-up bound and then the
  * check's own timeout, `P-260`; `SIGTERM` then `SIGKILL`,
  * against the whole process group so a script that backgrounds something does not outlive its own
- * kill), heap size, captured output, and the environment the child is given — built, never
+ * kill, and then against any script group the check process had started and not ended, `P-266`),
+ * heap size, captured output, and the environment the child is given — built, never
  * inherited, so an `MS_*` override holding a database URL does not reach a user's script. Not
  * bounded, because Node exposes no `setrlimit` and reaching one would mean a shell or a native
  * dependency: CPU seconds, address space, file descriptors and child process count. `A-09`'s
@@ -69,6 +70,13 @@ export interface ProcessRunnerStats {
    * as well, and in neither `timedOut` nor `crashed`.
    */
   startupFailed: number;
+  /**
+   * Process groups a check process started and left running when it went, which the runner then
+   * ended (`P-266`): a script whose check process was killed outright, ran out of heap or crashed,
+   * and so never ended it. Each is logged with its sensor. Not on the heartbeat yet: a new field
+   * there needs a protocol version.
+   */
+  scriptGroupsEnded: number;
   waitMs: Percentiles;
   runMs: Percentiles;
   /**
@@ -207,6 +215,7 @@ export class ProcessRunner {
   readonly #refusals: RefusalLog;
   #crashed = 0;
   #startupFailed = 0;
+  #scriptGroupsEnded = 0;
   readonly #waits: number[] = [];
   readonly #runs: number[] = [];
   readonly #startups: number[] = [];
@@ -344,11 +353,14 @@ export class ProcessRunner {
       deadline.abort();
     };
     let clock = setTimeout(giveUp, this.#startupTimeoutMs);
+    const groups = new GroupLines();
     const onStdout = (chunk: Buffer): void => {
-      if (readyAt !== undefined || gaveUpAfterMs !== undefined) return;
       // latin1 maps each byte to one character, so a marker split across two chunks, or a
       // multi-byte character a library printed before it, cannot hide it.
-      if (!ready.push(chunk.toString('latin1'))) return;
+      const text = chunk.toString('latin1');
+      groups.push(text);
+      if (readyAt !== undefined || gaveUpAfterMs !== undefined) return;
+      if (!ready.push(text)) return;
       readyAt = process.hrtime.bigint();
       record(this.#startups, Number(readyAt - spawnedAt) / 1e6);
       clearTimeout(clock);
@@ -387,6 +399,9 @@ export class ProcessRunner {
     });
     clearTimeout(clock);
     if (gaveUpAfterMs !== undefined) record(this.#startups, gaveUpAfterMs);
+    // Before anything else, a check abandoned by `stop` included: the check process has gone, and
+    // whatever it started and did not end has nobody else to end it.
+    this.#endLeftBehind(job, groups.open());
 
     // Abandoned by `stop` while it ran, and answered there.
     if (job.settled) return;
@@ -531,6 +546,42 @@ export class ProcessRunner {
   }
 
   /**
+   * Ends the process groups a check process had started and not seen end, once it has gone
+   * (`P-266`).
+   *
+   * **`SIGKILL`, at once.** The check process that would have read the script's output and given
+   * it its grace is gone, and the pipes the script writes to went with it; a `SIGTERM` would buy a
+   * script nothing but a write that fails. A group that has already gone is passed over and not
+   * counted: a script that ended between the check process's last line and its death.
+   *
+   * POSIX only, as the announcements are: on Windows a script has no group of its own, and what a
+   * check process leaves there is `H-38`'s.
+   */
+  #endLeftBehind(job: Job, open: readonly number[]): void {
+    if (open.length === 0 || process.platform === 'win32') return;
+    const ended: number[] = [];
+    for (const pgid of open) {
+      try {
+        process.kill(-pgid, 'SIGKILL');
+        ended.push(pgid);
+      } catch (error: unknown) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ESRCH') continue;
+        this.#logger.error(
+          { sensorId: job.request.sensorId, sensorType: job.request.sensorType, pgid, code },
+          'a check process left a process group running that this probe could not end',
+        );
+      }
+    }
+    if (ended.length === 0) return;
+    this.#scriptGroupsEnded += ended.length;
+    this.#logger.warn(
+      { sensorId: job.request.sensorId, sensorType: job.request.sensorType, pgids: ended },
+      'a check process ended and left what it started running; this probe ended it',
+    );
+  }
+
+  /**
    * The one place a result is built.
    *
    * `parts` is a discriminated union rather than an outcome beside an optional channel list, so
@@ -580,6 +631,7 @@ export class ProcessRunner {
       refused: this.#refused,
       crashed: this.#crashed,
       startupFailed: this.#startupFailed,
+      scriptGroupsEnded: this.#scriptGroupsEnded,
       waitMs: percentiles(this.#waits),
       runMs: percentiles(this.#runs),
       startupMs: this.#startups.length === 0 ? null : percentiles(this.#startups),
@@ -696,6 +748,57 @@ export class ReadyLine {
       this.#overlong = false;
       rest = rest.slice(end + 1);
     }
+  }
+}
+
+/**
+ * Reads a check process's group lines (`GROUP_MARKER`, `P-266`) and keeps the groups it has
+ * started and not yet seen end.
+ *
+ * **Strict, because the runner sends `SIGKILL` to what this names.** A whole line, from its
+ * start, `started` or `ended`, a space and a pid of at most ten digits with no sign or leading
+ * zero; anything else is not a group line. Never 0 or 1, and never this process: `kill(-1)` is
+ * every process the probe's user may signal, and the probe's own group would be the probe.
+ * Holds at most one such line's length, however much the child writes, as `ReadyLine` does.
+ */
+export class GroupLines {
+  static readonly #longest = GROUP_MARKER.length + 'started '.length + 10;
+  readonly #open = new Set<number>();
+  #line = '';
+  #overlong = false;
+
+  push(text: string): void {
+    let rest = text;
+    for (;;) {
+      const end = rest.indexOf('\n');
+      if (!this.#overlong) {
+        this.#line += end === -1 ? rest : rest.slice(0, end);
+        if (this.#line.length > GroupLines.#longest) {
+          this.#overlong = true;
+          this.#line = '';
+        }
+      }
+      if (end === -1) return;
+      if (!this.#overlong) this.#read(this.#line);
+      this.#line = '';
+      this.#overlong = false;
+      rest = rest.slice(end + 1);
+    }
+  }
+
+  /** The groups started and not seen to end, oldest first. */
+  open(): number[] {
+    return [...this.#open];
+  }
+
+  #read(line: string): void {
+    if (!line.startsWith(GROUP_MARKER)) return;
+    const said = /^(started|ended) ([1-9][0-9]{0,9})$/.exec(line.slice(GROUP_MARKER.length));
+    if (said === null) return;
+    const pgid = Number(said[2]);
+    if (pgid <= 1 || pgid === process.pid) return;
+    if (said[1] === 'started') this.#open.add(pgid);
+    else this.#open.delete(pgid);
   }
 }
 

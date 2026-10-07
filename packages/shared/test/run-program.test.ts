@@ -2,7 +2,9 @@ import { strict as assert } from 'node:assert';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { subscribe, unsubscribe } from 'node:diagnostics_channel';
 import { after, before, describe, it } from 'node:test';
+import { PROGRAM_GROUP_CHANNEL, type ProgramGroupEvent } from '../src/process/group-channel.js';
 import { runProgram } from '../src/process/run.js';
 
 /**
@@ -222,5 +224,50 @@ describe('running a program', { skip: posix ? false : 'POSIX only' }, () => {
     const result = await run(file);
     assert.ok(result.outcome === 'failed');
     assert.equal(result.code, 'EACCES');
+  });
+
+  describe('naming the group it starts (`P-266`)', () => {
+    const heard: ProgramGroupEvent[] = [];
+    const listener = (message: unknown): void => {
+      heard.push(message as ProgramGroupEvent);
+    };
+    before(() => {
+      subscribe(PROGRAM_GROUP_CHANNEL, listener);
+    });
+    after(() => {
+      unsubscribe(PROGRAM_GROUP_CHANNEL, listener);
+    });
+
+    it('says the group started, with the program’s pid, and that it ended', async () => {
+      heard.length = 0;
+      const file = await script('pid.sh', 'echo $$');
+      const result = await run(file);
+      assert.ok(result.outcome === 'exited');
+      const pid = Number(result.stdout.trim());
+      assert.deepEqual(heard, [
+        { event: 'started', pgid: pid },
+        { event: 'ended', pgid: pid },
+      ]);
+    });
+
+    it('says it ended when it was ended, too', async () => {
+      heard.length = 0;
+      const file = await script('lingers.sh', 'echo $$\nsleep 30');
+      const result = await run(file, { timeoutMs: 200, graceMs: 200 });
+      assert.ok(result.outcome === 'timeout');
+      const pid = Number(result.stdout.trim());
+      assert.deepEqual(
+        heard.map((one) => one.event),
+        ['started', 'ended'],
+      );
+      assert.ok(heard.every((one) => one.pgid === pid));
+    });
+
+    it('names nothing for a program that never started', async () => {
+      heard.length = 0;
+      const result = await run(join(dir, 'absent-too.sh'));
+      assert.ok(result.outcome === 'failed');
+      assert.deepEqual(heard, []);
+    });
   });
 });

@@ -145,6 +145,8 @@ export type {
 } from './process/memory-watch.js';
 export { runProgram } from './process/run.js';
 export type { ProgramRun, ProgramRunOptions } from './process/run.js';
+export { PROGRAM_GROUP_CHANNEL } from './process/group-channel.js';
+export type { ProgramGroupEvent } from './process/group-channel.js';
 
 export {
   exceptionProblem,

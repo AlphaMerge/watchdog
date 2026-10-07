@@ -143,4 +143,16 @@ export const RESULT_MARKER = 'ms-check-result:';
  */
 export const READY_MARKER = 'ms-check-ready';
 
+/**
+ * How a check process names a process group it has started, and says when that group's program
+ * has ended (`P-266`): a line of stdout reading `GROUP_MARKER` then `started` or `ended`, a space
+ * and the group's id. Here for the reason `RESULT_MARKER` is.
+ *
+ * **The runner's to act on once the check process has gone.** A script runs in a group of its
+ * own, which the runner's kill of the check process's group does not reach, and the check process
+ * ends it on its cancel only while it lives. A group named and not yet ended when the check
+ * process has gone has nobody left to end it, so the runner does.
+ */
+export const GROUP_MARKER = 'ms-check-group:';
+
 export type { CheckResult };
