@@ -914,22 +914,30 @@ export class ObjectRepository {
       unit: string;
       lookup_id: string | null;
       counter_bits: number | null;
-    }>('SELECT key, name, unit, lookup_id, counter_bits FROM channel WHERE sensor_id = $1', [
-      sensorId,
-    ]);
+      is_primary: boolean;
+    }>(
+      `SELECT key, name, unit, lookup_id, counter_bits, is_primary
+       FROM channel WHERE sensor_id = $1`,
+      [sensorId],
+    );
     return rows.map((row) => ({
       key: row.key,
       name: row.name,
       unit: row.unit,
       lookupId: row.lookup_id,
       counterBits: row.counter_bits,
+      isPrimary: row.is_primary,
     }));
   }
 
   /**
-   * Writes what an edit re-declared (`P-303`), in one statement. Never limits or their source:
-   * nothing an edit re-declares touches them. Bumps the sensor's version by trigger, like any
-   * channel write, so the caller reads the sensor again afterwards.
+   * Writes what an edit re-declared (`P-303`). Never limits or their source: nothing an edit
+   * re-declares touches them. Bumps the sensor's version by trigger, like any channel write, so
+   * the caller reads the sensor again afterwards.
+   *
+   * The primary that moves (`P-309`) is demoted in a statement of its own first. The
+   * one-primary-per-sensor index is not deferrable, so it is checked row by row as one UPDATE
+   * goes, and an UPDATE that promoted the new primary before reaching the old one would fail.
    */
   async redeclareChannels(
     q: Queryable,
@@ -937,11 +945,22 @@ export class ObjectRepository {
     changes: readonly ChannelRedeclaration[],
   ): Promise<number> {
     if (changes.length === 0) return 0;
+    const demoted = changes
+      .filter((change) => change.before.isPrimary && !change.after.isPrimary)
+      .map((change) => change.key);
+    if (demoted.length > 0) {
+      await q.query(
+        'UPDATE channel SET is_primary = false WHERE sensor_id = $1 AND key = ANY($2::text[])',
+        [sensorId, demoted],
+      );
+    }
     const rows = await q.query<{ id: number }>(
       `UPDATE channel AS c
-       SET name = d.name, unit = d.unit, lookup_id = d.lookup_id, counter_bits = d.counter_bits
-       FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::smallint[])
-            AS d(key, name, unit, lookup_id, counter_bits)
+       SET name = d.name, unit = d.unit, lookup_id = d.lookup_id, counter_bits = d.counter_bits,
+           is_primary = d.is_primary
+       FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::smallint[],
+                   $7::boolean[])
+            AS d(key, name, unit, lookup_id, counter_bits, is_primary)
        WHERE c.sensor_id = $1 AND c.key = d.key
        RETURNING c.id`,
       [
@@ -951,6 +970,7 @@ export class ObjectRepository {
         changes.map((change) => change.after.unit),
         changes.map((change) => change.after.lookupId),
         changes.map((change) => change.after.counterBits),
+        changes.map((change) => change.after.isPrimary),
       ],
     );
     return rows.length;

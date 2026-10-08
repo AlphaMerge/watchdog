@@ -242,7 +242,11 @@ channel the sensor is judged by.
   lookup an operator pointed it at. An edit that would turn an existing channel from a `counter`
   into a gauge or back is refused, because the stored samples are rates on one side and raw
   values on the other: say in that parameter's description that it is fixed once the sensor
-  exists, as `snmp.custom`'s `mode` does.
+  exists, as `snmp.custom`'s `mode` does. Which channel is `isPrimary` moves with the edit too
+  (`P-309`), once that channel has a row: a key the edit adds and makes primary becomes it on a
+  later edit, not on its first reading. If `channels()` throws for what a sensor has stored, an
+  edit cannot tell an operator's lookup from yours, so it leaves every lookup as it is and logs
+  that, naming your type (`P-311`).
 - **`lookup` and `counter` may depend on parameters.** A channel the core first sees in a reading
   (a key a later build added, or one an edit added) gets them from `channels()` asked with that
   sensor's own stored parameters, not `{}` (`P-297`), so a column-per-channel type like

@@ -394,14 +394,27 @@ describe('the sensor-type gate, given a type that breaks its own channel declara
     assert.deepEqual(leaked(logged.err.stack ?? ''), [], 'a value reached the logged stack');
   });
 
-  it('answers a stored sensor’s channels without refusing or logging when it can, and null when not', () => {
+  it('answers a stored sensor’s channels without refusing or logging, and says why when it cannot', () => {
     const lines: string[] = [];
     const gate = catalogueSensorTypeGate(testCatalogue([throwing]), {
       logger: pino({ level: 'info' }, { write: (line: string) => lines.push(line) }),
     });
-    assert.equal(gate.storedChannelsFor('test.throwing', { column: 'good' })?.length, 1);
-    assert.equal(gate.storedChannelsFor('test.throwing', { column: COLUMN }), null);
-    assert.equal(gate.storedChannelsFor('test.unregistered', {}), null);
+    const good = gate.storedChannelsFor('test.throwing', { column: 'good' });
+    assert.equal(good.kind === 'declared' ? good.channels.length : good.kind, 1);
+
+    // Why, for the edit's log line (`P-311`), with no value of the parameters in it.
+    const broken = gate.storedChannelsFor('test.throwing', { column: COLUMN, community: SECRET });
+    assert.equal(broken.kind, 'unanswered');
+    assert.equal(broken.code, 'TypeError');
+    const why = broken.message;
+    assert.match(why, /^no column called \[a parameter\] answers for \[a parameter\]/u);
+    assert.deepEqual(leaked(why), [], why);
+
+    assert.deepEqual(gate.storedChannelsFor('test.unregistered', {}), {
+      kind: 'unanswered',
+      code: 'UNREGISTERED',
+      message: '"test.unregistered" is not a registered sensor type',
+    });
     assert.equal(lines.length, 0, 'nobody asked to write these parameters');
   });
 });

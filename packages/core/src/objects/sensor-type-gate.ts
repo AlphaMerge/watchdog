@@ -43,6 +43,17 @@ export interface SensorReads {
   readonly requires?: 'installation';
 }
 
+/** What a sensor's stored parameters declare, as far as its type can say (`P-303`, `P-311`). */
+export type StoredDeclaration =
+  | { readonly kind: 'declared'; readonly channels: readonly ChannelDraft[] }
+  | {
+      readonly kind: 'unanswered';
+      /** The error's `code`, or its name; `UNREGISTERED` for a type this build does not have. */
+      readonly code: string;
+      /** Without any value of the parameters in it. */
+      readonly message: string;
+    };
+
 /** Params fit to leave the process, and which secrets were taken out of them. */
 export interface RedactedParams {
   readonly params: Record<string, unknown>;
@@ -76,15 +87,14 @@ export interface SensorTypeGate {
   channelsFor(sensorType: string, params: Record<string, unknown>): readonly ChannelDraft[];
 
   /**
-   * What a sensor's *stored* parameters declared, or `null` when the type cannot say: it is not
-   * registered, or it throws for them (`P-303`). Neither refused nor logged, because nobody is
-   * asking to write these parameters; an edit compares against them to learn what it changes,
-   * and without them falls back to the channel rows themselves.
+   * What a sensor's *stored* parameters declared, or why the type cannot say: it is not
+   * registered, or it throws for them (`P-303`). Neither refused nor logged here, because nobody
+   * is asking to write these parameters; an edit compares against them to learn what it changes,
+   * and without them falls back to the channel rows themselves and says what it left
+   * (`P-311`). The reason's message has every value of the parameters taken out of it, since
+   * those can be secrets.
    */
-  storedChannelsFor(
-    sensorType: string,
-    params: Record<string, unknown>,
-  ): readonly ChannelDraft[] | null;
+  storedChannelsFor(sensorType: string, params: Record<string, unknown>): StoredDeclaration;
 
   /**
    * Params safe to hand to an API response or an audit row. Never call the un-redacted params
@@ -367,17 +377,27 @@ export function catalogueSensorTypeGate(
       return draftsOf(defs);
     },
 
-    storedChannelsFor(
-      sensorType: string,
-      params: Record<string, unknown>,
-    ): readonly ChannelDraft[] | null {
-      if (!catalogue.has(sensorType)) return null;
+    storedChannelsFor(sensorType: string, params: Record<string, unknown>): StoredDeclaration {
+      if (!catalogue.has(sensorType)) {
+        return {
+          kind: 'unanswered',
+          code: 'UNREGISTERED',
+          message: `"${sensorType}" is not a registered sensor type`,
+        };
+      }
       try {
-        return draftsOf(catalogue.channelsFor(sensorType, params));
-      } catch {
+        return { kind: 'declared', channels: draftsOf(catalogue.channelsFor(sensorType, params)) };
+      } catch (cause) {
         // A type that cannot answer for what is stored — one stored before `P-293`, or before a
-        // build changed the type — leaves the caller the channel rows, which is what it asks for.
-        return null;
+        // build changed the type — leaves the caller the channel rows, and why, for its log.
+        return {
+          kind: 'unanswered',
+          code: errorKindOf(cause),
+          message:
+            cause instanceof Error
+              ? withoutParamValues(cause.message, params, catalogue.writeOnlyPaths(sensorType))
+              : `it threw a ${typeof cause}`,
+        };
       }
     },
 

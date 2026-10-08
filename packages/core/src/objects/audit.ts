@@ -142,7 +142,8 @@ export type Mutation =
   | {
       /**
        * An edit to a sensor's parameters changed what its type declares for a channel, and the
-       * channel was written to match (`P-303`): its name, unit, lookup or counter width.
+       * channel was written to match (`P-303`): its name, unit, lookup or counter width, or
+       * whether it is the sensor's primary channel (`P-309`).
        *
        * Its own entry beside the sensor's `object.updated`, which says which parameter moved:
        * this says what that did to the channel, and it is a `channel.*` action, so the result

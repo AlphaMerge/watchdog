@@ -1120,6 +1120,7 @@ const DECLARATION_FIELDS = [
   'unit',
   'lookupId',
   'counterBits',
+  'isPrimary',
 ] as const satisfies readonly (keyof ChannelDeclaration)[];
 
 const PROCESSING_FIELDS = [

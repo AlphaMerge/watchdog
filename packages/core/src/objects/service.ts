@@ -2330,6 +2330,10 @@ export class ObjectService {
    * channels do not depend on its parameters: the edit path pays for this only where it can
    * matter. The new declaration goes through the gate's refusal (`P-296`, `P-305`), so an edit to
    * parameters the type cannot answer for is refused as a create of them is.
+   *
+   * When the type cannot answer for the *stored* parameters, the lookups the plan could not tell
+   * from an operator's are left as they are (`P-311`), and that is logged: which channels, and
+   * the type's error without any value of the parameters in it.
    */
   async #redeclareChannels(
     q: Queryable,
@@ -2339,7 +2343,8 @@ export class ObjectService {
     params: Record<string, unknown>,
   ): Promise<readonly ChannelRedeclaration[]> {
     const next = this.#sensorTypes.channelsFor(sensorType, params);
-    const stored = this.#sensorTypes.storedChannelsFor(sensorType, storedParams);
+    const answer = this.#sensorTypes.storedChannelsFor(sensorType, storedParams);
+    const stored = answer.kind === 'declared' ? answer.channels : null;
     if (stored !== null && isDeepStrictEqual(stored, next)) return [];
 
     const plan = planRedeclaration(stored, next, await this.#repo.declaredChannels(q, id));
@@ -2360,6 +2365,20 @@ export class ObjectService {
       );
     }
     await this.#repo.redeclareChannels(q, id, plan.changes);
+    if (answer.kind === 'unanswered' && plan.lookupsKept.length > 0) {
+      this.#logger.warn(
+        {
+          objectId: id,
+          sensorType,
+          phase: 'redeclare-channels',
+          channels: plan.lookupsKept,
+          err: { code: answer.code, message: answer.message },
+        },
+        'an edit declares a different lookup for these channels and they were left as they are: ' +
+          'the sensor type cannot say what the stored parameters declared, so a lookup an ' +
+          'operator chose cannot be told from the one the type wrote',
+      );
+    }
     return plan.changes;
   }
 

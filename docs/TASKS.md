@@ -11360,10 +11360,41 @@ because each is a decision rather than a defect:
       scenario test that nothing goes Down that the operator silenced), or a view or report that
       lists them for the operator, or keep.
 
-- [ ] **P-309 — an edit does not re-declare which channel is primary** · XS · P-303 · Found
+- [x] **P-309 — an edit does not re-declare which channel is primary** · XS · P-303 · Found
       2026-10-08 in `P-303`. A `snmp.table` edit that reorders columns leaves the first-created
       column primary. **Done when** decided: re-declare `is_primary` on edit (one primary always),
       or keep and say so in the type's description, with a test.
+
+      **P-309 outcome. Re-declared, where the declared primary has a row.**
+      - **What decided it.** `is_primary` is written by a create and a clone and by nothing else:
+        no route lets an operator choose it, so a row that is not the declared primary is one an
+        earlier declaration left behind, and moving it overrides nobody. `snmp.table` makes the
+        first column primary because the operator led with it, so a reorder is the operator saying
+        which column leads. And it judges nothing: primary picks the number in a list, the
+        mini-graph line and a notification's last value (`notifications/context.ts`), not the
+        sensor's state, so alarm volume cannot change (no M-17 scenario needed).
+      - **How** (`objects/redeclare.ts`, `ObjectRepository.redeclareChannels`). `isPrimary` is a
+        fifth field of `ChannelDeclaration`, compared against the rows rather than the stored
+        answer (nothing else writes it, so this also repairs a row an earlier edit could not move).
+        When the declared primary has a row, it is promoted and every other row demoted, a column
+        the edit removed included. The index `channel_one_primary_per_sensor` is a partial unique
+        index, not deferrable, so it is checked row by row inside one UPDATE: the demotion is its
+        own statement first, then the main UPDATE writes `is_primary` with the rest. Each moved
+        channel is a `channel.redeclared` entry with `channel.<key>.isPrimary` in its diff
+        (`DECLARATION_FIELDS`), and as a `channel.*` action it invalidates the ingestion cache.
+      - **One primary always, not "the declared one always".** When the declared primary has no
+        row yet (a column the edit adds and puts first, or `exe.script.advanced`'s
+        `primaryChannel` renamed), the edit keeps the current primary rather than leaving the
+        sensor with none, since an edit does not create channels (`P-303`). Ingestion then creates
+        that row without `is_primary`, so it becomes primary on the next edit that changes the
+        declaration, not on its first reading. Said in `redeclare.ts` and
+        `adding-a-sensor-type.md`; listed as a follow-up.
+      - **Tests.** `channel-redeclaration.test.ts`: a reorder moves the primary with both audit
+        entries, and back again on the answer's ETag (the swap does not trip the index); a column
+        put first with no row keeps the old primary, and a removed primary column is demoted when
+        the new one has a row, keeping its own row. Five new rows in the `planRedeclaration` table
+        (moved, kept with no row, removed demoted, given to a sensor with none, left when the edit
+        declares none).
 
 - [ ] **P-310 — a channel an edit removed keeps its row with nothing saying it is retired** · S ·
       P-303 · Found 2026-10-08 in `P-303`. A table column removed by an edit keeps its row and
@@ -11371,11 +11402,39 @@ because each is a decision rather than a defect:
       retired channel is marked (and shown as such), or the reason not to is written down, with
       tests.
 
-- [ ] **P-311 — a broken type's edit compares against the rows and can overwrite a hand-set
+- [x] **P-311 — a broken type's edit compares against the rows and can overwrite a hand-set
       lookup** · XS · P-303 · Found 2026-10-08 in `P-303`. When a type cannot answer for a sensor's
       stored parameters, the edit plan compares the new declaration against the rows, so a lookup
       the operator set by hand can be replaced, unlogged. **Done when** the plan refuses or skips
       in that case and logs it, with a test.
+
+      **P-311 outcome. Skipped for the lookup only, and logged; the edit is not refused.**
+      - **What decided it.** Refusing would leave a sensor whose stored parameters a later build
+        cannot answer for with no way to be fixed by the edit that would fix it. And the lookup is
+        the only declared field with a second writer (`PATCH …/channels/:key`): name, unit and
+        counter width are written by a create, a clone or an edit only, so without the stored
+        answer the row *is* the old declaration and comparing against it is still right. So the
+        plan writes no lookup when the stored answer is missing, names each channel whose lookup
+        the new declaration differs from (`lookupsKept`), and goes on with the other fields; a
+        counter/gauge flip is still refused against the row.
+      - **Logged** (`ObjectService.#redeclareChannels`): a warning with the sensor, type, phase
+        `redeclare-channels`, the channels kept, and the type's error code and message.
+        `storedChannelsFor` now returns a discriminated union (`declared` with the channels, or
+        `unanswered` with a code and a message) instead of `null`, and cuts every value of the
+        stored parameters out of the message with `withoutParamValues` (secrets in every encoded
+        form), so the service never holds the raw error. An unregistered type is `UNREGISTERED`.
+        Channel keys are named in the line: they are the channels' identity, on every channel
+        read, and no `writeOnly` parameter is a key. Only when something was kept: an edit that
+        moved no lookup says nothing.
+      - **Tests.** `channel-redeclaration.test.ts`: an operator's lookup, stored parameters the
+        type throws for (written as an older build could have left them), an edit declaring
+        another lookup: 200, the operator's lookup kept, no `channel.redeclared` entry, one log
+        line naming the channel with the message scrubbed and the parameter's value nowhere in the
+        log. The table's "against the rows alone" row now keeps the lookup, with new rows for the
+        other fields still written and the refusal still made. `broken-sensor-type.test.ts`: the
+        `unanswered` reason scrubbed of the secret in every form, and the unregistered answer.
+      - **Not done.** Nothing tells the operator in the reply; the edit answers 200 and the log is
+        for whoever ships the type.
 
 - [ ] **P-312 — channels created from the fallback are never repaired, and an unregistered type's
       are not counted** · S · P-306 · Found 2026-10-08 in `P-306`. Ingestion's `{}` fallback writes

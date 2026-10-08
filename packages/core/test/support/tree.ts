@@ -3,6 +3,7 @@ import { PauseRepository } from '../../src/objects/pause-repository.js';
 import { Migrator } from '../../src/db/migrator.js';
 import { MIGRATIONS } from '../../src/db/migrations/index.js';
 import type { SensorCatalogue, SensorType } from '@ms/sensors';
+import type { Logger } from '@ms/shared';
 import { catalogueSensorTypeGate } from '../../src/objects/sensor-type-gate.js';
 import type { Database } from '../../src/db/pool.js';
 import { InheritanceResolver } from '../../src/settings/inheritance.js';
@@ -117,6 +118,8 @@ export async function buildHarness(
     unreachedFactories?: () => ReadonlySet<number>;
     /** How long a change waits for the tree lock (`P-229`); 30 s unless a test is about it. */
     treeLockWaitMs?: number;
+    /** The object service's logger, for a test about what it says (`P-311`); silent otherwise. */
+    logger?: Logger;
   } = {},
 ): Promise<Harness> {
   await new Migrator({ db, logger: silent, migrations: MIGRATIONS }).up();
@@ -184,7 +187,7 @@ export async function buildHarness(
     // Read-only and unconditional, for the same reason: the pause view has to be able to say a
     // master is holding an object (`M-11`), and refusing a dependency loop is not optional.
     dependencies: new DependencyRepository(),
-    logger: silent,
+    logger: options.logger ?? silent,
   });
 
   const root = await repository.getRoot(db);

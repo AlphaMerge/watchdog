@@ -31,6 +31,28 @@ import type { ChannelDraft } from './sensor-type-gate.js';
  * **A channel an edit adds or removes is not written here.** An added key (a table column) is
  * created on its first reading with the shape the stored parameters declare (`P-297`); a removed
  * one keeps its row and its history, and stops receiving readings.
+ *
+ * **Which channel is primary moves with the declaration** (`P-309`): a table edit that puts
+ * another column first makes that column primary, as a create of those parameters would. Against
+ * the rows rather than the stored answer, because nothing but a create or a clone writes
+ * `is_primary` (no operator chooses it), so a row that is not the declared primary is one an
+ * earlier declaration left behind. One primary always: the declared one is promoted and every
+ * other row demoted together, a removed key included, so the one-primary-per-sensor index is
+ * never violated and never left with none. **Except when the declared primary has no row yet** —
+ * a column the edit adds and puts first, or `exe.script.advanced`'s `primaryChannel` renamed:
+ * the edit does not create channels, so the current primary is kept rather than leaving the
+ * sensor with none until a reading arrives. The reading that creates that row does not make it
+ * primary either (ingestion writes no `is_primary`); the next edit that changes the declaration
+ * does.
+ *
+ * **Without the stored answer, a lookup is left as it is** (`P-311`). When the type cannot say
+ * what the stored parameters declared — it throws for them, as one stored by an older build can
+ * make it — the edit has only the rows to compare against, and the lookup is the one declared
+ * field an operator also writes (`PATCH …/channels/:key`): a row's lookup that differs from the
+ * new declaration may be the operator's choice or the old declaration, and nothing says which.
+ * So it is kept, and the plan names the channel so the caller can say so. The other fields have
+ * no other writer, so the row is the old declaration and is compared as before, and a mode change
+ * is still refused against the row.
  */
 
 /** The part of a channel row an edit can re-declare. */
@@ -39,6 +61,8 @@ export interface ChannelDeclaration {
   readonly unit: string;
   readonly lookupId: string | null;
   readonly counterBits: number | null;
+  /** Whether this is the sensor's primary channel (`P-309`). */
+  readonly isPrimary: boolean;
 }
 
 export interface StoredChannel extends ChannelDeclaration {
@@ -59,7 +83,15 @@ export interface ModeChange {
 
 export type RedeclarationPlan =
   | { readonly kind: 'refused'; readonly modeChanges: readonly ModeChange[] }
-  | { readonly kind: 'redeclare'; readonly changes: readonly ChannelRedeclaration[] };
+  | {
+      readonly kind: 'redeclare';
+      readonly changes: readonly ChannelRedeclaration[];
+      /**
+       * The channels whose lookup the new declaration differs from and that were left as they
+       * are, because the stored answer could not be had (`P-311`). Empty whenever it could.
+       */
+      readonly lookupsKept: readonly string[];
+    };
 
 function declarationOf(draft: ChannelDraft): ChannelDeclaration {
   // As `createChannels` writes them: no unit is '', no lookup or counter is NULL.
@@ -68,6 +100,17 @@ function declarationOf(draft: ChannelDraft): ChannelDeclaration {
     unit: draft.unit ?? '',
     lookupId: draft.lookup ?? null,
     counterBits: draft.counterBits ?? null,
+    isPrimary: draft.isPrimary === true,
+  };
+}
+
+function declarationOfRow(row: StoredChannel): ChannelDeclaration {
+  return {
+    name: row.name,
+    unit: row.unit,
+    lookupId: row.lookupId,
+    counterBits: row.counterBits,
+    isPrimary: row.isPrimary,
   };
 }
 
@@ -76,7 +119,8 @@ const modeOf = (shape: ChannelDeclaration): 'counter' | 'gauge' =>
 
 /**
  * Compares the stored parameters' declaration (`null` when the type cannot answer for them, as
- * if it named no key) with the edit's, against the rows.
+ * if it named no key, except that no lookup is written: `P-311`) with the edit's, against the
+ * rows.
  */
 export function planRedeclaration(
   stored: readonly ChannelDraft[] | null,
@@ -87,17 +131,20 @@ export function planRedeclaration(
   const byKey = new Map(rows.map((row) => [row.key, row]));
   const modeChanges: ModeChange[] = [];
   const changes: ChannelRedeclaration[] = [];
+  const lookupsKept: string[] = [];
+
+  // The primary the edit declares, where it has a row to be; otherwise the rows keep theirs.
+  const declaredPrimary = next.find((draft) => draft.isPrimary === true)?.key;
+  const primaryKey =
+    declaredPrimary !== undefined && byKey.has(declaredPrimary) ? declaredPrimary : null;
+  const primaryOf = (row: StoredChannel): boolean =>
+    primaryKey === null ? row.isPrimary : row.key === primaryKey;
 
   for (const draft of next) {
     const row = byKey.get(draft.key);
     if (row === undefined) continue;
     const after = declarationOf(draft);
-    const before: ChannelDeclaration = {
-      name: row.name,
-      unit: row.unit,
-      lookupId: row.lookupId,
-      counterBits: row.counterBits,
-    };
+    const before = declarationOfRow(row);
     const previous = was.get(draft.key) ?? null;
     // Whether this edit is what changes the field: its declaration moved, and the row does not
     // already hold where it moved to.
@@ -112,26 +159,43 @@ export function planRedeclaration(
       continue;
     }
 
+    // Not when the stored answer is missing: the row's lookup may be an operator's (`P-311`).
+    const relook = moved('lookupId') && stored !== null;
+    if (moved('lookupId') && !relook) lookupsKept.push(draft.key);
+
     const written: ChannelDeclaration = {
       name: moved('name') ? after.name : before.name,
       unit: moved('unit') ? after.unit : before.unit,
-      lookupId: moved('lookupId') ? after.lookupId : before.lookupId,
+      lookupId: relook ? after.lookupId : before.lookupId,
       // Only between two widths: a mode that would change was refused above, and a row whose
       // mode already differs from a declaration this edit did not change is left as it is.
       counterBits:
         before.counterBits !== null && after.counterBits !== null && moved('counterBits')
           ? after.counterBits
           : before.counterBits,
+      isPrimary: primaryOf(row),
     };
     if (
       written.name !== before.name ||
       written.unit !== before.unit ||
       written.lookupId !== before.lookupId ||
-      written.counterBits !== before.counterBits
+      written.counterBits !== before.counterBits ||
+      written.isPrimary !== before.isPrimary
     ) {
       changes.push({ key: draft.key, before, after: written });
     }
   }
 
-  return modeChanges.length > 0 ? { kind: 'refused', modeChanges } : { kind: 'redeclare', changes };
+  // A row the edit no longer declares is not re-declared, but it stops being primary when the
+  // declared primary has a row to take over (`P-309`).
+  const declared = new Set(next.map((draft) => draft.key));
+  for (const row of rows) {
+    if (declared.has(row.key) || primaryOf(row) === row.isPrimary) continue;
+    const before = declarationOfRow(row);
+    changes.push({ key: row.key, before, after: { ...before, isPrimary: primaryOf(row) } });
+  }
+
+  return modeChanges.length > 0
+    ? { kind: 'refused', modeChanges }
+    : { kind: 'redeclare', changes, lookupsKept };
 }

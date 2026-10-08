@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
+import { pino } from 'pino';
 import { BUILT_IN_SENSOR_TYPES, type SensorType } from '@ms/sensors';
 import type { CheckResult } from '@ms/shared';
 import { ApiServer } from '../src/api/server.js';
@@ -32,6 +33,12 @@ function shipped(id: string): SensorType {
 }
 const snmpCustom = shipped('snmp.custom');
 const snmpCustomString = shipped('snmp.custom.string');
+
+/**
+ * A column key `test.columns` throws for, with the key in its message — standing in for stored
+ * parameters a later build's type cannot answer for (`P-311`).
+ */
+const UNREADABLE = 'unreadable-column';
 
 /**
  * `snmp.table`'s shape without SNMP: each column a channel, a counter or a lookup as its
@@ -67,6 +74,8 @@ const columns: SensorType = {
       ? (params['columns'] as { key: string; counter?: boolean; bits?: 32 | 64; lookup?: string }[])
       : [];
     if (named.length === 0) return [{ key: 'value', name: 'Value', isPrimary: true }];
+    const unreadable = named.find((column) => column.key === UNREADABLE);
+    if (unreadable !== undefined) throw new Error(`no column called ${unreadable.key} here`);
     return named.map((column, at) => ({
       key: column.key,
       name: column.key,
@@ -115,11 +124,16 @@ describe(
     let resolver: ChannelResolver;
     let deviceId: number;
     const types = [snmpCustom, snmpCustomString, columns];
+    /** What the object service logs (`P-311`). */
+    const lines: string[] = [];
 
     before(async () => {
       scratch = await createScratchDatabase('redeclare');
       db = scratch.db;
-      harness = await buildHarness(db, { types });
+      harness = await buildHarness(db, {
+        types,
+        logger: pino({ level: 'info' }, { write: (line: string) => lines.push(line) }),
+      });
       // Where the result path's cache sits in production: behind the audit sink, inside the
       // mutation's transaction (`M-04`). And the real audit log, to read the entries back.
       resolver = new ChannelResolver({ logger: silent });
@@ -433,6 +447,118 @@ describe(
       assert.equal(second.ids.get(`${String(id)}:value`)?.lookupId, 'ms.test.other');
     });
 
+    // ── which channel is primary (`P-309`) ─────────────────────────────────────────────────────
+
+    const primaryOf = async (id: number): Promise<string[]> =>
+      (
+        await db.query<{ key: string }>(
+          'SELECT key FROM channel WHERE sensor_id = $1 AND is_primary ORDER BY key',
+          [id],
+        )
+      ).map((found) => found.key);
+
+    it('makes the column an edit puts first the primary, as a create of those columns would', async () => {
+      const id = await create('test.columns', { columns: [{ key: 'used' }, { key: 'free' }] });
+      assert.deepEqual(await primaryOf(id), ['used'], 'as created');
+
+      const reordered = await edit(id, { columns: [{ key: 'free' }, { key: 'used' }] });
+      assert.equal(reordered.statusCode, 200, reordered.body);
+      assert.deepEqual(await primaryOf(id), ['free']);
+      assert.deepEqual(
+        (await redeclaredEntries(id)).sort((a, b) =>
+          String(a.channelKey).localeCompare(String(b.channelKey)),
+        ),
+        [
+          {
+            channelKey: 'free',
+            diff: [{ field: 'channel.free.isPrimary', before: false, after: true }],
+          },
+          {
+            channelKey: 'used',
+            diff: [{ field: 'channel.used.isPrimary', before: true, after: false }],
+          },
+        ],
+      );
+
+      // Back again, on the version the edit answered with: the swap is not refused by the
+      // one-primary index halfway, and the ETag is current.
+      const back = await edit(
+        id,
+        { columns: [{ key: 'used' }, { key: 'free' }] },
+        String(reordered.headers['etag']),
+      );
+      assert.equal(back.statusCode, 200, back.body);
+      assert.deepEqual(await primaryOf(id), ['used']);
+    });
+
+    it('keeps the primary while the column put first has no row, and moves it off a removed one', async () => {
+      const id = await create('test.columns', { columns: [{ key: 'used' }, { key: 'free' }] });
+
+      // `fresh` has no row until its first reading, so the sensor keeps the primary it has
+      // rather than none.
+      const added = await edit(id, {
+        columns: [{ key: 'fresh' }, { key: 'used' }, { key: 'free' }],
+      });
+      assert.equal(added.statusCode, 200, added.body);
+      assert.deepEqual(await primaryOf(id), ['used'], 'a sensor left with no primary channel');
+
+      // `used` is taken out and `free` leads: the removed row keeps its history, not the primary.
+      const removed = await edit(id, { columns: [{ key: 'free' }] });
+      assert.equal(removed.statusCode, 200, removed.body);
+      assert.deepEqual(await primaryOf(id), ['free']);
+      assert.deepEqual(
+        (await rows(id)).map((found) => found.key),
+        ['free', 'used'],
+        'a removed column keeps its row',
+      );
+    });
+
+    // ── a type that cannot answer for what is stored (`P-311`) ─────────────────────────────────
+
+    it('leaves a lookup as it is when the type cannot say what the stored parameters declared, and says so', async () => {
+      const id = await create('test.columns', {
+        columns: [{ key: 'value', lookup: 'ms.declared.first' }],
+      });
+      const pointed = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/objects/${String(id)}/channels/value`,
+        headers: { 'if-match': await etagOf(id) },
+        payload: { lookupId: 'ms.operator.choice' },
+      });
+      assert.equal(pointed.statusCode, 200, pointed.body);
+      // Parameters this build's type throws for, as an older build could have stored them.
+      await db.query('UPDATE sensor_config SET params = $2::jsonb WHERE object_id = $1', [
+        id,
+        JSON.stringify({
+          columns: [{ key: 'value', lookup: 'ms.declared.first' }, { key: UNREADABLE }],
+        }),
+      ]);
+      lines.length = 0;
+
+      const edited = await edit(id, { columns: [{ key: 'value', lookup: 'ms.declared.second' }] });
+      assert.equal(edited.statusCode, 200, edited.body);
+      assert.equal(
+        (await rows(id))[0]?.lookup_id,
+        'ms.operator.choice',
+        'the operator’s lookup was replaced by an edit that could not tell it was theirs',
+      );
+      assert.deepEqual(await redeclaredEntries(id), []);
+
+      const said = lines
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((line) => line['phase'] === 'redeclare-channels');
+      assert.equal(said.length, 1, lines.join(''));
+      const logged = said.at(0);
+      assert.ok(logged !== undefined);
+      assert.equal(logged['objectId'], id);
+      assert.equal(logged['sensorType'], 'test.columns');
+      assert.deepEqual(logged['channels'], ['value']);
+      const err = logged['err'] as Record<string, unknown>;
+      assert.equal(err['code'], 'Error');
+      assert.equal(err['message'], 'no column called [a parameter] here');
+      assert.ok(!lines.join('').includes(UNREADABLE), 'a parameter’s value reached the log');
+    });
+
     // ── an edit and a channel's first reading at once (`P-303` review) ─────────────────────────
 
     /** A resolver that declares shapes, as `main.ts` builds it. */
@@ -562,6 +688,7 @@ const row = (key: string, more: Partial<StoredChannel> = {}): StoredChannel => (
   unit: '',
   lookupId: null,
   counterBits: null,
+  isPrimary: false,
   ...more,
 });
 
@@ -576,6 +703,8 @@ describe('what an edit re-declares', () => {
     next: readonly ChannelDraft[];
     rows: readonly StoredChannel[];
     written?: readonly (readonly [string, Partial<StoredChannel>])[];
+    /** The lookups left as the rows hold them for want of the stored answer (`P-311`). */
+    kept?: readonly string[];
     refused?: readonly { key: string; from: 'counter' | 'gauge'; to: 'counter' | 'gauge' }[];
   }[] = [
     {
@@ -614,11 +743,67 @@ describe('what an edit re-declares', () => {
       written: [['back', { name: 'Back', lookupId: 'b' }]],
     },
     {
-      name: 'against the rows alone, when the stored answer cannot be had',
+      name: 'no lookup, when the stored answer cannot be had: the row’s may be an operator’s',
       stored: null,
       next: [draft('value', { lookup: 'b' })],
       rows: [row('value', { lookupId: 'a' })],
-      written: [['value', { lookupId: 'b' }]],
+      written: [],
+      kept: ['value'],
+    },
+    {
+      name: 'the other fields against the rows, when the stored answer cannot be had',
+      stored: null,
+      next: [draft('value', { name: 'Renamed', unit: 'C', lookup: 'a', counterBits: 32 })],
+      rows: [row('value', { lookupId: 'a', counterBits: 64 })],
+      written: [['value', { name: 'Renamed', unit: 'C', counterBits: 32 }]],
+    },
+    {
+      name: 'a refusal against the row, when the stored answer cannot be had',
+      stored: null,
+      next: [draft('value', { counterBits: 64, lookup: 'b' })],
+      rows: [row('value')],
+      refused: [{ key: 'value', from: 'gauge', to: 'counter' }],
+    },
+    {
+      name: 'the primary, moved to the column the edit puts first',
+      stored: [draft('a', { isPrimary: true }), draft('b')],
+      next: [draft('b', { isPrimary: true }), draft('a')],
+      rows: [row('a', { isPrimary: true }), row('b')],
+      written: [
+        ['b', { isPrimary: true }],
+        ['a', { isPrimary: false }],
+      ],
+    },
+    {
+      name: 'the primary, kept while the declared one has no row',
+      stored: [draft('a', { isPrimary: true })],
+      next: [draft('fresh', { isPrimary: true }), draft('a')],
+      rows: [row('a', { isPrimary: true })],
+      written: [],
+    },
+    {
+      name: 'the primary, taken off a removed key when the declared one has a row',
+      stored: [draft('a', { isPrimary: true }), draft('b')],
+      next: [draft('b', { isPrimary: true })],
+      rows: [row('a', { isPrimary: true }), row('b')],
+      written: [
+        ['b', { isPrimary: true }],
+        ['a', { isPrimary: false }],
+      ],
+    },
+    {
+      name: 'the primary, given to a sensor with none whatever the stored answer said',
+      stored: [draft('a', { isPrimary: true })],
+      next: [draft('a', { isPrimary: true, name: 'A' })],
+      rows: [row('a')],
+      written: [['a', { name: 'A', isPrimary: true }]],
+    },
+    {
+      name: 'the primary, left as the rows hold it when the edit declares none',
+      stored: [draft('a')],
+      next: [draft('a', { lookup: 'x' })],
+      rows: [row('a', { isPrimary: true })],
+      written: [['a', { lookupId: 'x' }]],
     },
     {
       name: 'a counter’s new width',
@@ -679,6 +864,7 @@ describe('what an edit re-declares', () => {
         return;
       }
       assert.equal(plan.kind, 'redeclare');
+      assert.deepEqual(plan.lookupsKept, one.kept ?? []);
       assert.deepEqual(
         plan.changes.map((change) => [change.key, change.after]),
         (one.written ?? []).map(([key, more]) => {
