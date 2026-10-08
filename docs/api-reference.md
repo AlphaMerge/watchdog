@@ -290,7 +290,7 @@ Sets a channel’s error and warning limits, the lookup that decides its state, 
 | `lookupId` | string,null |  |
 | `processing` | object |  |
 
-**200** { id, sensorId, key, name, unit, isPrimary, scaleMul, scaleDiv, decimals, limits, spikeMin, spikeMax, showInGraph, showInTable, lookupId }
+**200** { id, sensorId, key, name, unit, isPrimary, scaleMul, scaleDiv, decimals, limits, spikeMin, spikeMax, showInGraph, showInTable, lookupId, retired }
 
 ## credentials
 

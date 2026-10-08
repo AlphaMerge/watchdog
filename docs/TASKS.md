@@ -11396,11 +11396,82 @@ because each is a decision rather than a defect:
         (moved, kept with no row, removed demoted, given to a sensor with none, left when the edit
         declares none).
 
-- [ ] **P-310 — a channel an edit removed keeps its row with nothing saying it is retired** · S ·
+- [x] **P-310 — a channel an edit removed keeps its row with nothing saying it is retired** · S ·
       P-303 · Found 2026-10-08 in `P-303`. A table column removed by an edit keeps its row and
       history and stops getting readings; the UI shows it as if it were still read. **Done when** a
       retired channel is marked (and shown as such), or the reason not to is written down, with
       tests.
+
+      **P-310 outcome. Marked, and derived on every read rather than stored, for the types that
+      promise their readings name no channel they do not declare.** No migration, no protocol
+      change.
+      - **Derived, not stored.** A channel is retired when its sensor's type declares every key it
+        reports and the type's declaration for the sensor's *stored* parameters does not name
+        the channel's key. Asked of the declaration on each read, so it cannot disagree with it:
+        a column put back is live again with nothing to clear, a type whose answer changes in a
+        new build is read by that build, and nothing has to be written by the edit (which stays
+        clear of `redeclare.ts`, `P-309`/`P-311`'s). A stored flag would need a column and a
+        writer on every path that changes parameters (edit, clone, template, discovery), each one
+        another place to get it wrong.
+      - **Why not for every type.** It is exact for `snmp.table`: `execute` reports one key per
+        column `readColumns` gives and `channels()` maps the same columns. It is wrong for a type
+        whose keys come from what it ran: `exe.script.advanced` and `ssh.script` report whatever
+        the script printed, and the database types a query's columns, so a key the declaration
+        does not name may be one the readings do, and calling it retired would say a live channel
+        is not read. The core cannot tell the two apart from the declaration, so the type says
+        which it is: a new optional `declaresEveryChannel` on the contract. Opt-in, because unset
+        fails safe (nothing called retired, as before) where an opt-out flag forgotten would mark
+        live channels. Set on the nine shipped types whose channels an edit can remove and whose
+        `execute` was read path by path to report only declared keys: `snmp.table`,
+        `rest.custom`, `http.content`, `http.transaction`, `http.request` and `http.advanced`
+        (`size` with `HEAD`), `mail.smtp` (`sendTime` with `to`), `port.tcp` (`bannerMatched`
+        with `banner`), `flow.netflow` (its extra channels). Not set on the script and database
+        types, nor yet on types whose channels do not depend on parameters (nothing an edit can
+        retire there). Not enforced at run time: the catalogue does not drop or fail a reading
+        outside the declaration.
+      - **The core** (`sensor-type-gate.ts`, `ObjectService`). `SensorTypeGate.reportableKeys`
+        answers the declared keys for a type that promises them, and `null` for any other, for one
+        this build does not register, and for one that throws for the stored parameters (what it
+        left out is then unknown). `ChannelRecord.retired` (required in `ms:channelRecord`) is
+        filled from it by `channels()` (the list and `?include=channels`) and by the channel
+        `PATCH`'s answer; the repository returns rows without it. Read with the stored
+        parameters, not the redacted ones. `false` is "not known to be retired", never "being
+        read", and the schema and type say so. `api-reference.md` regenerated.
+      - **State and graph: nothing to change, now pinned.** A sensor's state is the roll-up of the
+        readings in its result (`M-05`), so a channel nobody reads judges nothing, whatever its
+        limits and last reading. History is dense with a null for a bucket with no reading
+        (`S-08`), so the line stops at the edit. A reading a probe took before it heard of the
+        edit is a reading and is judged and stored as one.
+      - **The UI** (`ChannelTable.tsx`). A `retired` mark beside the name, as `primary` is, with
+        a title saying what it means; the name muted; where the reading goes, **not read**
+        instead of *no recent reading* (which reads as an outage) once its last reading has aged
+        out of the values window, and that reading until then. `web-ui.md` and
+        `adding-a-sensor-type.md` (the flag, when to set it, and where the list is) say so.
+      - **Tests.** `retired-channels.test.ts` (core, through the API and real ingestion): a
+        table-like test type, a column removed is retired on the list, the object read and a
+        channel `PATCH`, and live once put back; the shipped `snmp.table` the same; a script-like
+        type with a channel from a reading, its declared key changed, neither called retired; a
+        type throwing for stored parameters, none; a removed column whose last readings breached
+        its error limit (sensor Down), then readings of the other column only: the sensor Up with
+        cause `scan` and no message, and the removed one's `avg`, `min`, `max` and `count` null for
+        each bucket after the edit and never 0, the other column's present. Without the database:
+        the exact list of shipped types that set the flag; `null` for `exe.script.advanced`,
+        `ssh.script` and an unregistered type; `http.request`'s keys with and without `HEAD`.
+        `snmp-table.test.ts`: the flag is set, and four executions against the SNMP simulator
+        (by index, by name, a counter, a column the row lacks) report only declared keys.
+        `retired-channels.test.tsx` (web): the mark on the retired row and not the live one,
+        **not read** against a live channel's *no recent reading*, with no values, a reading
+        before the edit still shown, and its history handed to the chart and the table as gaps
+        (dashes) after the edit, never a zero.
+      - **Mutations** (restored byte for byte, `dist` rebuilt): the gate ignoring the flag fails 2
+        (the script type and `exe.script.advanced`); a type that throws answered as declaring
+        nothing, with the channel `PATCH` answering underived, fails 2; the list underived fails
+        3; no mark in the table fails 2 web tests; no **not read** fails 2.
+      - **Not done.** The History tab's legend does not
+        mark a retired channel (its line simply ends); the types whose channels do not depend on
+        parameters are unflagged, so a channel a later build drops from one is not called
+        retired; `retired` is not offered as a filter or on the values route. Listed as
+        follow-ups.
 
 - [x] **P-311 — a broken type's edit compares against the rows and can overwrite a hand-set
       lookup** · XS · P-303 · Found 2026-10-08 in `P-303`. When a type cannot answer for a sensor's

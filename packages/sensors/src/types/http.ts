@@ -40,6 +40,10 @@ export const httpRequest: SensorType = {
     },
   },
 
+  // Every reading is keyed by a channel `channels(params)` names for the same parameters, so one
+  // an edit no longer names is retired (`P-310`).
+  declaresEveryChannel: true,
+
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[] {
     return httpChannels(params['method'] !== 'HEAD');
   },

@@ -437,6 +437,40 @@ describe('the type as the catalogue sees it', () => {
     assert.equal(defs.filter((def) => def.isPrimary === true).length, 1);
   });
 
+  it('reports no key its declaration does not name, so a removed column is retired (P-310)', async () => {
+    // The promise `declaresEveryChannel` makes, and what the core reads a channel as retired by:
+    // a key the stored parameters do not declare is one no scan will report.
+    assert.equal(catalogue.declaration('snmp.table').declaresEveryChannel, true);
+    const cases: Record<string, unknown>[] = [
+      { rowIndex: '2', columns: SIZE_AND_USED },
+      {
+        rowIndex: '2',
+        columns: [
+          { column: String(UNITS), name: 'Units' },
+          { column: String(FAILS), name: 'Failures', mode: 'counter' },
+          { column: String(STATE), name: 'State', lookup: 'ms.snmp.hr-storage-state' },
+        ],
+      },
+      // Found by name, with a column the row does not implement (gapped, not reported).
+      { indexColumn: String(DESCR), rowMatch: 'Physical memory', columns: SIZE_AND_USED },
+      {
+        indexColumn: String(DESCR),
+        rowMatch: 'Physical memory',
+        columns: [...SIZE_AND_USED, { column: String(FAILS), name: 'Failures', mode: 'counter' }],
+      },
+    ];
+    for (const params of cases) {
+      const execution = await run(params);
+      const declared = new Set(
+        catalogue.channelsFor('snmp.table', { tableOid: TABLE, ...params }).map((def) => def.key),
+      );
+      assert.ok(execution.channels.length > 0, JSON.stringify(params));
+      for (const reading of execution.channels) {
+        assert.ok(declared.has(reading.key), `${reading.key} is not declared`);
+      }
+    }
+  });
+
   it('requires a table and at least one column', () => {
     const result = catalogue.validate('snmp.table', { tableOid: TABLE, columns: [] });
     assert.ok(!result.valid);

@@ -308,6 +308,7 @@ export const channelRecordSchema = {
     'showInGraph',
     'showInTable',
     'lookupId',
+    'retired',
   ],
   properties: {
     id: { type: 'integer' },
@@ -326,6 +327,15 @@ export const channelRecordSchema = {
     showInGraph: { type: 'boolean' },
     showInTable: { type: 'boolean' },
     lookupId: { type: ['string', 'null'] },
+    retired: {
+      type: 'boolean',
+      description:
+        'Nothing will read this channel again: the sensor’s type declares every channel it ' +
+        'reports, and the sensor’s parameters no longer declare this one (an edit took it ' +
+        'out). Its history is kept, and putting it back makes it live again. Worked out from ' +
+        'the type on every read. `false` also where the type cannot say: one whose readings ' +
+        'can name channels it does not declare, such as a script’s.',
+    },
   },
 } as const;
 

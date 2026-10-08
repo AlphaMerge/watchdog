@@ -76,6 +76,10 @@ export const portTcp: SensorType = {
     },
   },
 
+  // Every reading is keyed by a channel `channels(params)` names for the same parameters, so one
+  // an edit no longer names is retired (`P-310`).
+  declaresEveryChannel: true,
+
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[] {
     const banner = typeof params['banner'] === 'string' ? params['banner'].trim() : '';
     return [

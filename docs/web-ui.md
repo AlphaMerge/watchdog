@@ -250,6 +250,14 @@ so a link to a sensor's triggers is a link somebody can send.
 | **Triggers**    | The notification triggers on this object                                          |
 | **Changes**     | The audit trail for this object                                                   |
 
+A channel an edit took out of a sensor's parameters — a `snmp.table` column removed — keeps its
+row and its history and is no longer read. The channel table marks it **retired** beside its name
+and says **not read** where the reading goes, rather than *no recent reading*, which would read
+as an outage; its limits judge nothing, so it plays no part in the sensor's state. On the
+**History** tab its line stops at the edit, as a gap. Put the column back and it is read again,
+with its history. Only a type that promises its readings name no channel it does not declare is
+marked this way (`P-310`); a script's extra channels are never called retired.
+
 Add a sensor beneath a device at `/objects/:id/add-sensor`. Everything after "which type" is
 generated from the type's `paramsSchema`, which is what keeps adding a sensor type a one-file job.
 A secret parameter shows as set, never as its value, and a save that leaves it alone keeps it —

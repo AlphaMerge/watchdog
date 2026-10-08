@@ -5,6 +5,14 @@ import { channelLinkFor } from './credentials-model';
 import { formatValue, howLongAgo } from './model';
 
 /**
+ * What a retired channel is (`P-310`), wherever the table says so. Its history stays on the
+ * History tab, where the line stops at the edit rather than falling to zero.
+ */
+const RETIRED =
+  'An edit took this channel out of the sensor’s parameters, so nothing reads it any more and ' +
+  'it judges nothing. Its history is kept; put it back to read it again.';
+
+/**
  * The channel table (`U-04`) — what each channel reads, and what judges it.
  *
  * **An absent reading is stated, never blank and never zero.** The core withholds anything older
@@ -63,7 +71,13 @@ export function ChannelTable({
             <tr key={channel.id}>
               <th scope="row" className="py-2 pr-3 text-left font-normal">
                 <span className="flex flex-wrap items-center gap-2">
-                  <span className="font-medium text-text">{channel.name}</span>
+                  <span
+                    className={
+                      channel.retired ? 'font-medium text-text-muted' : 'font-medium text-text'
+                    }
+                  >
+                    {channel.name}
+                  </span>
                   <span className="font-mono text-xs text-text-muted">{channel.key}</span>
                   {channel.isPrimary && (
                     <span
@@ -71,6 +85,14 @@ export function ChannelTable({
                       title="The channel whose state is the sensor's state"
                     >
                       primary
+                    </span>
+                  )}
+                  {channel.retired && (
+                    <span
+                      className="border border-border px-1.5 py-0.5 text-xs text-text-muted"
+                      title={RETIRED}
+                    >
+                      retired
                     </span>
                   )}
                   <Processing channel={channel} />
@@ -107,6 +129,15 @@ function Reading({
   intervalSeconds: number | null;
   now: number;
 }): React.JSX.Element {
+  // A reading taken before the edit is still a reading, and shows as one until it ages out.
+  // After that "no recent reading" would read as an outage, which this is not.
+  if (channel.retired && (value === null || value.value === null || value.at === null)) {
+    return (
+      <span className="text-text-muted" title={RETIRED}>
+        not read
+      </span>
+    );
+  }
   if (value === null) return <span className="text-text-muted">—</span>;
   if (value.value === null || value.at === null) {
     const window =

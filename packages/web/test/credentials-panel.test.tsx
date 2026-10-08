@@ -1165,6 +1165,7 @@ describe('Core Health’s count of sets without bounds', () => {
     spikeMin: null,
     spikeMax: null,
     lookupId: null,
+    retired: false,
   });
   const CHANNELS = [
     channel(1, 'credentialsUnbounded', 'Credential sets without targets'),

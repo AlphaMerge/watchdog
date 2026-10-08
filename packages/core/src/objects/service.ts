@@ -81,6 +81,7 @@ import type {
   SettingChange,
   SettingView,
   SiblingMove,
+  StoredChannelRecord,
   SubtreeCounts,
   SubtreeOptions,
   SubtreeResult,
@@ -380,7 +381,10 @@ export class ObjectService {
   }
 
   async channels(id: ObjectId): Promise<ChannelRecord[]> {
-    const object = await this.get(id);
+    // The stored object, not `get`'s: which channels the type declares is asked with the
+    // parameters as stored, secrets included, and this never leaves the process.
+    const object = await this.#repo.get(this.#db, id);
+    if (object === null) throw notFound(id);
     if (object.kind !== 'sensor') {
       throw new ObjectError(
         'OBJECT_KIND_MISMATCH',
@@ -388,7 +392,10 @@ export class ObjectService {
         { context: { objectId: id, phase: 'channels' }, details: { storedKind: object.kind } },
       );
     }
-    return this.#repo.channels(this.#db, id);
+    const reportable = this.#sensorTypes.reportableKeys(object.sensorType, object.params);
+    return (await this.#repo.channels(this.#db, id)).map((channel) =>
+      withRetirement(channel, reportable),
+    );
   }
 
   /**
@@ -530,7 +537,12 @@ export class ObjectService {
       // record read before it carries an ETag that is already stale (the trap S-16 documented).
       const updated = await this.#repo.channel(q, id, key);
       if (updated === null) throw notFound(id);
-      return updated;
+      // A retired channel can still be set, for the day its key is put back; the answer says it
+      // is retired as the list does.
+      return withRetirement(
+        updated,
+        this.#sensorTypes.reportableKeys(object.sensorType, object.params),
+      );
     });
   }
 
@@ -3145,6 +3157,18 @@ export class ObjectService {
       return { ...item, effective } as ObjectSummary;
     });
   }
+}
+
+/**
+ * A channel as read, with whether nothing will read it again (`P-310`): its type names every key
+ * it can report for the sensor's stored parameters, and not this one. `reportable` is `null`
+ * where the type cannot say, and then no channel is called retired.
+ */
+function withRetirement(
+  channel: StoredChannelRecord,
+  reportable: ReadonlySet<string> | null,
+): ChannelRecord {
+  return { ...channel, retired: reportable !== null && !reportable.has(channel.key) };
 }
 
 function parentKindInvalid(childKind: string, parentKind: string): ObjectError {

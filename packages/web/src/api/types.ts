@@ -193,6 +193,12 @@ export interface ChannelRecord {
    * has to be able to see.
    */
   lookupId: string | null;
+  /**
+   * Nothing will read this channel again (`P-310`): an edit took its key out of the sensor's
+   * parameters, and its type reports no channel it does not declare. History kept. `false` also
+   * where the core cannot say, so never read it as "being read".
+   */
+  retired: boolean;
 }
 
 /** One entry in `GET /lookups`. */

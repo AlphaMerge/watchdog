@@ -97,6 +97,15 @@ export interface SensorTypeGate {
   storedChannelsFor(sensorType: string, params: Record<string, unknown>): StoredDeclaration;
 
   /**
+   * Every channel key a sensor of this type can report with these *stored* parameters, or `null`
+   * when the type cannot say (`P-310`): it does not declare every channel it reports (a script's
+   * keys come from its output), it is not registered, or it throws for them. A key a sensor has a
+   * channel for and this does not name is retired: nothing will read it again. Neither refused
+   * nor logged, as `storedChannelsFor`.
+   */
+  reportableKeys(sensorType: string, params: Record<string, unknown>): ReadonlySet<string> | null;
+
+  /**
    * Params safe to hand to an API response or an audit row. Never call the un-redacted params
    * anything but internal: CLAUDE.md's write-only rule covers every route, to everyone.
    */
@@ -398,6 +407,22 @@ export function catalogueSensorTypeGate(
               ? withoutParamValues(cause.message, params, catalogue.writeOnlyPaths(sensorType))
               : `it threw a ${typeof cause}`,
         };
+      }
+    },
+
+    reportableKeys(
+      sensorType: string,
+      params: Record<string, unknown>,
+    ): ReadonlySet<string> | null {
+      if (!catalogue.has(sensorType)) return null;
+      // Only a type that promises it: for any other, a key its declaration does not name may be
+      // one its readings do, and calling that channel retired would say a live one is not read.
+      if (catalogue.declaration(sensorType).declaresEveryChannel !== true) return null;
+      try {
+        return new Set(catalogue.channelsFor(sensorType, params).map((def) => def.key));
+      } catch {
+        // What the declaration was is unknown, so which channels it left out is too.
+        return null;
       }
     },
 

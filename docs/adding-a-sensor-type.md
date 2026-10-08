@@ -246,7 +246,8 @@ channel the sensor is judged by.
   (`P-309`), once that channel has a row: a key the edit adds and makes primary becomes it on a
   later edit, not on its first reading. If `channels()` throws for what a sensor has stored, an
   edit cannot tell an operator's lookup from yours, so it leaves every lookup as it is and logs
-  that, naming your type (`P-311`).
+  that, naming your type (`P-311`). A channel the edit no longer declares keeps its row and
+  history; it is shown retired only if your type sets `declaresEveryChannel` (below).
 - **`lookup` and `counter` may depend on parameters.** A channel the core first sees in a reading
   (a key a later build added, or one an edit added) gets them from `channels()` asked with that
   sensor's own stored parameters, not `{}` (`P-297`), so a column-per-channel type like
@@ -288,6 +289,22 @@ filled in. Each `channelsFor` after that, which is how every sensor gets its cha
 the answer differs from `{}`'s. For a type without the flag, it throws on a channel with `limits`
 that only real parameters produce, the one place such a channel is ever seen. Either refuses that
 sensor's create or edit with a 400 naming the type, and logs a warning for you (`P-296`).
+
+### `declaresEveryChannel` (optional)
+
+`true` promises that every key `execute` reports is one `channels(params)` declares for the
+parameters it ran with, on every path. Then a channel a sensor has and its stored parameters no
+longer declare is one nothing will read again — an edit took it out, as removing a `snmp.table`
+column does — and the core shows it as **retired** (`P-310`): `retired: true` on the channel, a
+mark beside it on the sensor page, its row, settings and history kept. Putting the key back makes
+it live again. Nothing is stored: it is worked out from your declaration on each read.
+
+Leave it unset when your keys come from what the check ran into — a script's output
+(`exe.script.advanced`, `ssh.script`), a query's columns — because a key your declaration does
+not name is then one your readings may, and the core would call a channel that is still read
+retired. Unset is safe: none of your channels is ever called retired, which is how every channel
+looked before. The types that set it are listed in `retired-channels.test.ts`, each checked by
+reading its `execute`; add yours there.
 
 ### `execute(context)`
 

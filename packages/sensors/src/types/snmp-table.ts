@@ -239,6 +239,10 @@ export const snmpTable: SensorType = {
     ['tableOid', 'columns'],
   ),
 
+  // A reading per column `readColumns` gives, and `channels` maps the same columns: a column an
+  // edit took out is retired (`P-310`), its row and history kept.
+  declaresEveryChannel: true,
+
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[] {
     const columns = readColumns(params);
     if (columns.length === 0) {

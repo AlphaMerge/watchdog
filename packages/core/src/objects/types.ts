@@ -305,7 +305,23 @@ export interface ChannelRecord {
    * ordinary situation an operator has to be able to see, not one to hide by omitting the id.
    */
   readonly lookupId: string | null;
+  /**
+   * Nothing will read this channel again (`P-310`): its sensor's type declares every channel it
+   * reports, and the sensor's stored parameters no longer declare this key. An edit took it out
+   * (a table column removed); the row and its history are kept, and putting the key back makes
+   * it live again.
+   *
+   * **Derived on every read, never stored**, from the type's current declaration, so it cannot
+   * disagree with it. `false` where the type cannot say, which is any type whose readings may
+   * name keys its declaration does not (`declaresEveryChannel` unset), one this build does not
+   * register, and one that throws for the stored parameters. So `false` is "not known to be
+   * retired", never "being read".
+   */
+  readonly retired: boolean;
 }
+
+/** A channel as its row holds it: everything but what is derived on read. */
+export type StoredChannelRecord = Omit<ChannelRecord, 'retired'>;
 
 /** No secret, no key id, no length, no hash. There is no field a secret could occupy. */
 export interface CredentialView {

@@ -82,6 +82,10 @@ export const mailSmtp: SensorType = {
     },
   },
 
+  // Every reading is keyed by a channel `channels(params)` names for the same parameters, so one
+  // an edit no longer names is retired (`P-310`).
+  declaresEveryChannel: true,
+
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[] {
     const posts = typeof params['to'] === 'string' && params['to'].trim() !== '';
     return [

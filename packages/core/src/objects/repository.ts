@@ -10,7 +10,6 @@ import { ObjectError, notFound } from './errors.js';
 import type {
   CarriedGrants,
   ChannelProcessing,
-  ChannelRecord,
   CloneCounts,
   CountsByKind,
   CreateObjectInput,
@@ -26,6 +25,7 @@ import type {
   PageRequest,
   Precondition,
   Priority,
+  StoredChannelRecord,
   SubtreeCounts,
   SubtreeOptions,
   SubtreeResult,
@@ -1038,7 +1038,7 @@ export class ObjectRepository {
     return written + (await write(ordered.filter((id) => !unseen.has(id))));
   }
 
-  async channels(q: Queryable, sensorId: ObjectId): Promise<ChannelRecord[]> {
+  async channels(q: Queryable, sensorId: ObjectId): Promise<StoredChannelRecord[]> {
     const rows = await q.query<{
       id: number;
       sensor_id: string;
@@ -1083,7 +1083,11 @@ export class ObjectRepository {
   }
 
   /** One channel by the key its sensor type gave it, or null. */
-  async channel(q: Queryable, sensorId: ObjectId, key: string): Promise<ChannelRecord | null> {
+  async channel(
+    q: Queryable,
+    sensorId: ObjectId,
+    key: string,
+  ): Promise<StoredChannelRecord | null> {
     const all = await this.channels(q, sensorId);
     return all.find((channel) => channel.key === key) ?? null;
   }

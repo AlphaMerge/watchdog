@@ -528,6 +528,19 @@ export interface SensorType {
    * a channel `{}` names, and at `channelsFor` on one only real parameters produce.
    */
   readonly fixedChannels?: boolean;
+  /**
+   * Every key `execute` reports is one `channels(params)` declares for the parameters it ran
+   * with (`P-310`). So a sensor's channel whose key its stored parameters do not declare is one
+   * nothing will read again: an edit took it out (a table column removed), and the core shows it
+   * as **retired**, its row and history kept.
+   *
+   * **Set it only if it is true of every reading, on every path through `execute`.** A type whose
+   * keys come from what it ran (a script's output, a query's columns) does not declare every
+   * key, and with this set each channel it reports beyond its declaration would be shown retired
+   * while it is still being read. Absent, nothing of the type is ever called retired: the core
+   * cannot tell a retired channel from one the readings named.
+   */
+  readonly declaresEveryChannel?: boolean;
   execute(context: CheckContext): Promise<CheckExecution>;
   /**
    * A dry run against a pasted document (`U-13`), for types with a mapping language.
