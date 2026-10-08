@@ -412,6 +412,25 @@ interface ProbeSession {
   approved: boolean;
   /** The branch this probe owns, or null while its GID is unclaimed (R-01 enrols it). */
   probeObjectId: number | null;
+  /**
+   * Settles once it is decided who this session is, or that it never will be (`P-307` review):
+   * `identified` after the handshake's lookup of its probe object (whatever it found), or at once
+   * where there is no lookup to make; `unapproved` when the admission said pending; `gone` when the
+   * connection closed, or was refused, first. The first to settle it wins.
+   *
+   * **What a message that names its sender waits for**, rather than its place in `pending`. With
+   * a registry, `pending` starts as the admission, and a message that arrives during it is chained
+   * straight behind that, before the configuration push (and its lookup) that the admission queues
+   * at its end; so its place in the chain said only that admission was over, and a batch or an
+   * answer was judged as from no probe at all.
+   */
+  known: Promise<SessionKnown>;
+  settleKnown: (how: SessionKnown) => void;
+  /**
+   * The handshake's lookup found no branch, so the configuration push that follows it does not
+   * look again (and say so again); any later push does, since enrolment may have come since.
+   */
+  lookedUpUnclaimed: boolean;
   /** The last health report this probe sent, or undefined if it has sent none (`P-13`). */
   health?: ProbeHealthReport;
   /** The first this session, kept for Probe Health's baselines (`P-284` review). */
@@ -476,6 +495,9 @@ interface ProbeSession {
    */
   clockOffset: RecentMinimum;
 }
+
+/** How far it has been decided who a session is (`ProbeSession.known`). */
+type SessionKnown = 'identified' | 'unapproved' | 'gone';
 
 /** How long a probe's clock offset is the smallest of (`P-232`). */
 export const CLOCK_OFFSET_WINDOW_MS = 5 * 60_000;
@@ -1090,8 +1112,11 @@ export class ProbeEndpoint {
   }
 
   /**
-   * An answer from a session that has not yet said who it is, handed over behind `pending` once
-   * it has (`P-307`), as a batch is and as `P-300`'s review counted a late unfit answer.
+   * An answer from a session that has not yet said who it is, handed over once `known` says it
+   * has (`P-307`), as a batch is and as `P-300`'s review counted a late unfit answer. Its review:
+   * `known` rather than a place in `pending`, which with a registry put an answer that came
+   * during the admission ahead of the lookup; and an answer on a connection that closed before
+   * the lookup is handed over to nobody, rather than as from no probe.
    *
    * **Taken at arrival, it was judged against a probe nobody had looked up.** A session's probe
    * object is resolved after the welcome, so an answer then came as from no probe: one to a query
@@ -1116,7 +1141,18 @@ export class ProbeEndpoint {
     session: ProbeSession,
   ): void {
     if (this.#options.queries === undefined) return;
-    session.pending = session.pending.then(() => {
+    // On `known` and not behind `pending`: nothing orders an answer after a batch, and a caller is
+    // waiting on it. Not on `pending`'s place either, which with a registry says only that the
+    // admission is over, not that the lookup is (`P-307` review).
+    void session.known.then((known) => {
+      if (known === 'gone') {
+        logger.info(
+          { queryId: message.queryId },
+          'an answer to a query arrived on a connection that closed before it was known which ' +
+            'probe sent it; not delivered and not counted',
+        );
+        return;
+      }
       if (!session.approved) {
         logger.warn(
           { queryId: message.queryId, ...(unfit === undefined ? {} : { unfit }) },
@@ -1134,6 +1170,95 @@ export class ProbeEndpoint {
         );
       }
     });
+  }
+
+  /**
+   * The handshake's lookup of which probe object this session is, made at once rather than in
+   * `pending`, and settling `known` when it is done (`P-307` review).
+   *
+   * **Not in `pending`, because what waits for it is.** A results batch or a query's answer that
+   * arrives during the admission is chained behind it and waits on `known`; a lookup chained
+   * after them would wait for them in turn. Made only where the configuration push would make it
+   * (an approved session, a configuration source, a probe that can be sent one); anywhere else
+   * there is nothing to learn, and `known` settles at once, with no probe object, as before. A
+   * lookup that fails is logged, and settles it all the same: what waits is then judged as from
+   * no probe, as it was before, and the next push looks again.
+   */
+  #identify(session: ProbeSession, logger: Logger, presented: string): void {
+    const source = this.#options.probeConfig;
+    if (
+      source === undefined ||
+      !session.approved ||
+      !capabilitiesFor(session.protocolVersion).configPush
+    ) {
+      session.settleKnown('identified');
+      return;
+    }
+    void (async () => {
+      try {
+        await this.#lookUp(source, session, logger, presented);
+        if (session.probeObjectId === null) session.lookedUpUnclaimed = true;
+      } catch (error: unknown) {
+        logger.error(
+          describeError(error),
+          'could not look up which probe object this probe is; what it sent meanwhile is taken ' +
+            'as from none, and the next configuration push looks again',
+        );
+      }
+      session.settleKnown('identified');
+    })();
+  }
+
+  /** Which probe object this session's GID claims, and what follows from its claiming one. */
+  async #lookUp(
+    source: ProbeConfigSource,
+    session: ProbeSession,
+    logger: Logger,
+    presented: string | undefined,
+  ): Promise<void> {
+    session.probeObjectId = await source.probeObjectFor(session.info.gid);
+    if (session.probeObjectId !== null) {
+      // Best-effort, and its own catch (`P-80`). `touch` is one `UPDATE ... last_seen_at`
+      // documented as unable to fail a handshake, but a rejection landed in the outer catch
+      // — skipping `found()` below. Because the guard that re-runs this block is
+      // `probeObjectId === null` and the field is already set, `found()` would never be
+      // called again for the life of the session: the probe's sensors stayed Unknown with
+      // reason 'link' while it delivered normally, every arriving result re-decided against
+      // an overlay saying its probe was unreachable. The delivery sweep cannot rescue that
+      // either — it reads `marked === 'link'` and correctly leaves `R-05`'s probes alone.
+      try {
+        await source.touch(session.probeObjectId);
+      } catch (error: unknown) {
+        logger.warn(
+          { probeObjectId: session.probeObjectId, ...describeError(error) },
+          'could not record this probe’s last-seen time; continuing',
+        );
+      }
+      logger.info({ probeObjectId: session.probeObjectId }, 'probe claimed a branch');
+      // Its sensors go back to their last reading (`R-05`). Here rather than at the
+      // handshake, because this is the moment the *branch* is known — a session without
+      // one was never carrying sensors, so there is nothing to bring back.
+      const reachability = this.#options.reachability;
+      if (reachability !== undefined) {
+        void reachability.found(session.probeObjectId).catch((error: unknown) => {
+          logger.error(describeError(error), 'could not restore this probe’s sensors');
+        });
+      }
+      // `linkFor` answers `connected` for this probe from the assignment above (`U-24`).
+      this.#options.links?.changed(session.probeObjectId);
+      // A probe that has just claimed its branch may have a sweep waiting, and a
+      // reconnecting one almost certainly does — a run left `queued` by the disconnect
+      // below. Offering it here rather than on a timer is what makes a resume immediate.
+      this.#offerSweep(session.probeObjectId, logger);
+    } else if (presented !== undefined) {
+      // Not an error: an unenrolled probe is the ordinary state of a freshly installed
+      // one. Saying so once at the handshake beats silence, which a probe cannot tell
+      // apart from a core that never answered.
+      logger.info(
+        { gid: session.info.gid },
+        'no probe object claims this GID; sending an empty configuration',
+      );
+    }
   }
 
   #queueResults(
@@ -1164,7 +1289,20 @@ export class ProbeEndpoint {
     }
 
     session.pending = session.pending.then(async () => {
-      // Chained behind the admission, so this reads the settled answer rather than racing it.
+      // **Once it is known who sent it, not merely once the admission is over** (`P-307`
+      // review). With a registry, a batch that arrived during the admission is chained straight
+      // behind it, ahead of the lookup of its probe object, and was judged as from no probe:
+      // every result refused as another's and dropped, and its unfit ones counted on the totals
+      // and not on the probe's Reports refused. A connection that closed first is answered by
+      // nobody and judged by nothing; the probe sends the batch again on its next one.
+      if ((await session.known) === 'gone') {
+        logger.info(
+          { batchId: message.batchId },
+          'results arrived on a connection that closed before it was known which probe sent ' +
+            'them; not stored and not counted, and the probe will send them again',
+        );
+        return;
+      }
       // An unapproved probe has no assignments and so nothing to report — this is defence in
       // depth rather than an expected path, and `invalid` because retrying will not help: what
       // the probe needs is a person, not a longer backoff.
@@ -1185,8 +1323,8 @@ export class ProbeEndpoint {
         const origin = { gid: session.info.gid, probeObjectId: session.probeObjectId };
         const reply = await receiver.acceptProbeResults(origin, message);
         // **Counted with the batch's acknowledgement, and only then** (`P-281` review): here the
-        // session has resolved its probe object, which the batch waited for behind `pending`,
-        // and a batch refused back is sent again and would be counted again.
+        // session has resolved its probe object, which the batch waited for on `known`, and a
+        // batch refused back is sent again and would be counted again.
         const unfit = this.#unfit.get(message);
         if (unfit !== undefined && reply.type === 'results-ack') {
           if (receiver.unfitResults === undefined) {
@@ -1277,6 +1415,7 @@ export class ProbeEndpoint {
         { gid, displayName: hello.displayName, assignedIdentity: hello.gid === '' },
         'probe connected',
       );
+      this.#identify(session, logger, hello.configVersion ?? '');
       this.#queueConfig(session, logger, hello.configVersion ?? '');
       return session;
     }
@@ -1304,11 +1443,13 @@ export class ProbeEndpoint {
         // is the right behaviour for a core whose database is briefly unreachable.
         logger.error(describeError(error), 'the probe registry could not be asked');
         reject('internal-error', 'this core cannot check probe registrations right now');
+        session.settleKnown('gone');
         return;
       }
 
       if (decision.kind === 'refused') {
         reject(decision.code, decision.detail);
+        session.settleKnown('gone');
         return;
       }
 
@@ -1325,6 +1466,10 @@ export class ProbeEndpoint {
       // broken permanently for that probe.
       if (connection.closed) {
         logger.info({ gid: decision.gid }, 'the probe disconnected while it was being admitted');
+        // Already settled by the close; said here too, because `approved` is set above, and a
+        // message held for this session must not go on to be judged as from no probe (`P-307`
+        // review).
+        session.settleKnown('gone');
         return;
       }
 
@@ -1365,7 +1510,12 @@ export class ProbeEndpoint {
 
       // **An unapproved probe is sent nothing**, which is the whole of what approval means
       // here: it holds an identity and a heartbeat and no work at all.
-      if (session.approved) this.#queueConfig(session, logger, hello.configVersion ?? '');
+      if (session.approved) {
+        this.#identify(session, logger, hello.configVersion ?? '');
+        this.#queueConfig(session, logger, hello.configVersion ?? '');
+      } else {
+        session.settleKnown('unapproved');
+      }
     })();
 
     return session;
@@ -1445,6 +1595,10 @@ export class ProbeEndpoint {
     context: { remoteAddress: string },
     approved: boolean,
   ): ProbeSession {
+    let settleKnown: (how: SessionKnown) => void = () => undefined;
+    const known = new Promise<SessionKnown>((resolve) => {
+      settleKnown = resolve;
+    });
     const session: ProbeSession = {
       connection,
       info: {
@@ -1465,6 +1619,9 @@ export class ProbeEndpoint {
       advertisedVersion: hello.protocolVersion,
       approved,
       probeObjectId: null,
+      known,
+      settleKnown,
+      lookedUpUnclaimed: false,
       sentVersion: null,
       sentSensors: [],
       configAcksOutstanding: 0,
@@ -1563,54 +1720,17 @@ export class ProbeEndpoint {
     }
 
     session.pending = session.pending.then(async () => {
+      // After the handshake's lookup, which settles `known` and is not in this chain: a message
+      // chained ahead of this link may be waiting for it (`P-307` review).
+      if ((await session.known) === 'gone') return;
       try {
         // Re-resolved while unclaimed, because enrolment happens *after* a probe connects
         // (R-01): a session that found no branch at the handshake is exactly the one that might
-        // have been given one since. Once claimed, it is not looked up again.
+        // have been given one since. Once claimed, it is not looked up again. The handshake's own
+        // lookup has just been made, so the push that follows it does not make it again.
         if (session.probeObjectId === null) {
-          session.probeObjectId = await source.probeObjectFor(session.info.gid);
-          if (session.probeObjectId !== null) {
-            // Best-effort, and its own catch (`P-80`). `touch` is one `UPDATE ... last_seen_at`
-            // documented as unable to fail a handshake, but a rejection landed in the outer catch
-            // — skipping `found()` below. Because the guard that re-runs this block is
-            // `probeObjectId === null` and the field is already set, `found()` would never be
-            // called again for the life of the session: the probe's sensors stayed Unknown with
-            // reason 'link' while it delivered normally, every arriving result re-decided against
-            // an overlay saying its probe was unreachable. The delivery sweep cannot rescue that
-            // either — it reads `marked === 'link'` and correctly leaves `R-05`'s probes alone.
-            try {
-              await source.touch(session.probeObjectId);
-            } catch (error: unknown) {
-              logger.warn(
-                { probeObjectId: session.probeObjectId, ...describeError(error) },
-                'could not record this probe’s last-seen time; continuing',
-              );
-            }
-            logger.info({ probeObjectId: session.probeObjectId }, 'probe claimed a branch');
-            // Its sensors go back to their last reading (`R-05`). Here rather than at the
-            // handshake, because this is the moment the *branch* is known — a session without
-            // one was never carrying sensors, so there is nothing to bring back.
-            const reachability = this.#options.reachability;
-            if (reachability !== undefined) {
-              void reachability.found(session.probeObjectId).catch((error: unknown) => {
-                logger.error(describeError(error), 'could not restore this probe’s sensors');
-              });
-            }
-            // `linkFor` answers `connected` for this probe from the assignment above (`U-24`).
-            this.#options.links?.changed(session.probeObjectId);
-            // A probe that has just claimed its branch may have a sweep waiting, and a
-            // reconnecting one almost certainly does — a run left `queued` by the disconnect
-            // below. Offering it here rather than on a timer is what makes a resume immediate.
-            this.#offerSweep(session.probeObjectId, logger);
-          } else if (presented !== undefined) {
-            // Not an error: an unenrolled probe is the ordinary state of a freshly installed
-            // one. Saying so once at the handshake beats silence, which a probe cannot tell
-            // apart from a core that never answered.
-            logger.info(
-              { gid: session.info.gid },
-              'no probe object claims this GID; sending an empty configuration',
-            );
-          }
+          if (session.lookedUpUnclaimed) session.lookedUpUnclaimed = false;
+          else await this.#lookUp(source, session, logger, presented);
         }
 
         const assignments =
@@ -1883,6 +2003,9 @@ export class ProbeEndpoint {
   }
 
   #handleClose(close: ConnectionClose, session: ProbeSession | undefined, logger: Logger): void {
+    // Whatever waits to learn who this session is learns that it never will (`P-307` review). A
+    // lookup already done has settled it, and stands.
+    session?.settleKnown('gone');
     if (session !== undefined && this.#sessions.get(session.info.gid) === session) {
       this.#sessions.delete(session.info.gid);
     }

@@ -14,6 +14,7 @@ import {
   RESULT_LIMITS,
   type CoreToProbeMessage,
   type IngestionConfig,
+  type Logger,
   type ProbeQuery,
 } from '@ms/shared';
 import type { Database } from '../src/db/pool.js';
@@ -248,6 +249,8 @@ describe(
         queries?: ProbeQueryService;
         /** Who is let in; absent, every probe is. */
         registry?: ProbeAdmission;
+        /** Where the endpoint logs; absent, nowhere. */
+        logger?: Logger;
       } = {},
     ): Promise<{ endpoint: ProbeEndpoint; port: number }> {
       assert.ok(dir !== undefined);
@@ -264,7 +267,7 @@ describe(
           handshakeTimeoutMs: 5_000,
           heartbeatIntervalMs: 60_000,
         },
-        logger: silent,
+        logger: options.logger ?? silent,
         coreVersion: '9.9.9',
         results: options.results ?? ingestion,
         ...(options.queries === undefined ? {} : { queries: options.queries }),
@@ -1191,6 +1194,243 @@ describe(
             'the callers to be settled',
             Promise.all([mine.settled, another.settled]),
           );
+          await started.endpoint.stop();
+        }
+      });
+
+      /**
+       * A registry whose answer waits until the test lets it go, and says when it was asked: what
+       * `main.ts` always has, and the path on which `pending` starts as the admission.
+       */
+      function heldRegistry(gid: string): {
+        registry: ProbeAdmission;
+        asked: Promise<void>;
+        release: () => void;
+      } {
+        const gate = { release: (): void => undefined, asked: (): void => undefined };
+        const released = new Promise<void>((resolve) => {
+          gate.release = resolve;
+        });
+        const asked = new Promise<void>((resolve) => {
+          gate.asked = resolve;
+        });
+        return {
+          registry: {
+            admit: async () => {
+              gate.asked();
+              await released;
+              return { kind: 'approved' as const, gid, objectId: probeId };
+            },
+          },
+          asked,
+          release: () => {
+            gate.release();
+          },
+        };
+      }
+
+      // `P-307` review: with a registry, `pending` starts as the admission, and a message that
+      // arrives during it is chained straight behind it, ahead of the lookup the admission queues
+      // at its end. Gated on `pending`'s place, an answer and a batch were judged as from no probe.
+      it('judges what arrives during the admission as from the probe the lookup finds', async () => {
+        const held = heldRegistry('registered');
+        // And the lookup after it, so what is held is seen to wait for the lookup and not only
+        // for the admission: the end of the admission is what `pending` said.
+        const lookup = { open: (): void => undefined };
+        const looked = new Promise<void>((resolve) => {
+          lookup.open = resolve;
+        });
+        const { queries, asked } = awaiting();
+        const started = await startEndpoint({
+          queries,
+          registry: held.registry,
+          probeObjectFor: async () => {
+            await looked;
+            return probeId;
+          },
+        });
+        const mine = ask(queries, probeId);
+        const another = ask(queries, probeId + 1_000_000);
+        try {
+          assert.ok(dir !== undefined);
+          const [mineId, anotherId] = asked as [string, string];
+          const probe = await RawPeer.connect(dir, started.port);
+          try {
+            probe.send({
+              type: 'hello',
+              protocolVersion: PROTOCOL_VERSION,
+              gid: 'registered',
+              displayName: 'Registered',
+              agentVersion: '1.0.0-rc.2',
+              accessKey: '',
+            });
+            await within(10_000, 'the registry to be asked', held.asked);
+            const refusedBefore = refusals.countsFor(probeId).refused;
+            const foreignBefore = refusals.countsFor(probeId).foreignRecently;
+            const totals = refusals.stats();
+            const stored = await samplesOf(sensors[4] ?? 0);
+            // All of it before the welcome, while the registry has not answered.
+            probe.send({ type: 'query-result', queryId: mineId, result: good(sensors[4] ?? 0, 7) });
+            probe.send({
+              type: 'query-result',
+              queryId: anotherId,
+              result: good(sensors[4] ?? 0, 8),
+            });
+            probe.send({
+              type: 'query-result',
+              queryId: 'asked-of-the-last-connection',
+              result: { ...good(sensors[1] ?? 0, 1), outcome: 'maybe' },
+            });
+            probe.send({
+              type: 'results',
+              batchId: 'during-admission',
+              sentAt: at(),
+              results: [
+                good(sensors[4] ?? 0, 4),
+                { ...good(sensors[1] ?? 0, 5), outcome: 'maybe' },
+              ],
+            });
+            // Answered at once, behind nothing: everything above has been taken once it is here.
+            probe.send({ type: 'heartbeat', seq: 1, sentAt: at() });
+            await probe.waitFor('the heartbeat’s ack', (m) =>
+              m.type === 'heartbeat-ack' ? m : undefined,
+            );
+            assert.ok(!probe.received.some((m) => m.type === 'welcome'), 'still being admitted');
+            assert.deepEqual(refusals.stats(), totals, 'nothing judged yet');
+            assert.equal(queries.stats().answered, 0);
+            assert.equal(mine.told(), undefined);
+
+            held.release();
+            await probe.waitFor('the welcome', (m) => (m.type === 'welcome' ? m : undefined));
+            probe.send({ type: 'heartbeat', seq: 2, sentAt: at() });
+            await probe.waitFor('the second heartbeat’s ack', (m) =>
+              m.type === 'heartbeat-ack' && m.seq === 2 ? m : undefined,
+            );
+            // Admitted, and the probe not yet looked up: still nothing judged.
+            assert.equal(probe.received.find(answerTo('during-admission')), undefined);
+            assert.deepEqual(refusals.stats(), totals, 'nothing judged before the lookup');
+            assert.equal(mine.told(), undefined);
+
+            lookup.open();
+            const answer = await probe.waitFor(
+              'the answer to the batch',
+              answerTo('during-admission'),
+            );
+            assert.equal(answer.type, 'results-ack', JSON.stringify(answer));
+
+            const told = await within(10_000, 'the asked probe’s answer', mine.settled);
+            if (told.kind !== 'ok') assert.fail(JSON.stringify(told));
+            assert.equal(told.result.channels[0]?.value, 7);
+            // The batch's good result was this probe's to report, so it is stored; judged as from
+            // no probe, it was refused as another's and dropped.
+            assert.equal(await samplesOf(sensors[4] ?? 0), stored + 1);
+            // Its unfit result, the late unfit answer and the answer to another probe's query, on
+            // this probe's Reports refused (a foreign one is counted as refused as well).
+            assert.equal(refusals.countsFor(probeId).refused, refusedBefore + 3);
+            assert.equal(refusals.stats().refused, totals.refused + 3, 'and nowhere else');
+            // That answer, on this probe's Reports foreign.
+            assert.equal(refusals.countsFor(probeId).foreignRecently, foreignBefore + 1);
+            assert.equal(refusals.stats().foreign, totals.foreign + 1);
+            assert.equal(queries.stats().foreign, 1);
+            assert.equal(queries.stats().unfit, 1);
+            assert.equal(
+              another.told(),
+              undefined,
+              'its caller still waits for the probe it asked',
+            );
+          } finally {
+            probe.close();
+          }
+        } finally {
+          held.release();
+          lookup.open();
+          queries.stop();
+          await within(
+            10_000,
+            'the callers to be settled',
+            Promise.all([mine.settled, another.settled]),
+          );
+          await started.endpoint.stop();
+        }
+      });
+
+      it('judges nothing that arrived on a connection that closed during the admission', async () => {
+        const held = heldRegistry('vanishing');
+        const lines: string[] = [];
+        const { queries, asked } = awaiting();
+        const started = await startEndpoint({
+          queries,
+          registry: held.registry,
+          logger: pino(
+            { level: 'info', base: null },
+            { write: (line: string) => lines.push(line) },
+          ),
+        });
+        // Polled a bounded number of times, so a line never written fails the test and leaves
+        // nothing running after it.
+        const logged = async (text: string): Promise<void> => {
+          for (let tries = 0; tries < 2_000; tries += 1) {
+            if (lines.some((line) => line.includes(text))) return;
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          assert.fail(`never logged "${text}"; logged ${lines.join('')}`);
+        };
+        const another = ask(queries, probeId + 1_000_000);
+        try {
+          assert.ok(dir !== undefined);
+          const [anotherId] = asked as [string];
+          const probe = await RawPeer.connect(dir, started.port);
+          const totals = refusals.stats();
+          const stored = await samplesOf(sensors[4] ?? 0);
+          probe.send({
+            type: 'hello',
+            protocolVersion: PROTOCOL_VERSION,
+            gid: 'vanishing',
+            displayName: 'Vanishing',
+            agentVersion: '1.0.0-rc.2',
+            accessKey: '',
+          });
+          await within(10_000, 'the registry to be asked', held.asked);
+          probe.send({
+            type: 'query-result',
+            queryId: anotherId,
+            result: good(sensors[4] ?? 0, 8),
+          });
+          probe.send({
+            type: 'query-result',
+            queryId: 'asked-of-the-last-connection',
+            result: { ...good(sensors[1] ?? 0, 1), outcome: 'maybe' },
+          });
+          probe.send({
+            type: 'results',
+            batchId: 'never-acked',
+            sentAt: at(),
+            results: [good(sensors[4] ?? 0, 4), { ...good(sensors[1] ?? 0, 5), outcome: 'maybe' }],
+          });
+          probe.send({ type: 'heartbeat', seq: 1, sentAt: at() });
+          await probe.waitFor('the heartbeat’s ack', (m) =>
+            m.type === 'heartbeat-ack' ? m : undefined,
+          );
+          probe.close();
+          await probe.closed('the connection to close');
+          // The core's side, which hears of it later than the peer's: released before this, the
+          // admission found the connection still open and went on to look the probe up.
+          await logged('probe connection closed');
+          held.release();
+          // The admission sees the close and ends; `approved` is set by then, and nothing held
+          // may go on as from no probe.
+          await logged('the probe disconnected while it was being admitted');
+          await logged('results arrived on a connection that closed before');
+          await logged('an answer to a query arrived on a connection that closed before');
+          assert.deepEqual(refusals.stats(), totals, 'nothing counted, as from nobody or anyone');
+          assert.equal(queries.stats().foreign, 0);
+          assert.equal(queries.stats().unfit, 0);
+          assert.equal(another.told(), undefined);
+          assert.equal(await samplesOf(sensors[4] ?? 0), stored, 'and nothing stored');
+        } finally {
+          held.release();
+          queries.stop();
+          await within(10_000, 'the caller to be settled', another.settled);
           await started.endpoint.stop();
         }
       });

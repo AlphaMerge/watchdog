@@ -11290,6 +11290,38 @@ because each is a decision rather than a defect:
       - **Mutations** (restored byte for byte, `dist` rebuilt): handing every answer straight
         through fails both new tests and `P-300`'s two; dropping the approved check fails the
         two unapproved tests.
+      - **Amended on review** (a second commit). **With a registry, the production path, the
+        gate was a place in `pending` that said only that admission was over.** There `pending`
+        starts as the admission, and a message that came during it was chained straight behind
+        it, ahead of the configuration push (and its lookup) the admission queues at its end; so
+        an answer, a late unfit answer and a results batch (`P-281`'s count too, and the batch's
+        results with it: refused as another probe's and dropped) were judged as from no probe.
+        The test passed only because it ran without a registry and answered after the welcome.
+        And `approved` is set before the admission's closed-socket return, so held work could go
+        on as from no probe after a close. Now a session has a `known` promise, settled once:
+        `identified` when the handshake's lookup of its probe object is done (whatever it found,
+        or at once where there is none to make: no configuration source, a probe too old for a
+        push), `unapproved` when the admission says pending, `gone` when the connection closed
+        or was refused first. The handshake's lookup (`#identify`, which uses the lookup the push
+        made, now `#lookUp`) is made at once rather than in `pending`, since what waits for it is
+        in `pending`; the push after it does not look again, a later one still does. Results
+        wait on `known` in their place in `pending` (order kept); answers wait on `known` alone,
+        not behind batches. `gone` hands nothing over and counts nothing, and says so in the log;
+        a batch on a connection that closed is sent again by the probe on its next. A lookup
+        that fails settles `identified` with no probe object, as before, and is logged.
+        **Tests** (`unfit-results.test.ts`, a registry whose `admit` is held, and the lookup held
+        after it): an awaited answer, an answer to another probe's query, a late unfit answer and
+        a batch with a good and an unfit result, all sent before the welcome; nothing judged
+        while admitted and not yet looked up; then the asked caller has its answer, the batch's
+        good result is stored, and that probe's Reports refused is +3 (the two unfit and the
+        foreign one) and Reports foreign +1, the totals by the same. A connection closed during
+        the admission (released once the core has heard the close): nothing counted, stored or
+        settled, and each held thing logged as not judged. **Mutations** (restored byte for
+        byte, `dist` rebuilt): results not waiting on `known` fails both (the batch acked with
+        nothing stored); answers gated on `pending` again fails both; a close settling
+        `identified` fails the close test (on its log; the counts held, since `approved` was
+        still false when it closed); settling `known` before the lookup fails three: `P-300`'s
+        held-lookup test, the first `P-307` test and the admission test.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
