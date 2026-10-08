@@ -1,10 +1,12 @@
-import { MIN_SCRUBBED_LENGTH, SCRUBBED, scrubSecrets } from '@ms/shared';
+import { encodedForms, MIN_SCRUBBED_LENGTH, SCRUBBED, scrubSecrets } from '@ms/shared';
 import { credentialKind, secretFields } from '../credentials/index.js';
 import { authorizationFor } from './http/auth.js';
 
 // The scrubber itself lives in `@ms/shared` since `A-44`, where a notification program's output
-// is scrubbed by the same code. Re-exported, so every type that imports it from here is unchanged.
-export { MIN_SCRUBBED_LENGTH, SCRUBBED, scrubSecrets };
+// is scrubbed by the same code, and `encodedForms` since `P-305`'s review, where the core cuts a
+// stored secret out of a sensor type's error. Re-exported, so everything that imports them from
+// here is unchanged.
+export { encodedForms, MIN_SCRUBBED_LENGTH, SCRUBBED, scrubSecrets };
 
 /**
  * Keeping a check's secrets out of what it says (`S-19`).
@@ -81,38 +83,6 @@ export function secretsOfCheck(
     }
   }
   return [...out];
-}
-
-/**
- * A secret, and the forms a server echoes a request back in (`A-42`).
- *
- * A server that logs or reflects what it was sent does so encoded as the request carried it: a
- * query string percent-encoded, a form body with `+` for a space, a header in base64, a page
- * HTML-escaped, a JSON reply with its quotes escaped. Each is the secret, as readable to anybody
- * who decodes it as the secret is to anybody at all. The forms that are the secret unchanged
- * collapse into it.
- */
-export function encodedForms(secret: string): string[] {
-  const uri = encodeURIComponent(secret);
-  const base64 = Buffer.from(secret, 'utf8').toString('base64');
-  return [
-    ...new Set([
-      secret,
-      uri,
-      uri.replace(/%[0-9A-F]{2}/g, (hex) => hex.toLowerCase()),
-      uri.replace(/%20/g, '+'),
-      base64,
-      base64.replace(/=+$/, ''),
-      Buffer.from(secret, 'utf8').toString('base64url'),
-      secret
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;'),
-      JSON.stringify(secret).slice(1, -1),
-    ]),
-  ];
 }
 
 function valueAt(source: Readonly<Record<string, unknown>>, segments: readonly string[]): unknown {

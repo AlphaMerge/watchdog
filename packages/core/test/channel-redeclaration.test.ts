@@ -1,7 +1,9 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { BUILT_IN_SENSOR_TYPES, type SensorType } from '@ms/sensors';
+import type { CheckResult } from '@ms/shared';
 import { ApiServer } from '../src/api/server.js';
 import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from '../src/audit/store.js';
 import type { Database } from '../src/db/pool.js';
@@ -9,6 +11,7 @@ import { ChannelResolver } from '../src/ingestion/channels.js';
 import { ResultCacheInvalidator } from '../src/ingestion/invalidation.js';
 import { planRedeclaration, type StoredChannel } from '../src/objects/redeclare.js';
 import type { ChannelDraft } from '../src/objects/sensor-type-gate.js';
+import { declaredChannelLookup } from '../src/state/declared-limits.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import {
   createScratchDatabase,
@@ -17,6 +20,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { within } from './support/within.js';
 
 const available = await databaseAvailable();
 
@@ -427,6 +431,121 @@ describe(
 
       const second = await db.tx((q) => resolver.resolve(q, [reading]));
       assert.equal(second.ids.get(`${String(id)}:value`)?.lookupId, 'ms.test.other');
+    });
+
+    // ── an edit and a channel's first reading at once (`P-303` review) ─────────────────────────
+
+    /** A resolver that declares shapes, as `main.ts` builds it. */
+    const declaring = (): ChannelResolver =>
+      new ChannelResolver({
+        logger: silent,
+        declaredShape: declaredChannelLookup(testCatalogue(types)),
+      });
+
+    /** Until some session in this database waits on a lock: the other side is blocked. */
+    const somebodyWaits = (what: string): Promise<void> =>
+      within(
+        10_000,
+        what,
+        (async () => {
+          for (;;) {
+            const waiting = await db.query<{ n: number }>(
+              `SELECT count(*)::int AS n FROM pg_stat_activity
+               WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+            );
+            if ((waiting[0]?.n ?? 0) > 0) return;
+            await sleep(20);
+          }
+        })(),
+      );
+
+    /**
+     * A table sensor with a column `x` its parameters declare and no row yet — added by an edit,
+     * not yet reported — so `x` is ingestion's to create, with lookup `ms.test.old`.
+     */
+    const columnNotYetReported = async (): Promise<number> => {
+      const id = await create('test.columns', { columns: [{ key: 'first' }] });
+      await harness.service.update(
+        testActor,
+        id,
+        {
+          kind: 'sensor',
+          params: { columns: [{ key: 'first' }, { key: 'x', lookup: 'ms.test.old' }] },
+        },
+        { kind: 'none' },
+      );
+      assert.deepEqual(
+        (await rows(id)).map((row) => row.key),
+        ['first'],
+      );
+      return id;
+    };
+    const renewed = { columns: [{ key: 'first' }, { key: 'x', lookup: 'ms.test.new' }] };
+    const readingOfX = (id: number): CheckResult => ({
+      sensorId: id,
+      at: new Date('2026-10-08T11:00:00.000Z').toISOString(),
+      outcome: 'ok',
+      message: '',
+      durationMs: 1,
+      channels: [{ key: 'x', value: 1 }],
+    });
+
+    it('gives a channel first read during an edit the edit’s declaration, not the one it replaced', async () => {
+      // The edit has written the new parameters and looked for `x`'s row — there is none — and
+      // is held open before its commit. A first reading of `x` arrives. Read unlocked, its
+      // parameters were the old ones, the edit committed having seen no row, and `x` kept
+      // `ms.test.old` for good: the stored declaration then matched, so no edit looked again.
+      const id = await columnNotYetReported();
+      const ingesting = declaring();
+      const was = harness.audit.also;
+      let creating: Promise<unknown> | undefined;
+      harness.audit.also = {
+        record: async (_q, _actor, mutations) => {
+          if (!mutations.some((one) => one.action === 'object.updated')) return;
+          creating = db.tx((q) => ingesting.resolve(q, [readingOfX(id)]));
+          await somebodyWaits('the first reading of x waiting for the edit');
+        },
+      };
+      try {
+        await harness.service.update(
+          testActor,
+          id,
+          { kind: 'sensor', params: renewed },
+          { kind: 'none' },
+        );
+      } finally {
+        harness.audit.also = was;
+      }
+      assert.ok(creating !== undefined, 'the edit never reached its audit entry');
+      await within(10_000, 'the first reading of x', creating);
+
+      assert.equal(
+        (await rows(id)).find((row) => row.key === 'x')?.lookup_id,
+        'ms.test.new',
+        'the channel was created from the parameters the edit replaced',
+      );
+    });
+
+    it('re-declares a channel whose first reading committed while the edit waited', async () => {
+      // The other order: the reading holds its sensor while it creates `x`, the edit waits, and
+      // then finds the row and writes the new declaration over it.
+      const id = await columnNotYetReported();
+      const ingesting = declaring();
+      let editing: Promise<unknown> | undefined;
+      await db.tx(async (q) => {
+        await ingesting.resolve(q, [readingOfX(id)]);
+        editing = harness.service.update(
+          testActor,
+          id,
+          { kind: 'sensor', params: renewed },
+          { kind: 'none' },
+        );
+        await somebodyWaits('the edit waiting for the first reading of x');
+      });
+      assert.ok(editing !== undefined);
+      await within(10_000, 'the edit', editing);
+
+      assert.equal((await rows(id)).find((row) => row.key === 'x')?.lookup_id, 'ms.test.new');
     });
   },
 );

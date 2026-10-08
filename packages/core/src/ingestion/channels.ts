@@ -89,6 +89,23 @@ interface SensorDeclaring {
 
 const NO_SHAPE: ChannelShape = { lookup: null, counterBits: null };
 
+/** A `channel` row as the resolver reads it. */
+interface ChannelRow {
+  id: number;
+  sensor_id: string;
+  key: string;
+  name: string;
+  unit: string;
+  decimals: number | null;
+  limits: unknown;
+  lookup_id: string | null;
+  counter_bits: number | null;
+  scale_mul: string;
+  scale_div: string;
+  spike_min: number | null;
+  spike_max: number | null;
+}
+
 const DEFAULT_MAX_CACHED = 50_000;
 
 /**
@@ -275,67 +292,16 @@ export class ChannelResolver {
 
     const generation = this.#generation;
     const wanted = [...missing.values()];
-    const sensorIds = wanted.map((row) => row.sensorId);
-    const keys = wanted.map((row) => row.key);
-    // One query for both: the sensor's type carries the declaration, and its parameters choose
-    // the lookups and counters in it (`P-297`).
-    const sensors =
-      this.#declaredLimits === undefined && this.#declaredShape === undefined
-        ? new Map<string, SensorDeclaring>()
-        : await this.#sensorsFor(q, wanted);
-    const limits = this.#declaredFor(sensors, wanted);
-    const shapes = this.#shapesFor(sensors, wanted);
-
-    // Guarded by EXISTS rather than by the foreign key. A probe replaying a spool for a sensor
-    // that has since been deleted is ordinary, not exceptional, and letting the foreign key
-    // raise would fail the whole batch — including every other sensor's readings in it.
-    const created = await q.query<{ id: number }>(
-      `INSERT INTO channel (sensor_id, key, name, unit, lookup_id, counter_bits,
-                            limits, limits_source)
-       SELECT s.sensor_id, s.key, s.name, s.unit, s.lookup_id, s.counter_bits,
-              COALESCE(s.limits, '{}'::jsonb),
-              CASE WHEN s.limits IS NULL THEN 'unset' ELSE 'declared' END
-       FROM unnest($1::bigint[], $2::text[], $3::text[], $4::text[], $5::jsonb[],
-                   $6::text[], $7::smallint[])
-            AS s(sensor_id, key, name, unit, limits, lookup_id, counter_bits)
-       WHERE EXISTS (SELECT 1 FROM object o WHERE o.id = s.sensor_id AND o.kind = 'sensor')
-       ON CONFLICT (sensor_id, key) DO NOTHING
-       RETURNING id`,
-      [
-        sensorIds,
-        keys,
-        wanted.map((row) => row.name),
-        wanted.map((row) => row.unit),
-        limits,
-        shapes.map((shape) => shape.lookup),
-        shapes.map((shape) => shape.counterBits),
-      ],
-    );
-
-    // One lookup for the whole set: it picks up both what was just created and what already
-    // existed and therefore conflicted.
-    const found = await q.query<{
-      id: number;
-      sensor_id: string;
-      key: string;
-      name: string;
-      unit: string;
-      decimals: number | null;
-      limits: unknown;
-      lookup_id: string | null;
-      counter_bits: number | null;
-      scale_mul: string;
-      scale_div: string;
-      spike_min: number | null;
-      spike_max: number | null;
-    }>(
-      `SELECT c.id, c.sensor_id::text AS sensor_id, c.key, c.name, c.unit, c.decimals, c.limits,
-              c.lookup_id, c.counter_bits, c.scale_mul, c.scale_div, c.spike_min, c.spike_max
-       FROM channel c
-       JOIN unnest($1::bigint[], $2::text[]) AS w(sensor_id, key)
-         ON w.sensor_id = c.sensor_id AND w.key = c.key`,
-      [sensorIds, keys],
-    );
+    // What exists already, first: after a restart every channel is missing from the cache and
+    // nearly all of them are in the table, so a cold batch is this one query and nothing below.
+    const found = await this.#existing(q, wanted);
+    const have = new Set(found.map((row) => `${row.sensor_id}:${row.key}`));
+    const absent = wanted.filter((one) => !have.has(`${String(one.sensorId)}:${one.key}`));
+    let created = 0;
+    if (absent.length > 0) {
+      created = await this.#create(q, absent);
+      found.push(...(await this.#existing(q, absent)));
+    }
 
     for (const row of found) {
       const cacheKey = `${row.sensor_id}:${row.key}`;
@@ -371,10 +337,96 @@ export class ChannelResolver {
 
     return {
       ids,
-      created: created.length,
+      created,
       droppedReadings,
       droppedSensors: droppedSensors.size,
     };
+  }
+
+  /** The rows that exist for these `(sensor, key)` pairs, with everything judging needs. */
+  async #existing(
+    q: Queryable,
+    wanted: readonly { sensorId: number; key: string }[],
+  ): Promise<ChannelRow[]> {
+    return q.query<ChannelRow>(
+      `SELECT c.id, c.sensor_id::text AS sensor_id, c.key, c.name, c.unit, c.decimals, c.limits,
+              c.lookup_id, c.counter_bits, c.scale_mul, c.scale_div, c.spike_min, c.spike_max
+       FROM channel c
+       JOIN unnest($1::bigint[], $2::text[]) AS w(sensor_id, key)
+         ON w.sensor_id = c.sensor_id AND w.key = c.key`,
+      [wanted.map((row) => row.sensorId), wanted.map((row) => row.key)],
+    );
+  }
+
+  /**
+   * Creates the channels no row exists for, with what their sensors' types declare; returns how
+   * many it wrote.
+   *
+   * **The sensors are locked before their parameters are read** (`P-303` review). The shape comes
+   * from `sensor_config.params`, and an edit to those parameters re-declares the channels it can
+   * see, which a channel this path is creating is not, yet. Read unlocked, under READ COMMITTED,
+   * the parameters could be the ones the edit was replacing: the edit commits having seen no row,
+   * this INSERT commits the old lookup and counter width, and from then on the stored declaration
+   * matches the new parameters, so no later edit would look at the row again — `P-80`'s failure,
+   * for good. So each sensor's `object` row is taken `FOR NO KEY UPDATE` first, which an edit holds
+   * from its first statement (the versioned `UPDATE object`) to its commit. Whichever is first,
+   * the other waits: an edit after this sees the row and re-declares it; this after an edit reads,
+   * in a statement of its own and so a snapshot of its own, the parameters the edit committed.
+   *
+   * **The lock order is object, then `sensor_config`, then `channel`**, the edit's own: it writes
+   * `object`, then `sensor_config`, then `channel`, whose `channel_touch_owner` trigger touches
+   * `object` again, a row it already holds. The rows are taken in id order, so two batches over
+   * the same sensors cannot take them crosswise. And the mode is the one the INSERT below took
+   * anyway, through that trigger: this takes it a statement earlier rather than taking something
+   * new, and a share lock, which two batches could both hold and then both try to raise, is what
+   * it must not be. Paid only here, for a key no row exists for: a sensor's first reading, a key a
+   * build or an edit added.
+   */
+  async #create(
+    q: Queryable,
+    absent: readonly { sensorId: number; key: string; name: string; unit: string }[],
+  ): Promise<number> {
+    const declares = this.#declaredLimits !== undefined || this.#declaredShape !== undefined;
+    if (declares) {
+      await q.query(
+        `SELECT id FROM object WHERE id = ANY($1::bigint[]) ORDER BY id FOR NO KEY UPDATE`,
+        [[...new Set(absent.map((one) => one.sensorId))]],
+      );
+    }
+    // One query for both: the sensor's type carries the declaration, and its parameters choose
+    // the lookups and counters in it (`P-297`).
+    const sensors = declares
+      ? await this.#sensorsFor(q, absent)
+      : new Map<string, SensorDeclaring>();
+    const limits = this.#declaredFor(sensors, absent);
+    const shapes = this.#shapesFor(sensors, absent);
+
+    // Guarded by EXISTS rather than by the foreign key. A probe replaying a spool for a sensor
+    // that has since been deleted is ordinary, not exceptional, and letting the foreign key
+    // raise would fail the whole batch — including every other sensor's readings in it.
+    const created = await q.query<{ id: number }>(
+      `INSERT INTO channel (sensor_id, key, name, unit, lookup_id, counter_bits,
+                            limits, limits_source)
+       SELECT s.sensor_id, s.key, s.name, s.unit, s.lookup_id, s.counter_bits,
+              COALESCE(s.limits, '{}'::jsonb),
+              CASE WHEN s.limits IS NULL THEN 'unset' ELSE 'declared' END
+       FROM unnest($1::bigint[], $2::text[], $3::text[], $4::text[], $5::jsonb[],
+                   $6::text[], $7::smallint[])
+            AS s(sensor_id, key, name, unit, limits, lookup_id, counter_bits)
+       WHERE EXISTS (SELECT 1 FROM object o WHERE o.id = s.sensor_id AND o.kind = 'sensor')
+       ON CONFLICT (sensor_id, key) DO NOTHING
+       RETURNING id`,
+      [
+        absent.map((row) => row.sensorId),
+        absent.map((row) => row.key),
+        absent.map((row) => row.name),
+        absent.map((row) => row.unit),
+        limits,
+        shapes.map((shape) => shape.lookup),
+        shapes.map((shape) => shape.counterBits),
+      ],
+    );
+    return created.length;
   }
 
   /**

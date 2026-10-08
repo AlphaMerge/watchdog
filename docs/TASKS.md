@@ -11105,6 +11105,32 @@ because each is a decision rather than a defect:
         the column created first as primary); a removed column's channel is not marked retired;
         the edit form does not grey out `mode` for an existing sensor, it shows the 409. Listed as
         follow-ups.
+      - **Amended on review** (a second commit). **An edit racing a channel's first reading left
+        it the old declaration for good.** The edit re-declares only rows it can see, and a key
+        with no row was ingestion's; but `ChannelResolver` read `sensor_config.params` unlocked
+        under READ COMMITTED. It could read the parameters the edit was replacing, the edit could
+        commit without seeing a row, and the INSERT then commit the old lookup and counter width; after
+        that the stored declaration matched the new parameters, so later edits short-circuited, and
+        one fixing a counter/gauge mismatch was refused. `P-80` again.
+        - **The fix** (`ingestion/channels.ts`). `resolve` reads the rows that exist first, and
+          only for keys with none (`#create`) takes each sensor's `object` row `FOR NO KEY UPDATE`,
+          in id order, *before* reading its parameters in a statement of its own. An edit holds that
+          row from its first statement (the versioned `UPDATE object`) to its commit, so whichever
+          is first the other waits: ingestion after an edit reads the committed parameters, and an
+          edit after ingestion finds the row and re-declares it.
+        - **Lock order: `object`, then `sensor_config`, then `channel`**, on both sides: the edit
+          writes them in that order and `channel_touch_owner` touches `object` again, held. The
+          mode is the one the INSERT already took through that trigger, a statement earlier, not a
+          new one; a share lock was not used because two batches could both hold it and then both
+          raise it (a deadlock). Rows in id order, so two batches cannot take them crosswise.
+        - **Hot path.** Paid only for a key with no row. A cold cache after a restart is now one
+          query (the existing rows) where it was three (parameters, INSERT, SELECT).
+        - **Tests** (`channel-redeclaration.test.ts`). A column added by an edit and not yet
+          reported; a second edit changing its lookup, held open inside its transaction (its audit
+          sink) between the parameters' UPDATE and the commit until a first reading of the column
+          is seen waiting on a lock; the row then has the new lookup. And the other order: the
+          reading's transaction held open, the edit waiting, the row re-declared. Mutations: no
+          lock, and the parameters read before the lock, each fail the first.
 
 - [x] **P-304 — a tree create asks for channels with the raw parameters** · XS · P-296 · Found
       2026-10-08 in `P-296`. `createTree` (`service.ts`, about line 2100) passes
@@ -11157,6 +11183,23 @@ because each is a decision rather than a defect:
         unregistered type, and logging nothing. The test that held a `RangeError` to a 500 is
         replaced. Mutations: rethrowing anything but `SensorTypeError` fails 4; the unscrubbed
         message fails 4.
+      - **Amended on review** (a second commit). **A secret went only as spelled.** A type
+        throwing `cannot build ${JSON.stringify(params)}`, or quoting a URL or a header it built,
+        handed a stored secret the caller never sent back in the reply, JSON-escaped,
+        percent-encoded or base64'd: a breach of "credentials are write-only". Every string at or
+        beneath a `writeOnly` path now goes in each of `encodedForms` (`A-42`: percent-encoded in
+        both cases, `+` for a space, base64 padded, unpadded and URL-safe, HTML- and
+        JSON-escaped); the other parameters still go as spelled. `encodedForms` moved from
+        `@ms/sensors` to `@ms/shared` beside `scrubSecrets` (re-exported, so nothing importing it
+        changed) rather than being copied. The scrubbed `cause` now carries the original's frames,
+        scrubbed, instead of a fresh stack. P-297's ingestion warning uses the same function and is
+        covered by it. Tests: the throwing type now puts the secret (with a space, a slash, a plus
+        and quotes) as spelled, inside `JSON.stringify(params)`, percent-encoded and base64'd in
+        its message; no form reaches the create, subtree and edit replies, the error, its cause or
+        cause's stack, or the log line and its stack. `channel-provisioning.test.ts`'s ingestion
+        warning gains the base64 and JSON forms; a unit test covers a secret nested under a
+        `writeOnly` object and a short one's base64. Mutations: only the spelled form fails 6; the
+        unscrubbed stack fails 1; secrets not inherited beneath a `writeOnly` path fails 1.
 
 - [ ] **P-306 — a channel created without its declared shape is counted nowhere** · S · P-297 ·
       Found 2026-10-08 in `P-297`'s review. When a type cannot answer for a sensor's stored

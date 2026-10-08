@@ -3,11 +3,13 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { pino } from 'pino';
 import type { SensorType } from '@ms/sensors';
+import { encodedForms } from '@ms/shared';
 import { ApiServer } from '../src/api/server.js';
 import { AuditRepository } from '../src/audit/store.js';
 import type { Database } from '../src/db/pool.js';
 import { ObjectError } from '../src/objects/errors.js';
 import { catalogueSensorTypeGate } from '../src/objects/sensor-type-gate.js';
+import { withoutParamValues } from '../src/support/param-values.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import {
   createScratchDatabase,
@@ -60,10 +62,19 @@ const limited: SensorType = {
   execute: () => Promise.resolve({ channels: [] }),
 };
 
-/** A secret the throwing type is given, which no reply or log line may carry (`P-305`). */
-const SECRET = 'sekret-community-string';
+/**
+ * A secret the throwing type is given, which no reply or log line may carry (`P-305`), in any
+ * form: a space, a slash, a plus and quotes, so percent-encoding, a form's `+`, base64 and a JSON
+ * escape each spell it differently.
+ */
+const SECRET = 'sekret community/string+"x"';
 /** A parameter the throwing type puts in its own message. */
 const COLUMN = 'bogus-column';
+
+/** Every form of the secret, and the column, that `text` still carries. */
+function leaked(text: string): string[] {
+  return [...encodedForms(SECRET), COLUMN].filter((form) => text.includes(form));
+}
 
 /**
  * Throws from `channels()` for parameters its own schema accepts, with their values in the
@@ -87,7 +98,13 @@ const throwing: SensorType = {
     const column = typeof params['column'] === 'string' ? params['column'] : '';
     if (column === COLUMN) {
       const community = typeof params['community'] === 'string' ? params['community'] : '';
-      throw new TypeError(`no column called ${column} answers for ${community}`);
+      // The secret as spelled, JSON-escaped inside the parameters, in a query string and in a
+      // header: each a way a type's own message quotes what it was given (`P-305` review).
+      throw new TypeError(
+        `no column called ${column} answers for ${community}; asked ${JSON.stringify(params)} ` +
+          `at /q?c=${encodeURIComponent(community)} with Basic ` +
+          Buffer.from(community, 'utf8').toString('base64'),
+      );
     }
     return [{ key: 'value', name: 'Value', isPrimary: true }];
   },
@@ -200,7 +217,7 @@ describe(
         sensorType: 'test.throwing',
         broken: { column: COLUMN, community: SECRET },
         kept: { column: 'good', community: SECRET },
-        says: /failed to declare its channels for them \(TypeError: no column called \[a parameter\] answers for \[a parameter\]\)/u,
+        says: /failed to declare its channels for them \(TypeError: no column called \[a parameter\] answers for \[a parameter\]; asked \{"column":"\[a parameter\]","community":"\[a parameter\]"\} at \/q\?c=\[a parameter\] with Basic \[a parameter\]\)/u,
         reason: 'CHANNELS_FAILED',
       },
     ];
@@ -223,8 +240,7 @@ describe(
         assert.equal(error.details['sensorType'], one.sensorType);
         assert.equal(error.details['reason'], one.reason ?? 'BAD_SENSOR_TYPE');
         assert.equal(error.context['phase'], 'declare-channels');
-        assert.ok(!response.body.includes(SECRET), 'a secret reached the reply');
-        assert.ok(!response.body.includes(COLUMN), 'a parameter’s value reached the reply');
+        assert.deepEqual(leaked(response.body), [], 'a value reached the reply');
         assert.equal(await sensorsUnder(deviceId), 0, 'the refused sensor was written');
 
         // The type is otherwise usable: parameters that keep its promise make a sensor.
@@ -265,7 +281,7 @@ describe(
         const { error } = response.json<Envelope>();
         assert.equal(error.code, 'OBJECT_INVALID');
         assert.equal(error.details['sensorType'], one.sensorType);
-        assert.ok(!response.body.includes(SECRET), 'a secret reached the reply');
+        assert.deepEqual(leaked(response.body), [], 'a value reached the reply');
         const written = await db.query<{ count: string }>(
           "SELECT count(*) AS count FROM object WHERE parent_id = $1 AND name = 'Router'",
           [probeId],
@@ -302,8 +318,7 @@ describe(
       assert.equal(error.code, 'OBJECT_INVALID');
       assert.equal(error.details['reason'], 'CHANNELS_FAILED');
       assert.match(error.message, /"test\.throwing"/u);
-      assert.ok(!response.body.includes(SECRET), 'a stored secret reached the reply');
-      assert.ok(!response.body.includes(COLUMN), 'a parameter’s value reached the reply');
+      assert.deepEqual(leaked(response.body), [], 'a stored secret or a value reached the reply');
 
       const after = await db.query<{ params: Record<string, unknown> }>(
         'SELECT params FROM sensor_config WHERE object_id = $1',
@@ -358,9 +373,11 @@ describe('the sensor-type gate, given a type that breaks its own channel declara
     assert.equal(thrown.details['reason'], 'CHANNELS_FAILED');
     assert.match(thrown.message, /"test\.throwing"/u);
     assert.match(thrown.message, /TypeError/u, 'the message says what kind of error it was');
-    for (const said of [thrown.message, String((thrown.cause as Error | undefined)?.message)]) {
-      assert.ok(!said.includes(SECRET), `a secret reached the error: ${said}`);
-      assert.ok(!said.includes(COLUMN), `a parameter's value reached the error: ${said}`);
+    const cause = thrown.cause;
+    assert.ok(cause instanceof Error, 'the cause, scrubbed, is kept');
+    assert.ok(cause.stack !== undefined && cause.stack.includes('at '), 'with its frames');
+    for (const said of [thrown.message, cause.message, cause.stack]) {
+      assert.deepEqual(leaked(said), [], `a value reached the error: ${said}`);
     }
 
     assert.equal(lines.length, 1);
@@ -373,8 +390,8 @@ describe('the sensor-type gate, given a type that breaks its own channel declara
     assert.equal(logged.sensorType, 'test.throwing');
     assert.equal(logged.err.code, 'TypeError');
     assert.ok(logged.err.stack !== undefined, 'the stack, for whoever ships the type');
-    assert.ok(!(lines[0] ?? '').includes(SECRET), `a secret reached the log: ${lines[0] ?? ''}`);
-    assert.ok(!(lines[0] ?? '').includes(COLUMN), `a value reached the log: ${lines[0] ?? ''}`);
+    assert.deepEqual(leaked(lines[0] ?? ''), [], `a value reached the log: ${lines[0] ?? ''}`);
+    assert.deepEqual(leaked(logged.err.stack ?? ''), [], 'a value reached the logged stack');
   });
 
   it('answers a stored sensor’s channels without refusing or logging when it can, and null when not', () => {
@@ -386,5 +403,22 @@ describe('the sensor-type gate, given a type that breaks its own channel declara
     assert.equal(gate.storedChannelsFor('test.throwing', { column: COLUMN }), null);
     assert.equal(gate.storedChannelsFor('test.unregistered', {}), null);
     assert.equal(lines.length, 0, 'nobody asked to write these parameters');
+  });
+});
+
+describe('cutting parameter values out of a type’s words', () => {
+  it('takes a secret out in every form it is echoed in, beneath a writeOnly path too', () => {
+    const params = { auth: { key: 'pa ss/wd+"1"' }, label: 'edge-router', pin: 'x9' };
+    const text = [
+      JSON.stringify(params),
+      encodeURIComponent('pa ss/wd+"1"'),
+      Buffer.from('pa ss/wd+"1"', 'utf8').toString('base64url'),
+      Buffer.from('x9', 'utf8').toString('base64'),
+      'edge-router',
+    ].join(' | ');
+    const scrubbed = withoutParamValues(text, params, ['auth', 'pin']);
+    for (const form of [...encodedForms('pa ss/wd+"1"'), ...encodedForms('x9'), 'edge-router']) {
+      assert.ok(!scrubbed.includes(form), `${form} survived: ${scrubbed}`);
+    }
   });
 });

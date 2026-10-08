@@ -49,7 +49,7 @@ export {
 } from './logging/output.js';
 export type { LogOutputOptions, LogOutputStats } from './logging/output.js';
 export { currentCorrelation, newCorrelationId, withCorrelation } from './logging/correlation.js';
-export { MIN_SCRUBBED_LENGTH, SCRUBBED, scrubSecrets } from './logging/scrub.js';
+export { encodedForms, MIN_SCRUBBED_LENGTH, SCRUBBED, scrubSecrets } from './logging/scrub.js';
 export type { CorrelationContext } from './logging/correlation.js';
 
 export { Lifecycle } from './lifecycle/lifecycle.js';

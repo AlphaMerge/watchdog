@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { pino } from 'pino';
 import { SensorCatalogue, standardCatalogue, type SensorType } from '@ms/sensors';
-import type { CheckResult } from '@ms/shared';
+import { encodedForms, type CheckResult } from '@ms/shared';
 import { ChannelResolver } from '../src/ingestion/channels.js';
 import { declaredChannelLookup, declaredLimitsLookup } from '../src/state/declared-limits.js';
 import type { Database } from '../src/db/pool.js';
@@ -82,8 +82,12 @@ const brittle: SensorType = {
   },
   channels: (params) => {
     if (params['mode'] === 'typeError') {
+      const token = String(params['token']);
+      // As spelled, base64'd as a header carries it, and JSON-escaped inside the parameters
+      // (`P-305` review): a type quoting what it was given in any of them.
       throw new TypeError(
-        `no column "${String(params['label'])}" readable with ${String(params['token'])}`,
+        `no column "${String(params['label'])}" readable with ${token} ` +
+          `(${Buffer.from(token, 'utf8').toString('base64')}, ${JSON.stringify(params)})`,
       );
     }
     return [
@@ -298,7 +302,9 @@ describe(
       assert.match(first.err.message, /\[a parameter\]/u);
       assert.match(second.err.message, /declares limits on channel "bounded"/u);
       for (const line of lines) {
-        assert.ok(!line.includes(SECRET), `a secret reached the log: ${line}`);
+        for (const form of encodedForms(SECRET)) {
+          assert.ok(!line.includes(form), `a secret reached the log as ${form}: ${line}`);
+        }
         assert.ok(!line.includes(LABEL), `a parameter's value reached the log: ${line}`);
       }
     });
