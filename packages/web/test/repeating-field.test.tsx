@@ -87,6 +87,22 @@ describe('a repeating parameter', () => {
     expect(stored()).toEqual({ steps: [{ method: 'GET', path: '/health' }] });
   });
 
+  it('clears an optional field inside an entry with "—", and keeps the entry (U-39)', () => {
+    // The walk used to stop at the array and hand the parameters back unchanged, so the choice
+    // was ignored without a word and the select snapped back to what it held.
+    render(<Harness initial={{ steps: [{ method: 'POST', path: '/a' }, { method: 'POST' }] }} />);
+    const [, second] = within(screen.getByRole('group', { name: 'Steps' })).getAllByRole(
+      'listitem',
+    );
+    if (second === undefined) throw new Error('two entries expected');
+    const method = within(second).getByRole('combobox', { name: 'Method' });
+    fireEvent.change(method, { target: { value: '' } });
+    expect(stored()).toEqual({ steps: [{ method: 'POST', path: '/a' }, {}] });
+    expect((method as HTMLSelectElement).value).toBe('');
+    // Still two entries, the cleared one still there to fill in or remove.
+    expect(screen.getByRole('button', { name: 'Remove Step 2' })).toBeDefined();
+  });
+
   it('reorders by one position, from a button a keyboard can reach', () => {
     // Order is meaningful — a transaction's steps run in order — so it has to be changeable, and
     // `U-11`'s WCAG pass rules out a drag target as the only way to do it.

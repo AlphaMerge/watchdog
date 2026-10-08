@@ -348,6 +348,168 @@ describe('paths through an array', () => {
   });
 });
 
+/** Freezes every container in a value, so a helper that writes into what it was given throws. */
+function deepFreeze<T>(value: T): T {
+  if (typeof value === 'object' && value !== null) {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/** A slot never written (a hole), then an entry: the first reads `undefined`, not an entry. */
+const HOLEY: unknown[] = [];
+HOLEY[1] = { column: '8', mode: 'gauge' };
+
+describe('removing a path, through objects and arrays (U-39)', () => {
+  // `toStrictEqual` throughout: it tells an array from an object keyed "0", and a hole from an
+  // entry — the two ways a walk through an array goes wrong while `toEqual` still passes.
+  it.each([
+    ['a top-level key', { port: 22, host: 'a' }, 'port', { host: 'a' }],
+    [
+      'a nested key, pruning the object it empties',
+      { auth: { user: 'x' }, port: 22 },
+      'auth.user',
+      { port: 22 },
+    ],
+    [
+      'a nested key, keeping a branch that still holds something',
+      { auth: { user: 'x', key: 'k' } },
+      'auth.key',
+      { auth: { user: 'x' } },
+    ],
+    [
+      'a key in an array entry, the entry and its neighbours staying where they are',
+      {
+        columns: [
+          { column: '10', mode: 'counter' },
+          { column: '8', mode: 'gauge' },
+        ],
+      },
+      'columns.1.mode',
+      { columns: [{ column: '10', mode: 'counter' }, { column: '8' }] },
+    ],
+    [
+      'the only key in an entry, which leaves the entry, empty',
+      { steps: [{ method: 'GET' }, { method: 'POST' }] },
+      'steps.0.method',
+      { steps: [{}, { method: 'POST' }] },
+    ],
+    [
+      'a key in an object inside an entry, pruning that object and not the entry',
+      { steps: [{ path: '/', auth: { user: 'x' } }] },
+      'steps.0.auth.user',
+      { steps: [{ path: '/' }] },
+    ],
+    [
+      'a key in an entry of an array inside an entry',
+      {
+        steps: [
+          {
+            extract: [
+              { name: 'a', mode: 'gauge' },
+              { name: 'b', mode: 'counter' },
+            ],
+          },
+        ],
+      },
+      'steps.0.extract.1.mode',
+      { steps: [{ extract: [{ name: 'a', mode: 'gauge' }, { name: 'b' }] }] },
+    ],
+  ] as const)('removes %s', (_label, before, path, after) => {
+    expect(
+      removeAt(deepFreeze(structuredClone(before)) as Record<string, unknown>, path),
+    ).toStrictEqual(after);
+  });
+
+  it.each([
+    ['a key that is not there', { port: 22 }, 'host'],
+    ['under a key that is not there', { port: 22 }, 'auth.user'],
+    ['an index past the end', { columns: [{ column: '10', mode: 'counter' }] }, 'columns.3.mode'],
+    ['an index into a hole', { columns: HOLEY }, 'columns.0.mode'],
+    ['a property name where an array is', { columns: [{ mode: 'gauge' }] }, 'columns.mode'],
+    // `Number` reads this as 0; only a plain digit string is a position this form wrote.
+    ['an index written another way', { columns: [{ mode: 'gauge' }] }, 'columns.0x0.mode'],
+    ['through a string', { auth: 'not an object' }, 'auth.user'],
+    ['through a string entry', { tags: ['a', 'b'] }, 'tags.0.length'],
+    ['through null', { auth: null }, 'auth.user'],
+    // A whole entry is its array's Remove button's to take out; clearing a value never does it.
+    ['a whole entry', { tags: ['a', 'b', 'c'] }, 'tags.1'],
+    ['a whole object entry', { steps: [{ method: 'GET' }] }, 'steps.0'],
+    ['an inherited property', {}, 'toString'],
+  ] as const)('removes nothing at %s, and hands back what it was given', (_label, before, path) => {
+    const given = deepFreeze(structuredClone(before)) as Record<string, unknown>;
+    const result = removeAt(given, path);
+    expect(result).toBe(given);
+    expect(result).toStrictEqual(before);
+  });
+
+  it('copies only what it changes, and never what it was given', () => {
+    const untouched = { column: '8', mode: 'gauge' };
+    const before = deepFreeze({
+      tableOid: '1.3',
+      columns: [{ column: '10', mode: 'counter' }, untouched],
+    });
+    const after = removeAt(before, 'columns.0.mode');
+    expect(before.columns[0]).toStrictEqual({ column: '10', mode: 'counter' });
+    expect(after['columns']).not.toBe(before.columns);
+    expect((after['columns'] as unknown[])[1]).toBe(untouched);
+  });
+
+  it('round-trips with writeAt: an entry set and then cleared is the entry it was', () => {
+    const before = { columns: [{ column: '6', name: 'Errors' }] };
+    const set = writeAt(before, 'columns.0.mode', 'counter');
+    expect(readAt(set, 'columns.0.mode')).toBe('counter');
+    expect(removeAt(set, 'columns.0.mode')).toStrictEqual(before);
+  });
+});
+
+describe('writing and reading a path, checked beside removing one (U-39)', () => {
+  it.each([
+    ['a top-level key', {}, 'port', 22, { port: 22 }],
+    [
+      'into an existing entry',
+      { steps: [{ method: 'GET' }] },
+      'steps.0.path',
+      '/',
+      { steps: [{ method: 'GET', path: '/' }] },
+    ],
+    ['the next entry, appending', { tags: ['a'] }, 'tags.1', 'b', { tags: ['a', 'b'] }],
+    [
+      'an entry of an array inside an entry',
+      { steps: [{ extract: [{ name: 'a' }] }] },
+      'steps.0.extract.0.mode',
+      'gauge',
+      { steps: [{ extract: [{ name: 'a', mode: 'gauge' }] }] },
+    ],
+    [
+      'through a string, replacing it with the container the path needs',
+      { auth: 'x' },
+      'auth.user',
+      'u',
+      { auth: { user: 'u' } },
+    ],
+  ] as const)(
+    'writes %s, as an array where the path says index',
+    (_label, before, path, value, after) => {
+      const given = deepFreeze(structuredClone(before)) as Record<string, unknown>;
+      const written = writeAt(given, path, value);
+      expect(written).toStrictEqual(after);
+      expect(readAt(written, path)).toBe(value);
+    },
+  );
+
+  it.each([
+    ['an index past the end', { tags: ['a'] }, 'tags.4'],
+    ['a property name where an array is', { tags: ['a'] }, 'tags.length.x'],
+    ['through a string', { auth: 'x' }, 'auth.user'],
+    ['through null', { auth: null }, 'auth.user'],
+    ['an index into an object', { steps: { method: 'GET' } }, 'steps.0.method'],
+  ] as const)('reads undefined at %s rather than throwing', (_label, source, path) => {
+    expect(readAt(source as Record<string, unknown>, path)).toBeUndefined();
+  });
+});
+
 describe('checking a repeating parameter', () => {
   it('reports the count against minItems and maxItems', () => {
     const steps = fieldsOf(STEPS)[0];

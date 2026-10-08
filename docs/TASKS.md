@@ -22737,10 +22737,50 @@ because each is a decision rather than a defect:
       P-310 · Found 2026-10-08 in `P-310`. **Done when** the channel list can hide retired channels
       and the `/values` route carries `retired`, with tests.
 
-- [ ] **U-39 — "—" on an optional field inside an array entry does nothing** · XS · U-34 · Found
+- [x] **U-39 — "—" on an optional field inside an array entry does nothing** · XS · U-34 · Found
       2026-10-08 in `U-34`. `removeAt` in `packages/web/src/forms/schema.ts` returns the document
       unchanged for a path through an array (`columns.0.mode`), so the choice is silently ignored.
       Pre-existing. **Done when** it removes the key, with a test.
+
+      **U-39 outcome. `removeAt` walks arrays by index, copies only what it changes, and never
+      takes an entry out.**
+      - **Through an array, the entry stays.** `columns.0.mode` copies the entry without the key
+        and puts it back at its own position: still an array, the same length, no hole. An entry
+        left empty (`{}`) is kept, because it is one of the operator's rows and has its own Remove;
+        objects above and inside an entry are pruned when emptied, as before. So "—" on an
+        `snmp.table` column's mode saves the column without `mode`, and the core applies the
+        default.
+      - **What it does not remove, it hands back unchanged (the same object).** A path whose last
+        segment is a position names a whole entry, and that is `ArrayField`'s Remove to do: a
+        splice here would delete the entry from under a control being cleared and shift the rest,
+        and deleting the slot would leave a hole that serialises as `null`. So that, an index past
+        the end or into a hole, a property name or a non-digit index (`0x0`) where an array is, a
+        path through a string or `null`, a key not there, and an inherited property (`toString`,
+        now `Object.hasOwn`) all remove nothing.
+      - **The siblings, checked.** `readAt` already descended arrays by index and reads `undefined`
+        at every bad path. `writeAt` already built arrays where the next segment is an index; it
+        leaves empty slots for an index past the end, which the form never asks for (an entry's
+        controls exist only for entries the array holds, and Add appends) — said in its comment,
+        pinned where the existing test already showed it, not changed.
+      - **`U-34`'s "—" on a `changed` field is now reachable**, and works as that ticket's review
+        built it: the select becomes the read-only box showing the default it compared
+        (`gauge`), focus moves from the select to the box, and the reason is the polite live
+        region the box is described by.
+      - **Tests.** `schema-form.test.ts`: removal table-driven over deep-frozen inputs with
+        `toStrictEqual` (which tells an array from an object keyed "0" and a hole from an entry):
+        7 paths that remove, 12 that remove nothing and return the same object, copy-on-write,
+        a round trip with `writeAt`; and `writeAt`/`readAt` tables beside it (10).
+        `repeating-field.test.tsx`: "—" inside an entry keeps the entry. `fixed-field.test.tsx`:
+        "—" on a `changed` column locks at the default with focus on the box; "—" on an added
+        column leaves `{}`; a `ParamsForm` save of an `snmp.table` column on "—" sends no `mode`.
+        Mutations: the pre-fix `removeAt` fails 22; an emptied entry spliced out fails 3, or
+        deleted to a hole fails 3; no index check fails 1; no own-property check fails 2; the
+        array written in place fails 5; a whole entry spliced out fails 2; a no-op returning a
+        copy fails 12; no refocus in `SchemaForm` fails 2 (one of them the new "—" test).
+      - **Not done.** Clearing a scalar entry of an array of strings (the last character
+        deleted) is still ignored: its control emits "absent", and an entry cannot be absent
+        without being removed, which `removeAt` now refuses on purpose. What it should hold
+        instead is the form's decision, not the path helper's.
 
 - [ ] **U-40 — the edit form cannot see a channel kept from a column an earlier edit removed** ·
       S · U-34 · Found 2026-10-08 in `U-34`. Putting that column back in the other mode is

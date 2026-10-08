@@ -283,6 +283,52 @@ describe('a fixed field in a table column (snmp.table)', () => {
     expect(box.getAttribute('aria-describedby')?.split(' ')).toContain(reason.id);
   });
 
+  it('locks at the default, with focus on the box, when a changed field is set to "—" (U-39)', () => {
+    // Column 10 (a counter) retyped as 8, which the sensor has as a gauge: `changed`. "—" is
+    // absent, and absent is the default — a gauge — so it is put back, and locks. Until `U-39`
+    // the "—" never reached the parameters inside an array and the select kept "counter".
+    render(<Harness schema={TABLE} initial={STORED_TABLE} existing={STORED_TABLE} />);
+    const [first] = columnEntries();
+    if (first === undefined) throw new Error('an entry expected');
+    fireEvent.change(within(first).getByRole('textbox', { name: 'Column' }), {
+      target: { value: '8' },
+    });
+    const select = within(first).getByRole('combobox', { name: 'Reading type' });
+    select.focus();
+    fireEvent.change(select, { target: { value: '' } });
+    // The key is gone from the entry, not written as anything; the entry and its neighbour stay.
+    expect((values() as typeof STORED_TABLE).columns).toEqual([
+      { column: '8', name: 'In' },
+      STORED_TABLE.columns[1],
+    ]);
+    // The box shows the default it compared, not a blank announced as nothing.
+    const box = fixedBox(first);
+    expect(box.readOnly).toBe(true);
+    expect(box.value).toBe('gauge');
+    // Focus followed the field from the select to the box (WCAG 2.4.3), and the box carries the
+    // reason, in the polite live region the changed sentence was in.
+    expect(document.activeElement).toBe(box);
+    const reason = within(first).getByText(FIXED_REASON);
+    expect(reason.getAttribute('aria-live')).toBe('polite');
+    expect(box.getAttribute('aria-describedby')?.split(' ')).toContain(reason.id);
+  });
+
+  it('clears an added column’s mode with "—", leaving the column (U-39)', () => {
+    render(<Harness schema={TABLE} initial={STORED_TABLE} existing={STORED_TABLE} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add column' }));
+    const added = columnEntries()[2];
+    if (added === undefined) throw new Error('an added entry expected');
+    // Seeded at the default, as every added entry is.
+    expect((values() as typeof STORED_TABLE).columns[2]).toEqual({ mode: 'gauge' });
+    const select = within(added).getByRole('combobox', { name: 'Reading type' });
+    fireEvent.change(select, { target: { value: '' } });
+    expect((values() as typeof STORED_TABLE).columns).toEqual([...STORED_TABLE.columns, {}]);
+    // Open still: nothing is stored for it, so "—" is a choice and not a lock.
+    expect(
+      within(added).getByRole<HTMLSelectElement>('combobox', { name: 'Reading type' }).value,
+    ).toBe('');
+  });
+
   it('leaves focus on a column key whose new value locks the mode', () => {
     // The other way to lock a field: retyping the key of an added column to one the sensor has,
     // holding the same mode. The operator is typing the key; the mode must not take focus.
@@ -412,6 +458,72 @@ describe('the refusal, when the core still sends it', () => {
     );
     expect(alert.textContent).toContain(REFUSAL.error.message);
     expect(alert.textContent).toContain('req-77');
+  });
+
+  it('saves an snmp.table column set to "—" without a mode, so the core applies its default', async () => {
+    // `U-39`: the "—" has to reach the request, not just the screen.
+    const calls: unknown[] = [];
+    vi.stubGlobal('fetch', (_path: string, init?: RequestInit) => {
+      calls.push(typeof init?.body === 'string' ? (JSON.parse(init.body) as unknown) : undefined);
+      return Promise.resolve(
+        new Response(JSON.stringify({ id: 44, kind: 'sensor', version: 2 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    });
+    const stored = {
+      tableOid: '1.3.6.1.2.1.2.2.1',
+      columns: [{ column: '10', name: 'In', mode: 'counter' }],
+    };
+    const detail = {
+      id: 44,
+      kind: 'sensor',
+      name: 'Interface 4',
+      version: 1,
+      sensorType: 'snmp.table',
+      params: stored,
+      redactedParams: [],
+    } as unknown as ObjectDetail;
+    const type: SensorTypeSummary = {
+      id: 'snmp.table',
+      category: 'SNMP',
+      costHint: 'medium',
+      paramsSchema: TABLE as Record<string, unknown>,
+      hasPreview: false,
+    };
+    const saved = vi.fn();
+    render(<ParamsForm detail={detail} type={type} onSaved={saved} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add column' }));
+    const [, added] = columnEntries();
+    if (added === undefined) throw new Error('an added entry expected');
+    fireEvent.change(within(added).getByRole('textbox', { name: 'Column' }), {
+      target: { value: '6' },
+    });
+    fireEvent.change(within(added).getByRole('textbox', { name: 'Channel name' }), {
+      target: { value: 'Errors' },
+    });
+    fireEvent.change(within(added).getByRole('combobox', { name: 'Reading type' }), {
+      target: { value: '' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save parameters' }));
+
+    await waitFor(() => {
+      expect(saved).toHaveBeenCalledTimes(1);
+    });
+    expect(calls).toEqual([
+      {
+        kind: 'sensor',
+        params: {
+          tableOid: '1.3.6.1.2.1.2.2.1',
+          columns: [
+            { column: '10', name: 'In', mode: 'counter' },
+            { column: '6', name: 'Errors' },
+          ],
+        },
+      },
+    ]);
   });
 
   it('shows any other refusal as before, as an alert', async () => {

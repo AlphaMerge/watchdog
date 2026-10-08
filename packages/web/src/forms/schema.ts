@@ -267,6 +267,10 @@ export function readAt(source: Record<string, unknown>, path: string): unknown {
  * that always created objects would produce `{steps: {"0": {method: …}}}` — which serialises to
  * JSON that looks almost right, validates as the wrong type, and is refused by the server with a
  * message about `steps` rather than about the form.
+ *
+ * An index past the end of an array writes there and leaves the slots before it empty. The form
+ * never asks for one (`U-39` checked): an entry's controls exist only for entries the array holds,
+ * and Add appends, so every index it writes is one the array has or the next one.
  */
 export function writeAt(
   target: Record<string, unknown>,
@@ -312,29 +316,70 @@ function copyContainer(child: unknown, wantArray: boolean): Container {
 }
 
 /**
- * Removes a dotted path, and any object it leaves empty above it.
+ * Removes a dotted path, and any object it leaves empty above it — through arrays too (`U-39`).
+ *
+ * **Through an array, by index, and the entry stays.** `columns.0.mode` is how an optional field
+ * inside an entry is set back to "—", and the walk used to stop at the array and hand the document
+ * back unchanged, so the choice was ignored without a word. Now the entry is copied without the
+ * key and put back at its own position: the array stays an array, the same length, with no hole
+ * where an entry was; and an entry left with nothing in it is still an entry, because it is one
+ * of the operator's rows, not an empty branch the schema never asked for. Objects above and inside
+ * an entry are pruned as before.
+ *
+ * **Never an entry itself.** A path whose last segment is a position names a whole entry, and an
+ * entry is taken out by its array's own Remove (`ArrayField`), which says which one it removed.
+ * Splicing here would delete an entry from under a control being cleared and shift every one after
+ * it; deleting the slot would leave a hole that serialises as `null`. So that, an index past the
+ * end, a property name where an array is, and a path through something that is not a container all
+ * remove nothing — and nothing removed hands back the very object it was given.
  *
  * `Reflect.deleteProperty` rather than `delete next[head]`: the key is data, and the lint rule
  * against dynamic delete exists to catch objects being used as maps, which is exactly what
  * `params` is — the same reasoning the catalogue's own `deleteAtPath` records.
  */
 export function removeAt(target: Record<string, unknown>, path: string): Record<string, unknown> {
-  const segments = path.split('.');
-  const head = segments[0];
-  if (head === undefined) return target;
-  const next = { ...target };
-  if (segments.length === 1) {
+  const removed = removeFrom(target, path.split('.'));
+  return isRecord(removed) ? removed : target;
+}
+
+/** What `container` becomes without the path, or `undefined` when there was nothing to remove. */
+function removeFrom(container: Container, segments: readonly string[]): Container | undefined {
+  const [head, ...rest] = segments;
+  if (head === undefined) return undefined;
+
+  if (Array.isArray(container)) {
+    if (rest.length === 0 || !isIndex(head)) return undefined;
+    const at = Number(head);
+    // Past the end, or a hole, reads `undefined`, which is not a container: nothing to remove.
+    const entry: unknown = container[at];
+    if (!isContainer(entry)) return undefined;
+    const pruned = removeFrom(entry, rest);
+    if (pruned === undefined) return undefined;
+    const next = [...container];
+    next[at] = pruned;
+    return next;
+  }
+
+  if (!Object.hasOwn(container, head)) return undefined;
+  const next = { ...container };
+  if (rest.length === 0) {
     Reflect.deleteProperty(next, head);
     return next;
   }
-  const child = next[head];
-  if (typeof child !== 'object' || child === null || Array.isArray(child)) return next;
-  const pruned = removeAt(child as Record<string, unknown>, segments.slice(1).join('.'));
+  const child = container[head];
+  if (!isContainer(child)) return undefined;
+  const pruned = removeFrom(child, rest);
+  if (pruned === undefined) return undefined;
   // An object left with nothing in it is not the same as an object with an empty child; the
-  // schema asked for neither, so the branch goes too.
-  if (Object.keys(pruned).length === 0) Reflect.deleteProperty(next, head);
+  // schema asked for neither, so the branch goes too. An array is never emptied here — the walk
+  // does not take entries out — so only an object can be left empty.
+  if (isRecord(pruned) && Object.keys(pruned).length === 0) Reflect.deleteProperty(next, head);
   else next[head] = pruned;
   return next;
+}
+
+function isContainer(value: unknown): value is Container {
+  return typeof value === 'object' && value !== null;
 }
 
 // ---------------------------------------------------------------------------------------------
