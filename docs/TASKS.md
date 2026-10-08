@@ -11352,6 +11352,43 @@ because each is a decision rather than a defect:
         removed fails the flap test (`found` called for the branch). Either check alone holds
         the flap test, since the second catches what the first lets by.
 
+- [ ] **P-308 — a status channel left without its lookup is only named, never repaired** · S ·
+      P-302 · Found 2026-10-08 in `P-302`'s review. Migration 073 fills no `lookup_id` (a wrong
+      fill raises alarms) and logs the channels whose type declares one they lack. One narrow case
+      is provable: a clone whose source still exists with the same type and parameters and holds
+      the lookup on that key. **Done when** decided: copy the source's lookup in that case (with a
+      scenario test that nothing goes Down that the operator silenced), or a view or report that
+      lists them for the operator, or keep.
+
+- [ ] **P-309 — an edit does not re-declare which channel is primary** · XS · P-303 · Found
+      2026-10-08 in `P-303`. A `snmp.table` edit that reorders columns leaves the first-created
+      column primary. **Done when** decided: re-declare `is_primary` on edit (one primary always),
+      or keep and say so in the type's description, with a test.
+
+- [ ] **P-310 — a channel an edit removed keeps its row with nothing saying it is retired** · S ·
+      P-303 · Found 2026-10-08 in `P-303`. A table column removed by an edit keeps its row and
+      history and stops getting readings; the UI shows it as if it were still read. **Done when** a
+      retired channel is marked (and shown as such), or the reason not to is written down, with
+      tests.
+
+- [ ] **P-311 — a broken type's edit compares against the rows and can overwrite a hand-set
+      lookup** · XS · P-303 · Found 2026-10-08 in `P-303`. When a type cannot answer for a sensor's
+      stored parameters, the edit plan compares the new declaration against the rows, so a lookup
+      the operator set by hand can be replaced, unlogged. **Done when** the plan refuses or skips
+      in that case and logs it, with a test.
+
+- [ ] **P-312 — channels created from the fallback are never repaired, and an unregistered type's
+      are not counted** · S · P-306 · Found 2026-10-08 in `P-306`. Ingestion's `{}` fallback writes
+      a channel without its declared shape and nothing writes it again; a sensor whose type this
+      build does not register gets no shape and is not counted on `channelsCreatedUndeclared`.
+      **Done when** decided for each: repair on the next successful declaration (or say why not),
+      and count the unregistered case or say why it differs, with tests.
+
+- [ ] **P-313 — `/probes`' schema does not allow the skew `ahead`** · XS · U-33 · Found 2026-10-08
+      in `U-33`. The registration schema's `skew.kind` enum in `api/routes/probes.ts` lacks
+      `'ahead'`, which `describeSkew` returns since `P-178`. **Done when** the schema and
+      `docs/api-reference.md` name it, with a test that serialises a probe ahead of the core.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -22287,6 +22324,19 @@ because each is a decision rather than a defect:
         - refusal checked only below the listener's version: failed 1;
         - refused whenever the time is null: failed 8.
 
+- [ ] **U-34 — the edit form offers a mode the core will refuse** · XS · P-303 · Found 2026-10-08
+      in `P-303`. `snmp.custom`'s and `snmp.table` columns' `mode` is fixed once the sensor exists
+      (`409 OBJECT_CHANNEL_MODE_FIXED`), but the edit form leaves it enabled and only shows the
+      refusal after submit. **Done when** the form shows it read-only on an existing sensor, says
+      why, with a test (WCAG 2.1 AA).
+
+- [ ] **U-35 — a probe refused at version 0 looks like one never recorded** · S · U-33 · Found
+      2026-10-08 in `U-33`. A hello refused at 0 overwrites the recorded version with 0, which
+      `/probes`' skew and the health answer both read as "nothing recorded"; and a probe accepted by
+      an older core below a raised floor still gets the U-31/U-32 sentences instead of "will be
+      refused". **Done when** a refusal is told apart on the row (a marker or the refusal's time) and
+      both places say it, with tests.
+
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
       siblings are substituted into any text a step sends: the path, every header and the body.
@@ -27702,6 +27752,13 @@ other tickets cite them, which is why `P-24` kept its name when it became `V2-17
       for a unit that normally runs as `ms-probe`, so it cannot tell. A host with a `User=root`
       drop-in finds out when the upgraded probe exits 78. **Done when** `setup.sh` reads the unit's
       user (`systemctl show -p User ms-probe`) and says so before restarting, with a smoke step.
+
+- [ ] **H-42 — the release notes must say what migration 073 does and does not repair** · XS ·
+      P-302 · Found 2026-10-08 in `P-302`. Clones made before `P-302` stored counters as totals
+      (073 fixes the width; stored totals stay), have no status lookup (073 names them, does not
+      fill them), and on a fixed type may already have lost an operator's thresholds to the
+      declared default at a start (unrecoverable). **Done when** the release notes say all three,
+      pointing at `docs/installation.md`'s section.
 
 ---
 
