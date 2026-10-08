@@ -7,7 +7,7 @@ import { ChannelResolver } from '../src/ingestion/channels.js';
 import { Ingestor } from '../src/ingestion/ingestor.js';
 import { IngestionService } from '../src/ingestion/service.js';
 import { declaredChannelLookup, declaredLimitsLookup } from '../src/state/declared-limits.js';
-import type { Database } from '../src/db/pool.js';
+import type { Database, Queryable } from '../src/db/pool.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -199,6 +199,65 @@ describe(
       // a limit written for a rate — `spoolUnwritten`'s `upperError: 0.00001`, for instance —
       // latches Down for the life of the probe process and cannot be cleared.
       assert.equal(byKey.get('in')?.counter_bits, 64);
+    });
+
+    // `P-306` on `P-303`'s resolver: rows that exist are read first and only the rest are
+    // created, but a key another batch creates between that read and this INSERT conflicts, and
+    // was not made from this sensor's fallback here. Only the rows the INSERT returned count.
+    it('counts only the channels its own INSERT created, not one another batch made first', async () => {
+      const sensor = await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name: 'raced-broken',
+        sensorType: 'test.brittle',
+        params: { mode: 'fine' },
+      });
+      await db.query('UPDATE sensor_config SET params = $2::jsonb WHERE object_id = $1', [
+        sensor.id,
+        JSON.stringify({ mode: 'typeError', label: 'east' }),
+      ]);
+      await db.query('DELETE FROM channel WHERE sensor_id = $1', [sensor.id]);
+
+      const catalogue = testCatalogue([columns, brittle]);
+      const resolver = new ChannelResolver({
+        logger: silent,
+        declaredLimits: declaredLimitsLookup(catalogue),
+        declaredShape: declaredChannelLookup(catalogue),
+      });
+      let raced = 0;
+      const resolved = await db.tx((q) => {
+        // The other batch, in the one place it can land: after the read of what exists and
+        // before this INSERT. In this transaction, so it holds no lock this one waits for.
+        const racing: Queryable = {
+          query: async (text, values) => {
+            if (text.includes('INSERT INTO channel') && raced === 0) {
+              raced += 1;
+              await q.query(
+                "INSERT INTO channel (sensor_id, key, name, unit) VALUES ($1, 'raced', 'raced', '')",
+                [sensor.id],
+              );
+            }
+            return q.query(text, values);
+          },
+        };
+        return resolver.resolve(racing, [
+          {
+            sensorId: sensor.id,
+            at: new Date('2026-10-08T12:00:00.000Z').toISOString(),
+            outcome: 'ok',
+            message: '',
+            durationMs: 1,
+            channels: [
+              { key: 'raced', value: 1 },
+              { key: 'fresh', value: 1 },
+            ],
+          },
+        ]);
+      });
+      assert.equal(raced, 1, 'the other batch landed');
+      assert.equal(resolved.ids.size, 2, 'both channels resolved');
+      assert.equal(resolved.created, 1, 'one created here');
+      assert.equal(resolved.createdUndeclared, 1, 'and only that one counted');
     });
 
     it('says once, without a parameter’s value, when a type cannot answer for a sensor', async () => {
