@@ -446,13 +446,42 @@ changes nothing; rename one of the two and run it again.
 **Migration 073 repairs channels, and its rollback keeps the repair.** Until it, a cloned sensor's
 channels lost their lookup and counter width, so a cloned traffic sensor stored the interface's
 cumulative byte count where the rate belongs, and its status channel was judged by nothing. 073
-gives every channel the lookup and counter width its sensor type declares where the row has
-none (a lookup somebody set or cleared by hand is left as it is), marks thresholds a clone copied
-as set by hand unless they are the type's own default, and logs how many, by type. The
-totals already stored stay in the history: a graph across the upgrade shows them climbing, a gap
-of one scan, then rates far below them. A repaired status channel is judged from the next scan,
-so an interface that was down all along turns its sensor Down then. `migrate down` past 073
-leaves the repaired rows as they are; the release before reads them correctly.
+gives every channel the counter width its sensor type declares where the row has none, labels
+thresholds a clone copied (a health sensor's follow the release's defaults again; any other
+sensor's count as set by hand), and logs how many, by type. The totals already stored stay in the
+history: a graph across the upgrade shows them climbing, a gap of one scan, then rates far below
+them. A threshold written for a rate that the totals held in Down or Warning clears once the rates
+arrive; nothing else changes state. `migrate down` past 073 leaves the repaired rows as they are;
+the release before reads them correctly.
+
+**073 does not give a status channel its lookup back; you do.** An empty lookup may be one that
+somebody cleared on purpose, on the clone or on the sensor it was cloned from, and the upgrade
+cannot tell which: setting it would turn every shut port on every clone Down at the first scan.
+So 073 leaves them, and logs a warning naming, for each sensor type, how many channels have no
+lookup although the type declares one, and the first 50 sensors holding them. To list all of
+them, and the lookup each type declares, ask the database:
+
+```sql
+SELECT c.sensor_id, o.name AS sensor, sc.type, c.key
+  FROM channel c
+  JOIN sensor_config sc ON sc.object_id = c.sensor_id
+  JOIN object o ON o.id = c.sensor_id
+ WHERE c.lookup_id IS NULL
+   AND (sc.type, c.key) IN (('snmp.traffic', 'status'))
+ ORDER BY sc.type, c.sensor_id;
+```
+
+Widen the last condition with the types and keys the warning names (`snmp.custom.string`'s
+`value`, an `snmp.table` sensor's status columns). Set the ones that should be judged, one channel
+at a time, with the lookup the type declares (`ms.snmp.if-oper-status` for an interface status):
+
+```bash
+auth=(-H "Authorization: Bearer ${MS_TOKEN}" -H 'content-type: application/json')
+curl -s "${auth[@]}" -X PATCH http://127.0.0.1:8080/api/v1/objects/<sensor id>/channels/status \
+  -d '{"lookupId": "ms.snmp.if-oper-status"}'
+```
+
+It takes effect at the sensor's next scan. A port whose status should stay unjudged needs nothing.
 
 ## Uninstalling
 

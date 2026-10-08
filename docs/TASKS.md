@@ -10964,49 +10964,79 @@ because each is a decision rather than a defect:
         `channel_counter`, so a clone's first counter reading is a `first`, as a new sensor's is,
         and the samples. `limits_source` was the quiet one: written as `unset`, an operator's
         threshold on a fixed type is replaced by the declared default at the next start.
-      - **Migration 073 (`channel-declared-shape`) repairs existing rows, with an `N-28` data step**
-        that builds the core's catalogue (`standardCatalogue(sensorTypesFor(BUILD.profile))`, not
-        through `profile.ts`, which would pull the v2 modules into the migrations' graph) and asks
-        each sensor's type with its stored parameters, in windows of sensor ids, filling only what
-        is empty. `counter_bits` where the type declares a counter. `lookup_id` where it declares
-        one, unless the audit log holds a `channel.lookup.set` for that sensor and key (an
-        operator's clear is kept; past the audit retention it is forgotten). `limits_source` on a
-        row holding thresholds as `unset`, which only the old clone wrote: `declared` if they are
-        exactly the type's declaration, else `operator`, as 038 decided. A set width or lookup is
-        never changed. A type this build does not register, or that throws for the stored
-        parameters, is left alone and counted (no `{}` guess written for good). Logged once with
-        counts by type. `up` comments `channel.lookup_id`; the rollback removes the comment and
-        keeps the rows, which the build before reads correctly. `installation.md` says so.
-      - **It repairs the shape, not only clones.** The row cannot say how it was made, and the
-        same rows came from ingestion before `P-80` (a key a later build declared) and from
-        `P-297`'s `{}` era; they are equally wrong and get the same fix. It also fills one
-        direction of `P-303` once: a sensor edited from gauge to counter mode becomes a counter.
-        The other direction (a counter edited to a gauge, a lookup edited to another) is left.
+      - **Migration 073 (`channel-declared-shape`) repairs what it safely can, with an `N-28` data
+        step** that builds the core's catalogue (`standardCatalogue(sensorTypesFor(BUILD.profile))`,
+        not through `profile.ts`, which would pull the v2 modules into the migrations' graph) and
+        asks each sensor's type with its stored parameters, in windows of sensor ids.
+        - **`counter_bits` is written** where the type declares a counter and the row has none. No
+          API sets the column, so an empty one is never a decision. It turns stored totals into
+          rates from the next readings on, and the only states it can move are the ones totals
+          latched: a rate threshold a climbing total held in Down or Warning clears.
+        - **`lookup_id` is not written, only said.** An empty one may be an operator's `M-06`
+          clear, and on an old clone that clear was made on the *source*, which the old clone did
+          not copy, `object.cloned` (root ids only) cannot reliably name, and audit retention
+          erases anyway. Filling it would turn every shut port on every clone Down at the first
+          scan; not filling it leaves the channel judged by nothing, as it is today. So 073 logs
+          one warning: per type, the channels whose type declares a lookup their row lacks, and
+          the first 50 sensors holding them. `installation.md` gives the query to list them all
+          and the `PATCH /api/v1/objects/:id/channels/:key` call to set one. A narrowly provable
+          safe case exists (a channel on a sensor whose `object.cloned` root is the sensor itself,
+          whose source still exists with the same type and parameters and holds the lookup on
+          that key: copy the source's) but is not implemented.
+        - **`limits_source`, on a row holding thresholds as `unset`** (only the old clone wrote
+          that): `declared` on a `fixedChannels` type, so the start-up pass brings it to this
+          build's declaration or clears it where there is none (`P-291`), as it already did to
+          every such clone that lived through a start; a clone made since the last start carries
+          the declaration of the build it was made under, and labelled `operator` it would keep
+          that for good across a skipped release. `operator` on any other type, which cannot
+          declare limits (`P-293`), so its thresholds were a person's on the source; and on a type
+          this build does not register, which the start-up pass leaves alone anyway.
+        - A set width is never changed. A type that throws for the stored parameters, or that this
+          build does not register, is left alone and counted (no `{}` guess written for good).
+          `up` adds a note to `channel.counter_bits`'s comment; the rollback puts back 023's
+          comment and keeps the rows, which the build before reads correctly.
+      - **It reads the shape, not only clones.** The row cannot say how it was made, and the same
+        rows came from ingestion before `P-80` (a key a later build declared) and from `P-297`'s
+        `{}` era; they get the same width and the same warning. It also fills one direction of
+        `P-303` once: a sensor edited from gauge to counter mode becomes a counter.
       - **What an operator sees.** Stored totals stay: a total cannot become a rate after the fact,
         and nothing rewrites history. The first reading after the upgrade has no baseline and
         stores nothing; from the second, rates. A graph across it shows the climbing totals, a
         one-scan gap, then rates far below. A rate threshold the totals held in Down or Warning
-        clears once rates arrive. A repaired status channel is judged from its next reading, so an
-        interface down all along turns its sensor Down then. No scenario test: the repair adds no
-        alarm path, and a repaired or newly cloned sensor alarms exactly as a freshly created one
-        of the same type and parameters, which the existing scenarios cover.
+        clears once rates arrive; nothing else changes state. A status channel without its lookup
+        stays judged by nothing until somebody sets it, and the log says which.
       - **Tests** (`cloned-channels.test.ts`, shipped catalogue through `buildHarness`'s new
         `catalogue` option): the column list against the table; a device holding `snmp.traffic`
         (64 and 32 bits), `snmp.custom` in counter mode, `snmp.custom.string` with a lookup and
         `snmp.table` with a counter and a lookup column cloned, each copy's rows equal to its
         source's on every copied column and each holding the expected lookups and widths; the
         source's operator threshold, scaling and display flag carried, its counter baseline not,
-        a cleared lookup kept cleared; the same for each sensor cloned alone. The repair: clones
-        put back in the old shape, then one sensor id a window, with an audit entry for one
-        lookup, a fixed type's declared and chosen thresholds, an unregistered type and one that
-        throws; counts asserted, and a second run writes nothing. And the migrator applying 073
-        to a database at 072 with a broken `snmp.traffic` row, the comment, the rollback keeping
-        the rows. Mutations (each restored byte for byte, `dist` rebuilt): the old column list
-        fails both clone tests; `limits_source` out of the list fails the column test, a clone
-        test and the repair test; the audit guard ignored, `declared` never chosen, and the data
-        step removed each fail their test.
+        a cleared lookup kept cleared; the same for each sensor cloned alone. The repair: every
+        shipped type and a traffic sensor whose status was cleared on the source, cloned and put
+        back in the old clone's shape, one sensor id a window and one sensor named a type; widths
+        written, no lookup written anywhere, the unjudged channels counted and named, the warning
+        said once with them; copied thresholds on a fixed type (an older declaration and another
+        value) both `declared`, on `snmp.traffic` and an unregistered type `operator`, an empty
+        one left `unset`; a type that throws left; a second run writes nothing and still says.
+        A scenario (`M-17`): a shut port's source cleared, cloned in the old shape and resumed,
+        one scan of ifOperStatus 2, 073, a fresh ingestion service and another scan: the clone
+        stays Up with no `sensor_state` row added, while a port with the lookup goes Down on the
+        same reading. And the migrator applying 073 to a database at 072 with a broken
+        `snmp.traffic` row: the width written, the status left, the comment, the rollback putting
+        023's comment back and keeping the rows.
+      - **Amended on review** (a second commit). The first version filled `lookup_id` too,
+        guarded only by a `channel.lookup.set` on the channel's own sensor, which misses a clear
+        made on the source and one past retention: an alarm storm on upgrade. And it labelled a
+        copied threshold that differed from this build's declaration `operator`, which froze an
+        older build's default for good. Mutations on the amended 073 (each restored byte for
+        byte, `dist` rebuilt): filling the lookup again fails the repair test, the scenario and
+        the migrator test; `operator` written for a fixed type (which `tsc` also reports, and emits) fails the repair test; the bound on named
+        sensors removed fails it; the data step removed fails the migrator test. The clone's
+        mutations, again: the old column list fails both clone tests; `limits_source` out of the
+        list fails the column test, a clone test and the repair test.
 
-      - **Not done.** `P-303`'s other direction, as above.
+      - **Not done.** `P-303`'s other direction (a counter edited to a gauge, a lookup edited to
+        another). Lookups on old clones are left to the operator, as above.
 
 - [ ] **P-303 — an edit that changes a channel's mode or lookup does not redeclare it** · S ·
       P-297 · Found 2026-10-08 in `P-297`. An update replaces `params` and declares no channels, so

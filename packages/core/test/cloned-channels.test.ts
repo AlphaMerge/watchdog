@@ -1,13 +1,21 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
+import { pino } from 'pino';
 import { SensorCatalogue, standardCatalogue, type SensorType } from '@ms/sensors';
+import type { CheckResult, IngestionConfig, Logger } from '@ms/shared';
 import { Visibility } from '../src/auth/access.js';
 import { Migrator } from '../src/db/migrator.js';
 import { MIGRATIONS } from '../src/db/migrations/index.js';
 import { repairChannelShapes } from '../src/db/migrations/073-channel-declared-shape.js';
 import type { Database } from '../src/db/pool.js';
+import { ChannelResolver } from '../src/ingestion/channels.js';
+import { Ingestor } from '../src/ingestion/ingestor.js';
+import { IngestionService } from '../src/ingestion/service.js';
+import type { LookupCatalogue } from '../src/lookups/catalogue.js';
+import { loadLookups } from '../src/lookups/loader.js';
+import { PauseRepository } from '../src/objects/pause-repository.js';
 import { CHANNEL_COLUMNS_A_CLONE_OWNS, CLONED_CHANNEL_COLUMNS } from '../src/objects/repository.js';
-import { declaredLimitsLookup } from '../src/state/declared-limits.js';
+import { SensorStateService } from '../src/state/service.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -262,6 +270,44 @@ const brittle: SensorType = {
   execute: () => Promise.resolve({ channels: [] }),
 };
 
+/** A logger whose lines a test can read. */
+function capturing(): { logger: Logger; lines: () => Record<string, unknown>[] } {
+  const written: string[] = [];
+  const logger = pino({ level: 'info' }, { write: (line: string) => void written.push(line) });
+  return {
+    logger,
+    lines: () => written.map((line) => JSON.parse(line) as Record<string, unknown>),
+  };
+}
+
+/**
+ * The row the clone's INSERT wrote before `P-302`. It copied every other column, so a clone made
+ * now with these three put back to what that statement left them is that row exactly.
+ */
+async function asTheOldCloneWroteIt(db: Database, sensorId: number): Promise<void> {
+  await db.query(
+    `UPDATE channel SET lookup_id = NULL, counter_bits = NULL, limits_source = 'unset'
+      WHERE sensor_id = $1`,
+    [sensorId],
+  );
+}
+
+/** A probe, a device and the shipped sensors on it, for the two suites below. */
+async function sourcesOn(h: Harness, host: string): Promise<{ deviceId: number }> {
+  const probe = await h.service.create(testActor, {
+    kind: 'probe',
+    parentId: h.rootId,
+    name: 'Probe',
+  });
+  const device = await h.service.create(testActor, {
+    kind: 'device',
+    parentId: probe.id,
+    name: 'edge-router',
+    host,
+  });
+  return { deviceId: device.id };
+}
+
 describe('migration 073 repairs a clone made before P-302', { skip }, () => {
   let scratch: ScratchDatabase;
   let db: Database;
@@ -274,7 +320,7 @@ describe('migration 073 repairs a clone made before P-302', { skip }, () => {
   const rawSensor = async (
     type: string,
     params: Record<string, unknown>,
-    channels: readonly { key: string; limits?: string; source?: string }[],
+    channels: readonly { key: string; limits?: string }[],
   ): Promise<number> => {
     const [row] = await db.query<{ id: string }>(
       `INSERT INTO object (parent_id, kind, name) VALUES ($1, 'sensor', $2) RETURNING id::text`,
@@ -289,38 +335,18 @@ describe('migration 073 repairs a clone made before P-302', { skip }, () => {
     for (const [at, channel] of channels.entries()) {
       await db.query(
         `INSERT INTO channel (sensor_id, key, name, is_primary, limits, limits_source)
-         VALUES ($1, $2, $2, $3, $4::jsonb, $5)`,
-        [id, channel.key, at === 0, channel.limits ?? '{}', channel.source ?? 'unset'],
+         VALUES ($1, $2, $2, $3, $4::jsonb, 'unset')`,
+        [id, channel.key, at === 0, channel.limits ?? '{}'],
       );
     }
     return id;
-  };
-
-  /** The shape a clone wrote before `P-302`: its source's row, less three columns. */
-  const breakLikeTheOldClone = async (sensorId: number): Promise<void> => {
-    await db.query(
-      `UPDATE channel SET lookup_id = NULL, counter_bits = NULL, limits_source = 'unset'
-        WHERE sensor_id = $1`,
-      [sensorId],
-    );
   };
 
   before(async () => {
     scratch = await createScratchDatabase('channel_shape_repair');
     db = scratch.db;
     h = await buildHarness(db, { catalogue });
-    const probe = await h.service.create(testActor, {
-      kind: 'probe',
-      parentId: h.rootId,
-      name: 'Probe',
-    });
-    const device = await h.service.create(testActor, {
-      kind: 'device',
-      parentId: probe.id,
-      name: 'edge-router',
-      host: '192.0.2.41',
-    });
-    deviceId = device.id;
+    ({ deviceId } = await sourcesOn(h, '192.0.2.41'));
     for (const one of SHIPPED) {
       const sensor = await h.service.create(testActor, {
         kind: 'sensor',
@@ -334,10 +360,21 @@ describe('migration 073 repairs a clone made before P-302', { skip }, () => {
     await h.service.patchChannel(testActor, sources.get('Traffic') ?? 0, 'in', {
       limits: { enabled: true, upperWarning: 1_000_000 },
     });
+    // The case the lookup must not be filled for: a shut port whose status an operator cleared
+    // on the source (`M-06`), which the old clone did not copy and nothing on the clone records.
+    const shut = await h.service.create(testActor, {
+      kind: 'sensor',
+      parentId: deviceId,
+      name: 'Shut port',
+      sensorType: 'snmp.traffic',
+      params: { ifIndex: 9 },
+    });
+    await h.service.patchChannel(testActor, shut.id, 'status', { lookupId: null });
+    sources.set('Shut port', shut.id);
     for (const [name, source] of sources) {
       const copy = await h.service.clone(testActor, source, {}, Visibility.EVERYTHING);
       clones.set(name, copy.object.id);
-      await breakLikeTheOldClone(copy.object.id);
+      await asTheOldCloneWroteIt(db, copy.object.id);
     }
   });
 
@@ -345,17 +382,10 @@ describe('migration 073 repairs a clone made before P-302', { skip }, () => {
     await scratch.drop();
   });
 
-  it('gives each broken clone its type’s declaration, an operator’s decisions kept, and finds nothing the second time', async () => {
-    // A lookup an operator set on a clone and cleared again: the log says so, the row cannot.
-    const traffic = clones.get('Traffic') ?? assert.fail('traffic clone');
-    await db.query(
-      `INSERT INTO audit_log (at, action, object_id, object_kind, actor_kind, actor_ref, summary)
-       VALUES (now(), 'channel.lookup.set', $1, 'sensor', 'system', 'test', $2::jsonb)`,
-      [traffic, JSON.stringify({ channelKey: 'status' })],
-    );
-    // A threshold copied onto a fixed type's channel that is exactly its declaration, and one
-    // that is not: `declared` and `operator`.
-    const declaredLimits = declaredLimitsLookup(catalogue);
+  it('writes the counter widths and the thresholds’ owners, no lookup, and names the channels judged by nothing', async () => {
+    // Copied thresholds on a fixed type, one an older build's declaration and one not: both
+    // `declared`, for the start-up pass to bring to this build's. On a type that cannot declare
+    // limits, and on one this build does not register, `operator`.
     const fixed = catalogue
       .ids()
       .filter((id) => catalogue.declaration(id).fixedChannels === true)
@@ -367,54 +397,203 @@ describe('migration 073 repairs a clone made before P-302', { skip }, () => {
       )[0];
     assert.ok(fixed !== undefined, 'a shipped fixed type declares a threshold');
     const health = await rawSensor(fixed.type, {}, [
-      { key: fixed.key, limits: JSON.stringify(declaredLimits(fixed.type, fixed.key)) },
+      { key: fixed.key, limits: JSON.stringify({ enabled: true, upperError: 123_456 }) },
       { key: 'chosen', limits: JSON.stringify({ enabled: true, upperError: 5 }) },
       // Untouched: empty and `unset` is a channel nobody has decided about.
       { key: 'blank' },
     ]);
-    // Left alone: a type this build does not register, and one that cannot answer.
-    const gone = await rawSensor('gone.type', {}, [{ key: 'value' }]);
+    const gone = await rawSensor('gone.type', {}, [
+      { key: 'value', limits: JSON.stringify({ enabled: true, upperError: 7 }) },
+    ]);
     const extended = new SensorCatalogue();
     for (const id of catalogue.ids()) extended.register(catalogue.type(id));
     extended.register(brittle);
     const unanswering = await rawSensor('test.brittle', { broken: true }, [{ key: 'value' }]);
     const answering = await rawSensor('test.brittle', {}, [{ key: 'value' }]);
 
-    // One sensor id a window, so the walk crosses every boundary there is.
-    const repaired = await repairChannelShapes(db, extended.seal(), 1);
+    // One sensor id a window, so the walk crosses every boundary there is; one sensor named a
+    // type, so the bound is seen.
+    const log = capturing();
+    const repaired = await repairChannelShapes(db, extended.seal(), {
+      window: 1,
+      listed: 1,
+      logger: log.logger,
+    });
 
     for (const one of SHIPPED) {
       const copy = clones.get(one.name) ?? assert.fail(one.name);
       const rows = await channelsOf(db, copy);
-      if (one.name === 'Traffic') {
-        assertDeclared(rows, { ...one.expect, status: { lookup_id: null, counter_bits: null } });
-        const inbound = rows.find((row) => row.key === 'in');
-        assert.equal(inbound?.limits_source, 'operator', 'copied thresholds are an operator’s');
-      } else {
-        assertDeclared(rows, one.expect);
+      for (const [key, shape] of Object.entries(one.expect)) {
+        const row = rows.find((candidate) => candidate.key === key) ?? assert.fail(key);
+        assert.equal(row.counter_bits, shape.counter_bits, `${one.name} ${key} width`);
+        assert.equal(row.lookup_id, null, `${one.name} ${key}: no lookup written`);
       }
     }
-    const sourceOf = async (sensorId: number, key: string): Promise<ChannelRow | undefined> =>
-      (await channelsOf(db, sensorId)).find((row) => row.key === key);
-    assert.equal((await sourceOf(health, fixed.key))?.limits_source, 'declared');
-    assert.equal((await sourceOf(health, 'chosen'))?.limits_source, 'operator');
-    assert.equal((await sourceOf(health, 'blank'))?.limits_source, 'unset');
-    assert.equal((await sourceOf(gone, 'value'))?.counter_bits, null);
-    assert.equal((await sourceOf(unanswering, 'value'))?.counter_bits, null);
-    assert.equal((await sourceOf(answering, 'value'))?.counter_bits, 64);
+    const shutRows = await channelsOf(db, clones.get('Shut port') ?? 0);
+    assert.equal(shutRows.find((row) => row.key === 'status')?.lookup_id, null);
+    assert.equal(shutRows.find((row) => row.key === 'in')?.counter_bits, 64);
 
-    // Counters: in, out and total on both traffic copies, the custom one, the table's column and
-    // the brittle type's answer. Lookups: the 32-bit copy's status, the string's and the table's.
-    assert.equal(repaired.counters, 9);
-    assert.equal(repaired.lookups, 3);
-    assert.equal(repaired.lookupsAnOperatorSet, 1);
-    assert.equal(repaired.limitSources, 3);
+    const rowOf = async (sensorId: number, key: string): Promise<ChannelRow | undefined> =>
+      (await channelsOf(db, sensorId)).find((row) => row.key === key);
+    const trafficIn = await rowOf(clones.get('Traffic') ?? 0, 'in');
+    assert.equal(trafficIn?.limits_source, 'operator', 'a non-fixed type’s thresholds');
+    assert.equal((await rowOf(health, fixed.key))?.limits_source, 'declared');
+    assert.equal((await rowOf(health, 'chosen'))?.limits_source, 'declared');
+    assert.equal((await rowOf(health, 'blank'))?.limits_source, 'unset');
+    assert.equal((await rowOf(gone, 'value'))?.limits_source, 'operator');
+    assert.equal((await rowOf(unanswering, 'value'))?.counter_bits, null);
+    assert.equal((await rowOf(answering, 'value'))?.counter_bits, 64);
+
+    // Widths: in, out and total on three traffic copies, the custom one, the table's column and
+    // the brittle type's answer.
+    assert.equal(repaired.counters, 12);
+    assert.deepEqual(repaired.limitSources, { declared: 2, operator: 2 });
     assert.equal(repaired.unregistered, 1);
     assert.deepEqual(repaired.unanswerable, { 'test.brittle': 1 });
-    assert.equal(repaired.byType['snmp.traffic'], 7);
+    assert.equal(repaired.byType['snmp.traffic'], 9);
+    // The status of the three traffic copies and of the shut port's source, whose clear is a
+    // decision; the string's value and the table's status column.
+    const firstTraffic = Math.min(
+      clones.get('Traffic') ?? 0,
+      clones.get('Traffic at 32 bits') ?? 0,
+      clones.get('Shut port') ?? 0,
+      sources.get('Shut port') ?? 0,
+    );
+    assert.deepEqual(repaired.unjudged, {
+      'snmp.traffic': { channels: 4, sensorIds: [firstTraffic] },
+      'snmp.custom.string': { channels: 1, sensorIds: [clones.get('Status string')] },
+      'snmp.table': { channels: 1, sensorIds: [clones.get('Interface table')] },
+    });
+    const warned = log.lines().filter((line) => line['level'] === 40);
+    assert.equal(warned.length, 1, 'said once');
+    assert.deepEqual(warned[0]?.['unjudged'], repaired.unjudged);
+    assert.match(String(warned[0]?.['msg']), /PATCH \/api\/v1\/objects\/:id\/channels\/:key/u);
 
-    const again = await repairChannelShapes(db, extended.seal(), 1);
-    assert.equal(again.counters + again.lookups + again.limitSources, 0);
+    const again = await repairChannelShapes(db, extended.seal(), { window: 1 });
+    assert.equal(again.counters, 0);
+    assert.deepEqual(again.limitSources, { declared: 0, operator: 0 });
+    assert.equal(again.unjudged['snmp.traffic']?.channels, 4, 'still said, never written');
+  });
+});
+
+const CONFIG: IngestionConfig = {
+  queueMaxRows: 200_000,
+  batchMaxRows: 5_000,
+  batchMaxDelayMs: 5,
+  slowDownAtPercent: 50,
+  retryAfterMs: 1_000,
+  replay: { maxConcurrentProbes: 4, stepMs: 250, maxDelayMs: 30_000, idleAfterMs: 30_000 },
+};
+
+/**
+ * The upgrade over a clone of a switch whose shut ports had their status cleared (`P-302`
+ * review, `M-17`): one scan before 073, 073, one scan after, the port still reporting down. The
+ * clone stays Up and writes no state, where a channel with the lookup goes Down on the same
+ * reading, so the test can tell.
+ */
+describe('migration 073 raises no state change on a cleared status (scenario)', { skip }, () => {
+  let scratch: ScratchDatabase;
+  let db: Database;
+  let h: Harness;
+  let lookups: LookupCatalogue;
+
+  before(async () => {
+    lookups = await loadLookups({ logger: silentLogger });
+    scratch = await createScratchDatabase('channel_shape_scenario');
+    db = scratch.db;
+    h = await buildHarness(db, { catalogue });
+  });
+
+  after(async () => {
+    await scratch.drop();
+  });
+
+  it('keeps a shut port’s clone Up across the upgrade, while a judged port goes Down', async () => {
+    const { deviceId } = await sourcesOn(h, '192.0.2.42');
+    const traffic = (name: string, ifIndex: number) =>
+      h.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name,
+        sensorType: 'snmp.traffic',
+        params: { ifIndex },
+      });
+    const shut = await traffic('Shut port', 7);
+    await h.service.patchChannel(testActor, shut.id, 'status', { lookupId: null });
+    const judged = await traffic('Judged port', 8);
+    const copy = await h.service.clone(testActor, shut.id, {}, Visibility.EVERYTHING);
+    await asTheOldCloneWroteIt(db, copy.object.id);
+    // A clone arrives paused (`S-03`); this one had long been put to work.
+    await h.service.resume(testActor, copy.object.id, Visibility.EVERYTHING);
+
+    const build = () => {
+      const states = new SensorStateService({
+        db,
+        logger: silentLogger,
+        settings: h.resolver,
+        pauses: new PauseRepository(),
+      });
+      const ingestor = new Ingestor({ db, logger: silentLogger, config: CONFIG });
+      const service = new IngestionService({
+        db,
+        logger: silentLogger,
+        ingestor,
+        states,
+        resolver: new ChannelResolver({ logger: silentLogger, lookups }),
+      });
+      return { service, ingestor };
+    };
+    const scan = async (minute: number, batchId: string): Promise<void> => {
+      const { service, ingestor } = build();
+      // Behind the core's clock, which refuses a reading from its future.
+      const at = new Date(Date.now() - (10 - minute) * 60_000).toISOString();
+      const result = (sensorId: number): CheckResult => ({
+        sensorId,
+        at,
+        outcome: 'ok',
+        message: '',
+        durationMs: 5,
+        channels: [{ key: 'status', value: 2 }],
+      });
+      const reply = await service.acceptResults('probe-073', {
+        type: 'results',
+        batchId,
+        results: [result(copy.object.id), result(judged.id)],
+      });
+      await ingestor.stop();
+      assert.equal(reply.type, 'results-ack', `batch ${batchId} taken`);
+    };
+    const states = async (sensorId: number): Promise<string[]> =>
+      (
+        await db.query<{ state: string }>(
+          'SELECT state FROM sensor_state WHERE sensor_id = $1 ORDER BY time',
+          [sensorId],
+        )
+      ).map((row) => row.state);
+    const current = async (sensorId: number): Promise<string | undefined> =>
+      (
+        await db.query<{ state: string }>(
+          'SELECT state FROM sensor_runtime WHERE object_id = $1',
+          [sensorId],
+        )
+      )[0]?.state;
+
+    await scan(0, 'before');
+    assert.equal(await current(judged.id), 'down', 'the lookup turns ifOperStatus 2 Down');
+    assert.equal(await current(copy.object.id), 'up');
+    const before = await states(copy.object.id);
+
+    // A fresh service after it, as a core starting after `migrate up` would have.
+    await repairChannelShapes(db, catalogue);
+    await scan(1, 'after');
+
+    assert.equal(await current(copy.object.id), 'up', 'still judged by nothing');
+    assert.deepEqual(await states(copy.object.id), before, 'no state written');
+    assert.equal(
+      (await channelsOf(db, copy.object.id)).find((row) => row.key === 'in')?.counter_bits,
+      64,
+      'the repair did run on it',
+    );
   });
 });
 
@@ -458,6 +637,15 @@ describe('migration 073 as the migrator runs it', { skip }, () => {
           'SELECT key, lookup_id, counter_bits FROM channel WHERE sensor_id = $1 ORDER BY key',
           [sensor],
         );
+      const comment = async (): Promise<string | null> =>
+        (
+          await q.query<{ comment: string | null }>(
+            `SELECT col_description('channel'::regclass, attnum) AS comment
+               FROM pg_attribute WHERE attrelid = 'channel'::regclass AND attname = 'counter_bits'`,
+          )
+        )[0]?.comment ?? null;
+      const before = await comment();
+      assert.match(before ?? '', /T-02/u);
 
       assert.deepEqual(
         (await upTo(73).up()).applied.map((one) => one.id),
@@ -466,22 +654,15 @@ describe('migration 073 as the migrator runs it', { skip }, () => {
       const repaired = await read();
       assert.deepEqual(repaired, [
         { key: 'in', lookup_id: null, counter_bits: 64 },
-        { key: 'status', lookup_id: STATUS, counter_bits: null },
+        { key: 'status', lookup_id: null, counter_bits: null },
       ]);
-      const comment = async (): Promise<string | null> =>
-        (
-          await q.query<{ comment: string | null }>(
-            `SELECT col_description('channel'::regclass, attnum) AS comment
-               FROM pg_attribute WHERE attrelid = 'channel'::regclass AND attname = 'lookup_id'`,
-          )
-        )[0]?.comment ?? null;
       assert.match((await comment()) ?? '', /migration 073/u);
 
       assert.deepEqual(
         (await upTo(73).down(1)).reverted.map((one) => one.id),
         [73],
       );
-      assert.equal(await comment(), null);
+      assert.equal(await comment(), before, '023’s comment, as it was');
       assert.deepEqual(await read(), repaired);
     } finally {
       await fresh.drop();
