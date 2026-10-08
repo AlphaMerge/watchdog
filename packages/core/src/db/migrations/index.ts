@@ -71,6 +71,7 @@ import { migration070 } from './070-target-policy-exception.js';
 import { migration071 } from './071-legible-delivery-errors.js';
 import { migration072 } from './072-probe-protocol-accepted-at.js';
 import { migration073 } from './073-channel-declared-shape.js';
+import { migration074 } from './074-probe-protocol-refused-at.js';
 import { migration043 } from './043-request-settled-at.js';
 
 /**
@@ -153,6 +154,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration071,
   migration072,
   migration073,
+  migration074,
 ];
 
 export type { Migration } from './types.js';

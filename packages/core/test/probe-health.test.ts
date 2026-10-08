@@ -1878,6 +1878,7 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
           [
             'at',
             'channels',
+            'lastProtocolRefusedAt',
             'lastProtocolVersion',
             'lastProtocolVersionAt',
             'message',
@@ -1945,7 +1946,11 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
           // A revoked identity's time is no more the probe's than its version is.
           await stamp('u31-revoked', '2026-10-06T00:00:00.000Z', SEEN);
           const service = build(() => ({ connected: false }));
-          assert.deepEqual(await service.lastProtocol(probeId), { version: 12, at: ACCEPTED });
+          assert.deepEqual(await service.lastProtocol(probeId), {
+            version: 12,
+            at: ACCEPTED,
+            refusedAt: null,
+          });
 
           const answer = await ask(service, probeId);
           assert.equal(answer.status, 200, answer.body);
@@ -1966,7 +1971,11 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
           // A version a hello was refused over, or one recorded before migration 072.
           await stamp('u31-live', null, SEEN);
           const service = build(() => ({ connected: false }));
-          assert.deepEqual(await service.lastProtocol(probeId), { version: 12, at: null });
+          assert.deepEqual(await service.lastProtocol(probeId), {
+            version: 12,
+            at: null,
+            refusedAt: null,
+          });
           const answer = await ask(service, probeId);
           assert.equal(answer.json['lastProtocolVersion'], 12, answer.body);
           assert.ok('lastProtocolVersionAt' in answer.json, answer.body);
@@ -1974,9 +1983,73 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
 
           // Only a revoked identity, however recently it was accepted: neither.
           await stamp('u31-watcher-revoked', ACCEPTED, SEEN);
-          assert.deepEqual(await service.lastProtocol(watcherId), { version: null, at: null });
+          assert.deepEqual(await service.lastProtocol(watcherId), {
+            version: null,
+            at: null,
+            refusedAt: null,
+          });
           const watcher = await ask(service, watcherId);
           assert.equal(watcher.json['lastProtocolVersionAt'], null, watcher.body);
+        });
+      });
+
+      describe('and when it was refused (U-35)', () => {
+        // A hello refused over its version records the version and when. A refusal at 0 was read
+        // as the `R-01` upgrade's "nothing recorded", so the form told a probe that is refused at
+        // every hello "This updates when it connects".
+        const REFUSED = '2026-10-07T06:00:00.000Z';
+        const refuse = (gid: string, version: number, at: string | null): Promise<unknown> =>
+          db.query(
+            `UPDATE probe_registration
+             SET protocol_version = $2, protocol_accepted_at = NULL, protocol_refused_at = $3
+             WHERE gid = $1`,
+            [gid, version, at],
+          );
+        afterEach(async () => {
+          await db.query(
+            `UPDATE probe_registration SET protocol_refused_at = NULL, protocol_accepted_at = NULL
+             WHERE gid LIKE 'u31-%'`,
+          );
+          await refuse('u31-live', 12, null);
+        });
+
+        it('serves a refusal at 0 as 0 and its time, not as nothing recorded', async () => {
+          await refuse('u31-live', 0, REFUSED);
+          const service = build(() => ({ connected: false }));
+          assert.deepEqual(await service.lastProtocol(probeId), {
+            version: 0,
+            at: null,
+            refusedAt: REFUSED,
+          });
+          const answer = await ask(service, probeId);
+          assert.equal(answer.status, 200, answer.body);
+          assert.equal(answer.json['lastProtocolVersion'], 0, answer.body);
+          assert.equal(answer.json['lastProtocolVersionAt'], null, answer.body);
+          assert.equal(answer.json['lastProtocolRefusedAt'], REFUSED, answer.body);
+
+          // A 0 with no refusal beside it is still the upgrade's: nothing recorded.
+          await refuse('u31-live', 0, null);
+          assert.deepEqual(await service.lastProtocol(probeId), {
+            version: null,
+            at: null,
+            refusedAt: null,
+          });
+          const nothing = await ask(service, probeId);
+          assert.equal(nothing.json['lastProtocolVersion'], null, nothing.body);
+          assert.equal(nothing.json['lastProtocolRefusedAt'], null, nothing.body);
+        });
+
+        it('serves the refusal’s time beside any version, and never a revoked identity’s', async () => {
+          await refuse('u31-live', 12, REFUSED);
+          await refuse('u31-watcher-revoked', 0, REFUSED);
+          const service = build(() => ({ connected: false }));
+          const answer = await ask(service, probeId);
+          assert.equal(answer.json['lastProtocolVersion'], 12, answer.body);
+          assert.equal(answer.json['lastProtocolRefusedAt'], REFUSED, answer.body);
+
+          const watcher = await ask(service, watcherId);
+          assert.equal(watcher.json['lastProtocolVersion'], null, watcher.body);
+          assert.equal(watcher.json['lastProtocolRefusedAt'], null, watcher.body);
         });
       });
 
@@ -1992,11 +2065,16 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
           sources: { link: () => ({ connected: false }) },
           ingest: () => Promise.resolve(),
         });
-        assert.deepEqual(await down.lastProtocol(probeId), { version: null, at: null });
+        assert.deepEqual(await down.lastProtocol(probeId), {
+          version: null,
+          at: null,
+          refusedAt: null,
+        });
         const answer = await ask(down, probeId);
         assert.equal(answer.status, 200, answer.body);
         assert.equal(answer.json['lastProtocolVersion'], null, answer.body);
         assert.equal(answer.json['lastProtocolVersionAt'], null, answer.body);
+        assert.equal(answer.json['lastProtocolRefusedAt'], null, answer.body);
         assert.equal(answer.json['message'], 'not connected to the core');
       });
     });

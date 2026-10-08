@@ -786,13 +786,13 @@ The same numbers the Core Health sensor records, read live. **A `null` is a gap 
 
 How one probe is doing, right now
 
-**Answers for a probe that is not connected**, which is the whole reason Probe Health is evaluated by the core: a probe cannot report its own absence. `connected` is 0 then and every other channel is `null` — a gap, because the probe’s numbers are not zero, they are unknown, and a scheduler lag of 0 ms from a probe that is gone would be the most misleading reading this system could produce. A probe below protocol 7 cannot send its own numbers either; the message says so in words rather than leaving the channels silently absent. `numbersUnavailable` says why the probe’s own numbers are gaps, as a value: `not-connected`; `protocol`, the only reason that is about versions, with the version it speaks and the one its numbers need; `no-heartbeat`, connected and none arrived yet, with how long it has been connected; `not-reported`, heartbeats that carry none. `null` when it reported them. `protocolVersion` is the version the probe speaks on its current connection, `null` when it is not connected: a probe that reports, below the version a channel arrived in, leaves that channel a gap whether or not what it counts is running. `lastProtocolVersion` is the version the probe declared at the last handshake the core recorded, kept after it disconnects: the one `GET /probes` shows, said of that connection and not of the probe now, which may have been upgraded since. `null` when none is recorded or the database could not be asked. `lastProtocolVersionAt` is when a handshake the core accepted spoke that version, as ISO 8601: not when the probe was last seen, which a refused hello moves too. `null` whenever `lastProtocolVersion` is, beside a version a hello was refused over, and for one recorded before the core kept the time.
+**Answers for a probe that is not connected**, which is the whole reason Probe Health is evaluated by the core: a probe cannot report its own absence. `connected` is 0 then and every other channel is `null` — a gap, because the probe’s numbers are not zero, they are unknown, and a scheduler lag of 0 ms from a probe that is gone would be the most misleading reading this system could produce. A probe below protocol 7 cannot send its own numbers either; the message says so in words rather than leaving the channels silently absent. `numbersUnavailable` says why the probe’s own numbers are gaps, as a value: `not-connected`; `protocol`, the only reason that is about versions, with the version it speaks and the one its numbers need; `no-heartbeat`, connected and none arrived yet, with how long it has been connected; `not-reported`, heartbeats that carry none. `null` when it reported them. `protocolVersion` is the version the probe speaks on its current connection, `null` when it is not connected: a probe that reports, below the version a channel arrived in, leaves that channel a gap whether or not what it counts is running. `lastProtocolVersion` is the version the probe declared at the last handshake the core recorded, kept after it disconnects: the one `GET /probes` shows, said of that connection and not of the probe now, which may have been upgraded since. `null` when none is recorded or the database could not be asked. `lastProtocolVersionAt` is when a handshake the core accepted spoke that version, as ISO 8601: not when the probe was last seen, which a refused hello moves too. `null` whenever `lastProtocolVersion` is, beside a version a hello was refused over, and for one recorded before the core kept the time. `lastProtocolRefusedAt` is when a hello was last refused over that version, as ISO 8601: the probe has not connected since, and a core with the same floor will refuse it again. Never beside `lastProtocolVersionAt`, and `null` whenever `lastProtocolVersion` is, beside an accepted version, and for one recorded before the core kept the time. A `lastProtocolVersion` of 0 is served only beside it: a 0 without it is nothing recorded, and is `null`.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
 | `id` | path | integer | **required** |
 
-**200** { at, probeId, message, numbersUnavailable, protocolVersion, lastProtocolVersion, lastProtocolVersionAt, channels } · **503** { error }
+**200** { at, probeId, message, numbersUnavailable, protocolVersion, lastProtocolVersion, lastProtocolVersionAt, lastProtocolRefusedAt, channels } · **503** { error }
 
 ## libraries
 
@@ -1456,7 +1456,7 @@ The addresses of this device its probe may connect to although `probe.targetPoli
 
 Every probe this core knows, and what was decided about it
 
-Includes the ones waiting for approval, which is the list worth opening: a probe in `pending` is connected and doing nothing, on purpose. `lastAddress` is beside each one because "a probe called backup-01 wants in" is not a decision anybody can make and "from 10.4.2.9" is. `protocolVersion` is what the probe declared at its last handshake that was accepted or was refused over the version itself, and `protocolAcceptedAt` is when an accepted one spoke it: `null` when that handshake was refused, and for a version recorded before the core kept the time. `lastSeenAt` is the last hello of any kind, refused ones included, so it is not when the version was spoken.
+Includes the ones waiting for approval, which is the list worth opening: a probe in `pending` is connected and doing nothing, on purpose. `lastAddress` is beside each one because "a probe called backup-01 wants in" is not a decision anybody can make and "from 10.4.2.9" is. `protocolVersion` is what the probe declared at its last handshake that was accepted or was refused over the version itself, and `protocolAcceptedAt` is when an accepted one spoke it: `null` when that handshake was refused, and for a version recorded before the core kept the time. `protocolRefusedAt` is when a hello was last refused over it, the other way round, so a refusal at 0 is not read as nothing recorded. `lastSeenAt` is the last hello of any kind, refused ones included, so it is not when the version was spoken. `skew.kind` is `unknown`, `current`, `outdated`, `ahead` (a probe newer than this core, which is admitted and speaks this core’s version) or `incompatible` (one this core refuses at the handshake).
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -1481,7 +1481,7 @@ Binds this identity to a probe object. The probe is issued a key of its own at i
 | `objectId` | integer | **required** |
 | `local` | boolean |  |
 
-**200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
+**200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, protocolRefusedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
 
 ### `POST /api/v1/probes/{gid}/revoke`
 
@@ -1499,7 +1499,7 @@ The record is kept rather than deleted, so the same identity cannot come back by
 | --- | --- | --- |
 | `note` | string |  |
 
-**200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
+**200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, protocolRefusedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
 
 ### `PUT /api/v1/probes/{gid}/allow-from`
 
@@ -1517,7 +1517,7 @@ Ranges in the same spellings a discovery takes — `10.0.0.0/24`, `10.0.0.1-50`,
 | --- | --- | --- |
 | `allowFrom` | string[] | **required** |
 
-**200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
+**200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, protocolRefusedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
 
 ### `DELETE /api/v1/probes/{gid}`
 

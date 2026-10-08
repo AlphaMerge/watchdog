@@ -1690,6 +1690,114 @@ describe(
       }
     });
 
+    it('keeps when a probe’s recorded version was refused, never beside an accepted time, and rolls back to none (074)', async () => {
+      // `U-35`: a refusal at 0 read as the `R-01` upgrade's "nothing recorded". The refusal's time
+      // beside the version tells them apart, and is never beside the accepted one.
+      const fresh = await createScratchDatabase('probe_protocol_refused_at');
+      try {
+        const all = migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 74),
+        );
+        // Rows from before: a refusal at 0 and an upgrade's 0 look alike, so neither is guessed.
+        await migrator(
+          fresh.db,
+          MIGRATIONS.filter((one) => one.id <= 73),
+        ).up();
+        const q = fresh.db;
+        await q.query(
+          `INSERT INTO probe_registration
+             (gid, protocol_version, last_seen_at, protocol_accepted_at)
+           VALUES ('accepted', 12, now(), now()), ('zero', 0, now(), NULL), ('never', 0, NULL, NULL)`,
+        );
+        await all.up();
+        const column = async (): Promise<boolean> =>
+          (
+            await q.query(
+              `SELECT 1 FROM information_schema.columns
+               WHERE table_name = 'probe_registration' AND column_name = 'protocol_refused_at'`,
+            )
+          ).length === 1;
+        assert.equal(await column(), true);
+        const times = async (): Promise<string[]> =>
+          (
+            await q.query<{ line: string }>(
+              `SELECT gid || ':' || coalesce(
+                        to_char(protocol_refused_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI'),
+                        'null') AS line
+               FROM probe_registration ORDER BY gid`,
+            )
+          ).map((row) => row.line);
+        assert.deepEqual(await times(), ['accepted:null', 'never:null', 'zero:null']);
+
+        const set = (gid: string, at: string | null, accepted?: string | null): Promise<unknown> =>
+          q.query(
+            `UPDATE probe_registration
+             SET protocol_refused_at = $2::timestamptz,
+                 protocol_accepted_at = CASE WHEN $3::boolean THEN $4::timestamptz
+                                             ELSE protocol_accepted_at END
+             WHERE gid = $1`,
+            [gid, at, accepted !== undefined, accepted ?? null],
+          );
+        // Beside version 0: the case it exists for.
+        await set('zero', '2026-10-07T06:00:00Z');
+        // The refusal over a version writes all three at once: no accepted time beside it.
+        await set('accepted', '2026-10-07T06:00:00Z', null);
+        assert.deepEqual(await times(), [
+          'accepted:2026-10-07 06:00',
+          'never:null',
+          'zero:2026-10-07 06:00',
+        ]);
+        // And an acceptance clears it as it writes its own.
+        await q.query(
+          `UPDATE probe_registration
+           SET protocol_refused_at = NULL, protocol_accepted_at = '2026-10-07T07:00:00Z'
+           WHERE gid = 'accepted'`,
+        );
+
+        const refused: [string, string, string | null | undefined][] = [
+          ['accepted', '2026-10-07T06:00:00Z', undefined],
+          ['zero', 'infinity', undefined],
+          ['zero', '-infinity', undefined],
+        ];
+        for (const [gid, at, accepted] of refused) {
+          await assert.rejects(
+            set(gid, at, accepted),
+            /probe_registration_protocol_refused_at_check/,
+            `${gid} ${at}`,
+          );
+        }
+        // An accepted time cannot be written beside a refusal either.
+        await assert.rejects(
+          q.query(
+            `UPDATE probe_registration SET protocol_version = 12, protocol_accepted_at = now()
+             WHERE gid = 'zero'`,
+          ),
+          /probe_registration_protocol_refused_at_check/,
+        );
+
+        await all.down(1);
+        assert.equal(await column(), false);
+        const accepted = await q.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM probe_registration
+           WHERE protocol_accepted_at IS NOT NULL`,
+        );
+        assert.equal(accepted[0]?.n, 1, 'and nothing else: 072 stays');
+        const again = await all.up();
+        assert.deepEqual(
+          again.applied.map((one) => one.id),
+          [74],
+        );
+        assert.deepEqual(
+          await times(),
+          ['accepted:null', 'never:null', 'zero:null'],
+          'a refusal does not come back with the column',
+        );
+      } finally {
+        await fresh.drop();
+      }
+    });
+
     it('runs a data step after `up` and before the record, and runs both again after the step fails (N-28)', async () => {
       const fresh = await createScratchDatabase('data_step');
       try {

@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { Ajv } from 'ajv';
 import Fastify from 'fastify';
 import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
@@ -775,13 +776,15 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
 
       const stored = await registry.get('known-machine');
       assert.equal(stored?.protocolVersion, 0, 'the version it is actually running');
-      // **And its skew reads `unknown`, not `incompatible`** — because 0 is also the sentinel for
-      // "has not connected since this core started recording versions", which is what stops an
-      // upgrade putting a red mark against every carried-over row. A probe that genuinely claims
-      // 0 is therefore indistinguishable from one that has never been seen. Harmless, because
-      // the *refusal* above is what protects the system either way, and worth writing down
-      // rather than papering over: the display is ambiguous, the admission is not.
-      assert.equal(stored.skew.kind, 'unknown');
+      // **And its skew reads `incompatible`, not `unknown`** (`U-35`). 0 is also the sentinel for
+      // "has not connected since this core started recording versions", and until `U-35` a
+      // probe that really claimed 0 read as one never seen. The refusal's time tells them apart
+      // now: this one was refused, and says so.
+      assert.equal(stored.skew.kind, 'incompatible');
+      assert.match(stored.skew.explanation, /speaks protocol 0/);
+      assert.match(stored.skew.explanation, /its last hello was refused/);
+      assert.equal(typeof stored.protocolRefusedAt, 'string');
+      assert.equal(stored.protocolAcceptedAt, null);
     });
 
     it('does not enrol one it has never seen, because approving it could not help', async () => {
@@ -812,6 +815,44 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       assert.equal(stored?.protocolVersion, 99, 'and the version it really speaks is recorded');
       assert.equal(stored.skew.kind, 'ahead', 'reported as a skew this end can fix, not a refusal');
     });
+
+    /**
+     * `GET /probes` names `ahead` (`P-313`). The registration schema's enum stopped at
+     * `incompatible` when `P-178` added `ahead`, so the reference told a client a kind it would
+     * be sent could not occur. The serializer does not check an enum, so the item is checked
+     * against the route's own response schema, read off the route as Fastify registered it.
+     */
+    it('is served by GET /probes as ahead, which the route’s own schema allows (P-313)', async () => {
+      let declared: unknown;
+      const app = Fastify();
+      app.addHook('onRoute', (route) => {
+        if (route.url === '/probes' && route.method === 'GET') declared = route.schema?.response;
+      });
+      await app.register(probeRoutes, { registry });
+      try {
+        await registry.admit(
+          hello({ gid: 'from-the-future', protocolVersion: PROTOCOL_VERSION + 1 }),
+        );
+        const response = await app.inject({ method: 'GET', url: '/probes' });
+        assert.equal(response.statusCode, 200, response.body);
+        const body = response.json<{ items: Record<string, unknown>[] }>();
+        const item = body.items.find((one) => one['gid'] === 'from-the-future');
+        assert.ok(item !== undefined, response.body);
+        assert.deepEqual(item['skew'], {
+          kind: 'ahead',
+          peerVersion: PROTOCOL_VERSION + 1,
+          ownVersion: PROTOCOL_VERSION,
+          explanation: (await registry.get('from-the-future'))?.skew.explanation,
+        });
+
+        const schema = (declared as Record<string, object> | undefined)?.['200'];
+        assert.ok(schema !== undefined, 'the route declares its 200');
+        const validate = new Ajv({ strict: false, validateFormats: false }).compile(schema);
+        assert.ok(validate(body), JSON.stringify(validate.errors));
+      } finally {
+        await app.close();
+      }
+    });
   });
 
   /**
@@ -830,13 +871,19 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
     };
     const recorded = async (
       gid: string,
-    ): Promise<{ version: number; acceptedAt: string | null; seenAt: string | null }> => {
+    ): Promise<{
+      version: number;
+      acceptedAt: string | null;
+      seenAt: string | null;
+      refusedAt: string | null;
+    }> => {
       const [row] = await db.query<{
         protocol_version: number;
         protocol_accepted_at: Date | null;
         last_seen_at: Date | null;
+        protocol_refused_at: Date | null;
       }>(
-        `SELECT protocol_version, protocol_accepted_at, last_seen_at
+        `SELECT protocol_version, protocol_accepted_at, last_seen_at, protocol_refused_at
          FROM probe_registration WHERE gid = $1`,
         [gid],
       );
@@ -845,6 +892,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
         version: row.protocol_version,
         acceptedAt: row.protocol_accepted_at?.toISOString() ?? null,
         seenAt: row.last_seen_at?.toISOString() ?? null,
+        refusedAt: row.protocol_refused_at?.toISOString() ?? null,
       };
     };
 
@@ -866,6 +914,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
         version: PROTOCOL_VERSION - 9,
         acceptedAt: '2026-01-01T10:00:00.000Z',
         seenAt: '2026-01-01T10:00:00.000Z',
+        refusedAt: null,
       });
 
       at('2026-01-02T10:00:00.000Z');
@@ -942,10 +991,37 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       const row = await recorded(first.gid);
       assert.equal(row.version, 0, 'the version is recorded, as R-06 has it');
       assert.equal(row.acceptedAt, null, 'and no accepted handshake spoke it');
+      assert.equal(row.refusedAt, '2026-01-02T10:00:00.000Z', 'and when it was refused (U-35)');
+
+      // Refused again: the last refusal's time, which says it is still trying.
+      at('2026-01-02T11:00:00.000Z');
+      await clocked.admit(hello({ gid: first.gid, protocolVersion: 0 }));
+      assert.equal((await recorded(first.gid)).refusedAt, '2026-01-02T11:00:00.000Z');
 
       at('2026-01-03T10:00:00.000Z');
       await clocked.admit(hello({ gid: first.gid, protocolVersion: PROTOCOL_VERSION - 9 }));
-      assert.equal((await recorded(first.gid)).acceptedAt, '2026-01-03T10:00:00.000Z');
+      const accepted = await recorded(first.gid);
+      assert.equal(accepted.acceptedAt, '2026-01-03T10:00:00.000Z');
+      assert.equal(accepted.refusedAt, null, 'an accepted handshake clears the refusal');
+    });
+
+    it('leaves the refusal’s time as it was on a refusal over anything but the version (U-35)', async () => {
+      at('2026-01-01T10:00:00.000Z');
+      const first = await clocked.admit(hello({ protocolVersion: PROTOCOL_VERSION - 9 }));
+      assert.ok(first.kind === 'pending');
+      at('2026-01-02T10:00:00.000Z');
+      await clocked.admit(hello({ gid: first.gid, protocolVersion: 0 }));
+
+      at('2026-01-03T10:00:00.000Z');
+      const wrong = await clocked.admit(
+        hello({ gid: first.gid, protocolVersion: PROTOCOL_VERSION, accessKey: 'nope' }),
+      );
+      assert.ok(wrong.kind === 'refused' && wrong.code === 'bad-access-key');
+      const row = await recorded(first.gid);
+      assert.deepEqual(
+        { version: row.version, acceptedAt: row.acceptedAt, refusedAt: row.refusedAt },
+        { version: 0, acceptedAt: null, refusedAt: '2026-01-02T10:00:00.000Z' },
+      );
     });
 
     /**
@@ -964,7 +1040,9 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
           .json<{ items: Record<string, unknown>[] }>()
           .items.find((one) => one['gid'] === gid);
         assert.ok(item !== undefined, `${gid} not listed: ${response.body}`);
-        assert.equal(item['protocolAcceptedAt'], (await clocked.get(gid))?.protocolAcceptedAt);
+        const registration = await clocked.get(gid);
+        assert.equal(item['protocolAcceptedAt'], registration?.protocolAcceptedAt);
+        assert.equal(item['protocolRefusedAt'], registration?.protocolRefusedAt);
         return item;
       };
       try {
@@ -983,12 +1061,20 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
         assert.ok('protocolAcceptedAt' in refused, JSON.stringify(refused));
         assert.equal(refused['protocolAcceptedAt'], null);
         assert.equal(typeof refused['lastSeenAt'], 'string');
+        // And when it was refused, so the 0 is not the upgrade's "nothing recorded" (`U-35`).
+        assert.equal(refused['protocolRefusedAt'], '2026-01-02T10:00:00.000Z');
+        const refusedSkew = refused['skew'] as Record<string, unknown>;
+        assert.equal(refusedSkew['kind'], 'incompatible');
+        assert.match(String(refusedSkew['explanation']), /its last hello was refused/);
+        assert.equal(enrolled['protocolRefusedAt'], null);
 
         // Accepted again, then refused for its key: the accepted time stays, last seen moves on.
         at('2026-01-03T10:00:00.000Z');
         await clocked.admit(hello({ gid: first.gid, protocolVersion: PROTOCOL_VERSION - 8 }));
         const accepted = await listed(first.gid);
         assert.equal(accepted['protocolAcceptedAt'], '2026-01-03T10:00:00.000Z');
+        assert.ok('protocolRefusedAt' in accepted, JSON.stringify(accepted));
+        assert.equal(accepted['protocolRefusedAt'], null);
         await db.query(
           "UPDATE probe_registration SET last_seen_at = '2026-01-03T10:00:00Z' WHERE gid = $1",
           [first.gid],
@@ -1035,6 +1121,23 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       assert.equal(stored?.protocolVersion, 0);
       assert.equal(stored.skew.kind, 'unknown');
       assert.match(stored.skew.explanation, /has not connected/);
+      assert.equal(stored.protocolRefusedAt, null);
+    });
+
+    it('says a version this core refuses, with no refusal recorded, will be refused at the next hello (U-35)', async () => {
+      // What a core with a lower floor leaves behind once this one's floor is above it: a version
+      // it accepted, which this core refuses, and no refusal yet. The floor is 1 and a hello's
+      // version is at least 0, so no such row can be written by a handshake today; -1, which the
+      // column allows, stands in for it, because the skew reads it the same way.
+      await db.query(
+        `INSERT INTO probe_registration (gid, status, object_id, decided_at, protocol_version)
+         VALUES ('accepted-then', 'approved', $1, now(), -1)`,
+        [probeId],
+      );
+      const stored = await registry.get('accepted-then');
+      assert.equal(stored?.skew.kind, 'incompatible');
+      assert.match(stored.skew.explanation, /will be refused when it next connects/);
+      assert.doesNotMatch(stored.skew.explanation, /last hello was refused/);
     });
   });
 });

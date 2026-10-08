@@ -39,6 +39,8 @@ const health = (channels: Record<string, number | null>): ProbeHealthView => ({
   lastProtocolVersion: 32,
   // With no time beside it, as for a version recorded before the core kept one (`U-32`).
   lastProtocolVersionAt: null,
+  // And not refused (`U-35`).
+  lastProtocolRefusedAt: null,
   channels,
 });
 
@@ -80,10 +82,12 @@ const unavailable = (
 const downAt = (
   lastProtocolVersion: number | null,
   lastProtocolVersionAt: string | null = null,
+  lastProtocolRefusedAt: string | null = null,
 ): ProbeHealthView => ({
   ...unavailable({ reason: 'not-connected' }, 0),
   lastProtocolVersion,
   lastProtocolVersionAt,
+  lastProtocolRefusedAt,
 });
 
 /** Six days and a bit before every answer's `at` above: when a probe's version was accepted. */
@@ -427,29 +431,44 @@ describe('whether a probe’s listener is running', () => {
     });
   });
 
-  describe('when its last hello was refused over its version (U-33)', () => {
-    // What the core records for a hello it refused over the version: the version, and no time,
-    // because no accepted handshake spoke it. One below the floor is the one it refuses.
+  describe('when its last hello was refused over its version (U-33, U-35)', () => {
+    // What the core records for a hello it refused over the version: the version, no accepted
+    // time, and when it was refused (`U-35`). One below the floor is the one it refuses, which
+    // today is 0: served as 0 beside the refusal, where it used to be served as nothing at all.
     const REFUSED = MIN_PROTOCOL_VERSION - 1;
+    /** An hour and a half before every answer's `at` above. */
+    const REFUSED_AT = '2026-10-02T08:30:00.000Z';
 
-    it('says the hello was refused, not when it last connected', () => {
-      const notice = say('syslog', downAt(REFUSED));
+    it('says the hello was refused, and when, not when it last connected', () => {
+      const notice = say('syslog', downAt(REFUSED, null, REFUSED_AT));
+      const absolute = new Date(REFUSED_AT).toLocaleString();
       expect(notice?.kind).toBe('unknown');
       expect(notice?.text).toBe(
         'Probe “Berlin” is not connected, so whether its syslog listener is running cannot be ' +
-          'checked. It has not connected since its hello was refused over its version: it spoke ' +
-          `protocol ${String(REFUSED)}, and this core accepts protocol ` +
+          `checked. Its last hello, 2 hours ago (${absolute}), was refused over its version: it ` +
+          `spoke protocol ${String(REFUSED)}, and this core accepts protocol ` +
           `${String(MIN_PROTOCOL_VERSION)} or newer, so unless it has been upgraded since, it ` +
           'will be refused again when it tries. Check that syslogListener.enabled is true in ' +
           'that probe’s configuration file.',
       );
-      expect(notice?.time).toBeUndefined();
+      expect(notice?.time).toEqual({
+        dateTime: REFUSED_AT,
+        shown: `2 hours ago (${absolute})`,
+      });
       expect(notice?.text).not.toContain('When it last connected');
+      expect(notice?.text).not.toContain('This updates when it connects');
       // Each listener its own setting, and flow its caveat.
-      const flow = text('flow', downAt(REFUSED));
-      expect(flow).toContain('It has not connected since its hello was refused over its version');
+      const flow = text('flow', downAt(REFUSED, null, REFUSED_AT));
+      expect(flow).toContain('Its last hello, 2 hours ago (');
+      expect(flow).toContain('was refused over its version');
       expect(flow).toContain('Check that flowListener.enabled is true');
       expect(flow).toContain('A probe on the v1 build has no flow collector');
+    });
+
+    it('says it without a time when the refusal’s does not parse', () => {
+      const notice = say('syslog', downAt(REFUSED, null, 'not a time'));
+      expect(notice?.text).toContain('checked. Its last hello was refused over its version: it');
+      expect(notice?.time).toBeUndefined();
     });
 
     it('keeps "when it last connected" for a version this core accepts, with a time or without', () => {
@@ -458,16 +477,22 @@ describe('whether a probe’s listener is running', () => {
       expect(text('syslog', downAt(12))).not.toContain('refused');
       // With: accepted, and when (`U-32`).
       expect(text('syslog', downAt(12, ACCEPTED))).toContain('When it last connected, 6 days ago');
-      // A refused version with a time beside it was accepted by a core that took it then: the
-      // time is the core's word that it connected, so the sentence is the connection's.
-      expect(text('syslog', downAt(REFUSED, ACCEPTED))).toContain(
-        `When it last connected, 6 days ago`,
+    });
+
+    it('never says "when it last connected" of a version the core says was refused', () => {
+      // Refused by a core whose floor was higher than this one's: no connection spoke it, so
+      // the `U-31` sentence would be false. Nothing can be said until it connects.
+      const notice = say('syslog', downAt(12, null, REFUSED_AT));
+      expect(notice?.text).toBe(
+        'Probe “Berlin” is not connected, so whether its syslog listener is running cannot be ' +
+          'checked. This updates when it connects.',
       );
     });
 
     it('judges a connected probe by the version it speaks now, not a refused one before it', () => {
-      expect(say('syslog', { ...RUNNING, lastProtocolVersion: REFUSED })).toBeNull();
-      expect(say('syslog', { ...OFF, lastProtocolVersion: REFUSED })?.kind).toBe('off');
+      const refused = { lastProtocolVersion: REFUSED, lastProtocolRefusedAt: REFUSED_AT };
+      expect(say('syslog', { ...RUNNING, ...refused })).toBeNull();
+      expect(say('syslog', { ...OFF, ...refused })?.kind).toBe('off');
     });
   });
 
@@ -910,16 +935,25 @@ describe('the add-sensor form on a probe that was too old when it last connected
     expect(notice().className).toContain('text-text-muted');
   });
 
-  it('says a probe refused over its version was refused, in the same muted status region (U-33)', async () => {
-    await open({ health: downAt(MIN_PROTOCOL_VERSION - 1) });
+  it('says a probe refused over its version was refused, and when, in the same muted status region (U-33, U-35)', async () => {
+    const refusedAt = '2026-10-02T08:30:00.000Z';
+    await open({ health: downAt(MIN_PROTOCOL_VERSION - 1, null, refusedAt) });
     pick('flow.netflow');
     await waitFor(() => {
-      expect(notice().textContent).toContain(
-        'It has not connected since its hello was refused over its version',
-      );
+      expect(notice().textContent).toContain('was refused over its version');
     });
+    const absolute = new Date(refusedAt).toLocaleString();
+    expect(notice().textContent).toContain(
+      `Its last hello, 2 hours ago (${absolute}), was refused over its version: it spoke ` +
+        `protocol ${String(MIN_PROTOCOL_VERSION - 1)}`,
+    );
     expect(notice().textContent).not.toContain('When it last connected');
-    expect(notice().querySelectorAll('time')).toHaveLength(0);
+    // As the rest of the UI marks a time, with every word of it in the sentence (WCAG 1.3.1).
+    const times = notice().querySelectorAll('time');
+    expect(times).toHaveLength(1);
+    expect(times[0]?.getAttribute('dateTime')).toBe(refusedAt);
+    expect(times[0]?.getAttribute('title')).toBe(refusedAt);
+    expect(times[0]?.textContent).toBe(`2 hours ago (${absolute})`);
     // Not a caution: nothing about the listener is known (WCAG 1.3.1, 1.4.1, 1.4.3, 4.1.3).
     expect(notice().getAttribute('role')).toBe('status');
     expect(screen.getByLabelText('Sensor type').getAttribute('aria-describedby')).toBe(

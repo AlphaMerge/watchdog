@@ -160,6 +160,14 @@ export interface ProbeHealthView {
    * the form says so rather than "when it last connected" (`U-33`).
    */
   lastProtocolVersionAt: string | null;
+  /**
+   * When a hello was last refused over `lastProtocolVersion`, as ISO 8601 (`U-35`): the probe has
+   * not connected since. Never beside `lastProtocolVersionAt`; `null` beside an accepted version,
+   * for one recorded before the core kept the time, and whenever `lastProtocolVersion` is. A
+   * `lastProtocolVersion` of 0 comes only with it: a 0 without it is nothing recorded, and is
+   * served as `null`.
+   */
+  lastProtocolRefusedAt: string | null;
   channels: Record<string, number | null>;
 }
 

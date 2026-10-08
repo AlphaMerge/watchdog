@@ -128,7 +128,13 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
           'asked. `lastProtocolVersionAt` is when a handshake the core accepted spoke that ' +
           'version, as ISO 8601: not when the probe was last seen, which a refused hello moves ' +
           'too. `null` whenever `lastProtocolVersion` is, beside a version a hello was refused ' +
-          'over, and for one recorded before the core kept the time.',
+          'over, and for one recorded before the core kept the time. ' +
+          '`lastProtocolRefusedAt` is when a hello was last refused over that version, as ISO ' +
+          '8601: the probe has not connected since, and a core with the same floor will refuse ' +
+          'it again. Never beside `lastProtocolVersionAt`, and `null` whenever ' +
+          '`lastProtocolVersion` is, beside an accepted version, and for one recorded before the ' +
+          'core kept the time. A `lastProtocolVersion` of 0 is served only beside it: a 0 ' +
+          'without it is nothing recorded, and is `null`.',
         params: {
           type: 'object',
           additionalProperties: false,
@@ -147,6 +153,7 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
               'protocolVersion',
               'lastProtocolVersion',
               'lastProtocolVersionAt',
+              'lastProtocolRefusedAt',
               'channels',
             ],
             properties: {
@@ -178,6 +185,10 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
               // `U-32`. When that version was accepted, so the form can say when the probe last
               // connected. The registry's own column beside the version, not `last_seen_at`.
               lastProtocolVersionAt: { type: ['string', 'null'], format: 'date-time' },
+              // `U-35`. When a hello was refused over that version, so the form can say the probe
+              // will be refused again, and a refusal at 0 is not read as nothing recorded. The
+              // registry's own column, read with the version, under the same `read` right.
+              lastProtocolRefusedAt: { type: ['string', 'null'], format: 'date-time' },
               channels: {
                 type: 'object',
                 additionalProperties: false,
@@ -209,6 +220,7 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
         protocolVersion,
         lastProtocolVersion: last.version,
         lastProtocolVersionAt: last.at,
+        lastProtocolRefusedAt: last.refusedAt,
         channels: reading,
       };
     },

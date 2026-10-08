@@ -11,7 +11,14 @@ export interface ProbeRoutesOptions {
 const registrationSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['gid', 'status', 'displayName', 'protocolAcceptedAt', 'firstSeenAt'],
+  required: [
+    'gid',
+    'status',
+    'displayName',
+    'protocolAcceptedAt',
+    'protocolRefusedAt',
+    'firstSeenAt',
+  ],
   properties: {
     gid: { type: 'string' },
     status: { type: 'string', enum: ['pending', 'approved', 'revoked'] },
@@ -25,6 +32,16 @@ const registrationSchema = {
         'When a handshake this core accepted spoke `protocolVersion` (U-33). `null` beside a ' +
         'version a hello was refused over, and for one recorded before the core kept the time. ' +
         'Not `lastSeenAt`, which every hello moves, refused ones included.',
+    },
+    protocolRefusedAt: {
+      type: ['string', 'null'],
+      format: 'date-time',
+      description:
+        'When a hello was last refused over `protocolVersion` (U-35). `null` beside a version a ' +
+        'handshake this core accepted, and for one recorded before the core kept the time. ' +
+        'Never set beside `protocolAcceptedAt`. A `protocolVersion` of 0 with this set is a ' +
+        'probe that claimed 0 and was refused; with neither time it is a probe that has not ' +
+        'connected since the core started recording versions.',
     },
     lastAddress: { type: 'string' },
     allowFrom: { type: 'array', items: { type: 'string' } },
@@ -47,9 +64,19 @@ const registrationSchema = {
         'What this probe’s protocol version means against this core (R-06). `outdated` is the ' +
         'one worth reading: such a probe connects and heartbeats normally and is refused every ' +
         'feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning ' +
-        'nothing at all.',
+        'nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and ' +
+        'the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a ' +
+        'version this core refuses at the handshake; its `explanation` says whether the last ' +
+        'hello was refused over it (`protocolRefusedAt`) or a core with a lower floor accepted ' +
+        'it and this one will refuse it at the next (U-35). `unknown` is a 0 with neither time: ' +
+        'nothing recorded.',
       properties: {
-        kind: { type: 'string', enum: ['unknown', 'current', 'outdated', 'incompatible'] },
+        // Every kind `describeSkew` returns (`P-313`): the serializer does not check an enum, so
+        // a missing one went out anyway while the reference told a client it could not.
+        kind: {
+          type: 'string',
+          enum: ['unknown', 'current', 'outdated', 'ahead', 'incompatible'],
+        },
         peerVersion: { type: 'integer' },
         ownVersion: { type: 'integer' },
         missing: { type: 'array', items: { type: 'string' } },
@@ -97,9 +124,13 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
           'and "from 10.4.2.9" is. `protocolVersion` is what the probe declared at its last ' +
           'handshake that was accepted or was refused over the version itself, and ' +
           '`protocolAcceptedAt` is when an accepted one spoke it: `null` when that handshake ' +
-          'was refused, and for a version recorded before the core kept the time. `lastSeenAt` ' +
-          'is the last hello of any kind, refused ones included, so it is not when the version ' +
-          'was spoken.',
+          'was refused, and for a version recorded before the core kept the time. ' +
+          '`protocolRefusedAt` is when a hello was last refused over it, the other way round, ' +
+          'so a refusal at 0 is not read as nothing recorded. `lastSeenAt` is the last hello ' +
+          'of any kind, refused ones included, so it is not when the version was spoken. ' +
+          '`skew.kind` is `unknown`, `current`, `outdated`, `ahead` (a probe newer than this ' +
+          'core, which is admitted and speaks this core’s version) or `incompatible` (one this ' +
+          'core refuses at the handshake).',
         querystring: {
           type: 'object',
           additionalProperties: false,

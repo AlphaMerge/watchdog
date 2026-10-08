@@ -76,6 +76,17 @@ export interface ProbeRegistration {
    * is never another handshake's time.
    */
   protocolAcceptedAt: string | null;
+  /**
+   * When a hello was last refused over `protocolVersion` (`U-35`), or `null`: beside a version a
+   * handshake accepted, and for one recorded before migration 074.
+   *
+   * **What tells a refusal at 0 from nothing recorded.** Both are a stored 0 with no accepted
+   * time, and until this the row read the refusal as the `R-01` upgrade's "has not connected
+   * since": `unknown`, for a probe that is refused at every hello. Never beside
+   * `protocolAcceptedAt`: the two are written in one statement, and the column's check refuses
+   * both.
+   */
+  protocolRefusedAt: string | null;
   lastAddress: string;
   allowFrom: string[];
 
@@ -241,7 +252,7 @@ export class ProbeRegistry {
         'refusing a probe whose protocol this core cannot speak',
       );
       // `R-06`: the one refusal whose whole content is the version, so the queue shows it.
-      // Not accepted, so no time beside it (`U-32`).
+      // Not accepted, so no accepted time beside it (`U-32`), and the refusal's instead (`U-35`).
       if (existing !== null) await this.#speaks(existing.gid, hello.protocolVersion, false);
       return { kind: 'refused', code: 'protocol-version', detail: explainSkew(skew) };
     }
@@ -738,12 +749,20 @@ export class ProbeRegistry {
    * For the refusal over the version it is false and the time is cleared: no accepted handshake
    * spoke that version, and a time kept from an earlier one would date it wrongly. The form says
    * "when it last connected" from this pair; `last_seen_at` moves on every hello and cannot.
+   *
+   * **And when it was refused, the other way round** (`U-35`). The refusal writes the time to
+   * `protocol_refused_at` and an acceptance clears it, so the row says which of the two the
+   * version was. Without it a refusal at 0 was a 0 with no time, which is also what the `R-01`
+   * upgrade left for a probe that had not connected since, and both were read as nothing
+   * recorded.
    */
   async #speaks(gid: string, protocolVersion: number, accepted: boolean): Promise<void> {
+    const now = this.#now().toISOString();
     await this.#db.query(
-      `UPDATE probe_registration SET protocol_version = $2, protocol_accepted_at = $3
+      `UPDATE probe_registration
+       SET protocol_version = $2, protocol_accepted_at = $3, protocol_refused_at = $4
        WHERE gid = $1`,
-      [gid, protocolVersion, accepted ? this.#now().toISOString() : null],
+      [gid, protocolVersion, accepted ? now : null, accepted ? null : now],
     );
   }
 }
@@ -823,9 +842,10 @@ function read(row: Record<string, unknown>): ProbeRegistration {
     displayName: text(row['display_name']),
     agentVersion: text(row['agent_version']),
     protocolVersion: Number(row['protocol_version'] ?? 0),
-    skew: skewFor(Number(row['protocol_version'] ?? 0)),
+    skew: skewFor(Number(row['protocol_version'] ?? 0), row['protocol_refused_at'] != null),
     protocolAcceptedAt:
       row['protocol_accepted_at'] == null ? null : iso(row['protocol_accepted_at']),
+    protocolRefusedAt: row['protocol_refused_at'] == null ? null : iso(row['protocol_refused_at']),
     lastAddress: text(row['last_address']),
     allowFrom: Array.isArray(row['allow_from']) ? (row['allow_from'] as string[]) : [],
     hasOwnKey: row['access_key_hash'] != null && row['access_key_confirmed_at'] != null,
@@ -844,11 +864,25 @@ function read(row: Record<string, unknown>): ProbeRegistration {
  * over, so zero is what a probe that has not reconnected since looks like. `describeSkew` would
  * call that incompatible, which is true of a peer that really claimed zero and false of every
  * row an upgrade wrote.
+ *
+ * **Unless the row says that zero was refused** (`U-35`). A hello refused over its version writes
+ * the version and `protocol_refused_at`, so a refused 0 is the probe's own claim, and is
+ * `incompatible` like any other version below the floor.
+ *
+ * **And `incompatible` says what happens next, from what the row says happened** (`U-35`). A
+ * version this build refuses was either refused at the probe's last hello, or accepted by a core
+ * whose floor was lower and recorded before this one started: that probe is not connected,
+ * because this core has refused it at every hello since, and will be refused at its next one.
+ * The reason alone said neither.
  */
-function skewFor(protocolVersion: number): RegistrationSkew {
+function skewFor(protocolVersion: number, refused: boolean): RegistrationSkew {
   const skew: ProtocolSkew =
-    protocolVersion === 0 ? { kind: 'unknown' } : describeSkew(protocolVersion);
-  return { ...skew, explanation: explainSkew(skew) };
+    protocolVersion === 0 && !refused ? { kind: 'unknown' } : describeSkew(protocolVersion);
+  if (skew.kind !== 'incompatible') return { ...skew, explanation: explainSkew(skew) };
+  const next = refused
+    ? 'so its last hello was refused, and it will be refused again until it is upgraded'
+    : 'so it will be refused when it next connects, unless it has been upgraded since';
+  return { ...skew, explanation: `${explainSkew(skew)}, ${next}` };
 }
 
 function iso(value: unknown): string {

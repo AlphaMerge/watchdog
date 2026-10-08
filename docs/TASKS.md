@@ -11443,10 +11443,27 @@ because each is a decision rather than a defect:
       **Done when** decided for each: repair on the next successful declaration (or say why not),
       and count the unregistered case or say why it differs, with tests.
 
-- [ ] **P-313 — `/probes`' schema does not allow the skew `ahead`** · XS · U-33 · Found 2026-10-08
+- [x] **P-313 — `/probes`' schema does not allow the skew `ahead`** · XS · U-33 · Found 2026-10-08
       in `U-33`. The registration schema's `skew.kind` enum in `api/routes/probes.ts` lacks
       `'ahead'`, which `describeSkew` returns since `P-178`. **Done when** the schema and
       `docs/api-reference.md` name it, with a test that serialises a probe ahead of the core.
+
+      **P-313 outcome.**
+      - **The enum names all five kinds**: `unknown`, `current`, `outdated`, `ahead` and
+        `incompatible`. The skew's schema description now says what `ahead` and `incompatible`
+        mean.
+      - **The reference names it too.** `docs/api-reference.md` renders a route's description
+        and top-level fields, not a nested enum. So `GET /probes`' description now lists the
+        kinds, and the reference was regenerated with its generator.
+      - **Nothing was being dropped.** `fast-json-stringify` does not check an enum, so a probe
+        ahead of the core was already served `ahead`. Only the contract was wrong: the schema
+        and the OpenAPI document told a client that kind could not occur.
+      - **Test.** `probe-registry.test.ts` enrols a probe at `PROTOCOL_VERSION + 1` and lists it
+        through `probeRoutes` on a bare Fastify. The skew is served exactly as `ahead` with both
+        versions and the explanation. The whole answer is then validated, with Ajv, against
+        the route's own 200 schema, read off the route by an `onRoute` hook. That validation
+        is what fails without the fix.
+      - **Mutation:** the enum without `ahead` failed 1.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
@@ -22389,12 +22406,124 @@ because each is a decision rather than a defect:
       refusal after submit. **Done when** the form shows it read-only on an existing sensor, says
       why, with a test (WCAG 2.1 AA).
 
-- [ ] **U-35 — a probe refused at version 0 looks like one never recorded** · S · U-33 · Found
+- [x] **U-35 — a probe refused at version 0 looks like one never recorded** · S · U-33 · Found
       2026-10-08 in `U-33`. A hello refused at 0 overwrites the recorded version with 0, which
       `/probes`' skew and the health answer both read as "nothing recorded"; and a probe accepted by
       an older core below a raised floor still gets the U-31/U-32 sentences instead of "will be
       refused". **Done when** a refusal is told apart on the row (a marker or the refusal's time) and
       both places say it, with tests.
+
+      **U-35 outcome. Decided: record the refusal's time, beside the version, and say it in all
+      three places.**
+      - **Migration 074, `probe_registration.protocol_refused_at`.** It is when a hello was last
+        refused over the recorded `protocol_version`.
+        - A check keeps it finite and never beside `protocol_accepted_at`. So a version is
+          accepted at a time, refused at a time, or neither: recorded before the times were
+          kept, or the `R-01` upgrade's 0.
+        - Existing rows get NULL. A stored 0 with no accepted time and a `last_seen_at` may be an
+          upgrade's row touched by a hello refused for its key, or a refusal at 0, and nothing
+          tells which. No version above 0 was ever refused, because the floor has been 1
+          throughout.
+        - The rollback drops the column, and is tested. The build before reads a refusal at 0 as
+          nothing recorded, as it did.
+      - **Written by `#speaks`, in the statement that writes the version.**
+        - A version refusal writes the version and the refusal's time, and clears the accepted
+          time.
+        - An accepted handshake writes the version and its time, and clears the refusal's.
+        - Every other refusal (key, address, revoked) writes none of the three.
+        - The time is the *last* refusal's: a probe that retries reads as still trying.
+      - **`GET /probes`** carries `protocolRefusedAt`, declared and required in the registration
+        schema, as `U-33` did for the accepted time.
+        - `skewFor` reads a 0 as `unknown` only when no refusal is recorded. A refused 0 is
+          `incompatible` and is no longer the upgrade's sentinel.
+        - Every `incompatible` explanation now says what happens next:
+          - *…older than the oldest this build understands (1), so its last hello was refused,
+            and it will be refused again until it is upgraded* when a refusal is recorded;
+          - *…so it will be refused when it next connects, unless it has been upgraded since*
+            for a version a core with a lower floor accepted.
+      - **`GET /probes/{id}/health`** gains `lastProtocolRefusedAt` (ISO 8601 or `null`). It is
+        read in the same query as the version, from the live identity only, under the route's
+        existing `onObject('read')`.
+        - A 0 is served as `lastProtocolVersion: 0` when a refusal is beside it. Without one it
+          is still `null`, as nothing recorded.
+        - It is `null` beside an accepted version, for a revoked identity, and when the database
+          cannot be asked (`P-126`).
+        - No new route, so the runbook appendix is unchanged. `docs/api-reference.md` is
+          regenerated.
+      - **What the form says.** Any recorded version this core refuses comes first, before the
+        listener's version, by the handshake's own `isProtocolCompatible`:
+        - **Refused** (the core says so): *Probe "Berlin" is not connected, so whether its syslog
+          listener is running cannot be checked. Its last hello, 2 hours ago (02/10/2026,
+          08:30:00), was refused over its version: it spoke protocol 0, and this core accepts
+          protocol 1 or newer, so unless it has been upgraded since, it will be refused again when
+          it tries*, then the setting to check by hand. Without a parseable time: *Its last hello
+          was refused…*.
+        - **Accepted by a lower floor**: *…When it last connected, 6 days ago (…), it spoke
+          protocol 14, which this core no longer accepts: it accepts protocol 20 or newer, so
+          unless it has been upgraded since, it will be refused when it tries*. Until now it got
+          the `U-31` or `U-32` sentence, or none at all, for a probe that cannot connect.
+        - A version the core says was refused is never given "when it last connected", even one
+          this core would accept. Such a version comes from a core whose floor was higher.
+        - The time is marked up as `U-32`'s is: `<time dateTime title>`, every word of it in the
+          sentence, reckoned from the answer's `at`. It uses the same muted `role="status"`
+          region the field is described by (WCAG 1.3.1, 1.4.1, 1.4.3, 4.1.3).
+        - So the `U-33` inference ("a version with no time that this build refuses was refused")
+          is replaced by the core's word. No `U-33` sentence was reachable at floor 1 anyway: the
+          only refused version, 0, was served as `null`.
+      - **Tests.**
+        - `migrator.test.ts` (074): carried-over rows, including both kinds of 0, get NULL.
+          - A refusal is kept beside 0 and beside a cleared accepted time.
+          - Refused: beside an accepted time, as ±infinity, and an accepted time written beside
+            a refusal.
+          - The rollback drops it, and a refusal does not come back.
+        - `probe-registry.test.ts`, with a clock:
+          - a version refusal writes its time and no accepted time;
+          - a second refusal moves the time;
+          - an accepted hello clears it;
+          - a key refusal leaves all three as they were.
+          - The refused-at-0 row's skew is `incompatible` with "its last hello was refused", where
+            it used to assert `unknown`.
+          - A row below the floor with no refusal says "will be refused when it next connects".
+            -1 stands in for a version below a raised floor, because no handshake can write one
+            at floor 1.
+          - Through `probeRoutes`: `protocolRefusedAt` and the refused skew are served, and
+            `null` is served present for an enrolled and a re-accepted probe.
+        - `probe-health.test.ts`: a refused 0 is served as 0 with the refusal's time, and a 0
+          without one is still `null`. The time is served beside a nonzero version, and never a
+          revoked identity's. The answer's keys are exact, and `null` is served when the
+          database throws.
+        - `add-sensor-listener.test.tsx`, model:
+          - the refused sentence word for word, with its `time`;
+          - no time when the refusal's does not parse;
+          - flow's setting and caveat;
+          - no "when it last connected" beside a refusal;
+          - a connected probe judged by its live version.
+          - Rendered: one `<time>` with `dateTime` and `title`, the sentence, muted status
+            region.
+        - `add-sensor-refused-floor.test.ts` (floor mocked at 20):
+          - refused at 14 and 12 says refused;
+          - accepted at 14 six days ago says *will be refused* with the time, for syslog and
+            flow, and not the `U-31` or `U-32` sentences;
+          - 12 with no time says the same without it;
+          - 22 keeps its old sentences.
+      - **Mutations**, each failing the tests (core ones rebuilt, each restored byte for byte):
+        - a version refusal writing no time: failed 4;
+        - a refused 0 read as `unknown` again: failed 2;
+        - the registration without the time: failed 2;
+        - the registration schema without the property: failed 2;
+        - the health service serving a refused 0 as nothing: failed 1;
+        - the health route serving no refusal time: failed 2;
+        - 074 without its check: failed 1;
+        - the form ignoring the refusal: failed 4;
+        - the form giving the refusal no time: failed 2;
+        - the form saying "when it last connected" beside a refusal: failed 1;
+        - the form's `U-33` rule, refused only with no time: failed 1.
+        - **One survived:** dropping `protocolRefusedAt` from the schema's `required` alone. The
+          registry always sets it, so the serializer's output is the same; the property's
+          declaration is what serves it, and that mutation fails.
+      - **Not done:** the health answer's `message` is unchanged; it describes the live link. No
+        backfill: no row can tell a refused 0 from an upgrade's. A web app served by a core
+        older than this is not a case, because the core serves its own web app.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

@@ -176,13 +176,18 @@ export interface ProbeHealthStats {
  * What the registry recorded at a probe's last handshake (`U-31`, `U-32`): the version it declared,
  * and when a handshake the core accepted spoke it, as ISO 8601. `at` is never given without
  * `version`, and is `null` beside one that was refused or recorded before migration 072.
+ *
+ * `refusedAt` is when a hello was last refused over `version` (`U-35`), the other way round: never
+ * given without `version`, never beside `at`, and `null` beside an accepted version and for one
+ * recorded before migration 074.
  */
 export interface LastProtocol {
   readonly version: number | null;
   readonly at: string | null;
+  readonly refusedAt: string | null;
 }
 
-const NO_LAST_PROTOCOL: LastProtocol = { version: null, at: null };
+const NO_LAST_PROTOCOL: LastProtocol = { version: null, at: null, refusedAt: null };
 
 /** One reading of every channel. `null` is a gap and stays one — never a zero (`CLAUDE.md`). */
 export type ProbeHealthReading = Readonly<Record<string, number | null>>;
@@ -646,7 +651,11 @@ export class ProbeHealthService {
    * beside `protocolVersion`, which a connected probe's reader already has. The live identity
    * only: a revoked one no longer holds the probe (`probe_registration_object_idx`). Zero is what
    * the `R-01` upgrade left for a probe that has not connected since, an absence and not a
-   * version, as `skewFor` reads it, and a time with no version is not given either.
+   * version, as `skewFor` reads it, and a time with no version is not given either. **Unless that
+   * zero was refused** (`U-35`): a hello refused over its version writes `protocol_refused_at`,
+   * so a 0 beside it is what the probe claimed, and is served with the refusal's time. Until then
+   * it was served as nothing recorded, and the form said "This updates when it connects" of a
+   * probe that is refused at every hello.
    *
    * **The time is `protocol_accepted_at`, never `last_seen_at`**, which every hello moves before
    * it is decided. It is `null` beside a version a hello was refused over (`R-06`), and for a
@@ -661,19 +670,24 @@ export class ProbeHealthService {
       const rows = await this.#db.query<{
         protocol_version: number;
         protocol_accepted_at: Date | string | null;
+        protocol_refused_at: Date | string | null;
       }>(
-        `SELECT protocol_version, protocol_accepted_at FROM probe_registration
+        `SELECT protocol_version, protocol_accepted_at, protocol_refused_at
+         FROM probe_registration
          WHERE object_id = $1 AND status <> 'revoked'`,
         [probeObjectId],
       );
       const row = rows[0];
-      if (row === undefined || row.protocol_version === 0) return NO_LAST_PROTOCOL;
+      if (row === undefined) return NO_LAST_PROTOCOL;
+      if (row.protocol_version === 0 && row.protocol_refused_at === null) return NO_LAST_PROTOCOL;
       return {
         version: row.protocol_version,
         at:
           row.protocol_accepted_at === null
             ? null
             : new Date(row.protocol_accepted_at).toISOString(),
+        refusedAt:
+          row.protocol_refused_at === null ? null : new Date(row.protocol_refused_at).toISOString(),
       };
     } catch (error: unknown) {
       this.#logger.warn(
