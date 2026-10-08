@@ -11635,7 +11635,7 @@ because each is a decision rather than a defect:
       nested enums and descriptions (or links each route to its schema), `--check` stays the gate,
       with a test.
 
-- [ ] **P-319 — a refused hello rewrites a probe's row before its key is checked** · S · U-35 ·
+- [x] **P-319 — a refused hello rewrites a probe's row before its key is checked** · S · U-35 ·
       Found 2026-10-08 reviewing `U-35`. mTLS proves only that the peer holds a certificate the
       shared CA signed; nothing ties it to a GID. `admit` runs `#touch` (display name, agent
       version, address, last seen) and, on a version refusal, `#speaks` before the access key,
@@ -11644,6 +11644,75 @@ because each is a decision rather than a defect:
       reconnects. Pre-existing (R-06/U-32, A-41c kept it on purpose); U-35 only changed the label.
       **Done when** nothing is written to a probe's row for a hello that has not proved that
       probe's identity, or the certificate is bound to its GID, with a test of a forged hello.
+
+      **P-319 outcome. Decided: a hello writes to a probe's row only once it has proved it is
+      that probe.** Proof is what `admit` already checked, in its old order: not revoked, an
+      address the probe's filter (or the installation's) allows, and the key (the enrolment key
+      for a pending probe, its own key, or the enrolment key in `P-37`'s window).
+      - **Why the R-06 rule goes.** `R-01`/`R-06` wrote every hello first so the row would say
+        "a revoked identity tried at 04:12 from an address nobody recognises". But what was
+        written was a claim. mTLS proves only that the peer holds a certificate the CA signed,
+        and nothing ties it to a GID. So any certificate holder could rename an approved probe,
+        move its address and, since `U-35`, have `/probes` call a working probe refused over its
+        version. The forger's address also overwrote the genuine one, which destroyed the trace
+        the rule was for. `A-41c` already took the protocol version out of the pre-decision write
+        for this reason, and this finishes that move for the rest of the row. The trace now lives
+        where a claim cannot pass for the probe's own facts: the log and a Core Health counter.
+      - **`registry.ts`.** `#prove` decides the proof and writes nothing except `P-37`'s
+        first-use stamp once the probe's own key has matched.
+        - A version refusal is still the answer the probe gets, whatever the proof found, so an
+          operator with an old probe is not told to check a key.
+        - `#touch` and `#speaks(…, false)` run only for a proven hello. `U-35`'s refusal still
+          records `protocol_refused_at` for a genuine probe; the key is in the hello, which
+          parses at any version.
+        - An accepted hello writes as before. A proven version refusal on the enrolment key does
+          not issue a key.
+        - Every refusal that leaves no row (known GID with bad key, address or revocation at any
+          version; new GID refused for key, address or version) logs one `warn`. The line has the
+          GID claimed, the address, the code, why, and the name and versions it declared.
+          Enrolment refusals and a pending probe's wrong key used to log nothing.
+        - `stats().hellosRefusedUnproven` counts them.
+      - **Observable.** A new Core Health channel, `probeHellosUnproven`, is a 64-bit counter
+        shown as a rate. It has no limit and no lookup, so alarm volume is unchanged and no
+        scenario test is needed. It is exported as `ms_core_probe_hellos_unproven_total` and
+        documented in `administration.md`; `sensor-reference.md` is regenerated. The endpoint
+        now runs the decision under a fresh `requestId` (with `probeGid` when one was named).
+        The registry's reason and the endpoint's `rejecting probe` share it, and the session
+        that follows does not inherit it.
+      - **What `/probes` says.** `lastSeenAt`, `displayName`, `agentVersion` and `lastAddress`
+        come from the last hello that proved itself. The route description says so, and
+        `api-reference.md` is regenerated.
+      - **Not done.** Binding the certificate to a GID needs the peer certificate's fingerprint
+        recorded at enrolment and checked at each hello, which is a migration.
+        `deploy/enrol-probe.sh` issues the certificate with an operator-chosen CN before the core
+        assigns the GID, so it was not trivially available. A pending probe is still proved only by the shared enrolment
+        key, so anyone holding that key and a certificate can rewrite a *pending* row; that is
+        inherent in having no key of its own yet.
+      - **Tests.**
+        - `probe-registry.test.ts`, table-driven over an approved probe on its own key. These
+          forged hellos each leave every column of the row unchanged (name, agent version,
+          address, last seen, protocol version, accepted and refused times, key fields), keep
+          the skew `current`, count once, log once under the caller's `requestId`, and close or
+          withdraw nothing:
+          - a refused version with a stranger's key;
+          - a refused version with the enrolment key it no longer uses;
+          - a good version with each of those two keys;
+          - revoked, at a good and a refused version;
+          - its own key from an address its filter refuses, at a good and a refused version.
+        - Also in `probe-registry.test.ts`:
+          - a genuine version refusal still records `protocol_refused_at`, the version and the
+            agent version, uncounted;
+          - one proven on the enrolment key in `P-37`'s window is recorded and issued no key;
+          - new GIDs refused for key, address and version are counted and enrol nothing, and a
+            genuine enrolment still does.
+          - `U-32`'s "left as it was" test now asserts last seen does not move, and the
+            `GET /probes` test asserts a key refusal leaves `lastSeenAt`. The old "records a
+            refused attempt" test asserted the defect and is removed.
+        - `probe-endpoint.test.ts`: the registry sees a `requestId`, a different one per hello.
+          Its reason line and `rejecting probe` carry it with `probeGid`, and the admitted
+          session's `probe connected` does not.
+        - `core-health.test.ts`, `metrics.test.ts` and `health-types.test.ts` cover the channel,
+          its counter shape, its export and its gap without a registry.
 
 - [ ] **P-320 — types whose channels do not depend on parameters are not flagged
       `declaresEveryChannel`** · S · P-310 · Found 2026-10-08 in `P-310`. Only nine types whose

@@ -31,7 +31,7 @@ const registrationSchema = {
       description:
         'When a handshake this core accepted spoke `protocolVersion` (U-33). `null` beside a ' +
         'version a hello was refused over, and for one recorded before the core kept the time. ' +
-        'Not `lastSeenAt`, which every hello moves, refused ones included.',
+        'Not `lastSeenAt`, which a hello refused over its version moves too.',
     },
     protocolRefusedAt: {
       type: ['string', 'null'],
@@ -127,7 +127,11 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
           'was refused, and for a version recorded before the core kept the time. ' +
           '`protocolRefusedAt` is when a hello was last refused over it, the other way round, ' +
           'so a refusal at 0 is not read as nothing recorded. `lastSeenAt` is the last hello ' +
-          'of any kind, refused ones included, so it is not when the version was spoken. ' +
+          'that proved it is this probe (its key accepted, not revoked, from an address its ' +
+          'filter allows), accepted or refused over its version, so it is not when the version ' +
+          'was spoken. `displayName`, `agentVersion` and `lastAddress` are from that hello too: ' +
+          'a hello refused before proving its identity changes nothing here, and is in the core ' +
+          'log and Core Health `probeHellosUnproven` instead. ' +
           '`skew.kind` is `unknown`, `current`, `outdated`, `ahead` (a probe newer than this ' +
           'core, which is admitted and speaks this core’s version) or `incompatible` (one this ' +
           'core refuses at the handshake).',

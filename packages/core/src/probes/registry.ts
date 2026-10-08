@@ -53,6 +53,22 @@ export type ProbeDecision =
     };
 
 /**
+ * Whether a hello proved it is the probe whose row it named (`P-319`), and with which key.
+ *
+ * `own` is the key the probe was issued; `enrolment` the shared one, which a pending probe and an
+ * approved probe that has never used a key of its own still present. When it did not, the
+ * refusal it is given, and why, for the log line.
+ */
+type Proof =
+  | { proven: true; key: 'own' | 'enrolment' }
+  | {
+      proven: false;
+      refusal: Extract<ProbeDecision, { kind: 'refused' }>;
+      why: string;
+      fields?: Readonly<Record<string, unknown>>;
+    };
+
+/**
  * A skew verdict with its own sentence attached, so every caller does not reassemble one.
  *
  * The union carries the parts a UI would arrange itself; `explanation` is the same thing said
@@ -70,9 +86,9 @@ export interface ProbeRegistration {
    * When a handshake this core accepted spoke `protocolVersion` (`U-33`), or `null`: beside a
    * version a hello was refused over (`R-06`), and for one recorded before migration 072.
    *
-   * **Not `lastSeenAt`**, which every hello moves before it is decided, refused ones included. Read
-   * beside the version, `lastSeenAt` made a probe refused at 04:12 look as if it had connected
-   * then speaking whatever the row held. The pair is written in one statement (`#speaks`), so this
+   * **Not `lastSeenAt`**, which a hello refused over its version moves too (and, before `P-319`,
+   * every hello did, whatever it was refused for). Read beside the version, `lastSeenAt` made a
+   * probe refused at 04:12 look as if it had connected then speaking whatever the row held. The pair is written in one statement (`#speaks`), so this
    * is never another handshake's time.
    */
   protocolAcceptedAt: string | null;
@@ -192,6 +208,7 @@ export class ProbeRegistry {
   readonly #enrolmentKeys: readonly string[];
   readonly #enrolFrom: readonly string[];
   readonly #now: () => Date;
+  #hellosRefusedUnproven = 0;
 
   constructor(options: ProbeRegistryOptions) {
     this.#db = options.db;
@@ -215,101 +232,86 @@ export class ProbeRegistry {
   }
 
   /**
+   * Hellos refused before they proved the identity they named, since the core started (`P-319`).
+   *
+   * Every refusal that leaves no row behind: a known GID whose key, address or revocation
+   * refused it (whatever its version), and a GID nobody has seen that was refused for its key,
+   * its address or its version. Those leave nothing but a log line, so this is the number that
+   * says they are happening. A refusal of a hello that did prove itself, over its version, is on
+   * the probe's own row and is not counted here.
+   */
+  stats(): { hellosRefusedUnproven: number } {
+    return { hellosRefusedUnproven: this.#hellosRefusedUnproven };
+  }
+
+  /**
    * What to do with a probe that has just connected.
    *
-   * **Every path here writes what it saw**, including the refusals: an operator investigating
-   * "why is backup-01 not scanning" needs the row that says a revoked identity tried at 04:12
-   * from an address they do not recognise, and a refusal that left no trace is the one that
-   * takes a day to find.
+   * **Nothing is written to a probe's row until the hello has proved it is that probe**
+   * (`P-319`): its access key accepted, the identity not revoked, and its address one the
+   * probe's filter allows. A refusal of a hello that has not is logged, under the handshake's
+   * correlation id, and counted (`stats().hellosRefusedUnproven`, a Core Health channel) — and
+   * leaves the row as it was.
+   *
+   * **It used to be the other way round, on purpose**: "every path here writes what it saw,
+   * including the refusals" (`R-01`, `R-06`), so that the row would say a revoked identity tried
+   * at 04:12 from an address nobody recognised. But what it saw was a *claim*. mTLS proves only
+   * that the peer holds a certificate the installation's CA signed, and nothing ties that
+   * certificate to a GID, so any holder could name an approved probe and rewrite its name, its
+   * agent version and its address — and, since `U-35`, have `/probes` call a connected, working
+   * probe refused over its version. The row is what an operator, the add-sensor form and Probe
+   * Health read as *that probe's* facts, and a row anybody can write is evidence of nothing: the
+   * forger's address overwrote the genuine probe's, which is the opposite of keeping a trace.
+   * `A-41c` made the same move for the protocol version alone, for the same reason; this
+   * finishes it for the rest of the row. The trace R-06 wanted is the log line, which says the
+   * GID claimed, the address, and why, and which nobody can use to change what a probe is.
    */
   async admit(hello: ProbeHello): Promise<ProbeDecision> {
     const existing = hello.gid === '' ? null : await this.get(hello.gid);
 
-    // Recorded before the decision, so a refused attempt is still visible in the queue. Not the
-    // protocol version: see `#speaks`.
-    if (existing !== null) await this.#touch(existing.gid, hello);
-
-    // **Version skew is a refusal like every other one here, so it is recorded like every other
-    // one** (`R-06`). It used to be checked in the endpoint, before the registry saw the probe
-    // at all, which meant the one refusal an operator is most likely to hit — they upgraded one
-    // end and not the other — was the one refusal that left no row behind. The touch above ran
-    // first, so the queue now shows the version the probe is actually running rather than the
-    // version it ran the last time it managed to connect.
-    //
-    // A probe this core has *never* seen and cannot talk to is refused without a row. Enrolling
-    // it would put something in the approval queue that approving cannot help, and its identity
-    // claims are the claims of a peer whose protocol this build does not implement.
+    // **Version skew is a refusal like every other one, and the answer the probe is given**
+    // (`R-06`): checked first, so the operator of a probe that is too old is told that, not to
+    // check a key that was never the problem.
     const skew = describeSkew(hello.protocolVersion);
+
+    if (existing === null) {
+      // A probe this core has *never* seen and cannot talk to is refused without a row.
+      // Enrolling it would put something in the approval queue that approving cannot help, and
+      // its identity claims are the claims of a peer whose protocol this build does not
+      // implement.
+      if (skew.kind === 'incompatible') {
+        this.#refusedVersion(hello, null);
+        return { kind: 'refused', code: 'protocol-version', detail: explainSkew(skew) };
+      }
+      return this.#enrol(hello);
+    }
+
+    const proof = await this.#prove(existing, hello);
+
     if (skew.kind === 'incompatible') {
-      this.#logger.warn(
-        {
-          gid: hello.gid,
-          remoteAddress: hello.remoteAddress,
-          protocolVersion: hello.protocolVersion,
-          coreProtocolVersion: PROTOCOL_VERSION,
-          known: existing !== null,
-        },
-        'refusing a probe whose protocol this core cannot speak',
-      );
-      // `R-06`: the one refusal whose whole content is the version, so the queue shows it.
-      // Not accepted, so no accepted time beside it (`U-32`), and the refusal's instead (`U-35`).
-      if (existing !== null) await this.#speaks(existing.gid, hello.protocolVersion, false);
+      this.#refusedVersion(hello, proof);
+      // `R-06`: the one refusal whose whole content is the version, so the queue shows it — for
+      // the probe that proved it is this one, and only for it. Not accepted, so no accepted time
+      // beside it (`U-32`), and the refusal's instead (`U-35`). The proof decides only whether the
+      // row is written: the probe is told about its version whatever the proof found.
+      if (proof.proven) {
+        await this.#touch(existing.gid, hello);
+        await this.#speaks(existing.gid, hello.protocolVersion, false);
+      }
       return { kind: 'refused', code: 'protocol-version', detail: explainSkew(skew) };
     }
 
-    if (existing === null) return this.#enrol(hello);
-
-    if (existing.status === 'revoked') {
-      this.#logger.warn(
-        { gid: existing.gid, remoteAddress: hello.remoteAddress },
-        'a revoked probe tried to connect',
-      );
-      return {
-        kind: 'refused',
-        code: 'revoked',
-        detail: existing.note === '' ? 'this probe has been revoked' : existing.note,
-      };
+    if (!proof.proven) {
+      this.#refusedUnproven(hello, proof.refusal.code, proof.why, proof.fields);
+      return proof.refusal;
     }
 
-    if (!this.#addressAllowedFor(existing, hello.remoteAddress)) {
-      this.#logger.warn(
-        {
-          gid: existing.gid,
-          remoteAddress: hello.remoteAddress,
-          filters: existing.allowFrom.length > 0 ? existing.allowFrom : this.#enrolFrom,
-        },
-        'a probe connected from an address its filter does not allow',
-      );
-      return {
-        kind: 'refused',
-        code: 'source-not-allowed',
-        detail: refusedFrom(hello.remoteAddress),
-      };
-    }
-
-    if (existing.status === 'pending') {
-      // A pending probe still presents the enrolment key, because it has none of its own yet.
-      if (!this.#enrolmentKeyMatches(hello.accessKey)) {
-        return {
-          kind: 'refused',
-          code: 'bad-access-key',
-          detail: 'the access key was not accepted',
-        };
-      }
-      await this.#speaks(existing.gid, hello.protocolVersion, true);
-      return { kind: 'pending', gid: existing.gid };
-    }
-
-    // **Which key it presented, not merely whether one was accepted** (`P-37`). `existing` was
-    // read before this ran, so its `hasOwnKey` is a snapshot from before a first use could be
-    // recorded — deciding whether to issue from that snapshot hands a second key to the probe
-    // that just proved it had the first.
-    const accepted = await this.#keyAccepted(existing.gid, hello.accessKey);
-    if (accepted === 'no') {
-      this.#logger.warn({ gid: existing.gid }, 'an approved probe presented the wrong key');
-      return { kind: 'refused', code: 'bad-access-key', detail: 'the access key was not accepted' };
-    }
+    // Proven, and accepted: what it says about itself, then the version it speaks and when.
+    await this.#touch(existing.gid, hello);
     await this.#speaks(existing.gid, hello.protocolVersion, true);
+
+    if (existing.status === 'pending') return { kind: 'pending', gid: existing.gid };
+    const accepted = proof.key;
 
     // **An approved probe that has never used a key of its own is given one now**, in the welcome
     // it is about to receive. This is the only moment a key can be delivered to a machine that
@@ -337,10 +339,25 @@ export class ProbeRegistry {
 
   /** A probe nobody has seen before. */
   async #enrol(hello: ProbeHello): Promise<ProbeDecision> {
+    // Refused without a row, as ever, and now said and counted like any other hello that proved
+    // nothing (`P-319`): it is the same fact, about a GID nobody has seen.
     if (!this.#enrolmentKeyMatches(hello.accessKey)) {
+      this.#refusedUnproven(
+        hello,
+        'bad-access-key',
+        'a new probe presented a key that is not the enrolment key',
+      );
       return { kind: 'refused', code: 'bad-access-key', detail: 'the access key was not accepted' };
     }
     if (!addressAllowed(hello.remoteAddress, this.#enrolFrom)) {
+      this.#refusedUnproven(
+        hello,
+        'source-not-allowed',
+        'a new probe connected from an address enrolment does not allow',
+        {
+          filters: this.#enrolFrom,
+        },
+      );
       return {
         kind: 'refused',
         code: 'source-not-allowed',
@@ -663,6 +680,116 @@ export class ProbeRegistry {
     return addressAllowed(address, filters);
   }
 
+  /**
+   * Whether this hello proves it is the probe the row describes (`P-319`), and with which key.
+   *
+   * In the order the refusals have always been given: a revoked identity, then an address its
+   * filter does not allow, then the key. Nothing here writes to the row except `#keyAccepted`
+   * recording a key's first use, and that only once the key has matched — which is the proof.
+   */
+  async #prove(existing: ProbeRegistration, hello: ProbeHello): Promise<Proof> {
+    if (existing.status === 'revoked') {
+      return {
+        proven: false,
+        why: 'a revoked probe tried to connect',
+        refusal: {
+          kind: 'refused',
+          code: 'revoked',
+          detail: existing.note === '' ? 'this probe has been revoked' : existing.note,
+        },
+      };
+    }
+
+    if (!this.#addressAllowedFor(existing, hello.remoteAddress)) {
+      return {
+        proven: false,
+        why: 'a probe connected from an address its filter does not allow',
+        fields: { filters: existing.allowFrom.length > 0 ? existing.allowFrom : this.#enrolFrom },
+        refusal: {
+          kind: 'refused',
+          code: 'source-not-allowed',
+          detail: refusedFrom(hello.remoteAddress),
+        },
+      };
+    }
+
+    const wrongKey = (why: string): Proof => ({
+      proven: false,
+      why,
+      refusal: {
+        kind: 'refused',
+        code: 'bad-access-key',
+        detail: 'the access key was not accepted',
+      },
+    });
+
+    // A pending probe still presents the enrolment key, because it has none of its own yet.
+    if (existing.status === 'pending') {
+      return this.#enrolmentKeyMatches(hello.accessKey)
+        ? { proven: true, key: 'enrolment' }
+        : wrongKey('a pending probe presented a key that is not the enrolment key');
+    }
+
+    // **Which key it presented, not merely whether one was accepted** (`P-37`). `existing` was
+    // read before this ran, so its `hasOwnKey` is a snapshot from before a first use could be
+    // recorded — deciding whether to issue from that snapshot hands a second key to the probe
+    // that just proved it had the first.
+    const key = await this.#keyAccepted(existing.gid, hello.accessKey);
+    return key === 'no'
+      ? wrongKey('an approved probe presented the wrong key')
+      : { proven: true, key };
+  }
+
+  /**
+   * A hello refused before it proved the identity it named (`P-319`): said, and counted.
+   *
+   * **The log line is where what the hello claimed goes now**, rather than the row: the GID it
+   * named, the address it came from, and the name, agent version and protocol it declared — the
+   * trace `R-06` wanted, under the handshake's correlation id, without letting the claim stand as
+   * the probe's own.
+   */
+  #refusedUnproven(
+    hello: ProbeHello,
+    code: Extract<ProbeDecision, { kind: 'refused' }>['code'],
+    why: string,
+    fields: Readonly<Record<string, unknown>> = {},
+  ): void {
+    this.#hellosRefusedUnproven += 1;
+    this.#logger.warn(
+      {
+        gid: hello.gid,
+        remoteAddress: hello.remoteAddress,
+        code,
+        claimed: {
+          displayName: hello.displayName.slice(0, 200),
+          agentVersion: hello.agentVersion.slice(0, 64),
+          protocolVersion: hello.protocolVersion,
+        },
+        ...fields,
+      },
+      why,
+    );
+  }
+
+  /** A hello refused over its version: said, and counted when it proved nothing (`P-319`). */
+  #refusedVersion(hello: ProbeHello, proof: Proof | null): void {
+    const proven = proof?.proven ?? false;
+    if (!proven) this.#hellosRefusedUnproven += 1;
+    this.#logger.warn(
+      {
+        gid: hello.gid,
+        remoteAddress: hello.remoteAddress,
+        protocolVersion: hello.protocolVersion,
+        coreProtocolVersion: PROTOCOL_VERSION,
+        known: proof !== null,
+        proven,
+        // Why the row was left alone, for a known probe whose hello proved nothing.
+        ...(proof !== null && !proof.proven ? { unprovenBecause: proof.why } : {}),
+      },
+      'refusing a probe whose protocol this core cannot speak',
+    );
+  }
+
   #enrolmentKeyMatches(presented: string): boolean {
     if (this.#enrolmentKeys.length === 0) return true;
     return matchesAny(presented, this.#enrolmentKeys);
@@ -719,6 +846,13 @@ export class ProbeRegistry {
     return 'no';
   }
 
+  /**
+   * What a probe says about itself, and when it last said it.
+   *
+   * **Only for a hello that proved it is this probe** (`P-319`): accepted, or refused over its
+   * version alone. It used to run first, for every hello naming a known GID, which let anybody
+   * holding a certificate the CA signed rename an approved probe and move its address.
+   */
   async #touch(gid: string, hello: ProbeHello): Promise<void> {
     await this.#db.query(
       `UPDATE probe_registration
@@ -748,7 +882,8 @@ export class ProbeRegistry {
    * that is about to be welcomed, approved or pending, and the time is the registry's clock then.
    * For the refusal over the version it is false and the time is cleared: no accepted handshake
    * spoke that version, and a time kept from an earlier one would date it wrongly. The form says
-   * "when it last connected" from this pair; `last_seen_at` moves on every hello and cannot.
+   * "when it last connected" from this pair; `last_seen_at` moves on a refusal over the version
+   * too, and cannot.
    *
    * **And when it was refused, the other way round** (`U-35`). The refusal writes the time to
    * `protocol_refused_at` and an acceptance clears it, so the row says which of the two the

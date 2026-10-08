@@ -82,6 +82,7 @@ function sources(
     unboundedCredentials: number;
     credentialsWithheld: number;
     lateRefusalWritesGivenUp: number;
+    probeHellosUnproven: number;
     statementTimeouts: number;
     lockTimeouts: number;
     disk: { freePercent: number; freeBytes: number; databaseBytes: number } | null;
@@ -155,6 +156,9 @@ function sources(
     ...(overrides.lateRefusalWritesGivenUp === undefined
       ? {}
       : { lateRefusalWritesGivenUp: () => overrides.lateRefusalWritesGivenUp ?? 0 }),
+    ...(overrides.probeHellosUnproven === undefined
+      ? {}
+      : { probeHellosUnproven: () => overrides.probeHellosUnproven ?? 0 }),
     database: () => ({
       statements: overrides.statementTimeouts ?? 0,
       locks: overrides.lockTimeouts ?? 0,
@@ -624,6 +628,17 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal(await read(), null);
     });
 
+    it('passes the probe hellos refused unproven through as a counter, and gaps without a registry to ask (P-319)', async () => {
+      // They write nothing to any probe's row, so this and the log are their only trace.
+      const read = async (given?: number): Promise<number | null | undefined> =>
+        (await build(given === undefined ? {} : { probeHellosUnproven: given }).read())[
+          'probeHellosUnproven'
+        ];
+      assert.equal(await read(5), 5);
+      assert.equal(await read(0), 0, 'none is a reading, not a gap');
+      assert.equal(await read(), null);
+    });
+
     it('reads the pool’s cancelled statements and lock waits given up, as counters (P-229)', async () => {
       const reading = await build({ statementTimeouts: 3, lockTimeouts: 2 }).read();
       assert.equal(reading['dbStatementTimeouts'], 3);
@@ -970,6 +985,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
         readingsDroppedUnfit: 3,
         channelsCreatedUndeclared: 2,
         lateRefusalWritesGivenUp: 4,
+        probeHellosUnproven: 3,
         ingestQueue: 0,
       });
       for (const reading of readings) {
@@ -980,7 +996,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
           assert.equal(reading.counter, undefined, reading.key);
         }
       }
-      assert.equal(readings.length, 21);
+      assert.equal(readings.length, 22);
 
       // Named rather than left to the loop above, which agrees with whatever the declaration
       // says and would go on passing if a channel quietly stopped being a counter. These
@@ -1012,6 +1028,7 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
           // `P-306`: channels created without their declared shape.
           'channelsCreatedUndeclared',
           'lateRefusalWritesGivenUp',
+          'probeHellosUnproven',
         ],
       );
     });

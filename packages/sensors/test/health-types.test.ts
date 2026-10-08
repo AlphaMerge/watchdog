@@ -301,6 +301,25 @@ describe('the self-monitoring sensor types', () => {
     ]);
   });
 
+  it('carries the probe hellos refused unproven as a counter on Core Health and not an alarm (P-319)', () => {
+    // A probe reinstalled without its key retries into these until somebody looks: a job, not an
+    // outage, so no limit. Declared beside the other refusals of something that reached a port.
+    const channels = coreHealth.channels({});
+    assert.deepEqual(
+      channels.find((one) => one.key === 'probeHellosUnproven'),
+      {
+        key: 'probeHellosUnproven',
+        name: 'Probe hellos refused unproven',
+        unit: 'hellos',
+        counter: { bits: 64 },
+      },
+    );
+    const keys = channels.map((one) => one.key);
+    const from = keys.indexOf('hostsRefused');
+    assert.ok(from >= 0);
+    assert.deepEqual(keys.slice(from, from + 2), ['hostsRefused', 'probeHellosUnproven']);
+  });
+
   it('keeps both out of every probe’s assignment list', () => {
     // The mechanism `T-21` built. For Probe Health it is not an optimisation but the whole
     // design: a probe cannot report its own absence, so the core has to be the one asking.

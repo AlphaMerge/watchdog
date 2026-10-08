@@ -13,6 +13,7 @@ import {
   MessageConnection,
   parseProbeToCore,
   PROTOCOL_VERSION,
+  newCorrelationId,
   versionFor,
   withCorrelation,
   type CheckResult,
@@ -1481,28 +1482,39 @@ export class ProbeEndpoint {
     // `pending`, and nothing is sent to the probe until the answer is in.
     const session = this.#openSession(hello.gid, hello, connection, context, false);
 
-    session.pending = (async () => {
-      let decision: Awaited<ReturnType<ProbeAdmission['admit']>>;
-      try {
-        decision = await registry.admit({
-          gid: hello.gid,
-          displayName: hello.displayName,
-          agentVersion: hello.agentVersion,
-          protocolVersion: hello.protocolVersion,
-          accessKey: hello.accessKey,
-          remoteAddress: context.remoteAddress,
-        });
-      } catch (error) {
-        // A registry that cannot answer is not permission to come in. The probe retries, which
-        // is the right behaviour for a core whose database is briefly unreachable.
-        logger.error(describeError(error), 'the probe registry could not be asked');
-        reject('internal-error', 'this core cannot check probe registrations right now');
-        session.settleKnown('gone');
-        return;
-      }
+    // **One correlation id for the decision** (`P-319`): the registry's line saying why a hello
+    // was refused and this one saying it was rejected carry the same `requestId`. A refusal of a
+    // hello that has not proved its identity writes nothing to the probe's row, so these lines
+    // are the whole trace of it. Only around the decision: the session that follows outlives
+    // the handshake, and its lines are correlated by `probeGid` as every message's are.
+    const decided = withCorrelation(
+      { requestId: newCorrelationId(), ...(hello.gid === '' ? {} : { probeGid: hello.gid }) },
+      async (): Promise<Awaited<ReturnType<ProbeAdmission['admit']>> | undefined> => {
+        let decision: Awaited<ReturnType<ProbeAdmission['admit']>>;
+        try {
+          decision = await registry.admit({
+            gid: hello.gid,
+            displayName: hello.displayName,
+            agentVersion: hello.agentVersion,
+            protocolVersion: hello.protocolVersion,
+            accessKey: hello.accessKey,
+            remoteAddress: context.remoteAddress,
+          });
+        } catch (error) {
+          // A registry that cannot answer is not permission to come in. The probe retries, which
+          // is the right behaviour for a core whose database is briefly unreachable.
+          logger.error(describeError(error), 'the probe registry could not be asked');
+          reject('internal-error', 'this core cannot check probe registrations right now');
+          return undefined;
+        }
+        if (decision.kind === 'refused') reject(decision.code, decision.detail);
+        return decision;
+      },
+    );
 
-      if (decision.kind === 'refused') {
-        reject(decision.code, decision.detail);
+    session.pending = (async () => {
+      const decision = await decided;
+      if (decision === undefined || decision.kind === 'refused') {
         session.settleKnown('gone');
         return;
       }

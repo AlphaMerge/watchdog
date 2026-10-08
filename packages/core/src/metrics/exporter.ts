@@ -351,6 +351,13 @@ const CORE_METRICS: readonly Metric[] = [
     help: 'Writes of the late-refusal record that gave way, were not waited for, or failed. Each is made again within a minute.',
     counter: true,
   },
+  // `P-319`: refusals that leave no row behind, so this and the log are their only trace.
+  {
+    key: 'probeHellosUnproven',
+    name: 'ms_core_probe_hellos_unproven_total',
+    help: 'Probe hellos refused before they proved the identity they named: a wrong key, an address the filter does not allow, a revoked identity, or a new probe refused for its key, address or version. None writes to a probe’s row; the core log names the GID, the address and why.',
+    counter: true,
+  },
 ];
 
 const PROBE_METRICS: readonly Metric[] = [

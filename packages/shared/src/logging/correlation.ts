@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
  * every call site.
  */
 export interface CorrelationContext {
-  /** One HTTP/WebSocket request. */
+  /** One HTTP/WebSocket request, or the decision on one probe's hello (`P-319`). */
   readonly requestId?: string;
   /** One check execution. */
   readonly checkId?: string;

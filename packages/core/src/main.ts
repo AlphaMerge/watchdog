@@ -1441,6 +1441,7 @@ async function serve(): Promise<void> {
       unboundedCredentials: (q) => vault.unboundedSets(q),
       credentialsWithheld: () => credentialVouching.stats().withheld,
       lateRefusalWritesGivenUp: () => credentialVouching.stats().recordWritesGivenUp,
+      probeHellosUnproven: () => probeRegistry.stats().hellosRefusedUnproven,
       database: () => db.timeouts(),
       alarms: () => alarmScheduler.stats,
       disk: () => housekeeper.stats.disk,

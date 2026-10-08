@@ -3,7 +3,7 @@ import { Ajv } from 'ajv';
 import Fastify from 'fastify';
 import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
-import { PROTOCOL_VERSION } from '@ms/shared';
+import { createLogger, PROTOCOL_VERSION, withCorrelation } from '@ms/shared';
 import { ProbeRegistry } from '../src/probes/registry.js';
 import { probeRoutes } from '../src/api/routes/probes.js';
 import { IN_PROCESS_SOURCES } from '../src/ingestion/sources.js';
@@ -718,19 +718,6 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       assert.notEqual(stored.lastSeenAt, null);
     });
 
-    it('records a refused attempt rather than losing it', async () => {
-      // "Why is backup-01 not scanning" is answered by the row that says a revoked identity
-      // tried at 04:12 from an address nobody recognises. A refusal that left no trace is the
-      // one that takes a day to find.
-      const first = await registry.admit(hello());
-      assert.ok(first.kind === 'pending');
-      await registry.revoke(first.gid, 'no longer ours', testActor);
-      await registry.admit(hello({ gid: first.gid, remoteAddress: '198.51.100.3' }));
-
-      const stored = await registry.get(first.gid);
-      assert.equal(stored?.lastAddress, '198.51.100.3');
-    });
-
     it('lists by status, so the queue is one query', async () => {
       const first = await registry.admit(hello());
       const second = await registry.admit(hello({ gid: 'second-machine' }));
@@ -935,15 +922,19 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       assert.equal(now.acceptedAt, '2026-01-03T10:00:00.000Z');
     });
 
-    it('is left as it was by a refusal over anything but the version, which still moves last seen', async () => {
+    it('is left as it was by a refusal over anything but the version, and so is last seen (P-319)', async () => {
       at('2026-01-01T10:00:00.000Z');
       const first = await clocked.admit(hello({ protocolVersion: PROTOCOL_VERSION - 9 }));
       assert.ok(first.kind === 'pending');
       const kept = { version: PROTOCOL_VERSION - 9, acceptedAt: '2026-01-01T10:00:00.000Z' };
+      const seen = (await recorded(first.gid)).seenAt;
+      assert.notEqual(seen, null);
       const unchanged = async (why: string): Promise<void> => {
         const row = await recorded(first.gid);
         assert.deepEqual({ version: row.version, acceptedAt: row.acceptedAt }, kept, why);
-        assert.notEqual(row.seenAt, kept.acceptedAt, `${why}: and last seen moved`);
+        // Until `P-319` every hello moved it before it was decided, so a hello that proved
+        // nothing said the probe had been seen.
+        assert.equal(row.seenAt, seen, `${why}: and last seen did not move`);
       };
 
       at('2026-01-02T10:00:00.000Z');
@@ -1068,7 +1059,8 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
         assert.match(String(refusedSkew['explanation']), /its last hello was refused/);
         assert.equal(enrolled['protocolRefusedAt'], null);
 
-        // Accepted again, then refused for its key: the accepted time stays, last seen moves on.
+        // Accepted again, then refused for its key: the accepted time stays, and since `P-319`
+        // last seen does too, because that hello proved nothing.
         at('2026-01-03T10:00:00.000Z');
         await clocked.admit(hello({ gid: first.gid, protocolVersion: PROTOCOL_VERSION - 8 }));
         const accepted = await listed(first.gid);
@@ -1086,10 +1078,241 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
         const keyRefused = await listed(first.gid);
         assert.equal(keyRefused['protocolVersion'], PROTOCOL_VERSION - 8);
         assert.equal(keyRefused['protocolAcceptedAt'], '2026-01-03T10:00:00.000Z');
-        assert.notEqual(keyRefused['lastSeenAt'], keyRefused['protocolAcceptedAt']);
+        assert.equal(keyRefused['lastSeenAt'], '2026-01-03T10:00:00.000Z');
       } finally {
         await app.close();
       }
+    });
+  });
+
+  /**
+   * A hello that has not proved the identity it names (`P-319`).
+   *
+   * mTLS proves only that the peer holds a certificate the installation's CA signed; nothing ties
+   * that certificate to a GID. So the access key, the revocation and the address filter are what
+   * prove a hello is the probe it names, and until they have, nothing is written to that probe's
+   * row. `admit` used to write the name, agent version, address and last seen first, and on a
+   * version refusal the version and the refusal's time, so a forged hello could rename an
+   * approved, connected probe and have `/probes` call it refused (`U-35`).
+   */
+  describe('a hello that has not proved the identity it names (P-319)', () => {
+    const lines: Record<string, unknown>[] = [];
+    let clock = new Date('2026-01-01T10:00:00.000Z');
+    let proving: ProbeRegistry;
+    const recorder: { closed: string[]; withdrawn: string[] } = { closed: [], withdrawn: [] };
+
+    beforeEach(() => {
+      lines.length = 0;
+      recorder.closed.length = 0;
+      recorder.withdrawn.length = 0;
+      clock = new Date('2026-01-01T10:00:00.000Z');
+      proving = new ProbeRegistry({
+        db,
+        audit: new DatabaseAuditSink(),
+        // The service's own logger, so a line carries the correlation context it was said in.
+        logger: createLogger({
+          name: 'ms-core',
+          level: 'warn',
+          destination: {
+            write: (chunk: string) => {
+              lines.push(JSON.parse(chunk) as Record<string, unknown>);
+            },
+          },
+        }),
+        enrolmentKeys: ['shared-key'],
+        now: () => clock,
+      });
+      proving.attach({
+        disconnect: (gid) => {
+          recorder.closed.push(gid);
+          return true;
+        },
+        withdraw: (gid) => {
+          recorder.withdrawn.push(gid);
+          return true;
+        },
+        remoteAddressOf: () => '10.4.2.9',
+      });
+    });
+
+    /** Every column of the row, as text, so "unchanged" means every one of them. */
+    const row = async (gid: string): Promise<Record<string, unknown>> => {
+      const [found] = await db.query<Record<string, unknown>>(
+        `SELECT * FROM probe_registration WHERE gid = $1`,
+        [gid],
+      );
+      assert.ok(found !== undefined, `no row for ${gid}`);
+      return JSON.parse(JSON.stringify(found)) as Record<string, unknown>;
+    };
+
+    /**
+     * An approved probe that is connected and working: enrolled, approved, issued its own key,
+     * and in on that key — so the enrolment key no longer proves it is this probe.
+     */
+    const approvedAndConnected = async (): Promise<{ gid: string; key: string }> => {
+      const first = await proving.admit(hello({ displayName: 'backup-01', agentVersion: '0.1.0' }));
+      assert.ok(first.kind === 'pending');
+      await proving.approve(first.gid, probeId, testActor);
+      const issuing = await proving.admit(hello({ gid: first.gid }));
+      assert.ok(issuing.kind === 'approved' && issuing.issuedKey !== undefined);
+      const own = await proving.admit(hello({ gid: first.gid, accessKey: issuing.issuedKey }));
+      assert.equal(own.kind, 'approved');
+      const stored = await proving.get(first.gid);
+      assert.ok(stored?.hasOwnKey === true && stored.protocolAcceptedAt !== null);
+      recorder.closed.length = 0;
+      return { gid: first.gid, key: issuing.issuedKey };
+    };
+
+    const forgeries: readonly {
+      name: string;
+      /** What else is true of the probe first: revoked, or narrowed to an address. */
+      arrange?: (gid: string) => Promise<unknown>;
+      over: (probe: { gid: string; key: string }) => Partial<Parameters<ProbeRegistry['admit']>[0]>;
+      code: string;
+    }[] = [
+      {
+        name: 'a version this core refuses, with a key that is nobody’s',
+        over: ({ gid }) => ({ gid, protocolVersion: 0, accessKey: 'forged' }),
+        code: 'protocol-version',
+      },
+      {
+        name: 'a version this core refuses, with the enrolment key the probe no longer uses',
+        over: ({ gid }) => ({ gid, protocolVersion: 0, accessKey: 'shared-key' }),
+        code: 'protocol-version',
+      },
+      {
+        name: 'a version this core speaks, with a key that is nobody’s',
+        over: ({ gid }) => ({ gid, accessKey: 'forged' }),
+        code: 'bad-access-key',
+      },
+      {
+        name: 'a version this core speaks, with the enrolment key the probe no longer uses',
+        over: ({ gid }) => ({ gid, accessKey: 'shared-key' }),
+        code: 'bad-access-key',
+      },
+      {
+        name: 'a revoked identity',
+        arrange: (gid) => proving.revoke(gid, 'replaced by web-dc4', testActor),
+        over: ({ gid, key }) => ({ gid, accessKey: key }),
+        code: 'revoked',
+      },
+      {
+        name: 'a revoked identity, at a version this core refuses',
+        arrange: (gid) => proving.revoke(gid, '', testActor),
+        over: ({ gid, key }) => ({ gid, accessKey: key, protocolVersion: 0 }),
+        code: 'protocol-version',
+      },
+      {
+        name: 'the probe’s own key, from an address its filter does not allow',
+        arrange: (gid) => proving.setAllowFrom(gid, ['10.4.2.0/24'], testActor),
+        over: ({ gid, key }) => ({ gid, accessKey: key }),
+        code: 'source-not-allowed',
+      },
+      {
+        name: 'the probe’s own key, from an address its filter does not allow, at a version this core refuses',
+        arrange: (gid) => proving.setAllowFrom(gid, ['10.4.2.0/24'], testActor),
+        over: ({ gid, key }) => ({ gid, accessKey: key, protocolVersion: 0 }),
+        code: 'protocol-version',
+      },
+    ];
+
+    for (const forgery of forgeries) {
+      it(`leaves an approved, connected probe’s row as it was: ${forgery.name}`, async () => {
+        const probe = await approvedAndConnected();
+        await forgery.arrange?.(probe.gid);
+        const before = await row(probe.gid);
+        const counted = proving.stats().hellosRefusedUnproven;
+        recorder.withdrawn.length = 0;
+
+        clock = new Date('2026-01-05T04:12:00.000Z');
+        const decision = await withCorrelation({ requestId: 'forged-hello' }, () =>
+          proving.admit(
+            hello({
+              displayName: 'not-backup-01',
+              agentVersion: '6.6.6',
+              remoteAddress: '192.0.2.66',
+              ...forgery.over(probe),
+            }),
+          ),
+        );
+        assert.ok(decision.kind === 'refused', JSON.stringify(decision));
+        assert.equal(decision.code, forgery.code);
+
+        // Name, agent version, address, last seen, protocol version, and the accepted and
+        // refused times: every column.
+        assert.deepEqual(await row(probe.gid), before);
+        const after = await proving.get(probe.gid);
+        assert.equal(after?.displayName, 'backup-01');
+        assert.equal(after.skew.kind, 'current', 'not called incompatible (U-35)');
+        assert.equal(after.protocolRefusedAt, null, 'nor refused over its version');
+
+        // Observable all the same: counted once, and said under the handshake's correlation id,
+        // with what the hello claimed.
+        assert.equal(proving.stats().hellosRefusedUnproven, counted + 1);
+        const said = lines.filter((line) => line['requestId'] === 'forged-hello');
+        assert.equal(said.length, 1, JSON.stringify(lines));
+        const [line] = said;
+        assert.ok(line !== undefined);
+        assert.equal(line['gid'], probe.gid);
+        assert.equal(line['remoteAddress'], '192.0.2.66');
+        assert.equal(line['level'], 'warn');
+        // And nothing was done to the live connection.
+        assert.deepEqual(recorder, { closed: [], withdrawn: [] });
+      });
+    }
+
+    it('still records a refusal over the version for a probe that proved it is this one (U-35)', async () => {
+      const probe = await approvedAndConnected();
+      clock = new Date('2026-01-05T04:12:00.000Z');
+      const decision = await proving.admit(
+        hello({ gid: probe.gid, accessKey: probe.key, protocolVersion: 0, agentVersion: '0.0.9' }),
+      );
+      assert.ok(decision.kind === 'refused' && decision.code === 'protocol-version');
+      const after = await proving.get(probe.gid);
+      assert.equal(after?.protocolVersion, 0);
+      assert.equal(after.protocolRefusedAt, '2026-01-05T04:12:00.000Z');
+      assert.equal(after.protocolAcceptedAt, null);
+      assert.equal(after.agentVersion, '0.0.9', 'and what it says about itself');
+      assert.equal(after.skew.kind, 'incompatible');
+      assert.equal(proving.stats().hellosRefusedUnproven, 0, 'proven, so not counted');
+    });
+
+    it('records it for a probe that proved itself on the enrolment key its own never replaced', async () => {
+      // `P-37`'s window: approved, issued a key in a welcome that never arrived. The enrolment
+      // key is still what proves it, so its refusal is recorded — and it is not issued a key in
+      // a welcome it will not be sent.
+      const first = await proving.admit(hello());
+      assert.ok(first.kind === 'pending');
+      await proving.approve(first.gid, probeId, testActor);
+      clock = new Date('2026-01-05T04:12:00.000Z');
+      const decision = await proving.admit(hello({ gid: first.gid, protocolVersion: 0 }));
+      assert.ok(decision.kind === 'refused' && decision.code === 'protocol-version');
+      const after = await row(first.gid);
+      assert.equal(after['protocol_refused_at'], '2026-01-05T04:12:00.000Z');
+      assert.equal(after['access_key_hash'], null, 'no key issued to a refused hello');
+    });
+
+    it('counts a new GID refused for its key, its address or its version, and enrols none', async () => {
+      const narrowed = new ProbeRegistry({
+        db,
+        audit: new DatabaseAuditSink(),
+        logger: silentLogger,
+        enrolmentKeys: ['shared-key'],
+        enrolFrom: ['10.0.0.0/8'],
+      });
+      for (const over of [
+        { gid: 'stranger-key', accessKey: 'forged' },
+        { gid: 'stranger-address', remoteAddress: '192.0.2.66' },
+        { gid: 'stranger-version', protocolVersion: 0 },
+      ]) {
+        const decision = await narrowed.admit(hello(over));
+        assert.equal(decision.kind, 'refused', over.gid);
+      }
+      assert.equal(narrowed.stats().hellosRefusedUnproven, 3);
+      assert.equal((await narrowed.list()).length, 0);
+      // A genuine enrolment is not counted, and still enrols (`R-01`).
+      assert.equal((await narrowed.admit(hello({ gid: 'newcomer' }))).kind, 'pending');
+      assert.equal(narrowed.stats().hellosRefusedUnproven, 3);
     });
   });
 

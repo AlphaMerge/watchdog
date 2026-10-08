@@ -18,6 +18,8 @@ export function fixedCoreHealth(
     readonly reporting?: boolean;
     /** Writes of the late-refusal record given up (`A-68`); no source, and a gap, when absent. */
     readonly lateRefusalWritesGivenUp?: () => number;
+    /** Probe hellos refused unproven (`P-319`); no source, and a gap, when absent. */
+    readonly probeHellosUnproven?: () => number;
   } = {},
 ): CoreHealthService {
   return new CoreHealthService({
@@ -79,6 +81,9 @@ export function fixedCoreHealth(
       ...(options.lateRefusalWritesGivenUp === undefined
         ? {}
         : { lateRefusalWritesGivenUp: options.lateRefusalWritesGivenUp }),
+      ...(options.probeHellosUnproven === undefined
+        ? {}
+        : { probeHellosUnproven: options.probeHellosUnproven }),
       database: () => ({ statements: 4, locks: 3 }),
     },
     ingest: () => Promise.resolve(),

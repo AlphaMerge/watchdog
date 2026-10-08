@@ -722,6 +722,30 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       );
     });
 
+    it('exports the probe hellos refused unproven as a core counter, and nothing without a registry (`P-319`)', async () => {
+      let refused = 3;
+      const core = fixedCoreHealth(db, { probeHellosUnproven: () => refused });
+      const exports = new MetricsExporter({
+        db,
+        logger: silent,
+        coreHealth: () => core,
+        probeHealth: () => undefined,
+      });
+      const first = (await exports.scrape()).body;
+      assert.equal(parse(first).get('ms_core_probe_hellos_unproven_total'), 3);
+      assert.match(first, /^# TYPE ms_core_probe_hellos_unproven_total counter$/mu);
+      assert.match(first, /^# HELP ms_core_probe_hellos_unproven_total \S/mu);
+      refused = 8;
+      assert.equal(
+        parse((await exports.scrape()).body).get('ms_core_probe_hellos_unproven_total'),
+        8,
+      );
+      assert.equal(
+        parse((await exporter().scrape()).body).has('ms_core_probe_hellos_unproven_total'),
+        false,
+      );
+    });
+
     it('still omits a counter the probe did not report at all', async () => {
       // The other half. A probe that is gone reports nothing, and nothing is not zero.
       const metrics = parse((await varying(() => ({ connected: false })).scrape()).body);

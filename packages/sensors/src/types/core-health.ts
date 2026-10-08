@@ -603,6 +603,19 @@ const CHANNELS: readonly ChannelDef[] = [
   // for the core is not in `api.allowedHosts` yet — who is told why in the answer itself. What the
   // line is for is the second case showing up as a step, when a DNS name or a proxy changes.
   { key: 'hostsRefused', name: 'Requests refused for an unknown Host', unit: 'requests' },
+  // **Probe hellos refused before they proved the identity they named** (`P-319`): a known GID
+  // presented with the wrong key, from an address its filter does not allow, or revoked, and a
+  // GID nobody has seen refused for its key, address or version. None of them writes to a
+  // probe's row, so this and the core log (which names the GID, the address and why) are the
+  // only trace. A counter, so the counter path makes it a rate. No limit: a probe reinstalled
+  // without its key retries into these until somebody looks, which is a job and not an outage;
+  // what the line is for is a rate that starts when nothing changed.
+  {
+    key: 'probeHellosUnproven',
+    name: 'Probe hellos refused unproven',
+    unit: 'hellos',
+    counter: { bits: 64 },
+  },
   // **Requests the per-client rate limit refused** (`A-39`), since the last reading. **Any is the
   // warning**: the limit is a backstop nobody using the web UI meets, so a refusal is a runaway
   // loop, an enumeration, or a provisioning script that needs `api.rateLimitPerMinute` raised or

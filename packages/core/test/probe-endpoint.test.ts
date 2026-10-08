@@ -8,6 +8,8 @@ import { connect, type TLSSocket } from 'node:tls';
 import { before, describe, it } from 'node:test';
 import { pino } from 'pino';
 import {
+  createLogger,
+  currentCorrelation,
   encodeFrame,
   FrameDecoder,
   MIN_PROTOCOL_VERSION,
@@ -781,6 +783,78 @@ describe('ProbeEndpoint', { skip: opensslAvailable ? false : 'openssl is not ava
 
       assert.equal(endpoint.linkFor(7).connected, false, 'a dead socket is not a connected probe');
       assert.deepEqual(found, [], 'and its sensors were not declared healthy on its behalf');
+    } finally {
+      await endpoint.stop();
+    }
+  });
+
+  it('says a refused hello under one correlation id, the registry’s reason and its own (P-319)', async () => {
+    // A hello refused before it proved the identity it named writes nothing to the probe's row,
+    // so the log lines are its whole trace: the registry's, saying why, and the endpoint's,
+    // saying it was rejected. They carry one `requestId`, and the session after a hello that is
+    // let in does not go on carrying it.
+    const lines: Record<string, unknown>[] = [];
+    const logger = createLogger({
+      name: 'ms-core',
+      level: 'info',
+      destination: {
+        write: (chunk: string) => {
+          lines.push(JSON.parse(chunk) as Record<string, unknown>);
+        },
+      },
+    });
+    const seen: (string | undefined)[] = [];
+    const endpoint = new ProbeEndpoint({
+      config: endpointConfig(dir),
+      logger,
+      coreVersion: '9.9.9',
+      probeConfig: {
+        probeObjectFor: () => Promise.resolve(7),
+        assignmentsFor: () =>
+          Promise.resolve({ version: 'v1', sensors: [], stamps: new Map<number, string>() }),
+        touch: () => Promise.resolve(),
+      },
+      registry: {
+        admit: (said) => {
+          seen.push(currentCorrelation()?.requestId);
+          if (said.accessKey === 'forged') {
+            logger.warn({ gid: said.gid }, 'an approved probe presented the wrong key');
+            return Promise.resolve({
+              kind: 'refused' as const,
+              code: 'bad-access-key' as const,
+              detail: 'the access key was not accepted',
+            });
+          }
+          return Promise.resolve({ kind: 'approved' as const, gid: said.gid, objectId: 7 });
+        },
+      },
+    });
+    const address = await endpoint.start();
+    try {
+      const forged = await TestProbe.connect(dir, address.port);
+      forged.send(hello({ gid: 'probe-gid', accessKey: 'forged' }));
+      await forged.waitFor((m) => m.type === 'reject');
+      const genuine = await TestProbe.connect(dir, address.port);
+      genuine.send(hello({ gid: 'probe-gid' }));
+      await genuine.waitFor((m) => m.type === 'welcome');
+
+      assert.equal(seen.length, 2);
+      const [refusedId, admittedId] = seen;
+      assert.ok(typeof refusedId === 'string' && refusedId !== '', 'the decision had an id');
+      assert.ok(typeof admittedId === 'string' && admittedId !== refusedId, 'one per hello');
+      const said = lines.filter((line) => line['requestId'] === refusedId);
+      const messages = said.map((line) => line['msg']);
+      const why = messages.indexOf('an approved probe presented the wrong key');
+      const rejected = messages.indexOf('rejecting probe');
+      assert.ok(why >= 0 && rejected >= 0, JSON.stringify(lines));
+      assert.ok(why < rejected, 'the reason, then the rejection');
+      assert.ok(said.every((line) => line['probeGid'] === 'probe-gid'));
+      // The genuine session's lines after its decision are not the handshake's.
+      const connected = lines.find((line) => line['msg'] === 'probe connected');
+      assert.ok(connected !== undefined, JSON.stringify(lines.map((line) => line['msg'])));
+      assert.notEqual(connected['requestId'], admittedId);
+      forged.close();
+      genuine.close();
     } finally {
       await endpoint.stop();
     }

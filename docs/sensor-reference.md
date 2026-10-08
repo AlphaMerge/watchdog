@@ -1026,6 +1026,7 @@ cost: **light** · evaluated by the core, never by a probe
 | `logDropped` | Log lines dropped | lines | default limits: warn above 0 |
 | `logBacklog` | Log waiting to be written | MB | — |
 | `hostsRefused` | Requests refused for an unknown Host | requests | — |
+| `probeHellosUnproven` | Probe hellos refused unproven | hellos | 64-bit counter → rate |
 | `rateLimited` | Requests refused by the rate limit | requests | default limits: warn above 0 |
 | `heartbeatFailures` | Heartbeats that did not arrive | requests | default limits: warn above 0 |
 | `dbStatementTimeouts` | Database statements cancelled | statements | 64-bit counter → rate; default limits: warn above 0.00001 |

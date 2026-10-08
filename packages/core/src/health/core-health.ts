@@ -217,6 +217,12 @@ export interface CoreHealthSources {
    */
   lateRefusalWritesGivenUp?: () => number;
   /**
+   * `ProbeRegistry.stats().hellosRefusedUnproven` — probe hellos refused before they proved the
+   * identity they named, which write nothing to a probe's row (`P-319`). A running total; the
+   * channel is a counter. Absent where there is no registry, and the channel gaps.
+   */
+  probeHellosUnproven?: () => number;
+  /**
    * `Database.timeouts()` — the pool's statements cancelled and lock waits given up (`P-229`).
    * The core pool's alone: a pool built for one kind of work keeps its own.
    */
@@ -480,6 +486,8 @@ export class CoreHealthService {
       // Since the last reading, and the whole count on the first: the total started with this
       // process, as the meter did.
       hostsRefused: hosts === undefined ? null : meters.hosts.take(hosts.refused, uptime, true),
+      // A running total; the counter path makes it a rate (`P-319`).
+      probeHellosUnproven: this.#sources.probeHellosUnproven?.() ?? null,
       // The same shape: refused since the last reading, and the whole count on the first.
       rateLimited:
         rateLimit === undefined ? null : meters.rateLimit.take(rateLimit.refused, uptime, true),
