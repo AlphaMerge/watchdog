@@ -11732,11 +11732,80 @@ because each is a decision rather than a defect:
       **Done when** retired also requires no reading since the declaration changed (or the
       probe's catalogue is consulted), with a test of a probe ahead.
 
-- [ ] **P-323 — a declared primary created before P-314 stays non-primary** · XS · P-314 · Found
+- [x] **P-323 — a declared primary created before P-314 stays non-primary** · XS · P-314 · Found
       2026-10-08 in `P-314`. Ingestion now makes the declared primary primary when its first reading
       creates it, but a row created earlier keeps `is_primary` false until an edit changes the
       declaration. **Done when** a one-off start-up repair pass (like S-18's declared-limits pass)
       moves it, audited as a system write, with a test.
+
+      **P-323 outcome. A start-up pass, every start, not awaited, in pages; the move and the
+      declaration are `P-314`'s.** No migration, no protocol change.
+      - **What it moves** (`state/declared-primary.ts`, `repairDeclaredPrimaries`). For each
+        sensor, the key its type declares primary for its *stored* parameters, from
+        `declaredChannelLookup` (`primary`, as ingestion reads it); where that key has a row and the
+        row is not primary, every primary row of the sensor is demoted and that row promoted, by
+        `moveDeclaredPrimaries` — `ChannelResolver.#makePrimary`'s body, moved out of the class so
+        both callers make the same move (demote in a statement of its own first: the index is not
+        deferrable). A sensor with no primary gets the declared one, as `P-309`/`P-314` give it.
+        **Left**: a row already primary, a declared primary with no row (the reading that creates
+        it moves it, and demoting now would leave none), a type declaring none, a type this build
+        does not register, and a type that throws for the stored parameters (`primary` is null on
+        the `{}` fallback, whose primary is a placeholder's).
+      - **Audited** as a `channel.redeclared` entry per channel whose `isPrimary` changed, by
+        `{ kind: 'system', component: 'declared-primary-startup-repair' }` (S-18 names its pass
+        after what it fixes, `declared-limits`; this says that and when), through the same
+        `ingestionAuditSinks` composite ingestion uses: the database, the log, and the result-cache
+        invalidator, so the `channel.*` entry makes ingestion forget the sensor.
+      - **Every start, no marker**, as S-18's. A marker needs a table (a migration) and buys
+        nothing an idempotent pass does not: after the first run the unlocked read finds nothing,
+        and nothing is locked, written or audited (a second run leaves every sensor's `version`
+        alone, tested). It is also the right upgrade for a later build that declares a different
+        primary for the same parameters; no operator writes `is_primary` (`P-309`), so nobody is
+        overridden.
+      - **Bounded, and not in the start's way — where it differs from S-18, and why.** S-18's pass
+        is one set-based UPDATE, awaited before anything reads a limit, cheap because after the
+        first start it matches nothing; it is neither batched nor in the background. This one
+        cannot be one statement: the declaration is the type's code on each sensor's parameters,
+        so every start reads every `sensor_config` row. So it reads keyset pages of 500 sensors,
+        each an unlocked read of the page and of the rows that would move, and only where something
+        would, a short transaction of its own. `main.ts` does not await it — it runs once the core
+        is up, as the start-up alarm reconciliation does (`P-177`) — checks `lifecycle.signal`
+        between pages, and a shutdown hook waits for the page in flight. A failure is logged and
+        the next start goes over every sensor again. Late is harmless: primary picks a list
+        number, the mini-graph line and a notification's last value, and no state is judged from
+        it (so no M-17 scenario).
+      - **Safe beside ingestion and edits.** A page with something to move locks only those
+        sensors' `object` rows `FOR NO KEY UPDATE` in id order, then re-reads `sensor_config`,
+        then the channel rows, and decides again from what is committed: object, `sensor_config`,
+        `channel`, the order an edit, ingestion's channel creation and `patchChannel` take. A
+        reading of an existing channel takes only key-share locks and is not held up.
+      - **Visible.** One `info` line with `sensors`, `moved`, `undeclared` and `undeclaredTypes`
+        (and `complete: false` if shutdown stopped it) whenever it moved anything or met a type
+        that could not answer; `debug` otherwise. Each move is also in the audit log and its log.
+        The lookup is built without a logger, since its warning speaks of channels ingestion
+        creates; this line names the types instead.
+      - **Tests** (`declared-primary.test.ts`, real database). One table run in pages of two:
+        moved; moved off a column the parameters no longer name; already right; no row; the type
+        throws (with `{}`'s primary present as a row, so a fallback would move it); the type
+        declares none; the type is not registered in this build; a sensor with no primary. Each
+        asserts the primary and the audit moves in order; all by the repair's actor; the report's
+        counts (3 moved, 1 undeclared, `test.brittle`); the database entries' diffs; the
+        invalidator told. Then a second run: nothing moved, nothing audited, no sensor's version
+        changed. Shutdown already begun: nothing read, `complete: false`, done on the next run.
+        Races: a reading holding the sensor while it creates a channel (the repair waits, then
+        moves; the reading's row is kept); the repair holding the sensor (a reading of an existing
+        channel is not held up, one creating a channel waits); an edit committed between the
+        unlocked read and the lock that puts the already-primary column back first (the repair
+        decides again and moves nothing). `channel-provisioning`, `channel-redeclaration`,
+        `declared-limits` and `audit-composition` still pass.
+      - **Mutations** (each restored byte for byte, `dist` rebuilt): no move fails 5; promoting
+        before demoting fails 5 on the index; not re-deciding under the lock fails the edit race;
+        no lock fails the holding race (`nobody waited`); moving rows already primary fails 4;
+        the ingestion actor fails the table; ignoring shutdown fails the shutdown test; one page
+        only fails the table.
+      - **Not done.** The `main.ts` wiring (not awaited, shutdown hook, `ingestionAudit`) is
+        typechecked but no test starts the core. Not measured at a large installation: a page is
+        one indexed read plus one `channelsFor` per sensor, and nothing waits for it.
 
 - [ ] **P-324 — a channel `PATCH` now takes `FOR UPDATE` on its sensor** · XS · P-314 · Found
       2026-10-08 in `P-314`. The lock that fixed the deadlock with a reading briefly blocks a

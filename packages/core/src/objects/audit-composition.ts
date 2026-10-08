@@ -109,7 +109,9 @@ export function grantAuditSinks(all: AuditSinkSet): AuditSink[] {
 }
 
 /**
- * A primary channel moved by the reading that created it (`P-314`).
+ * A primary channel moved by the reading that created it (`P-314`), or by the start-up repair of
+ * one a reading created before that (`P-323`, `repairDeclaredPrimaries`): the same move, so the
+ * same sinks.
  *
  * **The record and the result-cache invalidator.** A `channel.*` entry is what tells ingestion to
  * forget a sensor's cached channels (`M-04`), and this one is written by ingestion's own channel

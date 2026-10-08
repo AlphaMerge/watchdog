@@ -128,7 +128,7 @@ interface ChannelRow {
   spike_max: number | null;
 }
 
-/** What `#makePrimary` reads back of a channel it moved, for the audit entry. */
+/** What `moveDeclaredPrimaries` reads back of a channel it moved, for the audit entry. */
 interface DeclarationRow {
   sensor_id: string;
   key: string;
@@ -509,63 +509,18 @@ export class ChannelResolver {
    * came from `{}`, whose primary is a placeholder's (`DeclaredShapes.primary` is null then), so
    * the sensor keeps what it has.
    *
-   * **Demoted first, in a statement of its own**, as `ObjectRepository.redeclareChannels` does:
-   * `channel_one_primary_per_sensor` is a partial unique index and not deferrable, so it is
-   * checked row by row as one UPDATE goes. The callers hold each sensor's `object` row already
-   * (`#create`), so the lock order stays object, then `channel`; every other writer of an
-   * existing channel row takes the object first too (an edit by its versioned UPDATE,
-   * `patchChannel` by `lockForUpdate`), so the row demoted here is never held by somebody waiting
-   * for the sensor.
-   *
-   * **Recorded as the edit's move is**: a `channel.redeclared` entry for each channel whose
-   * `is_primary` changed, by the system actor `ingestion`, since no person chose it. Being a
-   * `channel.*` action it also makes ingestion forget what it cached of the sensor (`M-04`),
-   * though nothing it caches holds `is_primary`.
+   * **The move itself is `moveDeclaredPrimaries`**, shared with the start-up repair (`P-323`):
+   * demoted first, recorded by the system actor `ingestion`. The callers hold each sensor's
+   * `object` row already (`#create`), so the lock order stays object, then `channel`; every
+   * other writer of an existing channel row takes the object first too (an edit by its versioned
+   * UPDATE, `patchChannel` by `lockForUpdate`), so the row demoted here is never held by somebody
+   * waiting for the sensor.
    */
   async #makePrimary(
     q: Queryable,
     promoted: readonly { sensor_id: string; key: string }[],
   ): Promise<void> {
-    const sensors = promoted.map((row) => row.sensor_id);
-    const demoted = await q.query<DeclarationRow>(
-      `UPDATE channel SET is_primary = false
-       WHERE sensor_id = ANY($1::bigint[]) AND is_primary
-       RETURNING sensor_id::text AS sensor_id, key, name, unit, lookup_id, counter_bits`,
-      [sensors],
-    );
-    const raised = await q.query<DeclarationRow>(
-      `UPDATE channel AS c SET is_primary = true
-       FROM unnest($1::bigint[], $2::text[]) AS p(sensor_id, key)
-       WHERE c.sensor_id = p.sensor_id AND c.key = p.key
-       RETURNING c.sensor_id::text AS sensor_id, c.key, c.name, c.unit, c.lookup_id,
-                 c.counter_bits`,
-      [sensors, promoted.map((row) => row.key)],
-    );
-    // Said by the audit sink's log, as an edit's move is; nothing of its own here.
-    if (this.#audit === undefined) return;
-    const entry = (row: DeclarationRow, wasPrimary: boolean): Mutation => {
-      const before: ChannelDeclaration = {
-        name: row.name,
-        unit: row.unit,
-        lookupId: row.lookup_id,
-        counterBits: row.counter_bits,
-        isPrimary: wasPrimary,
-      };
-      return {
-        action: 'channel.redeclared',
-        objectId: Number(row.sensor_id),
-        kind: 'sensor',
-        channelKey: row.key,
-        before,
-        after: { ...before, isPrimary: !wasPrimary },
-      };
-    };
-    await this.#audit.record(
-      q,
-      INGESTION,
-      [...demoted.map((row) => entry(row, true)), ...raised.map((row) => entry(row, false))],
-      new Date(),
-    );
+    await moveDeclaredPrimaries(q, promoted, { audit: this.#audit, actor: INGESTION });
   }
 
   /**
@@ -602,4 +557,76 @@ export class ChannelResolver {
     }
     this.#cache.set(cacheKey, channel);
   }
+}
+
+/**
+ * Makes each named channel its sensor's primary, demoting whatever held it first, and records
+ * every channel whose `is_primary` changed (`P-314`, `P-323`).
+ *
+ * **One move, two callers**: the reading that creates a declared primary (`ChannelResolver`) and
+ * the start-up repair of rows created before that existed (`repairDeclaredPrimaries`). Each passes
+ * only rows that exist and that the sensor's own stored parameters declare primary, at most one a
+ * sensor, and holds each sensor's `object` row already, so the lock order is object, then
+ * `channel`.
+ *
+ * **Demoted first, in a statement of its own**, as `ObjectRepository.redeclareChannels` does:
+ * `channel_one_primary_per_sensor` is a partial unique index and not deferrable, so it is checked
+ * row by row as one UPDATE goes. Every row of these sensors still primary is demoted, so each ends
+ * with exactly the one named.
+ *
+ * **Recorded as an edit's move is**: a `channel.redeclared` entry for each channel whose
+ * `is_primary` changed, by the caller's system actor, since no person chose it. Being a
+ * `channel.*` action it also makes ingestion forget what it cached of the sensor (`M-04`), though
+ * nothing it caches holds `is_primary`. Absent `audit`, the rows still move and nothing is
+ * recorded, which is for tests about other things.
+ *
+ * Returns how many channels it promoted.
+ */
+export async function moveDeclaredPrimaries(
+  q: Queryable,
+  promoted: readonly { sensor_id: string; key: string }[],
+  options: { readonly audit: AuditSink | undefined; readonly actor: Actor },
+): Promise<number> {
+  if (promoted.length === 0) return 0;
+  const sensors = promoted.map((row) => row.sensor_id);
+  const demoted = await q.query<DeclarationRow>(
+    `UPDATE channel SET is_primary = false
+     WHERE sensor_id = ANY($1::bigint[]) AND is_primary
+     RETURNING sensor_id::text AS sensor_id, key, name, unit, lookup_id, counter_bits`,
+    [sensors],
+  );
+  const raised = await q.query<DeclarationRow>(
+    `UPDATE channel AS c SET is_primary = true
+     FROM unnest($1::bigint[], $2::text[]) AS p(sensor_id, key)
+     WHERE c.sensor_id = p.sensor_id AND c.key = p.key
+     RETURNING c.sensor_id::text AS sensor_id, c.key, c.name, c.unit, c.lookup_id,
+               c.counter_bits`,
+    [sensors, promoted.map((row) => row.key)],
+  );
+  // Said by the audit sink's log, as an edit's move is; nothing of its own here.
+  if (options.audit === undefined) return raised.length;
+  const entry = (row: DeclarationRow, wasPrimary: boolean): Mutation => {
+    const before: ChannelDeclaration = {
+      name: row.name,
+      unit: row.unit,
+      lookupId: row.lookup_id,
+      counterBits: row.counter_bits,
+      isPrimary: wasPrimary,
+    };
+    return {
+      action: 'channel.redeclared',
+      objectId: Number(row.sensor_id),
+      kind: 'sensor',
+      channelKey: row.key,
+      before,
+      after: { ...before, isPrimary: !wasPrimary },
+    };
+  };
+  await options.audit.record(
+    q,
+    options.actor,
+    [...demoted.map((row) => entry(row, true)), ...raised.map((row) => entry(row, false))],
+    new Date(),
+  );
+  return raised.length;
 }

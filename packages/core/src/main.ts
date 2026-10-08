@@ -45,6 +45,7 @@ import {
   declaredChannelLookup,
   declaredLimitsLookup,
 } from './state/declared-limits.js';
+import { repairDeclaredPrimaries } from './state/declared-primary.js';
 import { DiskWatcher } from './timeseries/disk.js';
 import { CredentialVault } from './vault/service.js';
 import { VaultKeyring } from './vault/keyring.js';
@@ -582,7 +583,8 @@ async function serve(): Promise<void> {
     clockFreezeSync,
     triggerSync,
   };
-  channelAudit = new CompositeAuditSink(ingestionAuditSinks(auditSinks));
+  const ingestionAudit = new CompositeAuditSink(ingestionAuditSinks(auditSinks));
+  channelAudit = ingestionAudit;
 
   // Object rights (`A-03`), built here rather than beside the accounts because email needs it
   // first — a message goes to the people a template names only if they may read what it is about
@@ -695,6 +697,35 @@ async function serve(): Promise<void> {
       'sensor types declare limits for channels this installation has none of',
     );
   }
+
+  // **A declared primary a reading created before `P-314` is moved onto at every start**
+  // (`P-323`), and so is one a later build's type declares differently. The same move, the same
+  // record and the same sinks as ingestion's, by its own system actor. Not awaited, unlike the
+  // pass above: that one is one statement, while this runs every sensor's type on its stored
+  // parameters, in pages, and what it moves is what a list shows rather than anything judged —
+  // so a big installation does not wait for it to come up. Locked as an edit is, so ingestion and
+  // the API may run beside it. Shutdown stops it between pages; a failure is logged, and the next
+  // start goes over every sensor again.
+  const primaryRepair = repairDeclaredPrimaries({
+    db,
+    logger,
+    catalogue,
+    audit: ingestionAudit,
+    signal: lifecycle.signal,
+  }).then(
+    () => undefined,
+    (error: unknown) => {
+      logger.error(
+        describeError(error),
+        'could not finish moving declared primaries at startup; the next start tries again',
+      );
+    },
+  );
+  lifecycle.onShutdown({
+    name: 'declared-primary-repair',
+    timeoutMs: 5_000,
+    run: () => primaryRepair,
+  });
 
   // The library itself. Its own audit sink, so a schedule edit re-derives the flags in the same
   // transaction that changed it — the same composite the object service uses, because a
