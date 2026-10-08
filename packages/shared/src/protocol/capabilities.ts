@@ -1,4 +1,5 @@
 import {
+  isProtocolCompatible,
   MIN_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
   type CheckResult,
@@ -419,7 +420,8 @@ export type ProtocolSkew =
   | { kind: 'incompatible'; peerVersion: number; ownVersion: number; reason: string };
 
 export function describeSkew(peerVersion: number): ProtocolSkew {
-  if (!Number.isInteger(peerVersion) || peerVersion < MIN_PROTOCOL_VERSION) {
+  // The handshake's own test, so `incompatible` is exactly what the registry refuses (`U-33`).
+  if (!isProtocolCompatible(peerVersion)) {
     return {
       kind: 'incompatible',
       peerVersion,

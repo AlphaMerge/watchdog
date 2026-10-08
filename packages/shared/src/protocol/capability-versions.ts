@@ -1,8 +1,8 @@
 import type { ProbeCapabilities } from './capabilities.js';
 
 /**
- * `@ms/shared/capability-versions` — the version each capability arrived in, and nothing else
- * (`P-294`).
+ * `@ms/shared/capability-versions` — the version each capability arrived in (`P-294`), and the
+ * floor below which a peer is refused (`U-33`). Nothing else.
  *
  * **Its own file so the browser can read it.** The rest of `protocol/` is service code: the
  * message schemas pull in `ajv`, and `capabilities.ts` reads them. The add-sensor form needs only
@@ -53,4 +53,43 @@ export const INTRODUCED: readonly (readonly [keyof ProbeCapabilities, number])[]
 /** The version a peer must speak for one capability — the number the gates used to inline. */
 export function versionFor(capability: keyof ProbeCapabilities): number {
   return SINCE[capability];
+}
+
+/**
+ * The oldest peer version this build still understands.
+ *
+ * Still 1: a version-1 probe never sends results, so an older probe against this core simply
+ * heartbeats. There is nothing to break, and forcing an upgrade in lockstep would defeat the
+ * point of negotiating at all.
+ *
+ * **Here, beside the capability table, so the browser can read it** (`U-33`). The add-sensor form
+ * says a probe's last hello was refused over its version, and decides that by the test the
+ * handshake refuses by, rather than by a copy of this number.
+ */
+export const MIN_PROTOCOL_VERSION = 1;
+
+/**
+ * Whether two peers can hold a conversation at all (`P-178`).
+ *
+ * **Only the floor, since every feature is gated by capability.** This used to refuse a peer
+ * *above* this build as well, on the reasoning that the newer end knows messages this one has
+ * never seen and treating its silence as agreement is how a skew becomes a data-loss bug. That
+ * was right when version numbers were compared inline at each send site. It is not right now:
+ * every message that is not in every version is gated through `capabilitiesFor`, and each end
+ * gates on the *negotiated* version — so the newer end never sends the older one a field it
+ * cannot parse. The refusal had stopped protecting against anything and had started costing a
+ * lockstep fleet upgrade on every bump.
+ *
+ * And the cost was not a clean refusal, which is what made it worth changing rather than
+ * documenting. A probe that refuses the welcome destroys the socket and reconnects for ever;
+ * the core meanwhile accepts the hello, opens a session, restores every sensor under that probe
+ * to its last reading, computes and sends a full configuration push, and is hung up on — once a
+ * minute, per probe, indefinitely, with nothing scanned. Bumping `PROTOCOL_VERSION` to add two
+ * optional fields would have taken every deployed probe offline until the fleet caught up
+ * (`P-168`), which is the failure the bump was made to prevent.
+ *
+ * A peer below `MIN_PROTOCOL_VERSION` is still refused: that is a genuine floor, not a feature.
+ */
+export function isProtocolCompatible(peerVersion: number): boolean {
+  return Number.isInteger(peerVersion) && peerVersion >= MIN_PROTOCOL_VERSION;
 }

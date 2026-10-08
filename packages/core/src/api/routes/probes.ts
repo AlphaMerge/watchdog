@@ -11,13 +11,21 @@ export interface ProbeRoutesOptions {
 const registrationSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['gid', 'status', 'displayName', 'firstSeenAt'],
+  required: ['gid', 'status', 'displayName', 'protocolAcceptedAt', 'firstSeenAt'],
   properties: {
     gid: { type: 'string' },
     status: { type: 'string', enum: ['pending', 'approved', 'revoked'] },
     displayName: { type: 'string' },
     agentVersion: { type: 'string' },
     protocolVersion: { type: 'integer' },
+    protocolAcceptedAt: {
+      type: ['string', 'null'],
+      format: 'date-time',
+      description:
+        'When a handshake this core accepted spoke `protocolVersion` (U-33). `null` beside a ' +
+        'version a hello was refused over, and for one recorded before the core kept the time. ' +
+        'Not `lastSeenAt`, which every hello moves, refused ones included.',
+    },
     lastAddress: { type: 'string' },
     allowFrom: { type: 'array', items: { type: 'string' } },
     hasOwnKey: {
@@ -86,7 +94,12 @@ export function probeRoutes(app: FastifyInstance, options: ProbeRoutesOptions): 
           'Includes the ones waiting for approval, which is the list worth opening: a probe in ' +
           '`pending` is connected and doing nothing, on purpose. `lastAddress` is beside each ' +
           'one because "a probe called backup-01 wants in" is not a decision anybody can make ' +
-          'and "from 10.4.2.9" is.',
+          'and "from 10.4.2.9" is. `protocolVersion` is what the probe declared at its last ' +
+          'handshake that was accepted or was refused over the version itself, and ' +
+          '`protocolAcceptedAt` is when an accepted one spoke it: `null` when that handshake ' +
+          'was refused, and for a version recorded before the core kept the time. `lastSeenAt` ' +
+          'is the last hello of any kind, refused ones included, so it is not when the version ' +
+          'was spoken.',
         querystring: {
           type: 'object',
           additionalProperties: false,

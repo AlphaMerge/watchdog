@@ -156,7 +156,8 @@ export interface ProbeHealthView {
    * When a handshake the core accepted spoke `lastProtocolVersion`, as ISO 8601 (`U-32`). Not
    * when the probe was last seen: a refused hello moves that too. `null` whenever
    * `lastProtocolVersion` is, beside a version a hello was refused over, and for one recorded
-   * before the core kept the time.
+   * before the core kept the time. Beside a version this build refuses, that is the refusal, and
+   * the form says so rather than "when it last connected" (`U-33`).
    */
   lastProtocolVersionAt: string | null;
   channels: Record<string, number | null>;

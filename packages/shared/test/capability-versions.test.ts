@@ -1,9 +1,18 @@
 import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
-import { capabilitiesFor, PROTOCOL_VERSION, versionFor } from '../src/index.js';
+import {
+  capabilitiesFor,
+  describeSkew,
+  isProtocolCompatible,
+  MIN_PROTOCOL_VERSION,
+  PROTOCOL_VERSION,
+  versionFor,
+} from '../src/index.js';
 import {
   INTRODUCED,
+  isProtocolCompatible as isProtocolCompatibleForBrowser,
+  MIN_PROTOCOL_VERSION as MIN_PROTOCOL_VERSION_FOR_BROWSER,
   versionFor as versionForBrowser,
 } from '../src/protocol/capability-versions.js';
 
@@ -51,5 +60,26 @@ describe('the capability versions entry point', () => {
       );
     }
     assert.ok(INTRODUCED.every(([, since]) => since <= PROTOCOL_VERSION));
+  });
+
+  it('holds the floor the handshake refuses by, so the form says "refused" by the same rule (U-33)', () => {
+    assert.equal(isProtocolCompatible, isProtocolCompatibleForBrowser, 'one function, re-exported');
+    assert.equal(MIN_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION_FOR_BROWSER);
+    // And `incompatible`, which the registry refuses a hello over, is exactly its negation.
+    for (const version of [
+      -1,
+      0,
+      MIN_PROTOCOL_VERSION,
+      12,
+      PROTOCOL_VERSION,
+      PROTOCOL_VERSION + 1,
+      1.5,
+    ]) {
+      assert.equal(
+        describeSkew(version).kind === 'incompatible',
+        !isProtocolCompatible(version),
+        String(version),
+      );
+    }
   });
 });

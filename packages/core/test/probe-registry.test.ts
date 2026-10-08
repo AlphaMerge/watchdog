@@ -1,8 +1,10 @@
 import { strict as assert } from 'node:assert';
+import Fastify from 'fastify';
 import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { PROTOCOL_VERSION } from '@ms/shared';
 import { ProbeRegistry } from '../src/probes/registry.js';
+import { probeRoutes } from '../src/api/routes/probes.js';
 import { IN_PROCESS_SOURCES } from '../src/ingestion/sources.js';
 import type { Database } from '../src/db/pool.js';
 import {
@@ -944,6 +946,64 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       at('2026-01-03T10:00:00.000Z');
       await clocked.admit(hello({ gid: first.gid, protocolVersion: PROTOCOL_VERSION - 9 }));
       assert.equal((await recorded(first.gid)).acceptedAt, '2026-01-03T10:00:00.000Z');
+    });
+
+    /**
+     * `GET /probes` carries the time beside the version (`U-33`). It showed `protocolVersion`
+     * beside `lastSeenAt` only, and every hello moves that, so a probe refused at one time read as
+     * having spoken its version then. Through the route's own schema, which drops a field it does
+     * not declare, so the registration having the field is not enough.
+     */
+    it('is served by GET /probes as protocolAcceptedAt, apart from lastSeenAt (U-33)', async () => {
+      const app = Fastify();
+      await app.register(probeRoutes, { registry: clocked });
+      const listed = async (gid: string): Promise<Record<string, unknown>> => {
+        const response = await app.inject({ method: 'GET', url: '/probes' });
+        assert.equal(response.statusCode, 200, response.body);
+        const item = response
+          .json<{ items: Record<string, unknown>[] }>()
+          .items.find((one) => one['gid'] === gid);
+        assert.ok(item !== undefined, `${gid} not listed: ${response.body}`);
+        assert.equal(item['protocolAcceptedAt'], (await clocked.get(gid))?.protocolAcceptedAt);
+        return item;
+      };
+      try {
+        at('2026-01-01T10:00:00.000Z');
+        const first = await clocked.admit(hello({ protocolVersion: PROTOCOL_VERSION - 9 }));
+        assert.ok(first.kind === 'pending');
+        const enrolled = await listed(first.gid);
+        assert.equal(enrolled['protocolVersion'], PROTOCOL_VERSION - 9);
+        assert.equal(enrolled['protocolAcceptedAt'], '2026-01-01T10:00:00.000Z');
+
+        // Refused over the version: the version it declared, no time, and last seen moved.
+        at('2026-01-02T10:00:00.000Z');
+        await clocked.admit(hello({ gid: first.gid, protocolVersion: 0 }));
+        const refused = await listed(first.gid);
+        assert.equal(refused['protocolVersion'], 0);
+        assert.ok('protocolAcceptedAt' in refused, JSON.stringify(refused));
+        assert.equal(refused['protocolAcceptedAt'], null);
+        assert.equal(typeof refused['lastSeenAt'], 'string');
+
+        // Accepted again, then refused for its key: the accepted time stays, last seen moves on.
+        at('2026-01-03T10:00:00.000Z');
+        await clocked.admit(hello({ gid: first.gid, protocolVersion: PROTOCOL_VERSION - 8 }));
+        const accepted = await listed(first.gid);
+        assert.equal(accepted['protocolAcceptedAt'], '2026-01-03T10:00:00.000Z');
+        await db.query(
+          "UPDATE probe_registration SET last_seen_at = '2026-01-03T10:00:00Z' WHERE gid = $1",
+          [first.gid],
+        );
+        at('2026-01-04T10:00:00.000Z');
+        await clocked.admit(
+          hello({ gid: first.gid, protocolVersion: PROTOCOL_VERSION, accessKey: 'nope' }),
+        );
+        const keyRefused = await listed(first.gid);
+        assert.equal(keyRefused['protocolVersion'], PROTOCOL_VERSION - 8);
+        assert.equal(keyRefused['protocolAcceptedAt'], '2026-01-03T10:00:00.000Z');
+        assert.notEqual(keyRefused['lastSeenAt'], keyRefused['protocolAcceptedAt']);
+      } finally {
+        await app.close();
+      }
     });
   });
 

@@ -3856,11 +3856,77 @@ because each is a decision rather than a defect:
           - VS16 kept after a bare digit: failed 3;
           - the VS15/VS16 base back to `\p{Emoji}`: failed 3.
 
-- [ ] **N-30 — runs of the combining grapheme joiner or Khmer's inherent vowels can still hide
+- [x] **N-30 — runs of the combining grapheme joiner or Khmer's inherent vowels can still hide
       text** · XS · N-29 · Found 2026-10-08 in `N-29`. U+034F and U+17B4/U+17B5 are marks, so
       `legible()` keeps them, and a run of them on one visible character carries bits nobody sees,
       as variation selectors did before `N-29`. **Done when** decided: escape them (or runs of
       them), or keep, said in `legible.ts`, with the idempotency property kept.
+
+      **N-30 outcome. The CGJ is kept only directly before a combining mark that is drawn. Khmer's
+      inherent vowels are escaped everywhere.**
+      - **These three were the whole gap.** Under Node's Unicode 17.0, the default-ignorables that
+        the `N-27`/`N-29` pattern left unescaped are exactly U+034F, U+17B4 and U+17B5. This was
+        checked by sweeping every code point against the old pattern. So the pattern is now every
+        default-ignorable, and `kept()` holds the three exceptions in one place: a joiner where
+        it joins, a selector where it selects, and a CGJ before a drawn mark.
+      - **The CGJ before a drawn mark** (`DRAWN_MARK`: a `\p{M}` that is not itself
+        default-ignorable). That is where it does its one job. It stops canonical reordering from
+        moving a mark past another, and it lets a search tell two spellings apart (Hebrew points,
+        an umlaut from a diaeresis). What it can hide there is one bit beside an accent the reader
+        sees. "é" as one code point or as "e" plus U+0301 already hides that bit, and `legible()`
+        does not normalise, so this opens nothing new. A run keeps only its last CGJ, because each
+        of the others stands before another CGJ. A CGJ between letters, at the end, or before a
+        selector or a Khmer vowel is escaped.
+      - **Khmer U+17B4/U+17B5 escaped everywhere.** They were encoded for transliteration, the
+        Standard discourages their use, and they draw nothing in Khmer text. No place exists
+        where one shows a reader something. The Khmer letter before one stays.
+      - **Rejected.**
+        - *Escaping only runs*: one mark per letter still carries two bits a letter (none, CGJ,
+          AQ or AA). That is `N-29`'s argument.
+        - *Keeping them*: `N-27`'s answer, and the bug.
+        - *Escaping the CGJ everywhere*: it costs Hebrew and collated text the distinction the
+          CGJ was written for, and it puts the following mark on the escape's last hex digit. It
+          also closes nothing that canonical equivalence leaves open.
+      - **Idempotent.** A kept CGJ stands before a mark that is never escaped, so a second pass
+        sees the same neighbour. `stays()` now asks `kept()`, so a joiner beside a CGJ is judged
+        by what the CGJ becomes. It still never asks about a joiner beside a joiner, which would
+        recurse.
+      - **Migration 071's rows stay legible under the rule they were written under, and are not
+        all final under this one.**
+        - A row written or rewritten before `N-30` kept every CGJ and Khmer vowel. For a row
+          holding one of those three, `legible(row)` is not the row.
+        - This does not break 071. Its re-run relies on one version of `legible()` leaving its own
+          output as it is, and that still holds.
+        - 071 is recorded and does not run again, so nothing rewrites those rows. That does not
+          matter: what they keep is what `N-27` chose to keep, bits beside a character a reader
+          sees, and only rows holding these three marks are affected.
+        - If the data step ran again after a failure part way, its output would be final under
+          this rule.
+        - On the dev database, 071 and 072 ran at 2026-10-08 00:20, and no `notification_request`
+          has a `last_error` at all, so no row is affected there. That was a read-only count with
+          `strpos` for the three characters.
+        - `legible.ts` says this beside the idempotency paragraph.
+      - **Tests** (`legible.test.ts`).
+        - Rows kept: a CGJ before U+0308, between Hebrew points, and before a spacing mark
+          (U+093E) and an enclosing mark (U+20E3).
+        - Rows escaped: a CGJ between letters, at the end, one on each letter, a run (only the
+          last kept), and before a selector or a Khmer vowel. The Khmer vowels after a Khmer
+          letter, alone and in a pair.
+        - The single-code-point sweep stays exact: everything default-ignorable is escaped alone.
+        - The text holding every code point now keeps two things: U+180B, as before, and U+034F,
+          which stands before U+0350, a drawn mark. U+17B4 and U+17B5 come out escaped.
+        - A new sweep puts every code point after a CGJ and after each Khmer vowel. It checks that
+          the CGJ is kept exactly before a drawn mark (more than 2,000 of them), and that the
+          Khmer vowels are kept nowhere. It runs in about 2.7 s.
+        - The idempotency property's alphabet gains the CGJ, both Khmer vowels, a Khmer letter
+          and a Hebrew point: 35 symbols, every string of up to four (about 1.5 million), plus
+          the 50,000 seeded ones. It runs in about 1.7 s.
+      - **Mutations**, each of which failed the tests:
+        - the pattern back to `N-29`'s: failed 9;
+        - the CGJ always kept: failed 7;
+        - the CGJ never kept: failed 6;
+        - the CGJ kept before any mark, default-ignorable ones included: failed 5;
+        - the Khmer vowels kept after a Khmer letter: failed 4.
 
 ## Phase 5 — Web UI
 
@@ -21761,12 +21827,87 @@ because each is a decision rather than a defect:
       - **Not done:** `GET /probes` (admin) does not show the time; `ProbeRegistration` is
         unchanged.
 
-- [ ] **U-33 — `/probes` does not show when the version was accepted, and a refused version reads
+- [x] **U-33 — `/probes` does not show when the version was accepted, and a refused version reads
       as a connection** · S · U-32 · Found 2026-10-08 in `U-32`. The admin list shows
       `protocolVersion` beside `lastSeenAt`, which is touched by refused hellos too, so the two are
       easy to confuse; and a probe refused over its version shows that version with no time while
       the form still says "when it last connected". **Done when** `/probes` carries
       `protocolAcceptedAt` and the form says a refused hello was refused, with tests.
+
+      **U-33 outcome. `/probes` carries the time, and the form says "refused" by the handshake's
+      own rule.**
+      - **`ProbeRegistration.protocolAcceptedAt`** (ISO 8601 or `null`) is read from migration
+        072's `protocol_accepted_at`.
+        - It reaches every route that returns a registration: `GET /probes`, and the approve,
+          revoke, address-filter and delete answers.
+        - The registration schema declares it and requires it, because the serializer drops a
+          field the schema does not name.
+        - `GET /probes`' description says what each time is. `lastSeenAt` is every hello,
+          refused ones included, so it is not when the version was spoken.
+        - `docs/api-reference.md` is regenerated with its generator. No new route, so the
+          runbook appendix is unchanged.
+      - **No probes admin view exists in the web app**, so there was no listed version to put the
+        time beside. Nothing in `packages/web` reads `GET /probes`.
+      - **What the form says.** A probe that is not connected, whose recorded version has no time
+        and is one this core refuses, now reads: *Probe "Berlin" is not connected, so whether its
+        syslog listener is running cannot be checked. It has not connected since its hello was
+        refused over its version: it spoke protocol 0, and this core accepts protocol 1 or newer,
+        so unless it has been upgraded since, it will be refused again when it tries*, followed by
+        the setting to check by hand.
+        - "It has not connected since" holds because an accepted handshake would have overwritten
+          the pair.
+        - It is checked before the listener's own version, because a refused probe reports
+          nothing, whatever its number says of the counter.
+        - A version with no time that this core accepts was recorded before 072, and was
+          accepted, so it keeps the `U-31` sentence. A refused version with a time was accepted
+          by a core whose floor was lower, so it keeps the `U-32` sentence.
+        - Same muted `role="status"` region the field is described by, with no `<time>` (WCAG
+          1.3.1, 1.4.1, 1.4.3, 4.1.3).
+      - **The rule is the handshake's, not a copy.**
+        - `MIN_PROTOCOL_VERSION` and `isProtocolCompatible` move from `messages.ts`, which pulls
+          in `ajv`, to `@ms/shared/capability-versions`, the browser-safe entry point (`P-294`).
+          `messages.ts` and the package index re-export them unchanged.
+        - `describeSkew` now calls `isProtocolCompatible`. So `incompatible`, which is what the
+          registry refuses a hello over, is by construction what the form calls refused.
+        - No health field was added: the form reads the version, the null time and the floor.
+      - **What this does today.** The floor is 1, and a hello's version is an integer of at least
+        0 by schema, so the only version ever refused is 0.
+        - The registry records that 0, and `ProbeHealthService.lastProtocol` serves 0 as `null`
+          (`U-31`: the `R-01` upgrade's "nothing recorded"). So a probe refused at 0 still gets
+          the plain "This updates when it connects".
+        - The new sentence is reached once the floor is raised. A refused version is then a real
+          number, and before this change the form said "when it last connected" beside it.
+        - In `/probes` the refused 0 now shows `protocolAcceptedAt: null` beside it, but its
+          `skew` still reads `unknown` (follow-up).
+      - **Tests.**
+        - `probe-registry.test.ts`, through `probeRoutes` on a bare Fastify, so the route's own
+          serializer is exercised. Each item's field equals `registry.get()`'s.
+          - Enrolled: the time is served.
+          - Refused at 0: 0, and `null` present rather than missing, while `lastSeenAt` moved.
+          - Accepted again: the new time.
+          - Refused for its key: the accepted time kept, while `lastSeenAt` moved past it.
+        - `capability-versions.test.ts`: the index and the browser file export the same function
+          and floor. `describeSkew(v).kind === 'incompatible'` is exactly `!isProtocolCompatible(v)`
+          for -1, 0, the floor, 12, the current version, one above it, and 1.5.
+        - `add-sensor-listener.test.tsx`, model:
+          - the refused sentence word for word for syslog, with no time, and flow's setting and
+            caveat;
+          - a version this core accepts, with or without a time, keeps "when it last connected";
+          - a refused version with a time keeps the `U-32` sentence;
+          - a connected probe is judged by its live version.
+        - Rendered: the refused sentence in the muted status region the field is described by,
+          with no `<time>`.
+        - `add-sensor-refused-floor.test.ts` (new) mocks the browser table with a floor of 20.
+          Version 14, which carries syslog's counter, is called refused, and so is 12. 22 with no
+          time keeps flow's `U-31` sentence and syslog's plain one.
+      - **Mutations**, each of which failed the tests (core ones rebuilt, and each restored byte
+        for byte):
+        - `read()` serving `null`: failed 1;
+        - the schema without the field: failed 1;
+        - the form without the refusal branch: failed 3;
+        - refusal judged by a copied `spoke < 1`: failed 1;
+        - refusal checked only below the listener's version: failed 1;
+        - refused whenever the time is null: failed 8.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

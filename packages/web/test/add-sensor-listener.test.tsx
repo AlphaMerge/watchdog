@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { versionFor } from '@ms/shared';
+import { MIN_PROTOCOL_VERSION, versionFor } from '@ms/shared';
 import type { ObjectRef, ProbeHealthView, SensorTypeSummary } from '../src/api/types';
 import { AddSensor } from '../src/routes/AddSensor';
 import {
@@ -424,6 +424,50 @@ describe('whether a probe’s listener is running', () => {
         [400 * 86_400_000, '400 days ago'],
       ];
       for (const [elapsed, said] of cases) expect(agoInWords(elapsed), String(elapsed)).toBe(said);
+    });
+  });
+
+  describe('when its last hello was refused over its version (U-33)', () => {
+    // What the core records for a hello it refused over the version: the version, and no time,
+    // because no accepted handshake spoke it. One below the floor is the one it refuses.
+    const REFUSED = MIN_PROTOCOL_VERSION - 1;
+
+    it('says the hello was refused, not when it last connected', () => {
+      const notice = say('syslog', downAt(REFUSED));
+      expect(notice?.kind).toBe('unknown');
+      expect(notice?.text).toBe(
+        'Probe “Berlin” is not connected, so whether its syslog listener is running cannot be ' +
+          'checked. It has not connected since its hello was refused over its version: it spoke ' +
+          `protocol ${String(REFUSED)}, and this core accepts protocol ` +
+          `${String(MIN_PROTOCOL_VERSION)} or newer, so unless it has been upgraded since, it ` +
+          'will be refused again when it tries. Check that syslogListener.enabled is true in ' +
+          'that probe’s configuration file.',
+      );
+      expect(notice?.time).toBeUndefined();
+      expect(notice?.text).not.toContain('When it last connected');
+      // Each listener its own setting, and flow its caveat.
+      const flow = text('flow', downAt(REFUSED));
+      expect(flow).toContain('It has not connected since its hello was refused over its version');
+      expect(flow).toContain('Check that flowListener.enabled is true');
+      expect(flow).toContain('A probe on the v1 build has no flow collector');
+    });
+
+    it('keeps "when it last connected" for a version this core accepts, with a time or without', () => {
+      // Without: recorded before the core kept the time, and accepted then (`U-31`).
+      expect(text('syslog', downAt(12))).toContain('When it last connected it spoke protocol 12,');
+      expect(text('syslog', downAt(12))).not.toContain('refused');
+      // With: accepted, and when (`U-32`).
+      expect(text('syslog', downAt(12, ACCEPTED))).toContain('When it last connected, 6 days ago');
+      // A refused version with a time beside it was accepted by a core that took it then: the
+      // time is the core's word that it connected, so the sentence is the connection's.
+      expect(text('syslog', downAt(REFUSED, ACCEPTED))).toContain(
+        `When it last connected, 6 days ago`,
+      );
+    });
+
+    it('judges a connected probe by the version it speaks now, not a refused one before it', () => {
+      expect(say('syslog', { ...RUNNING, lastProtocolVersion: REFUSED })).toBeNull();
+      expect(say('syslog', { ...OFF, lastProtocolVersion: REFUSED })?.kind).toBe('off');
     });
   });
 
@@ -864,6 +908,25 @@ describe('the add-sensor form on a probe that was too old when it last connected
     // Still the muted status region the field is described by (WCAG 1.3.1, 1.4.3, 4.1.3).
     expect(notice().getAttribute('role')).toBe('status');
     expect(notice().className).toContain('text-text-muted');
+  });
+
+  it('says a probe refused over its version was refused, in the same muted status region (U-33)', async () => {
+    await open({ health: downAt(MIN_PROTOCOL_VERSION - 1) });
+    pick('flow.netflow');
+    await waitFor(() => {
+      expect(notice().textContent).toContain(
+        'It has not connected since its hello was refused over its version',
+      );
+    });
+    expect(notice().textContent).not.toContain('When it last connected');
+    expect(notice().querySelectorAll('time')).toHaveLength(0);
+    // Not a caution: nothing about the listener is known (WCAG 1.3.1, 1.4.1, 1.4.3, 4.1.3).
+    expect(notice().getAttribute('role')).toBe('status');
+    expect(screen.getByLabelText('Sensor type').getAttribute('aria-describedby')).toBe(
+      'sensor-type-listener',
+    );
+    expect(notice().className).toContain('text-text-muted');
+    expect(notice().className).not.toContain('text-warning-fg');
   });
 
   it('keeps the plain "not connected" sentence for a probe that was new enough', async () => {

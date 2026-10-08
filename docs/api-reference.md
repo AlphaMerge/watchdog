@@ -1456,7 +1456,7 @@ The addresses of this device its probe may connect to although `probe.targetPoli
 
 Every probe this core knows, and what was decided about it
 
-Includes the ones waiting for approval, which is the list worth opening: a probe in `pending` is connected and doing nothing, on purpose. `lastAddress` is beside each one because "a probe called backup-01 wants in" is not a decision anybody can make and "from 10.4.2.9" is.
+Includes the ones waiting for approval, which is the list worth opening: a probe in `pending` is connected and doing nothing, on purpose. `lastAddress` is beside each one because "a probe called backup-01 wants in" is not a decision anybody can make and "from 10.4.2.9" is. `protocolVersion` is what the probe declared at its last handshake that was accepted or was refused over the version itself, and `protocolAcceptedAt` is when an accepted one spoke it: `null` when that handshake was refused, and for a version recorded before the core kept the time. `lastSeenAt` is the last hello of any kind, refused ones included, so it is not when the version was spoken.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -1481,7 +1481,7 @@ Binds this identity to a probe object. The probe is issued a key of its own at i
 | `objectId` | integer | **required** |
 | `local` | boolean |  |
 
-**200** { gid, status, displayName, agentVersion, protocolVersion, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
+**200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
 
 ### `POST /api/v1/probes/{gid}/revoke`
 
@@ -1499,7 +1499,7 @@ The record is kept rather than deleted, so the same identity cannot come back by
 | --- | --- | --- |
 | `note` | string |  |
 
-**200** { gid, status, displayName, agentVersion, protocolVersion, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
+**200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
 
 ### `PUT /api/v1/probes/{gid}/allow-from`
 
@@ -1517,7 +1517,7 @@ Ranges in the same spellings a discovery takes — `10.0.0.0/24`, `10.0.0.1-50`,
 | --- | --- | --- |
 | `allowFrom` | string[] | **required** |
 
-**200** { gid, status, displayName, agentVersion, protocolVersion, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
+**200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
 
 ### `DELETE /api/v1/probes/{gid}`
 

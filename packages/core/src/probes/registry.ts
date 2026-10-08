@@ -66,6 +66,16 @@ export interface ProbeRegistration {
   displayName: string;
   agentVersion: string;
   protocolVersion: number;
+  /**
+   * When a handshake this core accepted spoke `protocolVersion` (`U-33`), or `null`: beside a
+   * version a hello was refused over (`R-06`), and for one recorded before migration 072.
+   *
+   * **Not `lastSeenAt`**, which every hello moves before it is decided, refused ones included. Read
+   * beside the version, `lastSeenAt` made a probe refused at 04:12 look as if it had connected
+   * then speaking whatever the row held. The pair is written in one statement (`#speaks`), so this
+   * is never another handshake's time.
+   */
+  protocolAcceptedAt: string | null;
   lastAddress: string;
   allowFrom: string[];
 
@@ -814,6 +824,8 @@ function read(row: Record<string, unknown>): ProbeRegistration {
     agentVersion: text(row['agent_version']),
     protocolVersion: Number(row['protocol_version'] ?? 0),
     skew: skewFor(Number(row['protocol_version'] ?? 0)),
+    protocolAcceptedAt:
+      row['protocol_accepted_at'] == null ? null : iso(row['protocol_accepted_at']),
     lastAddress: text(row['last_address']),
     allowFrom: Array.isArray(row['allow_from']) ? (row['allow_from'] as string[]) : [],
     hasOwnKey: row['access_key_hash'] != null && row['access_key_confirmed_at'] != null,

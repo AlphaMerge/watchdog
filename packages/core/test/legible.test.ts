@@ -82,8 +82,37 @@ describe('legible', () => {
       'a\u2065b\ufff0c\ufff8d\u{e0000}e\u{e0002}f\u{e0080}g\u{e0fff}',
       'a\\u2065b\\ufff0c\\ufff8d\\u{e0000}e\\u{e0002}f\\u{e0080}g\\u{e0fff}',
     ],
-    ['the default-ignorable marks that are not selectors are kept: CGJ', 'a\u{34f}b', 'a\u{34f}b'],
-    ['and Khmer’s inherent vowels', '\u{1780}\u{17b4}\u{17b5}', '\u{1780}\u{17b4}\u{17b5}'],
+    // The default-ignorable marks that are not selectors (`N-30`): a CGJ before a drawn mark, and
+    // nothing else.
+    ['a CGJ before a combining mark is kept', 'u\u{34f}\u{308}', 'u\u{34f}\u{308}'],
+    [
+      'a CGJ between Hebrew points is kept',
+      '\u{5d1}\u{5b8}\u{34f}\u{5b7}',
+      '\u{5d1}\u{5b8}\u{34f}\u{5b7}',
+    ],
+    [
+      'a CGJ before a spacing or an enclosing mark is kept',
+      '\u{915}\u{34f}\u{93e} 1\u{34f}\u{20e3}',
+      '\u{915}\u{34f}\u{93e} 1\u{34f}\u{20e3}',
+    ],
+    ['a CGJ between letters is escaped', 'a\u{34f}b', 'a\\u034fb'],
+    ['a CGJ at the end is escaped', 'refused\u{34f}', 'refused\\u034f'],
+    ['one CGJ on each letter is escaped', 'r\u{34f}e\u{34f}f\u{34f}', 'r\\u034fe\\u034ff\\u034f'],
+    [
+      'a run of CGJs keeps only the last, before the mark',
+      'e\u{34f}\u{34f}\u{34f}\u{301}',
+      'e\\u034f\\u034f\u{34f}\u{301}',
+    ],
+    [
+      'a CGJ before a selector or a Khmer inherent vowel is escaped, and so is what follows',
+      '\u{2764}\u{34f}\u{fe0f} \u{1780}\u{34f}\u{17b4}',
+      '\u{2764}\\u034f\\ufe0f \u{1780}\\u034f\\u17b4',
+    ],
+    [
+      'Khmer’s inherent vowels are escaped, and the letter before them kept',
+      '\u{1780}\u{17b4}\u{17b5} \u{1780}\u{17b5}',
+      '\u{1780}\\u17b4\\u17b5 \u{1780}\\u17b5',
+    ],
     // The variation selectors (`N-29`): one, where it picks a glyph a reader sees, and no more.
     ['VS16 after an emoji is kept', 'down \u{2764}\u{fe0f}', 'down \u{2764}\u{fe0f}'],
     ['VS15 after an emoji is kept', '\u{2614}\u{fe0e}', '\u{2614}\u{fe0e}'],
@@ -157,11 +186,11 @@ describe('legible', () => {
     });
   }
 
-  it('escapes exactly the controls, format characters, separators, variation selectors and default-ignorables that are not marks', () => {
+  it('escapes exactly the controls, format characters, separators, variation selectors and default-ignorables', () => {
     // Every code point there is, alone, beyond the BMP too since the tag characters are
     // (`N-27`): escaped when it is one of those and is not newline or tab, and otherwise left
-    // exactly as it was. A joiner alone joins nothing, and a selector alone selects nothing
-    // (`N-29`), so both are escaped too.
+    // exactly as it was. A joiner alone joins nothing, a selector alone selects nothing (`N-29`),
+    // and a CGJ alone stands before no mark (`N-30`), so each is escaped too.
     const wrong: string[] = [];
     for (let point = 0; point <= 0x10ffff; point += 1) {
       if (point >= 0xd800 && point <= 0xdfff) continue;
@@ -173,7 +202,7 @@ describe('legible', () => {
         /\p{Zl}/u.test(one) ||
         /\p{Zp}/u.test(one) ||
         /\p{Variation_Selector}/u.test(one) ||
-        (/\p{Default_Ignorable_Code_Point}/u.test(one) && !/\p{Mn}/u.test(one));
+        /\p{Default_Ignorable_Code_Point}/u.test(one);
       const expected =
         !unsafe || one === '\n' || one === '\t'
           ? one
@@ -185,12 +214,13 @@ describe('legible', () => {
     assert.deepEqual(wrong, []);
   });
 
-  it('leaves none of them in a text that holds every code point, except newline, tab and one selector', () => {
+  it('leaves none of them in a text that holds every code point, except newline, tab, one selector and the CGJ', () => {
     // In context, so a joiner and a selector have neighbours. Each joiner's are format
     // characters, so neither is kept. Each selector follows another selector, a format
     // character, or a character it does not vary, but for U+180B, the first Mongolian free
     // variation selector, which follows U+180A MONGOLIAN NIRUGU: a Mongolian character that is
-    // drawn, so it is kept (`N-29`).
+    // drawn, so it is kept (`N-29`). The CGJ stands before U+0350, a combining mark that is
+    // drawn, so it is kept too; Khmer's U+17B4 and U+17B5 are not, anywhere (`N-30`).
     let all = '';
     for (let point = 0; point <= 0x10ffff; point += 1) {
       if (point >= 0xd800 && point <= 0xdfff) continue;
@@ -199,9 +229,11 @@ describe('legible', () => {
     const out = legible(all);
     const left =
       out.match(
-        /[^\P{Cc}\n\t]|[\p{Cf}\p{Zl}\p{Zp}\p{Variation_Selector}]|(?!\p{Mn})\p{Default_Ignorable_Code_Point}/gu,
+        /[^\P{Cc}\n\t]|[\p{Cf}\p{Zl}\p{Zp}\p{Variation_Selector}\p{Default_Ignorable_Code_Point}]/gu,
       ) ?? [];
-    assert.deepEqual(left, ['\u{180b}']);
+    assert.deepEqual(left, ['\u{34f}', '\u{180b}']);
+    assert.ok(out.includes('\u{34e}\u{34f}\u{350}'));
+    assert.ok(out.includes('\u{17b3}\\u17b4\\u17b5\u{17b6}'));
     assert.ok(out.includes('\u{180a}\u{180b}\\u180c\\u180d\\u180e\\u180f'));
     // And the two it keeps are still there, once each.
     assert.equal(out.match(/[\n\t]/g)?.length, 2);
@@ -260,6 +292,39 @@ describe('legible', () => {
     assert.equal(kept.get('\\u{e0100}'), undefined);
   });
 
+  it('keeps a CGJ before exactly the combining marks that are drawn, and no other default-ignorable mark anywhere (N-30)', () => {
+    // Every code point after a CGJ, and after each Khmer inherent vowel. What follows is made
+    // legible as it would be after a letter; the CGJ is kept only where it is a drawn mark.
+    const drawn = (next: string): boolean =>
+      /^\p{M}$/u.test(next) && !/^\p{Default_Ignorable_Code_Point}$/u.test(next);
+    const marks: readonly (readonly [string, string, (next: string) => boolean])[] = [
+      ['\u{34f}', '\\u034f', drawn],
+      ['\u{17b4}', '\\u17b4', () => false],
+      ['\u{17b5}', '\\u17b5', () => false],
+    ];
+    const wrong: string[] = [];
+    let wrongCount = 0;
+    const kept = new Map<string, number>();
+    for (let point = 0; point <= 0x10ffff; point += 1) {
+      if (point >= 0xd800 && point <= 0xdfff) continue;
+      const next = String.fromCodePoint(point);
+      const after = legible(`a${next}`).slice(1);
+      for (const [mark, escaped, keeps] of marks) {
+        const keep = keeps(next);
+        if (keep) kept.set(escaped, (kept.get(escaped) ?? 0) + 1);
+        if (legible(`a${mark}${next}`) !== `a${keep ? mark : escaped}${after}`) {
+          wrongCount += 1;
+          if (wrong.length < 20) wrong.push(`${escaped}+${point.toString(16)}`);
+        }
+      }
+    }
+    assert.deepEqual({ wrongCount, wrong }, { wrongCount: 0, wrong: [] });
+    // Presence, so that the sweep cannot pass by keeping nothing.
+    assert.ok((kept.get('\\u034f') ?? 0) > 2_000, 'a CGJ kept before the drawn marks');
+    assert.equal(kept.get('\\u17b4'), undefined);
+    assert.equal(kept.get('\\u17b5'), undefined);
+  });
+
   it('keeps VS16 after a bare digit, a regional indicator or a skin tone nowhere (N-29 review)', () => {
     const cases: readonly (readonly [string, string])[] = [
       ['4\u{fe0f}0', '4\\ufe0f0'],
@@ -298,8 +363,9 @@ describe('legible', () => {
   it('leaves its own output as it is (N-28, N-29 review)', () => {
     // Every string of up to four code points from an alphabet of the things that interact —
     // selectors, joiners, pictures, digits, the keycap mark, regional indicators, skin tones,
-    // joining-script letters and their format characters, Mongolian and its selectors, the
-    // escapable ones — and then longer ones drawn from it with a fixed seed.
+    // joining-script letters and their format characters, Mongolian and its selectors, the CGJ
+    // and Khmer's inherent vowels with marks for them to stand before (`N-30`), the escapable
+    // ones — and then longer ones drawn from it with a fixed seed.
     const alphabet = [
       'a',
       '4',
@@ -331,6 +397,12 @@ describe('legible', () => {
       '\u{180e}',
       '\u{202f}',
       '\u{301}',
+      // `N-30`: the CGJ, Khmer's inherent vowels, a Khmer letter and a Hebrew point.
+      '\u{34f}',
+      '\u{17b4}',
+      '\u{17b5}',
+      '\u{1780}',
+      '\u{5b8}',
     ];
     const unstable: string[] = [];
     let checked = 0;
@@ -363,6 +435,7 @@ describe('legible', () => {
       check(text);
     }
     assert.deepEqual(unstable, []);
-    assert.equal(checked, 30 + 30 ** 2 + 30 ** 3 + 30 ** 4 + 50_000);
+    assert.equal(alphabet.length, 35);
+    assert.equal(checked, 35 + 35 ** 2 + 35 ** 3 + 35 ** 4 + 50_000);
   });
 });

@@ -1,4 +1,8 @@
-import { versionFor } from '@ms/shared/capability-versions';
+import {
+  isProtocolCompatible,
+  MIN_PROTOCOL_VERSION,
+  versionFor,
+} from '@ms/shared/capability-versions';
 import type { ObjectRef, ProbeHealthView } from '../api/types';
 
 /**
@@ -28,6 +32,10 @@ import type { ObjectRef, ProbeHealthView } from '../api/types';
  * the probe declared when it last connected. A probe that was below a listener's version then
  * will be below it when it comes back, unless somebody upgrades it meanwhile, so the form says
  * that as well, as a fact about the last connection and not about the probe now.
+ *
+ * **Unless the last version was refused** (`U-33`). The core records the version a hello was
+ * refused over, with no time beside it, so the version alone is not a connection: the form says
+ * that hello was refused, and does not say "when it last connected".
  */
 
 interface ListenerSpec {
@@ -171,11 +179,26 @@ export function listenerNotice(
   if (speaks !== null && speaks < spec.since) {
     return { kind: 'unknown', text: tooOld(spec, probeName, speaks, spec.since) };
   }
+  // **Not connected, and refused over its version when it last tried** (`U-33`). The core records
+  // the version such a hello declared and no time beside it, because none was accepted. So a
+  // version with no time is not a connection when this build would refuse it: the test is the
+  // handshake's own, from the same table, not a copy of the floor. Before the listener's version,
+  // because a refused probe will not report anything, whatever its version says of the counter.
+  // A version with no time that this build accepts is one recorded before the core kept the time
+  // (migration 072), and was accepted: the `U-31` sentence is true of it.
+  const spoke = health.lastProtocolVersion;
+  if (
+    speaks === null &&
+    typeof spoke === 'number' &&
+    health.lastProtocolVersionAt === null &&
+    !isProtocolCompatible(spoke)
+  ) {
+    return { kind: 'unknown', text: refusedOverVersion(spec, probeName, spoke) };
+  }
   // **Not connected, and too old when it last was** (`U-31`). Still `unknown`: the probe may have
   // been upgraded while it was away, so this is said of the last connection, beside the reason
   // nothing can be checked now. A version recorded at or above the listener's says nothing new,
   // and the sentence stays the connection's.
-  const spoke = health.lastProtocolVersion;
   if (speaks === null && typeof spoke === 'number' && spoke < spec.since) {
     const when = whenAccepted(health.lastProtocolVersionAt, health.at);
     return {
@@ -280,6 +303,24 @@ function tooOldWhenLastConnected(
     `checked. ${lastConnected} it spoke protocol ${String(spoke)}, and reporting it ` +
     `needs protocol ${String(spec.since)}, so unless it has been upgraded since, it will not ` +
     `say when it reconnects either. ${checkByHand(spec)}`
+  );
+}
+
+/**
+ * A probe that is not connected, whose last hello was refused over the version it spoke (`U-33`).
+ *
+ * **Refused, not "when it last connected"**: no accepted handshake spoke that version, and none has
+ * since, or the core would have recorded that one. So it is said as a refusal, with the version on
+ * each end, and that an upgrade is what lets it in. No time: the core keeps none for a refusal,
+ * and the time the probe was last seen is not given to a reader of the probe.
+ */
+function refusedOverVersion(spec: ListenerSpec, probeName: string, spoke: number): string {
+  return (
+    `Probe “${probeName}” is not connected, so whether its ${spec.name} is running cannot be ` +
+    `checked. It has not connected since its hello was refused over its version: it spoke ` +
+    `protocol ${String(spoke)}, and this core accepts protocol ` +
+    `${String(MIN_PROTOCOL_VERSION)} or newer, so unless it has been upgraded since, it will be ` +
+    `refused again when it tries. ${checkByHand(spec)}`
   );
 }
 

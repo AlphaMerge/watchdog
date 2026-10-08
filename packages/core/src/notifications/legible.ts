@@ -1,11 +1,9 @@
 /**
  * Every control, every format character (which holds every bidirectional control), the two
  * Unicode line and paragraph separators, every variation selector (`N-29`), and every other
- * default-ignorable code point that is not a mark (`N-27` review).
+ * default-ignorable code point (`N-27` review), the marks among them too (`N-30`).
  */
-const ESCAPABLE =
-  String.raw`[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Variation_Selector}]` +
-  String.raw`|(?!\p{Mn})\p{Default_Ignorable_Code_Point}`;
+const ESCAPABLE = String.raw`[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Variation_Selector}\p{Default_Ignorable_Code_Point}]`;
 
 /** CRLF first, so it is taken as one; then each of those. */
 const UNSAFE = new RegExp(String.raw`\r\n|${ESCAPABLE}`, 'gu');
@@ -36,6 +34,16 @@ const MONGOLIAN_SELECTOR = /^(?=\p{Variation_Selector})\p{scx=Mong}$/u;
  * narrow no-break space U+202F, which Mongolian uses and which draws as a gap.
  */
 const MONGOLIAN = /^(?![\p{Variation_Selector}\p{Cf}\p{White_Space}])\p{scx=Mong}$/u;
+
+/** The combining grapheme joiner, kept only before a mark that is drawn (`N-30`). */
+const CGJ = '\u{34f}';
+
+/**
+ * What a CGJ is kept before: a combining mark that is drawn. A `\p{M}` that is not itself
+ * default-ignorable, so not another CGJ, a variation selector or a Khmer inherent vowel. None of
+ * these is ever escaped, so what a kept CGJ stands before is the same on a second pass.
+ */
+const DRAWN_MARK = /^(?!\p{Default_Ignorable_Code_Point})\p{M}$/u;
 
 /** The two joiners, kept only where they join (`N-27`). */
 const ZWNJ = '\u200c';
@@ -152,8 +160,35 @@ const SKIN_TONE = /^\p{Emoji_Modifier}$/u;
  * character, and "refused" with a different VS17–VS256 on each letter is seven hidden bytes that
  * look exactly like "refused". **Keeping them all** is what this was.
  *
- * **Not the other default-ignorable marks** (`\p{Mn}`: the combining grapheme joiner U+034F and
- * Khmer's U+17B4 and U+17B5). They attach to a visible character without changing what it says.
+ * **The other default-ignorable marks: the combining grapheme joiner only before a mark that is
+ * drawn, and Khmer's inherent vowels nowhere** (`N-30`). These three are the default-ignorable
+ * marks (`\p{Mn}`) that are not selectors. `N-27` kept them because they attach to a visible
+ * character without changing what it says; but each draws nothing, so a run of them on one
+ * character is text nobody sees, as a run of selectors was before `N-29`.
+ *
+ * - **U+034F COMBINING GRAPHEME JOINER** has one job. Standing between a character and a
+ *   combining mark, it keeps canonical reordering from moving that mark past another, and lets a
+ *   search or a sort tell two spellings apart: Hebrew points in a set order, an umlaut from a
+ *   diaeresis. So it is kept **directly before a combining mark that is drawn** (`DRAWN_MARK`),
+ *   which is where it does that. What it can hide there is whether it is there: one bit beside an
+ *   accent the reader can see. "é" written as one code point or as "e" and U+0301 already hides
+ *   that bit without it, and `legible()` does not normalise. So the CGJ adds no hiding place that
+ *   canonical equivalence does not already give. Everywhere else it is escaped. That includes a
+ *   run, because each CGJ but the last stands before another one, and the end of the text.
+ * - **U+17B4 and U+17B5, KHMER VOWEL INHERENT AQ and AA**, are escaped wherever they stand. They
+ *   were encoded for transliteration, the Standard discourages their use, and in Khmer text they
+ *   draw nothing and change nothing. No place exists where one says something a reader sees.
+ *   Escaped, the Khmer letter before it stays.
+ *
+ * Three other answers were rejected:
+ *
+ * - **Escaping only runs** keeps one on every character. That is the `N-29` argument again: none,
+ *   CGJ, AQ or AA after each letter is two hidden bits a character, and "refused" carrying them
+ *   reads exactly as "refused".
+ * - **Keeping them** is what `N-27` and `N-29` left, and a run on one letter is any number of bits.
+ * - **Escaping the CGJ everywhere** would cost a Hebrew or a collated text the distinction it was
+ *   written for. It would also put the mark that followed onto the last hex digit of the escape.
+ *   And it would close nothing that canonical equivalence leaves open.
  *
  * **Escaped, not removed.** Each becomes `\uXXXX`, or `\u{XXXXX}` beyond the BMP so that a tag
  * character is not read as four hex digits and a letter. A reader sees *something was there* —
@@ -181,6 +216,16 @@ const SKIN_TONE = /^\p{Emoji_Modifier}$/u;
  * runs it over rows that may already be legible, and stops rewriting them only because of this
  * (`N-28`).
  *
+ * **A rule that escapes more leaves older output not final** (`N-30`). A row written before
+ * `N-30`, by `#record` or by migration 071's rewrite, kept every CGJ and every Khmer inherent
+ * vowel. This rule escapes some of those, so `legible()` of such a row is not that row. That
+ * does not break the property 071 relies on, which is about one version of this function and
+ * its own output. It means those rows are legible by the rule they were written under, and
+ * nothing rewrites them: 071 is recorded, and runs once. They need no rewrite. What they keep is
+ * what `N-27` chose to keep, hidden bits beside a character a reader sees. Only a row holding one
+ * of those three marks is affected. If 071's data step ran again, after a failure part way, it
+ * would apply this rule, and its output would be final under this rule.
+ *
  * A literal backslash followed by `u` in the original reads the same as an escape. This is a
  * diagnosis for a person, not data to parse back.
  */
@@ -188,12 +233,22 @@ export function legible(text: string): string {
   return text.replace(UNSAFE, (found: string, at: number) => {
     if (found === '\r\n') return '\n';
     if (found === '\n' || found === '\t') return found;
-    if ((found === ZWNJ || found === ZWJ) && joins(found, text, at)) return found;
-    if (SELECTOR.test(found) && selects(found, text, at)) return found;
+    if (kept(found, text, at)) return found;
     const point = found.codePointAt(0) ?? 0;
     const hex = point.toString(16);
     return point > 0xffff ? `\\u{${hex}}` : `\\u${hex.padStart(4, '0')}`;
   });
+}
+
+/**
+ * Whether the escapable code point `found`, at `at`, is one of the few left where it stands: a
+ * joiner where it joins, a selector where it selects, a CGJ before a mark that is drawn.
+ */
+function kept(found: string, text: string, at: number): boolean {
+  if (found === ZWNJ || found === ZWJ) return joins(found, text, at);
+  if (SELECTOR.test(found)) return selects(found, text, at);
+  if (found === CGJ) return DRAWN_MARK.test(pointAt(text, at + found.length));
+  return false;
 }
 
 /**
@@ -221,11 +276,16 @@ function joins(joiner: string, text: string, at: number): boolean {
   return SKIN_TONE.test(before) && PICTURE.test(pointBefore(text, beforeAt));
 }
 
-/** Whether the code point `point`, at `at`, is one `legible()` leaves as it is. Not at an end. */
+/**
+ * Whether the code point `point`, at `at`, is one `legible()` leaves as it is. Not at an end, and
+ * not another joiner: a joiner beside a joiner joins nothing, and asking `joins` about it would
+ * ask about this one again.
+ */
 function stays(point: string, text: string, at: number): boolean {
   if (point === '') return false;
   if (!ESCAPABLE_ONE.test(point)) return true;
-  return SELECTOR.test(point) && selects(point, text, at);
+  if (point === ZWNJ || point === ZWJ) return false;
+  return kept(point, text, at);
 }
 
 /**
