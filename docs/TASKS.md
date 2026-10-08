@@ -11038,11 +11038,73 @@ because each is a decision rather than a defect:
       - **Not done.** `P-303`'s other direction (a counter edited to a gauge, a lookup edited to
         another). Lookups on old clones are left to the operator, as above.
 
-- [ ] **P-303 — an edit that changes a channel's mode or lookup does not redeclare it** · S ·
+- [x] **P-303 — an edit that changes a channel's mode or lookup does not redeclare it** · S ·
       P-297 · Found 2026-10-08 in `P-297`. An update replaces `params` and declares no channels, so
       `snmp.custom`'s `mode` or `snmp.custom.string`'s `lookup` changed by an edit leaves the stored
       row with what the create wrote. **Done when** an edit re-declares the channels it changes (or
       refuses the change and says why), with tests.
+
+      **P-303 outcome. Both, split by what the change does to stored samples: a lookup, name,
+      unit or counter width is re-declared; a counter turned gauge (or back) is refused.**
+      - **Re-declared where the edit changed it, and only there** (`objects/redeclare.ts`,
+        `ObjectService.#redeclareChannels`). The edit asks the gate for the new parameters'
+        channels and the stored parameters' (`storedChannelsFor`, new: neither refused nor
+        logged), and for each existing channel writes a field only when the edit moved its
+        declaration and the row does not already hold the new value. So an edit that leaves a
+        channel alone leaves its row alone, including a lookup an operator pointed it at through
+        `PATCH …/channels/:key`; an edit that is about that lookup is the later decision and wins.
+        A key the stored answer does not name (a table column taken out and put back), or a type
+        that cannot answer for its stored parameters, is compared against the row. No read at all
+        when the two answers are equal, which is every edit of a type whose channels do not
+        depend on parameters. Name and unit came along: they are on the same row, an edit of
+        `channelName` or `unit` left them stale the same way, and nothing else writes them.
+      - **Limits are never written.** Only a `fixedChannels` type declares them (`P-293`), and its
+        answer is the same for any parameters or the write is refused (`P-296`), so no edit can
+        change one: no operator row (`limits_source = 'operator'`) is touched, and none is read.
+      - **Why counter ↔ gauge is refused, not re-declared.** A counter's stored samples are rates
+        and a gauge's are the raw value (`T-02`), on one series with one unit. Re-declaring would
+        show the operator a line that jumps by orders of magnitude at the edit (a rate of 1,250
+        octets/s, then a total of 9.8e12), the unit relabelled over the whole history ("octets/s"
+        becomes "octets", or the reverse), an hour's rollup averaging a rate with a total, and
+        limits written for one judged against the other; gauge → counter adds a gap at the first
+        reading. Leaving the row as created (before this) is worse: a counter stored as cumulative
+        totals, `P-80`'s failure, silently. A scale factor change, which is allowed and steps the
+        graph, keeps the quantity; this changes what it is. So `409 OBJECT_CHANNEL_MODE_FIXED`
+        (new code: the parameters would make a new sensor, this sensor's channel refuses them),
+        naming each channel and direction in the message and `details.channels`, and saying to
+        add a new sensor; nothing written. Refused only where the edit changes the mode and the
+        row differs, so a row that already holds the new mode, or one whose mode no declaration
+        this edit touches, passes. `snmp.custom`'s and `snmp.table`'s `mode` descriptions say it
+        is fixed once the sensor exists (`docs/sensor-reference.md` regenerated), and
+        `adding-a-sensor-type.md` states both rules. A counter's *width* is re-declared: the
+        samples are rates either way.
+      - **Adding and removing channels.** An edit can, on `snmp.table` (columns). An added key is
+        not written by the edit: its first reading creates it with the shape the stored
+        parameters declare (`P-297`), unchanged. A removed key keeps its row and its history and
+        receives no more readings; put back as the other mode it is refused, as the same mode it
+        is re-declared.
+      - **Seen everywhere it is cached.** Each re-declared channel is a `channel.redeclared` audit
+        entry (before/after of the four fields, diffed like the channel's other entries) after the
+        sensor's `object.updated`, and being a `channel.*` action it makes ingestion forget the
+        cached channel (`M-04`), so the next reading is judged by the new lookup. The sensor is
+        read again after the channel write, so the edit answers with a version that does not 412
+        on its own next write (`P-29`'s trap). The new parameters go through the gate's refusal,
+        so an edit to parameters the type cannot answer for is a 400 like the create (`P-305`).
+      - **Tests.** `channel-redeclaration.test.ts` (core, through the API, with the shipped
+        `snmp.custom` and `snmp.custom.string` and a table-like test type): a lookup changed and
+        cleared, the answer's version current and good for the next PATCH, the two audit entries;
+        name and unit re-declared on a counter with an operator's limits left as they were; both
+        mode flips refused with code, message, details and phase, channel and params unchanged;
+        an operator's lookup kept through an unrelated edit and replaced by one about the lookup;
+        table columns re-declared, a flip refused, a removed column kept, put back refused or
+        re-declared; a `ChannelResolver` behind the real invalidator returning the new lookup
+        after the edit. A 13-row table over `planRedeclaration`. Mutations: no re-declaration
+        fails 7; no refusal fails 6; comparing against the rows only fails the operator-lookup
+        test; no re-read fails the version test; no audit entries fail the cache and audit tests.
+      - **Not done.** `is_primary` is not re-declared (a table edit that reorders columns leaves
+        the column created first as primary); a removed column's channel is not marked retired;
+        the edit form does not grey out `mode` for an existing sensor, it shows the 409. Listed as
+        follow-ups.
 
 - [x] **P-304 — a tree create asks for channels with the raw parameters** · XS · P-296 · Found
       2026-10-08 in `P-296`. `createTree` (`service.ts`, about line 2100) passes
@@ -11059,10 +11121,42 @@ because each is a decision rather than a defect:
       both get `value` at 64 bits and `wraps`, and both store `{ mode: 'counter' }`. Mutation:
       the raw parameters put back fails it.
 
-- [ ] **P-305 — a type's `channels()` that throws on valid parameters is still a 500** · XS ·
+- [x] **P-305 — a type's `channels()` that throws on valid parameters is still a 500** · XS ·
       P-296 · Found 2026-10-08 in `P-296`. Only `SensorTypeError` is turned into a 400 naming the
       type. **Done when** decided: any throw from a type's `channels()` for schema-valid
       parameters is a 400 naming the type (logged as the type's fault), or keep, with a test.
+
+      **P-305 outcome. A 400 naming the type, logged as the type's fault, with no parameter's
+      value in either.**
+      - **Why not keep the 500.** `channelsFor` runs only after `normalise` accepted the
+        parameters against the type's own schema, so a throw there is the type contradicting
+        itself, as a `P-296` breach is: these parameters, with this type, in this build, always
+        fail, and the caller can act (other parameters work). A 500 said "the request could not
+        be completed" and blamed nobody. A type is a plugin (`CLAUDE.md`), and whoever ships it
+        reads the log.
+      - **The change** (`sensor-type-gate.ts`, `refusedDeclaration`). Any throw from
+        `catalogue.channelsFor` is `OBJECT_INVALID` with context `{ sensorType, phase:
+        'declare-channels' }`; `details.reason` is the `SensorTypeError`'s code as before, or
+        `CHANNELS_FAILED`, with the error's kind (`TypeError`) in a message that says the schema
+        accepts the parameters, so the fault is the type's. Both kinds warn with the type, the
+        phase, and the error's code or name, message and stack. The same path now serves an edit
+        (`P-303` asks the gate for the new parameters' channels), so the message reads "cannot
+        have these parameters" rather than "cannot be created with".
+      - **No values.** Every string the parameters hold (three characters or more, and a
+        `writeOnly` one of any length) is cut out of the reply's message, the logged message, the
+        logged stack and the error's `cause`: `P-297`'s rule. It matters more here: on an edit the
+        parameters include secrets carried from what is stored, which the caller never sent and a
+        type's message would have handed back. `P-297`'s scrubber moved to
+        `support/param-values.ts` for the second caller; `declared-limits.ts` uses it unchanged.
+      - **Tests.** `broken-sensor-type.test.ts`: a type throwing a `TypeError` with a column name
+        and a `writeOnly` community in its message, refused on create (400, `CHANNELS_FAILED`, the
+        type named, no value in the body, nothing written), on a subtree create (nothing written),
+        and on an edit that carries the stored secret (no secret in the reply, params unchanged);
+        the gate alone: the `ObjectError`, its `cause` and the one warning line, stack included,
+        with neither value; `storedChannelsFor` answering, `null` for a throw and for an
+        unregistered type, and logging nothing. The test that held a `RangeError` to a 500 is
+        replaced. Mutations: rethrowing anything but `SensorTypeError` fails 4; the unscrubbed
+        message fails 4.
 
 - [ ] **P-306 — a channel created without its declared shape is counted nowhere** · S · P-297 ·
       Found 2026-10-08 in `P-297`'s review. When a type cannot answer for a sensor's stored

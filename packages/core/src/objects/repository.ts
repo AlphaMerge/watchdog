@@ -4,6 +4,7 @@ import { MAX_WALK_DEPTH } from '../db/walk.js';
 import { atLeast, groupRightsOn, type AccessRight, type Visibility } from '../auth/access.js';
 import { limitsFromDeclaration, parseLimits, type ChannelLimits } from '../state/limits.js';
 import { SENSOR_STATES, type SensorState } from '../state/tables.js';
+import type { ChannelRedeclaration, StoredChannel } from './redeclare.js';
 import type { ChannelDraft } from './sensor-type-gate.js';
 import { ObjectError, notFound } from './errors.js';
 import type {
@@ -900,6 +901,56 @@ export class ObjectRepository {
         drafts.map((draft) => draft.lookup ?? null),
         drafts.map((draft) => draft.counterBits ?? null),
         drafts.map((draft) => declaredLimitsJson(draft)),
+      ],
+    );
+    return rows.length;
+  }
+
+  /** A sensor's channels as far as an edit can re-declare them (`P-303`). */
+  async declaredChannels(q: Queryable, sensorId: ObjectId): Promise<StoredChannel[]> {
+    const rows = await q.query<{
+      key: string;
+      name: string;
+      unit: string;
+      lookup_id: string | null;
+      counter_bits: number | null;
+    }>('SELECT key, name, unit, lookup_id, counter_bits FROM channel WHERE sensor_id = $1', [
+      sensorId,
+    ]);
+    return rows.map((row) => ({
+      key: row.key,
+      name: row.name,
+      unit: row.unit,
+      lookupId: row.lookup_id,
+      counterBits: row.counter_bits,
+    }));
+  }
+
+  /**
+   * Writes what an edit re-declared (`P-303`), in one statement. Never limits or their source:
+   * nothing an edit re-declares touches them. Bumps the sensor's version by trigger, like any
+   * channel write, so the caller reads the sensor again afterwards.
+   */
+  async redeclareChannels(
+    q: Queryable,
+    sensorId: ObjectId,
+    changes: readonly ChannelRedeclaration[],
+  ): Promise<number> {
+    if (changes.length === 0) return 0;
+    const rows = await q.query<{ id: number }>(
+      `UPDATE channel AS c
+       SET name = d.name, unit = d.unit, lookup_id = d.lookup_id, counter_bits = d.counter_bits
+       FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::smallint[])
+            AS d(key, name, unit, lookup_id, counter_bits)
+       WHERE c.sensor_id = $1 AND c.key = d.key
+       RETURNING c.id`,
+      [
+        sensorId,
+        changes.map((change) => change.key),
+        changes.map((change) => change.after.name),
+        changes.map((change) => change.after.unit),
+        changes.map((change) => change.after.lookupId),
+        changes.map((change) => change.after.counterBits),
       ],
     );
     return rows.length;

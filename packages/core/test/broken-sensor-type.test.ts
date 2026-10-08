@@ -60,6 +60,42 @@ const limited: SensorType = {
   execute: () => Promise.resolve({ channels: [] }),
 };
 
+/** A secret the throwing type is given, which no reply or log line may carry (`P-305`). */
+const SECRET = 'sekret-community-string';
+/** A parameter the throwing type puts in its own message. */
+const COLUMN = 'bogus-column';
+
+/**
+ * Throws from `channels()` for parameters its own schema accepts, with their values in the
+ * message — a bug in the type, which is what `P-305` is about. `community` is `writeOnly`, so on
+ * an edit it is carried from what is stored, and the caller never sent it.
+ */
+const throwing: SensorType = {
+  id: 'test.throwing',
+  category: 'Custom',
+  costHint: 'light',
+  secretDestinations: { community: [] },
+  paramsSchema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      column: { type: 'string', minLength: 1 },
+      community: { type: 'string', minLength: 1, writeOnly: true },
+    },
+  },
+  channels: (params) => {
+    const column = typeof params['column'] === 'string' ? params['column'] : '';
+    if (column === COLUMN) {
+      const community = typeof params['community'] === 'string' ? params['community'] : '';
+      throw new TypeError(`no column called ${column} answers for ${community}`);
+    }
+    return [{ key: 'value', name: 'Value', isPrimary: true }];
+  },
+  execute: () => Promise.resolve({ channels: [] }),
+};
+
+const brokenTypes = [shifting, limited, throwing];
+
 interface Envelope {
   error: {
     code: string;
@@ -91,7 +127,7 @@ describe(
     before(async () => {
       scratch = await createScratchDatabase('brokentype');
       db = scratch.db;
-      harness = await buildHarness(db, { types: [shifting, limited] });
+      harness = await buildHarness(db, { types: brokenTypes });
       const server = new ApiServer({
         config: {
           host: '127.0.0.1',
@@ -106,7 +142,7 @@ describe(
         history: new HistoryService({ db, logger: silent }),
         db,
         audit: new AuditRepository(),
-        catalogue: testCatalogue([shifting, limited]),
+        catalogue: testCatalogue(brokenTypes),
       });
       await server.build('9.9.9', harness.service);
       app = server.app;
@@ -159,6 +195,14 @@ describe(
         kept: { limited: false },
         says: /declares limits on channel "bounded" without `fixedChannels`/u,
       },
+      {
+        name: 'a type whose channels() throws for parameters its schema accepts (P-305)',
+        sensorType: 'test.throwing',
+        broken: { column: COLUMN, community: SECRET },
+        kept: { column: 'good', community: SECRET },
+        says: /failed to declare its channels for them \(TypeError: no column called \[a parameter\] answers for \[a parameter\]\)/u,
+        reason: 'CHANNELS_FAILED',
+      },
     ];
 
     for (const one of refusals) {
@@ -177,8 +221,10 @@ describe(
         assert.match(error.message, new RegExp(`"${one.sensorType.replace('.', '\\.')}"`, 'u'));
         assert.match(error.message, one.says, 'the message says what the type got wrong');
         assert.equal(error.details['sensorType'], one.sensorType);
-        assert.equal(error.details['reason'], 'BAD_SENSOR_TYPE');
+        assert.equal(error.details['reason'], one.reason ?? 'BAD_SENSOR_TYPE');
         assert.equal(error.context['phase'], 'declare-channels');
+        assert.ok(!response.body.includes(SECRET), 'a secret reached the reply');
+        assert.ok(!response.body.includes(COLUMN), 'a parameter’s value reached the reply');
         assert.equal(await sensorsUnder(deviceId), 0, 'the refused sensor was written');
 
         // The type is otherwise usable: parameters that keep its promise make a sensor.
@@ -219,6 +265,7 @@ describe(
         const { error } = response.json<Envelope>();
         assert.equal(error.code, 'OBJECT_INVALID');
         assert.equal(error.details['sensorType'], one.sensorType);
+        assert.ok(!response.body.includes(SECRET), 'a secret reached the reply');
         const written = await db.query<{ count: string }>(
           "SELECT count(*) AS count FROM object WHERE parent_id = $1 AND name = 'Router'",
           [probeId],
@@ -226,6 +273,44 @@ describe(
         assert.equal(Number(written[0]?.count ?? -1), 0, 'part of the subtree was written');
       });
     }
+
+    it('refuses an edit to parameters the type cannot answer for, without the stored secret (P-305)', async () => {
+      const created = await post('/api/v1/objects', {
+        kind: 'sensor',
+        parentId: deviceId,
+        name: 'edited',
+        sensorType: 'test.throwing',
+        params: { column: 'good', community: SECRET },
+      });
+      assert.equal(created.statusCode, 201, created.body);
+      const id = created.json<{ id: number }>().id;
+      const stored = await db.query<{ params: Record<string, unknown> }>(
+        'SELECT params FROM sensor_config WHERE object_id = $1',
+        [id],
+      );
+
+      // No `community`: a read never returns it, so it is carried from what is stored, and the
+      // type's message would have carried it back to a caller who never had it.
+      const response = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/objects/${String(id)}`,
+        headers: { 'if-match': String(created.headers['etag']) },
+        payload: { kind: 'sensor', params: { column: COLUMN } },
+      });
+      assert.equal(response.statusCode, 400, response.body);
+      const { error } = response.json<Envelope>();
+      assert.equal(error.code, 'OBJECT_INVALID');
+      assert.equal(error.details['reason'], 'CHANNELS_FAILED');
+      assert.match(error.message, /"test\.throwing"/u);
+      assert.ok(!response.body.includes(SECRET), 'a stored secret reached the reply');
+      assert.ok(!response.body.includes(COLUMN), 'a parameter’s value reached the reply');
+
+      const after = await db.query<{ params: Record<string, unknown> }>(
+        'SELECT params FROM sensor_config WHERE object_id = $1',
+        [id],
+      );
+      assert.deepEqual(after[0]?.params, stored[0]?.params, 'the refused edit was written');
+    });
   },
 );
 
@@ -255,16 +340,51 @@ describe('the sensor-type gate, given a type that breaks its own channel declara
     assert.equal(logged.sensorType, 'test.shifting');
   });
 
-  it('leaves any other throw alone, as a fault of ours rather than the caller’s', () => {
-    const throwing: SensorType = {
-      ...limited,
-      id: 'test.throwing',
-      channels: (params) => {
-        if (params['limited'] === true) throw new RangeError('a bug in the type');
-        return [{ key: 'value', name: 'Value', isPrimary: true }];
-      },
+  it('refuses any other throw as the type’s fault too, and says it without a value (P-305)', () => {
+    const lines: string[] = [];
+    const gate = catalogueSensorTypeGate(testCatalogue([throwing]), {
+      logger: pino({ level: 'info' }, { write: (line: string) => lines.push(line) }),
+    });
+
+    let thrown: unknown;
+    try {
+      gate.channelsFor('test.throwing', { column: COLUMN, community: SECRET });
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown instanceof ObjectError, `expected an ObjectError, got ${String(thrown)}`);
+    assert.equal(thrown.status, 400);
+    assert.equal(thrown.details['sensorType'], 'test.throwing');
+    assert.equal(thrown.details['reason'], 'CHANNELS_FAILED');
+    assert.match(thrown.message, /"test\.throwing"/u);
+    assert.match(thrown.message, /TypeError/u, 'the message says what kind of error it was');
+    for (const said of [thrown.message, String((thrown.cause as Error | undefined)?.message)]) {
+      assert.ok(!said.includes(SECRET), `a secret reached the error: ${said}`);
+      assert.ok(!said.includes(COLUMN), `a parameter's value reached the error: ${said}`);
+    }
+
+    assert.equal(lines.length, 1);
+    const logged = JSON.parse(lines[0] ?? '{}') as {
+      level: number;
+      sensorType: string;
+      err: { code: string; message: string; stack?: string };
     };
-    const gate = catalogueSensorTypeGate(testCatalogue([throwing]));
-    assert.throws(() => gate.channelsFor('test.throwing', { limited: true }), RangeError);
+    assert.equal(logged.level, 40, 'a warning');
+    assert.equal(logged.sensorType, 'test.throwing');
+    assert.equal(logged.err.code, 'TypeError');
+    assert.ok(logged.err.stack !== undefined, 'the stack, for whoever ships the type');
+    assert.ok(!(lines[0] ?? '').includes(SECRET), `a secret reached the log: ${lines[0] ?? ''}`);
+    assert.ok(!(lines[0] ?? '').includes(COLUMN), `a value reached the log: ${lines[0] ?? ''}`);
+  });
+
+  it('answers a stored sensor’s channels without refusing or logging when it can, and null when not', () => {
+    const lines: string[] = [];
+    const gate = catalogueSensorTypeGate(testCatalogue([throwing]), {
+      logger: pino({ level: 'info' }, { write: (line: string) => lines.push(line) }),
+    });
+    assert.equal(gate.storedChannelsFor('test.throwing', { column: 'good' })?.length, 1);
+    assert.equal(gate.storedChannelsFor('test.throwing', { column: COLUMN }), null);
+    assert.equal(gate.storedChannelsFor('test.unregistered', {}), null);
+    assert.equal(lines.length, 0, 'nobody asked to write these parameters');
   });
 });

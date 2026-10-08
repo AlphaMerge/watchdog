@@ -3,6 +3,7 @@ import type { Queryable } from '../db/pool.js';
 import type { AccessRight } from '../auth/access.js';
 import type { ChannelLimits } from '../state/limits.js';
 import type { LibraryNode } from '../libraries/nodes.js';
+import type { ChannelDeclaration } from './redeclare.js';
 import type { ChannelProcessing } from './types.js';
 import type {
   CloneCounts,
@@ -137,6 +138,23 @@ export type Mutation =
       channelKey: string;
       before: ChannelProcessing;
       after: ChannelProcessing;
+    }
+  | {
+      /**
+       * An edit to a sensor's parameters changed what its type declares for a channel, and the
+       * channel was written to match (`P-303`): its name, unit, lookup or counter width.
+       *
+       * Its own entry beside the sensor's `object.updated`, which says which parameter moved:
+       * this says what that did to the channel, and it is a `channel.*` action, so the result
+       * path forgets what it cached of the channel (`M-04`). A lookup changed this way is not
+       * also a `channel.lookup.set`, which is a person pointing a channel somewhere.
+       */
+      action: 'channel.redeclared';
+      objectId: ObjectId;
+      kind: ObjectKind;
+      channelKey: string;
+      before: ChannelDeclaration;
+      after: ChannelDeclaration;
     }
   | {
       /**
@@ -1066,6 +1084,7 @@ function summarise(mutation: Mutation): Record<string, unknown> {
     case 'channel.limits.set':
     case 'channel.lookup.set':
     case 'channel.processing.set':
+    case 'channel.redeclared':
       return {
         action: mutation.action,
         objectId: mutation.objectId,

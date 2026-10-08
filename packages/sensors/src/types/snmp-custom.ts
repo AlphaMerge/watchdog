@@ -51,7 +51,8 @@ export const snmpCustom: SensorType = {
           'counter only ever goes up and is stored as a *rate*: the difference between two ' +
           'readings over the time between them, which is what an Interface or Errors counter ' +
           'is for. Choosing counter for a gauge produces nonsense, so the sensor says when the ' +
-          'device disagrees with this setting.',
+          'device disagrees with this setting. It cannot be changed once the sensor exists, ' +
+          'since its stored history would mean two things: add a new sensor to read the other way.',
       },
       channelName: {
         type: 'string',

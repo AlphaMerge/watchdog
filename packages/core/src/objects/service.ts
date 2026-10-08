@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { isRestricted, restrictionOf } from '@ms/sensors';
 import { exceptionProblem, MAX_EXCEPTION_ADDRESSES, type Logger } from '@ms/shared';
 import { changedParamKeys } from '../audit/diff.js';
@@ -27,6 +28,7 @@ import type { Actor, AuditSink, Mutation } from './audit.js';
 import { assertDeviceHost } from './device-host.js';
 import { ObjectError, notFound, parentNotFound } from './errors.js';
 import { reorderAmong } from './ordering.js';
+import { planRedeclaration, type ChannelRedeclaration } from './redeclare.js';
 import { planTree, type TreeNodeInput, type TreePlanInput } from './tree-plan.js';
 import { versionConflict } from './repository.js';
 import type { ObjectRepository } from './repository.js';
@@ -2320,6 +2322,47 @@ export class ObjectService {
     );
   }
 
+  /**
+   * Re-declares the channels an edit to a sensor's parameters changes (`P-303`), and refuses one
+   * that would turn a channel from a counter into a gauge or back. `redeclare.ts` says why.
+   *
+   * Nothing is read when the two declarations are the same, which is every edit of a type whose
+   * channels do not depend on its parameters: the edit path pays for this only where it can
+   * matter. The new declaration goes through the gate's refusal (`P-296`, `P-305`), so an edit to
+   * parameters the type cannot answer for is refused as a create of them is.
+   */
+  async #redeclareChannels(
+    q: Queryable,
+    id: ObjectId,
+    sensorType: string,
+    storedParams: Record<string, unknown>,
+    params: Record<string, unknown>,
+  ): Promise<readonly ChannelRedeclaration[]> {
+    const next = this.#sensorTypes.channelsFor(sensorType, params);
+    const stored = this.#sensorTypes.storedChannelsFor(sensorType, storedParams);
+    if (stored !== null && isDeepStrictEqual(stored, next)) return [];
+
+    const plan = planRedeclaration(stored, next, await this.#repo.declaredChannels(q, id));
+    if (plan.kind === 'refused') {
+      const said = plan.modeChanges
+        .map((change) => `"${change.key}" from a ${change.from} into a ${change.to}`)
+        .join(', ');
+      throw new ObjectError(
+        'OBJECT_CHANNEL_MODE_FIXED',
+        `this edit would turn channel ${said}, which is refused: a counter's stored samples are ` +
+          'rates and a gauge’s are the raw value, so the channel’s history, its unit and its ' +
+          'limits would mean one thing before the edit and another after it. Add a new sensor ' +
+          'with these parameters instead; this one keeps its history',
+        {
+          context: { objectId: id, sensorType, phase: 'redeclare-channels' },
+          details: { sensorType, channels: plan.modeChanges },
+        },
+      );
+    }
+    await this.#repo.redeclareChannels(q, id, plan.changes);
+    return plan.changes;
+  }
+
   /** A node's input as `create` would have normalised it, with its parent id filled in. */
   #normalisedFor(node: TreeNodeInput, parentId: ObjectId): CreateObjectInput {
     const withParent = { ...node, parentId } as CreateObjectInput;
@@ -2383,7 +2426,21 @@ export class ObjectService {
             }
           : patch;
 
-      const after = await this.#repo.update(q, id, applied, pre);
+      const updated = await this.#repo.update(q, id, applied, pre);
+
+      // What the new parameters change about the channels the sensor has (`P-303`): written to
+      // match, or the edit refused when it would turn one from a counter into a gauge or back.
+      // After the precondition, so a stale writer hears 412 first.
+      const redeclared =
+        before.kind === 'sensor' && applied.kind === 'sensor' && applied.params !== undefined
+          ? await this.#redeclareChannels(q, id, before.sensorType, before.params, applied.params)
+          : [];
+      // Writing a channel bumps the sensor's version by trigger, so the row read before it would
+      // hand the caller an ETag that 412s on its own next write (the trap `P-29` closed for a
+      // create).
+      const reread = redeclared.length === 0 ? updated : await this.#repo.get(q, id);
+      if (reread === null) throw notFound(id);
+      const after = reread;
 
       // Writing the parameters vouches for all of them, not just the ones that changed: the
       // writer is the one standing behind the sensor from here on (`A-29`). A rename does not.
@@ -2425,6 +2482,14 @@ export class ObjectService {
             changedParams,
             ...(secretsCleared.length === 0 ? {} : { secretsCleared }),
           },
+          ...redeclared.map((change): Mutation => ({
+            action: 'channel.redeclared',
+            objectId: id,
+            kind: safeAfter.kind,
+            channelKey: change.key,
+            before: change.before,
+            after: change.after,
+          })),
         ],
         new Date(),
       );

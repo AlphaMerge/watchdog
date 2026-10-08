@@ -141,7 +141,9 @@ const COLUMN_SCHEMA = {
       description:
         'A gauge is stored as it is read. A counter only ever goes up and is stored as a rate — ' +
         'the difference between two readings over the time between them. Choosing counter for a ' +
-        'gauge produces nonsense, so the sensor says when the device disagrees.',
+        'gauge produces nonsense, so the sensor says when the device disagrees. It cannot be ' +
+        'changed for a column the sensor already has, since that channel’s stored history ' +
+        'would mean two things.',
     },
     lookup: {
       type: 'string',

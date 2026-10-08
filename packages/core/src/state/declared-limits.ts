@@ -1,6 +1,7 @@
 import type { ChannelDef, SensorCatalogue } from '@ms/sensors';
 import type { Logger } from '@ms/shared';
 import type { Database } from '../db/pool.js';
+import { errorKindOf, errorWithoutParamValues } from '../support/param-values.js';
 import { limitsFromDeclaration, type ChannelLimits } from './limits.js';
 
 /**
@@ -85,7 +86,7 @@ export function declaredChannelLookup(
   const warn = (sensorType: string, sensorId: number, cause: unknown): void => {
     const logger = options.logger;
     if (logger === undefined) return;
-    const code = codeOf(cause);
+    const code = errorKindOf(cause);
     const once = `${sensorType} ${code}`;
     if (warned.has(once)) return;
     warned.add(once);
@@ -128,61 +129,11 @@ export function declaredChannelLookup(
       warn(
         sensorType,
         sensorId,
-        withoutValuesOf(cause, params, catalogue.writeOnlyPaths(sensorType)),
+        errorWithoutParamValues(cause, params, catalogue.writeOnlyPaths(sensorType)),
       );
       return bare.get(sensorType) ?? none;
     }
   };
-}
-
-/** `SensorTypeError`'s code, any other error's own `code` if it has a string one, or its name. */
-function codeOf(cause: unknown): string {
-  if (typeof cause === 'object' && cause !== null) {
-    const code = (cause as { code?: unknown }).code;
-    if (typeof code === 'string' && code !== '') return code;
-    if (cause instanceof Error) return cause.name;
-  }
-  return typeof cause;
-}
-
-/**
- * The error with every string the stored parameters hold taken out of its message.
- *
- * A type's own `throw new Error(\`bad column ${column}\`)` puts a value in the message, and a
- * `writeOnly` parameter is a credential. Every string of three characters or more goes, and a
- * secret whatever its length; a shorter one would take pieces out of ordinary words, and is not
- * a value anyone could recognise. Longest first, so a value inside another goes with it.
- */
-function withoutValuesOf(
-  cause: unknown,
-  params: Readonly<Record<string, unknown>>,
-  secretPaths: readonly string[],
-): unknown {
-  if (!(cause instanceof Error)) return cause;
-  const secrets = new Set(secretPaths);
-  const values: string[] = [];
-  const walk = (node: unknown, path: string): void => {
-    if (typeof node === 'string') {
-      if (node.length >= 3 || (node !== '' && secrets.has(path))) values.push(node);
-    } else if (Array.isArray(node)) {
-      for (const item of node) walk(item, path);
-    } else if (typeof node === 'object' && node !== null) {
-      for (const [key, value] of Object.entries(node)) {
-        walk(value, path === '' ? key : `${path}.${key}`);
-      }
-    }
-  };
-  walk(params, '');
-  let message = cause.message;
-  for (const value of values.sort((a, b) => b.length - a.length)) {
-    message = message.split(value).join('[a parameter]');
-  }
-  if (message === cause.message) return cause;
-  const scrubbed = new Error(message);
-  scrubbed.name = cause.name;
-  const code = (cause as { code?: unknown }).code;
-  if (typeof code === 'string') Object.assign(scrubbed, { code });
-  return scrubbed;
 }
 
 /**

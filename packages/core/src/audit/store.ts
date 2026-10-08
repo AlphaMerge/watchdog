@@ -16,6 +16,7 @@ import type {
   ScheduleAudit,
 } from '../objects/audit.js';
 import type { ChannelLimits } from '../state/limits.js';
+import type { ChannelDeclaration } from '../objects/redeclare.js';
 import type { ChannelProcessing } from '../objects/types.js';
 import type { ObjectKind } from '../objects/types.js';
 import type { ObjectDetail } from '../objects/types.js';
@@ -1067,6 +1068,21 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
         })),
       };
 
+    case 'channel.redeclared':
+      return {
+        ...base,
+        objectKind: mutation.kind,
+        summary: { channelKey: mutation.channelKey },
+        // Only what the edit changed, as for the channel's other entries.
+        diff: DECLARATION_FIELDS.filter(
+          (field) => mutation.before[field] !== mutation.after[field],
+        ).map((field) => ({
+          field: `channel.${mutation.channelKey}.${field}`,
+          before: mutation.before[field],
+          after: mutation.after[field],
+        })),
+      };
+
     case 'channel.lookup.set':
       return {
         ...base,
@@ -1098,6 +1114,13 @@ function toRow(mutation: Mutation, actor: Actor, at: Date): AuditRow {
       };
   }
 }
+
+const DECLARATION_FIELDS = [
+  'name',
+  'unit',
+  'lookupId',
+  'counterBits',
+] as const satisfies readonly (keyof ChannelDeclaration)[];
 
 const PROCESSING_FIELDS = [
   'scaleMul',

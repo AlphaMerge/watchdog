@@ -6,6 +6,11 @@ import {
   type SensorReference,
 } from '@ms/sensors';
 import type { Logger } from '@ms/shared';
+import {
+  errorKindOf,
+  errorWithoutParamValues,
+  withoutParamValues,
+} from '../support/param-values.js';
 import { ObjectError } from './errors.js';
 import type { ChannelRecord } from './types.js';
 
@@ -60,8 +65,26 @@ export interface SensorTypeGate {
    */
   normalise(sensorType: string, params: Record<string, unknown>): Record<string, unknown>;
 
-  /** Channels to create with a new sensor, including which one is primary. */
+  /**
+   * The channels a sensor of this type declares with these parameters, including which one is
+   * primary: what a create writes, and what an edit re-declares against (`P-303`).
+   *
+   * Throws `ObjectError('OBJECT_INVALID')`, naming the type, when the type cannot answer for
+   * parameters its own schema accepted (`P-296`, `P-305`). The fault is the type's, so it is
+   * logged as such, and neither the reply nor the log carries a parameter's value.
+   */
   channelsFor(sensorType: string, params: Record<string, unknown>): readonly ChannelDraft[];
+
+  /**
+   * What a sensor's *stored* parameters declared, or `null` when the type cannot say: it is not
+   * registered, or it throws for them (`P-303`). Neither refused nor logged, because nobody is
+   * asking to write these parameters; an edit compares against them to learn what it changes,
+   * and without them falls back to the channel rows themselves.
+   */
+  storedChannelsFor(
+    sensorType: string,
+    params: Record<string, unknown>,
+  ): readonly ChannelDraft[] | null;
 
   /**
    * Params safe to hand to an API response or an audit row. Never call the un-redacted params
@@ -189,6 +212,18 @@ function assertStructurallySane(sensorType: string, params: Record<string, unkno
   }
 }
 
+function draftsOf(defs: readonly ChannelDef[]): readonly ChannelDraft[] {
+  return defs.map((def) => ({
+    key: def.key,
+    name: def.name,
+    ...(def.unit === undefined ? {} : { unit: def.unit }),
+    ...(def.isPrimary === undefined ? {} : { isPrimary: def.isPrimary }),
+    ...(def.lookup === undefined ? {} : { lookup: def.lookup }),
+    ...(def.counter === undefined ? {} : { counterBits: def.counter.bits }),
+    ...(def.limits === undefined ? {} : { limits: def.limits }),
+  }));
+}
+
 /**
  * The real gate: a `SensorCatalogue` behind the interface the object service uses.
  *
@@ -228,6 +263,62 @@ export function catalogueSensorTypeGate(
     if (catalogue.sealed) sealedCredentialedTypes = found;
     return found;
   };
+  /**
+   * The refusal for a type that cannot declare its channels for parameters its schema accepted,
+   * and the warning for whoever ships it (`P-296`, `P-305`).
+   *
+   * **No parameter's value in either.** The type's own message can carry one — `P-297`'s review
+   * found the same for the ingestion path — and on an edit the parameters include secrets the
+   * caller never sent, carried from what is stored. So every string the parameters hold is cut
+   * out of the message and the stack, as `P-297` does, and no parameter is logged as a field.
+   */
+  const refusedDeclaration = (
+    sensorType: string,
+    params: Record<string, unknown>,
+    cause: unknown,
+  ): ObjectError => {
+    const secrets = catalogue.has(sensorType) ? catalogue.writeOnlyPaths(sensorType) : [];
+    const broke = cause instanceof SensorTypeError;
+    const kind = errorKindOf(cause);
+    const said =
+      cause instanceof Error
+        ? withoutParamValues(cause.message, params, secrets)
+        : `it threw a ${typeof cause}`;
+    options.logger?.warn(
+      {
+        sensorType,
+        phase: 'declare-channels',
+        err: {
+          code: kind,
+          message: said,
+          ...(cause instanceof Error && cause.stack !== undefined
+            ? { stack: withoutParamValues(cause.stack, params, secrets) }
+            : {}),
+        },
+      },
+      broke
+        ? 'a sensor type broke its own channel declaration, and a sensor of it was refused'
+        : 'a sensor type could not declare its channels for parameters its schema accepts, ' +
+            'and a sensor of it was refused',
+    );
+    const scrubbed = errorWithoutParamValues(cause, params, secrets);
+    return new ObjectError(
+      'OBJECT_INVALID',
+      broke
+        ? `a sensor of type "${sensorType}" cannot have these parameters, because the type does ` +
+            `not keep to its own declaration: ${said}`
+        : `a sensor of type "${sensorType}" cannot have these parameters, because the type ` +
+            `failed to declare its channels for them (${kind}: ${said}); its parameters schema ` +
+            'accepts them, so the fault is the type’s',
+      {
+        context: { sensorType, phase: 'declare-channels' },
+        details: { sensorType, reason: broke ? kind : 'CHANNELS_FAILED' },
+        // The scrubbed one: something that logs this error with its cause must not find the
+        // value there either.
+        ...(scrubbed instanceof Error ? { cause: scrubbed } : {}),
+      },
+    );
+  };
   return {
     normalise(sensorType: string, params: Record<string, unknown>): Record<string, unknown> {
       assertStructurallySane(sensorType, params);
@@ -262,38 +353,32 @@ export function catalogueSensorTypeGate(
       try {
         defs = catalogue.channelsFor(sensorType, params);
       } catch (cause) {
-        // **A type breaking what it said at registration** (`P-296`): a `fixedChannels` type whose
-        // channels these parameters change, or one without the flag putting `limits` on a channel
-        // only these parameters make (`P-293`). Only `channelsFor` can see either, so it reaches
-        // a create rather than a start. Refused like every other sensor this gate will not
-        // write — a 400 naming the type, rather than a 500 that says nothing — and not created,
-        // because its channels would be ones the start-up limits pass reads wrongly. Any other
-        // throw is a fault of ours, and stays one.
-        if (!(cause instanceof SensorTypeError)) throw cause;
-        options.logger?.warn(
-          { sensorType, err: { code: cause.code, message: cause.message } },
-          'a sensor type broke its own channel declaration, and a sensor of it was refused',
-        );
-        throw new ObjectError(
-          'OBJECT_INVALID',
-          `a sensor of type "${sensorType}" cannot be created with these parameters, because ` +
-            `the type does not keep to its own declaration: ${cause.message}`,
-          {
-            context: { sensorType, phase: 'declare-channels' },
-            details: { sensorType, reason: cause.code },
-            cause,
-          },
-        );
+        // **A type that cannot answer for parameters its own schema accepted.** Two kinds, one
+        // answer. A type breaking what it said at registration (`P-296`): a `fixedChannels` type
+        // whose channels these parameters change, or one without the flag putting `limits` on a
+        // channel only these parameters make (`P-293`); only `channelsFor` can see either. Or a
+        // type whose `channels()` throws for them (`P-305`), which is a bug in the type just as
+        // surely: the schema is the type's own statement of what it accepts. Either way these
+        // parameters, with this type, in this build, are always refused, and the caller can act
+        // on that (other parameters work). So a 400 naming the type rather than a 500 that says
+        // nothing, and nothing written.
+        throw refusedDeclaration(sensorType, params, cause);
       }
-      return defs.map((def) => ({
-        key: def.key,
-        name: def.name,
-        ...(def.unit === undefined ? {} : { unit: def.unit }),
-        ...(def.isPrimary === undefined ? {} : { isPrimary: def.isPrimary }),
-        ...(def.lookup === undefined ? {} : { lookup: def.lookup }),
-        ...(def.counter === undefined ? {} : { counterBits: def.counter.bits }),
-        ...(def.limits === undefined ? {} : { limits: def.limits }),
-      }));
+      return draftsOf(defs);
+    },
+
+    storedChannelsFor(
+      sensorType: string,
+      params: Record<string, unknown>,
+    ): readonly ChannelDraft[] | null {
+      if (!catalogue.has(sensorType)) return null;
+      try {
+        return draftsOf(catalogue.channelsFor(sensorType, params));
+      } catch {
+        // A type that cannot answer for what is stored — one stored before `P-293`, or before a
+        // build changed the type — leaves the caller the channel rows, which is what it asks for.
+        return null;
+      }
     },
 
     carryWriteOnly(

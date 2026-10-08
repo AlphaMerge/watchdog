@@ -232,6 +232,17 @@ channel the sensor is judged by.
   display labels; `name` is.
 - **Must be pure.** It runs in the core, which has no network access to your target and no
   business doing I/O to answer "what channels does this type have".
+- **Must answer for anything your schema accepts.** A throw from `channels()` for parameters
+  `paramsSchema` let through refuses that sensor's create or edit with a 400 naming your type, and
+  logs a warning for you with every parameter's value cut out of the message (`P-305`). Put the
+  rule in the schema instead, where the form can show it.
+- **An edit re-declares what it changes** (`P-303`). When an edit to a sensor's parameters
+  changes the `name`, `unit`, `lookup` or counter width `channels()` gives an existing channel,
+  the channel is written to match; a channel the edit leaves alone keeps its row, including a
+  lookup an operator pointed it at. An edit that would turn an existing channel from a `counter`
+  into a gauge or back is refused, because the stored samples are rates on one side and raw
+  values on the other: say in that parameter's description that it is fixed once the sensor
+  exists, as `snmp.custom`'s `mode` does.
 - **`lookup` and `counter` may depend on parameters.** A channel the core first sees in a reading
   (a key a later build added, or one an edit added) gets them from `channels()` asked with that
   sensor's own stored parameters, not `{}` (`P-297`), so a column-per-channel type like
@@ -269,7 +280,7 @@ At registration a fixed type must answer `{}`, and answer the same once its sche
 filled in. Each `channelsFor` after that, which is how every sensor gets its channels, throws if
 the answer differs from `{}`'s. For a type without the flag, it throws on a channel with `limits`
 that only real parameters produce, the one place such a channel is ever seen. Either refuses that
-sensor's create with a 400 naming the type, and logs a warning for you (`P-296`).
+sensor's create or edit with a 400 naming the type, and logs a warning for you (`P-296`).
 
 ### `execute(context)`
 
