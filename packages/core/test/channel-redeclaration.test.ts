@@ -1,6 +1,5 @@
 import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
-import { setTimeout as sleep } from 'node:timers/promises';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { pino } from 'pino';
 import { BUILT_IN_SENSOR_TYPES, type SensorType } from '@ms/sensors';
@@ -21,6 +20,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { somebodyWaits } from './support/waits-for-lock.js';
 import { within } from './support/within.js';
 
 const available = await databaseAvailable();
@@ -568,23 +568,6 @@ describe(
         declaredShape: declaredChannelLookup(testCatalogue(types)),
       });
 
-    /** Until some session in this database waits on a lock: the other side is blocked. */
-    const somebodyWaits = (what: string): Promise<void> =>
-      within(
-        10_000,
-        what,
-        (async () => {
-          for (;;) {
-            const waiting = await db.query<{ n: number }>(
-              `SELECT count(*)::int AS n FROM pg_stat_activity
-               WHERE datname = current_database() AND wait_event_type = 'Lock'`,
-            );
-            if ((waiting[0]?.n ?? 0) > 0) return;
-            await sleep(20);
-          }
-        })(),
-      );
-
     /**
      * A table sensor with a column `x` its parameters declare and no row yet — added by an edit,
      * not yet reported — so `x` is ingestion's to create, with lookup `ms.test.old`.
@@ -629,7 +612,7 @@ describe(
         record: async (_q, _actor, mutations) => {
           if (!mutations.some((one) => one.action === 'object.updated')) return;
           creating = db.tx((q) => ingesting.resolve(q, [readingOfX(id)]));
-          await somebodyWaits('the first reading of x waiting for the edit');
+          await somebodyWaits(db, 'the first reading of x waiting for the edit');
         },
       };
       try {
@@ -666,7 +649,7 @@ describe(
           { kind: 'sensor', params: renewed },
           { kind: 'none' },
         );
-        await somebodyWaits('the edit waiting for the first reading of x');
+        await somebodyWaits(db, 'the edit waiting for the first reading of x');
       });
       assert.ok(editing !== undefined);
       await within(10_000, 'the edit', editing);

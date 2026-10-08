@@ -1,6 +1,5 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
-import { setTimeout as sleep } from 'node:timers/promises';
 import type { QueryResultRow } from 'pg';
 import { pino } from 'pino';
 import { SensorCatalogue, standardCatalogue, type SensorType } from '@ms/sensors';
@@ -20,6 +19,7 @@ import {
 } from './support/database.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
 import { testCatalogue } from './support/sensor-types.js';
+import { somebodyWaits } from './support/waits-for-lock.js';
 import { within } from './support/within.js';
 
 const available = await databaseAvailable();
@@ -1123,26 +1123,6 @@ describe(
 
     // ── at the same time as something else ───────────────────────────────────────────────────
 
-    /** Until some session in this database waits on a lock: the other side is blocked. */
-    const somebodyWaits = (what: string): Promise<void> => {
-      const deadline = Date.now() + 10_000;
-      return within(
-        11_000,
-        what,
-        (async () => {
-          while (Date.now() < deadline) {
-            const waiting = await db.query<{ n: number }>(
-              `SELECT count(*)::int AS n FROM pg_stat_activity
-               WHERE datname = current_database() AND wait_event_type = 'Lock'`,
-            );
-            if ((waiting[0]?.n ?? 0) > 0) return;
-            await sleep(20);
-          }
-          throw new Error(`nobody waited: ${what}`);
-        })(),
-      );
-    };
-
     /**
      * A resolve that stops once it holds its sensors, until `release` is called: the window in
      * which anything else touching those sensors has to wait for it.
@@ -1203,7 +1183,7 @@ describe(
         const other = db.tx((q) =>
           declaring(recorded).resolve(q, [reading(second, ['fresh']), reading(first, ['fresh'])]),
         );
-        await somebodyWaits('the second batch waiting for the first');
+        await somebodyWaits(db, 'the second batch waiting for the first');
         one.release();
         const [a, b] = await within(10_000, 'both batches', Promise.all([one.done, other]));
         assert.deepEqual([a.created, b.created], [2, 0], 'each fresh channel created once');
@@ -1238,7 +1218,7 @@ describe(
         record: async (_q, _actor, mutations) => {
           if (!mutations.some((one) => one.action === 'object.updated')) return;
           creating = db.tx((q) => resolver.resolve(q, [reading(sensor.id, ['fresh'])]));
-          await somebodyWaits('the first reading of fresh waiting for the edit');
+          await somebodyWaits(db, 'the first reading of fresh waiting for the edit');
         },
       };
       try {
@@ -1273,7 +1253,7 @@ describe(
           { kind: 'sensor', params: cols('used', 'fresh') },
           { kind: 'none' },
         );
-        await somebodyWaits('the edit waiting for the reading');
+        await somebodyWaits(db, 'the edit waiting for the reading');
       });
       assert.ok(editing !== undefined);
       await within(10_000, 'the edit', editing);
@@ -1295,7 +1275,7 @@ describe(
         const patched = harness.service.patchChannel(testActor, id, 'used', {
           limits: { upperError: 5 },
         });
-        await somebodyWaits('the channel edit waiting for the reading');
+        await somebodyWaits(db, 'the channel edit waiting for the reading');
         one.release();
         const settled = await within(
           10_000,

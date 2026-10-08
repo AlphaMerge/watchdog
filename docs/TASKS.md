@@ -11744,10 +11744,36 @@ because each is a decision rather than a defect:
       either a `FOR NO KEY UPDATE` helper is used or the measurement says it does not matter,
       committed to `docs/findings/`.
 
-- [ ] **P-325 — `somebodyWaits` in `channel-redeclaration.test.ts` loops after its bound** · XS ·
+- [x] **P-325 — `somebodyWaits` in `channel-redeclaration.test.ts` loops after its bound** · XS ·
       P-314 · Found 2026-10-08 in `P-314`. The helper keeps polling after `within` expires; the copy
       in `channel-provisioning.test.ts` has its own deadline. **Done when** the original stops at
       its bound too.
+
+      **P-325 outcome. One helper for both copies, and one poller under it that stops at its
+      bound.** Test code only.
+      - **`pollWithin(ms, what, met, intervalMs)`** in `test/support/within.ts`: asks `met` until
+        it answers true, rejects through `within` at `ms`, and in its `finally` aborts the loop —
+        the pending sleep is cancelled, so no timer outlives the call, and no poll starts after
+        the bound. A poll already out at the bound (a query cannot be called back) is let finish
+        and is the last. The provisioning copy's own deadline was not taken as the model: it
+        stopped the loop at 10 s under an 11 s `within`, but a query still out at 11 s was
+        followed by more until 10 s had passed, and it needed two numbers kept apart by hand.
+      - **`somebodyWaits(db, what, ms = 10_000)`** in `test/support/waits-for-lock.ts`, polling
+        `pg_stat_activity` for a session of this database waiting on a lock, as both copies did.
+        Both local copies are gone; the six call sites pass `db`.
+      - **The same pattern elsewhere, fixed in place:** two loops in `state-stream.test.ts`
+        (waiting for `checksOutstanding` to reach 0) had no bound of their own and would have
+        run for ever, holding the file open, had it never come; one in `unfit-results.test.ts`
+        (waiting for `sweep-finished`) ran up to 2,000 more tries after `within` gave up. All
+        three are now `pollWithin`. Every other polling helper in `packages/core/test`
+        (`until` in `ingestion`, `alarm-scheduler`, `heartbeat`, `stream-sign-out`, `waitUntil`
+        in `probe-endpoint`, the frame counters in `state-stream` and `object-visibility`) has a
+        deadline of its own and is not wrapped in `within`, so was left alone.
+      - **Tests** (`waits-for-lock.test.ts`, no database): at its bound it rejects naming what it
+        waited for and the poll count then stays put through 250 ms more, for a quick poll, a
+        poll still out at the bound, and `somebodyWaits` against a counting fake. Each case lets
+        its polls end once it has looked, so a helper that does not stop fails the case instead
+        of holding the file open. With the `finally`'s abort removed, those three fail.
 
 - [ ] **P-326 — a probe certificate is not bound to its GID** · M · P-319 · Found 2026-10-08 in
       `P-319`. mTLS proves only that the shared CA signed the certificate, so any certificate holder

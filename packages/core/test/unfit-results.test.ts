@@ -37,7 +37,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
-import { within } from './support/within.js';
+import { pollWithin, within } from './support/within.js';
 
 /**
  * A peer that does not fit its results, over the wire to the core's own endpoint and ingestion
@@ -1553,15 +1553,11 @@ describe(
             assert.equal(discovery.heard.length, 0, 'nor once admitted and not yet looked up');
 
             lookup.open();
-            await within(
+            await pollWithin(
               10_000,
               'the sweep to be recorded',
-              (async () => {
-                for (let tries = 0; tries < 2_000; tries += 1) {
-                  if (discovery.heard.some(([what]) => what === 'sweep-finished')) return;
-                  await new Promise((resolve) => setTimeout(resolve, 5));
-                }
-              })(),
+              () => discovery.heard.some(([what]) => what === 'sweep-finished'),
+              5,
             );
             assert.deepEqual(
               discovery.heard.filter(

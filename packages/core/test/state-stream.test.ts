@@ -29,7 +29,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
-import { within } from './support/within.js';
+import { pollWithin, within } from './support/within.js';
 import { Visibility } from '../src/auth/access.js';
 import { credentialKey, type CredentialCheck, type Lapse } from '../src/auth/credentials.js';
 
@@ -1781,14 +1781,11 @@ describe(
       // It answers, and the tick after reviews as it always did.
       hanging = false;
       answer();
-      await within(
+      await pollWithin(
         2_000,
         'the read that was out to answer',
-        (async () => {
-          while (bounded.stats.checksOutstanding !== 0) {
-            await new Promise((resolve) => setTimeout(resolve, 10));
-          }
-        })(),
+        () => bounded.stats.checksOutstanding === 0,
+        10,
       );
       await within(2_000, 'the sweep that can read', bounded.sweep());
       assert.equal(reads, 2);
@@ -2089,12 +2086,10 @@ describe(
       assert.equal(stats.credentialCheckFailures, 4);
 
       // Three seconds in, the question answers. Nothing is acted on for it; the next edge asks.
-      await within(
+      await pollWithin(
         4_000,
         'the hung question to answer',
-        (async () => {
-          while (broadcaster.stats.checksOutstanding !== 0) await sleep(20);
-        })(),
+        () => broadcaster.stats.checksOutstanding === 0,
       );
       await within(2_000, 'E', broadcaster.publish(db, [stateChange()]));
       assert.equal(questions, 2);
