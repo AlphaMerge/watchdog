@@ -11893,6 +11893,34 @@ because each is a decision rather than a defect:
       accepted. **Done when** U-32/U-33's reasons for keeping both are re-read and either one is
       dropped or the outcome says why both stay.
 
+- [ ] **P-329 — the testing rule names `within` but not `pollWithin`** · XS · P-325 · Found
+      2026-10-08 in `P-325`. `within` alone does not stop a polling loop; CLAUDE.md's testing rule
+      and rule 22 in `docs/findings/2026-09-04-tests-that-passed-for-the-wrong-reason.md` should say
+      that a poll goes through `pollWithin`. **Done when** both say so.
+
+- [ ] **P-330 — polling helpers with their own deadlines, and other packages' polls** · S · P-325
+      · Found 2026-10-08 in `P-325`. `until` (ingestion, alarm-scheduler, heartbeat,
+      stream-sign-out), `waitUntil` (probe-endpoint), `count` (state-stream) and `until`/`waitFor`
+      (object-visibility) each re-implement a bounded poll, and the probe, sensors and web tests
+      were not checked for the loop-after-`within` pattern. **Done when** they use `pollWithin` (or
+      an equivalent per package) and the other packages are checked, with any found fixed.
+
+- [ ] **P-331 — no test boots the core's start-up path** · S · P-323 · Found 2026-10-08 in
+      `P-323`. The declared-primary repair is started unawaited from `main.ts`, with a shutdown
+      hook that waits for the page in flight and a failure that is logged; none of that wiring is
+      exercised, only typechecked. **Done when** a test (or smoke run) starts the core and shows
+      the pass running, stopping at shutdown, and a failure logged without crashing.
+
+- [ ] **P-332 — the declared-primary repair's per-start cost is unmeasured** · XS · P-323 · Found
+      2026-10-08 in `P-323`. **Done when** measured at the v1 target (5,000 sensors / 15,000
+      channels) on a quiet machine and committed to `docs/findings/`.
+
+- [ ] **P-333 — start-up passes each read the whole tree on every start** · S · P-323 · Found
+      2026-10-08 in `P-323`. S-18's declared limits, P-177's alarm reconciliation and P-323's
+      declared primaries each go over every sensor at every start. **Done when** decided: one shared
+      policy for when such passes run (always, on a build change, or behind a version marker), with
+      the reason written down.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -23146,6 +23174,21 @@ because each is a decision rather than a defect:
       - **Not done.** A property name where `writeAt` meets an array (`tags.x`) is not refused: the
         walk takes the container's shape from the path, so it replaces the array with an object, as
         its "wrong shape" rule says. The form never writes such a path.
+
+- [ ] **U-43 — `writeAt` turns an array into an object for a property-name segment** · XS · U-42
+      · Found 2026-10-08 in `U-42`. `tags.x` replaces the whole array with an object under the
+      "wrong shape" rule, destroying its entries. The form never writes such a path. **Done when**
+      it is refused like U-42's past-the-end index, with a test.
+
+- [ ] **U-44 — a cleared JSON or number entry says "required" without saying why** · XS · U-41 ·
+      Found 2026-10-08 in `U-41`. A cleared JSON entry holds `''` and is refused as "required"
+      while the JSON box's own sentence is silent; a cleared number entry reads "required" with no
+      rendered test. **Done when** both say what to do (type a value or remove the entry), with
+      rendered tests.
+
+- [ ] **U-45 — the always-present problem paragraph adds a gap under every control** · XS · U-41 ·
+      Found 2026-10-08 in `U-41`. `space-y-1` puts 4px under each control for an empty live region.
+      **Done when** the empty region takes no space while staying in the DOM to be announced.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
