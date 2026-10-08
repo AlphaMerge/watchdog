@@ -26,7 +26,9 @@ import { ProbeQueryService, type QueryOutcome } from '../src/probes/queries.js';
 import { ProbeRefusals } from '../src/probes/refusals.js';
 import {
   ProbeEndpoint,
+  type DiscoverySink,
   type ProbeAdmission,
+  type ProbeReachabilitySink,
   type ResultReceiver,
 } from '../src/transport/probe-endpoint.js';
 import {
@@ -251,6 +253,10 @@ describe(
         registry?: ProbeAdmission;
         /** Where the endpoint logs; absent, nowhere. */
         logger?: Logger;
+        /** Told of sweeps and identification; absent, nothing is. */
+        discovery?: DiscoverySink;
+        /** Told when a probe's branch is found and lost; absent, nothing is. */
+        reachability?: ProbeReachabilitySink;
       } = {},
     ): Promise<{ endpoint: ProbeEndpoint; port: number }> {
       assert.ok(dir !== undefined);
@@ -272,6 +278,8 @@ describe(
         results: options.results ?? ingestion,
         ...(options.queries === undefined ? {} : { queries: options.queries }),
         ...(options.registry === undefined ? {} : { registry: options.registry }),
+        ...(options.discovery === undefined ? {} : { discovery: options.discovery }),
+        ...(options.reachability === undefined ? {} : { reachability: options.reachability }),
         probeConfig: {
           probeObjectFor: options.probeObjectFor ?? (() => Promise.resolve(probeId)),
           assignmentsFor: () => Promise.resolve(EMPTY_ASSIGNMENTS),
@@ -1198,6 +1206,54 @@ describe(
         }
       });
 
+      /** A discovery sink that records each message with the probe it was attributed to. */
+      function recordingDiscovery(): {
+        sink: DiscoverySink;
+        heard: [string, number | null, number][];
+      } {
+        const heard: [string, number | null, number][] = [];
+        const note = (what: string, from: number | null, runId: number): Promise<void> => {
+          heard.push([what, from, runId]);
+          return Promise.resolve();
+        };
+        return {
+          heard,
+          sink: {
+            pump: (probeObjectId) => note('pump', probeObjectId, 0),
+            progress: (from, runId) => note('sweep-progress', from, runId),
+            identified: (from, runId) => note('identify-progress', from, runId),
+            identifyFinished: (from, runId) => note('identify-finished', from, runId),
+            finished: (from, runId) => note('sweep-finished', from, runId),
+            probeDisconnected: (probeObjectId) => note('disconnected', probeObjectId, 0),
+          },
+        };
+      }
+
+      /** An endpoint logger whose lines a test can wait for. */
+      function capturing(): {
+        logger: Logger;
+        logged: (text: string) => Promise<void>;
+        saw: (text: string) => boolean;
+      } {
+        const lines: string[] = [];
+        return {
+          saw: (text) => lines.some((line) => line.includes(text)),
+          logger: pino(
+            { level: 'info', base: null },
+            { write: (line: string) => lines.push(line) },
+          ),
+          // Polled a bounded number of times, so a line never written fails the test and leaves
+          // nothing running after it.
+          logged: async (text: string): Promise<void> => {
+            for (let tries = 0; tries < 2_000; tries += 1) {
+              if (lines.some((line) => line.includes(text))) return;
+              await new Promise((resolve) => setTimeout(resolve, 5));
+            }
+            assert.fail(`never logged "${text}"; logged ${lines.join('')}`);
+          },
+        };
+      }
+
       /**
        * A registry whose answer waits until the test lets it go, and says when it was asked: what
        * `main.ts` always has, and the path on which `pending` starts as the admission.
@@ -1356,25 +1412,15 @@ describe(
 
       it('judges nothing that arrived on a connection that closed during the admission', async () => {
         const held = heldRegistry('vanishing');
-        const lines: string[] = [];
+        const { logger, logged } = capturing();
+        const discovery = recordingDiscovery();
         const { queries, asked } = awaiting();
         const started = await startEndpoint({
           queries,
           registry: held.registry,
-          logger: pino(
-            { level: 'info', base: null },
-            { write: (line: string) => lines.push(line) },
-          ),
+          logger,
+          discovery: discovery.sink,
         });
-        // Polled a bounded number of times, so a line never written fails the test and leaves
-        // nothing running after it.
-        const logged = async (text: string): Promise<void> => {
-          for (let tries = 0; tries < 2_000; tries += 1) {
-            if (lines.some((line) => line.includes(text))) return;
-            await new Promise((resolve) => setTimeout(resolve, 5));
-          }
-          assert.fail(`never logged "${text}"; logged ${lines.join('')}`);
-        };
         const another = ask(queries, probeId + 1_000_000);
         try {
           assert.ok(dir !== undefined);
@@ -1407,6 +1453,13 @@ describe(
             sentAt: at(),
             results: [good(sensors[4] ?? 0, 4), { ...good(sensors[1] ?? 0, 5), outcome: 'maybe' }],
           });
+          probe.send({
+            type: 'sweep-finished',
+            runId: 41,
+            ending: 'done',
+            cursor: 20,
+            message: '',
+          });
           probe.send({ type: 'heartbeat', seq: 1, sentAt: at() });
           await probe.waitFor('the heartbeat’s ack', (m) =>
             m.type === 'heartbeat-ack' ? m : undefined,
@@ -1422,6 +1475,11 @@ describe(
           await logged('the probe disconnected while it was being admitted');
           await logged('results arrived on a connection that closed before');
           await logged('an answer to a query arrived on a connection that closed before');
+          // Everything held ran when the close settled it; a turn of the loop, and the run must
+          // have been told nothing, before the line that says why is looked for.
+          await new Promise((resolve) => setImmediate(resolve));
+          assert.equal(discovery.heard.length, 0, 'no run told anything, by anyone');
+          await logged('a discovery message arrived on a connection that closed before');
           assert.deepEqual(refusals.stats(), totals, 'nothing counted, as from nobody or anyone');
           assert.equal(queries.stats().foreign, 0);
           assert.equal(queries.stats().unfit, 0);
@@ -1431,6 +1489,157 @@ describe(
           held.release();
           queries.stop();
           await within(10_000, 'the caller to be settled', another.settled);
+          await started.endpoint.stop();
+        }
+      });
+
+      // `P-307` review, again: a probe's sweep and identification runners go on across a link drop
+      // and report on the new connection before the welcome, and those reports waited for the
+      // admission and not for the lookup, so they were refused as from no probe.
+      it('attributes a sweep reported during the admission to the probe the lookup finds', async () => {
+        const held = heldRegistry('sweeping');
+        const lookup = { open: (): void => undefined };
+        const looked = new Promise<void>((resolve) => {
+          lookup.open = resolve;
+        });
+        const discovery = recordingDiscovery();
+        const started = await startEndpoint({
+          registry: held.registry,
+          discovery: discovery.sink,
+          probeObjectFor: async () => {
+            await looked;
+            return probeId;
+          },
+        });
+        try {
+          assert.ok(dir !== undefined);
+          const probe = await RawPeer.connect(dir, started.port);
+          try {
+            probe.send({
+              type: 'hello',
+              protocolVersion: PROTOCOL_VERSION,
+              gid: 'sweeping',
+              displayName: 'Sweeping',
+              agentVersion: '1.0.0',
+              accessKey: '',
+            });
+            await within(10_000, 'the registry to be asked', held.asked);
+            probe.send({
+              type: 'sweep-progress',
+              runId: 41,
+              cursor: 10,
+              found: [{ address: '192.0.2.5', rttMs: 1 }],
+              failed: 0,
+            });
+            probe.send({
+              type: 'sweep-finished',
+              runId: 41,
+              ending: 'done',
+              cursor: 20,
+              message: '',
+            });
+            probe.send({ type: 'heartbeat', seq: 1, sentAt: at() });
+            await probe.waitFor('the heartbeat’s ack', (m) =>
+              m.type === 'heartbeat-ack' ? m : undefined,
+            );
+            assert.equal(discovery.heard.length, 0, 'nothing recorded while being admitted');
+
+            held.release();
+            await probe.waitFor('the welcome', (m) => (m.type === 'welcome' ? m : undefined));
+            probe.send({ type: 'heartbeat', seq: 2, sentAt: at() });
+            await probe.waitFor('the second heartbeat’s ack', (m) =>
+              m.type === 'heartbeat-ack' && m.seq === 2 ? m : undefined,
+            );
+            assert.equal(discovery.heard.length, 0, 'nor once admitted and not yet looked up');
+
+            lookup.open();
+            await within(
+              10_000,
+              'the sweep to be recorded',
+              (async () => {
+                for (let tries = 0; tries < 2_000; tries += 1) {
+                  if (discovery.heard.some(([what]) => what === 'sweep-finished')) return;
+                  await new Promise((resolve) => setTimeout(resolve, 5));
+                }
+              })(),
+            );
+            assert.deepEqual(
+              discovery.heard.filter(
+                ([what]) => what === 'sweep-progress' || what === 'sweep-finished',
+              ),
+              [
+                ['sweep-progress', probeId, 41],
+                ['sweep-finished', probeId, 41],
+              ],
+              'both, in order, as from the probe that was found',
+            );
+          } finally {
+            probe.close();
+          }
+        } finally {
+          held.release();
+          lookup.open();
+          await started.endpoint.stop();
+        }
+      });
+
+      // `P-307` review, and older: `#handleClose` ran with no probe object while the handshake's
+      // lookup was in flight, so it told reachability nothing; the lookup then marked the branch
+      // found, its sensors back to their last reading for a probe with no connection.
+      it('does not mark a branch found when the lookup ends after the connection did', async () => {
+        const lookup = { open: (): void => undefined };
+        const looked = new Promise<void>((resolve) => {
+          lookup.open = resolve;
+        });
+        const { logger, logged, saw } = capturing();
+        const discovery = recordingDiscovery();
+        const reachable: [string, number][] = [];
+        const started = await startEndpoint({
+          logger,
+          discovery: discovery.sink,
+          reachability: {
+            found: (id) => {
+              reachable.push(['found', id]);
+              return Promise.resolve(0);
+            },
+            lost: (id) => {
+              reachable.push(['lost', id]);
+              return Promise.resolve(0);
+            },
+          },
+          probeObjectFor: async () => {
+            await looked;
+            return probeId;
+          },
+        });
+        try {
+          assert.ok(dir !== undefined);
+          const probe = await RawPeer.connect(dir, started.port);
+          probe.send({
+            type: 'hello',
+            protocolVersion: PROTOCOL_VERSION,
+            gid: 'flapping',
+            displayName: 'Flapping',
+            agentVersion: '1.0.0',
+            accessKey: '',
+          });
+          await probe.waitFor('the welcome', (m) => (m.type === 'welcome' ? m : undefined));
+          probe.close();
+          await probe.closed('the connection to close');
+          await logged('probe connection closed');
+          lookup.open();
+          // Whichever way the lookup ended, it has said so (polled a bounded number of times);
+          // then what it did is read, and only then the line that says why.
+          for (let tries = 0; tries < 2_000; tries += 1) {
+            if (saw('not marked found') || saw('probe claimed a branch')) break;
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          await new Promise((resolve) => setImmediate(resolve));
+          assert.deepEqual(reachable, [], 'neither lost, which it never was, nor found');
+          await logged('the probe disconnected while its branch was being looked up');
+          assert.equal(discovery.heard.length, 0, 'and no sweep offered to it');
+        } finally {
+          lookup.open();
           await started.endpoint.stop();
         }
       });

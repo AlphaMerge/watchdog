@@ -912,22 +912,22 @@ export class ProbeEndpoint {
         case 'sweep-progress':
           // Never awaited by the message loop, for the same reason results are not: a database
           // round trip must not delay the heartbeat that keeps this connection alive.
-          this.#queueDiscovery(session, logger, (sink, from) =>
+          this.#queueDiscovery(session, logger, message.type, (sink, from) =>
             sink.progress(from, message.runId, message.cursor, message.found, message.failed),
           );
           return session;
         case 'sweep-finished':
-          this.#queueDiscovery(session, logger, (sink, from) =>
+          this.#queueDiscovery(session, logger, message.type, (sink, from) =>
             sink.finished(from, message.runId, message.ending, message.cursor, message.message),
           );
           return session;
         case 'identify-progress':
-          this.#queueDiscovery(session, logger, (sink, from) =>
+          this.#queueDiscovery(session, logger, message.type, (sink, from) =>
             sink.identified(from, message.runId, message.cursor, message.found),
           );
           return session;
         case 'identify-finished':
-          this.#queueDiscovery(session, logger, (sink, from) =>
+          this.#queueDiscovery(session, logger, message.type, (sink, from) =>
             sink.identifyFinished(from, message.runId, message.ending, message.message),
           );
           return session;
@@ -949,14 +949,39 @@ export class ProbeEndpoint {
   #queueDiscovery(
     session: ProbeSession,
     logger: Logger,
+    what: string,
     run: (sink: DiscoverySink, from: number | null) => Promise<void>,
   ): void {
     const sink = this.#options.discovery;
     if (sink === undefined) return;
     session.pending = session.pending.then(async () => {
+      // **Once it is known who sent it** (`P-307` review), as a results batch waits. A probe's
+      // sweep and identification runners go on across a link drop and report on the new
+      // connection as soon as it is open, before the welcome; behind the admission alone, that
+      // was judged as from no probe: refused as foreign on the fleet's totals, its hosts never
+      // stored, its ending never recorded.
+      //
+      // From a session that was not approved, or one that closed before it was known, nothing is
+      // recorded and nothing counted: nothing was dispatched to the first, and the second's
+      // probe is the one whose last connection's close put its running sweep back to `queued`
+      // (`probeDisconnected`), so the run is offered again, from its cursor, when the probe is
+      // next connected and known. A dropped `sweep-finished` therefore leaves its run `queued`
+      // for the next connection, not `running` for good; an identification stays `identifying`
+      // with its own cursor, as any disconnect leaves it.
+      const known = await session.known;
+      if (known !== 'identified') {
+        logger.info(
+          { what, known },
+          known === 'gone'
+            ? 'a discovery message arrived on a connection that closed before it was known ' +
+                'which probe sent it; not recorded, and the run is offered again on its next'
+            : 'a discovery message arrived from a probe that has not been approved; not recorded',
+        );
+        return;
+      }
       try {
-        // Read when the message's turn comes rather than when it arrived: chained behind the
-        // admission, so this is the settled answer and not the null a session opens with.
+        // Read when the message's turn comes rather than when it arrived: after `known`, so
+        // this is the settled answer and not the null a session opens with.
         await run(sink, session.probeObjectId);
       } catch (error) {
         // A discovery write that fails must not take the connection with it: the probe is still
@@ -1205,8 +1230,15 @@ export class ProbeEndpoint {
             'as from none, and the next configuration push looks again',
         );
       }
-      session.settleKnown('identified');
+      // A session that went while it was looked up was settled `gone` by its close; said again
+      // here, so that one replaced by a newer connection is never `identified` as from none.
+      session.settleKnown(this.#stillLive(session) ? 'identified' : 'gone');
     })();
+  }
+
+  /** Open, and the session its gid points at: one a newer connection replaced is not. */
+  #stillLive(session: ProbeSession): boolean {
+    return !session.connection.closed && this.#sessions.get(session.info.gid) === session;
   }
 
   /** Which probe object this session's GID claims, and what follows from its claiming one. */
@@ -1216,7 +1248,20 @@ export class ProbeEndpoint {
     logger: Logger,
     presented: string | undefined,
   ): Promise<void> {
-    session.probeObjectId = await source.probeObjectFor(session.info.gid);
+    const claimed = await source.probeObjectFor(session.info.gid);
+    // **Gone while it was looked up** (`P-307` review; older than it). `#handleClose` ran with no
+    // probe object, so it told reachability nothing; marking the branch found now would put its
+    // sensors back to their last reading for a probe with no connection, a second transition each
+    // on a flapping link, with the next connection's own `found` to follow. Nothing is assigned,
+    // so nothing else acts for this session either.
+    if (!this.#stillLive(session)) {
+      logger.info(
+        { probeObjectId: claimed },
+        'the probe disconnected while its branch was being looked up; not marked found',
+      );
+      return;
+    }
+    session.probeObjectId = claimed;
     if (session.probeObjectId !== null) {
       // Best-effort, and its own catch (`P-80`). `touch` is one `UPDATE ... last_seen_at`
       // documented as unable to fail a handshake, but a rejection landed in the outer catch
@@ -1233,6 +1278,15 @@ export class ProbeEndpoint {
           { probeObjectId: session.probeObjectId, ...describeError(error) },
           'could not record this probe’s last-seen time; continuing',
         );
+      }
+      // And while its last-seen time was written: `#handleClose` saw the branch then, and has
+      // told reachability it was lost, which a `found` after it would undo.
+      if (!this.#stillLive(session)) {
+        logger.info(
+          { probeObjectId: session.probeObjectId },
+          'the probe disconnected as it claimed its branch; not marked found',
+        );
+        return;
       }
       logger.info({ probeObjectId: session.probeObjectId }, 'probe claimed a branch');
       // Its sensors go back to their last reading (`R-05`). Here rather than at the

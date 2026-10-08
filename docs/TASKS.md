@@ -11322,6 +11322,35 @@ because each is a decision rather than a defect:
         `identified` fails the close test (on its log; the counts held, since `approved` was
         still false when it closed); settling `known` before the lookup fails three: `P-300`'s
         held-lookup test, the first `P-307` test and the admission test.
+      - **Amended on a second review** (a third commit). **Discovery messages did not wait on
+        `known`**, though the amendment above said everything a session sent did: a probe's
+        sweep and identification runners go on across a link drop and report before the welcome,
+        so `sweep-progress`, `sweep-finished`, `identify-progress` and `identify-finished` sent
+        during the admission were refused as foreign on the totals, their hosts never stored and
+        their endings never recorded. `#queueDiscovery` now waits on `known` in its place in
+        `pending`, as results do. **From `unapproved` and `gone` nothing is recorded or
+        counted**, and it is logged: nothing was dispatched to an unapproved probe, and a `gone`
+        session's probe is one whose last connection's close put its running sweep back to
+        `queued` (`probeDisconnected`), so a dropped `sweep-finished` leaves the run `queued`, to
+        be offered again from its cursor when the probe is next connected and known, not
+        `running` for good; an identification stays `identifying` with its own cursor, as any
+        disconnect leaves it. **And a lookup that ended after the close marked the branch found**
+        (older than `P-307`, carried over): `#handleClose` ran with no probe object and told
+        reachability nothing, then the lookup put the probe's sensors back to their last reading
+        for a probe with no connection, a second transition each on a flapping link, and told
+        the link watch and offered a sweep. `#lookUp` now does none of it, and assigns nothing,
+        unless the connection is open and still the one its gid points at, checked after the
+        lookup and again after the last-seen write (a close during that has already told
+        reachability it was lost); `#identify` settles such a session `gone`. **Tests**: a
+        `sweep-progress` and a `sweep-finished` sent during a held admission, with the lookup held
+        after it, reach the discovery sink only once the lookup is done, in order and as that
+        probe's; the closed-during-admission test also sends a `sweep-finished`, which reaches
+        nothing; and a lookup held past the peer's close calls neither `found` nor `lost` and
+        offers no sweep. **Mutations** (restored byte for byte, `dist` rebuilt): discovery not
+        waiting on `known` fails the sweep test and the close test; `gone` treated as known
+        fails the close test (the run told, as from no probe); both live checks in `#lookUp`
+        removed fails the flap test (`found` called for the branch). Either check alone holds
+        the flap test, since the second catches what the first lets by.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
