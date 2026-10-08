@@ -11472,6 +11472,15 @@ because each is a decision rather than a defect:
         parameters are unflagged, so a channel a later build drops from one is not called
         retired; `retired` is not offered as a filter or on the values route. Listed as
         follow-ups.
+      - **Amended on review** (a second commit). **What `retired` and `not read` mean was only in
+        a `title`**, on spans nothing can focus, so a keyboard, touch or screen-reader user never
+        learnt that the history is kept and the column can be put back (WCAG 2.1 AA; the rule
+        `add-sensor-model.ts` states for a time). Now a note under the table, shown whenever a
+        channel is retired, says it in text, and each retired row's header and reading cell name
+        that note in `aria-describedby`; the titles stay. Tests assert the visible note and the
+        accessible description of the row header and the cell (`getByRole(…, { description })`),
+        none on a live row, and no note when nothing is retired. Mutations (restored byte for
+        byte): no `aria-describedby` fails the description test; no note fails it too.
 
 - [x] **P-311 — a broken type's edit compares against the rows and can overwrite a hand-set
       lookup** · XS · P-303 · Found 2026-10-08 in `P-303`. When a type cannot answer for a sensor's

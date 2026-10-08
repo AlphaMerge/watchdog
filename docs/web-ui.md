@@ -253,7 +253,9 @@ so a link to a sensor's triggers is a link somebody can send.
 A channel an edit took out of a sensor's parameters — a `snmp.table` column removed — keeps its
 row and its history and is no longer read. The channel table marks it **retired** beside its name
 and says **not read** where the reading goes, rather than *no recent reading*, which would read
-as an outage; its limits judge nothing, so it plays no part in the sensor's state. On the
+as an outage; a note under the table says what that means, and is each retired row's accessible
+description, so it does not depend on hovering. Its limits judge nothing, so it plays no part in
+the sensor's state. On the
 **History** tab its line stops at the edit, as a gap. Put the column back and it is read again,
 with its history. Only a type that promises its readings name no channel it does not declare is
 marked this way (`P-310`); a script's extra channels are never called retired.

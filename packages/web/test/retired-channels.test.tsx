@@ -87,10 +87,53 @@ describe('a retired channel in the channel table', () => {
         />
       </MemoryRouter>,
     );
-    const retired = within(rowOf('Column b')).getByText('retired');
-    expect(retired.getAttribute('title')).toMatch(/nothing reads it/);
-    expect(retired.getAttribute('title')).toMatch(/history is kept/);
+    expect(within(rowOf('Column b')).getByText('retired')).toBeDefined();
     expect(within(rowOf('Column a')).queryByText('retired')).toBeNull();
+  });
+
+  it('explains it to someone who cannot hover: on the page, and as the row’s description', () => {
+    // A title reaches a mouse and nothing else (`add-sensor-model.ts` says the same of a time).
+    // What a keyboard, touch or screen-reader user gets is the text on the page and the
+    // accessible description of the row's header and its reading.
+    render(
+      <MemoryRouter>
+        <ChannelTable
+          channels={CHANNELS}
+          sensorType="snmp.table"
+          values={values({ 1: null, 2: null })}
+          lookups={null}
+          now={NOW}
+        />
+      </MemoryRouter>,
+    );
+    const note = screen.getByText(/history is kept; put it back to read it again/i);
+    expect(note.textContent).toMatch(/^Retired: .*nothing reads it/);
+
+    const explained = /nothing reads it any more.*history is kept; put it back to read it again/i;
+    const header = screen.getByRole('rowheader', { description: explained });
+    expect(header.textContent).toContain('Column b');
+    const reading = screen.getByRole('cell', { description: explained });
+    expect(reading.textContent).toBe('not read');
+    // Described once each, and the live row not at all.
+    expect(screen.getAllByRole('rowheader', { description: explained })).toHaveLength(1);
+    expect(
+      screen.getByRole('rowheader', { name: /Column a/ }).getAttribute('aria-describedby'),
+    ).toBeNull();
+  });
+
+  it('carries no note when nothing is retired', () => {
+    render(
+      <MemoryRouter>
+        <ChannelTable
+          channels={[channel(1, 'a', { isPrimary: true })]}
+          sensorType="snmp.table"
+          values={null}
+          lookups={null}
+          now={NOW}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByText(/history is kept/i)).toBeNull();
   });
 
   it('says it is not read, not that a reading is missing', () => {

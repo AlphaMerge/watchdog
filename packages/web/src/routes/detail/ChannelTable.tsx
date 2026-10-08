@@ -1,3 +1,4 @@
+import { useId } from 'react';
 import { Link } from 'react-router-dom';
 import type { ChannelRecord, ChannelValue, LookupSummary, SensorValues } from '../../api/types';
 import { Empty } from '../../components/Panels';
@@ -35,6 +36,8 @@ export function ChannelTable({
   lookups: readonly LookupSummary[] | null;
   now: number;
 }): React.JSX.Element {
+  // Before the early return: a hook is called on every render or on none.
+  const retiredNote = useId();
   if (channels.length === 0) {
     return (
       <Empty because="A sensor type declares its channels, so they exist from the moment the sensor does (P-05).">
@@ -46,6 +49,12 @@ export function ChannelTable({
   const byId = new Map<number, ChannelValue>(
     (values?.channels ?? []).map((channel) => [channel.id, channel]),
   );
+  // What `retired` and `not read` mean, as text on the page and as the description of each
+  // retired row's header and reading. A title alone reaches nobody who cannot hover: not a
+  // keyboard, not a touch screen, not a screen reader.
+  const anyRetired = channels.some((channel) => channel.retired);
+  const describedBy = (channel: ChannelRecord): string | undefined =>
+    channel.retired ? retiredNote : undefined;
 
   return (
     <div className="overflow-x-auto">
@@ -69,7 +78,11 @@ export function ChannelTable({
         <tbody className="divide-y divide-border">
           {channels.map((channel) => (
             <tr key={channel.id}>
-              <th scope="row" className="py-2 pr-3 text-left font-normal">
+              <th
+                scope="row"
+                className="py-2 pr-3 text-left font-normal"
+                aria-describedby={describedBy(channel)}
+              >
                 <span className="flex flex-wrap items-center gap-2">
                   <span
                     className={
@@ -99,7 +112,10 @@ export function ChannelTable({
                   <CountedOn sensorType={sensorType} channelKey={channel.key} />
                 </span>
               </th>
-              <td className="py-2 pr-3 text-right align-top">
+              <td
+                className="py-2 pr-3 text-right align-top"
+                aria-describedby={describedBy(channel)}
+              >
                 <Reading
                   channel={channel}
                   value={byId.get(channel.id) ?? null}
@@ -114,6 +130,11 @@ export function ChannelTable({
           ))}
         </tbody>
       </table>
+      {anyRetired && (
+        <p id={retiredNote} className="mt-2 text-xs text-text-muted">
+          <span className="font-medium">Retired:</span> {RETIRED}
+        </p>
+      )}
     </div>
   );
 }
