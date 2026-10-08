@@ -467,7 +467,7 @@ describe('migration 073 repairs a clone made before P-302', { skip }, () => {
     const warned = log.lines().filter((line) => line['level'] === 40);
     assert.equal(warned.length, 1, 'said once');
     assert.deepEqual(warned[0]?.['unjudged'], repaired.unjudged);
-    assert.match(String(warned[0]?.['msg']), /PATCH \/api\/v1\/objects\/:id\/channels\/:key/u);
+    assert.match(String(warned[0]['msg']), /PATCH \/api\/v1\/objects\/:id\/channels\/:key/u);
 
     const again = await repairChannelShapes(db, extended.seal(), { window: 1 });
     assert.equal(again.counters, 0);
@@ -572,10 +572,9 @@ describe('migration 073 raises no state change on a cleared status (scenario)', 
       ).map((row) => row.state);
     const current = async (sensorId: number): Promise<string | undefined> =>
       (
-        await db.query<{ state: string }>(
-          'SELECT state FROM sensor_runtime WHERE object_id = $1',
-          [sensorId],
-        )
+        await db.query<{ state: string }>('SELECT state FROM sensor_runtime WHERE object_id = $1', [
+          sensorId,
+        ])
       )[0]?.state;
 
     await scan(0, 'before');
