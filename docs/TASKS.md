@@ -11732,6 +11732,40 @@ because each is a decision rather than a defect:
       **Done when** retired also requires no reading since the declaration changed (or the
       probe's catalogue is consulted), with a test of a probe ahead.
 
+- [ ] **P-323 — a declared primary created before P-314 stays non-primary** · XS · P-314 · Found
+      2026-10-08 in `P-314`. Ingestion now makes the declared primary primary when its first reading
+      creates it, but a row created earlier keeps `is_primary` false until an edit changes the
+      declaration. **Done when** a one-off start-up repair pass (like S-18's declared-limits pass)
+      moves it, audited as a system write, with a test.
+
+- [ ] **P-324 — a channel `PATCH` now takes `FOR UPDATE` on its sensor** · XS · P-314 · Found
+      2026-10-08 in `P-314`. The lock that fixed the deadlock with a reading briefly blocks a
+      concurrent results transaction's key-share lock on that sensor. **Done when** measured, and
+      either a `FOR NO KEY UPDATE` helper is used or the measurement says it does not matter,
+      committed to `docs/findings/`.
+
+- [ ] **P-325 — `somebodyWaits` in `channel-redeclaration.test.ts` loops after its bound** · XS ·
+      P-314 · Found 2026-10-08 in `P-314`. The helper keeps polling after `within` expires; the copy
+      in `channel-provisioning.test.ts` has its own deadline. **Done when** the original stops at
+      its bound too.
+
+- [ ] **P-326 — a probe certificate is not bound to its GID** · M · P-319 · Found 2026-10-08 in
+      `P-319`. mTLS proves only that the shared CA signed the certificate, so any certificate holder
+      can claim any GID and is stopped only by the key. **Done when** the peer certificate's
+      fingerprint is recorded at enrolment and checked at every hello (a migration;
+      `deploy/enrol-probe.sh` names the certificate before the core assigns a GID), with a rotation
+      path and tests.
+
+- [ ] **P-327 — a pending probe's row is writable by anyone holding the enrolment key** · S ·
+      P-319 · Found 2026-10-08 in `P-319`. A pending probe has no key of its own, so a hello proven
+      on the shared enrolment key may rename it or move its address. **Done when** decided:
+      per-enrolment tokens, or rely on `P-326`'s binding, written down, with a test.
+
+- [ ] **P-328 — `last_seen_at` and `protocol_accepted_at` now nearly coincide** · XS · P-319 ·
+      Found 2026-10-08 in `P-319`. Only a proven version refusal moves last seen without setting
+      accepted. **Done when** U-32/U-33's reasons for keeping both are re-read and either one is
+      dropped or the outcome says why both stay.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -22915,6 +22949,15 @@ because each is a decision rather than a defect:
       S · U-34 · Found 2026-10-08 in `U-34`. Putting that column back in the other mode is
       offered and then refused with a 409. **Done when** the form reads the sensor's channel rows
       and locks the mode for such a column too, with a test.
+
+- [ ] **U-41 — clearing an entry in an array of plain strings is ignored** · XS · U-39 · Found
+      2026-10-08 in `U-39`. Deleting the last character of a tag puts the text back: the entry's
+      control reports "absent", and an entry cannot be absent without being removed. **Done when**
+      decided what a cleared entry holds (`''`, or the last value with a warning), with a test.
+
+- [ ] **U-42 — `writeAt` leaves holes for an index past the end** · XS · U-39 · Found 2026-10-08
+      in `U-39`. The form cannot produce such a path today. **Done when** `writeAt` refuses or
+      appends, and the test that expects the hole is changed.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
