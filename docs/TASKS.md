@@ -11545,6 +11545,64 @@ because each is a decision rather than a defect:
         is what fails without the fix.
       - **Mutation:** the enum without `ahead` failed 1.
 
+- [ ] **P-314 — a declared primary first created by a reading is not primary** · XS · P-309 ·
+      Found 2026-10-08 in `P-309`. When an edit declares a primary that has no row yet, the edit
+      keeps the current primary, and ingestion's INSERT then creates the row without `is_primary`,
+      so it becomes primary only on the next edit that changes the declaration. **Done when** the
+      first reading of a declared primary moves `is_primary` to it (one primary always, the
+      `channel_one_primary_per_sensor` index respected under concurrent batches), with a test.
+
+- [ ] **P-315 — `/probes`' "will be refused when it next connects" cannot be reached** · XS ·
+      U-35 · Found 2026-10-08 in `U-35`. While `MIN_PROTOCOL_VERSION` is 1 no real handshake
+      reaches it; the core test uses a stored -1 and the web test mocks a floor of 20. **Done
+      when** a test raises the floor through the same seam a release would, or the sentence is
+      removed until a floor above 1 exists, said in the outcome.
+
+- [ ] **P-316 — a version refused before migration 074 still reads as nothing recorded** · XS ·
+      U-35 · Found 2026-10-08 in `U-35`. 074 leaves `protocol_refused_at` NULL on existing rows,
+      so an old refused 0 reads `unknown` until the probe's next refused hello. **Done when**
+      decided: backfill (and from what), or leave it and say so in the upgrade notes, with a test
+      either way.
+
+- [ ] **P-317 — the probe health answer's message does not mention a refusal** · XS · U-35 ·
+      Found 2026-10-08 in `U-35`. `GET /probes/{id}/health` carries `lastProtocolRefusedAt`, but
+      its `message` text says nothing of it. **Done when** the message names a refused version and
+      when, with a test.
+
+- [ ] **P-318 — the generated API reference hides nested enums and field descriptions** · S ·
+      P-313 · Found 2026-10-08 in `P-313`. `docs/api-reference.md` renders top-level fields only,
+      which is how `skew.kind` lacking `ahead` went unnoticed. **Done when** the generator renders
+      nested enums and descriptions (or links each route to its schema), `--check` stays the gate,
+      with a test.
+
+- [ ] **P-319 — a refused hello rewrites a probe's row before its key is checked** · S · U-35 ·
+      Found 2026-10-08 reviewing `U-35`. mTLS proves only that the peer holds a certificate the
+      shared CA signed; nothing ties it to a GID. `admit` runs `#touch` (display name, agent
+      version, address, last seen) and, on a version refusal, `#speaks` before the access key,
+      revocation and address checks, so a certificate holder can name any approved probe and make
+      `/probes` describe a connected, working probe as refused (`incompatible`) until it
+      reconnects. Pre-existing (R-06/U-32, A-41c kept it on purpose); U-35 only changed the label.
+      **Done when** nothing is written to a probe's row for a hello that has not proved that
+      probe's identity, or the certificate is bound to its GID, with a test of a forged hello.
+
+- [ ] **P-320 — types whose channels do not depend on parameters are not flagged
+      `declaresEveryChannel`** · S · P-310 · Found 2026-10-08 in `P-310`. Only nine types whose
+      channels an edit can remove set the flag, so a channel a later build drops from any other
+      type is never called retired. **Done when** each remaining type's `execute` is checked and
+      flagged where true, with the catalogue test listing them.
+
+- [ ] **P-321 — `declaresEveryChannel` is a promise nothing checks** · S · P-310 · Found
+      2026-10-08 in `P-310`. A flagged type that reports a key its declaration does not name shows
+      a live channel as retired. **Done when** such a reading is counted (a Core Health channel)
+      and logged naming the type and key, or refused, with a test.
+
+- [ ] **P-322 — a probe newer than the core can have its new channels shown retired** · S ·
+      P-310 · Found 2026-10-08 reviewing `P-310`. `retired` asks the core's catalogue, but readings
+      come from the probe's build, and ADR-001 Decision 13 lets a probe run ahead of the core; a
+      key a newer build adds to a flagged type is created by ingestion and then called retired.
+      **Done when** retired also requires no reading since the declaration changed (or the
+      probe's catalogue is consulted), with a test of a probe ahead.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -22665,6 +22723,29 @@ because each is a decision rather than a defect:
       - **Not done:** the health answer's `message` is unchanged; it describes the live link. No
         backfill: no row can tell a refused 0 from an upgrade's. A web app served by a core
         older than this is not a case, because the core serves its own web app.
+
+- [ ] **U-36 — an edit that kept a lookup does not say so** · XS · P-311 · Found 2026-10-08 in
+      `P-311`. When the type cannot answer for what is stored, the edit leaves every lookup and
+      logs a warning, but the reply and the form say nothing. **Done when** the reply names the
+      channels whose lookup was kept and the form shows it, with a test (WCAG 2.1 AA).
+
+- [ ] **U-37 — the History tab's legend does not mark a retired channel** · XS · P-310 · Found
+      2026-10-08 in `P-310`. Its line just ends at the edit. **Done when** the legend marks it in
+      text, not colour alone, with a test.
+
+- [ ] **U-38 — retired channels cannot be filtered, and `/values` does not say retired** · XS ·
+      P-310 · Found 2026-10-08 in `P-310`. **Done when** the channel list can hide retired channels
+      and the `/values` route carries `retired`, with tests.
+
+- [ ] **U-39 — "—" on an optional field inside an array entry does nothing** · XS · U-34 · Found
+      2026-10-08 in `U-34`. `removeAt` in `packages/web/src/forms/schema.ts` returns the document
+      unchanged for a path through an array (`columns.0.mode`), so the choice is silently ignored.
+      Pre-existing. **Done when** it removes the key, with a test.
+
+- [ ] **U-40 — the edit form cannot see a channel kept from a column an earlier edit removed** ·
+      S · U-34 · Found 2026-10-08 in `U-34`. Putting that column back in the other mode is
+      offered and then refused with a 409. **Done when** the form reads the sensor's channel rows
+      and locks the mode for such a column too, with a test.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
