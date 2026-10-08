@@ -55,6 +55,14 @@ export interface FieldModel {
   readonly writeOnly: boolean;
   /** Fixed once the sensor exists (`U-34`). What that means for a control is `fixedState`'s. */
   readonly createOnly: boolean;
+  /**
+   * One entry of an array of scalars, at its own path (`U-41`): `scalarEntryOf` builds it.
+   *
+   * Such an entry is never absent — only its array's Remove takes it out — so a control cleared
+   * empty holds `''` rather than being removed, and a string entry's `''` is a value its schema
+   * judges (`minLength`), not a missing one.
+   */
+  readonly entry: boolean;
   /** Set for `kind: 'object'`. */
   readonly children: readonly FieldModel[];
   /**
@@ -143,10 +151,45 @@ export function fieldsOf(schema: JsonSchema, prefix = ''): FieldModel[] {
       required: required.has(name),
       writeOnly: property.writeOnly === true,
       createOnly: property['x-createOnly'] === true,
+      entry: false,
       children: kind === 'object' ? fieldsOf(property, path) : [],
       items: kind === 'array' ? property.items : undefined,
     };
   });
+}
+
+/**
+ * Whether an array's entries are scalars, each one control at the entry's own path, rather than
+ * objects whose properties are laid out (`U-12`).
+ */
+export function hasScalarEntries(items: JsonSchema): boolean {
+  return fieldsOf(items).length === 0;
+}
+
+/**
+ * The field one entry of an array of scalars is (`U-12`, `U-41`): a list of strings is as
+ * legitimate a repeating parameter as a list of objects, and its entry has no property to lay out.
+ *
+ * One builder for the control and for the check before submit, so the two cannot disagree about
+ * what an entry is. Required, because an entry cannot be absent; no key to tell a stored entry
+ * from a new one, so never fixed (`U-34`).
+ */
+export function scalarEntryOf(items: JsonSchema, array: FieldModel, index: number): FieldModel {
+  const kind = kindOf(items);
+  return {
+    path: `${array.path}.${String(index)}`,
+    name: String(index),
+    label: `${items.title ?? array.label} ${String(index + 1)}`,
+    description: undefined,
+    kind,
+    schema: items,
+    required: true,
+    writeOnly: items.writeOnly === true,
+    createOnly: false,
+    entry: true,
+    children: [],
+    items: kind === 'array' ? items.items : undefined,
+  };
 }
 
 /**
@@ -268,9 +311,14 @@ export function readAt(source: Record<string, unknown>, path: string): unknown {
  * JSON that looks almost right, validates as the wrong type, and is refused by the server with a
  * message about `steps` rather than about the form.
  *
- * An index past the end of an array writes there and leaves the slots before it empty. The form
- * never asks for one (`U-39` checked): an entry's controls exist only for entries the array holds,
- * and Add appends, so every index it writes is one the array has or the next one.
+ * **An array position it cannot write is refused, and the document handed back unchanged** (`U-42`)
+ * — the same object, as `removeAt` does with what it does not remove. That is an index past the
+ * end, which used to be written there with empty slots before it: a hole serialises as `null`,
+ * which the core refuses with a message about the parameter rather than the form. Appending it
+ * instead would put the value somewhere the path does not say, so reading the path back would not
+ * find it. The form never asks for one (`U-39` checked): an entry's controls exist only for
+ * entries the array holds, and Add appends, so every index it writes is one the array has or the
+ * next one — which is still written, and is how an entry is appended.
  */
 export function writeAt(
   target: Record<string, unknown>,
@@ -285,6 +333,7 @@ export function writeAt(
     const segment = segments[index];
     const lookahead = segments[index + 1];
     if (segment === undefined || lookahead === undefined) break;
+    if (!writable(cursor, segment)) return target;
     const child = readChild(cursor, segment);
     const copy = copyContainer(child, isIndex(lookahead));
     writeChild(cursor, segment, copy);
@@ -292,11 +341,22 @@ export function writeAt(
   }
 
   const last = segments[segments.length - 1];
-  if (last !== undefined) writeChild(cursor, last, value);
+  if (last === undefined || !writable(cursor, last)) return target;
+  writeChild(cursor, last, value);
   return next;
 }
 
 type Container = Record<string, unknown> | unknown[];
+
+/**
+ * An object takes any key; an array, a position it has or the next one (`U-42`).
+ *
+ * The walk only ever stands in an array when this segment is an index — it chose the container's
+ * shape from it, one step back — so the position is all there is to check.
+ */
+function writable(container: Container, segment: string): boolean {
+  return !Array.isArray(container) || Number(segment) <= container.length;
+}
 
 function readChild(container: Container, segment: string): unknown {
   return Array.isArray(container) ? container[Number(segment)] : container[segment];

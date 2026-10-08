@@ -6,8 +6,10 @@ import {
   newEntryFor,
   readAt,
   removeAt,
+  scalarEntryOf,
   seedDefaults,
   writeAt,
+  type FieldModel,
   type JsonSchema,
 } from '../src/forms/schema';
 import { allProblems, problemsFor } from '../src/forms/validate';
@@ -322,9 +324,11 @@ describe('paths through an array', () => {
   });
 
   it('goes through an array into an array', () => {
-    const written = writeAt({}, 'steps.0.headers.1', 'accept: json');
-    expect(written).toEqual({ steps: [{ headers: [undefined, 'accept: json'] }] });
-    expect(readAt(written, 'steps.0.headers.1')).toBe('accept: json');
+    // `U-42`: this wrote `headers.1` into an empty array and expected the hole before it. A hole
+    // serialises as `null`; the next position is the one an entry can be written at.
+    const written = writeAt({}, 'steps.0.headers.0', 'accept: json');
+    expect(written).toStrictEqual({ steps: [{ headers: ['accept: json'] }] });
+    expect(readAt(written, 'steps.0.headers.0')).toBe('accept: json');
   });
 
   it('does not mutate the array it was given', () => {
@@ -475,6 +479,16 @@ describe('writing and reading a path, checked beside removing one (U-39)', () =>
       { steps: [{ method: 'GET', path: '/' }] },
     ],
     ['the next entry, appending', { tags: ['a'] }, 'tags.1', 'b', { tags: ['a', 'b'] }],
+    ['the first entry of an empty array', { tags: [] }, 'tags.0', 'a', { tags: ['a'] }],
+    [
+      'an entry cleared to the empty string (U-41)',
+      { tags: ['a', 'b'] },
+      'tags.0',
+      '',
+      {
+        tags: ['', 'b'],
+      },
+    ],
     [
       'an entry of an array inside an entry',
       { steps: [{ extract: [{ name: 'a' }] }] },
@@ -496,6 +510,23 @@ describe('writing and reading a path, checked beside removing one (U-39)', () =>
       const written = writeAt(given, path, value);
       expect(written).toStrictEqual(after);
       expect(readAt(written, path)).toBe(value);
+    },
+  );
+
+  it.each([
+    // Each of these used to write the value with a hole before it, which serialises as `null`.
+    ['an index past the end', { tags: ['a'] }, 'tags.4', 'x'],
+    ['an index past the end of an empty array', { tags: [] }, 'tags.1', 'x'],
+    ['past the end on the way to a key', { steps: [{ method: 'GET' }] }, 'steps.2.method', 'POST'],
+    ['past the end of an array the walk created', {}, 'steps.0.headers.1', 'accept: json'],
+    ['past the end where no array is yet', {}, 'steps.1.method', 'GET'],
+  ] as const)(
+    'refuses %s, and hands back what it was given (U-42)',
+    (_label, before, path, value) => {
+      const given = deepFreeze(structuredClone(before)) as Record<string, unknown>;
+      const written = writeAt(given, path, value);
+      expect(written).toBe(given);
+      expect(written).toStrictEqual(before);
     },
   );
 
@@ -538,5 +569,131 @@ describe('checking a repeating parameter', () => {
 
   it('says nothing about entries that are not there', () => {
     expect(allProblems(fieldsOf(STEPS), {}, readAt, fieldsOf)).toEqual([]);
+  });
+});
+
+/**
+ * Item schemas in the shapes the shipped types declare (`U-41`), written out rather than imported:
+ * the web package does not depend on `packages/sensors`.
+ */
+const ZONE: JsonSchema = { title: 'Blocklist', type: 'string', minLength: 3, maxLength: 253 };
+const ARGUMENT: JsonSchema = { title: 'Argument', type: 'string', maxLength: 1_000 };
+const DRIVE: JsonSchema = { title: 'Volume', type: 'string', minLength: 1, maxLength: 4 };
+
+const LISTS: JsonSchema = {
+  type: 'object',
+  required: ['zones'],
+  properties: {
+    zones: { type: 'array', minItems: 1, title: 'Blocklists', items: ZONE },
+    args: { type: 'array', default: [], title: 'Arguments', items: ARGUMENT },
+    drives: { type: 'array', default: [], title: 'Volumes', items: DRIVE },
+    ports: { type: 'array', title: 'Ports', items: { type: 'integer', minimum: 1 } },
+    host: { type: 'string', minLength: 3, title: 'Host' },
+    name: { type: 'string', title: 'Name' },
+  },
+};
+
+const field = (name: string): FieldModel => {
+  const found = fieldsOf(LISTS).find((one) => one.name === name);
+  if (found === undefined) throw new Error(`no ${name} field`);
+  return found;
+};
+
+describe('an entry of an array of scalars (U-41)', () => {
+  it('is one field at the entry’s own path, required, and marked as an entry', () => {
+    const entry = scalarEntryOf(ZONE, field('zones'), 1);
+    expect(entry).toMatchObject({
+      path: 'zones.1',
+      name: '1',
+      label: 'Blocklist 2',
+      kind: 'string',
+      required: true,
+      createOnly: false,
+      entry: true,
+      children: [],
+      items: undefined,
+    });
+    // The parameter's own label where the item names nothing.
+    expect(scalarEntryOf({ type: 'integer' }, field('ports'), 0)).toMatchObject({
+      label: 'Ports 1',
+      kind: 'integer',
+      entry: true,
+    });
+    // Nothing a schema's properties produce is an entry.
+    expect(fieldsOf(LISTS).every((one) => !one.entry)).toBe(true);
+  });
+
+  it.each([
+    // [label, items, array, value, messages]
+    [
+      'a cleared zone, which minLength refuses',
+      ZONE,
+      'zones',
+      '',
+      ['cannot be empty: type a value, or remove the entry'],
+    ],
+    ['a short zone', ZONE, 'zones', 'ab', ['must be at least 3 characters']],
+    ['a zone', ZONE, 'zones', 'zen.spamhaus.org', []],
+    ['a zone of spaces, which is three characters to Ajv too', ZONE, 'zones', '   ', []],
+    ['a cleared argument, which is an argument', ARGUMENT, 'args', '', []],
+    ['an argument of one space', ARGUMENT, 'args', ' ', []],
+    [
+      'a cleared drive',
+      DRIVE,
+      'drives',
+      '',
+      ['cannot be empty: type a value, or remove the entry'],
+    ],
+    ['a drive too long', DRIVE, 'drives', 'C:\\x\\', ['must be at most 4 characters']],
+    ['a hole, which is not a value', ARGUMENT, 'args', undefined, ['required']],
+    ['a cleared number, which is not a number', { type: 'integer' }, 'ports', '', ['required']],
+    ['a number', { type: 'integer', minimum: 1 }, 'ports', 0, ['must be 1 or more']],
+  ] as const)('judges %s', (_label, items, array, value, messages) => {
+    const entry = scalarEntryOf(items, field(array), 0);
+    expect(problemsFor(entry, value).map((problem) => problem.message)).toEqual(messages);
+  });
+
+  it.each([
+    // Unchanged for a field that is not an entry: empty is absent, and absent is judged by
+    // `required` alone.
+    ['an optional string, empty', 'host', '', []],
+    ['an optional string of spaces', 'host', '  ', []],
+    ['an optional string, short', 'host', 'ab', ['must be at least 3 characters']],
+  ] as const)('leaves %s as it was', (_label, name, value, messages) => {
+    expect(problemsFor(field(name), value).map((problem) => problem.message)).toEqual(messages);
+  });
+
+  it('checks each entry before submit, at the entry’s path, as its control does', () => {
+    const problems = allProblems(
+      fieldsOf(LISTS),
+      { zones: ['zen.spamhaus.org', '', 'ab'], args: ['', '-v'], ports: ['', 2] },
+      readAt,
+      fieldsOf,
+    );
+    expect(problems).toStrictEqual([
+      { path: 'zones.1', message: 'cannot be empty: type a value, or remove the entry' },
+      { path: 'zones.2', message: 'must be at least 3 characters' },
+      { path: 'ports.0', message: 'required' },
+    ]);
+  });
+
+  it('checks an array of scalars inside an entry of objects', () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: {
+        steps: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { headers: { type: 'array', items: { type: 'string', minLength: 1 } } },
+          },
+        },
+      },
+    };
+    expect(
+      allProblems(fieldsOf(schema), { steps: [{ headers: ['a', ''] }] }, readAt, fieldsOf),
+    ).toStrictEqual([
+      { path: 'steps.0.headers.1', message: 'cannot be empty: type a value, or remove the entry' },
+    ]);
   });
 });

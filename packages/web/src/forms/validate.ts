@@ -1,4 +1,4 @@
-import type { FieldModel, JsonSchema } from './schema';
+import { hasScalarEntries, scalarEntryOf, type FieldModel, type JsonSchema } from './schema';
 
 export interface FieldProblem {
   readonly path: string;
@@ -23,8 +23,17 @@ export function problemsFor(field: FieldModel, value: unknown): FieldProblem[] {
     problems.push({ path: field.path, message });
   };
 
+  // **A string entry's `''` is a value, not a gap** (`U-41`). An entry cleared holds it, and Ajv
+  // judges it as any other string: `exe.script`'s and the program method's `args` declare no
+  // `minLength`, so an empty argument is an argument and is passed as one, while `dns.blocklist`'s
+  // zones, `windows.volume`'s drives and a credential set's targets and host keys refuse it. So
+  // here it is checked against the same keywords, and "required" — which an entry always is,
+  // being unable to be absent — never stands in for them.
+  const stringEntry = field.entry && field.kind === 'string' && typeof value === 'string';
   const missing =
-    value === undefined || value === null || (typeof value === 'string' && value.trim() === '');
+    value === undefined ||
+    value === null ||
+    (typeof value === 'string' && value.trim() === '' && !stringEntry);
   if (missing) {
     // A write-only field left alone is not missing: the value is on the server, where this form
     // is never allowed to see it.
@@ -55,6 +64,13 @@ export function problemsFor(field: FieldModel, value: unknown): FieldProblem[] {
   }
 
   if (field.kind === 'string' && typeof value === 'string') {
+    // Said as what it is and what to do: the entry's own Remove sits above it, and "must be at
+    // least 3 characters" for a box the operator has just emptied reads as a complaint about
+    // something they did not type.
+    if (stringEntry && value === '' && (schema.minLength ?? 0) > 0) {
+      add('cannot be empty: type a value, or remove the entry');
+      return problems;
+    }
     if (schema.minLength !== undefined && value.length < schema.minLength) {
       add(`must be at least ${String(schema.minLength)} characters`);
     }
@@ -119,11 +135,17 @@ export function allProblems(
     // for the one parameter shape that is hardest to type correctly.
     const entries = read(values, field.path);
     if (field.kind !== 'array' || field.items === undefined || !Array.isArray(entries)) continue;
+    //
+    // **An entry of scalars too** (`U-41`), as the one field the form renders for it. These were
+    // never checked before submit, so a cleared blocklist zone went to the core and came back as
+    // a 400; now its `''` is judged here, at the entry's path, by the same rules as its control.
     const items = field.items;
+    const array = field;
     entries.forEach((_entry, index) => {
-      problems.push(
-        ...allProblems(fieldsFor(items, `${field.path}.${String(index)}`), values, read, fieldsFor),
-      );
+      const entryFields = hasScalarEntries(items)
+        ? [scalarEntryOf(items, array, index)]
+        : fieldsFor(items, `${field.path}.${String(index)}`);
+      problems.push(...allProblems(entryFields, values, read, fieldsFor));
     });
   }
   return problems;

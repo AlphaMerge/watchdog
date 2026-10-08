@@ -22976,14 +22976,75 @@ because each is a decision rather than a defect:
       offered and then refused with a 409. **Done when** the form reads the sensor's channel rows
       and locks the mode for such a column too, with a test.
 
-- [ ] **U-41 — clearing an entry in an array of plain strings is ignored** · XS · U-39 · Found
+- [x] **U-41 — clearing an entry in an array of plain strings is ignored** · XS · U-39 · Found
       2026-10-08 in `U-39`. Deleting the last character of a tag puts the text back: the entry's
       control reports "absent", and an entry cannot be absent without being removed. **Done when**
       decided what a cleared entry holds (`''`, or the last value with a warning), with a test.
 
-- [ ] **U-42 — `writeAt` leaves holes for an index past the end** · XS · U-39 · Found 2026-10-08
+      **U-41 outcome. A cleared entry holds `''`, and the schema says whether `''` may be saved.**
+      - **Decided: `''`, not the last value.** `''` is what the emptied box shows, so the form
+        holds what the operator sees; the last value with a warning would leave a box reading empty
+        over a value that is still saved. Removing the entry stays its array's Remove, as `U-39`
+        left it. `SchemaForm`'s `set` writes `''` where it used to call `removeAt`, for a field
+        marked as an entry and for nothing else.
+      - **Decided by what the core does with `''`**, type by type. Every shipped array of plain
+        strings: `exe.script`'s `args` and the program method's `args` declare no `minLength`, so
+        Ajv takes `''` and the probe passes it as an empty argument, which is an argument;
+        `dns.blocklist`'s `zones` (`minLength: 3`), `windows.volume`'s `drives`, a credential set's
+        `allowedTargets` and SSH host keys (`minLength: 1`) refuse it. So the form judges a string
+        entry's `''` as Ajv does: it is a value, never "required", and only `minLength` refuses it,
+        with *cannot be empty: type a value, or remove the entry* in place of "must be at least
+        3 characters" for a box the operator has just emptied. Whitespace is a value too, as it is
+        to Ajv. A cleared number or JSON entry also holds `''` and reads "required", which is no
+        worse than the number box's existing hold of unparseable text.
+      - **One builder for an entry.** `FieldModel.entry` marks it; `scalarEntryOf` (in `schema.ts`)
+        builds the field `Entry` renders, and `allProblems` now checks every scalar entry through
+        the same field — before, a list of strings was checked for its count only, so a blocklist
+        saved with an empty zone came back as a 400. Save is held back with "1 field needs
+        attention" as soon as the box is empty.
+      - **Announced (WCAG 2.1 AA, 4.1.3).** Every control's problem paragraph is now always
+        rendered, empty, as a polite live region, and named by `aria-describedby` only while it
+        says something (with `aria-invalid`). A problem appears when the field is left, when focus
+        is already elsewhere and the description is not read again; a live region is announced
+        only if it existed before its text changed.
+      - **Tests.** `schema-form.test.ts`: `scalarEntryOf`'s field; a table of 11 entry values
+        against the shipped shapes (zone, argument, drive, hole, number); 3 rows showing a field
+        that is not an entry is judged as before; `allProblems` at entry paths, top level and inside
+        an entry of objects. `repeating-field.test.tsx`: an argument cleared shows `''`, stores
+        `['', '-v']`, keeps the entry and says nothing; a zone cleared stores `''`, and on leaving
+        the region that existed empty before (same node, `aria-live="polite"`) says the sentence,
+        the box is `aria-invalid` and described by it, and typing again takes both away;
+        `ParamsForm` sends `args: ['', '-v']`, and holds back a cleared zone (Save disabled, no
+        request) until Remove takes it out. Mutations, each failing: the clear removed instead of
+        held 4; a string entry's `''` read as missing 11; no empty-entry sentence 6; scalar entries
+        not checked before submit 3; the region not live 1; the region rendered only with a
+        problem 3; `scalarEntryOf` not marking an entry 12.
+      - **Not done.** The always-present problem paragraph adds the 4px gap `space-y-1` gives a
+        last child under every control. A cleared JSON entry shows its own empty text while the
+        form holds `''`; it is refused with "required", but its box's own sentence says nothing
+        about why.
+
+- [x] **U-42 — `writeAt` leaves holes for an index past the end** · XS · U-39 · Found 2026-10-08
       in `U-39`. The form cannot produce such a path today. **Done when** `writeAt` refuses or
       appends, and the test that expects the hole is changed.
+
+      **U-42 outcome. `writeAt` refuses an index past the end and hands back the same object.**
+      - **Refuses, not appends.** Appending would put the value at a position the path does not
+        name, so reading the path back would find nothing, and a caller with a wrong index would
+        have its value land in some other entry's place without a word. Refusing is what
+        `removeAt` already does with what it does not remove (`U-39`), and it is the same object
+        back, so a caller can tell. The next index is still written: that is how Add appends.
+        Checked at every array the walk stands in, not just the last, so `steps.2.method` on one
+        step and `steps.0.headers.1` on no headers are refused too.
+      - **The test that expected the hole** (`goes through an array into an array`) now writes
+        `steps.0.headers.0` and expects `{steps: [{headers: ['accept: json']}]}` with
+        `toStrictEqual`; the hole case is a row of the new refusal table (5 rows, each `toBe` the
+        frozen input), beside 2 new write rows (the first entry of an empty array, an entry written
+        `''`). Mutations, each failing: writing past the end again 5; refusing the next index too
+        6; checking only the last segment 2.
+      - **Not done.** A property name where `writeAt` meets an array (`tags.x`) is not refused: the
+        walk takes the container's shape from the path, so it replaces the array with an object, as
+        its "wrong shape" rule says. The form never writes such a path.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

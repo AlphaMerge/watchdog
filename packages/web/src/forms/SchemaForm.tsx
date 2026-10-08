@@ -10,6 +10,7 @@ import {
   newEntryFor,
   readAt,
   removeAt,
+  scalarEntryOf,
   writeAt,
   type Existing,
   type FieldModel,
@@ -170,8 +171,15 @@ function Control({
     .filter((entry) => entry !== null)
     .join(' ');
 
+  // **A cleared entry holds `''`** (`U-41`). A control emptied says "absent", and an entry of an
+  // array cannot be absent: removing it is its array's Remove, which `removeAt` leaves to it, so
+  // the clear used to be ignored and the box put the text back under the caret. `''` is what the
+  // empty box shows, so the form holds what the operator sees; whether `''` may be saved is the
+  // schema's to say (`minLength`), and the check before submit says it at this entry.
   const set = (next: unknown): void => {
-    onChange(next === undefined ? removeAt(values, field.path) : writeAt(values, field.path, next));
+    if (next !== undefined) onChange(writeAt(values, field.path, next));
+    else if (field.entry) onChange(writeAt(values, field.path, ''));
+    else onChange(removeAt(values, field.path));
   };
 
   // **Focus stays on the field when putting it back locks it** (`U-34`, WCAG 2.4.3). A `changed`
@@ -259,11 +267,14 @@ function Control({
         </p>
       )}
 
-      {problems.length > 0 && (
-        <p id={`${id}-problem`} className="text-xs text-down-fg">
-          {problems.map((problem) => problem.message).join('; ')}
-        </p>
-      )}
+      {/* **Always there, and a polite live region** (`U-41`, WCAG 4.1.3). A problem appears when
+          the field is left, by which time focus is on the next control and the description tied
+          to this one is not read again; a live region is announced only if it existed before
+          its text changed, so it is rendered empty rather than not at all. Named by
+          `aria-describedby` only while it says something. */}
+      <p id={`${id}-problem`} className="text-xs text-down-fg" aria-live="polite">
+        {problems.map((problem) => problem.message).join('; ')}
+      </p>
     </div>
   );
 }
@@ -408,30 +419,12 @@ function Entry({
 }: FieldProps & { items: JsonSchema; index: number }): React.JSX.Element {
   const path = `${props.field.path}.${String(index)}`;
   const children = useMemo(() => fieldsOf(items, path), [items, path]);
-  const entryLabel = items.title ?? props.field.label;
 
   // An array *of scalars* has no properties to lay out, so the entry is one control at the entry's
-  // own path — a list of strings is as legitimate a repeating parameter as a list of objects. No
-  // key to tell a stored entry from a new one, so nothing in it is fixed (`U-34`).
+  // own path. Nothing in it is fixed (`U-34`), so nothing is existing either.
   if (children.length === 0) {
     return (
-      <Field
-        {...props}
-        existing={undefined}
-        field={{
-          path,
-          name: String(index),
-          label: `${entryLabel} ${String(index + 1)}`,
-          description: undefined,
-          kind: scalarKindOf(items),
-          schema: items,
-          required: true,
-          writeOnly: items.writeOnly === true,
-          createOnly: false,
-          children: [],
-          items: items.items,
-        }}
-      />
+      <Field {...props} existing={undefined} field={scalarEntryOf(items, props.field, index)} />
     );
   }
 
@@ -450,12 +443,6 @@ function Entry({
       ))}
     </div>
   );
-}
-
-/** What a scalar entry's control should be. `fieldsOf` cannot say, because there is no property. */
-function scalarKindOf(items: JsonSchema): FieldModel['kind'] {
-  const [only] = fieldsOf({ type: 'object', properties: { value: items } });
-  return only?.kind ?? 'json';
 }
 
 function EntryButton({

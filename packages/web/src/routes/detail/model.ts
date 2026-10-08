@@ -214,6 +214,7 @@ export function fieldFor(setting: SettingView, prefix: string): FieldModel {
     required: !nullable,
     writeOnly: false,
     createOnly: false,
+    entry: false,
     children: [],
     // Never an array: a setting is one value at one key, and `U-12`'s repeating control is for a
     // sensor type's parameters. An array-typed setting falls to the JSON box above.

@@ -1,8 +1,10 @@
 import { useState } from 'react';
-import { fireEvent, render, screen, within } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { ObjectDetail, SensorTypeSummary } from '../src/api/types';
 import { SchemaForm } from '../src/forms/SchemaForm';
 import type { JsonSchema } from '../src/forms/schema';
+import { ParamsForm } from '../src/routes/detail/ParamsForm';
 
 /**
  * The repeating control, driven the way an operator drives it (`U-12`).
@@ -186,6 +188,64 @@ describe('a repeating parameter', () => {
     expect(stored()).toEqual({ tags: ['two'] });
   });
 
+  it('clears a tag to empty, and keeps the entry (U-41)', () => {
+    // The control said "absent" and the entry cannot be absent, so the clear was ignored and the
+    // last character came back under the caret.
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: {
+        args: { type: 'array', title: 'Arguments', items: { type: 'string', title: 'Argument' } },
+      },
+    };
+    render(<Harness schema={schema} initial={{ args: ['x', '-v'] }} />);
+    const box = screen.getByRole<HTMLInputElement>('textbox', { name: 'Argument 1' });
+    fireEvent.change(box, { target: { value: '' } });
+    expect(box.value).toBe('');
+    expect(stored()).toStrictEqual({ args: ['', '-v'] });
+    expect(screen.getByRole('button', { name: 'Remove Argument 1' })).toBeDefined();
+    // No `minLength`: an empty argument is an argument, so leaving it says nothing.
+    fireEvent.blur(box);
+    expect(box.hasAttribute('aria-invalid')).toBe(false);
+    expect(document.getElementById(`${box.id}-problem`)?.textContent).toBe('');
+  });
+
+  it('says a cleared entry its schema refuses cannot be empty, announced and tied to it', () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: {
+        zones: {
+          type: 'array',
+          title: 'Blocklists',
+          items: { type: 'string', title: 'Blocklist', minLength: 3 },
+        },
+      },
+    };
+    render(<Harness schema={schema} initial={{ zones: ['zen.spamhaus.org', 'bl.spamcop.net'] }} />);
+    const box = screen.getByRole<HTMLInputElement>('textbox', { name: 'Blocklist 2' });
+    // The live region is there, empty, before anything is wrong: one added with its text already
+    // in it is not announced.
+    const region = document.getElementById(`${box.id}-problem`);
+    if (region === null) throw new Error('the problem region should exist before a problem');
+    expect(region.getAttribute('aria-live')).toBe('polite');
+    expect(region.textContent).toBe('');
+    expect(box.getAttribute('aria-describedby') ?? '').not.toContain(region.id);
+
+    fireEvent.change(box, { target: { value: '' } });
+    fireEvent.blur(box);
+    expect(box.value).toBe('');
+    expect(stored()).toStrictEqual({ zones: ['zen.spamhaus.org', ''] });
+    expect(document.getElementById(`${box.id}-problem`)).toBe(region);
+    expect(region.textContent).toBe('cannot be empty: type a value, or remove the entry');
+    expect(box.getAttribute('aria-invalid')).toBe('true');
+    expect((box.getAttribute('aria-describedby') ?? '').split(' ')).toContain(region.id);
+
+    // Typed again, the problem goes and the description with it.
+    fireEvent.change(box, { target: { value: 'b.barracudacentral.org' } });
+    expect(region.textContent).toBe('');
+    expect(box.hasAttribute('aria-invalid')).toBe(false);
+    expect(box.getAttribute('aria-describedby') ?? '').not.toContain(region.id);
+  });
+
   it('still shows a JSON box for an array whose entries are undescribed', () => {
     // Where "add an entry" has nothing to add, the honest control is the one that hands the
     // operator the value — the same rule a free-form object follows, and the reason `U-08`'s
@@ -194,5 +254,115 @@ describe('a repeating parameter', () => {
     render(<Harness schema={schema} initial={{ loose: [1, 2] }} />);
     expect(screen.queryByRole('button', { name: /^Add / })).toBeNull();
     expect(screen.getByLabelText('Loose').textContent).toContain('[');
+  });
+});
+
+describe('a cleared entry, saved (U-41)', () => {
+  // The shapes `dns.blocklist`'s zones and `exe.script`'s arguments declare: the first refuses
+  // `''`, the second takes it as an empty argument.
+  const LISTS: JsonSchema = {
+    type: 'object',
+    required: ['zones'],
+    properties: {
+      zones: {
+        type: 'array',
+        minItems: 1,
+        title: 'Blocklists',
+        items: { title: 'Blocklist', type: 'string', minLength: 3, maxLength: 253 },
+      },
+      args: {
+        type: 'array',
+        default: [],
+        title: 'Arguments',
+        items: { title: 'Argument', type: 'string', maxLength: 1_000 },
+      },
+    },
+  };
+
+  const typeOf = (): SensorTypeSummary => ({
+    id: 'test.lists',
+    category: 'Custom',
+    costHint: 'light',
+    paramsSchema: LISTS as Record<string, unknown>,
+    hasPreview: false,
+  });
+
+  const detailOf = (params: Record<string, unknown>): ObjectDetail =>
+    ({
+      id: 51,
+      kind: 'sensor',
+      name: 'Lists',
+      version: 3,
+      sensorType: 'test.lists',
+      params,
+      redactedParams: [],
+    }) as unknown as ObjectDetail;
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('sends an empty argument as one, where the schema accepts it', async () => {
+    const bodies: unknown[] = [];
+    vi.stubGlobal('fetch', (_path: string, init?: RequestInit) => {
+      bodies.push(typeof init?.body === 'string' ? (JSON.parse(init.body) as unknown) : undefined);
+      return Promise.resolve(
+        new Response(JSON.stringify({ id: 51, kind: 'sensor', version: 4 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    });
+    const saved = vi.fn();
+    render(
+      <ParamsForm
+        detail={detailOf({ zones: ['zen.spamhaus.org'], args: ['x', '-v'] })}
+        type={typeOf()}
+        onSaved={saved}
+      />,
+    );
+    fireEvent.change(screen.getByRole('textbox', { name: 'Argument 1' }), {
+      target: { value: '' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save parameters' }));
+
+    await waitFor(() => {
+      expect(saved).toHaveBeenCalledTimes(1);
+    });
+    expect(bodies).toStrictEqual([
+      { kind: 'sensor', params: { zones: ['zen.spamhaus.org'], args: ['', '-v'] } },
+    ]);
+  });
+
+  it('does not send a cleared zone, and says which field needs attention', () => {
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    render(
+      <ParamsForm
+        detail={detailOf({ zones: ['zen.spamhaus.org', 'bl.spamcop.net'] })}
+        type={typeOf()}
+        onSaved={() => undefined}
+      />,
+    );
+    const box = screen.getByRole<HTMLInputElement>('textbox', { name: 'Blocklist 2' });
+    fireEvent.change(box, { target: { value: '' } });
+    expect(box.value).toBe('');
+
+    // Before the box is left: the check before submit already holds the save back.
+    const save = screen.getByRole('button', { name: 'Save parameters' });
+    expect(save.hasAttribute('disabled')).toBe(true);
+    expect(screen.getByText('1 field needs attention')).toBeDefined();
+    fireEvent.click(save);
+    expect(fetch).not.toHaveBeenCalled();
+
+    fireEvent.blur(box);
+    expect(document.getElementById(`${box.id}-problem`)?.textContent).toBe(
+      'cannot be empty: type a value, or remove the entry',
+    );
+
+    // Removing the entry is the other way out, and it may then be saved.
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Blocklist 2' }));
+    expect(save.hasAttribute('disabled')).toBe(false);
+    expect(screen.queryByText('1 field needs attention')).toBeNull();
   });
 });
