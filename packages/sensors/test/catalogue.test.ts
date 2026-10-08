@@ -922,6 +922,70 @@ describe('a parameter fixed once the sensor exists (U-34)', () => {
     );
   });
 
+  it('refuses one on an object, an array or an entry schema, which the form does not lock', () => {
+    const leafOnly = /x-createOnly on an object or an array/;
+    refused(
+      withSchema({
+        auth: { type: 'object', [CREATE_ONLY]: true, properties: { mode: { type: 'string' } } },
+      }),
+      leafOnly,
+    );
+    refused(withSchema({ tags: { type: 'array', [CREATE_ONLY]: true, items: {} } }), leafOnly);
+    // A union that admits an object is one too. (`properties` with no `type` never gets this far:
+    // strict mode's `strictTypes` refuses that schema at compile.)
+    refused(withSchema({ any: { type: ['string', 'object'], [CREATE_ONLY]: true } }), leafOnly);
+    // The entry's own schema: the form draws its properties, never the entry as one control.
+    refused(
+      withSchema(
+        columns({
+          [ENTRY_KEY]: 'column',
+          [CREATE_ONLY]: true,
+          required: ['column'],
+          properties: { column: { type: 'string' } },
+        }),
+      ),
+      /"columns\.\*" x-createOnly on an object or an array/,
+    );
+  });
+
+  it('refuses one under a keyword the form does not draw as fields', () => {
+    const below = (keyword: string): RegExp =>
+      new RegExp(`x-createOnly under ${keyword.replace('$', '\\$')}, which the form does not draw`);
+    refused(
+      variant({
+        paramsSchema: { type: 'object', properties: {}, $defs: { mode: MODE } },
+      }),
+      below('$defs'),
+    );
+    refused(
+      variant({
+        paramsSchema: { type: 'object', properties: {}, definitions: { mode: MODE } },
+      }),
+      below('definitions'),
+    );
+    refused(
+      variant({ paramsSchema: { type: 'object', additionalProperties: MODE } }),
+      below('additionalProperties'),
+    );
+    refused(
+      variant({ paramsSchema: { type: 'object', patternProperties: { '^m': MODE } } }),
+      below('patternProperties'),
+    );
+    refused(
+      withSchema({
+        pair: { type: 'array', items: [MODE, { type: 'string' }], minItems: 2, maxItems: 2 },
+      }),
+      /x-createOnly under a tuple’s items/,
+    );
+    // `prefixItems` is a 2020-12 keyword this Ajv's draft does not know, so strict mode refuses the
+    // schema before the walk sees it. Refused either way, which is the promise; the walk's own
+    // refusal is held by the unit above for the keywords this Ajv compiles.
+    refused(
+      withSchema({ pair: { type: 'array', prefixItems: [MODE], minItems: 1, maxItems: 1 } }),
+      /prefixItems/,
+    );
+  });
+
   it('refuses one on a writeOnly parameter', () => {
     refused(
       withSchema({ token: { type: 'string', writeOnly: true, [CREATE_ONLY]: true } }),

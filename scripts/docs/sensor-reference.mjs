@@ -274,6 +274,12 @@ for (const category of categories) {
       if (schema.writeOnly === true) flags.push('**write-only**');
       // `U-34`: what the edit form shows read-only, and the core refuses to change.
       if (schema['x-createOnly'] === true) flags.push('**fixed once created**');
+      // And inside an array's entries, where `snmp.table`'s column mode is: the entry's own
+      // properties have no row here, so the array's row says it.
+      const entry = schema.type === 'array' ? schema.items?.properties : undefined;
+      for (const [name, property] of Object.entries(entry ?? {})) {
+        if (property['x-createOnly'] === true) flags.push(`**entry \`${name}\` fixed once created**`);
+      }
       say(
         `| \`${key}\` | ${typeOf(schema)} | ${defaultOf(schema)} | ${boundsOf(schema)} | ${flags.join(' ')} |`,
       );

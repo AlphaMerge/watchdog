@@ -744,7 +744,7 @@ cost: **medium** · credentials: `snmp`
 | `timeoutMs` | integer | `5000` | ≥ 100, ≤ 60000 |  |
 | `retries` | integer | `1` | ≥ 0, ≤ 5 |  |
 | `tableOid` | string |  | ≥ 1 chars, ≤ 255 chars | **required** |
-| `columns` | array of object |  | ≥ 1 entries, ≤ 20 entries | **required** |
+| `columns` | array of object |  | ≥ 1 entries, ≤ 20 entries | **required** **entry `mode` fixed once created** |
 | `indexColumn` | string | _(empty)_ | ≤ 64 chars |  |
 | `rowMatch` | string | _(empty)_ | ≤ 500 chars |  |
 | `rowMatchMode` | `exact` · `contains` · `regex` | `"exact"` |  |  |

@@ -61,6 +61,29 @@ export const CREATE_ONLY = 'x-createOnly';
  */
 export const ENTRY_KEY = 'x-entryKey';
 
+/**
+ * Subschema keywords holding a map of schemas the edit form does not draw as fields (`U-34`):
+ * an `x-createOnly` anywhere below one is refused, because there is no field there to lock.
+ */
+const UNRENDERED_MAPS = [
+  '$defs',
+  'definitions',
+  'patternProperties',
+  'dependentSchemas',
+  'dependencies',
+] as const;
+
+/** The same, for keywords holding one schema or a list of them. */
+const UNRENDERED_SCHEMAS = [
+  'additionalProperties',
+  'unevaluatedProperties',
+  'propertyNames',
+  'prefixItems',
+  'additionalItems',
+  'unevaluatedItems',
+  'contains',
+] as const;
+
 /** Subschema keywords the redactor cannot follow. See `assertWriteOnlyIsReachable`. */
 const COMBINATORS = ['oneOf', 'anyOf', 'allOf', 'not', 'if', 'then', 'else', 'items'] as const;
 
@@ -901,11 +924,18 @@ function collectWriteOnly(schema: JsonSchema, typeId: string, prefix = ''): read
  * - **Inside an array, only where the entry names its key** (`x-entryKey`), and the key is a
  *   required property of the entry. Without one the form cannot tell an entry the sensor already
  *   has from one this edit added, which may take either value.
+ * - **Only on a leaf**: no `type` of object or array, no `properties`, no `items`. The form locks
+ *   one control at a time; an object or an array is a fieldset of other controls, and an entry's
+ *   own schema is not a control at all, so an annotation there would promise a lock nothing does.
+ * - **Never under a keyword the form does not draw as fields** — `$defs`, `definitions`,
+ *   `additionalProperties`, `patternProperties`, `prefixItems`, a tuple's `items` and the rest of
+ *   `UNRENDERED` — for the same reason: there is no field there to lock.
  */
 function assertCreateOnlyIsPlaced(schema: JsonSchema, typeId: string): void {
-  walk(schema, '', true, false);
+  walk(schema, '', true, null);
 
-  function walk(node: unknown, path: string, keyed: boolean, insideCombinator: boolean): void {
+  /** `hidden` names where the walk went that the form does not render, or is null. */
+  function walk(node: unknown, path: string, keyed: boolean, hidden: string | null): void {
     if (typeof node !== 'object' || node === null || Array.isArray(node)) return;
     const record = node as Record<string, unknown>;
 
@@ -916,8 +946,19 @@ function assertCreateOnlyIsPlaced(schema: JsonSchema, typeId: string): void {
           `sensor type "${typeId}" marks "${path}" ${CREATE_ONLY} ${why}`,
         );
       };
-      if (insideCombinator) {
-        refuse('inside a schema combinator, where the form cannot tell when it applies');
+      if (hidden !== null) refuse(hidden);
+      const type = record['type'];
+      const types = Array.isArray(type) ? (type as unknown[]) : [type];
+      if (
+        types.includes('object') ||
+        types.includes('array') ||
+        record['properties'] !== undefined ||
+        record['items'] !== undefined
+      ) {
+        refuse(
+          'on an object or an array, which the form draws as other fields rather than one ' +
+            'control it can lock: put it on the leaf property that is fixed',
+        );
       }
       if (record['writeOnly'] === true) {
         refuse('and writeOnly: the form is never sent its value, so it has nothing to show');
@@ -933,21 +974,53 @@ function assertCreateOnlyIsPlaced(schema: JsonSchema, typeId: string): void {
     const properties = record['properties'];
     if (typeof properties === 'object' && properties !== null) {
       for (const [key, child] of Object.entries(properties as Record<string, unknown>)) {
-        walk(child, path === '' ? key : `${path}.${key}`, keyed, insideCombinator);
+        walk(child, path === '' ? key : `${path}.${key}`, keyed, hidden);
       }
     }
 
     const items = record['items'];
-    if (items !== undefined) {
-      walk(items, `${path}.*`, keyed && namesItsKey(items), insideCombinator);
+    if (Array.isArray(items)) {
+      // A tuple: each position its own schema, which the form draws as one JSON box.
+      for (const child of items) {
+        walk(child, `${path}.items`, keyed, hidden ?? unrendered('a tuple’s items'));
+      }
+    } else if (items !== undefined) {
+      walk(items, `${path}.*`, keyed && namesItsKey(items), hidden);
     }
 
     for (const keyword of COMBINATORS) {
       if (keyword === 'items') continue;
       const branch = record[keyword];
       if (branch === undefined) continue;
-      for (const child of Array.isArray(branch) ? branch : [branch]) walk(child, path, keyed, true);
+      for (const child of Array.isArray(branch) ? branch : [branch]) {
+        walk(
+          child,
+          path,
+          keyed,
+          hidden ??
+            `inside a schema combinator (${keyword}), where the form cannot tell when it applies`,
+        );
+      }
     }
+
+    for (const keyword of UNRENDERED_MAPS) {
+      const map = record[keyword];
+      if (typeof map !== 'object' || map === null || Array.isArray(map)) continue;
+      for (const [key, child] of Object.entries(map as Record<string, unknown>)) {
+        walk(child, `${path}.${keyword}.${key}`, keyed, hidden ?? unrendered(keyword));
+      }
+    }
+    for (const keyword of UNRENDERED_SCHEMAS) {
+      const branch = record[keyword];
+      if (branch === undefined) continue;
+      for (const child of Array.isArray(branch) ? branch : [branch]) {
+        walk(child, `${path}.${keyword}`, keyed, hidden ?? unrendered(keyword));
+      }
+    }
+  }
+
+  function unrendered(where: string): string {
+    return `under ${where}, which the form does not draw as fields, so there is nothing to lock`;
   }
 
   /** Whether an array's entry schema names a required property of its own as its key. */

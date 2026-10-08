@@ -22530,6 +22530,22 @@ because each is a decision rather than a defect:
       - **Not done.** The add-sensor and template forms pass no `existing`, correctly; nothing
         tells the form about a channel kept from a column an earlier edit removed, so that case is
         the 409's.
+      - **Amended on review** (a second commit). **Putting a `changed` field back dropped focus to
+        the page**: the select it was on became a read-only box. Focus now moves to the box when
+        the change came from that field while it had focus (not when a column key typed elsewhere
+        locks it), and the reason is a polite live region, so the new state is heard. **A locked
+        field the form holds as absent showed an empty box**: `locked` now carries the value it
+        compared (the default), and the box shows that. **The catalogue admitted `x-createOnly`
+        where the form does nothing with it**: on an object or array, on an entry schema, or under
+        `$defs`, `definitions`, `additionalProperties`, `patternProperties`, `dependentSchemas`,
+        `dependencies`, `propertyNames`, `contains`, `additionalItems`, `unevaluated*` or a tuple's
+        `items`; all refused now (`prefixItems` is refused by strict mode first). **The sensor
+        reference missed `snmp.table`'s column mode**: an array of objects' row now says
+        **entry `mode` fixed once created**. Tests: 4 web (focus moved and kept, the default shown
+        in an entry and at the top), 2 catalogue (leaf only, unrendered keywords). Mutations: no
+        refocus fails 1; refocus regardless of where focus was fails 2; the form's value shown
+        instead of the compared one fails 2; no leaf check fails 1; the unrendered keywords walked
+        as rendered fails 1; the generator without the entry flag fails `--check`.
 
 - [x] **U-35 — a probe refused at version 0 looks like one never recorded** · S · U-33 · Found
       2026-10-08 in `U-33`. A hello refused at 0 overwrites the recorded version with 0, which

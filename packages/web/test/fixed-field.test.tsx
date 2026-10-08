@@ -136,6 +136,14 @@ describe('which entry a fixed field belongs to, and whether it is locked', () =>
     expect(fixedState(modeField(), existing, value).kind).toBe(kind);
   });
 
+  it('carries the value it compared when locked, so absent reads as the default', () => {
+    expect(fixedState(modeField(), {}, undefined)).toEqual({ kind: 'locked', value: 'gauge' });
+    expect(fixedState(modeField(), { mode: 'counter' }, 'counter')).toEqual({
+      kind: 'locked',
+      value: 'counter',
+    });
+  });
+
   it('says what is stored when the form holds something else', () => {
     expect(fixedState(modeField(), { mode: 'gauge' }, 'counter')).toEqual({
       kind: 'changed',
@@ -262,9 +270,53 @@ describe('a fixed field in a table column (snmp.table)', () => {
       name: 'Reading type',
       description: /where it is “gauge”: saving another value is refused/,
     });
+    select.focus();
     fireEvent.change(select, { target: { value: 'gauge' } });
-    // Put back, it locks again.
-    expect(fixedBox(first).readOnly).toBe(true);
+    // Put back, it locks again — and focus moves with it to the read-only box rather than falling
+    // to the page with the select it was on (WCAG 2.4.3).
+    const box = fixedBox(first);
+    expect(box.readOnly).toBe(true);
+    expect(document.activeElement).toBe(box);
+    // The sentence changed in place, in a polite live region, so the new state is announced.
+    const reason = within(first).getByText(FIXED_REASON);
+    expect(reason.getAttribute('aria-live')).toBe('polite');
+    expect(box.getAttribute('aria-describedby')?.split(' ')).toContain(reason.id);
+  });
+
+  it('leaves focus on a column key whose new value locks the mode', () => {
+    // The other way to lock a field: retyping the key of an added column to one the sensor has,
+    // holding the same mode. The operator is typing the key; the mode must not take focus.
+    render(<Harness schema={TABLE} initial={STORED_TABLE} existing={STORED_TABLE} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add column' }));
+    const added = columnEntries()[2];
+    if (added === undefined) throw new Error('an added entry expected');
+    const key = within(added).getByRole('textbox', { name: 'Column' });
+    key.focus();
+    fireEvent.change(key, { target: { value: '8' } });
+    expect(fixedBox(added).readOnly).toBe(true);
+    expect(document.activeElement).toBe(key);
+  });
+
+  it('shows the default it compared, not a blank, when the form holds the field as absent', () => {
+    // A column stored without a mode is a gauge: absent is the default on both sides, so it is
+    // locked while the form holds nothing — and the box must read "gauge", not be an empty field
+    // announced as nothing. (The core stores defaults; a row from before one was declared may not.)
+    const stored = {
+      tableOid: '1.3.6.1.2.1.2.2.1',
+      columns: [{ column: '8', name: 'Status' }],
+    };
+    render(<Harness schema={TABLE} initial={stored} existing={stored} />);
+    const [only] = columnEntries();
+    if (only === undefined) throw new Error('an entry expected');
+    expect(fixedBox(only).value).toBe('gauge');
+    // Shown, not written: the parameters stay as stored.
+    expect(values()).toEqual(stored);
+  });
+
+  it('shows the default at the top level too', () => {
+    const stored = { oid: '1.3.6.1.2.1.1.3.0', unit: '' };
+    render(<Harness schema={CUSTOM} initial={stored} existing={stored} />);
+    expect(fixedBox(document.body).value).toBe('gauge');
   });
 });
 

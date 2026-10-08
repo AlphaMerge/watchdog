@@ -1,4 +1,4 @@
-import { useCallback, useId, useMemo, useState } from 'react';
+import { useCallback, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   existingEntry,
   existingWithin,
@@ -174,8 +174,24 @@ function Control({
     onChange(next === undefined ? removeAt(values, field.path) : writeAt(values, field.path, next));
   };
 
+  // **Focus stays on the field when putting it back locks it** (`U-34`, WCAG 2.4.3). A `changed`
+  // field set back to what is stored turns from a select into a read-only box, and the select
+  // that had focus is gone: without this, focus falls to the page and a screen reader user never
+  // hears that the field is now fixed. Only when the change came from this control while it had
+  // focus — a column key retyped elsewhere in the entry can lock this field too, and must not
+  // pull focus away from the key being typed.
+  const wrapper = useRef<HTMLDivElement>(null);
+  const refocus = useRef(false);
+  useLayoutEffect(() => {
+    if (!refocus.current) return;
+    refocus.current = false;
+    if (fixed.kind !== 'locked') return;
+    const control = document.getElementById(id);
+    if (control !== null && document.activeElement !== control) control.focus();
+  });
+
   return (
-    <div className="space-y-1">
+    <div className="space-y-1" ref={wrapper}>
       <div className="flex flex-wrap items-baseline gap-2">
         <label htmlFor={id} className="text-sm font-medium text-text">
           {field.label}
@@ -219,12 +235,13 @@ function Control({
         <SchemaControl
           id={id}
           field={field}
-          value={value}
+          value={fixed.kind === 'locked' ? fixed.value : value}
           disabled={disabled}
           describedBy={describedBy}
           invalid={problems.length > 0}
           readOnly={fixed.kind === 'locked'}
           onValue={(next) => {
+            refocus.current = wrapper.current?.contains(document.activeElement) ?? false;
             set(next);
           }}
           onBlur={() => {
@@ -234,7 +251,10 @@ function Control({
       )}
 
       {fixed.kind !== 'open' && (
-        <p id={`${id}-fixed`} className="text-xs text-text-muted">
+        // Polite live region as well as a description: going from `changed` to `locked` keeps this
+        // element and changes its sentence, which is announced even where moving focus onto the
+        // read-only box does not read its description again.
+        <p id={`${id}-fixed`} className="text-xs text-text-muted" aria-live="polite">
           {fixed.kind === 'locked' ? FIXED_REASON : fixedChangedReason(fixed.stored)}
         </p>
       )}

@@ -410,11 +410,14 @@ export function fixedChangedReason(stored: unknown): string {
  *   editable, saying what is stored, so the operator can put it back. Locking it would freeze a
  *   value the core refuses, with no control to undo it but retyping the key.
  *
- * Absent is the schema's default on both sides, as the core stores it.
+ * Absent is the schema's default on both sides, as the core stores it. So `locked` carries the
+ * value it compared, which is what the read-only box shows: a field the form holds as absent (an
+ * optional select's "—") is locked at the default, and showing the form's `undefined` instead would
+ * be an empty box announced as nothing.
  */
 export type FixedState =
   | { readonly kind: 'open' }
-  | { readonly kind: 'locked' }
+  | { readonly kind: 'locked'; readonly value: unknown }
   | { readonly kind: 'changed'; readonly stored: unknown };
 
 export function fixedState(field: FieldModel, existing: Existing, value: unknown): FixedState {
@@ -423,6 +426,6 @@ export function fixedState(field: FieldModel, existing: Existing, value: unknown
   const stored = existing[field.name] ?? fallback;
   const held = value ?? fallback;
   return JSON.stringify(held) === JSON.stringify(stored)
-    ? { kind: 'locked' }
+    ? { kind: 'locked', value: held }
     : { kind: 'changed', stored };
 }

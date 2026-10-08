@@ -527,7 +527,7 @@ All of these fail at startup, loudly, rather than at runtime:
 | `id` is not already registered                 | shadowing makes behaviour depend on registration order          |
 | `paramsSchema` compiles                        | a broken schema would fail on the first sensor, not the first boot |
 | no `writeOnly` inside a combinator             | it could not be reliably redacted                               |
-| `x-createOnly` only on a plain property, never on a `writeOnly` one, and inside an array only where the entry's `x-entryKey` names a required property of it | the form could not tell when it applies, has no value to show, or could not tell a stored entry from an added one (`U-34`) |
+| `x-createOnly` only on a leaf property (no object or array type, no `properties` or `items`), never behind a combinator or under `$defs`, `definitions`, `additionalProperties`, `patternProperties`, `prefixItems` or a tuple's `items`, never on a `writeOnly` one, and inside an array only where the entry's `x-entryKey` names a required property of it | the form locks one control: it has no control to lock elsewhere, could not tell when it applies, has no value to show, or could not tell a stored entry from an added one (`U-34`) |
 | every `writeOnly` has a `secretDestinations` entry, naming visible properties | a secret stays with where it is sent (`A-40`) |
 | every kind in `credentialKinds` has a `kind:<id>` entry, and no other kind does | an inherited set goes only where somebody vouched (`A-41`) |
 | every kind in `pinnedKinds` is one of `credentialKinds` | a promise about a set the type is never sent is a typo (`A-41c`) |
