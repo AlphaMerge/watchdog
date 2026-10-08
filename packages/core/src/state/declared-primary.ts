@@ -1,5 +1,5 @@
 import type { SensorCatalogue } from '@ms/sensors';
-import type { Logger } from '@ms/shared';
+import { describeError, type Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
 import { moveDeclaredPrimaries } from '../ingestion/channels.js';
 import type { Actor, AuditSink } from '../objects/audit.js';
@@ -56,14 +56,19 @@ import { declaredChannelLookup, type DeclaredShapes } from './declared-limits.js
  * Running it late costs nothing: what it moves is what a list shows, and no state is judged from
  * it.
  *
- * **Safe against a reading and an edit arriving meanwhile.** A page that has something to move
- * takes the `object` rows of the sensors that would move (not the whole page)
- * `FOR NO KEY UPDATE` in id order, then reads `sensor_config`
- * again, then the channel rows, and only then writes: the order an edit takes them in, and
+ * **Safe against a reading, an edit, a delete or a reorder arriving meanwhile.** A page that has
+ * something to move takes the `object` rows of the sensors that would move (not the whole page)
+ * `FOR NO KEY UPDATE SKIP LOCKED`, then reads `sensor_config` again, then the channel rows, and
+ * only then writes: object, `sensor_config`, `channel`, the order an edit takes them in, and
  * ingestion's when it creates a channel (`P-303` review, `P-314`), and `patchChannel`'s (`P-314`).
- * Whichever comes first, the other waits; this one then re-derives from parameters and rows that
- * nobody can change under it, so a primary an edit or a reading moved meanwhile is not moved back.
- * A reading of an existing channel takes only key-share locks, which this does not block.
+ * **It never waits for a sensor** (`P-323` review): one somebody else holds is skipped, counted
+ * and left for the next start, so the repair cannot deadlock with a writer that locks `object`
+ * rows in another order (a subtree delete, a sibling reorder), and never makes an operator's
+ * write wait or fail. A writer arriving after it waits for one short page transaction. What it
+ * does hold it decides about again, from parameters and rows nobody can change under it, so a
+ * primary an edit or a reading moved meanwhile is not moved back. A reading of an existing
+ * channel takes only key-share locks, which this does not block. A page that throws anyway is
+ * logged with its range and the pass goes on; the pass itself never rejects.
  */
 
 /** Who moves a primary at start-up: nobody did, an earlier build's declaration had not. */
@@ -91,6 +96,16 @@ export interface DeclaredPrimaryRepairReport {
   readonly sensors: number;
   /** Sensors whose primary this pass moved. Zero on every start after the first. */
   readonly moved: number;
+  /**
+   * Sensors with a primary to move that another transaction held when their page came to lock
+   * them (`SKIP LOCKED`): left as they are, for the next start.
+   */
+  readonly skipped: number;
+  /**
+   * Pages whose move threw: each logged with its sensor range, the pages after it gone on with,
+   * and its sensors left for the next start.
+   */
+  readonly failedPages: number;
   /**
    * Sensors left alone because their type threw for their stored parameters, so what they declare
    * primary is unknown (`P-306`'s fallback).
@@ -130,6 +145,8 @@ export async function repairDeclaredPrimaries(
   const undeclaredTypes = new Set<string>();
   let sensors = 0;
   let moved = 0;
+  let skipped = 0;
+  let failedPages = 0;
   let undeclared = 0;
   let complete = true;
   let after = '0';
@@ -139,13 +156,26 @@ export async function repairDeclaredPrimaries(
       complete = false;
       break;
     }
-    const page = await options.db.query<SensorRow>(
-      `SELECT object_id::text AS id, type, params FROM sensor_config
-       WHERE object_id > $1::bigint ORDER BY object_id LIMIT $2`,
-      [after, batchSize],
-    );
+    let page: SensorRow[];
+    try {
+      page = await options.db.query<SensorRow>(
+        `SELECT object_id::text AS id, type, params FROM sensor_config
+         WHERE object_id > $1::bigint ORDER BY object_id LIMIT $2`,
+        [after, batchSize],
+      );
+    } catch (error) {
+      // Nothing to go on to: the next page is not known. Stopped, said, and never rejected.
+      logger.warn(
+        { ...describeError(error), afterSensorId: after, phase: 'read-page' },
+        'could not read the next page of sensors for the declared-primary repair; the rest ' +
+          'waits for the next start',
+      );
+      complete = false;
+      break;
+    }
+    const first = page[0];
     const last = page.at(-1);
-    if (last === undefined) break;
+    if (first === undefined || last === undefined) break;
     after = last.id;
     sensors += page.length;
 
@@ -153,34 +183,55 @@ export async function repairDeclaredPrimaries(
       undeclared += 1;
       undeclaredTypes.add(type);
     });
-    // Unlocked, and nearly always empty: on every start after the first, this is the whole cost
-    // of a page, and no sensor is locked. Only the sensors it names are locked below; one it did
-    // not name and an edit changes meanwhile is that edit's to move (`P-309`).
-    const stale = await notPrimary(options.db, wanted);
-    if (stale.length === 0) continue;
-    moved += await options.db.tx((q) =>
-      moveLocked(
-        q,
-        stale.map((one) => one.sensor_id),
-        declared,
-        options.audit,
-      ),
-    );
+    // **A failure is the page's, not the pass's** (`P-323` review). One page whose transaction
+    // throws — whatever the reason, since a lock this pass skips cannot be the reason — is logged
+    // with its range and counted, and the pages after it go on; the next start tries it again.
+    try {
+      // Unlocked, and nearly always empty: on every start after the first, this is the whole cost
+      // of a page, and no sensor is locked. Only the sensors it names are locked below; one it did
+      // not name and an edit changes meanwhile is that edit's to move (`P-309`).
+      const stale = await notPrimary(options.db, wanted);
+      if (stale.length === 0) continue;
+      const done = await options.db.tx((q) =>
+        moveLocked(
+          q,
+          stale.map((one) => one.sensor_id),
+          declared,
+          options.audit,
+        ),
+      );
+      moved += done.moved;
+      skipped += done.skipped;
+    } catch (error) {
+      failedPages += 1;
+      logger.warn(
+        {
+          ...describeError(error),
+          firstSensorId: first.id,
+          lastSensorId: last.id,
+          phase: 'move-page',
+        },
+        'could not move the declared primaries of one page of sensors; the pages after it go ' +
+          'on, and the next start tries this one again',
+      );
+    }
   }
 
   const report: DeclaredPrimaryRepairReport = {
     sensors,
     moved,
+    skipped,
+    failedPages,
     undeclared,
     undeclaredTypes: [...undeclaredTypes].sort(),
     complete,
   };
-  if (moved > 0 || undeclared > 0 || !complete) {
+  if (moved > 0 || skipped > 0 || failedPages > 0 || undeclared > 0 || !complete) {
     logger.info(
       report,
       'moved is_primary onto the channel each sensor’s type declares primary, where an ' +
-        'earlier build had left it elsewhere; sensors whose type could not answer for their ' +
-        'stored parameters were left as they are',
+        'earlier build had left it elsewhere; sensors another transaction held, and sensors ' +
+        'whose type could not answer for their stored parameters, were left as they are',
     );
   } else {
     logger.debug(report, 'every sensor’s declared primary is already primary');
@@ -191,31 +242,43 @@ export async function repairDeclaredPrimaries(
 /**
  * The move for these sensors, under their locks: everything decided again from what is committed
  * once nobody else can change it, since the unlocked read only said that something might move.
+ *
+ * **Only the sensors nobody else holds** (`P-323` review). `SKIP LOCKED` rather than a wait,
+ * because this pass cannot rely on the lock order of every other writer of `object` rows: a
+ * subtree delete (`deleteIds`) takes them in scan order and a sibling reorder
+ * (`writeSiblingOrder`) in join order, neither by id. Waiting would mean a deadlock or the pool's
+ * `lock_timeout` for one side — and the side Postgres picks might be the operator's delete. Nothing
+ * here is urgent, so a held sensor is simply left: counted as `skipped`, moved by the next start.
+ * Once its sensors are held, this waits on nothing: their channel rows are written only by
+ * writers that take the sensor first, and the trigger it fires touches only that sensor.
  */
 async function moveLocked(
   q: Queryable,
   ids: readonly string[],
   declared: Lookup,
   audit: AuditSink,
-): Promise<number> {
+): Promise<{ moved: number; skipped: number }> {
   // Object, then `sensor_config`, then `channel`: an edit's order, and ingestion's (`P-314`).
-  await q.query(
-    `SELECT id FROM object WHERE id = ANY($1::bigint[]) ORDER BY id FOR NO KEY UPDATE`,
+  const held = await q.query<{ id: string }>(
+    `SELECT id::text AS id FROM object WHERE id = ANY($1::bigint[])
+     ORDER BY id FOR NO KEY UPDATE SKIP LOCKED`,
     [ids],
   );
+  const skipped = ids.length - held.length;
+  if (held.length === 0) return { moved: 0, skipped };
   const fresh = await q.query<SensorRow>(
     `SELECT object_id::text AS id, type, params FROM sensor_config
      WHERE object_id = ANY($1::bigint[])`,
-    [ids],
+    [held.map((row) => row.id)],
   );
   // Counted on the unlocked read already; not twice.
   const stale = await notPrimary(
     q,
     primariesOf(fresh, declared, () => undefined),
   );
-  if (stale.length === 0) return 0;
+  if (stale.length === 0) return { moved: 0, skipped };
   await moveDeclaredPrimaries(q, stale, { audit, actor: DECLARED_PRIMARY_REPAIR });
-  return stale.length;
+  return { moved: stale.length, skipped };
 }
 
 /** Each sensor's declared primary, for those whose own stored parameters declare one. */

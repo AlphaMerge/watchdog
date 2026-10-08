@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { QueryResultRow } from 'pg';
+import { pino } from 'pino';
 import type { SensorType } from '@ms/sensors';
 import type { CheckResult } from '@ms/shared';
 import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from '../src/audit/store.js';
@@ -119,6 +120,7 @@ describe(
     let db: Database;
     let harness: Harness;
     let deviceId: number;
+    let probeId: number;
 
     before(async () => {
       scratch = await createScratchDatabase('declared_primary');
@@ -136,6 +138,7 @@ describe(
         host: '192.0.2.41',
       });
       deviceId = device.id;
+      probeId = probe.id;
     });
 
     after(async () => {
@@ -199,10 +202,11 @@ describe(
       created: Record<string, unknown>,
       stored: Record<string, unknown>,
       rows: readonly (readonly [string, boolean])[],
+      parentId: number = deviceId,
     ): Promise<number> => {
       const sensor = await harness.service.create(testActor, {
         kind: 'sensor',
-        parentId: deviceId,
+        parentId,
         name: `${type}-${String(process.hrtime.bigint())}`,
         sensorType: type,
         params: created,
@@ -383,11 +387,20 @@ describe(
       assert.deepEqual(
         {
           moved: first.moved,
+          skipped: first.skipped,
+          failedPages: first.failedPages,
           undeclared: first.undeclared,
           types: first.undeclaredTypes,
           complete: first.complete,
         },
-        { moved: 3, undeclared: 1, types: ['test.brittle'], complete: true },
+        {
+          moved: 3,
+          skipped: 0,
+          failedPages: 0,
+          undeclared: 1,
+          types: ['test.brittle'],
+          complete: true,
+        },
         'the report counts what it moved and what it could not judge',
       );
       assert.ok(first.sensors >= cases.length, 'every sensor read');
@@ -532,9 +545,10 @@ describe(
         audit: recording(recorded),
       });
 
-    it('waits for a reading that holds the sensor, then moves it, with the reading’s row kept', async () => {
-      // The reading creates `extra`, which is not the declared primary, while holding the sensor;
-      // the repair, which saw `used` non-primary unlocked, waits for it and then moves.
+    it('skips a sensor another transaction holds, counts it, and moves it on the next run', async () => {
+      // A reading holds the sensor while it creates `extra`, which is not the declared primary.
+      // The repair, which saw `used` non-primary unlocked, does not wait for it (`P-323` review):
+      // it finishes with the sensor skipped and counted, and the next run moves it.
       const id = await sensorWith('test.columns', cols('used'), cols('used', 'extra'), [
         ['other', true],
         ['used', false],
@@ -561,22 +575,29 @@ describe(
         ),
       );
       const recorded: Recorded[] = [];
-      let repairing: Promise<DeclaredPrimaryRepairReport> | undefined;
       try {
         await within(10_000, 'the reading holding its sensor', locked.wait);
-        repairing = repair(recording(recorded));
-        await somebodyWaits('the repair waiting for the reading');
-        released.open();
-        const [created, report] = await within(
-          10_000,
-          'the reading and the repair',
-          Promise.all([creating, repairing]),
+        // Under the pool's lock_timeout, so a repair that waited would fail here, not pass late.
+        const report = await within(
+          4_000,
+          'the repair, beside a held sensor',
+          repair(recording(recorded)),
         );
+        assert.deepEqual(
+          { moved: report.moved, skipped: report.skipped, failedPages: report.failedPages },
+          { moved: 0, skipped: 1, failedPages: 0 },
+        );
+        assert.equal(recorded.length, 0, 'nothing moved, so nothing audited');
+        released.open();
+        const created = await within(10_000, 'the reading', creating);
         assert.equal(created.created, 1, 'the reading created its row');
-        assert.equal(report.moved, 1);
       } finally {
         released.open();
       }
+      assert.deepEqual(await primaryOf(id), ['other'], 'left as it was');
+
+      const next = await repair(recording(recorded));
+      assert.deepEqual({ moved: next.moved, skipped: next.skipped }, { moved: 1, skipped: 0 });
       assert.deepEqual(await primaryOf(id), ['used']);
       assert.deepEqual(fromReading, [], 'the reading moved nothing: `extra` is not the primary');
       assert.deepEqual(
@@ -591,6 +612,140 @@ describe(
         'extra',
       ]);
       assert.equal(extra.length, 1);
+    });
+
+    it('neither waits for nor deadlocks with a subtree delete holding a sensor of its page', async () => {
+      // `deleteIds` locks `object` rows in scan order, not by id. The delete below holds the
+      // sensor of the device it is removing, uncommitted, while the repair runs over a page that
+      // holds both that sensor and another one: the repair moves the other, skips the held one,
+      // and returns while the delete is still open; then the delete commits.
+      const doomed = await harness.service.create(testActor, {
+        kind: 'device',
+        parentId: probeId,
+        name: 'doomed',
+        host: '192.0.2.42',
+      });
+      const gone = await sensorWith(
+        'test.columns',
+        cols('used'),
+        cols('used', 'free'),
+        [
+          ['other', true],
+          ['used', false],
+        ],
+        doomed.id,
+      );
+      const kept = await sensorWith('test.columns', cols('used'), cols('used', 'free'), [
+        ['other', true],
+        ['used', false],
+      ]);
+      const recorded: Recorded[] = [];
+      let during: DeclaredPrimaryRepairReport | undefined;
+      const was = harness.audit.also;
+      harness.audit.also = {
+        record: async (_q, _actor, mutations) => {
+          if (!mutations.some((one) => one.action === 'object.deleted')) return;
+          if (during !== undefined) return;
+          during = await within(
+            4_000,
+            'the repair while the delete holds its rows',
+            repair(recording(recorded)),
+          );
+        },
+      };
+      try {
+        await within(
+          20_000,
+          'the delete',
+          harness.service.delete(
+            testActor,
+            doomed.id,
+            { kind: 'exact', descendants: 1 },
+            { kind: 'none' },
+          ),
+        );
+      } finally {
+        harness.audit.also = was;
+      }
+      assert.ok(during !== undefined, 'the delete never reached its audit entry');
+      assert.deepEqual(
+        { moved: during.moved, skipped: during.skipped, failedPages: during.failedPages },
+        { moved: 1, skipped: 1, failedPages: 0 },
+      );
+      assert.deepEqual(await primaryOf(kept), ['used']);
+      assert.deepEqual(await primaryOf(gone), [], 'deleted, with its channels');
+      assert.equal(await versionOf(gone), 'gone');
+      assert.deepEqual(
+        recorded.flatMap((entry) => entry.moves.map((move) => move.sensorId)),
+        [kept, kept],
+        'only the sensor it held was moved',
+      );
+    });
+
+    it('goes on past a page whose transaction throws, and says which', async () => {
+      // Pages of one, the first failing: the sensor after it is still moved, and the failed one
+      // is moved by the next run. The pass resolves; it does not reject.
+      const first = await sensorWith('test.columns', cols('used'), cols('used', 'free'), [
+        ['other', true],
+        ['used', false],
+      ]);
+      const second = await sensorWith('test.columns', cols('used'), cols('used', 'free'), [
+        ['other', true],
+        ['used', false],
+      ]);
+      let failed = 0;
+      const failingOnce: DeclaredPrimaryRepairOptions['db'] = {
+        query: <T extends QueryResultRow>(text: string, values?: readonly unknown[]) =>
+          db.query<T>(text, values),
+        tx: <T>(fn: (q: Queryable) => Promise<T>): Promise<T> =>
+          db.tx(async (q) => {
+            if (failed === 0) {
+              failed += 1;
+              throw new Error('a page that cannot be moved');
+            }
+            return fn(q);
+          }),
+      };
+      const recorded: Recorded[] = [];
+      const lines: string[] = [];
+      const logger = pino(
+        { level: 'warn' },
+        {
+          write: (line: string) => {
+            lines.push(line);
+          },
+        },
+      );
+      const report = await repair(recording(recorded), {
+        db: failingOnce,
+        batchSize: 1,
+        logger,
+      });
+      assert.equal(failed, 1);
+      const said = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+      assert.deepEqual(
+        said.map((one) => [
+          one['phase'],
+          one['firstSensorId'],
+          one['lastSensorId'],
+          one['message'],
+        ]),
+        [['move-page', String(first), String(first), 'a page that cannot be moved']],
+        'the failed page, by its range and its error',
+      );
+      assert.deepEqual(
+        {
+          moved: report.moved,
+          failedPages: report.failedPages,
+          skipped: report.skipped,
+          complete: report.complete,
+        },
+        { moved: 1, failedPages: 1, skipped: 0, complete: true },
+      );
+      assert.deepEqual(await primaryOf(first), ['other'], 'its page failed');
+      assert.deepEqual(await primaryOf(second), ['used'], 'the page after it went on');
+      await repair(recording(recorded));
+      assert.deepEqual(await primaryOf(first), ['used'], 'moved by the next run');
     });
 
     it('holds the sensor while it moves, and a reading creating a channel waits for it', async () => {

@@ -11807,6 +11807,38 @@ because each is a decision rather than a defect:
         typechecked but no test starts the core. Not measured at a large installation: a page is
         one indexed read plus one `channelsFor` per sensor, and nothing waits for it.
 
+      **P-323 review. The repair never waits for a sensor, and one page's failure is that
+      page's.** The lock was `ORDER BY id FOR NO KEY UPDATE`, but two multi-row writers of
+      `object` do not lock by id — a subtree delete (`deleteIds`, scan order) and a sibling reorder
+      (`writeSiblingOrder`, join order) — and the repair takes no tree lock and `db.tx` does not
+      retry. So one deadlock or one 5 s `lock_timeout` rejected the whole pass, leaving every later
+      page for the next restart, or failed the operator's delete or reorder if Postgres picked that
+      side.
+      - **`FOR NO KEY UPDATE SKIP LOCKED`, not a retry.** Nothing here is urgent, so a sensor
+        somebody holds is left, counted in a new `skipped` field and the info line, and moved by
+        the next start; the repair decides again only about the sensors it got. It never depends
+        on another writer's lock order, and never makes an operator's write wait on it for longer
+        than one short page transaction or fail. A retry on 40P01/55P03 would still wait first, and
+        could still be the side that kills the delete. Once its sensors are held it waits on
+        nothing: their channel rows are written only by writers that take the sensor first, and
+        `channel_touch_owner` touches only that sensor.
+      - **A page that throws anyway** is logged at `warn` with its error, `firstSensorId`,
+        `lastSensorId` and `phase: 'move-page'`. It is counted in a new `failedPages`, and the
+        pages after it go on. A failure to read the next page stops the pass with
+        `complete: false` and a `warn` line. The pass resolves either way; it does not reject.
+      - **Tests** (`declared-primary.test.ts`). The old "waits for a reading that holds the sensor"
+        race is now: a reading holds the sensor, the repair finishes inside a 4 s `within` (under
+        the pool's lock timeout) with `skipped: 1` and nothing audited, and the next run moves it.
+        A subtree delete holding one sensor of a page, uncommitted, while the repair runs inside
+        it: the repair returns inside a 4 s `within` with the other sensor moved and the held one
+        skipped, and the delete then commits. A first page whose transaction throws, in pages of
+        one: the next page's sensor is moved, `failedPages: 1`, the warn line names the failed
+        page's range and error, and the next run moves the failed one.
+      - **Mutations** (restored byte for byte, `dist` rebuilt): without `SKIP LOCKED` the skip
+        test and the delete test both time out at their `within`; not counting the skipped fails
+        both; rethrowing a page's failure fails the failing-page test; re-reading every sensor
+        instead of only those held fails the delete test.
+
 - [ ] **P-324 — a channel `PATCH` now takes `FOR UPDATE` on its sensor** · XS · P-314 · Found
       2026-10-08 in `P-314`. The lock that fixed the deadlock with a reading briefly blocks a
       concurrent results transaction's key-share lock on that sensor. **Done when** measured, and
