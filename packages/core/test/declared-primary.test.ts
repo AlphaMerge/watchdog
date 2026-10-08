@@ -1,6 +1,5 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
-import { setTimeout as sleep } from 'node:timers/promises';
 import type { QueryResultRow } from 'pg';
 import { pino } from 'pino';
 import type { SensorType } from '@ms/sensors';
@@ -23,6 +22,7 @@ import {
 } from './support/database.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
 import { testCatalogue } from './support/sensor-types.js';
+import { somebodyWaits } from './support/waits-for-lock.js';
 import { within } from './support/within.js';
 
 const available = await databaseAvailable();
@@ -467,26 +467,6 @@ describe(
 
     // ── at the same time as something else ───────────────────────────────────────────────────
 
-    /** Until some session in this database waits on a lock: the other side is blocked. */
-    const somebodyWaits = (what: string): Promise<void> => {
-      const deadline = Date.now() + 10_000;
-      return within(
-        11_000,
-        what,
-        (async () => {
-          while (Date.now() < deadline) {
-            const waiting = await db.query<{ n: number }>(
-              `SELECT count(*)::int AS n FROM pg_stat_activity
-               WHERE datname = current_database() AND wait_event_type = 'Lock'`,
-            );
-            if ((waiting[0]?.n ?? 0) > 0) return;
-            await sleep(20);
-          }
-          throw new Error(`nobody waited: ${what}`);
-        })(),
-      );
-    };
-
     /** A gate: `wait` resolves once `open` is called. */
     const gate = (): { wait: Promise<void>; open: () => void } => {
       let open: () => void = () => undefined;
@@ -772,7 +752,7 @@ describe(
           db.tx((q) => resolver([]).resolve(q, [reading(id, ['other'])])),
         );
         creating = db.tx((q) => resolver([]).resolve(q, [reading(id, ['extra'])]));
-        await somebodyWaits('the reading creating a channel waiting for the repair');
+        await somebodyWaits(db, 'the reading creating a channel waiting for the repair');
         released.open();
         const [report, created] = await within(
           10_000,
