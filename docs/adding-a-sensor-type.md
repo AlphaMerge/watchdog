@@ -242,12 +242,18 @@ channel the sensor is judged by.
   lookup an operator pointed it at. An edit that would turn an existing channel from a `counter`
   into a gauge or back is refused, because the stored samples are rates on one side and raw
   values on the other: say in that parameter's description that it is fixed once the sensor
-  exists, as `snmp.custom`'s `mode` does. Which channel is `isPrimary` moves with the edit too
-  (`P-309`), once that channel has a row: a key the edit adds and makes primary becomes it on a
-  later edit, not on its first reading. If `channels()` throws for what a sensor has stored, an
-  edit cannot tell an operator's lookup from yours, so it leaves every lookup as it is and logs
-  that, naming your type (`P-311`). A channel the edit no longer declares keeps its row and
-  history; it is shown retired only if your type sets `declaresEveryChannel` (below).
+  exists, as `snmp.custom`'s `mode` does, and mark it `'x-createOnly': true` (`U-34`). The edit
+  form then shows it read-only on an existing sensor, with the reason, instead of offering a
+  change the core refuses. Inside an array, also name on the entry's schema the required property
+  that says which entry it is — `'x-entryKey': 'column'` on `snmp.table`'s columns — so an entry
+  is matched to what the sensor has by what it is, not where it sits, and one an edit adds stays
+  open. The annotation is the warning; the refusal is still the core's, judged from the channels.
+  Which channel is `isPrimary` moves with the edit too (`P-309`), once that channel has a row: a
+  key the edit adds and makes primary becomes it on a later edit, not on its first reading. If
+  `channels()` throws for what a sensor has stored, an edit cannot tell an operator's lookup from
+  yours, so it leaves every lookup as it is and logs that, naming your type (`P-311`). A channel
+  the edit no longer declares keeps its row and history; it is shown retired only if your type
+  sets `declaresEveryChannel` (below).
 - **`lookup` and `counter` may depend on parameters.** A channel the core first sees in a reading
   (a key a later build added, or one an edit added) gets them from `channels()` asked with that
   sensor's own stored parameters, not `{}` (`P-297`), so a column-per-channel type like
@@ -521,6 +527,7 @@ All of these fail at startup, loudly, rather than at runtime:
 | `id` is not already registered                 | shadowing makes behaviour depend on registration order          |
 | `paramsSchema` compiles                        | a broken schema would fail on the first sensor, not the first boot |
 | no `writeOnly` inside a combinator             | it could not be reliably redacted                               |
+| `x-createOnly` only on a plain property, never on a `writeOnly` one, and inside an array only where the entry's `x-entryKey` names a required property of it | the form could not tell when it applies, has no value to show, or could not tell a stored entry from an added one (`U-34`) |
 | every `writeOnly` has a `secretDestinations` entry, naming visible properties | a secret stays with where it is sent (`A-40`) |
 | every kind in `credentialKinds` has a `kind:<id>` entry, and no other kind does | an inherited set goes only where somebody vouched (`A-41`) |
 | every kind in `pinnedKinds` is one of `credentialKinds` | a promise about a set the type is never sent is a typo (`A-41c`) |

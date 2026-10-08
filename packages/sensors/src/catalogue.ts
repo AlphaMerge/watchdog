@@ -36,6 +36,31 @@ export const SENSOR_TYPE_ID = /^[a-z0-9]+(\.[a-z0-9-]+)+$/;
  */
 export const MAX_RECOVERY_HOLD_SECONDS = 86_400;
 
+/**
+ * A parameter fixed once the sensor exists (`U-34`): `'x-createOnly': true` on its property.
+ *
+ * **One annotation, read in two places.** The edit form shows the parameter read-only on an
+ * existing sensor and says why, and this catalogue refuses at registration an annotation the form
+ * could not honour. Neither has to know a type id, which is what keeps a type one file.
+ *
+ * It describes what an edit will be refused; it is not what refuses it. The core's refusal is
+ * judged from the channels an edit would change (`P-303`, `409 OBJECT_CHANNEL_MODE_FIXED`), which
+ * an annotation can only describe. So the annotation is the warning before submit, and the 409
+ * stays the answer for what the form cannot see — a table column taken out by one edit and put
+ * back as the other mode by the next.
+ */
+export const CREATE_ONLY = 'x-createOnly';
+
+/**
+ * Which property of an array entry says which existing thing the entry is (`U-34`), on the
+ * entry's schema: `'x-entryKey': 'column'` for `snmp.table`, whose channel key comes from it.
+ *
+ * Required wherever an entry holds an `x-createOnly` property. An entry's position is not its
+ * identity — entries reorder, and a column added above the others moves every one of them — so a
+ * form that locked "entry 2's mode" would lock the wrong column after the first move.
+ */
+export const ENTRY_KEY = 'x-entryKey';
+
 /** Subschema keywords the redactor cannot follow. See `assertWriteOnlyIsReachable`. */
 const COMBINATORS = ['oneOf', 'anyOf', 'allOf', 'not', 'if', 'then', 'else', 'items'] as const;
 
@@ -131,6 +156,10 @@ export class SensorCatalogue {
     // `.default` is the callable at runtime while its typings describe a namespace. Same cast,
     // and same reason, as `packages/shared/src/config/load.ts`.
     (ajvFormats.default as unknown as FormatsPlugin)(this.#ajv);
+    // Annotations, not assertions: they constrain no parameter's value. Declared so that strict
+    // mode admits them, and refuses one given a value of the wrong type (`U-34`).
+    this.#ajv.addKeyword({ keyword: CREATE_ONLY, metaSchema: { type: 'boolean' } });
+    this.#ajv.addKeyword({ keyword: ENTRY_KEY, metaSchema: { type: 'string', minLength: 1 } });
   }
 
   register(type: SensorType): this {
@@ -163,6 +192,7 @@ export class SensorCatalogue {
     }
 
     const writeOnly = collectWriteOnly(type.paramsSchema, type.id);
+    assertCreateOnlyIsPlaced(type.paramsSchema, type.id);
     assertSecretsSayWhereTheyGo(type, writeOnly);
     assertPinsWhatItUses(type);
     assertOnePrimaryChannel(type);
@@ -857,6 +887,91 @@ function collectWriteOnly(schema: JsonSchema, typeId: string, prefix = ''): read
         walk(child, path, true);
       }
     }
+  }
+}
+
+/**
+ * Refuses an `x-createOnly` the edit form could not honour (`U-34`).
+ *
+ * - **Not behind a combinator** other than an array's `items`. Which branch of a `oneOf` applies
+ *   depends on the value, and a form that guessed would lock a field the core accepts or leave
+ *   open one it refuses.
+ * - **Not on a `writeOnly` parameter.** The form is never sent a secret's value, so it has nothing
+ *   to show read-only, and keeping a secret is already what leaving it alone does.
+ * - **Inside an array, only where the entry names its key** (`x-entryKey`), and the key is a
+ *   required property of the entry. Without one the form cannot tell an entry the sensor already
+ *   has from one this edit added, which may take either value.
+ */
+function assertCreateOnlyIsPlaced(schema: JsonSchema, typeId: string): void {
+  walk(schema, '', true, false);
+
+  function walk(node: unknown, path: string, keyed: boolean, insideCombinator: boolean): void {
+    if (typeof node !== 'object' || node === null || Array.isArray(node)) return;
+    const record = node as Record<string, unknown>;
+
+    if (record[CREATE_ONLY] === true) {
+      const refuse = (why: string): never => {
+        throw new SensorTypeError(
+          'BAD_SENSOR_TYPE',
+          `sensor type "${typeId}" marks "${path}" ${CREATE_ONLY} ${why}`,
+        );
+      };
+      if (insideCombinator) {
+        refuse('inside a schema combinator, where the form cannot tell when it applies');
+      }
+      if (record['writeOnly'] === true) {
+        refuse('and writeOnly: the form is never sent its value, so it has nothing to show');
+      }
+      if (!keyed) {
+        refuse(
+          `inside an array entry that does not name its key: give the entry schema ${ENTRY_KEY}, ` +
+            'naming the required property that says which entry it is',
+        );
+      }
+    }
+
+    const properties = record['properties'];
+    if (typeof properties === 'object' && properties !== null) {
+      for (const [key, child] of Object.entries(properties as Record<string, unknown>)) {
+        walk(child, path === '' ? key : `${path}.${key}`, keyed, insideCombinator);
+      }
+    }
+
+    const items = record['items'];
+    if (items !== undefined) {
+      walk(items, `${path}.*`, keyed && namesItsKey(items), insideCombinator);
+    }
+
+    for (const keyword of COMBINATORS) {
+      if (keyword === 'items') continue;
+      const branch = record[keyword];
+      if (branch === undefined) continue;
+      for (const child of Array.isArray(branch) ? branch : [branch]) walk(child, path, keyed, true);
+    }
+  }
+
+  /** Whether an array's entry schema names a required property of its own as its key. */
+  function namesItsKey(items: unknown): boolean {
+    if (typeof items !== 'object' || items === null || Array.isArray(items)) return false;
+    const record = items as Record<string, unknown>;
+    const key = record[ENTRY_KEY];
+    if (typeof key !== 'string') return false;
+    const properties = record['properties'];
+    const required = record['required'];
+    const named =
+      typeof properties === 'object' &&
+      properties !== null &&
+      Object.hasOwn(properties, key) &&
+      Array.isArray(required) &&
+      required.includes(key);
+    if (!named) {
+      throw new SensorTypeError(
+        'BAD_SENSOR_TYPE',
+        `sensor type "${typeId}" names ${ENTRY_KEY} "${key}", which is not a required property ` +
+          'of the entry it is on',
+      );
+    }
+    return true;
   }
 }
 

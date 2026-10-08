@@ -1,11 +1,17 @@
 import { useCallback, useId, useMemo, useState } from 'react';
 import {
+  existingEntry,
+  existingWithin,
+  FIXED_REASON,
   fieldsOf,
+  fixedChangedReason,
+  fixedState,
   isMultiline,
   newEntryFor,
   readAt,
   removeAt,
   writeAt,
+  type Existing,
   type FieldModel,
   type JsonSchema,
 } from './schema';
@@ -25,6 +31,14 @@ export interface SchemaFormProps {
   readonly disabled?: boolean;
   /** Problems the server reported, keyed by the path it named. */
   readonly serverProblems?: readonly FieldProblem[];
+  /**
+   * The stored parameters of the sensor being edited; absent when adding one (`U-34`).
+   *
+   * What decides whether a field marked `x-createOnly` is shown read-only. Not `values`, which
+   * move as the operator types: an entry they add to an array is new however long it has been on
+   * the screen, and only what is stored says which entries the sensor already has.
+   */
+  readonly existing?: Record<string, unknown>;
 }
 
 /**
@@ -49,6 +63,7 @@ export function SchemaForm({
   onReplace,
   disabled = false,
   serverProblems = [],
+  existing,
 }: SchemaFormProps): React.JSX.Element {
   const fields = useMemo(() => fieldsOf(schema), [schema]);
   const [touched, setTouched] = useState<ReadonlySet<string>>(new Set());
@@ -76,6 +91,7 @@ export function SchemaForm({
           touched={touched}
           markTouched={markTouched}
           serverProblems={serverProblems}
+          existing={existing}
         />
       ))}
     </div>
@@ -93,6 +109,8 @@ interface FieldProps {
   touched: ReadonlySet<string>;
   markTouched: (path: string) => void;
   serverProblems: readonly FieldProblem[];
+  /** What the sensor already has around this field (`U-34`); `existingWithin` says how. */
+  existing: Existing;
 }
 
 function Field(props: FieldProps): React.JSX.Element {
@@ -101,6 +119,7 @@ function Field(props: FieldProps): React.JSX.Element {
     return <ArrayField {...props} items={field.items} />;
   }
   if (field.kind === 'object') {
+    const within = existingWithin(props.existing, field.name);
     return (
       <fieldset className="border border-border px-3 pb-3 pt-1">
         <legend className="px-1 text-xs font-medium uppercase tracking-wide text-text-muted">
@@ -111,7 +130,7 @@ function Field(props: FieldProps): React.JSX.Element {
         )}
         <div className="space-y-4">
           {field.children.map((child) => (
-            <Field key={child.path} {...props} field={child} />
+            <Field key={child.path} {...props} field={child} existing={within} />
           ))}
         </div>
       </fieldset>
@@ -131,11 +150,13 @@ function Control({
   touched,
   markTouched,
   serverProblems,
+  existing,
 }: FieldProps): React.JSX.Element {
   const id = useId();
   const value = readAt(values, field.path);
   const isSet = redacted.includes(field.path);
   const beingReplaced = replacing.has(field.path);
+  const fixed = fixedState(field, existing, value);
 
   const problems = [
     ...serverProblems.filter((problem) => problem.path === field.path),
@@ -143,6 +164,7 @@ function Control({
   ];
   const describedBy = [
     field.description === undefined ? null : `${id}-hint`,
+    fixed.kind === 'open' ? null : `${id}-fixed`,
     problems.length > 0 ? `${id}-problem` : null,
   ]
     .filter((entry) => entry !== null)
@@ -201,6 +223,7 @@ function Control({
           disabled={disabled}
           describedBy={describedBy}
           invalid={problems.length > 0}
+          readOnly={fixed.kind === 'locked'}
           onValue={(next) => {
             set(next);
           }}
@@ -208,6 +231,12 @@ function Control({
             markTouched(field.path);
           }}
         />
+      )}
+
+      {fixed.kind !== 'open' && (
+        <p id={`${id}-fixed`} className="text-xs text-text-muted">
+          {fixed.kind === 'locked' ? FIXED_REASON : fixedChangedReason(fixed.stored)}
+        </p>
       )}
 
       {problems.length > 0 && (
@@ -362,11 +391,13 @@ function Entry({
   const entryLabel = items.title ?? props.field.label;
 
   // An array *of scalars* has no properties to lay out, so the entry is one control at the entry's
-  // own path — a list of strings is as legitimate a repeating parameter as a list of objects.
+  // own path — a list of strings is as legitimate a repeating parameter as a list of objects. No
+  // key to tell a stored entry from a new one, so nothing in it is fixed (`U-34`).
   if (children.length === 0) {
     return (
       <Field
         {...props}
+        existing={undefined}
         field={{
           path,
           name: String(index),
@@ -376,6 +407,7 @@ function Entry({
           schema: items,
           required: true,
           writeOnly: items.writeOnly === true,
+          createOnly: false,
           children: [],
           items: items.items,
         }}
@@ -383,10 +415,18 @@ function Entry({
     );
   }
 
+  // The stored entry this one *is*, by its key and not its position (`U-34`): an entry the
+  // operator added, or one whose key they changed to something the sensor does not have, is new.
+  const existing = existingEntry(
+    items,
+    readAt(props.values, path),
+    props.existing?.[props.field.name],
+  );
+
   return (
     <div className="space-y-4">
       {children.map((child) => (
-        <Field key={child.path} {...props} field={child} />
+        <Field key={child.path} {...props} field={child} existing={existing} />
       ))}
     </div>
   );

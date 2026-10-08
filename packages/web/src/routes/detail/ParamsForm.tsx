@@ -5,6 +5,7 @@ import { MappingPreview } from '../../forms/MappingPreview';
 import { SchemaForm } from '../../forms/SchemaForm';
 import { fieldsOf, readAt, type JsonSchema } from '../../forms/schema';
 import { allProblems, type FieldProblem } from '../../forms/validate';
+import { modeChangesOf, type ModeChange } from './model';
 
 /**
  * A sensor's parameters, edited through the form its type's schema generates (`U-08`).
@@ -63,6 +64,8 @@ export function ParamsForm({
       </p>
     );
   }
+
+  const modeChanges = failed === null ? null : modeChangesOf(failed);
 
   const save = (): void => {
     setSaving(true);
@@ -125,6 +128,7 @@ export function ParamsForm({
         onReplace={onReplace}
         disabled={saving}
         serverProblems={serverProblems}
+        existing={stored}
       />
 
       {type.hasPreview && <MappingPreview typeId={type.id} params={values} />}
@@ -162,8 +166,11 @@ export function ParamsForm({
         )}
       </div>
 
-      {failed !== null && (
-        <p className="text-xs text-down-fg">
+      {failed !== null && modeChanges !== null && (
+        <ModeRefusal error={failed} changes={modeChanges} />
+      )}
+      {failed !== null && modeChanges === null && (
+        <p className="text-xs text-down-fg" role="alert">
           {failed.message}
           {failed.status === 412 &&
             ' — somebody else changed this sensor since this form was opened. Reload to see' +
@@ -174,5 +181,46 @@ export function ParamsForm({
         </p>
       )}
     </form>
+  );
+}
+
+/**
+ * The core refused an edit that would turn a channel from a counter into a gauge or back
+ * (`P-303`, `U-34`).
+ *
+ * **Said in full, not as a line of small red text under the buttons.** The refusal is not a typo
+ * to correct: the edit cannot be made to this sensor at all, and the way forward is a different
+ * action — put the value back, or add a new sensor. So it names each channel and direction, and
+ * keeps the core's own sentence, which says why. `role="alert"` because it appears after a submit,
+ * away from where focus is, and nothing else would tell a screen reader the save did not happen.
+ */
+function ModeRefusal({
+  error,
+  changes,
+}: {
+  error: ApiError;
+  changes: readonly ModeChange[];
+}): React.JSX.Element {
+  return (
+    <div role="alert" className="space-y-2 border border-down-border bg-down-bg p-3 text-sm">
+      <p className="font-medium text-down-fg">
+        Not saved: this edit would change what{' '}
+        {changes.length > 1 ? 'these channels store' : 'a channel stores'}.
+      </p>
+      {changes.length > 0 && (
+        <ul className="list-disc space-y-1 pl-5 text-text">
+          {changes.map((change) => (
+            <li key={change.key}>
+              Channel <code className="font-mono">{change.key}</code>: a {change.from} cannot become
+              a {change.to}.
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="text-text">{error.message}</p>
+      {error.correlationId !== undefined && (
+        <p className="font-mono text-xs text-text-muted">{error.correlationId}</p>
+      )}
+    </div>
   );
 }

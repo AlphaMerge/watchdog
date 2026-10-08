@@ -22480,11 +22480,56 @@ because each is a decision rather than a defect:
         - refusal checked only below the listener's version: failed 1;
         - refused whenever the time is null: failed 8.
 
-- [ ] **U-34 — the edit form offers a mode the core will refuse** · XS · P-303 · Found 2026-10-08
+- [x] **U-34 — the edit form offers a mode the core will refuse** · XS · P-303 · Found 2026-10-08
       in `P-303`. `snmp.custom`'s and `snmp.table` columns' `mode` is fixed once the sensor exists
       (`409 OBJECT_CHANNEL_MODE_FIXED`), but the edit form leaves it enabled and only shows the
       refusal after submit. **Done when** the form shows it read-only on an existing sensor, says
       why, with a test (WCAG 2.1 AA).
+
+      **U-34 outcome. A schema annotation the catalogue and the form both read, and no type id in
+      the web package.**
+      - **`'x-createOnly': true`** on a parameter says it is fixed once the sensor exists;
+        `snmp.custom`'s `mode` and `snmp.table`'s column `mode` carry it. Inside an array the entry
+        schema also names its key, **`'x-entryKey': 'column'`**, because an entry's position is not
+        its identity: columns reorder, and a column added above the others moves every one, so a
+        lock by index would hold the wrong column after the first move. An entry whose key the
+        sensor does not have (added, or its column retyped to a new one) stays open, as the core
+        allows. The catalogue declares both keywords to Ajv (strict mode admits them and refuses a
+        wrong-typed value) and refuses at registration an annotation the form could not honour:
+        behind a combinator, on a `writeOnly` parameter, or in an array entry that names no key or
+        a key that is not a required property of it (`CREATE_ONLY`, `ENTRY_KEY`,
+        `assertCreateOnlyIsPlaced`). The sensor reference flags it (**fixed once created**), and
+        `adding-a-sensor-type.md` states it beside `P-303`'s rule and in the registration table.
+      - **The annotation warns; the core still decides.** The 409 is judged from the channels, so
+        nothing in the core's refusal changed.
+      - **The form** (`SchemaForm`'s new `existing` prop, the stored parameters, passed only by
+        `ParamsForm`, so adding a sensor is unchanged). A field is `open` (not fixed, or nothing
+        stored there), `locked` (stored, holding the stored value: a read-only text box) or
+        `changed` (stored, holding another value, reachable only by retyping a column's key to one
+        the sensor has as the other mode: left editable, saying what is stored, so it can be put
+        back). A read-only `<input>`, not a disabled `<select>`: a disabled control leaves the tab
+        order and some screen readers skip it with its reason, and `readonly` on a `<select>` is
+        ignored. The reason, "Fixed once the sensor exists; add a new sensor to change it.", is
+        tied by `aria-describedby` after the type's own description.
+      - **The 409 when it still comes** (a removed column put back as the other mode, which the
+        stored parameters no longer name; a stale form; another writer): a `role="alert"` block
+        naming each channel and direction from `details.channels`, with the core's own sentence and
+        correlation id, instead of a line of small text. Any other refusal keeps its old text and
+        now also has `role="alert"`.
+      - **Tests.** `packages/web/test/fixed-field.test.tsx` (20): the model's states table-driven;
+        a scalar read-only, focusable, its computed accessible description the hint plus the
+        reason, not changeable, and a select when adding; table columns locked, an added one open,
+        the lock following the column through a reorder, a retyped key opening it, a key retyped
+        to the other mode's column saying what is stored and re-locking when put back; the 409
+        rendered through `ParamsForm` against a stubbed fetch; a 412 still shown. Catalogue (7):
+        the shipped annotations exactly, admitted placements, each refusal, wrong-typed values.
+        Mutations: the model not reading the annotation fails 13; never read-only fails 7; entries
+        matched by position fails 3; reason not in `aria-describedby` fails 2; no refusal branch
+        fails 1; no `changed` state fails 3; no registration check fails 4; `snmp.table` without
+        the annotation fails 1.
+      - **Not done.** The add-sensor and template forms pass no `existing`, correctly; nothing
+        tells the form about a channel kept from a column an earlier edit removed, so that case is
+        the 409's.
 
 - [x] **U-35 — a probe refused at version 0 looks like one never recorded** · S · U-33 · Found
       2026-10-08 in `U-33`. A hello refused at 0 overwrites the recorded version with 0, which

@@ -26,6 +26,16 @@ export interface JsonSchema {
   readonly items?: JsonSchema;
   readonly minItems?: number;
   readonly maxItems?: number;
+  /**
+   * Fixed once the sensor exists (`U-34`): shown read-only when editing one, open when adding.
+   * The sensor catalogue documents it (`CREATE_ONLY`) and refuses one this form could not honour.
+   */
+  readonly 'x-createOnly'?: boolean;
+  /**
+   * On an array's entry schema: the property that says which existing entry this is (`U-34`), so
+   * a fixed field is matched to what the sensor has by what the entry *is*, not where it sits.
+   */
+  readonly 'x-entryKey'?: string;
 }
 
 /** What kind of control a property gets. `json` is the honest fallback, never a silent drop. */
@@ -43,6 +53,8 @@ export interface FieldModel {
   readonly required: boolean;
   /** A credential. Never populated from a read, and omitted from a save unless it was replaced. */
   readonly writeOnly: boolean;
+  /** Fixed once the sensor exists (`U-34`). What that means for a control is `fixedState`'s. */
+  readonly createOnly: boolean;
   /** Set for `kind: 'object'`. */
   readonly children: readonly FieldModel[];
   /**
@@ -130,6 +142,7 @@ export function fieldsOf(schema: JsonSchema, prefix = ''): FieldModel[] {
       schema: property,
       required: required.has(name),
       writeOnly: property.writeOnly === true,
+      createOnly: property['x-createOnly'] === true,
       children: kind === 'object' ? fieldsOf(property, path) : [],
       items: kind === 'array' ? property.items : undefined,
     };
@@ -322,4 +335,94 @@ export function removeAt(target: Record<string, unknown>, path: string): Record<
   if (Object.keys(pruned).length === 0) Reflect.deleteProperty(next, head);
   else next[head] = pruned;
   return next;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fixed once the sensor exists (`U-34`).
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * What the sensor already has, at the level of the object a field sits in: the stored parameters
+ * at the top, a stored object one level down, the stored entry an array entry *is* inside an
+ * array. `undefined` means nothing exists there yet — a sensor being added, or an entry this edit
+ * added — and a fixed field there may take any value.
+ */
+export type Existing = Readonly<Record<string, unknown>> | undefined;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * What exists inside an object field, given what exists around it.
+ *
+ * An object the stored parameters leave out still exists when its parent does: the core stores
+ * defaults, so an absent child is one whose every value is its default, not one being added.
+ */
+export function existingWithin(existing: Existing, name: string): Existing {
+  if (existing === undefined) return undefined;
+  const child = existing[name];
+  return isRecord(child) ? child : {};
+}
+
+/**
+ * The stored entry an array entry is, matched by the entry schema's `x-entryKey` (`U-34`).
+ *
+ * **By what the entry is, never by where it sits.** Entries reorder, and a column added above
+ * the others moves every one of them, so "the stored entry at this index" would lock the wrong
+ * column's mode after the first move and leave the right one open. An entry whose key matches
+ * nothing stored is new to this edit; so is every entry of an array whose schema names no key,
+ * which the catalogue refuses for any entry that holds a fixed field.
+ */
+export function existingEntry(items: JsonSchema, entry: unknown, storedEntries: unknown): Existing {
+  const key = items['x-entryKey'];
+  if (key === undefined || !isRecord(entry) || !Array.isArray(storedEntries)) return undefined;
+  const identity = entry[key];
+  if (identity === undefined) return undefined;
+  return (storedEntries as unknown[]).filter(isRecord).find((stored) => stored[key] === identity);
+}
+
+/**
+ * Why a field marked `x-createOnly` is read-only on an existing sensor (`U-34`).
+ *
+ * One sentence for every such field, because the reason is the same one: the core refuses the
+ * change (`P-303`), and the way to the other value is another sensor. The type's own description,
+ * shown above it, says what the field means and why it is fixed for that type.
+ */
+export const FIXED_REASON = 'Fixed once the sensor exists; add a new sensor to change it.';
+
+/** The same, for a `changed` field: what is stored, so the operator can put it back. */
+export function fixedChangedReason(stored: unknown): string {
+  const shown = typeof stored === 'string' ? stored : JSON.stringify(stored);
+  return (
+    `Fixed once the sensor exists, where it is “${shown}”: saving another value is refused. ` +
+    'Put it back, or add a new sensor to change it.'
+  );
+}
+
+/**
+ * Whether a fixed field can be changed here.
+ *
+ * - `open`: not fixed, or nothing exists here yet. The ordinary control.
+ * - `locked`: it exists and holds what is stored. Read-only, with the reason.
+ * - `changed`: it exists, and what the form holds is not what is stored. Only reachable inside an
+ *   array — an entry's key edited to name a column the sensor has with the other mode — and left
+ *   editable, saying what is stored, so the operator can put it back. Locking it would freeze a
+ *   value the core refuses, with no control to undo it but retyping the key.
+ *
+ * Absent is the schema's default on both sides, as the core stores it.
+ */
+export type FixedState =
+  | { readonly kind: 'open' }
+  | { readonly kind: 'locked' }
+  | { readonly kind: 'changed'; readonly stored: unknown };
+
+export function fixedState(field: FieldModel, existing: Existing, value: unknown): FixedState {
+  if (!field.createOnly || existing === undefined) return { kind: 'open' };
+  const fallback = defaultFor(field);
+  const stored = existing[field.name] ?? fallback;
+  const held = value ?? fallback;
+  return JSON.stringify(held) === JSON.stringify(stored)
+    ? { kind: 'locked' }
+    : { kind: 'changed', stored };
 }

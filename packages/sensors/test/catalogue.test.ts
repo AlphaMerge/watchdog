@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import { SensorCatalogue, SensorTypeError } from '../src/catalogue.js';
+import { CREATE_ONLY, ENTRY_KEY, SensorCatalogue, SensorTypeError } from '../src/catalogue.js';
 import type { ChannelDef, SensorType } from '../src/contract.js';
 import {
   sensorTypesFor,
@@ -847,5 +847,112 @@ describe('the built-in catalogue', () => {
         : result.problems.filter((problem) => !/required/i.test(problem.message));
       assert.deepEqual(bad, [], `${id} rejects its own defaults`);
     }
+  });
+});
+
+describe('a parameter fixed once the sensor exists (U-34)', () => {
+  /** A type whose schema is `properties`, with `pingType`'s everything else. */
+  const withSchema = (properties: Record<string, unknown>): SensorType =>
+    variant({ paramsSchema: { type: 'object', properties } });
+  const refused = (type: SensorType, pattern: RegExp): void => {
+    assert.throws(
+      () => new SensorCatalogue().register(type),
+      (error: unknown) =>
+        error instanceof SensorTypeError &&
+        error.code === 'BAD_SENSOR_TYPE' &&
+        pattern.test(error.message),
+    );
+  };
+  // No `default`: strict mode refuses one inside a combinator, which would refuse the combinator
+  // case below for a reason that is not this one.
+  const MODE = { enum: ['gauge', 'counter'], [CREATE_ONLY]: true };
+  const columns = (entry: Record<string, unknown>): Record<string, unknown> => ({
+    columns: { type: 'array', items: { type: 'object', ...entry } },
+  });
+
+  it('is what the shipped types whose mode an edit refuses carry, and no other type', () => {
+    // The two types `P-303`'s refusal can reach. The form reads the annotation, not these ids.
+    const shipped = standardCatalogue().summaries();
+    const fixed = shipped.flatMap((summary) => {
+      const found: string[] = [];
+      const walk = (node: unknown, path: string): void => {
+        if (typeof node !== 'object' || node === null) return;
+        const record = node as Record<string, unknown>;
+        if (record[CREATE_ONLY] === true) found.push(`${summary.id}:${path}`);
+        const properties = (record['properties'] ?? {}) as Record<string, unknown>;
+        for (const [key, child] of Object.entries(properties)) {
+          walk(child, path === '' ? key : `${path}.${key}`);
+        }
+        if (record['items'] !== undefined) walk(record['items'], `${path}.*`);
+      };
+      walk(summary.paramsSchema, '');
+      return found;
+    });
+    assert.deepEqual(fixed.sort(), ['snmp.custom:mode', 'snmp.table:columns.*.mode']);
+    const table = shipped.find((summary) => summary.id === 'snmp.table');
+    const properties = table?.paramsSchema['properties'] as Record<string, Record<string, unknown>>;
+    const items = properties['columns']?.['items'] as Record<string, unknown>;
+    assert.equal(items[ENTRY_KEY], 'column');
+  });
+
+  it('admits the annotation on a plain property and on a keyed array entry', () => {
+    const c = new SensorCatalogue();
+    c.register(withSchema({ mode: MODE }));
+    c.register(
+      variant({
+        id: 'test.keyed',
+        paramsSchema: {
+          type: 'object',
+          properties: columns({
+            [ENTRY_KEY]: 'column',
+            required: ['column'],
+            properties: { column: { type: 'string' }, mode: MODE },
+          }),
+        },
+      }),
+    );
+    // An annotation only: it constrains no value.
+    assert.equal(c.validate('icmp.ping', { mode: 'counter' }).valid, true);
+  });
+
+  it('refuses one inside a combinator', () => {
+    refused(
+      withSchema({ reading: { oneOf: [{ type: 'object', properties: { mode: MODE } }] } }),
+      /"reading\.mode" x-createOnly inside a schema combinator/,
+    );
+  });
+
+  it('refuses one on a writeOnly parameter', () => {
+    refused(
+      withSchema({ token: { type: 'string', writeOnly: true, [CREATE_ONLY]: true } }),
+      /"token" x-createOnly and writeOnly/,
+    );
+  });
+
+  it('refuses one in an array entry that does not name its key', () => {
+    refused(
+      withSchema(columns({ properties: { column: { type: 'string' }, mode: MODE } })),
+      /"columns\.\*\.mode" x-createOnly inside an array entry that does not name its key/,
+    );
+  });
+
+  it('refuses a key that is not a required property of the entry', () => {
+    const entry = { properties: { column: { type: 'string' }, mode: MODE } };
+    refused(
+      withSchema(columns({ ...entry, [ENTRY_KEY]: 'column' })),
+      /x-entryKey "column", which is not a required property/,
+    );
+    refused(
+      withSchema(columns({ ...entry, [ENTRY_KEY]: 'index', required: ['column'] })),
+      /x-entryKey "index", which is not a required property/,
+    );
+  });
+
+  it('refuses an annotation given a value of the wrong type, as strict mode does any keyword', () => {
+    refused(withSchema({ mode: { ...MODE, [CREATE_ONLY]: 'yes' } }), /unusable paramsSchema/);
+    refused(
+      withSchema(columns({ [ENTRY_KEY]: 3, properties: { mode: { type: 'string' } } })),
+      /unusable paramsSchema/,
+    );
   });
 });

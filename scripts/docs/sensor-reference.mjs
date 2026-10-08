@@ -272,6 +272,8 @@ for (const category of categories) {
       const flags = [];
       if (required.has(key)) flags.push('**required**');
       if (schema.writeOnly === true) flags.push('**write-only**');
+      // `U-34`: what the edit form shows read-only, and the core refuses to change.
+      if (schema['x-createOnly'] === true) flags.push('**fixed once created**');
       say(
         `| \`${key}\` | ${typeOf(schema)} | ${defaultOf(schema)} | ${boundsOf(schema)} | ${flags.join(' ')} |`,
       );

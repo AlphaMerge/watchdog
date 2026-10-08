@@ -213,6 +213,7 @@ export function fieldFor(setting: SettingView, prefix: string): FieldModel {
     // Calling it required would make that unreachable through the control.
     required: !nullable,
     writeOnly: false,
+    createOnly: false,
     children: [],
     // Never an array: a setting is one value at one key, and `U-12`'s repeating control is for a
     // sensor type's parameters. An array-typed setting falls to the JSON box above.
@@ -227,4 +228,43 @@ export function fieldFor(setting: SettingView, prefix: string): FieldModel {
 /** A kind's settings pre-filled from the defaults its schema declares. */
 export function seedFrom(kind: TriggerKind | undefined): Record<string, unknown> {
   return seedDefaults(kind?.settingsSchema ?? {});
+}
+
+// ---------------------------------------------------------------------------------------------
+// Parameters (U-34).
+// ---------------------------------------------------------------------------------------------
+
+/** One channel an edit would have turned into the other mode, as the core names it (`P-303`). */
+export interface ModeChange {
+  readonly key: string;
+  readonly from: string;
+  readonly to: string;
+}
+
+/**
+ * The channels a `409 OBJECT_CHANNEL_MODE_FIXED` names, or `null` for any other refusal.
+ *
+ * **Still reachable with the form doing its part.** A field marked `x-createOnly` is read-only
+ * for an entry the sensor has, but a table column taken out by one edit keeps its channel, and
+ * putting it back as the other mode is an entry the stored parameters no longer name — so the
+ * form leaves it open and the core refuses it. A stale form, or another writer, gets here too.
+ *
+ * Read defensively: `details` is whatever the core sent, and a list item missing a field is
+ * dropped rather than shown as "undefined into a undefined".
+ */
+export function modeChangesOf(error: {
+  readonly status: number;
+  readonly code: string;
+  readonly details: Readonly<Record<string, unknown>>;
+}): readonly ModeChange[] | null {
+  if (error.status !== 409 || error.code !== 'OBJECT_CHANNEL_MODE_FIXED') return null;
+  const raw = error.details['channels'];
+  if (!Array.isArray(raw)) return [];
+  return (raw as unknown[]).flatMap((entry) => {
+    if (typeof entry !== 'object' || entry === null) return [];
+    const { key, from, to } = entry as Record<string, unknown>;
+    return typeof key === 'string' && typeof from === 'string' && typeof to === 'string'
+      ? [{ key, from, to }]
+      : [];
+  });
 }

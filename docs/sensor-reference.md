@@ -564,7 +564,7 @@ Every sensor of this type has:
 | `timeoutMs` | integer | `5000` | ≥ 100, ≤ 60000 |  |
 | `retries` | integer | `1` | ≥ 0, ≤ 5 |  |
 | `oid` | string |  | ≥ 1 chars, ≤ 255 chars | **required** |
-| `mode` | `gauge` · `counter` | `"gauge"` |  |  |
+| `mode` | `gauge` · `counter` | `"gauge"` |  | **fixed once created** |
 | `channelName` | string | `"Value"` | ≥ 1 chars, ≤ 200 chars |  |
 | `unit` | string | _(empty)_ | ≤ 50 chars |  |
 

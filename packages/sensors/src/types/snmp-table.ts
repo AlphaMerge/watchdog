@@ -107,6 +107,9 @@ const COLUMN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: ['column', 'name'],
+  // An entry is the column it reads, wherever it sits in the list: the channel key comes from
+  // `column`, so that is what tells a column the sensor has from one an edit adds (`U-34`).
+  'x-entryKey': 'column',
   properties: {
     column: {
       type: 'string',
@@ -137,6 +140,8 @@ const COLUMN_SCHEMA = {
     mode: {
       enum: ['gauge', 'counter'],
       default: 'gauge',
+      // Fixed for a column the sensor has; a column an edit adds may take either (`U-34`).
+      'x-createOnly': true,
       title: 'Reading type',
       description:
         'A gauge is stored as it is read. A counter only ever goes up and is stored as a rate — ' +

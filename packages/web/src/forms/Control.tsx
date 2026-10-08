@@ -29,6 +29,13 @@ function optionOf(value: unknown): string {
 
 const INPUT_CLASS = 'border bg-surface px-2 py-1 text-sm text-text';
 
+/** A value as a read-only box shows it: what its own control would have shown, as text. */
+function displayOf(field: FieldModel, value: unknown): string {
+  if (field.kind === 'boolean') return value === true ? 'Yes' : 'No';
+  if (field.kind === 'json') return value === undefined ? '' : JSON.stringify(value);
+  return optionOf(value);
+}
+
 export function SchemaControl({
   id,
   field,
@@ -38,6 +45,7 @@ export function SchemaControl({
   invalid,
   onValue,
   onBlur,
+  readOnly = false,
 }: {
   id: string;
   field: FieldModel;
@@ -47,7 +55,26 @@ export function SchemaControl({
   invalid: boolean;
   onValue: (next: unknown) => void;
   onBlur: () => void;
+  /** Shown and announced, never changed (`U-34`). The caller says why, through `describedBy`. */
+  readOnly?: boolean;
 }): React.JSX.Element {
+  if (readOnly) {
+    // **A read-only text box, whatever the kind**, rather than the kind's own control disabled.
+    // A disabled control leaves the tab order and some screen readers skip it, so the reason tied
+    // to it by `aria-describedby` is never read; and a `<select>` has no read-only state at all —
+    // `readonly` on one is ignored and the value still changes. A text box with `readOnly` is
+    // focusable, announced as read-only with its label and its reason, and cannot be changed.
+    return (
+      <input
+        id={id}
+        type="text"
+        readOnly
+        value={displayOf(field, value)}
+        aria-describedby={describedBy === '' ? undefined : describedBy}
+        className="w-64 border border-control bg-surface-muted px-2 py-1 text-sm text-text"
+      />
+    );
+  }
   // `-fg` and not `-border` for the invalid case: the pale border tint is 1.7:1 on the light
   // surface, and an error outline is a state indicator, which WCAG 1.4.11 holds to 3:1. The
   // message underneath and `aria-invalid` carry it too — this is the one a sighted mouse user

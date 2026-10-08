@@ -45,6 +45,9 @@ export const snmpCustom: SensorType = {
       mode: {
         enum: ['gauge', 'counter'],
         default: 'gauge',
+        // The edit form shows it read-only on an existing sensor; the core refuses the change
+        // either way (`P-303`, `U-34`).
+        'x-createOnly': true,
         title: 'Reading type',
         description:
           'A gauge is stored as it is read — a temperature, a percentage, a queue depth. A ' +
