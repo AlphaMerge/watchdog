@@ -2080,26 +2080,33 @@ export class ObjectService {
       const sensorTypes = new Set<string>();
 
       for (const level of plan.levels) {
+        // Normalised once, and the same parameters are stored and asked for channels (`P-304`):
+        // as `create` does, so a type whose channels depend on a defaulted parameter gets the
+        // same channels whichever route made the sensor.
+        const normalised = level.map((node) => ({
+          node,
+          input: this.#normalisedFor(node.input, input.parentId),
+        }));
         const written = await this.#repo.createLevel(
           q,
-          level.map((node) => ({
+          normalised.map(({ node, input: filled }) => ({
             // Resolved here rather than in the planner because only this point knows the ids:
             // the planner works in indices, which is what makes it testable without a database.
             parentId: node.parentId ?? ids.get(node.parentIndex ?? -1) ?? input.parentId,
-            input: this.#normalisedFor(node.input, input.parentId),
+            input: filled,
           })),
         );
-        level.forEach((node, at) => {
+        normalised.forEach(({ node, input: filled }, at) => {
           const id = written[at];
           /* c8 ignore next -- createLevel returns one id per node or throws */
           if (id === undefined) return;
           ids.set(node.index, id);
-          if (node.input.kind !== 'sensor') return;
+          if (filled.kind !== 'sensor') return;
           sensors.push(id);
-          sensorTypes.add(node.input.sensorType);
+          sensorTypes.add(filled.sensorType);
           for (const draft of this.#sensorTypes.channelsFor(
-            node.input.sensorType,
-            node.input.params ?? {},
+            filled.sensorType,
+            filled.params ?? {},
           )) {
             drafts.push({ sensorId: id, draft });
           }

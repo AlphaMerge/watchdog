@@ -443,6 +443,17 @@ old name is refused rather than saving it back. Nothing is merged or deleted. If
 would still clash, because somebody had already used that exact name, the rollback stops and
 changes nothing; rename one of the two and run it again.
 
+**Migration 073 repairs channels, and its rollback keeps the repair.** Until it, a cloned sensor's
+channels lost their lookup and counter width, so a cloned traffic sensor stored the interface's
+cumulative byte count where the rate belongs, and its status channel was judged by nothing. 073
+gives every channel the lookup and counter width its sensor type declares where the row has
+none (a lookup somebody set or cleared by hand is left as it is), marks thresholds a clone copied
+as set by hand unless they are the type's own default, and logs how many, by type. The
+totals already stored stay in the history: a graph across the upgrade shows them climbing, a gap
+of one scan, then rates far below them. A repaired status channel is judged from the next scan,
+so an interface that was down all along turns its sensor Down then. `migrate down` past 073
+leaves the repaired rows as they are; the release before reads them correctly.
+
 ## Uninstalling
 
 ```bash

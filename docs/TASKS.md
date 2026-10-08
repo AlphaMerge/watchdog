@@ -10935,7 +10935,7 @@ because each is a decision rather than a defect:
       Warning with a scenario test (`M-17`) showing it does not hold a sensor in Warning for good,
       as `P-283` found for the probe.
 
-- [ ] **P-302 — a cloned sensor's channels lose their lookup, counter width and limit source** ·
+- [x] **P-302 — a cloned sensor's channels lose their lookup, counter width and limit source** ·
       S · P-297 · Found 2026-10-08 in `P-297`. The clone path in `repository.ts` (about line 1812)
       copies channels without `lookup_id`, `counter_bits` and `limits_source`. A cloned
       `snmp.traffic` sensor stores cumulative octets as values on `in`/`out`/`total` and judges
@@ -10944,17 +10944,90 @@ because each is a decision rather than a defect:
       re-declares from the type), existing broken clones are repaired or said, with a test over the
       shipped types that declare lookups or counters.
 
+      **P-302 outcome. A clone copies every column of its source's channels, from one list a test
+      holds against the table; migration 073 repairs the rows the old clone wrote.**
+      - **Copied, not declared again.** A clone stores its source's `params` as they are, so its
+        type declares for it exactly what the source's create declared: for the declared columns
+        the two choices give the same row. They differ on everything else, which is an operator's
+        and which a declaration would lose: thresholds and `limits_source` (`S-18`), a lookup set or
+        cleared (`M-06`), scaling, decimals and the spike filter (`M-07`), the display flags. A
+        clone is its source. And the drift that caused this was a hand-written column list missing
+        the three columns added after it (009, 023, 038), so the fix is aimed at that:
+        `CLONED_CHANNEL_COLUMNS` builds the statement, and a test reads `channel`'s columns from
+        `information_schema` and requires each to be in it or in `CHANNEL_COLUMNS_A_CLONE_OWNS`. A
+        column added later fails that test until somebody decides.
+      - **Every column, and what a clone does with it.** Copied: `key`, `name`, `unit`,
+        `is_primary`, `lookup_id`, `counter_bits` (declared; no API sets the last one), `limits`
+        and `limits_source`, `scale_mul`, `scale_div`, `decimals`, `spike_min`, `spike_max`,
+        `show_in_graph`, `show_in_table`. Its own: `id` and `sensor_id` (new, so no history),
+        `created_at` and `updated_at`. Not copied, being keyed by the channel id:
+        `channel_counter`, so a clone's first counter reading is a `first`, as a new sensor's is,
+        and the samples. `limits_source` was the quiet one: written as `unset`, an operator's
+        threshold on a fixed type is replaced by the declared default at the next start.
+      - **Migration 073 (`channel-declared-shape`) repairs existing rows, with an `N-28` data step**
+        that builds the core's catalogue (`standardCatalogue(sensorTypesFor(BUILD.profile))`, not
+        through `profile.ts`, which would pull the v2 modules into the migrations' graph) and asks
+        each sensor's type with its stored parameters, in windows of sensor ids, filling only what
+        is empty. `counter_bits` where the type declares a counter. `lookup_id` where it declares
+        one, unless the audit log holds a `channel.lookup.set` for that sensor and key (an
+        operator's clear is kept; past the audit retention it is forgotten). `limits_source` on a
+        row holding thresholds as `unset`, which only the old clone wrote: `declared` if they are
+        exactly the type's declaration, else `operator`, as 038 decided. A set width or lookup is
+        never changed. A type this build does not register, or that throws for the stored
+        parameters, is left alone and counted (no `{}` guess written for good). Logged once with
+        counts by type. `up` comments `channel.lookup_id`; the rollback removes the comment and
+        keeps the rows, which the build before reads correctly. `installation.md` says so.
+      - **It repairs the shape, not only clones.** The row cannot say how it was made, and the
+        same rows came from ingestion before `P-80` (a key a later build declared) and from
+        `P-297`'s `{}` era; they are equally wrong and get the same fix. It also fills one
+        direction of `P-303` once: a sensor edited from gauge to counter mode becomes a counter.
+        The other direction (a counter edited to a gauge, a lookup edited to another) is left.
+      - **What an operator sees.** Stored totals stay: a total cannot become a rate after the fact,
+        and nothing rewrites history. The first reading after the upgrade has no baseline and
+        stores nothing; from the second, rates. A graph across it shows the climbing totals, a
+        one-scan gap, then rates far below. A rate threshold the totals held in Down or Warning
+        clears once rates arrive. A repaired status channel is judged from its next reading, so an
+        interface down all along turns its sensor Down then. No scenario test: the repair adds no
+        alarm path, and a repaired or newly cloned sensor alarms exactly as a freshly created one
+        of the same type and parameters, which the existing scenarios cover.
+      - **Tests** (`cloned-channels.test.ts`, shipped catalogue through `buildHarness`'s new
+        `catalogue` option): the column list against the table; a device holding `snmp.traffic`
+        (64 and 32 bits), `snmp.custom` in counter mode, `snmp.custom.string` with a lookup and
+        `snmp.table` with a counter and a lookup column cloned, each copy's rows equal to its
+        source's on every copied column and each holding the expected lookups and widths; the
+        source's operator threshold, scaling and display flag carried, its counter baseline not,
+        a cleared lookup kept cleared; the same for each sensor cloned alone. The repair: clones
+        put back in the old shape, then one sensor id a window, with an audit entry for one
+        lookup, a fixed type's declared and chosen thresholds, an unregistered type and one that
+        throws; counts asserted, and a second run writes nothing. And the migrator applying 073
+        to a database at 072 with a broken `snmp.traffic` row, the comment, the rollback keeping
+        the rows. Mutations (each restored byte for byte, `dist` rebuilt): the old column list
+        fails both clone tests; `limits_source` out of the list fails the column test, a clone
+        test and the repair test; the audit guard ignored, `declared` never chosen, and the data
+        step removed each fail their test.
+
+      - **Not done.** `P-303`'s other direction, as above.
+
 - [ ] **P-303 — an edit that changes a channel's mode or lookup does not redeclare it** · S ·
       P-297 · Found 2026-10-08 in `P-297`. An update replaces `params` and declares no channels, so
       `snmp.custom`'s `mode` or `snmp.custom.string`'s `lookup` changed by an edit leaves the stored
       row with what the create wrote. **Done when** an edit re-declares the channels it changes (or
       refuses the change and says why), with tests.
 
-- [ ] **P-304 — a tree create asks for channels with the raw parameters** · XS · P-296 · Found
+- [x] **P-304 — a tree create asks for channels with the raw parameters** · XS · P-296 · Found
       2026-10-08 in `P-296`. `createTree` (`service.ts`, about line 2100) passes
       `node.input.params`, where a single create passes the parameters with defaults filled, so a
       type whose channels depend on a defaulted parameter gets different channels by route.
       **Done when** both use the normalised parameters, with a test.
+
+      **P-304 outcome. Normalised once per node, and that input both stored and asked.**
+      `createTree` maps each level's nodes through `#normalisedFor` before `createLevel`, and the
+      channel drafts read the same object, so the parameters asked for channels are the ones
+      stored, as in `create`. Not surveyed across the catalogue; the obvious candidate,
+      `snmp.traffic`'s `counterWidth`, defaults to `auto`, which answers as `{}` does. Test (`channel-provisioning.test.ts`): a type whose default `mode: 'counter'` makes
+      `value` a counter and adds a channel, created with `{}` once by `create` and once in a tree;
+      both get `value` at 64 bits and `wraps`, and both store `{ mode: 'counter' }`. Mutation:
+      the raw parameters put back fails it.
 
 - [ ] **P-305 — a type's `channels()` that throws on valid parameters is still a 500** · XS ·
       P-296 · Found 2026-10-08 in `P-296`. Only `SensorTypeError` is turned into a 400 naming the

@@ -2,7 +2,7 @@ import { pino } from 'pino';
 import { PauseRepository } from '../../src/objects/pause-repository.js';
 import { Migrator } from '../../src/db/migrator.js';
 import { MIGRATIONS } from '../../src/db/migrations/index.js';
-import type { SensorType } from '@ms/sensors';
+import type { SensorCatalogue, SensorType } from '@ms/sensors';
 import { catalogueSensorTypeGate } from '../../src/objects/sensor-type-gate.js';
 import type { Database } from '../../src/db/pool.js';
 import { InheritanceResolver } from '../../src/settings/inheritance.js';
@@ -102,6 +102,11 @@ export async function buildHarness(
     states?: boolean;
     alarms?: AlarmReactor;
     types?: readonly SensorType[];
+    /**
+     * A whole catalogue in place of the test types and `types` (`P-302`): the shipped one, for a
+     * test about what the real types declare.
+     */
+    catalogue?: SensorCatalogue;
     /** The sensors the core is declining to evaluate (`A-29`); `SensorVouching.withheld`. */
     withheldSensors?: () => ReadonlyMap<number, string>;
     /** A lost probe's sensors (`R-05`); `ProbeReachability.unreachableSensors`. */
@@ -170,7 +175,7 @@ export async function buildHarness(
     resolver,
     audit,
     vault,
-    sensorTypes: catalogueSensorTypeGate(testCatalogue(options.types ?? [])),
+    sensorTypes: catalogueSensorTypeGate(options.catalogue ?? testCatalogue(options.types ?? [])),
     ...(states === undefined ? {} : { states }),
     ...(dependencies === undefined ? {} : { dependencyDelays: dependencies }),
     // Read-only, and unconditional: the pause view has to be able to say a schedule is holding

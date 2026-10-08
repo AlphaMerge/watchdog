@@ -31,6 +31,50 @@ import type {
   UpdateObjectInput,
 } from './types.js';
 
+/**
+ * The columns of `channel` a clone copies from its source's row (`P-302`).
+ *
+ * **Copied, not declared again from the type.** The copy carries its source's parameters as they
+ * are stored, so what its type declares for them is what the source's create declared: the
+ * declared columns (`name`, `unit`, `is_primary`, `lookup_id`, `counter_bits`, and `limits` with
+ * `limits_source`) come out the same either way. The rest are an operator's: thresholds and who
+ * set them (`S-18`), a lookup chosen or cleared (`M-06`), scaling, decimals and the spike filter
+ * (`M-07`), and the display flags. A declaration would lose those, and a clone is its source.
+ *
+ * `limits_source` matters as much as `limits`: written as `unset`, an operator's threshold on a
+ * fixed type is replaced by the declared default at the next start.
+ */
+export const CLONED_CHANNEL_COLUMNS = [
+  'key',
+  'name',
+  'unit',
+  'is_primary',
+  'lookup_id',
+  'counter_bits',
+  'limits',
+  'limits_source',
+  'scale_mul',
+  'scale_div',
+  'decimals',
+  'spike_min',
+  'spike_max',
+  'show_in_graph',
+  'show_in_table',
+] as const;
+
+/**
+ * The columns of `channel` a clone writes for itself (`P-302`): a new id and sensor, so it has
+ * none of its source's history (and none of its counter baseline, `channel_counter`, which is
+ * keyed by the id: the clone's first counter reading is a `first`, as a new sensor's is), and
+ * its own times.
+ */
+export const CHANNEL_COLUMNS_A_CLONE_OWNS = [
+  'id',
+  'sensor_id',
+  'created_at',
+  'updated_at',
+] as const;
+
 /** One advisory-lock namespace for every structural change to the tree. */
 const TREE_LOCK = `hashtext('ms:object-tree')::bigint`;
 
@@ -1807,13 +1851,15 @@ export class ObjectRepository {
 
     // New channel ids mean the clone has no history for free: samples (S-05) are keyed by
     // channel_id, so there is no path by which a clone could render its source's graph.
+    //
+    // **Every other column is the source's** (`P-302`), from one list a test holds against the
+    // table, so a column added later is copied or refused on purpose rather than forgotten: this
+    // statement once named its columns by hand and missed the three added after it, and a cloned
+    // traffic sensor stored cumulative octets and judged its status by nothing.
     const channelRows = await q.query<{ count: string }>(`
       WITH inserted AS (
-        INSERT INTO channel (sensor_id, key, name, unit, is_primary, scale_mul, scale_div,
-                             decimals, limits, spike_min, spike_max, show_in_graph, show_in_table)
-        SELECT m.new_id, ch.key, ch.name, ch.unit, ch.is_primary, ch.scale_mul, ch.scale_div,
-               ch.decimals, ch.limits, ch.spike_min, ch.spike_max, ch.show_in_graph,
-               ch.show_in_table
+        INSERT INTO channel (sensor_id, ${CLONED_CHANNEL_COLUMNS.join(', ')})
+        SELECT m.new_id, ${CLONED_CHANNEL_COLUMNS.map((column) => `ch.${column}`).join(', ')}
         FROM clone_map m JOIN channel ch ON ch.sensor_id = m.src_id
         RETURNING 1
       )

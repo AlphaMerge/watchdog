@@ -527,3 +527,100 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
     assert.deepEqual(shapes('test.unanswerable', { columns: [] }, 1).get('one'), bare);
   });
 });
+
+/**
+ * A type whose channels depend on a parameter with a default (`P-304`): `{}` is a gauge, and the
+ * filled-in `{ mode: 'counter' }` a counter with a second channel, as `snmp.custom`'s would be if
+ * its default were a counter. The stored parameters are the filled-in ones, whichever route made
+ * the sensor.
+ */
+const defaulted: SensorType = {
+  id: 'test.defaulted',
+  category: 'Custom',
+  costHint: 'light',
+  paramsSchema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: { mode: { enum: ['gauge', 'counter'], default: 'counter' } },
+  },
+  channels: (params) => [
+    {
+      key: 'value',
+      name: 'Value',
+      isPrimary: true,
+      ...(params['mode'] === 'counter' ? { counter: { bits: 64 as const } } : {}),
+    },
+    ...(params['mode'] === 'counter' ? [{ key: 'wraps', name: 'Wraps' }] : []),
+  ],
+  execute: () => Promise.resolve({ channels: [] }),
+};
+
+describe(
+  'a tree create declares channels from the parameters it stores (P-304)',
+  { skip: available ? false : 'no PostgreSQL reachable (start docker-compose.dev.yml)' },
+  () => {
+    let scratch: ScratchDatabase;
+    let harness: Harness;
+
+    before(async () => {
+      scratch = await createScratchDatabase('tree_channels');
+      harness = await buildHarness(scratch.db, { types: [defaulted] });
+    });
+
+    after(async () => {
+      await scratch.drop();
+    });
+
+    it('gives a sensor the channels a single create gives it, defaults filled', async () => {
+      const probe = await harness.service.create(testActor, {
+        kind: 'probe',
+        parentId: harness.rootId,
+        name: 'Probe',
+      });
+      const device = await harness.service.create(testActor, {
+        kind: 'device',
+        parentId: probe.id,
+        name: 'router',
+        host: '192.0.2.31',
+      });
+      const single = await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: device.id,
+        name: 'single',
+        sensorType: 'test.defaulted',
+        params: {},
+      });
+      const tree = await harness.service.createTree(testActor, {
+        parentId: probe.id,
+        nodes: [
+          { kind: 'device', name: 'switch', host: '192.0.2.32', ref: 'd' },
+          {
+            kind: 'sensor',
+            name: 'from a tree',
+            parentRef: 'd',
+            sensorType: 'test.defaulted',
+            params: {},
+          },
+        ],
+      });
+      const fromTree = tree.objects[1]?.id ?? assert.fail('no sensor in the tree');
+
+      const shape = (sensorId: number) =>
+        scratch.db.query<{ key: string; counter_bits: number | null }>(
+          'SELECT key, counter_bits FROM channel WHERE sensor_id = $1 ORDER BY key',
+          [sensorId],
+        );
+      const expected = [
+        { key: 'value', counter_bits: 64 },
+        { key: 'wraps', counter_bits: null },
+      ];
+      assert.deepEqual(await shape(single.id), expected);
+      assert.deepEqual(await shape(fromTree), expected);
+      // And what is stored is what was asked about: the default, on both.
+      for (const id of [single.id, fromTree]) {
+        const stored = await harness.service.get(id);
+        assert.deepEqual(stored.kind === 'sensor' ? stored.params : null, { mode: 'counter' });
+      }
+    });
+  },
+);

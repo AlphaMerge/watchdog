@@ -70,6 +70,7 @@ import { migration069 } from './069-probe-protocol-flap.js';
 import { migration070 } from './070-target-policy-exception.js';
 import { migration071 } from './071-legible-delivery-errors.js';
 import { migration072 } from './072-probe-protocol-accepted-at.js';
+import { migration073 } from './073-channel-declared-shape.js';
 import { migration043 } from './043-request-settled-at.js';
 
 /**
@@ -151,6 +152,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration070,
   migration071,
   migration072,
+  migration073,
 ];
 
 export type { Migration } from './types.js';
