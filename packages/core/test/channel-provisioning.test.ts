@@ -2,8 +2,10 @@ import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { pino } from 'pino';
 import { SensorCatalogue, standardCatalogue, type SensorType } from '@ms/sensors';
-import { encodedForms, type CheckResult } from '@ms/shared';
+import { encodedForms, type CheckResult, type IngestionConfig } from '@ms/shared';
 import { ChannelResolver } from '../src/ingestion/channels.js';
+import { Ingestor } from '../src/ingestion/ingestor.js';
+import { IngestionService } from '../src/ingestion/service.js';
 import { declaredChannelLookup, declaredLimitsLookup } from '../src/state/declared-limits.js';
 import type { Database } from '../src/db/pool.js';
 import {
@@ -263,10 +265,14 @@ describe(
         ),
       );
       // And a later channel of the first sensor: the same type, the same kind of error.
-      await db.tx((q) => resolver.resolve(q, [reading(typeError, 'later')]));
+      const later = await db.tx((q) => resolver.resolve(q, [reading(typeError, 'later')]));
 
       assert.equal(resolved.created, 4, 'every channel was still created');
       assert.equal(resolved.droppedReadings, 0);
+      // `P-306`: and every one of them counted, though the log said it twice.
+      assert.equal(resolved.createdUndeclared, 4);
+      assert.equal(later.created, 1);
+      assert.equal(later.createdUndeclared, 1);
       const rows = await db.query<{ sensor_id: string; key: string; counter_bits: number | null }>(
         'SELECT sensor_id::text AS sensor_id, key, counter_bits FROM channel ' +
           'WHERE sensor_id = ANY($1::bigint[]) ORDER BY sensor_id, key',
@@ -306,6 +312,105 @@ describe(
           assert.ok(!line.includes(form), `a secret reached the log as ${form}: ${line}`);
         }
         assert.ok(!line.includes(LABEL), `a parameter's value reached the log: ${line}`);
+      }
+    });
+
+    // `P-306`: the fallback was said once a type and kind of error, and counted nowhere an
+    // operator watches. Ingestion counts each channel it created from it, for Core Health; only
+    // those it created, since the lookup is asked again for every channel that exists already
+    // when the cache is empty, which after a restart is every one.
+    it('counts on ingestion the channels it created without their declared shape, and no others', async () => {
+      const fine = await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name: 'counted-fine',
+        sensorType: 'test.brittle',
+        params: { mode: 'fine' },
+      });
+      const broken = await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name: 'counted-broken',
+        sensorType: 'test.brittle',
+        params: { mode: 'fine' },
+      });
+      // Stored behind the type's back, as an earlier build would have left them.
+      await db.query('UPDATE sensor_config SET params = $2::jsonb WHERE object_id = $1', [
+        broken.id,
+        JSON.stringify({ mode: 'typeError', label: 'west' }),
+      ]);
+      await db.query('DELETE FROM channel WHERE sensor_id = ANY($1::bigint[])', [
+        [fine.id, broken.id],
+      ]);
+
+      const catalogue = testCatalogue([columns, brittle]);
+      const config: IngestionConfig = {
+        queueMaxRows: 200_000,
+        batchMaxRows: 5_000,
+        batchMaxDelayMs: 5,
+        slowDownAtPercent: 50,
+        retryAfterMs: 1_000,
+        replay: { maxConcurrentProbes: 4, stepMs: 250, maxDelayMs: 30_000, idleAfterMs: 30_000 },
+      };
+      const ingestor = new Ingestor({ db, logger: silent, config });
+      // A core's ingestion as `main.ts` builds it, and a second one standing for a restart: a
+      // resolver with nothing cached, over channels that exist.
+      const service = (): IngestionService =>
+        new IngestionService({
+          db,
+          logger: silent,
+          ingestor,
+          resolver: new ChannelResolver({
+            logger: silent,
+            declaredLimits: declaredLimitsLookup(catalogue),
+            declaredShape: declaredChannelLookup(catalogue),
+          }),
+        });
+      // Recent, so ingestion's clock checks take every result.
+      const since = Date.now() - 600_000;
+      let minute = 0;
+      const batch = (): Parameters<IngestionService['acceptResults']>[1] => {
+        minute += 1;
+        const at = new Date(since + minute * 60_000).toISOString();
+        return {
+          type: 'results',
+          batchId: `undeclared-${String(minute)}`,
+          results: [fine.id, broken.id].map((sensorId) => ({
+            sensorId,
+            at,
+            outcome: 'ok' as const,
+            message: '',
+            durationMs: 1,
+            channels: [
+              { key: 'value', value: minute },
+              { key: 'other', value: minute },
+            ],
+          })),
+        };
+      };
+      try {
+        const first = service();
+        assert.equal((await first.acceptResults('probe-1', batch())).type, 'results-ack');
+        assert.equal(first.stats().channelsCreated, 4);
+        assert.equal(
+          first.stats().channelsCreatedUndeclared,
+          2,
+          'the broken sensor’s two, not the fine one’s',
+        );
+        // The same channels again: cached, so nothing created and nothing counted.
+        assert.equal((await first.acceptResults('probe-1', batch())).type, 'results-ack');
+        assert.equal(first.stats().channelsCreatedUndeclared, 2);
+
+        const restarted = service();
+        assert.equal((await restarted.acceptResults('probe-1', batch())).type, 'results-ack');
+        assert.equal(restarted.stats().channelsCreated, 0);
+        assert.equal(
+          restarted.stats().channelsCreatedUndeclared,
+          0,
+          'asked again, created nothing',
+        );
+      } finally {
+        await ingestor.stop();
       }
     });
 
@@ -485,13 +590,18 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
       // Asked first: an unregistered type answers nothing, which would pass a row expecting it.
       assert.ok(catalogue.has(one.type), `${one.type} is not a shipped type`);
       assert.equal(catalogue.declaration(one.type).fixedChannels, undefined, 'not a fixed type');
-      assert.deepEqual(shipped(one.type, one.params, 1).get(one.key), one.shape, 'the sensor');
-      assert.deepEqual(shipped(one.type, {}, 1).get(one.key), one.bare, '`{}`');
+      const answer = shipped(one.type, one.params, 1);
+      assert.deepEqual(answer.shapes.get(one.key), one.shape, 'the sensor');
+      assert.equal(answer.undeclared, false, 'answered for its own parameters (`P-306`)');
+      assert.deepEqual(shipped(one.type, {}, 1).shapes.get(one.key), one.bare, '`{}`');
     });
   }
 
   it('answers nothing for a type this build does not register', () => {
-    assert.equal(shipped('gone.type', { anything: 1 }, 1).size, 0);
+    const answer = shipped('gone.type', { anything: 1 }, 1);
+    assert.equal(answer.shapes.size, 0);
+    // Nothing to fall back from: not counted as a channel created without its shape (`P-306`).
+    assert.equal(answer.undeclared, false);
   });
 
   it('falls back to `{}` only when the sensor’s own answer cannot be had', () => {
@@ -525,12 +635,23 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
     const shapes = declaredChannelLookup(catalogue.seal());
 
     const bare: Shape = { lookup: null, counterBits: 64 };
-    assert.deepEqual(shapes('test.fragile', { broken: true }, 1).get('total'), bare);
-    assert.deepEqual(shapes('test.fragile', { limited: true }, 1).get('total'), bare);
-    assert.equal(shapes('test.fragile', { limited: true }, 1).get('extra'), undefined);
-    // With no `{}` answer to fall back on it answers nothing, rather than throwing into ingestion.
-    assert.equal(shapes('test.unanswerable', {}, 1).size, 0);
-    assert.deepEqual(shapes('test.unanswerable', { columns: [] }, 1).get('one'), bare);
+    const broken = shapes('test.fragile', { broken: true }, 1);
+    const limited = shapes('test.fragile', { limited: true }, 1);
+    assert.deepEqual(broken.shapes.get('total'), bare);
+    assert.deepEqual(limited.shapes.get('total'), bare);
+    assert.equal(limited.shapes.get('extra'), undefined);
+    // Each fallback says so, for the resolver to count what it creates from it (`P-306`).
+    assert.equal(broken.undeclared, true);
+    assert.equal(limited.undeclared, true);
+    assert.equal(shapes('test.fragile', {}, 1).undeclared, false);
+    // With no `{}` answer to fall back on it answers nothing, rather than throwing into ingestion,
+    // and that is a fallback too.
+    const nothing = shapes('test.unanswerable', {}, 1);
+    assert.equal(nothing.shapes.size, 0);
+    assert.equal(nothing.undeclared, true);
+    const answered = shapes('test.unanswerable', { columns: [] }, 1);
+    assert.deepEqual(answered.shapes.get('one'), bare);
+    assert.equal(answered.undeclared, false);
   });
 });
 

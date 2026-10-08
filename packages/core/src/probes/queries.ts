@@ -265,7 +265,10 @@ export class ProbeQueryService {
    * whether the thing they just fixed works. The id is a random UUID, so this is not a guess
    * anyone makes by accident, and that is exactly why an answer from elsewhere is foreign rather
    * than late: it is refused, the caller keeps waiting for the real one, and Probe Health warns
-   * on the probe that sent it.
+   * on the probe that sent it. `from` is the sender as its session resolved it: the endpoint
+   * holds an answer from a session that has not been admitted or looked up yet until it has, and
+   * hands over nothing from one that was not approved (`P-307`), so a null here is a GID that has
+   * claimed no branch, and is counted in the totals only, as its batches are.
    *
    * **A result the core could not make fit is refused, and the query answered `too-old`**
    * (`P-289`). It used to close the link, so the caller was told the probe had gone and every

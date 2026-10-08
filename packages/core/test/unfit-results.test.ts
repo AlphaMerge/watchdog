@@ -14,13 +14,14 @@ import {
   RESULT_LIMITS,
   type CoreToProbeMessage,
   type IngestionConfig,
+  type ProbeQuery,
 } from '@ms/shared';
 import type { Database } from '../src/db/pool.js';
 import { Ingestor } from '../src/ingestion/ingestor.js';
 import { SensorOwnership } from '../src/ingestion/ownership.js';
 import { IngestionService } from '../src/ingestion/service.js';
 import { EMPTY_ASSIGNMENTS } from '../src/probes/config.js';
-import { ProbeQueryService } from '../src/probes/queries.js';
+import { ProbeQueryService, type QueryOutcome } from '../src/probes/queries.js';
 import { ProbeRefusals } from '../src/probes/refusals.js';
 import {
   ProbeEndpoint,
@@ -1052,6 +1053,193 @@ describe(
       } finally {
         await started.endpoint.stop();
       }
+    });
+
+    // `P-307`: an answer to a query someone still awaits was handed over as it arrived, as from
+    // the session's probe object, which is null until the admission and the lookup are done. So
+    // it was refused as foreign with `foreign(null)`: the fleet's totals rose and no probe's
+    // Probe Health did, and a peer nobody approved could raise them too.
+    describe('an answer to an awaited query from a session that has not said who it is (`P-307`)', () => {
+      const QUERY: ProbeQuery = {
+        kind: 'check',
+        assignment: {
+          sensorId: 1,
+          sensorType: 'icmp.ping',
+          params: {},
+          target: { host: '192.0.2.10', ipVersion: 'v4' },
+          intervalSeconds: 60,
+          timeoutMs: 5_000,
+        },
+      };
+
+      /** A query service whose sender records each query's id and says it was sent. */
+      function awaiting(): { queries: ProbeQueryService; asked: string[] } {
+        const asked: string[] = [];
+        const queries = new ProbeQueryService({
+          logger: silent,
+          refusals,
+          sender: {
+            sendQuery: (_probe, message) => {
+              if (message.kind === 'ask') asked.push(message.queryId);
+              return { kind: 'sent' };
+            },
+          },
+        });
+        return { queries, asked };
+      }
+
+      /** Asks, and keeps what it was told and whether it has been told anything yet. */
+      function ask(
+        queries: ProbeQueryService,
+        probeObjectId: number,
+      ): { told: () => QueryOutcome | undefined; settled: Promise<QueryOutcome> } {
+        let outcome: QueryOutcome | undefined;
+        // Long, so a loaded machine does not end it: the caller's deadline is not what is tested.
+        const settled = queries.ask(probeObjectId, QUERY, { timeoutMs: 120_000 }).then((one) => {
+          outcome = one;
+          return one;
+        });
+        return { told: () => outcome, settled };
+      }
+
+      it('waits for the probe to be known: answers the query it was asked, refuses another’s on itself', async () => {
+        const gate = { open: (): void => undefined };
+        const opened = new Promise<void>((resolve) => {
+          gate.open = resolve;
+        });
+        const { queries, asked } = awaiting();
+        const started = await startEndpoint({
+          queries,
+          probeObjectFor: async () => {
+            await opened;
+            return probeId;
+          },
+        });
+        // One put to this probe, and one to another that this one has no business answering.
+        const mine = ask(queries, probeId);
+        const another = ask(queries, probeId + 1_000_000);
+        try {
+          assert.ok(dir !== undefined);
+          assert.equal(asked.length, 2);
+          const [mineId, anotherId] = asked as [string, string];
+          const probe = await RawPeer.connect(dir, started.port);
+          try {
+            probe.send({
+              type: 'hello',
+              protocolVersion: PROTOCOL_VERSION,
+              gid: 'reconnecting',
+              displayName: 'Reconnecting',
+              agentVersion: '1.0.0',
+              accessKey: '',
+            });
+            await probe.waitFor('the welcome', (m) => (m.type === 'welcome' ? m : undefined));
+            const totals = refusals.stats().foreign;
+            const mineBefore = refusals.countsFor(probeId).foreignRecently;
+            probe.send({ type: 'query-result', queryId: mineId, result: good(sensors[4] ?? 0, 7) });
+            probe.send({
+              type: 'query-result',
+              queryId: anotherId,
+              result: good(sensors[4] ?? 0, 8),
+            });
+            // Answered at once and behind nothing: once its ack is here, both answers have been
+            // taken, while the branch is still being looked up.
+            probe.send({ type: 'heartbeat', seq: 1, sentAt: at() });
+            await probe.waitFor('the heartbeat’s ack', (m) =>
+              m.type === 'heartbeat-ack' ? m : undefined,
+            );
+            assert.equal(queries.stats().foreign, 0, 'judged against no probe');
+            assert.equal(refusals.stats().foreign, totals, 'the totals did not move');
+            assert.equal(queries.stats().answered, 0);
+            // What the callers are told meanwhile: nothing. Both are still waiting.
+            assert.equal(mine.told(), undefined);
+            assert.equal(another.told(), undefined);
+
+            gate.open();
+            // Chained behind the same admission and lookup, and after the answers: once its ack is
+            // here, both have been handed over as this probe's.
+            probe.send({
+              type: 'results',
+              batchId: 'after-the-answers',
+              sentAt: at(),
+              results: [good(sensors[4] ?? 0, 9)],
+            });
+            const answer = await probe.waitFor(
+              'the answer to the batch',
+              answerTo('after-the-answers'),
+            );
+            assert.equal(answer.type, 'results-ack', JSON.stringify(answer));
+
+            const told = await within(10_000, 'the asked probe’s answer', mine.settled);
+            if (told.kind !== 'ok') assert.fail(JSON.stringify(told));
+            assert.equal(told.result.channels[0]?.value, 7, 'the answer it sent');
+            assert.equal(queries.stats().answered, 1);
+            // The other is refused as foreign on this probe's Probe Health, which names it, and
+            // its caller keeps waiting for the probe it asked.
+            assert.equal(queries.stats().foreign, 1);
+            assert.equal(refusals.countsFor(probeId).foreignRecently, mineBefore + 1);
+            assert.equal(refusals.stats().foreign, totals + 1, 'and once on the totals');
+            assert.equal(another.told(), undefined);
+            assert.ok(probe.open, 'the link is up');
+          } finally {
+            probe.close();
+          }
+        } finally {
+          gate.open();
+          queries.stop();
+          await within(
+            10_000,
+            'the callers to be settled',
+            Promise.all([mine.settled, another.settled]),
+          );
+          await started.endpoint.stop();
+        }
+      });
+
+      it('hands nothing over from a probe that has not been approved', async () => {
+        const { queries, asked } = awaiting();
+        const started = await startEndpoint({
+          queries,
+          registry: { admit: () => Promise.resolve({ kind: 'pending' as const, gid: 'unvetted' }) },
+        });
+        const waiting = ask(queries, probeId);
+        try {
+          assert.ok(dir !== undefined);
+          const [queryId] = asked as [string];
+          const probe = await RawPeer.connect(dir, started.port);
+          try {
+            probe.send({
+              type: 'hello',
+              protocolVersion: PROTOCOL_VERSION,
+              gid: 'unvetted',
+              displayName: 'Unvetted',
+              agentVersion: '1.0.0',
+              accessKey: '',
+            });
+            await probe.waitFor('the welcome', (m) => (m.type === 'welcome' ? m : undefined));
+            const totals = refusals.stats().foreign;
+            probe.send({ type: 'query-result', queryId, result: good(sensors[4] ?? 0, 7) });
+            // Its batch is refused behind the same admission, after the answer.
+            probe.send({
+              type: 'results',
+              batchId: 'unvetted',
+              sentAt: at(),
+              results: [good(sensors[4] ?? 0, 3)],
+            });
+            const answer = await probe.waitFor('the answer to the batch', answerTo('unvetted'));
+            assert.equal(answer.type, 'results-nack', JSON.stringify(answer));
+            assert.equal(queries.stats().foreign, 0, 'a peer nobody let in moves no counter');
+            assert.equal(refusals.stats().foreign, totals);
+            assert.equal(queries.stats().answered, 0, 'and settles nobody’s query');
+            assert.equal(waiting.told(), undefined);
+          } finally {
+            probe.close();
+          }
+        } finally {
+          queries.stop();
+          await within(10_000, 'the caller to be settled', waiting.settled);
+          await started.endpoint.stop();
+        }
+      });
     });
 
     it('still closes on a batch that is wrong outside its results: that is the conversation', async () => {

@@ -477,6 +477,24 @@ const CHANNELS: readonly ChannelDef[] = [
     unit: 'readings',
     counter: { bits: 64 },
   },
+  // `P-306`. Channels ingestion created for a sensor whose type could not declare its channels
+  // for the sensor's stored parameters (a type's own error, or a declaration `P-296` refuses on a
+  // sensor stored before it), so they took the type's answer to `{}`, or nothing (`P-297`). Each
+  // may keep no lookup or counter width for good, since nothing writes the row again: a counter
+  // storing cumulative totals, or a status judged by nothing. The core log names the type, once
+  // for each kind of error; this is the count the log cannot give.
+  //
+  // **No limit.** The damage is done when the row is written, and no alarm undoes it. Made a
+  // rate, a warning would come and go with each first sighting, a Warning and a recovery more on
+  // the core's own sensor for a fault the log already names; held on the total, it would stay
+  // Warning until the core restarted, whatever was mended. Either changes alarm volume. A counter
+  // to graph, and to alert on from `/metrics` if wanted, as `resultsRefusedUnfit` is.
+  {
+    key: 'channelsCreatedUndeclared',
+    name: 'Channels created undeclared',
+    unit: 'channels',
+    counter: { bits: 64 },
+  },
   // `P-247`. How far this core's clock is behind every remote probe's, when two or more are
   // connected: the smallest lead among them, 0 when any is not ahead, and a gap with fewer than two,
   // since one probe ahead cannot be told from one probe wrong. **The core's condition, not theirs**:

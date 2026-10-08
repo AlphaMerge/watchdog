@@ -113,6 +113,8 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       // batches and two from query answers (`P-300`).
       assert.equal(metrics.get('ms_core_results_refused_unfit_total'), 5);
       assert.equal(metrics.get('ms_core_readings_dropped_unfit_total'), 5);
+      // `P-306`: channels created without what their type declares for them.
+      assert.equal(metrics.get('ms_core_channels_created_undeclared_total'), 6);
     });
 
     it('carries each probe’s numbers, labelled by probe', async () => {
@@ -174,6 +176,7 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
         'ms_core_db_lock_waits_given_up_total',
         'ms_core_results_refused_unfit_total',
         'ms_core_readings_dropped_unfit_total',
+        'ms_core_channels_created_undeclared_total',
       ]) {
         assert.match(body, new RegExp(`# TYPE ${name} counter`), name);
       }

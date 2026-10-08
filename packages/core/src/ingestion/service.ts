@@ -236,6 +236,14 @@ export interface ResultStats {
   /** Rates computed across a counter going round. Routine on 32 bits; never seen on 64. */
   counterWrapped: number;
   channelsCreated: number;
+  /**
+   * Of `channelsCreated`, those created without their declared shape (`P-306`): the sensor's
+   * type could not declare its channels for the sensor's stored parameters, so the channel took
+   * the type's answer to `{}`, or nothing, and may keep no lookup or counter width for good. On
+   * Core Health as `channelsCreatedUndeclared`; the core log names the type, once for each kind
+   * of error.
+   */
+  channelsCreatedUndeclared: number;
   cachedChannels: number;
   /** Absent when no state machine is wired. */
   state?: StateStats;
@@ -300,6 +308,7 @@ export class IngestionService {
   #counterStale = 0;
   #counterWrapped = 0;
   #channelsCreated = 0;
+  #channelsCreatedUndeclared = 0;
 
   constructor(options: IngestionServiceOptions) {
     this.#db = options.db;
@@ -345,6 +354,7 @@ export class IngestionService {
       counterStale: this.#counterStale,
       counterWrapped: this.#counterWrapped,
       channelsCreated: this.#channelsCreated,
+      channelsCreatedUndeclared: this.#channelsCreatedUndeclared,
       cachedChannels: this.#resolver.cached,
       ...(this.#states === undefined ? {} : { state: this.#states.stats() }),
     };
@@ -878,6 +888,7 @@ export class IngestionService {
         : await this.#db.tx((q) => this.#resolver.resolve(q, withReadings));
     if (resolved !== null) {
       this.#channelsCreated += resolved.created;
+      this.#channelsCreatedUndeclared += resolved.createdUndeclared;
       this.#discardedUnknownSensor += resolved.droppedReadings;
     }
 

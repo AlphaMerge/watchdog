@@ -2,7 +2,7 @@ import type { CheckResult, Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
 import type { LookupCatalogue } from '../lookups/catalogue.js';
 import type { LookupDefinition } from '../lookups/definition.js';
-import type { ChannelShape } from '../state/declared-limits.js';
+import type { ChannelShape, DeclaredShapes } from '../state/declared-limits.js';
 import { parseLimits, type ChannelLimits } from '../state/limits.js';
 import { parseTransform, type ReadingTransform } from './scaling.js';
 
@@ -40,6 +40,12 @@ export interface ResolvedChannels {
   ids: Map<string, ResolvedChannel>;
   /** Channels created on this call, because this is the first result that mentioned them. */
   created: number;
+  /**
+   * Of `created`, those whose sensor's type could not declare its channels for the sensor's
+   * stored parameters, so they were created from its answer to `{}` or from nothing (`P-306`).
+   * Each may lack a lookup or counter width for good: nothing writes the row again.
+   */
+  createdUndeclared: number;
   /** Readings whose sensor no longer exists. Dropped — but counted, never silently. */
   droppedReadings: number;
   droppedSensors: number;
@@ -72,13 +78,15 @@ export interface ChannelResolverOptions {
    * installations that matter: the ones that existed before the channel was declared.
    *
    * Given the sensor's stored parameters and answering for each channel key that sensor declares
-   * (`P-297`), since a lookup or a counter is often what a parameter chose.
+   * (`P-297`), since a lookup or a counter is often what a parameter chose; and saying when the
+   * type could not answer for them, so the channels created from its fallback are counted
+   * (`P-306`).
    */
   declaredShape?: (
     sensorType: string,
     params: Readonly<Record<string, unknown>>,
     sensorId: number,
-  ) => ReadonlyMap<string, ChannelShape>;
+  ) => DeclaredShapes;
 }
 
 /** A sensor's row, as far as what its type declares for a new channel goes. */
@@ -219,23 +227,28 @@ export class ChannelResolver {
   #shapesFor(
     sensors: ReadonlyMap<string, SensorDeclaring>,
     wanted: readonly { sensorId: number; key: string }[],
-  ): ChannelShape[] {
+  ): { shapes: ChannelShape[]; undeclared: ReadonlySet<string> } {
     const declared = this.#declaredShape;
-    if (declared === undefined) return wanted.map(() => NO_SHAPE);
+    const undeclared = new Set<string>();
+    if (declared === undefined) return { shapes: wanted.map(() => NO_SHAPE), undeclared };
     // Once a sensor, however many of its channels are new: a table sensor's first scan is all of
     // them at once.
-    const bySensor = new Map<string, ReadonlyMap<string, ChannelShape>>();
-    return wanted.map((one) => {
+    const bySensor = new Map<string, DeclaredShapes>();
+    const shapes = wanted.map((one) => {
       const id = String(one.sensorId);
       const sensor = sensors.get(id);
       if (sensor === undefined) return NO_SHAPE;
-      let shapes = bySensor.get(id);
-      if (shapes === undefined) {
-        shapes = declared(sensor.type, sensor.params, one.sensorId);
-        bySensor.set(id, shapes);
+      let answer = bySensor.get(id);
+      if (answer === undefined) {
+        answer = declared(sensor.type, sensor.params, one.sensorId);
+        bySensor.set(id, answer);
+        // Counted by the caller from the rows its INSERT returns, not here: a key another batch
+        // created meanwhile conflicts, and was not made from this answer.
+        if (answer.undeclared) undeclared.add(id);
       }
-      return shapes.get(one.key) ?? NO_SHAPE;
+      return answer.shapes.get(one.key) ?? NO_SHAPE;
     });
+    return { shapes, undeclared };
   }
 
   async #sensorsFor(
@@ -287,7 +300,7 @@ export class ChannelResolver {
     }
 
     if (missing.size === 0) {
-      return { ids, created: 0, droppedReadings: 0, droppedSensors: 0 };
+      return { ids, created: 0, createdUndeclared: 0, droppedReadings: 0, droppedSensors: 0 };
     }
 
     const generation = this.#generation;
@@ -298,8 +311,9 @@ export class ChannelResolver {
     const have = new Set(found.map((row) => `${row.sensor_id}:${row.key}`));
     const absent = wanted.filter((one) => !have.has(`${String(one.sensorId)}:${one.key}`));
     let created = 0;
+    let createdUndeclared = 0;
     if (absent.length > 0) {
-      created = await this.#create(q, absent);
+      ({ created, createdUndeclared } = await this.#create(q, absent));
       found.push(...(await this.#existing(q, absent)));
     }
 
@@ -338,6 +352,7 @@ export class ChannelResolver {
     return {
       ids,
       created,
+      createdUndeclared,
       droppedReadings,
       droppedSensors: droppedSensors.size,
     };
@@ -360,7 +375,9 @@ export class ChannelResolver {
 
   /**
    * Creates the channels no row exists for, with what their sensors' types declare; returns how
-   * many it wrote.
+   * many it wrote, and how many of those its sensor's type could not declare for the sensor's
+   * stored parameters (`P-306`), counted from the rows the INSERT returned: a key another batch
+   * created first conflicts, and was not made from the fallback here.
    *
    * **The sensors are locked before their parameters are read** (`P-303` review). The shape comes
    * from `sensor_config.params`, and an edit to those parameters re-declares the channels it can
@@ -385,7 +402,7 @@ export class ChannelResolver {
   async #create(
     q: Queryable,
     absent: readonly { sensorId: number; key: string; name: string; unit: string }[],
-  ): Promise<number> {
+  ): Promise<{ created: number; createdUndeclared: number }> {
     const declares = this.#declaredLimits !== undefined || this.#declaredShape !== undefined;
     if (declares) {
       await q.query(
@@ -399,12 +416,12 @@ export class ChannelResolver {
       ? await this.#sensorsFor(q, absent)
       : new Map<string, SensorDeclaring>();
     const limits = this.#declaredFor(sensors, absent);
-    const shapes = this.#shapesFor(sensors, absent);
+    const { shapes, undeclared } = this.#shapesFor(sensors, absent);
 
     // Guarded by EXISTS rather than by the foreign key. A probe replaying a spool for a sensor
     // that has since been deleted is ordinary, not exceptional, and letting the foreign key
     // raise would fail the whole batch — including every other sensor's readings in it.
-    const created = await q.query<{ id: number }>(
+    const created = await q.query<{ id: number; sensor_id: string }>(
       `INSERT INTO channel (sensor_id, key, name, unit, lookup_id, counter_bits,
                             limits, limits_source)
        SELECT s.sensor_id, s.key, s.name, s.unit, s.lookup_id, s.counter_bits,
@@ -415,7 +432,7 @@ export class ChannelResolver {
             AS s(sensor_id, key, name, unit, limits, lookup_id, counter_bits)
        WHERE EXISTS (SELECT 1 FROM object o WHERE o.id = s.sensor_id AND o.kind = 'sensor')
        ON CONFLICT (sensor_id, key) DO NOTHING
-       RETURNING id`,
+       RETURNING id, sensor_id::text AS sensor_id`,
       [
         absent.map((row) => row.sensorId),
         absent.map((row) => row.key),
@@ -426,7 +443,10 @@ export class ChannelResolver {
         shapes.map((shape) => shape.counterBits),
       ],
     );
-    return created.length;
+    return {
+      created: created.length,
+      createdUndeclared: created.filter((row) => undeclared.has(row.sensor_id)).length,
+    };
   }
 
   /**

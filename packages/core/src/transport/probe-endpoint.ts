@@ -822,16 +822,18 @@ export class ProbeEndpoint {
           this.#queueResults(message, connection, logger, session);
           return session;
         case 'query-result': {
-          // Straight through, and never queued behind `pending`: a query has a caller holding a
-          // deadline, and chaining it behind a results batch that is mid-write would spend that
-          // deadline waiting for work nobody is watching. With what the parser refused or fitted
-          // of its result (`P-289`), so the caller is told why there is none.
-          const late = this.#options.queries?.deliver(
-            message,
-            session.probeObjectId,
-            this.#unfit.get(message),
-          );
-          if (late !== undefined) this.#countLateUnfit(message.queryId, late, logger, session);
+          // Straight through from an approved session that knows its probe, and never queued
+          // behind `pending`: a query has a caller holding a deadline, and chaining it behind a
+          // results batch that is mid-write would spend that deadline waiting for work nobody is
+          // watching. With what the parser refused or fitted of its result (`P-289`), so the
+          // caller is told why there is none. From any other session it waits for the admission
+          // and the lookup to say who sent it (`P-307`).
+          const unfit = this.#unfit.get(message);
+          if (session.approved && session.probeObjectId !== null) {
+            this.#answer(message, unfit, session.probeObjectId, logger);
+          } else {
+            this.#answerOnceKnown(message, unfit, logger, session);
+          }
           return session;
         }
         case 'config-ack':
@@ -1062,36 +1064,73 @@ export class ProbeEndpoint {
   }
 
   /**
-   * A late answer to a query whose result could not be made to fit, counted behind `pending` as
-   * a batch's refused results are (`P-300` review). Nobody awaits it, so the wait costs no caller
-   * anything; counted at arrival, it was counted before the session had resolved its probe
-   * object, which is when late answers come (a probe's query runner goes on across a disconnect
-   * and answers on the new connection), so Core Health's total rose and that probe's Reports
-   * refused did not. **Never for a session that was not approved**: logged and not counted, as
-   * its batches are refused, so a peer nobody let in cannot move `resultsRefusedUnfit`.
+   * A query's answer, handed to the query service as from `from`: the probe object an approved
+   * session resolved, or null for a GID that has claimed no branch. A late one whose result could
+   * not be made to fit, which the service hands back, is counted against the same (`P-300`
+   * review).
    */
-  #countLateUnfit(
-    queryId: string,
-    refused: RefusedResult,
+  #answer(
+    message: Extract<ProbeToCoreMessage, { type: 'query-result' }>,
+    unfit: UnfitResults | undefined,
+    from: number | null,
     logger: Logger,
-    session: ProbeSession,
   ): void {
     const queries = this.#options.queries;
     if (queries === undefined) return;
+    const late = queries.deliver(message, from, unfit);
+    if (late === undefined) return;
+    try {
+      queries.refusedLate(message.queryId, from, late);
+    } catch (error: unknown) {
+      logger.error(
+        { err: describeError(error), queryId: message.queryId },
+        'counting a late answer that does not fit failed',
+      );
+    }
+  }
+
+  /**
+   * An answer from a session that has not yet said who it is, handed over behind `pending` once
+   * it has (`P-307`), as a batch is and as `P-300`'s review counted a late unfit answer.
+   *
+   * **Taken at arrival, it was judged against a probe nobody had looked up.** A session's probe
+   * object is resolved after the welcome, so an answer then came as from no probe: one to a query
+   * still awaited was refused as foreign with `foreign(null)`, which raises the fleet's totals
+   * and no probe's Probe Health; and a peer nobody approved could do the same. Now the admission
+   * and the lookup come first, and the answer is the resolved probe's: it settles the query if
+   * that probe is the one asked, and is refused as foreign on that probe's `reportsForeign`
+   * otherwise. A GID that has claimed no branch by then stays null and reaches the totals only,
+   * as its batches do. **A session that was not approved hands over nothing**: logged, not
+   * counted, and no query settled, as its batches are refused.
+   *
+   * **The caller is told nothing in the meantime.** It keeps waiting, bounded by its own
+   * deadline, which runs on: an answer from a peer that has not said who it is cannot settle
+   * someone's query or end it (`P-228`), and a wait here is the admission's round trips and the
+   * lookup, not a batch mid-write on a connection someone is waiting for. If the deadline passes
+   * first, the answer is late, and is the ordinary late answer once handed over.
+   */
+  #answerOnceKnown(
+    message: Extract<ProbeToCoreMessage, { type: 'query-result' }>,
+    unfit: UnfitResults | undefined,
+    logger: Logger,
+    session: ProbeSession,
+  ): void {
+    if (this.#options.queries === undefined) return;
     session.pending = session.pending.then(() => {
       if (!session.approved) {
         logger.warn(
-          { queryId, refused },
-          'an answer to a query arrived from a probe that has not been approved; not counted',
+          { queryId: message.queryId, ...(unfit === undefined ? {} : { unfit }) },
+          'an answer to a query arrived from a probe that has not been approved; not delivered ' +
+            'and not counted',
         );
         return;
       }
       try {
-        queries.refusedLate(queryId, session.probeObjectId, refused);
+        this.#answer(message, unfit, session.probeObjectId, logger);
       } catch (error: unknown) {
         logger.error(
-          { err: describeError(error), queryId },
-          'counting a late answer that does not fit failed',
+          { err: describeError(error), queryId: message.queryId },
+          'handing over an answer to a query failed',
         );
       }
     });

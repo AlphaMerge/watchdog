@@ -246,7 +246,10 @@ channel the sensor is judged by.
 - **`lookup` and `counter` may depend on parameters.** A channel the core first sees in a reading
   (a key a later build added, or one an edit added) gets them from `channels()` asked with that
   sensor's own stored parameters, not `{}` (`P-297`), so a column-per-channel type like
-  `snmp.table` needs nothing more.
+  `snmp.table` needs nothing more. If `channels()` throws for parameters a sensor has stored, the
+  channel is created from your `{}` answer instead and may keep neither for good: the core warns
+  naming your type and counts it on Core Health's `channelsCreatedUndeclared` (`P-306`). So answer
+  every parameter set your schema has ever admitted.
 - **`limits` on a channel declares default thresholds** (`S-18`). Almost no channel should have
   one: a threshold on a monitored device's response time depends on that device and belongs to the
   operator. Declare one only where the number means the same thing on every installation, which in

@@ -37,6 +37,19 @@ export interface ChannelShape {
 }
 
 /**
+ * What a sensor's type declares for its channels, and whether it could say (`P-306`).
+ *
+ * `undeclared` is set when the type could not answer for the sensor's stored parameters, so
+ * `shapes` is its answer to `{}` or nothing: a channel created from it may lack the lookup or
+ * counter width the sensor really declares, for good. The resolver counts the channels it creates
+ * that way, for Core Health, since the warning below is said once a type and kind of error.
+ */
+export interface DeclaredShapes {
+  readonly shapes: ReadonlyMap<string, ChannelShape>;
+  readonly undeclared: boolean;
+}
+
+/**
  * The rest of a channel's declaration, for channels the ingestion path creates (`P-80`).
  *
  * `ChannelResolver` is the only way a key a sensor type newly declares reaches the `channel`
@@ -72,7 +85,9 @@ export interface ChannelShape {
  * sensor's parameters taken out of its message, since those can be secrets. Once rather than per
  * sensor, because one broken type would otherwise write a line for every sensor of it on every
  * new channel; and by kind rather than by message, because a message can differ per sensor and
- * the set of them would have no bound.
+ * the set of them would have no bound. **And counted** (`P-306`): the answer says `undeclared`,
+ * so every channel the resolver creates from it is on Core Health's `channelsCreatedUndeclared`,
+ * the number an operator watches; this line says which type, and why.
  */
 export function declaredChannelLookup(
   catalogue: SensorCatalogue,
@@ -81,7 +96,7 @@ export function declaredChannelLookup(
   sensorType: string,
   params: Readonly<Record<string, unknown>>,
   sensorId: number,
-) => ReadonlyMap<string, ChannelShape> {
+) => DeclaredShapes {
   const warned = new Set<string>();
   const warn = (sensorType: string, sensorId: number, cause: unknown): void => {
     const logger = options.logger;
@@ -113,6 +128,9 @@ export function declaredChannelLookup(
       ]),
     );
   const none: ReadonlyMap<string, ChannelShape> = new Map();
+  // A type this build does not register declares nothing, and nothing is what it is given: not
+  // a fallback, so not counted.
+  const unregistered: DeclaredShapes = { shapes: none, undeclared: false };
   const bare = new Map<string, ReadonlyMap<string, ChannelShape>>();
   for (const id of catalogue.ids()) {
     try {
@@ -122,16 +140,16 @@ export function declaredChannelLookup(
     }
   }
   return (sensorType, params, sensorId) => {
-    if (!catalogue.has(sensorType)) return none;
+    if (!catalogue.has(sensorType)) return unregistered;
     try {
-      return shapesOf(catalogue.channelsFor(sensorType, params));
+      return { shapes: shapesOf(catalogue.channelsFor(sensorType, params)), undeclared: false };
     } catch (cause) {
       warn(
         sensorType,
         sensorId,
         errorWithoutParamValues(cause, params, catalogue.writeOnlyPaths(sensorType)),
       );
-      return bare.get(sensorType) ?? none;
+      return { shapes: bare.get(sensorType) ?? none, undeclared: true };
     }
   };
 }

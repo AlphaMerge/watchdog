@@ -11201,18 +11201,95 @@ because each is a decision rather than a defect:
         `writeOnly` object and a short one's base64. Mutations: only the spelled form fails 6; the
         unscrubbed stack fails 1; secrets not inherited beneath a `writeOnly` path fails 1.
 
-- [ ] **P-306 — a channel created without its declared shape is counted nowhere** · S · P-297 ·
+- [x] **P-306 — a channel created without its declared shape is counted nowhere** · S · P-297 ·
       Found 2026-10-08 in `P-297`'s review. When a type cannot answer for a sensor's stored
       parameters, ingestion warns once and creates the channel from `{}`'s answer; nothing an
       operator watches counts it. **Done when** Core Health (and `/metrics`) carries the count,
       with a test.
 
-- [ ] **P-307 — an awaited query answer from a session with no probe is counted as foreign on the
+      **P-306 outcome. A Core Health channel, `channelsCreatedUndeclared` (*Channels created
+      undeclared*, channels), a 64-bit counter made a rate, exported as
+      `ms_core_channels_created_undeclared_total`.** No protocol change, no migration.
+      - **What is counted: channels created, not sensors asked.** `declaredChannelLookup` now
+        answers `{ shapes, undeclared }`; `undeclared` is set only when the type threw for the
+        stored parameters and the answer is its `{}` one or nothing. A type this build does not
+        register is not a fallback and is not counted. The resolver is asked for every sensor
+        with a channel not cached, which after a restart is every sensor whose channels exist
+        already, so it counts only the rows the INSERT returns (`RETURNING id, sensor_id`) for a
+        sensor whose answer was `undeclared`: `ResolvedChannels.createdUndeclared`, summed by
+        `IngestionService` into `stats().channelsCreatedUndeclared`, and carried to Core Health
+        through `ingestionDiscards` beside `P-290`'s two. The warning stays once a type and kind
+        of error; the count is every channel.
+      - **No limit, so no scenario test.** The damage is done when the row is written, and no
+        alarm undoes it or names more than the log line does. Made a rate, a limit would add a
+        Warning and a recovery on the core's own sensor at each first sighting; held on a total,
+        it would stay Warning until a restart whatever was mended. Either moves alarm volume;
+        none leaves it where it was. Alerting from `/metrics` is there for whoever wants it.
+      - **Docs.** `administration.md`'s Core Health table has a row (what it means, why no
+        limit, what to do); `adding-a-sensor-type.md` says what a `channels()` that throws on
+        stored parameters costs; `sensor-reference.md` regenerated (`--check` current).
+      - **Tests.** `channel-provisioning.test.ts`: `P-297`'s warning test also asserts all four
+        fallback channels and the later one are counted though two lines were logged; a new
+        ingestion-level test (real `IngestionService`, `Ingestor` and resolver) of a fine and a
+        broken sensor of one type: 4 created, 2 counted; the same channels again count nothing;
+        a second service over the same rows (a restart: cache empty, the lookup asked again)
+        creates and counts 0. The table over the shipped catalogue asserts `undeclared: false`;
+        the fallback test asserts `true` for a throw, a `P-293` breach and a type with no `{}`
+        answer. `core-health.test.ts`: carried from the source, a declared counter with no limit
+        and no lookup, 0 a reading; in the named counter list. `metrics.test.ts`: exported with
+        its value and `# TYPE … counter`. The `ingestionDiscards` stubs in three scenario tests
+        and `support/health.ts` carry the field.
+      - **Mutations** (each restored byte for byte, `dist` rebuilt): counting the channels asked
+        about rather than created fails the restart assertion (2, not 0); the fallback saying
+        `undeclared: false` fails 3 tests; Core Health reading 0 fails the Core Health and
+        `/metrics` tests.
+      - **Not done.** Nothing repairs a channel already created this way (`P-303`'s ground: an
+        edit declares no channels). A sensor of a type this build does not register gets no
+        shape and is not counted.
+
+- [x] **P-307 — an awaited query answer from a session with no probe is counted as foreign on the
       totals only** · S · P-300 · Found 2026-10-08 in `P-300`'s review. An answer to a query still
       awaited, from a session whose probe is not resolved (or not approved), reaches
       `refusals.foreign(null)` and raises the fleet totals without any probe's Probe Health.
       **Done when** it is gated as `P-300`'s late count is (behind `pending`, approved only), with
       a test.
+
+      **P-307 outcome. The whole answer waits, not only its count.** No protocol change.
+      - **The endpoint.** A `query-result` from a session that is approved and has resolved its
+        probe object goes straight to the query service as before (a caller holds a deadline).
+        From any other session it is chained behind `session.pending` (`#answerOnceKnown`), after
+        the admission and the probe lookup, and then: from a session not approved, logged at
+        warn and nothing delivered, settled or counted, as its batches are refused; from an
+        approved one, delivered as the resolved probe's, so it settles the query if that probe is
+        the one asked and is refused as foreign on that probe's `reportsForeign` otherwise. A GID
+        that has claimed no branch by then is still null and reaches the totals only, as its
+        batches and `P-300`'s late count do. Holding the whole answer rather than only the
+        foreign count is the one way the judgement itself (which probe sent it) can be right.
+      - **`P-300`'s `#countLateUnfit` folded in.** One `#answer` delivers and counts a late unfit
+        answer with `refusedLate`; it runs at once for a known session and behind `pending` for
+        any other, so a late unfit answer is gated exactly as before. `ProbeQuerySink` unchanged.
+      - **What the caller is told in that window: nothing.** It keeps waiting, bounded by its own
+        deadline, which runs on. An answer from a peer that has not said who it is cannot settle
+        someone's query or end it (`P-228`), and the wait is the admission's round trips and the
+        lookup. If the deadline passes first, the caller is told `timeout` as ever, and the
+        answer is the ordinary late answer once handed over. In practice the asked probe's own
+        answer does not come this way: its previous connection's close abandons the query
+        (`offline`) before the new one is admitted.
+      - **Docs.** The refusal table in `administration.md` says an answer to another probe's query
+        is counted once the connection knows its probe, never from an unapproved one; the
+        `deliver` comment in `queries.ts` says `from` is resolved before it is called.
+      - **Tests** (`unfit-results.test.ts`, the real TLS endpoint, `probeObjectFor` held): two
+        queries awaited, one put to this probe and one to another; both answered after the
+        welcome, taken (the heartbeat's ack) while the lookup is held: nothing foreign on the
+        service or the totals, nothing answered, both callers still waiting. Once the lookup is
+        let go and a batch behind them acked: the first caller has the probe's answer, the second
+        is refused as foreign on this probe's `reportsForeign` and once on the totals, and its
+        caller is still waiting; the link up. From an unapproved session (its batch nacked behind
+        the same admission): nothing foreign, nothing answered, the caller waiting. `P-300`'s two
+        late-count tests pass unchanged through the new path.
+      - **Mutations** (restored byte for byte, `dist` rebuilt): handing every answer straight
+        through fails both new tests and `P-300`'s two; dropping the approved check fails the
+        two unapproved tests.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then

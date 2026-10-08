@@ -1016,6 +1016,7 @@ cost: **light** · evaluated by the core, never by a probe
 | `resultsUnreadableTime` | Results dropped for an unreadable time | results | 64-bit counter → rate; default limits: warn above 0 |
 | `resultsRefusedUnfit` | Results refused as unfit | results | 64-bit counter → rate |
 | `readingsDroppedUnfit` | Readings dropped fitting results | readings | 64-bit counter → rate |
+| `channelsCreatedUndeclared` | Channels created undeclared | channels | 64-bit counter → rate |
 | `clockBehind` | Clock behind the probes | s | default limits: warn above 60, error above 900 |
 | `reactionsDeferred` | Alarm reactions waiting on a catch-up | sensors | — |
 | `credentialsToReenter` | Credential sets to re-enter | sets | default limits: warn above 0 |

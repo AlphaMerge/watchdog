@@ -338,6 +338,13 @@ const CORE_METRICS: readonly Metric[] = [
     help: 'Readings dropped from probes’ results by fitting them to the protocol, as a current probe does before sending.',
     counter: true,
   },
+  // `P-306`: channels ingestion created without what their sensor's type declares for them.
+  {
+    key: 'channelsCreatedUndeclared',
+    name: 'ms_core_channels_created_undeclared_total',
+    help: 'Channels ingestion created from a sensor type’s answer to {} (or from nothing), because the type could not declare its channels for the sensor’s stored parameters. Each may have no lookup or counter width for good; the core log names the type.',
+    counter: true,
+  },
   {
     key: 'lateRefusalWritesGivenUp',
     name: 'ms_core_late_refusal_writes_given_up_total',

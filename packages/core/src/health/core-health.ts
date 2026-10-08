@@ -105,11 +105,12 @@ export interface CoreHealthSources {
   };
   /**
    * `IngestionService.stats()` — results refused because their clock was implausible (`P-99`),
-   * and those refused or cut down because they do not fit the protocol (`P-290`).
+   * those refused or cut down because they do not fit the protocol (`P-290`), and channels
+   * created without their declared shape (`P-306`).
    *
-   * Only these of that service's discard counters are on this sensor, and deliberately: the
-   * others describe a batch that was rejected and will be re-offered, while these describe data
-   * that is gone and a probe that needs looking at, its clock or its build.
+   * Only these of that service's counters are on this sensor, and deliberately: the others
+   * describe a batch that was rejected and will be re-offered, while these describe data that is
+   * gone or stored wrong, and a probe or a sensor type that needs looking at.
    */
   ingestionDiscards: () => {
     discardedFutureTime: number;
@@ -120,6 +121,11 @@ export interface CoreHealthSources {
     refusedUnfit: number;
     /** Readings dropped from a probe's results by fitting them (`P-281`). */
     discardedUnfitReadings: number;
+    /**
+     * Channels ingestion created from a type's answer to `{}`, or from nothing, because the type
+     * could not declare its channels for the sensor's stored parameters (`P-306`).
+     */
+    channelsCreatedUndeclared: number;
   };
   /**
    * The clock offsets of the connected probes that are not the local one, in milliseconds as
@@ -460,6 +466,8 @@ export class CoreHealthService {
       // Both run from this process's start, so the sum is the counter either is.
       resultsRefusedUnfit: discards.refusedUnfit + queries.unfit,
       readingsDroppedUnfit: discards.discardedUnfitReadings,
+      // Channels that may keep no lookup or counter width for good (`P-306`).
+      channelsCreatedUndeclared: discards.channelsCreatedUndeclared,
       // Seconds behind every remote probe, two or more of them (`P-247`); a gap with fewer.
       clockBehind: coreClock.behindSeconds,
       reactionsDeferred: ingestion.deferredReactions,
