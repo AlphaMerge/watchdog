@@ -1135,6 +1135,27 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       });
     });
 
+    /**
+     * What every refusal of a hello that proved nothing says (`P-319` review): why it was
+     * refused, what the hello claimed, and why its identity was not proven.
+     */
+    const unprovenShape = (
+      line: Record<string, unknown>,
+      code: string,
+      protocolVersion: number,
+      claimed = { displayName: 'not-backup-01', agentVersion: '6.6.6' },
+    ): void => {
+      const shown = JSON.stringify(line);
+      assert.equal(line['code'], code, shown);
+      assert.deepEqual(line['claimed'], { ...claimed, protocolVersion }, shown);
+      assert.equal(typeof line['unprovenBecause'], 'string', shown);
+      assert.notEqual(line['unprovenBecause'], '', shown);
+      assert.equal(typeof line['msg'], 'string', shown);
+      if (code === 'protocol-version') {
+        assert.equal(line['coreProtocolVersion'], PROTOCOL_VERSION, shown);
+      }
+    };
+
     /** Every column of the row, as text, so "unchanged" means every one of them. */
     const row = async (gid: string): Promise<Record<string, unknown>> => {
       const [found] = await db.query<Record<string, unknown>>(
@@ -1256,6 +1277,9 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
         assert.equal(line['gid'], probe.gid);
         assert.equal(line['remoteAddress'], '192.0.2.66');
         assert.equal(line['level'], 'warn');
+        // The shape `administration.md` promises, whatever it was refused for: the line is the
+        // only record of what the hello claimed.
+        unprovenShape(line, forgery.code, forgery.over(probe).protocolVersion ?? PROTOCOL_VERSION);
         // And nothing was done to the live connection.
         assert.deepEqual(recorder, { closed: [], withdrawn: [] });
       });
@@ -1296,17 +1320,41 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       const narrowed = new ProbeRegistry({
         db,
         audit: new DatabaseAuditSink(),
-        logger: silentLogger,
+        logger: createLogger({
+          name: 'ms-core',
+          level: 'warn',
+          destination: {
+            write: (chunk: string) => {
+              lines.push(JSON.parse(chunk) as Record<string, unknown>);
+            },
+          },
+        }),
         enrolmentKeys: ['shared-key'],
         enrolFrom: ['10.0.0.0/8'],
       });
-      for (const over of [
-        { gid: 'stranger-key', accessKey: 'forged' },
-        { gid: 'stranger-address', remoteAddress: '192.0.2.66' },
-        { gid: 'stranger-version', protocolVersion: 0 },
-      ]) {
-        const decision = await narrowed.admit(hello(over));
-        assert.equal(decision.kind, 'refused', over.gid);
+      for (const [over, code] of [
+        [{ gid: 'stranger-key', accessKey: 'forged' }, 'bad-access-key'],
+        [{ gid: 'stranger-address', remoteAddress: '192.0.2.66' }, 'source-not-allowed'],
+        [{ gid: 'stranger-version', protocolVersion: 0 }, 'protocol-version'],
+      ] as const) {
+        const decision = await withCorrelation({ requestId: over.gid }, () =>
+          narrowed.admit(hello(over)),
+        );
+        assert.ok(decision.kind === 'refused' && decision.code === code, over.gid);
+        // Said once, in the shape every unproven refusal has.
+        const said = lines.filter((line) => line['requestId'] === over.gid);
+        assert.equal(said.length, 1, JSON.stringify(lines));
+        const [line] = said;
+        assert.ok(line !== undefined);
+        unprovenShape(
+          line,
+          code,
+          'protocolVersion' in over ? over.protocolVersion : PROTOCOL_VERSION,
+          {
+            displayName: 'backup-01',
+            agentVersion: '0.1.0',
+          },
+        );
       }
       assert.equal(narrowed.stats().hellosRefusedUnproven, 3);
       assert.equal((await narrowed.list()).length, 0);

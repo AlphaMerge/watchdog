@@ -747,12 +747,18 @@ export class ProbeRegistry {
    * named, the address it came from, and the name, agent version and protocol it declared — the
    * trace `R-06` wanted, under the handshake's correlation id, without letting the claim stand as
    * the probe's own.
+   *
+   * **One shape for every one of them, whatever it was refused for** (`P-319` review): `code`,
+   * `claimed`, and `unprovenBecause`, the reason the identity was not proven. A refusal over the
+   * version passes its own sentence as `message` and its versions in `fields`; every other one
+   * is said in its reason.
    */
   #refusedUnproven(
     hello: ProbeHello,
     code: Extract<ProbeDecision, { kind: 'refused' }>['code'],
     why: string,
     fields: Readonly<Record<string, unknown>> = {},
+    message: string = why,
   ): void {
     this.#hellosRefusedUnproven += 1;
     this.#logger.warn(
@@ -765,28 +771,40 @@ export class ProbeRegistry {
           agentVersion: hello.agentVersion.slice(0, 64),
           protocolVersion: hello.protocolVersion,
         },
+        unprovenBecause: why,
         ...fields,
       },
-      why,
+      message,
     );
   }
 
-  /** A hello refused over its version: said, and counted when it proved nothing (`P-319`). */
+  /**
+   * A hello refused over its version (`R-06`). Said once either way, and when it proved nothing,
+   * said and counted as every other such refusal is (`P-319`).
+   */
   #refusedVersion(hello: ProbeHello, proof: Proof | null): void {
-    const proven = proof?.proven ?? false;
-    if (!proven) this.#hellosRefusedUnproven += 1;
-    this.#logger.warn(
-      {
-        gid: hello.gid,
-        remoteAddress: hello.remoteAddress,
-        protocolVersion: hello.protocolVersion,
-        coreProtocolVersion: PROTOCOL_VERSION,
-        known: proof !== null,
-        proven,
-        // Why the row was left alone, for a known probe whose hello proved nothing.
-        ...(proof !== null && !proof.proven ? { unprovenBecause: proof.why } : {}),
-      },
-      'refusing a probe whose protocol this core cannot speak',
+    const message = 'refusing a probe whose protocol this core cannot speak';
+    const versions = { coreProtocolVersion: PROTOCOL_VERSION, known: proof !== null };
+    if (proof?.proven === true) {
+      this.#logger.warn(
+        {
+          gid: hello.gid,
+          remoteAddress: hello.remoteAddress,
+          code: 'protocol-version',
+          protocolVersion: hello.protocolVersion,
+          proven: true,
+          ...versions,
+        },
+        message,
+      );
+      return;
+    }
+    this.#refusedUnproven(
+      hello,
+      'protocol-version',
+      proof === null ? 'no probe is registered under the GID it named' : proof.why,
+      { ...versions, ...(proof?.fields ?? {}) },
+      message,
     );
   }
 
