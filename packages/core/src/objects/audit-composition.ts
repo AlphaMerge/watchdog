@@ -109,6 +109,21 @@ export function grantAuditSinks(all: AuditSinkSet): AuditSink[] {
 }
 
 /**
+ * A primary channel moved by the reading that created it (`P-314`).
+ *
+ * **The record and the result-cache invalidator.** A `channel.*` entry is what tells ingestion to
+ * forget a sensor's cached channels (`M-04`), and this one is written by ingestion's own channel
+ * resolver, inside its transaction. Which channel is primary changes no probe's scan (no
+ * configuration push), no pause flag (no schedule or dependency sync), no probe's ownership of a
+ * sensor (no reachability or clock-freeze overlay) and no state an alarm chain reacts to (no
+ * trigger sync): it picks the number in a list, the mini-graph line and a notification's last
+ * value, all read when they are shown.
+ */
+export function ingestionAuditSinks(all: AuditSinkSet): AuditSink[] {
+  return [all.database, all.logging, all.cacheInvalidator];
+}
+
+/**
  * Approving, refusing, fencing or forgetting a probe (`A-20`).
  *
  * **The record and nothing else**, because the registry already acts on the decision itself: it

@@ -1,11 +1,16 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
+import { setTimeout as sleep } from 'node:timers/promises';
+import type { QueryResultRow } from 'pg';
 import { pino } from 'pino';
 import { SensorCatalogue, standardCatalogue, type SensorType } from '@ms/sensors';
 import { encodedForms, type CheckResult, type IngestionConfig } from '@ms/shared';
-import { ChannelResolver } from '../src/ingestion/channels.js';
+import { AuditRepository, CompositeAuditSink, DatabaseAuditSink } from '../src/audit/store.js';
+import { ChannelResolver, type ResolvedChannels } from '../src/ingestion/channels.js';
 import { Ingestor } from '../src/ingestion/ingestor.js';
+import { ResultCacheInvalidator } from '../src/ingestion/invalidation.js';
 import { IngestionService } from '../src/ingestion/service.js';
+import type { Actor, AuditSink } from '../src/objects/audit.js';
 import { declaredChannelLookup, declaredLimitsLookup } from '../src/state/declared-limits.js';
 import type { Database, Queryable } from '../src/db/pool.js';
 import {
@@ -15,6 +20,7 @@ import {
 } from './support/database.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
 import { testCatalogue } from './support/sensor-types.js';
+import { within } from './support/within.js';
 
 const available = await databaseAvailable();
 
@@ -585,6 +591,8 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
     key: string;
     shape: Shape | undefined;
     bare: Shape | undefined;
+    /** The key the sensor's own answer makes primary (`P-314`). */
+    primary: string;
   }[] = [
     {
       name: 'snmp.custom in counter mode is a counter',
@@ -593,6 +601,7 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
       key: 'value',
       shape: { lookup: null, counterBits: 64 },
       bare: { lookup: null, counterBits: null },
+      primary: 'value',
     },
     {
       name: 'snmp.custom.string carries the lookup its parameters name',
@@ -601,6 +610,7 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
       key: 'value',
       shape: { lookup: 'ms.snmp.if-oper-status', counterBits: null },
       bare: { lookup: null, counterBits: null },
+      primary: 'value',
     },
     {
       name: 'an snmp.table counter column',
@@ -609,6 +619,7 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
       key: 'col10',
       shape: { lookup: null, counterBits: 64 },
       bare: undefined,
+      primary: 'col10',
     },
     {
       name: 'an snmp.table lookup column',
@@ -617,6 +628,7 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
       key: 'col8',
       shape: { lookup: 'ms.snmp.if-oper-status', counterBits: null },
       bare: undefined,
+      primary: 'col10',
     },
     {
       name: 'snmp.table’s placeholder, which no sensor with columns declares',
@@ -625,6 +637,7 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
       key: 'value',
       shape: undefined,
       bare: { lookup: null, counterBits: null },
+      primary: 'col10',
     },
     {
       name: 'snmp.traffic forced to 32 bits',
@@ -633,6 +646,7 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
       key: 'in',
       shape: { lookup: null, counterBits: 32 },
       bare: { lookup: null, counterBits: 64 },
+      primary: 'in',
     },
     {
       name: 'snmp.traffic’s status lookup, which no parameter changes',
@@ -641,6 +655,7 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
       key: 'status',
       shape: { lookup: 'ms.snmp.if-oper-status', counterBits: null },
       bare: { lookup: 'ms.snmp.if-oper-status', counterBits: null },
+      primary: 'in',
     },
   ];
 
@@ -652,6 +667,7 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
       const answer = shipped(one.type, one.params, 1);
       assert.deepEqual(answer.shapes.get(one.key), one.shape, 'the sensor');
       assert.equal(answer.undeclared, false, 'answered for its own parameters (`P-306`)');
+      assert.equal(answer.primary, one.primary, 'its primary (`P-314`)');
       assert.deepEqual(shipped(one.type, {}, 1).shapes.get(one.key), one.bare, '`{}`');
     });
   }
@@ -661,6 +677,7 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
     assert.equal(answer.shapes.size, 0);
     // Nothing to fall back from: not counted as a channel created without its shape (`P-306`).
     assert.equal(answer.undeclared, false);
+    assert.equal(answer.primary, null, 'and no primary to move to (`P-314`)');
   });
 
   it('falls back to `{}` only when the sensor’s own answer cannot be had', () => {
@@ -703,14 +720,20 @@ describe('the lookup and counter width a sensor’s own parameters declare', () 
     assert.equal(broken.undeclared, true);
     assert.equal(limited.undeclared, true);
     assert.equal(shapes('test.fragile', {}, 1).undeclared, false);
+    // A fallback's primary is a placeholder's, so it names none (`P-314`); `{}` itself does.
+    assert.equal(broken.primary, null);
+    assert.equal(limited.primary, null);
+    assert.equal(shapes('test.fragile', {}, 1).primary, 'total');
     // With no `{}` answer to fall back on it answers nothing, rather than throwing into ingestion,
     // and that is a fallback too.
     const nothing = shapes('test.unanswerable', {}, 1);
     assert.equal(nothing.shapes.size, 0);
     assert.equal(nothing.undeclared, true);
+    assert.equal(nothing.primary, null);
     const answered = shapes('test.unanswerable', { columns: [] }, 1);
     assert.deepEqual(answered.shapes.get('one'), bare);
     assert.equal(answered.undeclared, false);
+    assert.equal(answered.primary, 'one');
   });
 });
 
@@ -807,6 +830,615 @@ describe(
         const stored = await harness.service.get(id);
         assert.deepEqual(stored.kind === 'sensor' ? stored.params : null, { mode: 'counter' });
       }
+    });
+  },
+);
+
+/** A type that declares two channels and no primary, so a reading can move nothing (`P-314`). */
+const unranked: SensorType = {
+  id: 'test.unranked',
+  category: 'Custom',
+  costHint: 'light',
+  paramsSchema: { type: 'object', additionalProperties: false, properties: {} },
+  channels: () => [
+    { key: 'a', name: 'A' },
+    { key: 'b', name: 'B' },
+  ],
+  execute: () => Promise.resolve({ channels: [] }),
+};
+
+/** What a resolver recorded: who, and which channel's `isPrimary` went which way. */
+interface Recorded {
+  actor: Actor;
+  moves: { sensorId: number | null; key: string; from: boolean; to: boolean }[];
+}
+
+/**
+ * The first reading of a channel its type declares primary (`P-314`).
+ *
+ * An edit that declares a primary with no row keeps the current one, since it creates no channels
+ * (`P-309`), and ingestion then created that row without `is_primary`, so it became primary only
+ * on the next edit that changed the declaration. Now the reading that creates it moves the
+ * primary to it, in its own transaction, demoting first.
+ */
+describe(
+  'the primary a reading creates (P-314)',
+  { skip: available ? false : 'no PostgreSQL reachable (start docker-compose.dev.yml)' },
+  () => {
+    let scratch: ScratchDatabase;
+    let db: Database;
+    let harness: Harness;
+    let deviceId: number;
+    const types = [columns, brittle, unranked];
+
+    before(async () => {
+      scratch = await createScratchDatabase('reading_primary');
+      db = scratch.db;
+      harness = await buildHarness(db, { types });
+      const probe = await harness.service.create(testActor, {
+        kind: 'probe',
+        parentId: harness.rootId,
+        name: 'Probe',
+      });
+      const device = await harness.service.create(testActor, {
+        kind: 'device',
+        parentId: probe.id,
+        name: 'switch',
+        host: '192.0.2.40',
+      });
+      deviceId = device.id;
+    });
+
+    after(async () => {
+      await scratch.drop();
+    });
+
+    /** A resolver as `main.ts` builds it, recording what it audits (and writing it, when asked). */
+    const declaring = (recorded: Recorded[], also?: AuditSink): ChannelResolver => {
+      const audit: AuditSink = {
+        record: async (q, actor, mutations, at) => {
+          recorded.push({
+            actor,
+            moves: mutations.map((one) =>
+              one.action === 'channel.redeclared'
+                ? {
+                    sensorId: one.objectId,
+                    key: one.channelKey,
+                    from: one.before.isPrimary,
+                    to: one.after.isPrimary,
+                  }
+                : assert.fail(`audited ${one.action}`),
+            ),
+          });
+          await also?.record(q, actor, mutations, at);
+        },
+      };
+      const catalogue = testCatalogue(types);
+      return new ChannelResolver({
+        logger: silent,
+        declaredLimits: declaredLimitsLookup(catalogue),
+        declaredShape: declaredChannelLookup(catalogue),
+        audit,
+      });
+    };
+
+    const primaryOf = async (sensorId: number): Promise<string[]> =>
+      (
+        await db.query<{ key: string }>(
+          'SELECT key FROM channel WHERE sensor_id = $1 AND is_primary ORDER BY key',
+          [sensorId],
+        )
+      ).map((one) => one.key);
+
+    const reading = (sensorId: number, keys: readonly string[]): CheckResult => ({
+      sensorId,
+      at: new Date('2026-10-08T12:00:00.000Z').toISOString(),
+      outcome: 'ok',
+      message: '',
+      durationMs: 1,
+      channels: keys.map((key) => ({ key, value: 1 })),
+    });
+
+    /**
+     * A sensor of `type` whose rows are exactly `rows` (the one marked `true` primary) and whose
+     * stored parameters are `stored`, written behind the type's back as an edit or an earlier
+     * build would have left them.
+     */
+    const sensorWith = async (
+      type: string,
+      created: Record<string, unknown>,
+      stored: Record<string, unknown>,
+      rows: readonly (readonly [string, boolean])[],
+    ): Promise<number> => {
+      const sensor = await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name: `${type}-${String(process.hrtime.bigint())}`,
+        sensorType: type,
+        params: created,
+      });
+      await db.query('DELETE FROM channel WHERE sensor_id = $1', [sensor.id]);
+      for (const [key, primary] of rows) {
+        await db.query(
+          "INSERT INTO channel (sensor_id, key, name, unit, is_primary) VALUES ($1, $2, $2, '', $3)",
+          [sensor.id, key, primary],
+        );
+      }
+      await db.query('UPDATE sensor_config SET params = $2::jsonb WHERE object_id = $1', [
+        sensor.id,
+        JSON.stringify(stored),
+      ]);
+      return sensor.id;
+    };
+
+    const cols = (...keys: string[]): Record<string, unknown> => ({
+      columns: keys.map((key) => ({ key })),
+    });
+
+    const cases: readonly {
+      name: string;
+      type: string;
+      created: Record<string, unknown>;
+      stored: Record<string, unknown>;
+      rows: readonly (readonly [string, boolean])[];
+      reported: readonly string[];
+      primary: readonly string[];
+      /** `[key, from, to]` for each channel whose `isPrimary` was audited as moved. */
+      moves: readonly (readonly [string, boolean, boolean])[];
+    }[] = [
+      {
+        name: 'moved to the column an edit put first, when its first reading creates it',
+        type: 'test.columns',
+        created: cols('used', 'free'),
+        stored: cols('fresh', 'used', 'free'),
+        rows: [
+          ['used', true],
+          ['free', false],
+        ],
+        reported: ['fresh', 'used', 'free'],
+        primary: ['fresh'],
+        moves: [
+          ['used', true, false],
+          ['fresh', false, true],
+        ],
+      },
+      {
+        name: 'given to a sensor with none, as a create of these parameters would',
+        type: 'test.columns',
+        created: cols('used'),
+        stored: cols('fresh', 'used'),
+        rows: [['used', false]],
+        reported: ['fresh'],
+        primary: ['fresh'],
+        moves: [['fresh', false, true]],
+      },
+      {
+        name: 'moved off a removed column that still holds it',
+        type: 'test.columns',
+        created: cols('gone', 'kept'),
+        stored: cols('fresh', 'kept'),
+        rows: [
+          ['gone', true],
+          ['kept', false],
+        ],
+        reported: ['fresh', 'kept'],
+        primary: ['fresh'],
+        moves: [
+          ['gone', true, false],
+          ['fresh', false, true],
+        ],
+      },
+      {
+        name: 'left, when the channel created is not the declared primary',
+        type: 'test.columns',
+        created: cols('used'),
+        stored: cols('used', 'extra'),
+        rows: [['used', true]],
+        reported: ['used', 'extra'],
+        primary: ['used'],
+        moves: [],
+      },
+      {
+        name: 'left, when the declared primary has a row already: an edit’s to move (P-309)',
+        type: 'test.columns',
+        created: cols('used', 'free'),
+        stored: cols('free', 'used', 'new'),
+        rows: [
+          ['used', true],
+          ['free', false],
+        ],
+        reported: ['free', 'used', 'new'],
+        primary: ['used'],
+        moves: [],
+      },
+      {
+        name: 'left, when the shape came from the fallback: `{}`’s primary is a placeholder’s',
+        type: 'test.brittle',
+        created: { mode: 'fine' },
+        stored: { mode: 'typeError', label: 'east' },
+        rows: [['kept', true]],
+        reported: ['value'],
+        primary: ['kept'],
+        moves: [],
+      },
+      {
+        name: 'left, when the type declares no primary',
+        type: 'test.unranked',
+        created: {},
+        stored: {},
+        rows: [['a', true]],
+        reported: ['b'],
+        primary: ['a'],
+        moves: [],
+      },
+    ];
+
+    for (const one of cases) {
+      it(one.name, async () => {
+        const id = await sensorWith(one.type, one.created, one.stored, one.rows);
+        const recorded: Recorded[] = [];
+        const resolved = await db.tx((q) =>
+          declaring(recorded).resolve(q, [reading(id, one.reported)]),
+        );
+        assert.equal(resolved.ids.size, one.reported.length, 'every reading resolved');
+
+        assert.deepEqual(await primaryOf(id), one.primary);
+        assert.deepEqual(
+          recorded.flatMap((entry) => entry.moves.map((move) => [move.key, move.from, move.to])),
+          one.moves,
+          'audited: demoted first, then promoted',
+        );
+        for (const entry of recorded) {
+          assert.deepEqual(entry.actor, { kind: 'system', component: 'ingestion' });
+          for (const move of entry.moves) assert.equal(move.sensorId, id);
+        }
+        // And never twice: the same readings again, uncached, create nothing and move nothing.
+        await db.tx((q) => declaring(recorded).resolve(q, [reading(id, one.reported)]));
+        assert.deepEqual(await primaryOf(id), one.primary, 'stable');
+        assert.equal(recorded.length, one.moves.length === 0 ? 0 : 1);
+      });
+    }
+
+    it('moves each sensor’s own primary in a batch of several, and only theirs', async () => {
+      const moving = await sensorWith('test.columns', cols('used'), cols('fresh', 'used'), [
+        ['used', true],
+      ]);
+      const staying = await sensorWith('test.columns', cols('used'), cols('used', 'extra'), [
+        ['used', true],
+      ]);
+      const recorded: Recorded[] = [];
+      await db.tx((q) =>
+        declaring(recorded).resolve(q, [reading(staying, ['extra']), reading(moving, ['fresh'])]),
+      );
+      assert.deepEqual(await primaryOf(moving), ['fresh']);
+      assert.deepEqual(await primaryOf(staying), ['used']);
+      assert.deepEqual(
+        recorded.flatMap((entry) => entry.moves.map((move) => [move.sensorId, move.key])),
+        [
+          [moving, 'used'],
+          [moving, 'fresh'],
+        ],
+      );
+    });
+
+    // ── at the same time as something else ───────────────────────────────────────────────────
+
+    /** Until some session in this database waits on a lock: the other side is blocked. */
+    const somebodyWaits = (what: string): Promise<void> => {
+      const deadline = Date.now() + 10_000;
+      return within(
+        11_000,
+        what,
+        (async () => {
+          while (Date.now() < deadline) {
+            const waiting = await db.query<{ n: number }>(
+              `SELECT count(*)::int AS n FROM pg_stat_activity
+               WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+            );
+            if ((waiting[0]?.n ?? 0) > 0) return;
+            await sleep(20);
+          }
+          throw new Error(`nobody waited: ${what}`);
+        })(),
+      );
+    };
+
+    /**
+     * A resolve that stops once it holds its sensors, until `release` is called: the window in
+     * which anything else touching those sensors has to wait for it.
+     */
+    const holding = (
+      resolver: ChannelResolver,
+      results: readonly CheckResult[],
+    ): { done: Promise<ResolvedChannels>; locked: Promise<void>; release: () => void } => {
+      let locked: () => void = () => undefined;
+      const lockedNow = new Promise<void>((resolve) => {
+        locked = resolve;
+      });
+      let release: () => void = () => undefined;
+      const released = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const done = db.tx((q) => {
+        const held: Queryable = {
+          query: async <T extends QueryResultRow>(
+            text: string,
+            values?: readonly unknown[],
+          ): Promise<T[]> => {
+            const rows = await q.query<T>(text, values);
+            if (text.includes('FOR NO KEY UPDATE')) {
+              locked();
+              await released;
+            }
+            return rows;
+          },
+        };
+        return resolver.resolve(held, results);
+      });
+      return {
+        done,
+        locked: lockedNow,
+        release: () => {
+          release();
+        },
+      };
+    };
+
+    it('moves it once when two batches create the declared primary at once', async () => {
+      // Two sensors, named in opposite orders by the two batches: the rows are taken in id
+      // order, so neither batch can hold one while waiting for the other's.
+      const first = await sensorWith('test.columns', cols('used'), cols('fresh', 'used'), [
+        ['used', true],
+      ]);
+      const second = await sensorWith('test.columns', cols('used'), cols('fresh', 'used'), [
+        ['used', true],
+      ]);
+      const recorded: Recorded[] = [];
+      const one = holding(declaring(recorded), [
+        reading(first, ['fresh']),
+        reading(second, ['fresh']),
+      ]);
+      try {
+        await within(10_000, 'the first batch holding its sensors', one.locked);
+        const other = db.tx((q) =>
+          declaring(recorded).resolve(q, [reading(second, ['fresh']), reading(first, ['fresh'])]),
+        );
+        await somebodyWaits('the second batch waiting for the first');
+        one.release();
+        const [a, b] = await within(10_000, 'both batches', Promise.all([one.done, other]));
+        assert.deepEqual([a.created, b.created], [2, 0], 'each fresh channel created once');
+        assert.equal(b.ids.size, 2, 'and the second batch resolved them');
+      } finally {
+        one.release();
+      }
+      assert.deepEqual(await primaryOf(first), ['fresh']);
+      assert.deepEqual(await primaryOf(second), ['fresh']);
+      // Moved by the batch that created the rows, and not again by the one that found them.
+      assert.equal(recorded.length, 1);
+      assert.equal(recorded[0]?.moves.length, 4);
+    });
+
+    it('reads the parameters an edit committed while it waited, and moves to their primary', async () => {
+      // The edit puts `fresh` first while `fresh` has no row, so it keeps `used` (`P-309`). The
+      // first reading of `fresh` arrives while the edit is open: it waits for the sensor, then
+      // reads the edit's parameters and makes `fresh` primary. Read unlocked, it would have seen
+      // the old ones, which do not name `fresh`, and left the primary where the edit left it.
+      const sensor = await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name: 'edited-while-read',
+        sensorType: 'test.columns',
+        params: cols('used', 'free'),
+      });
+      const recorded: Recorded[] = [];
+      const resolver = declaring(recorded);
+      const was = harness.audit.also;
+      let creating: Promise<unknown> | undefined;
+      harness.audit.also = {
+        record: async (_q, _actor, mutations) => {
+          if (!mutations.some((one) => one.action === 'object.updated')) return;
+          creating = db.tx((q) => resolver.resolve(q, [reading(sensor.id, ['fresh'])]));
+          await somebodyWaits('the first reading of fresh waiting for the edit');
+        },
+      };
+      try {
+        await harness.service.update(
+          testActor,
+          sensor.id,
+          { kind: 'sensor', params: cols('fresh', 'used', 'free') },
+          { kind: 'none' },
+        );
+      } finally {
+        harness.audit.also = was;
+      }
+      assert.ok(creating !== undefined, 'the edit never reached its audit entry');
+      await within(10_000, 'the first reading of fresh', creating);
+      assert.deepEqual(await primaryOf(sensor.id), ['fresh']);
+    });
+
+    it('lets an edit that waited for the reading move the primary on from there', async () => {
+      // The other order: the reading holds the sensor, creates `fresh` and makes it primary; the
+      // edit that puts `used` back first waits, then finds both rows and moves it back.
+      const id = await sensorWith('test.columns', cols('used'), cols('fresh', 'used'), [
+        ['used', true],
+      ]);
+      const recorded: Recorded[] = [];
+      const resolver = declaring(recorded);
+      let editing: Promise<unknown> | undefined;
+      await db.tx(async (q) => {
+        await resolver.resolve(q, [reading(id, ['fresh'])]);
+        editing = harness.service.update(
+          testActor,
+          id,
+          { kind: 'sensor', params: cols('used', 'fresh') },
+          { kind: 'none' },
+        );
+        await somebodyWaits('the edit waiting for the reading');
+      });
+      assert.ok(editing !== undefined);
+      await within(10_000, 'the edit', editing);
+      assert.deepEqual(await primaryOf(id), ['used']);
+      assert.equal(recorded.length, 1, 'the reading moved it once');
+    });
+
+    it('does not deadlock with a channel edit on the primary it demotes', async () => {
+      // A channel PATCH used to write the channel row first and the sensor (by trigger) after,
+      // the opposite of this path: holding `used` and waiting for the sensor, while the reading
+      // held the sensor and waited for `used` to demote it. Both sides now take the sensor first.
+      const id = await sensorWith('test.columns', cols('used'), cols('fresh', 'used'), [
+        ['used', true],
+      ]);
+      const recorded: Recorded[] = [];
+      const one = holding(declaring(recorded), [reading(id, ['fresh'])]);
+      try {
+        await within(10_000, 'the reading holding its sensor', one.locked);
+        const patched = harness.service.patchChannel(testActor, id, 'used', {
+          limits: { upperError: 5 },
+        });
+        await somebodyWaits('the channel edit waiting for the reading');
+        one.release();
+        const settled = await within(
+          10_000,
+          'the reading and the channel edit',
+          Promise.allSettled([one.done, patched]),
+        );
+        assert.deepEqual(
+          settled.map((outcome) =>
+            outcome.status === 'fulfilled' ? 'fulfilled' : String(outcome.reason),
+          ),
+          ['fulfilled', 'fulfilled'],
+        );
+      } finally {
+        one.release();
+      }
+      assert.deepEqual(await primaryOf(id), ['fresh']);
+      const limits = await db.query<{ limits: { upperError?: number } }>(
+        "SELECT limits FROM channel WHERE sensor_id = $1 AND key = 'used'",
+        [id],
+      );
+      assert.equal(limits[0]?.limits.upperError, 5);
+    });
+
+    it('moves it through ingestion, audited by the system, with the readings stored on it', async () => {
+      // End to end: an edit puts a new column first, the real result path creates it from its
+      // first reading, and the move reaches the audit log and the result cache as an edit's does.
+      const sensor = await harness.service.create(testActor, {
+        kind: 'sensor',
+        parentId: deviceId,
+        name: 'through-ingestion',
+        sensorType: 'test.columns',
+        params: cols('used', 'free'),
+      });
+      await harness.service.update(
+        testActor,
+        sensor.id,
+        { kind: 'sensor', params: cols('fresh', 'used', 'free') },
+        { kind: 'none' },
+      );
+      assert.deepEqual(await primaryOf(sensor.id), ['used'], 'the edit kept it (P-309)');
+
+      // Behind the database sink and the real invalidator, as `ingestionAuditSinks` puts it; the
+      // invalidator reaches the resolver through a handle, since each needs the other.
+      const forgot: number[] = [];
+      const handle: { resolver: ChannelResolver | null } = { resolver: null };
+      const invalidator = new ResultCacheInvalidator({
+        channels: {
+          forget: (sensorId) => {
+            forgot.push(sensorId);
+            return handle.resolver?.forget(sensorId) ?? 0;
+          },
+          clear: () => {
+            handle.resolver?.clear();
+          },
+        },
+        logger: silent,
+      });
+      const recorded: Recorded[] = [];
+      const resolver = declaring(
+        recorded,
+        new CompositeAuditSink([new DatabaseAuditSink(), invalidator]),
+      );
+      handle.resolver = resolver;
+      const config: IngestionConfig = {
+        queueMaxRows: 200_000,
+        batchMaxRows: 5_000,
+        batchMaxDelayMs: 5,
+        slowDownAtPercent: 50,
+        retryAfterMs: 1_000,
+        replay: { maxConcurrentProbes: 4, stepMs: 250, maxDelayMs: 30_000, idleAfterMs: 30_000 },
+      };
+      const ingestor = new Ingestor({ db, logger: silent, config });
+      const service = new IngestionService({ db, logger: silent, ingestor, resolver });
+      // Recent, so ingestion's clock checks take every result.
+      const since = Date.now() - 600_000;
+      const batch = (minute: number): Parameters<IngestionService['acceptResults']>[1] => ({
+        type: 'results',
+        batchId: `primary-${String(minute)}`,
+        results: [
+          {
+            sensorId: sensor.id,
+            at: new Date(since + minute * 60_000).toISOString(),
+            outcome: 'ok' as const,
+            message: '',
+            durationMs: 1,
+            channels: [
+              { key: 'used', value: minute },
+              { key: 'free', value: minute },
+              { key: 'fresh', value: 40 + minute },
+            ],
+          },
+        ],
+      });
+      try {
+        assert.equal((await service.acceptResults('probe-1', batch(1))).type, 'results-ack');
+        assert.equal((await service.acceptResults('probe-1', batch(2))).type, 'results-ack');
+      } finally {
+        await ingestor.stop();
+        invalidator.stop();
+      }
+
+      assert.deepEqual(await primaryOf(sensor.id), ['fresh']);
+      const stored = await db.query<{ value: number }>(
+        `SELECT s.value FROM sample s JOIN channel c ON c.id = s.channel_id
+         WHERE c.sensor_id = $1 AND c.is_primary ORDER BY s.time`,
+        [sensor.id],
+      );
+      assert.deepEqual(
+        stored.map((row) => row.value),
+        [41, 42],
+        'both readings, on the new primary',
+      );
+
+      const entries = (
+        await new AuditRepository().list(db, {
+          objectId: sensor.id,
+          categories: ['channel'],
+          limit: 50,
+        })
+      ).filter((entry) => entry.action === 'channel.redeclared');
+      assert.deepEqual(
+        entries
+          .map((entry) => ({
+            actor: entry.actor,
+            channelKey: entry.summary['channelKey'],
+            diff: entry.diff.map((change) => ({ ...change })),
+          }))
+          .sort((a, b) => String(a.channelKey).localeCompare(String(b.channelKey))),
+        [
+          {
+            actor: { kind: 'system', component: 'ingestion' },
+            channelKey: 'fresh',
+            diff: [{ field: 'channel.fresh.isPrimary', before: false, after: true }],
+          },
+          {
+            actor: { kind: 'system', component: 'ingestion' },
+            channelKey: 'used',
+            diff: [{ field: 'channel.used.isPrimary', before: true, after: false }],
+          },
+        ],
+        'once, by the batch that created it',
+      );
+      assert.ok(forgot.includes(sensor.id), 'the move made ingestion forget the sensor (M-04)');
     });
   },
 );

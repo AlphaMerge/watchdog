@@ -249,7 +249,7 @@ channel the sensor is judged by.
   is matched to what the sensor has by what it is, not where it sits, and one an edit adds stays
   open. The annotation is the warning; the refusal is still the core's, judged from the channels.
   Which channel is `isPrimary` moves with the edit too (`P-309`), once that channel has a row: a
-  key the edit adds and makes primary becomes it on a later edit, not on its first reading. If
+  key the edit adds and makes primary becomes it on its first reading (`P-314`). If
   `channels()` throws for what a sensor has stored, an edit cannot tell an operator's lookup from
   yours, so it leaves every lookup as it is and logs that, naming your type (`P-311`). A channel
   the edit no longer declares keeps its row and history; it is shown retired only if your type

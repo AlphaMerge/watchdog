@@ -11545,12 +11545,72 @@ because each is a decision rather than a defect:
         is what fails without the fix.
       - **Mutation:** the enum without `ahead` failed 1.
 
-- [ ] **P-314 — a declared primary first created by a reading is not primary** · XS · P-309 ·
+- [x] **P-314 — a declared primary first created by a reading is not primary** · XS · P-309 ·
       Found 2026-10-08 in `P-309`. When an edit declares a primary that has no row yet, the edit
       keeps the current primary, and ingestion's INSERT then creates the row without `is_primary`,
       so it becomes primary only on the next edit that changes the declaration. **Done when** the
       first reading of a declared primary moves `is_primary` to it (one primary always, the
       `channel_one_primary_per_sensor` index respected under concurrent batches), with a test.
+
+      **P-314 outcome. Moved by the reading that creates the row, in its transaction, and
+      audited as the edit's move is.** No migration, no protocol change.
+      - **Where the declaration comes from.** `declaredChannelLookup`'s answer gains `primary`:
+        the key the sensor's own stored parameters make primary (the first `isPrimary`, so one
+        row at most is promoted), the same answer the resolver already takes lookups and counter
+        widths from. No new parent-walking, nothing keyed on a type id.
+      - **When it moves** (`ChannelResolver.#makePrimary`). Only for a row this INSERT returned
+        whose key is its sensor's declared primary; a key another batch created first conflicted,
+        and that batch moved it. Every row still primary is demoted in a statement of its own,
+        then the new one set: the partial unique index is not deferrable (`P-309`'s reason).
+        Not when the answer was the `{}` fallback (`P-306`): its primary is a placeholder's
+        (`snmp.table`'s `value`), so `primary` is null and the sensor keeps what it has. A
+        declared primary whose row already exists is not touched here: that is an edit's to move,
+        and checking it on every cold read would cost a query a sensor after every restart.
+      - **A sensor with no primary gets one at creation too.** It is what a create of the same
+        parameters gives it and what `P-309`'s edit gives a sensor with none once the row exists;
+        leaving it none keeps it without a list number until an edit that may never come.
+      - **Locks.** The sensors' `object` rows are already held `FOR NO KEY UPDATE` in id order
+        before `sensor_config` is read (`P-303` review), so the order stays object, then
+        `sensor_config`, then `channel`, and two batches or a batch and an edit serialise on the
+        sensor. **One writer took them the other way round: `patchChannel`** wrote the channel
+        row and then the sensor through `channel_touch_owner`, so a channel PATCH on the primary
+        being demoted deadlocked with the reading (measured: `deadlock detected`). It now takes
+        the sensor first with `lockForUpdate` (`A-64`'s helper, which also makes its precondition
+        and `before` read from a row nobody else can change). That ordering also closes the same
+        crossing between a channel PATCH and an edit that re-declares that channel.
+      - **Audited.** One `channel.redeclared` entry per channel whose `isPrimary` changed (old
+        primary true → false, new one false → true), by `{ kind: 'system', component:
+        'ingestion' }` — the convention for system writes (`discovery`, `pause-sweep`). Through a
+        new named composition, `ingestionAuditSinks`: the database, the log and the result-cache
+        invalidator, since a `channel.*` entry is what makes ingestion forget a sensor (`M-04`);
+        no configuration push, schedule, dependency, reachability, clock-freeze or trigger sync,
+        none of which reads a primary. `main.ts` hands the resolver the sink late (the
+        invalidator holds the resolver), and the forwarder throws if it is ever reached unwired.
+        Nothing the resolver caches holds `is_primary`, so the cache was coherent either way.
+      - **No M-17 scenario.** Primary picks the number in a list, the mini-graph line
+        (`sensorsChannels`' order) and a notification's last value (`notifications/context.ts`'s
+        `c.is_primary` lateral), each read when shown; no state is judged from it.
+      - **Tests** (`channel-provisioning.test.ts`). A table of seven, each a fresh sensor with its
+        rows and stored parameters set: moved, given to a sensor with none, moved off a removed
+        column, left when the created key is not the primary, left when the primary has a row
+        (`P-309`'s), left on the fallback, left for a type declaring none; each asserting the
+        primary, the audit entries in order and the system actor, and that a second uncached pass
+        moves nothing. A batch of two sensors moving only its own. Races: two batches naming two
+        sensors in opposite orders, the first held after its lock (created once, moved once, 2+0
+        created); a reading arriving while an edit is open (reads the edit's parameters, moves to
+        their primary); an edit arriving while a reading holds the sensor (moves it back after);
+        a channel PATCH on the primary being demoted (both succeed). End to end through
+        `IngestionService` and `Ingestor` behind `DatabaseAuditSink` and the real invalidator:
+        the primary moves, both readings are stored on it, two `channel.redeclared` entries by
+        `ingestion` and no more on the second batch, the sensor forgotten. The shipped-catalogue
+        table and the fallback test assert `primary`. `audit-composition.test.ts` names the set.
+      - **Mutations** (each restored byte for byte, `dist` rebuilt): no move fails 9; promoting
+        before demoting fails 8 on the index; promoting rows another batch created fails the
+        two-batch race; no audit entries fails 6; a fallback naming `{}`'s primary fails 2; no
+        declared primary fails 17; `patchChannel` without the lock fails the deadlock test;
+        the invalidator left out of the set fails the composition test.
+      - **Not done.** A declared primary whose row a reading created before this build stays
+        unpromoted until an edit changes the declaration (no repair pass).
 
 - [ ] **P-315 — `/probes`' "will be refused when it next connects" cannot be reached** · XS ·
       U-35 · Found 2026-10-08 in `U-35`. While `MIN_PROTOCOL_VERSION` is 1 no real handshake

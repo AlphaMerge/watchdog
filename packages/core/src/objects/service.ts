@@ -429,6 +429,12 @@ export class ObjectService {
     pre: Precondition = { kind: 'none' },
   ): Promise<ChannelRecord> {
     return this.#db.tx(async (q) => {
+      // The sensor first, then its channel (`P-314`): the order an edit and ingestion take them
+      // in. Written the other way round, the channel UPDATE below held the row while its
+      // `channel_touch_owner` trigger waited for the sensor, and a reading that holds the sensor
+      // and moves the primary off this very channel waited for it back: a deadlock. And the
+      // precondition and `before` below are then read from a row nobody else can change (`A-64`).
+      await this.#repo.lockForUpdate(q, id);
       const object = await this.#repo.get(q, id);
       if (object === null) throw notFound(id);
       if (object.kind !== 'sensor') {

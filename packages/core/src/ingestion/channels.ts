@@ -2,6 +2,8 @@ import type { CheckResult, Logger } from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
 import type { LookupCatalogue } from '../lookups/catalogue.js';
 import type { LookupDefinition } from '../lookups/definition.js';
+import type { Actor, AuditSink, Mutation } from '../objects/audit.js';
+import type { ChannelDeclaration } from '../objects/redeclare.js';
 import type { ChannelShape, DeclaredShapes } from '../state/declared-limits.js';
 import { parseLimits, type ChannelLimits } from '../state/limits.js';
 import { parseTransform, type ReadingTransform } from './scaling.js';
@@ -87,7 +89,19 @@ export interface ChannelResolverOptions {
     params: Readonly<Record<string, unknown>>,
     sensorId: number,
   ) => DeclaredShapes;
+  /**
+   * Where a primary this path moves is recorded (`P-314`): a `channel.redeclared` entry for each
+   * channel whose `is_primary` it changed, by the system actor `ingestion`, in the same
+   * transaction. `main.ts` gives it the database, the log and the result-cache invalidator.
+   *
+   * Absent, the primary still moves and nothing is recorded, which is for tests about other
+   * things.
+   */
+  audit?: AuditSink;
 }
+
+/** Who moves a primary that a reading created (`P-314`): nobody did, the declaration did. */
+const INGESTION: Actor = { kind: 'system', component: 'ingestion' };
 
 /** A sensor's row, as far as what its type declares for a new channel goes. */
 interface SensorDeclaring {
@@ -114,6 +128,16 @@ interface ChannelRow {
   spike_max: number | null;
 }
 
+/** What `#makePrimary` reads back of a channel it moved, for the audit entry. */
+interface DeclarationRow {
+  sensor_id: string;
+  key: string;
+  name: string;
+  unit: string;
+  lookup_id: string | null;
+  counter_bits: number | null;
+}
+
 const DEFAULT_MAX_CACHED = 50_000;
 
 /**
@@ -134,6 +158,7 @@ export class ChannelResolver {
   readonly #maxCached: number;
   readonly #declaredLimits: ChannelResolverOptions['declaredLimits'];
   readonly #declaredShape: ChannelResolverOptions['declaredShape'];
+  readonly #audit: AuditSink | undefined;
   readonly #cache = new Map<string, ResolvedChannel>();
   /** Lookup ids already complained about, so a missing one is one log line and not one a scan. */
   readonly #missingLookups = new Set<string>();
@@ -149,6 +174,7 @@ export class ChannelResolver {
     this.#lookups = options.lookups;
     this.#declaredLimits = options.declaredLimits;
     this.#declaredShape = options.declaredShape;
+    this.#audit = options.audit;
     this.#maxCached = options.maxCached ?? DEFAULT_MAX_CACHED;
   }
 
@@ -227,10 +253,18 @@ export class ChannelResolver {
   #shapesFor(
     sensors: ReadonlyMap<string, SensorDeclaring>,
     wanted: readonly { sensorId: number; key: string }[],
-  ): { shapes: ChannelShape[]; undeclared: ReadonlySet<string> } {
+  ): {
+    shapes: ChannelShape[];
+    undeclared: ReadonlySet<string>;
+    /** The key each sensor's own answer makes primary, by sensor id (`P-314`). */
+    primaries: ReadonlyMap<string, string>;
+  } {
     const declared = this.#declaredShape;
     const undeclared = new Set<string>();
-    if (declared === undefined) return { shapes: wanted.map(() => NO_SHAPE), undeclared };
+    const primaries = new Map<string, string>();
+    if (declared === undefined) {
+      return { shapes: wanted.map(() => NO_SHAPE), undeclared, primaries };
+    }
     // Once a sensor, however many of its channels are new: a table sensor's first scan is all of
     // them at once.
     const bySensor = new Map<string, DeclaredShapes>();
@@ -245,10 +279,11 @@ export class ChannelResolver {
         // Counted by the caller from the rows its INSERT returns, not here: a key another batch
         // created meanwhile conflicts, and was not made from this answer.
         if (answer.undeclared) undeclared.add(id);
+        if (answer.primary !== null) primaries.set(id, answer.primary);
       }
       return answer.shapes.get(one.key) ?? NO_SHAPE;
     });
-    return { shapes, undeclared };
+    return { shapes, undeclared, primaries };
   }
 
   async #sensorsFor(
@@ -416,12 +451,12 @@ export class ChannelResolver {
       ? await this.#sensorsFor(q, absent)
       : new Map<string, SensorDeclaring>();
     const limits = this.#declaredFor(sensors, absent);
-    const { shapes, undeclared } = this.#shapesFor(sensors, absent);
+    const { shapes, undeclared, primaries } = this.#shapesFor(sensors, absent);
 
     // Guarded by EXISTS rather than by the foreign key. A probe replaying a spool for a sensor
     // that has since been deleted is ordinary, not exceptional, and letting the foreign key
     // raise would fail the whole batch — including every other sensor's readings in it.
-    const created = await q.query<{ id: number; sensor_id: string }>(
+    const created = await q.query<{ id: number; sensor_id: string; key: string }>(
       `INSERT INTO channel (sensor_id, key, name, unit, lookup_id, counter_bits,
                             limits, limits_source)
        SELECT s.sensor_id, s.key, s.name, s.unit, s.lookup_id, s.counter_bits,
@@ -432,7 +467,7 @@ export class ChannelResolver {
             AS s(sensor_id, key, name, unit, limits, lookup_id, counter_bits)
        WHERE EXISTS (SELECT 1 FROM object o WHERE o.id = s.sensor_id AND o.kind = 'sensor')
        ON CONFLICT (sensor_id, key) DO NOTHING
-       RETURNING id, sensor_id::text AS sensor_id`,
+       RETURNING id, sensor_id::text AS sensor_id, key`,
       [
         absent.map((row) => row.sensorId),
         absent.map((row) => row.key),
@@ -443,10 +478,94 @@ export class ChannelResolver {
         shapes.map((shape) => shape.counterBits),
       ],
     );
+    // Only a row this INSERT returned: a key another batch created first conflicted, and that
+    // batch, holding the sensor before this one could, moved the primary itself.
+    const promoted = created.filter((row) => primaries.get(row.sensor_id) === row.key);
+    if (promoted.length > 0) await this.#makePrimary(q, promoted);
     return {
       created: created.length,
       createdUndeclared: created.filter((row) => undeclared.has(row.sensor_id)).length,
     };
+  }
+
+  /**
+   * Moves each sensor's primary to the channel just created for the key its type declares
+   * primary (`P-314`).
+   *
+   * **Why here.** `is_primary` is written by a create, a clone and an edit (`P-309`), each from
+   * the type's declaration. An edit that declares a primary with no row yet — a column it adds
+   * and puts first, `exe.script.advanced`'s `primaryChannel` renamed — keeps the current one,
+   * since it creates no channels; this path creates that row, so it is where the declaration can
+   * first be honoured. Before this the row was created plain and became primary only on the next
+   * edit that changed the declaration, which might never come: the sensor's list number, its
+   * mini-graph line and a notification's last value went on following the column the operator
+   * had moved away from.
+   *
+   * **A sensor with no primary gets one too.** One primary is what a create of the same
+   * parameters gives it and what `P-309`'s edit gives a sensor with none whose declared primary
+   * has a row; leaving it none would keep it without a list number until an edit.
+   *
+   * **Not from a fallback.** When the type could not answer for the stored parameters the shape
+   * came from `{}`, whose primary is a placeholder's (`DeclaredShapes.primary` is null then), so
+   * the sensor keeps what it has.
+   *
+   * **Demoted first, in a statement of its own**, as `ObjectRepository.redeclareChannels` does:
+   * `channel_one_primary_per_sensor` is a partial unique index and not deferrable, so it is
+   * checked row by row as one UPDATE goes. The callers hold each sensor's `object` row already
+   * (`#create`), so the lock order stays object, then `channel`; every other writer of an
+   * existing channel row takes the object first too (an edit by its versioned UPDATE,
+   * `patchChannel` by `lockForUpdate`), so the row demoted here is never held by somebody waiting
+   * for the sensor.
+   *
+   * **Recorded as the edit's move is**: a `channel.redeclared` entry for each channel whose
+   * `is_primary` changed, by the system actor `ingestion`, since no person chose it. Being a
+   * `channel.*` action it also makes ingestion forget what it cached of the sensor (`M-04`),
+   * though nothing it caches holds `is_primary`.
+   */
+  async #makePrimary(
+    q: Queryable,
+    promoted: readonly { sensor_id: string; key: string }[],
+  ): Promise<void> {
+    const sensors = promoted.map((row) => row.sensor_id);
+    const demoted = await q.query<DeclarationRow>(
+      `UPDATE channel SET is_primary = false
+       WHERE sensor_id = ANY($1::bigint[]) AND is_primary
+       RETURNING sensor_id::text AS sensor_id, key, name, unit, lookup_id, counter_bits`,
+      [sensors],
+    );
+    const raised = await q.query<DeclarationRow>(
+      `UPDATE channel AS c SET is_primary = true
+       FROM unnest($1::bigint[], $2::text[]) AS p(sensor_id, key)
+       WHERE c.sensor_id = p.sensor_id AND c.key = p.key
+       RETURNING c.sensor_id::text AS sensor_id, c.key, c.name, c.unit, c.lookup_id,
+                 c.counter_bits`,
+      [sensors, promoted.map((row) => row.key)],
+    );
+    // Said by the audit sink's log, as an edit's move is; nothing of its own here.
+    if (this.#audit === undefined) return;
+    const entry = (row: DeclarationRow, wasPrimary: boolean): Mutation => {
+      const before: ChannelDeclaration = {
+        name: row.name,
+        unit: row.unit,
+        lookupId: row.lookup_id,
+        counterBits: row.counter_bits,
+        isPrimary: wasPrimary,
+      };
+      return {
+        action: 'channel.redeclared',
+        objectId: Number(row.sensor_id),
+        kind: 'sensor',
+        channelKey: row.key,
+        before,
+        after: { ...before, isPrimary: !wasPrimary },
+      };
+    };
+    await this.#audit.record(
+      q,
+      INGESTION,
+      [...demoted.map((row) => entry(row, true)), ...raised.map((row) => entry(row, false))],
+      new Date(),
+    );
   }
 
   /**

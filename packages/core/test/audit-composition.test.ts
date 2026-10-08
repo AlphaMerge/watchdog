@@ -5,6 +5,7 @@ import {
   discoveryAuditSinks,
   grantAuditSinks,
   identityAuditSinks,
+  ingestionAuditSinks,
   libraryAuditSinks,
   mapAuditSinks,
   probeAuditSinks,
@@ -90,6 +91,7 @@ describe('what each audited service tells', () => {
         grantAuditSinks,
         probeAuditSinks,
         discoveryAuditSinks,
+        ingestionAuditSinks,
       ]) {
         assert.ok(!others(all).includes(sink), `${name} is not in ${others.name}`);
       }
@@ -106,6 +108,18 @@ describe('what each audited service tells', () => {
       'configNotifier',
       'scheduleSync',
       'dependencySync',
+    ]);
+  });
+
+  it('gives a primary a reading moved to the record and the result cache alone (P-314)', () => {
+    // A `channel.*` entry is what makes ingestion forget a sensor's cached channels, so the
+    // invalidator is in. Which channel is primary changes nothing a probe scans, no pause flag,
+    // no probe's ownership of a sensor and no state an alarm chain reacts to.
+    const all = sinks();
+    assert.deepEqual(ingestionAuditSinks(all).map(all.named), [
+      'database',
+      'logging',
+      'cacheInvalidator',
     ]);
   });
 

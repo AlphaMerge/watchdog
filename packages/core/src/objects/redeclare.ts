@@ -41,9 +41,8 @@ import type { ChannelDraft } from './sensor-type-gate.js';
  * never violated and never left with none. **Except when the declared primary has no row yet** —
  * a column the edit adds and puts first, or `exe.script.advanced`'s `primaryChannel` renamed:
  * the edit does not create channels, so the current primary is kept rather than leaving the
- * sensor with none until a reading arrives. The reading that creates that row does not make it
- * primary either (ingestion writes no `is_primary`); the next edit that changes the declaration
- * does.
+ * sensor with none until a reading arrives. The reading that creates that row makes it primary
+ * (`P-314`, `ChannelResolver`), in its own transaction, with the sensor held as an edit holds it.
  *
  * **Without the stored answer, a lookup is left as it is** (`P-311`). When the type cannot say
  * what the stored parameters declared — it throws for them, as one stored by an older build can

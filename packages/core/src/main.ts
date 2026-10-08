@@ -29,6 +29,7 @@ import {
   discoveryAuditSinks,
   grantAuditSinks,
   identityAuditSinks,
+  ingestionAuditSinks,
   objectAuditSinks,
   probeAuditSinks,
   scheduleAuditSinks,
@@ -129,7 +130,7 @@ import { ClockFreeze } from './probes/clock-freeze.js';
 import { ClockFreezeSync } from './probes/clock-freeze-sync.js';
 import { ProbeEpisodeIndex } from './probes/episodes.js';
 import { RediscoverySweep } from './discovery/rediscovery-sweep.js';
-import type { Actor } from './objects/audit.js';
+import type { Actor, AuditSink } from './objects/audit.js';
 import { ReplayPacer } from './ingestion/replay-pacer.js';
 import { ProbeConfigService } from './probes/config.js';
 import { ProbeQueryService } from './probes/queries.js';
@@ -400,11 +401,24 @@ async function serve(): Promise<void> {
   // The declared limits reach a channel created here as well as one created with its sensor
   // (`S-18`): a channel a probe reports for the first time would otherwise wait for the next
   // start-up pass, which is how `S-17`'s new Core Health channels were found sitting unset.
+  // A primary moved by the reading that created it is audited (`P-314`) through sinks that
+  // include the cache invalidator, which holds this resolver: so the resolver is handed the sink
+  // late, once the set exists below, and refuses to move one before then rather than say nothing.
+  // eslint-disable-next-line prefer-const -- assigned below, once the audit sinks exist.
+  let channelAudit: AuditSink | undefined;
   const channels = new ChannelResolver({
     logger,
     lookups,
     declaredLimits: declaredLimitsLookup(catalogue),
     declaredShape: declaredChannelLookup(catalogue, { logger }),
+    audit: {
+      record: (q, actor, mutations, at) => {
+        if (channelAudit === undefined) {
+          throw new Error('the channel resolver’s audit sink is not wired yet');
+        }
+        return channelAudit.record(q, actor, mutations, at);
+      },
+    },
   });
   // `settings` is what makes the failure policy per-sensor and inheritable (M-03): a group can
   // set "warn for three intervals" for everything beneath it, and a sensor can override.
@@ -568,6 +582,7 @@ async function serve(): Promise<void> {
     clockFreezeSync,
     triggerSync,
   };
+  channelAudit = new CompositeAuditSink(ingestionAuditSinks(auditSinks));
 
   // Object rights (`A-03`), built here rather than beside the accounts because email needs it
   // first — a message goes to the people a template names only if they may read what it is about
