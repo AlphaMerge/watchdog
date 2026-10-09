@@ -13915,6 +13915,36 @@ because each is a decision rather than a defect:
       - **Not done.** The registries keep `strict: false`. `vault/service.ts` and `stream.ts`
         build Ajvs with no pattern and no sentence, and were not touched.
 
+- [ ] **P-378 — the sizing poll has sixteen checks to spare** · XS · P-373 · Found 2026-10-09 in
+      `P-373`. Of the 1,500 checks `perf/sizing-pass.test.ts` submits, only 1,016 complete; the
+      pool's bounded queue defers the rest, so a smaller queue limit or pool would leave the poll
+      waiting 30 s for a count it cannot reach. And `syslog-sender`'s UDP case waits a fixed
+      100 ms quiet window where a sentinel datagram would show the excess was read. **Done when**
+      the sizing test submits until 1,000 complete (or asserts on what the submits answered), and
+      the UDP case waits for a sentinel, with a mutation each.
+
+- [ ] **P-379 — Ajvs that say nothing of a mistyped keyword** · XS · P-376 · Found 2026-10-09 in
+      `P-376`. The protocol Ajv and the setting, trigger-kind and lookup registries run
+      `strict: false`, so a typo in a keyword is silent; `vault/service.ts` and
+      `api/routes/stream.ts` build their own Ajvs with no `unsaidPatterns` check; and
+      `web/src/forms/validate.ts` writes the `x-patternMessage` key as a literal. **Done when**
+      each runs strict (or says why not), the two refuse an unsaid pattern at load, and the web
+      reads `PATTERN_MESSAGE` from `@ms/shared`.
+
+- [ ] **P-380 — should a read-only user learn that a secret's rule failed?** · XS · P-375 ·
+      Found 2026-10-09 in `P-375`. `?invalidParams=true` lists a sensor to anyone who can read
+      it; if the path its type now refuses is `writeOnly`, that is one bit about a secret for a
+      reader without write access. **Done when** decided (the filter requires write, the set
+      leaves out sensors refused only on a `writeOnly` path for such readers, or the bit is
+      accepted and said in `administration.md`), and done if adopted.
+
+- [ ] **P-381 — two more `UPDATE … RETURNING` whose order was not checked** · XS · N-31 · Found
+      2026-10-09 in `N-31`. `N-31` found the dispatcher sending in whatever order `RETURNING`
+      gave; `objects/repository.ts` and `notifications/templates.ts` also use `RETURNING` and were
+      not audited. **Done when** every `RETURNING` in `packages/core/src` whose rows are used in
+      order is ordered explicitly (or said in the outcome to be read as a set), with a test where
+      the order matters.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -25864,6 +25894,43 @@ because each is a decision rather than a defect:
       About thirty `ErrorPanel`s are mounted with their text already in them when a read fails.
       **Done when** decided (load failures announced through an always-present region, or left
       as they are because the page has nothing else to say), and done if adopted.
+
+- [ ] **U-60 — a failed channel-list read says "Loading channels…" for good** · XS · U-55 ·
+      Found 2026-10-09 in `U-55`. If the first read of a sensor's channel list fails — on opening
+      the page or after moving from another sensor — `LiveChannels` shows its loading line forever
+      with no error panel. **Done when** a failed read shows the error with a retry, in an
+      always-present region as `U-54`'s are, with a test.
+
+- [ ] **U-61 — the History tab learns of a revived channel late, and of a new one never** · S ·
+      U-55 · Found 2026-10-09 in `U-55`. The History tab does not poll, so a channel a reading makes
+      live again is noticed only at the next Overview poll and its chart only on a range change;
+      and a channel `/values` names that the list does not hold never causes a re-read, so it
+      stays out of the table until a reload. **Done when** both are noticed while the page is
+      open, within the same once-a-minute bound, with tests.
+
+- [ ] **U-62 — moving between sensors shows the previous one for a render** · XS · U-55 · Found
+      2026-10-09 in `U-55`'s review. Every `useApi` keeps its old answer until its effect runs,
+      so the first render after a sensor-to-sensor move shows the whole previous page, header
+      included. **Done when** `useApi` answers `loading` whenever `answered` is not the path asked
+      for, with a test that no frame of the previous sensor is drawn.
+
+- [ ] **U-63 — the invalid-parameters list has no way in from the web** · XS · P-375 · Found
+      2026-10-09 in `P-375`. `?invalidParams=true` is reachable only through the API. **Done when**
+      Core Health's `sensorsWithInvalidParams` (and the sensor list) link to it, and the list says
+      when the check has not finished, with tests.
+
+- [ ] **U-64 — a refused template delete drops focus, and the run card shares one region** · XS ·
+      U-56 · Found 2026-10-09 in `U-56`. A refused delete removes *Yes, delete*, which had focus,
+      so focus falls to the page; and `RunPanel` uses one region for a refused cancel and for its
+      polls, so the next good poll (every 2 s) empties the refusal, and poll failures are alerts
+      where the first-read failure is polite. **Done when** focus moves to *Close*, and the cancel
+      refusal and the poll failures have regions of their own, with tests.
+
+- [ ] **U-65 — four components write the correlation id themselves** · XS · U-59 · Found
+      2026-10-09 in `U-59`. `ParamsForm`, `SettingsPanel`, `AddSensor` and `CredentialsPanel`
+      write the `ml-2 font-mono` span instead of using `CorrelationId`, and `CredentialsPanel`'s
+      has no leading space, so a screen reader runs the id into the message. **Done when** all
+      four use `CorrelationId`, with a test of the spoken text.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
