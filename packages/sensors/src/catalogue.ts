@@ -383,9 +383,25 @@ export class SensorCatalogue {
    * `limits`: the channels a type's real parameters produce are seen here and nowhere at
    * registration, so this is the one place the second rule can be held. Both throw rather than
    * repair, since either is a type that says one thing and does another.
+   *
+   * **A key declared twice throws too**, for the same reason: registration refuses it in `{}`'s
+   * answer, and only here are the keys a parameter names seen (`P-348`, an `extract` key the same
+   * as one of the type's own). The core turns this into a 400 naming the type on a create or an
+   * edit, before anything is written, rather than a scan reporting two readings under one key.
    */
   channelsFor(id: string, params: Readonly<Record<string, unknown>>): readonly ChannelDef[] {
     const defs = this.#require(id).channels(params);
+    const seen = new Set<string>();
+    for (const def of defs) {
+      if (seen.has(def.key)) {
+        throw new SensorTypeError(
+          'BAD_SENSOR_TYPE',
+          `sensor type "${id}" declares channel key "${def.key}" twice for these parameters: ` +
+            'a key a parameter names is one of the type’s own, which its schema should refuse',
+        );
+      }
+      seen.add(def.key);
+    }
     const fixed = this.#fixed.get(id);
     if (fixed !== undefined) {
       if (JSON.stringify(defs) !== fixed) {
@@ -762,7 +778,7 @@ function assertOnePrimaryChannel(type: SensorType): void {
     // channel set genuinely depends on params is still checked here for the empty case.
     defs = type.channels({});
   } catch {
-    return; // channels() may legitimately require params; the per-sensor path checks it again.
+    return; // channels() may legitimately require params; `channelsFor` checks keys per sensor.
   }
 
   const primary = defs.filter((def) => def.isPrimary === true);

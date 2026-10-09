@@ -88,6 +88,51 @@ describe('registration', () => {
     }
   });
 
+  it('refuses a sensor’s declaration that names one key twice, which only its parameters show (P-348)', () => {
+    // A key a parameter names that is one of the type's own: `{}` declares it once, so
+    // registration passes, and `channelsFor` is the first to see it twice.
+    const echoing = variant({
+      id: 'test.echoing',
+      paramsSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { extra: { type: 'string' } },
+      },
+      channels: (params) => [
+        { key: 'rtt', name: 'Response time', unit: 'ms', isPrimary: true },
+        ...(typeof params['extra'] === 'string' ? [{ key: params['extra'], name: 'Extra' }] : []),
+      ],
+    });
+    const c = new SensorCatalogue().register(echoing).seal();
+    assert.deepEqual(
+      c.channelsFor('test.echoing', { extra: 'lag' }).map((def) => def.key),
+      ['rtt', 'lag'],
+    );
+    assert.throws(
+      () => c.channelsFor('test.echoing', { extra: 'rtt' }),
+      (error: unknown) =>
+        error instanceof SensorTypeError &&
+        error.code === 'BAD_SENSOR_TYPE' &&
+        /"test\.echoing" declares channel key "rtt" twice/.test(error.message),
+    );
+  });
+
+  it('refuses to declare the stored parameters that gave a shipped type one key twice', () => {
+    // The parameter-keyed shipped types with a key of their own, each given that key by a
+    // parameter as a stored sensor from before `P-348` could have: the catalogue refuses the
+    // declaration rather than answering it.
+    const c = standardCatalogue(sensorTypesFor('full'));
+    const cases: [string, Record<string, unknown>][] = [
+      ['rest.custom', { extract: [{ key: 'responseTime', path: '$.a' }] }],
+      ['http.content', { extract: [{ key: 'responseTime', pattern: 'a' }] }],
+      ['db.postgresql', { extract: [{ key: 'rows' }] }],
+      ['exe.script.advanced', { primaryChannel: 'runtime' }],
+    ];
+    for (const [id, params] of cases) {
+      assert.throws(() => c.channelsFor(id, params), /twice for these parameters/, id);
+    }
+  });
+
   describe('whether a type declares every key it reports (P-350)', () => {
     const { declaresEveryChannel: _flag, ...unanswered } = pingType;
     const REASON = 'a key per thing the check found, named by what it found';

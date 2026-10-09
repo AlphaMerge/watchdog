@@ -12767,6 +12767,38 @@ because each is a decision rather than a defect:
       - **Not done.** Nothing names such a stored sensor on its own: a start-up pass that validates
         every stored sensor's parameters against its type and logs the ones that fail would, for
         this and any later schema tightening alike (a follow-up).
+      - **Amended on review** (a second commit). **`rest.custom` and `http.content` had the same
+        collision with `responseTime`**: each declares its mappings then `responseTime`, reports
+        both, and sets `declaresEveryChannel`, so a mapping keyed `responseTime` was declared twice
+        (primary with its unit, then `ms`) and the primary could silently be the HTTP timing. Both
+        now refuse it: `rest.custom`'s pattern is `^(?!responseTime$)[A-Za-z0-9_.-]+$` from
+        `REST_OWN_KEYS`; `http.content`'s key had no pattern, and gets only
+        `^(?!\s*responseTime\s*$)` from `HTTP_CONTENT_OWN_KEYS` (spaces included, because
+        `readExtractions` trims them), so no other key it took is refused. Each key's
+        description names it. The other parameter-keyed types were read: `ssh.script`,
+        `snmp.table` and `core.factory` declare no key of their own beside the operator's
+        (only a placeholder when there are none), and `flow.netflow` already drops its built-in
+        keys from its rules. **And a backstop, so the next such type cannot repeat it:**
+        `SensorCatalogue.channelsFor` now throws `BAD_SENSOR_TYPE` for a declaration naming one
+        key twice. Chosen there because it is the one per-sensor path every caller goes through,
+        registration already refuses the same in `{}`'s answer, and the core already turns a throw
+        there into a 400 naming the type with a warning on a create or an edit (`P-296`), before
+        anything is written; the API message loses the key itself, which is a parameter value
+        (`P-305`). For a sensor already stored with such parameters, the places that ask with
+        stored parameters treat it as they treat any type that cannot answer (`P-293`, `P-306`):
+        no retired marks, a new channel created from `{}`'s answer with `channelsCreatedUndeclared`
+        counted and a warning naming the type, migration 073 counting it unanswerable; its scans
+        go on as before. `adding-a-sensor-type.md` says so. Tests: `rest-custom.test.ts`, refused
+        at `/extract/0/key`, `ResponseTime`, `responseTime2`, `response_time`, `responseTime.p95`
+        accepted and declared once, `REST_OWN_KEYS` exactly the key `channels({})` declares and
+        the one appended after mappings; `http-advanced.test.ts` the same for `http.content`,
+        with leading and trailing spaces refused; `catalogue.test.ts`, a test type whose
+        parameter can name its own key answers once and throws for the repeat, and the four
+        shipped cases (`rest.custom`, `http.content`, a database type, `exe.script.advanced`)
+        throw for stored parameters that repeat; `broken-sensor-type.test.ts`, the gate refusing
+        `rest.custom`'s with a 400 naming the type and one warning. Mutations (restored byte for
+        byte, `dist` rebuilt): `rest.custom`'s old pattern fails its refusal; the guard disabled
+        fails the two catalogue cases and the gate's 400.
 
 - [x] **P-349 — `exe.script.advanced` with `primaryChannel` `runtime` declares it twice** · XS ·
       P-320 · Found 2026-10-09 in `P-320`. `channels()` declares `runtime` twice and `execute` drops

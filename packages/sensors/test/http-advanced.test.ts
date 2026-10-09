@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import { httpAdvanced } from '../src/types/http-advanced.js';
-import { httpContent } from '../src/types/http-content.js';
+import { SensorCatalogue } from '../src/catalogue.js';
+import { HTTP_CONTENT_OWN_KEYS, httpContent } from '../src/types/http-content.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
 
 let server: Server;
@@ -265,5 +266,42 @@ describe('http.content', () => {
       /still running after \d+ ms and was stopped.*nested quantifier/s,
     );
     assert.ok(Date.now() - started < 5_000, 'the watchdog, not the scan interval, ends it');
+  });
+});
+
+describe('an http.content extract key (P-348)', () => {
+  const catalogue = new SensorCatalogue().register(httpContent).seal();
+  const withKey = (key: string): Record<string, unknown> => ({
+    path: '/status',
+    extract: [{ key, pattern: 'queue=(\\d+)' }],
+  });
+
+  it('names exactly the key the sensor reports of its own', () => {
+    assert.deepEqual(
+      httpContent.channels({}).map((def) => def.key),
+      [...HTTP_CONTENT_OWN_KEYS],
+    );
+  });
+
+  it('refuses the sensor’s own key, spaced as readExtractions would trim it', () => {
+    for (const own of HTTP_CONTENT_OWN_KEYS) {
+      for (const key of [own, ` ${own}`, `${own} `]) {
+        const outcome = catalogue.validate(httpContent.id, withKey(key));
+        assert.ok(!outcome.valid, JSON.stringify(key));
+        assert.deepEqual(
+          outcome.problems.map((problem) => problem.path),
+          ['/extract/0/key'],
+        );
+      }
+    }
+  });
+
+  it('still takes a key that only resembles it, declared once', () => {
+    for (const key of ['ResponseTime', 'responseTime2', 'response time', 'queue']) {
+      const outcome = catalogue.validate(httpContent.id, withKey(key));
+      assert.ok(outcome.valid, key);
+      const keys = catalogue.channelsFor(httpContent.id, outcome.params).map((def) => def.key);
+      assert.equal(new Set(keys).size, keys.length, key);
+    }
   });
 });

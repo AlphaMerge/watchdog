@@ -357,11 +357,15 @@ it declares (`assertDeclaresEveryKey` in `packages/sensors/test/support`).
 **A key the operator names in the parameters must not be one of yours.** If your type reports
 channels of its own beside keys a parameter names, refuse your own keys in that parameter's
 schema, as the database types refuse `value`, `rows`, `queryTime` and `connectTime` as an
-`extract` key (`P-348`) and `exe.script.advanced` refuses `runtime` as its primary (`P-349`) — a
-`pattern` with a negative lookahead, which the sensor form checks too, and say so in the
-parameter's description, since the form's message is the pattern. Otherwise one result
-carries two readings under the key, of which the core stores one, and `channels()` declares it
-twice.
+`extract` key (`P-348`), `rest.custom` and `http.content` refuse `responseTime` as theirs, and
+`exe.script.advanced` refuses `runtime` as its primary (`P-349`) — a `pattern` with a negative
+lookahead, which the sensor form checks too, and say so in the parameter's description, since the
+form's message is the pattern. Otherwise one result carries two readings under the key, of which
+the core stores one, and `channels()` declares it twice. **The catalogue holds you to it**:
+`channelsFor` throws for a declaration that names one key twice, which the core answers on a create
+or an edit with a 400 naming your type and a warning for you, before anything is written. That is
+the backstop, not the fix: the operator learns of it from a refusal that blames your type rather
+than from the form.
 
 ### `execute(context)`
 

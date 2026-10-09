@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { pino } from 'pino';
-import type { SensorType } from '@ms/sensors';
+import { standardCatalogue, type SensorType } from '@ms/sensors';
 import { encodedForms } from '@ms/shared';
 import { ApiServer } from '../src/api/server.js';
 import { AuditRepository } from '../src/audit/store.js';
@@ -356,6 +356,28 @@ describe('the sensor-type gate, given a type that breaks its own channel declara
     const logged = JSON.parse(lines[0] ?? '{}') as { level: number; sensorType: string };
     assert.equal(logged.level, 40, 'a warning');
     assert.equal(logged.sensorType, 'test.shifting');
+  });
+
+  it('refuses parameters that declare one key twice as a 400 naming the type (P-348)', () => {
+    // A stored `rest.custom` from before its schema refused `responseTime` as a mapping key: an
+    // edit or a create carrying it is refused before anything is written, never scanned.
+    const lines: string[] = [];
+    const gate = catalogueSensorTypeGate(standardCatalogue(), {
+      logger: pino({ level: 'info' }, { write: (line: string) => lines.push(line) }),
+    });
+    let thrown: unknown;
+    try {
+      gate.channelsFor('rest.custom', { extract: [{ key: 'responseTime', path: '$.a' }] });
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown instanceof ObjectError, `expected an ObjectError, got ${String(thrown)}`);
+    assert.equal(thrown.status, 400);
+    assert.equal(thrown.details['sensorType'], 'rest.custom');
+    assert.match(thrown.message, /twice/);
+    // The key is a parameter value, cut as every one is (`P-305`).
+    assert.ok(!thrown.message.includes('responseTime'), thrown.message);
+    assert.equal(lines.length, 1, 'and a warning for whoever ships the type');
   });
 
   it('refuses any other throw as the type’s fault too, and says it without a value (P-305)', () => {

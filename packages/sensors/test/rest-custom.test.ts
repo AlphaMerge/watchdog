@@ -1,7 +1,8 @@
 import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { HttpSimulator, type RecordedRequest } from '@ms/simulators';
-import { restCustom } from '../src/types/rest-custom.js';
+import { SensorCatalogue } from '../src/catalogue.js';
+import { REST_OWN_KEYS, restCustom } from '../src/types/rest-custom.js';
 import type { CheckContext, CheckExecution, PreviewResult, PreviewRow } from '../src/contract.js';
 
 /**
@@ -597,6 +598,48 @@ describe('previewing against a pasted response', () => {
     ]) {
       const result = await preview(params);
       assert.ok(Array.isArray(result.rows), `${JSON.stringify(params)} threw or answered wrongly`);
+    }
+  });
+});
+
+describe('an extract key (P-348)', () => {
+  const catalogue = new SensorCatalogue().register(restCustom).seal();
+  const withKey = (key: string): Record<string, unknown> => ({
+    path: '/cluster',
+    extract: [{ key, path: '$.latency' }],
+  });
+
+  it('names exactly the key the sensor reports of its own', () => {
+    // `{}` declares it alone, as the primary; with mappings it comes after them.
+    assert.deepEqual(
+      restCustom.channels({}).map((def) => def.key),
+      [...REST_OWN_KEYS],
+    );
+    const own = restCustom
+      .channels({ extract: [{ key: 'depth', path: '$.queue.depth' }] })
+      .map((def) => def.key)
+      .filter((key) => key !== 'depth');
+    assert.deepEqual(own, [...REST_OWN_KEYS]);
+  });
+
+  for (const key of REST_OWN_KEYS) {
+    it(`refuses "${key}", the sensor's own channel`, () => {
+      const outcome = catalogue.validate(restCustom.id, withKey(key));
+      assert.ok(!outcome.valid, key);
+      assert.deepEqual(
+        outcome.problems.map((problem) => problem.path),
+        ['/extract/0/key'],
+      );
+    });
+  }
+
+  it('still takes a key that only resembles it, declared once', () => {
+    for (const key of ['ResponseTime', 'responseTime2', 'response_time', 'responseTime.p95']) {
+      const outcome = catalogue.validate(restCustom.id, withKey(key));
+      assert.ok(outcome.valid, key);
+      const keys = catalogue.channelsFor(restCustom.id, outcome.params).map((def) => def.key);
+      assert.equal(keys.filter((one) => one === key).length, 1, key);
+      assert.equal(new Set(keys).size, keys.length, key);
     }
   });
 });

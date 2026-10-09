@@ -75,6 +75,12 @@ const text = (record: Record<string, unknown>, key: string, fallback = ''): stri
 };
 
 /** Exported for its own tests: a mapping read wrongly is a channel quietly watching nothing. */
+/**
+ * The key every REST sensor reports of its own, which `channels()` declares after the mappings'
+ * (`P-348`). The schema refuses it as an `extract` key.
+ */
+export const REST_OWN_KEYS = ['responseTime'] as const;
+
 export function readMappings(params: Readonly<Record<string, unknown>>): Mapping[] {
   const raw = params['extract'];
   if (!Array.isArray(raw)) return [];
@@ -177,9 +183,13 @@ export const restCustom: SensorType = {
               type: 'string',
               minLength: 1,
               maxLength: 40,
-              pattern: '^[A-Za-z0-9_.-]+$',
+              // Not the sensor's own (`P-348`): a result would carry two readings under it, of
+              // which the core keeps one, and `channels()` would declare it twice.
+              pattern: `^(?!(?:${REST_OWN_KEYS.join('|')})$)[A-Za-z0-9_.-]+$`,
               title: 'Channel key',
-              description: 'Stable. Renaming it starts a new channel with no history.',
+              description:
+                'Stable. Renaming it starts a new channel with no history. Not ' +
+                `${REST_OWN_KEYS.map((key) => `\`${key}\``).join(', ')}: the sensor’s own channel.`,
             },
             name: { type: 'string', maxLength: 80, default: '', title: 'Channel name' },
             unit: { type: 'string', maxLength: 20, default: '', title: 'Unit' },

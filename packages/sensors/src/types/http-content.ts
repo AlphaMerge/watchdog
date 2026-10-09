@@ -34,6 +34,12 @@ interface Extraction {
   readonly pattern: string;
 }
 
+/**
+ * The key every content sensor reports of its own, which `channels()` declares after the
+ * extractions' (`P-348`). The schema refuses it as an `extract` key.
+ */
+export const HTTP_CONTENT_OWN_KEYS = ['responseTime'] as const;
+
 function readExtractions(params: Readonly<Record<string, unknown>>): Extraction[] {
   const raw = params['extract'];
   if (!Array.isArray(raw)) return [];
@@ -99,7 +105,16 @@ export const httpContent: SensorType = {
           additionalProperties: false,
           required: ['key', 'pattern'],
           properties: {
-            key: { type: 'string', minLength: 1, maxLength: 100, title: 'Key' },
+            key: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 100,
+              // Not the sensor's own (`P-348`), with the spaces `readExtractions` trims: a result
+              // would carry two readings under it, and `channels()` would declare it twice.
+              pattern: `^(?!\\s*(?:${HTTP_CONTENT_OWN_KEYS.join('|')})\\s*$)`,
+              title: 'Key',
+              description: `Not ${HTTP_CONTENT_OWN_KEYS.map((key) => `\`${key}\``).join(', ')}: the sensor’s own channel.`,
+            },
             name: { type: 'string', maxLength: 200, default: '', title: 'Channel name' },
             unit: { type: 'string', maxLength: 50, default: '', title: 'Unit' },
             pattern: {
