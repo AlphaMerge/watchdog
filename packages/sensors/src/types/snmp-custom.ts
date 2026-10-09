@@ -78,6 +78,9 @@ export const snmpCustom: SensorType = {
     ['oid'],
   ),
 
+  // Only `value`, gauge or counter: a channel a later build drops is retired (`P-320`).
+  declaresEveryChannel: true,
+
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[] {
     const name = typeof params['channelName'] === 'string' ? params['channelName'] : 'Value';
     const unit = typeof params['unit'] === 'string' ? params['unit'] : '';

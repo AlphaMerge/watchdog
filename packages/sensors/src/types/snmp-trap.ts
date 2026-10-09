@@ -131,6 +131,10 @@ export const snmpTrap: SensorType = {
     },
   },
 
+  // Every reading is keyed by a channel `channels()` names, on every path: a channel a later
+  // build drops is retired (`P-320`).
+  declaresEveryChannel: true,
+
   channels(): readonly ChannelDef[] {
     return [
       // Traps since the last scan, not a total: an upper limit on this is "more traps than

@@ -8,7 +8,9 @@ import { windowsMemory } from '../src/types/windows-memory.js';
 import { windowsService } from '../src/types/windows-service.js';
 import { windowsVolume } from '../src/types/windows-volume.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
+import { standardCatalogue } from '../src/index.js';
 import { installFakePowerShell } from '@ms/simulators';
+import { assertDeclaresEveryKey } from './support/declared-keys.js';
 
 /**
  * The four Windows sensors (`T-10`).
@@ -406,5 +408,51 @@ describe('what every Windows sensor does with a transport failure', () => {
       () => failing(windowsVolume, '#FAKE:error ConnectionError|WinRM cannot process the request.'),
       /winrm quickconfig/,
     );
+  });
+});
+
+describe('which Windows sensors report only keys they declare (P-320)', () => {
+  const MEMORY = {
+    TotalVisibleMemorySize: 16_777_216,
+    FreePhysicalMemory: 4_194_304,
+    TotalVirtualMemorySize: 33_554_432,
+    FreeVirtualMemory: 12_582_912,
+  };
+  const SPOOLER = { Name: 'Spooler', State: 'Running', StartMode: 'Auto', ProcessId: 2144 };
+
+  it('memory and service do, on each path', async () => {
+    const cases: [SensorType, unknown, Record<string, unknown>][] = [
+      [windowsMemory, MEMORY, {}],
+      [windowsMemory, { TotalVisibleMemorySize: 16_777_216, FreePhysicalMemory: 4_194_304 }, {}],
+      [windowsMemory, { TotalVisibleMemorySize: 0, FreePhysicalMemory: 0 }, {}],
+      [windowsService, SPOOLER, { service: 'Spooler' }],
+      [windowsService, { ...SPOOLER, State: 'Stopped', ProcessId: 0 }, { service: 'Spooler' }],
+    ];
+    for (const [type, answer, params] of cases) {
+      assertDeclaresEveryKey(type.id, params, await run(type, answer, params));
+    }
+  });
+
+  it('cpu and volume do not: their keys are the machine’s processors and drives', async () => {
+    // Why neither sets `declaresEveryChannel`: a key no declaration names is one they report.
+    const catalogue = standardCatalogue();
+    const cores = await run(windowsCpu, [
+      { Name: '0', PercentProcessorTime: 12 },
+      { Name: '_Total', PercentProcessorTime: 12 },
+    ]);
+    const volumes = await run(windowsVolume, [
+      { DeviceID: 'C:', Size: 100, FreeSpace: 10, DriveType: 3 },
+    ]);
+    for (const [type, execution] of [
+      [windowsCpu, cores],
+      [windowsVolume, volumes],
+    ] as const) {
+      assert.notEqual(catalogue.declaration(type.id).declaresEveryChannel, true, type.id);
+      const declared = new Set(catalogue.channelsFor(type.id, {}).map((def) => def.key));
+      assert.ok(
+        execution.channels.some((reading) => !declared.has(reading.key)),
+        `${type.id} reported only declared keys`,
+      );
+    }
   });
 });

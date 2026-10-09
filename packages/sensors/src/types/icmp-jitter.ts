@@ -67,6 +67,10 @@ export const icmpJitter: SensorType = {
     },
   },
 
+  // Every reading is keyed by a channel `channels()` names, on every path: a channel a later
+  // build drops is retired (`P-320`).
+  declaresEveryChannel: true,
+
   channels(): readonly ChannelDef[] {
     return [
       // The steadiness, not the speed. An average latency that looks fine can hide a link that

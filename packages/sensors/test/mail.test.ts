@@ -11,6 +11,7 @@ import { mailRoundTrip } from '../src/types/mail-roundtrip.js';
 import { mailSmtp } from '../src/types/mail-smtp.js';
 import { Mailbox, imapServer, pop3Server, smtpServer, type RunningServer } from '@ms/simulators';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
+import { assertDeclaresEveryKey } from './support/declared-keys.js';
 
 /**
  * The four mail sensors against the in-house simulators.
@@ -550,5 +551,32 @@ describe('mail.roundtrip', () => {
         }),
       /the relay would not take the test message: the recipient .* was refused: 550/,
     );
+  });
+});
+
+describe('the keys the mailbox types report (P-320)', () => {
+  it('are keys their declaration names for the same parameters', async () => {
+    mailbox.deliver('Subject: one\n\nbody');
+    const pop3 = { port: await start(pop3Server) };
+    assertDeclaresEveryKey('mail.pop3', pop3, await run(mailPop3, pop3));
+    const imap = { port: await start(imapServer), mailbox: 'INBOX' };
+    assertDeclaresEveryKey('mail.imap', imap, await run(mailImap, imap));
+    for (const [readWith, server] of [
+      ['imap', imapServer],
+      ['pop3', pop3Server],
+    ] as const) {
+      const params = {
+        from: 'a@example.invalid',
+        to: 'b@example.invalid',
+        readWith,
+        smtpPort: await start(smtpServer),
+        readPort: await start(server),
+        smtpSecurity: 'none',
+        readSecurity: 'none',
+        pollSeconds: 1,
+        deliveryTimeoutMs: 10_000,
+      };
+      assertDeclaresEveryKey('mail.roundtrip', params, await run(mailRoundTrip, params));
+    }
   });
 });

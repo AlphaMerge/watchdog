@@ -3,6 +3,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import { snmpTraffic } from '../src/types/snmp-traffic.js';
 import type { CheckContext, CheckExecution } from '../src/contract.js';
 import { TestSnmpAgent, type AgentEntry } from '@ms/simulators';
+import { assertDeclaresEveryKey } from './support/declared-keys.js';
 
 const IF_DESCR = '1.3.6.1.2.1.2.2.1.2';
 const IF_NAME = '1.3.6.1.2.1.31.1.1.1.1';
@@ -111,6 +112,24 @@ describe('the channels it declares', () => {
         .map((c) => c.key),
       ['in'],
     );
+  });
+});
+
+describe('the keys it reports (P-320)', () => {
+  it('are keys its declaration names for the same parameters, on each path', async () => {
+    // 64-bit, the fallback to 32, forced 32, by name, and an interface with no oper status (the
+    // `status` channel left out, never renamed).
+    const cases: [Record<string, unknown>, AgentEntry[]][] = [
+      [{ ifIndex: 2 }, MIB],
+      [{ ifIndex: 3 }, MIB],
+      [{ ifIndex: 2, counterWidth: '32' }, MIB],
+      [{ interfaceName: 'uplink to core' }, MIB],
+      [{ ifIndex: 2 }, MIB.filter((entry) => !entry.oid.startsWith(IF_OPER))],
+    ];
+    for (const [params, mib] of cases) {
+      agent.load(mib);
+      assertDeclaresEveryKey('snmp.traffic', params, await run(params));
+    }
   });
 });
 

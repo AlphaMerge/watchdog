@@ -4,6 +4,7 @@ import { snmpCustom } from '../src/types/snmp-custom.js';
 import { snmpCustomString } from '../src/types/snmp-custom-string.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
 import { TestSnmpAgent, type AgentEntry } from '@ms/simulators';
+import { assertDeclaresEveryKey } from './support/declared-keys.js';
 
 const SYS_DESCR = '1.3.6.1.2.1.1.1.0';
 const UPTIME = '1.3.6.1.2.1.1.3.0';
@@ -247,6 +248,24 @@ describe('both types', () => {
   it('declare exactly one primary channel', () => {
     for (const type of [snmpCustom, snmpCustomString]) {
       assert.equal(type.channels({}).filter((c) => c.isPrimary === true).length, 1, type.id);
+    }
+  });
+
+  it('report only keys their declaration names, on each path (P-320)', async () => {
+    // Gauge and counter of each width; a number pulled out, a match, and a match that missed.
+    const cases: [SensorType, Record<string, unknown>][] = [
+      [snmpCustom, { oid: GAUGE }],
+      [snmpCustom, { oid: COUNTER32, mode: 'counter' }],
+      [snmpCustom, { oid: COUNTER64, mode: 'counter', unit: 'octets' }],
+      [snmpCustomString, { oid: TEMP_TEXT, pattern: 'Temp: ([0-9.]+)C' }],
+      [
+        snmpCustomString,
+        { oid: SYS_DESCR, pattern: 'Cisco', mode: 'match', lookup: 'ms.snmp.if-oper-status' },
+      ],
+      [snmpCustomString, { oid: SYS_DESCR, pattern: 'Juniper', mode: 'match' }],
+    ];
+    for (const [type, params] of cases) {
+      assertDeclaresEveryKey(type.id, params, await run(type, params));
     }
   });
 

@@ -4,9 +4,10 @@ import { connect } from 'node:net';
 import { openSyslogReceiver, type ReceivedSyslog } from '../src/support/syslog/receiver.js';
 import { drain } from '../src/support/syslog/receiver.js';
 import { sendTcp, sendUdp } from '@ms/simulators';
-import { parseSyslog, renderSyslog } from '../src/support/syslog/parse.js';
+import { parseSyslog, renderSyslog, SEVERITIES } from '../src/support/syslog/parse.js';
 import { matches, readRules, syslogReceiver, SYSLOG_LISTENER } from '../src/types/syslog.js';
 import type { CheckContext, CheckExecution, ReceivedNotification } from '../src/contract.js';
+import { assertDeclaresEveryKey } from './support/declared-keys.js';
 
 /**
  * The syslog parser, the framings and the sensor.
@@ -620,5 +621,52 @@ describe('rules', () => {
 
   it('matches everything when there are no rules', () => {
     assert.ok(matches(notification({}), []));
+  });
+});
+
+describe('the keys syslog.receiver reports (P-320)', () => {
+  let receiver: Awaited<ReturnType<typeof openSyslogReceiver>>;
+  let port = 0;
+  const seen: ReceivedSyslog[] = [];
+
+  before(async () => {
+    ({ receiver, port } = await openOnFreePort(
+      { onMessage: (one) => seen.push(one), onMalformed: () => undefined },
+      500,
+    ));
+  });
+
+  after(async () => {
+    await receiver.close();
+  });
+
+  it('are keys its declaration names, whatever severity a sender names', async () => {
+    // One message at each of the eight severities, over a real socket from the simulator, handed
+    // on as the probe's listener hands them on.
+    await sendUdp(
+      port,
+      SEVERITIES.map((_, severity) => ({
+        format: 'rfc3164' as const,
+        severity,
+        hostname: 'gw',
+        tag: 'app[1]',
+        message: `severity ${String(severity)}`,
+      })),
+    );
+    await until(() => seen.length === SEVERITIES.length);
+    const items: ReceivedNotification[] = seen.map((one) => ({
+      at: '2026-08-27T09:15:00.000Z',
+      source: DEVICE,
+      text: renderSyslog(DEVICE, one.message),
+      detail: { ...one.message, transport: one.transport },
+    }));
+    // And a severity name no RFC has, which our probe never sends and a peer could: counted under
+    // no key, rather than reported under its own.
+    items.push(notification({ severityName: 'catastrophic' }));
+    for (const params of [{}, { minSeverity: 'warning' }, { sourceIsDevice: false }]) {
+      const execution = await run(params, items);
+      assertDeclaresEveryKey('syslog.receiver', params, execution);
+      assert.equal(execution.channels.length, 2 + SEVERITIES.length, JSON.stringify(params));
+    }
   });
 });

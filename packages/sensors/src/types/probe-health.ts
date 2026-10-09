@@ -755,6 +755,10 @@ export const probeHealth: SensorType = {
     },
   },
 
+  // Evaluated by the core, whose `readingsFrom` reports only keys of `CHANNELS`: a channel a later
+  // build drops is retired (`P-320`).
+  declaresEveryChannel: true,
+
   channels(): readonly ChannelDef[] {
     return CHANNELS;
   },

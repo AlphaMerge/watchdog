@@ -460,6 +460,10 @@ export function databaseSensor(
       required: ['query'],
       properties: { ...DB_SCHEMA, port: { ...DB_SCHEMA['port'], description } as JsonSchema },
     },
+    // Every reading is `value`, an `extract` key (`readDbMappings`, which `dbChannels` declares
+    // from too) or `rows`, `queryTime`, `connectTime`; a column name never becomes a key. So an
+    // `extract` entry an edit took out is retired (`P-320`).
+    declaresEveryChannel: true,
     channels: dbChannels,
     async execute(context: CheckContext): Promise<CheckExecution> {
       return runDbCheck(await driverPath(), context);

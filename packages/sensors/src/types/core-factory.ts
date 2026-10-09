@@ -127,6 +127,10 @@ export const coreFactory: SensorType = {
     },
   },
 
+  // Evaluated by the core (`factory/service.ts`), which reports only the keys of `channels`' entries
+  // that carry a formula: each one declared here. A channel an edit took out is retired (`P-320`).
+  declaresEveryChannel: true,
+
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[] {
     const raw = params['channels'];
     if (!Array.isArray(raw) || raw.length === 0) {

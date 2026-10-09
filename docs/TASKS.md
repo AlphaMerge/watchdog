@@ -11848,11 +11848,83 @@ because each is a decision rather than a defect:
         - `core-health.test.ts`, `metrics.test.ts` and `health-types.test.ts` cover the channel,
           its counter shape, its export and its gap without a registry.
 
-- [ ] **P-320 — types whose channels do not depend on parameters are not flagged
+- [x] **P-320 — types whose channels do not depend on parameters are not flagged
       `declaresEveryChannel`** · S · P-310 · Found 2026-10-08 in `P-310`. Only nine types whose
       channels an edit can remove set the flag, so a channel a later build drops from any other
       type is never called retired. **Done when** each remaining type's `execute` is checked and
       flagged where true, with the catalogue test listing them.
+
+      **P-320 outcome. Flagged on 32 more types, 41 of the 44 shipped; left off three, whose keys
+      come from what they read.** Only the flag and a comment beside it on each type: no
+      behaviour, core, protocol or migration change.
+      - **The check.** Every return path of each type's `execute` read against its own
+        `channels(params)` for the same parameters: error and diagnostic paths (all throw, so
+        report nothing), channels a path leaves out (left out, never renamed), per-item keys, and
+        keys built from remote data. For the three the core evaluates (`core.factory`,
+        `ms.core.health`, `ms.probe.health`, whose `execute` only rejects) the core's evaluator was
+        read instead: `factory/service.ts`'s sweep, and `readingsFrom` in `health/core-health.ts`
+        and `health/probe-health.ts`.
+      - **Two of P-310's examples were wrong, and are flagged.** `ssh.script` reads what the
+        script printed but reports only the keys its `channels` parameter declares (the rest are
+        named in the message, `T-07`), through the same `readChannels` its `channels()` uses. The
+        database types report `value`, the keys of `extract` (read by the same `readDbMappings`
+        `dbChannels` uses) and three counts and timings: never a column name. In both an entry an
+        edit took out is now retired, which is right.
+
+        | Type | Flagged | Why |
+        | --- | --- | --- |
+        | `core.factory` | yes | Core-evaluated; reports the keys of `channels` entries with a formula, each declared |
+        | `db.postgresql`, `db.mysql`, `db.mssql` | yes | `value`, `extract` keys, `rows`, `queryTime`, `connectTime`; a column that is not a number is left out |
+        | `dns.blocklist` | yes | `listings`, `checked`, `lookupTime`; every failure throws |
+        | `dns.record` | yes | `responseTime`, `records` |
+        | `exe.script` | yes | `value` and `runtime`, whatever the program printed |
+        | `exe.script.advanced` | **no** | Reports the program's own keys; declares only the primary and `runtime` |
+        | `icmp.ping` | yes | `rtt`, `loss`; no reply throws |
+        | `icmp.jitter` | yes | Five fixed keys; fewer than two replies throws |
+        | `mail.pop3`, `mail.imap` | yes | Fixed keys from one return |
+        | `mail.roundtrip` | yes | Four fixed keys; not delivered throws |
+        | `ms.core.health`, `ms.probe.health` | yes | Core-evaluated; `readingsFrom` iterates the declared list and leaves out a null |
+        | `port.range` | yes | `open`, `closed`, `openPercent` |
+        | `snmp.cpu` | yes | Three keys, or `load` alone on the UCD fallback |
+        | `snmp.custom`, `snmp.custom.string` | yes | `value` alone, in every mode |
+        | `snmp.diskfree`, `snmp.memory` | yes | Fixed keys; a percentage or swap with no figure left out |
+        | `snmp.traffic` | yes | `in`, `out`, `total`, and `status` when the device has one; parameters set only the width |
+        | `snmp.trap` | yes | Four fixed counts |
+        | `snmp.uptime` | yes | `uptime`, and `agentUptime` when the agent has one |
+        | `ssh.diskfree`, `ssh.load`, `ssh.meminfo` | yes | Fixed keys; a figure the host did not give left out |
+        | `ssh.script` | yes | Only the keys `channels` declares; anything else is named in the message |
+        | `syslog.receiver` | yes | `messages`, `senders` and the eight `SEVERITIES`, whatever severity name a message carries |
+        | `tls.certificate`, `tls.security` | yes | Six fixed keys each |
+        | `windows.cpu` | **no** | `core_<name>` per logical processor, named by the machine (default on) |
+        | `windows.memory`, `windows.service` | yes | Fixed keys; a figure or a pid the machine did not give left out |
+        | `windows.volume` | **no** | `free_`, `freebytes_` and `size_` per drive letter the machine reports |
+
+      - **Tests.** `retired-channels.test.ts` (core): the exact list of 41, and the exact three
+        left; `reportableKeys` `null` for `exe.script.advanced`, `windows.cpu` and
+        `windows.volume`, and `ssh.script`'s declared keys for its `channels`. Against the
+        simulators (`assertDeclaresEveryKey`, new in `packages/sensors/test/support`: flagged, and
+        every reported key in `channelsFor` for the parameters it ran with), each path that leaves
+        a channel out as well as the full one: `snmp.uptime`, `snmp.cpu`, `snmp.memory`,
+        `snmp.diskfree` (11 runs), `snmp.traffic` (5, one with no oper status), `snmp.custom` and
+        `snmp.custom.string` (6) on the SNMP agent; `mail.pop3`, `mail.imap` and
+        `mail.roundtrip` over IMAP and POP3 on the mail servers; `ssh.script` (extra keys, a
+        missing one, JSON, a bare number), `ssh.diskfree`, `ssh.load`, `ssh.meminfo` on the SSH
+        server; `windows.memory` and `windows.service` on the fake PowerShell, beside a test
+        that `windows.cpu` and `windows.volume` do report keys their declaration does not name;
+        `syslog.receiver` on eight severities sent by the syslog sender, plus a severity name no
+        RFC has. **No simulator, so the code reading alone:** `core.factory`, `ms.core.health`,
+        `ms.probe.health` (core-evaluated), the database types, `dns.blocklist`, `dns.record`,
+        `exe.script`, `icmp.ping`, `icmp.jitter`, `port.range`, `snmp.trap` (its tests hand it
+        batches), `tls.certificate`, `tls.security`.
+      - **Mutations** (each restored byte for byte, `dist` rebuilt): `exe.script.advanced` flagged
+        fails 3 (the core catalogue test's two lists and its `reportableKeys` `null`
+        assertion); `ssh.script` reporting what the script printed beyond its `channels` fails 2
+        (the simulator test, naming `latency`, and `T-07`'s no-declared-reading case).
+      - **Docs.** `adding-a-sensor-type.md` (set it whenever true; keys named in the parameters
+        keep the promise when read as `channels` reads them; the three that do not, and the test
+        helper); `web-ui.md` (every type but three). `sensor-reference.md` `--check` current.
+      - **Not done.** Nothing enforces the flag on a new type; a type that could set it and
+        does not is safe, only less informative.
 
 - [x] **P-321 — `declaresEveryChannel` is a promise nothing checks** · S · P-310 · Found
       2026-10-08 in `P-310`. A flagged type that reports a key its declaration does not name shows

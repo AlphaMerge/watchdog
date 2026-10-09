@@ -45,6 +45,10 @@ export const mailImap: SensorType = {
     },
   },
 
+  // Every reading is keyed by a channel `channels()` names, on every path: a channel a later
+  // build drops is retired (`P-320`).
+  declaresEveryChannel: true,
+
   channels(): readonly ChannelDef[] {
     return [
       // Unseen first: a mailbox somebody is working through has messages and no backlog, and the

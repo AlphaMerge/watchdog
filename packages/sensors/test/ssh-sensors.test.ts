@@ -7,6 +7,7 @@ import { sshScript } from '../src/types/ssh-script.js';
 import { standardCatalogue } from '../src/index.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
 import { TestSshServer } from '@ms/simulators';
+import { assertDeclaresEveryKey } from './support/declared-keys.js';
 import { until, within } from './support/within.js';
 
 let server: TestSshServer;
@@ -290,6 +291,40 @@ describe('all four types', () => {
   it('declare exactly one primary channel', () => {
     for (const type of types) {
       assert.equal(type.channels({}).filter((c) => c.isPrimary === true).length, 1, type.id);
+    }
+  });
+
+  it('report only keys their declaration names, on each path (P-320)', async () => {
+    // `ssh.script` included: what the script printed beyond its declared channels is named in
+    // the message and never reported, in each of the output forms it reads.
+    const script = {
+      command: './check.sh',
+      channels: [
+        { key: 'queue', name: 'Queue depth', unit: 'jobs' },
+        { key: 'temperature', name: 'Inlet temperature', unit: '°C' },
+      ],
+    };
+    const noSwap = MEMINFO.split('\n')
+      .filter((line) => !line.startsWith('Swap'))
+      .join('\n');
+    const oldKernel = MEMINFO.split('\n')
+      .filter((line) => !line.startsWith('MemAvailable'))
+      .join('\n');
+    const cases: [SensorType, Record<string, unknown>, string, string][] = [
+      [sshScript, script, './check.sh', 'queue:12\ntemperature:41\nlatency:8\n'],
+      [sshScript, script, './check.sh', 'queue:12\n'],
+      [sshScript, script, './check.sh', '{"channels":{"queue":3,"latency":8},"message":"ok"}\n'],
+      [sshScript, { command: './check.sh', channels: [{ key: 'value' }] }, './check.sh', '41.5\n'],
+      [sshDiskFree, { path: '/' }, "df -P -k '/'", DF],
+      [sshLoad, {}, LOAD_COMMAND, '2.00 1.50 1.00 1/234 5678\n8\n'],
+      [sshLoad, {}, LOAD_COMMAND, '2.00 1.50 1.00 1/234 5678\n\n'],
+      [sshMeminfo, {}, 'cat /proc/meminfo', MEMINFO],
+      [sshMeminfo, {}, 'cat /proc/meminfo', noSwap],
+      [sshMeminfo, {}, 'cat /proc/meminfo', oldKernel],
+    ];
+    for (const [type, params, command, stdout] of cases) {
+      server.answer(command, { stdout });
+      assertDeclaresEveryKey(type.id, params, await run(type, params));
     }
   });
 

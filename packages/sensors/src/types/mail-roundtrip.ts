@@ -117,6 +117,10 @@ export const mailRoundTrip: SensorType = {
     },
   },
 
+  // Every reading is keyed by a channel `channels()` names, on every path: a channel a later
+  // build drops is retired (`P-320`).
+  declaresEveryChannel: true,
+
   channels(): readonly ChannelDef[] {
     return [
       // Seconds to minutes on a healthy system, and a trend from four seconds to ninety is the

@@ -26,6 +26,10 @@ export const sshLoad: SensorType = {
 
   paramsSchema: sshParamsSchema({}, []),
 
+  // Every reading is keyed by a channel `channels()` names, on every path: a channel a later
+  // build drops is retired (`P-320`).
+  declaresEveryChannel: true,
+
   channels(): readonly ChannelDef[] {
     return [
       // The per-processor figure is primary rather than the raw one-minute average: it is the

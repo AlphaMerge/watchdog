@@ -258,7 +258,9 @@ description, so it does not depend on hovering. Its limits judge nothing, so it 
 the sensor's state. On the
 **History** tab its line stops at the edit, as a gap. Put the column back and it is read again,
 with its history. Only a type that promises its readings name no channel it does not declare is
-marked this way (`P-310`); a script's extra channels are never called retired. Nor is a channel
+marked this way (`P-310`): every shipped type but three (`P-320`). An advanced script's extra
+channels, and Windows CPU's per-processor and Windows Volume's per-drive channels, come from what
+was read, so no channel of those three types is ever called retired. Nor is a channel
 with a reading newer than the sensor's last change: a probe running a newer build than the core
 may still read a key the core's build no longer declares (`P-322`).
 

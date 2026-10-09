@@ -38,6 +38,10 @@ export const mailPop3: SensorType = {
     },
   },
 
+  // Every reading is keyed by a channel `channels()` names, on every path: a channel a later
+  // build drops is retired (`P-320`).
+  declaresEveryChannel: true,
+
   channels(): readonly ChannelDef[] {
     return [
       // First and primary. A mailbox nobody is collecting is the fault this sensor finds, and it

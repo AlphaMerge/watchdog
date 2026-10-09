@@ -61,6 +61,10 @@ export const tlsSecurity: SensorType = {
     },
   },
 
+  // Every reading is keyed by a channel `channels()` names, on every path: a channel a later
+  // build drops is retired (`P-320`).
+  declaresEveryChannel: true,
+
   channels(): readonly ChannelDef[] {
     return [
       // The weakest thing still accepted, because that is what an attacker gets to pick.

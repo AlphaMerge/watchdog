@@ -79,6 +79,9 @@ export const snmpCustomString: SensorType = {
     ['oid'],
   ),
 
+  // Only `value`, in either mode: a channel a later build drops is retired (`P-320`).
+  declaresEveryChannel: true,
+
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[] {
     const lookup = typeof params['lookup'] === 'string' ? params['lookup'].trim() : '';
     return [

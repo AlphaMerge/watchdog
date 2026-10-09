@@ -177,6 +177,10 @@ export const syslogReceiver: SensorType = {
     },
   },
 
+  // `messages`, `senders` and the eight `SEVERITIES`, whatever severity name a sender's message
+  // carries: a channel a later build drops is retired (`P-320`).
+  declaresEveryChannel: true,
+
   channels(): readonly ChannelDef[] {
     return [
       // Counting *all* matching messages is the primary, because that is what a limit is set on.

@@ -6,6 +6,7 @@ import { snmpMemory } from '../src/types/snmp-memory.js';
 import { snmpUptime } from '../src/types/snmp-uptime.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
 import { TestSnmpAgent, type AgentEntry } from '@ms/simulators';
+import { assertDeclaresEveryKey } from './support/declared-keys.js';
 
 /**
  * The MIB below is the dev target's own agent, copied from a live walk while `T-05` was written.
@@ -421,6 +422,28 @@ describe('all four types', () => {
       }, 50);
       await assert.rejects(() => pending, /cancelled/, type.id);
       assert.ok(Date.now() - started < 2_000, type.id);
+    }
+  });
+
+  it('report only keys their declaration names, on each path (P-320)', async () => {
+    // Each path that leaves a channel out as well as the full one. A key the declaration does not
+    // name would be a broken promise to the core, and a live channel shown retired.
+    const cases: [SensorType, Record<string, unknown>, AgentEntry[]][] = [
+      [snmpUptime, {}, MIB],
+      [snmpUptime, {}, without(HR_UPTIME)],
+      [snmpCpu, {}, MIB],
+      [snmpCpu, {}, without(PROC_LOAD)],
+      [snmpMemory, {}, MIB],
+      [snmpMemory, { countCacheAsAvailable: false }, MIB],
+      [snmpMemory, {}, without('1.3.6.1.2.1.25.2.3.1')],
+      [snmpMemory, {}, without(UCD_TOTAL_SWAP, UCD_AVAIL_SWAP)],
+      [snmpDiskFree, { mountPoint: '/' }, MIB],
+      [snmpDiskFree, { mountPoint: '/', storageIndex: '31' }, MIB],
+      [snmpDiskFree, { mountPoint: 'c:\\', matchMode: 'startsWith' }, MIB],
+    ];
+    for (const [type, params, mib] of cases) {
+      agent.load(mib);
+      assertDeclaresEveryKey(type.id, params, await run(type, params));
     }
   });
 });

@@ -324,12 +324,23 @@ breaks the promise. A rise that follows a core or probe upgrade is the first, an
 probe runs the core's version. Only one with every probe on the core's version is the second: fix
 the path, or unset the flag.
 
-Leave it unset when your keys come from what the check ran into — a script's output
-(`exe.script.advanced`, `ssh.script`), a query's columns — because a key your declaration does
-not name is then one your readings may, and the core would call a channel that is still read
-retired. Unset is safe: none of your channels is ever called retired, which is how every channel
-looked before. The types that set it are listed in `retired-channels.test.ts`, each checked by
-reading its `execute`; add yours there.
+**Set it whenever it is true, which is almost always** (`P-320`). A type whose channels never
+change with its parameters promises it as soon as `execute` reports only the keys it lists: a
+channel a later build drops is then shown retired instead of looking like an outage. A path that
+has no figure for a channel leaves it out, which keeps the promise; reporting it under another
+key breaks it. Keys the operator names in the parameters keep it too, when `execute` reads them
+with the same function `channels` does and reports nothing else: `ssh.script` reads what the
+script printed but reports only the keys its `channels` parameter declares, and the database
+types report only `extract`'s keys besides their own.
+
+Leave it unset when your keys come from what the check ran into — a script's own keys
+(`exe.script.advanced`), a channel per processor or per volume the machine has (`windows.cpu`,
+`windows.volume`), a query's columns — because a key your declaration does not name is then one
+your readings may, and the core would call a channel that is still read retired. Unset is safe:
+none of your channels is ever called retired, which is how every channel looked before. The types
+that set it, and the three that do not, are listed in `retired-channels.test.ts`, each checked by
+reading its `execute`; add yours there. If a simulator can run it, add a test that every key it
+reports is one it declares (`assertDeclaresEveryKey` in `packages/sensors/test/support`).
 
 ### `execute(context)`
 

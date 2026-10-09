@@ -627,29 +627,87 @@ describe('which types say a channel is retired', () => {
   const gate = catalogueSensorTypeGate(standardCatalogue());
 
   it('is the shipped types whose every reading is a channel they declare', () => {
-    // Each read for it (`P-310`): a type added here is one whose `execute` has been checked to
-    // report only keys `channels(params)` names for the same parameters.
+    // Each read for it (`P-310`, `P-320`): a type added here is one whose `execute` has been
+    // checked to report only keys `channels(params)` names for the same parameters; for the three
+    // the core evaluates, the core's evaluator was read instead.
     assert.deepEqual(
       BUILT_IN_SENSOR_TYPES.filter((type) => type.declaresEveryChannel === true)
         .map((type) => type.id)
         .sort(),
       [
+        'core.factory',
+        'db.mssql',
+        'db.mysql',
+        'db.postgresql',
+        'dns.blocklist',
+        'dns.record',
+        'exe.script',
         'flow.netflow',
         'http.advanced',
         'http.content',
         'http.request',
         'http.transaction',
+        'icmp.jitter',
+        'icmp.ping',
+        'mail.imap',
+        'mail.pop3',
+        'mail.roundtrip',
         'mail.smtp',
+        'ms.core.health',
+        'ms.probe.health',
+        'port.range',
         'port.tcp',
         'rest.custom',
+        'snmp.cpu',
+        'snmp.custom',
+        'snmp.custom.string',
+        'snmp.diskfree',
+        'snmp.memory',
         'snmp.table',
+        'snmp.traffic',
+        'snmp.trap',
+        'snmp.uptime',
+        'ssh.diskfree',
+        'ssh.load',
+        'ssh.meminfo',
+        'ssh.script',
+        'syslog.receiver',
+        'tls.certificate',
+        'tls.security',
+        'windows.memory',
+        'windows.service',
       ],
+    );
+  });
+
+  it('is every shipped type but the three whose keys come from what they read (`P-320`)', () => {
+    // The script's own keys, a channel per logical processor, and a set of channels per volume:
+    // a key none of their declarations names may be one their readings do.
+    assert.deepEqual(
+      BUILT_IN_SENSOR_TYPES.filter((type) => type.declaresEveryChannel !== true)
+        .map((type) => type.id)
+        .sort(),
+      ['exe.script.advanced', 'windows.cpu', 'windows.volume'],
     );
   });
 
   it('answers no keys for a type whose readings come from what it ran', () => {
     assert.equal(gate.reportableKeys('exe.script.advanced', { primaryChannel: 'x' }), null);
-    assert.equal(gate.reportableKeys('ssh.script', {}), null);
+    assert.equal(gate.reportableKeys('windows.cpu', {}), null);
+    assert.equal(gate.reportableKeys('windows.volume', { drives: ['C:'] }), null);
+  });
+
+  it('answers the declared keys of a script type that reports only those (`P-320`)', () => {
+    // `ssh.script` reads what the script printed, but reports only the keys `channels` names.
+    assert.deepEqual(
+      [
+        ...(gate.reportableKeys('ssh.script', {
+          command: './check.sh',
+          channels: [{ key: 'queue' }, { key: 'temperature' }],
+        }) ?? []),
+      ].sort(),
+      ['queue', 'temperature'],
+    );
   });
 
   it('answers no keys for a type this build does not register', () => {

@@ -34,6 +34,10 @@ export const windowsMemory: SensorType = {
     properties: { ...WINDOWS_SCHEMA },
   },
 
+  // Every reading is keyed by a channel `channels()` names, on every path: a channel a later
+  // build drops is retired (`P-320`).
+  declaresEveryChannel: true,
+
   channels(): readonly ChannelDef[] {
     return [
       { key: 'availablePercent', name: 'Available memory', unit: '%', isPrimary: true },

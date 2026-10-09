@@ -39,6 +39,10 @@ export const sshDiskFree: SensorType = {
     [],
   ),
 
+  // Every reading is keyed by a channel `channels()` names, on every path: a channel a later
+  // build drops is retired (`P-320`).
+  declaresEveryChannel: true,
+
   channels(): readonly ChannelDef[] {
     return [
       { key: 'percentUsed', name: 'Disk used', unit: '%', isPrimary: true },

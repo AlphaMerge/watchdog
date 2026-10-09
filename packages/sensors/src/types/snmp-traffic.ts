@@ -86,6 +86,10 @@ export const snmpTraffic: SensorType = {
     [],
   ),
 
+  // The same four keys for any parameters, which choose only the counter width; `status` is left
+  // out when the device has none. A channel a later build drops is retired (`P-320`).
+  declaresEveryChannel: true,
+
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[] {
     // Every counter here is octets, and the channel is octets *per second* — the core divides.
     // Bits are one `scale_mul: 8` away and are the operator's choice to make (`M-07`), not this

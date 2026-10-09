@@ -63,6 +63,10 @@ export const snmpDiskFree: SensorType = {
     ['mountPoint'],
   ),
 
+  // Every reading is keyed by a channel `channels()` names, on every path: a channel a later
+  // build drops is retired (`P-320`).
+  declaresEveryChannel: true,
+
   channels(): readonly ChannelDef[] {
     return [
       // The percentage is primary because it is the one number that means the same thing on a

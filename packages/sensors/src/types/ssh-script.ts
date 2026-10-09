@@ -105,6 +105,10 @@ export const sshScript: SensorType = {
     ['command', 'channels'],
   ),
 
+  // The keys come from the script, but only those `channels` declares are reported; any other is
+  // named in the message. So a channel an edit took out of `channels` is retired (`P-320`).
+  declaresEveryChannel: true,
+
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[] {
     const declared = readChannels(params);
     if (declared.length === 0) {

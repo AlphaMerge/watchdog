@@ -49,6 +49,10 @@ export const tlsCertificate: SensorType = {
     },
   },
 
+  // Every reading is keyed by a channel `channels()` names, on every path: a channel a later
+  // build drops is retired (`P-320`).
+  declaresEveryChannel: true,
+
   channels(): readonly ChannelDef[] {
     return [
       // The number somebody sets a limit on weeks out. Everything else is context for the day

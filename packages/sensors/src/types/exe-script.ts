@@ -59,6 +59,10 @@ export const exeScript: SensorType = {
     },
   },
 
+  // Only `value` and `runtime`, whatever the program printed: a channel a later build drops is
+  // retired (`P-320`). `exe.script.advanced` reports the program's own keys, so it cannot promise.
+  declaresEveryChannel: true,
+
   channels(params: Readonly<Record<string, unknown>>): readonly ChannelDef[] {
     const name = typeof params['valueName'] === 'string' ? params['valueName'].trim() : '';
     return [
