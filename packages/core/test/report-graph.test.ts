@@ -300,7 +300,7 @@ describe('a report’s graphs', () => {
           ]),
           at('2025-09-01T00:00:00Z'),
         ),
-        subject: { id: index, kind: 'sensor', name: `sensor ${String(index)}` },
+        subject: { id: index, kind: 'sensor' as const, name: `sensor ${String(index)}` },
       }));
       const html = renderHtml(doc('graph_and_table', sections, at('2025-09-01T00:00:00Z'), hours));
       const megabytes = Buffer.byteLength(html, 'utf8') / 1_048_576;
@@ -405,7 +405,7 @@ describe('a report’s graphs', () => {
     it('keeps a chart whole on one page, and puts no table in graph_only', () => {
       const sections = Array.from({ length: 6 }, (_, index) => ({
         ...section(PING, sixHours(), at('2026-08-31T22:00:00Z')),
-        subject: { id: index, kind: 'sensor', name: `sensor ${String(index)}` },
+        subject: { id: index, kind: 'sensor' as const, name: `sensor ${String(index)}` },
       }));
       const pages = paginate(doc('graph_only', sections), type);
       const charts = pages.flatMap((page) => page.blocks).filter((block) => block.chart !== null);

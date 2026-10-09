@@ -18,6 +18,8 @@ import { ReportError } from '../../reports/errors.js';
 import type { ReportContext } from '../../reports/context.js';
 import type { ReportRenderer } from '../../reports/render.js';
 import type { Database } from '../../db/pool.js';
+import { OBJECT_KINDS } from '../../objects/types.js';
+import { QUERY_ADJUSTMENT_KINDS } from '../../timeseries/query.js';
 import type { ReportFormatter } from '../../reports/formatter.js';
 import { MAX_PDF_PAGES, mediaTypeOf } from '../../reports/media.js';
 import type { ReportService, ReportViewer } from '../../reports/service.js';
@@ -157,7 +159,15 @@ const resolvedSchema = {
         type: 'object',
         additionalProperties: true,
         required: ['kind', 'reason'],
-        properties: { kind: { type: 'string' }, reason: { type: 'string' } },
+        properties: {
+          kind: { type: 'string', enum: [...QUERY_ADJUSTMENT_KINDS] },
+          reason: {
+            type: 'string',
+            description:
+              'A sentence for a person, naming the rule and its numbers. Free text: switch on ' +
+              '`kind`.',
+          },
+        },
       },
     },
   },
@@ -708,7 +718,7 @@ export function reportRoutes(app: FastifyInstance, options: ReportRouteOptions):
                   required: ['id', 'kind', 'name'],
                   properties: {
                     id: { type: 'integer' },
-                    kind: { type: 'string' },
+                    kind: { type: 'string', enum: [...OBJECT_KINDS] },
                     name: { type: 'string' },
                   },
                 },

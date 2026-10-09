@@ -1,16 +1,11 @@
 import { isIPv4 } from 'node:net';
-import type { DeviceKind, Fingerprint, OpenPort } from '@ms/shared';
+import { DEVICE_KINDS, type DeviceKind, type Fingerprint, type OpenPort } from '@ms/shared';
 
-/** The device kinds this build knows. A probe naming another is a newer probe, and is refused. */
-const KINDS: ReadonlySet<string> = new Set<DeviceKind>([
-  'windows',
-  'linux',
-  'network',
-  'printer',
-  'hypervisor',
-  'nas',
-  'unknown',
-]);
+/**
+ * The device kinds this build knows. A probe naming another is a newer probe, and is refused.
+ * The classifier's own list (`P-351`), which the plan's and the summary's enums read too.
+ */
+const KINDS: ReadonlySet<string> = new Set<DeviceKind>(DEVICE_KINDS);
 
 /**
  * The optional fields something downstream calls a string method on: the matcher lower-cases

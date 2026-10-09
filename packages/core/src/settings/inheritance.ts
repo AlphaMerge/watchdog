@@ -27,8 +27,23 @@ export interface ResolvedSetting<T = unknown> {
   source: SettingSource;
 }
 
-/** Credential kinds, mirroring the `credential_kind` enum in migration 001. */
-export type CredentialKind = 'snmp' | 'windows' | 'ssh' | 'vmware' | 'database' | 'http';
+/**
+ * Every kind a credential set can be stored as: the `credential_kind` enum, as migration 001
+ * declared it and migration 024 added `mail` to (`P-351`).
+ *
+ * The database's list, not the registry's. `@ms/sensors`' `CREDENTIAL_KINDS` is what this build
+ * can use, a subset of this one; a kind it adds needs a migration, and the value here with it.
+ */
+export const CREDENTIAL_SET_KINDS = [
+  'snmp',
+  'windows',
+  'ssh',
+  'vmware',
+  'database',
+  'http',
+  'mail',
+] as const;
+export type CredentialKind = (typeof CREDENTIAL_SET_KINDS)[number];
 
 /**
  * A credential set in effect for an object, and where it comes from.

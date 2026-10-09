@@ -9,9 +9,11 @@
 // Imported rather than repeated: migration 003 defines the enum, `state/tables.ts` mirrors it
 // under test, and a third copy here would be the one that drifts.
 import { SENSOR_STATES } from '../../state/tables.js';
-
-const OBJECT_KINDS = ['root', 'probe', 'group', 'device', 'sensor'] as const;
-const CREDENTIAL_KINDS = ['snmp', 'windows', 'ssh', 'vmware', 'database', 'http'] as const;
+// The same for the object and credential kinds (`P-351`). This file's own copy of the credential
+// kinds had no `mail`, which migration 024 added: a mail set was served anyway, because the
+// serializer does not check an enum, while the document said it could not occur (`P-313`).
+import { OBJECT_KINDS, WRITABLE_KINDS } from '../../objects/types.js';
+import { CREDENTIAL_SET_KINDS } from '../../settings/inheritance.js';
 
 export const settingSourceSchema = {
   $id: 'ms:settingSource',
@@ -351,7 +353,7 @@ export const credentialViewSchema = {
   additionalProperties: false,
   required: ['kind', 'publicParams', 'source', 'updatedAt', 'bounded'],
   properties: {
-    kind: { enum: CREDENTIAL_KINDS },
+    kind: { enum: CREDENTIAL_SET_KINDS },
     publicParams: { type: 'object', additionalProperties: true },
     source: { $ref: 'ms:settingSource' },
     updatedAt: { type: 'string' },
@@ -487,7 +489,7 @@ export const createObjectSchema = {
   required: ['kind', 'parentId', 'name'],
   additionalProperties: false,
   properties: {
-    kind: { enum: ['probe', 'group', 'device', 'sensor'] },
+    kind: { enum: WRITABLE_KINDS },
     parentId: { type: 'integer' },
     ...objectFields,
     host: { type: 'string', minLength: 1, maxLength: 255 },
@@ -547,7 +549,7 @@ export const treeNodeSchema = {
   required: ['kind', 'name'],
   additionalProperties: false,
   properties: {
-    kind: { enum: ['probe', 'group', 'device', 'sensor'] },
+    kind: { enum: WRITABLE_KINDS },
     ref: {
       type: 'string',
       minLength: 1,
@@ -745,7 +747,7 @@ export const moveResultSchema = {
         additionalProperties: false,
         required: ['kind', 'before', 'after'],
         properties: {
-          kind: { enum: CREDENTIAL_KINDS },
+          kind: { enum: CREDENTIAL_SET_KINDS },
           before: { enum: ['own', 'inherited', 'none'] },
           after: { enum: ['own', 'inherited', 'none'] },
         },
@@ -809,7 +811,7 @@ export const cloneResultSchema = {
       },
     },
     // Kinds only, never values: says in the 201 why the clone cannot authenticate yet.
-    droppedCredentialKinds: { type: 'array', items: { enum: CREDENTIAL_KINDS } },
+    droppedCredentialKinds: { type: 'array', items: { enum: CREDENTIAL_SET_KINDS } },
     settingsChanged: { type: 'array', items: settingChangeSchema },
   },
 } as const;

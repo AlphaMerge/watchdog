@@ -12,6 +12,7 @@ import type { Visibility } from '../auth/access.js';
 import type { Queryable } from '../db/pool.js';
 import { MAX_WALK_DEPTH } from '../db/walk.js';
 import type { ChannelVerdict, SensorFacts } from './machine.js';
+import type { ActorKind } from '../objects/audit.js';
 import type { SensorState, SensorStateCause } from './tables.js';
 
 /** One sensor's persisted working set. */
@@ -27,7 +28,7 @@ export interface SensorRuntime {
    * Absent on the batch read, which selects only what the machine needs — this is for the one
    * sensor a person is looking at.
    */
-  readonly acknowledgedBy?: { readonly kind: string; readonly label: string | null } | null;
+  readonly acknowledgedBy?: { readonly kind: ActorKind; readonly label: string | null } | null;
   /**
    * The machine's inputs. `probeReachable` and `vouchedFor` are **not** persisted — each is a
    * live fact, about a connection or about grants, and a value read from a table would be a
@@ -106,7 +107,7 @@ interface RuntimeRow {
   acknowledged_at: Date | null;
   acknowledged_until: Date | null;
   /** Only the single-sensor read selects these; the hot path does not need them (`M-13`). */
-  acknowledged_by_kind?: string | null;
+  acknowledged_by_kind?: ActorKind | null;
   acknowledged_by_label?: string | null;
   simulated_error: boolean;
   /** §2.2's answer, or null when nothing was judged. Both columns move together (`P-85`). */
@@ -682,7 +683,7 @@ export interface AcknowledgementWrite {
   readonly sensorId: number;
   readonly acknowledgedAt: Date | null;
   readonly acknowledgedUntil: Date | null;
-  readonly actorKind: string | null;
+  readonly actorKind: ActorKind | null;
   readonly actorLabel: string | null;
 }
 

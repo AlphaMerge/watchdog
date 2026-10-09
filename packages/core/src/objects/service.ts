@@ -24,7 +24,7 @@ import {
 import { downSensorsIn, sensorsIn } from '../state/runtime.js';
 import { isActiveAt, nextChangeAfter, type ScheduleDefinition } from '../schedules/definition.js';
 import { PauseRepository, flattenActor, type PauseCursor } from './pause-repository.js';
-import type { Actor, AuditSink, Mutation } from './audit.js';
+import type { Actor, ActorKind, AuditSink, Mutation } from './audit.js';
 import { assertDeviceHost } from './device-host.js';
 import { ObjectError, notFound, parentNotFound } from './errors.js';
 import { reorderAmong } from './ordering.js';
@@ -49,7 +49,7 @@ import {
   type NamedObject,
   type Writer,
 } from './sensor-reads.js';
-import type { SensorStateCause } from '../state/tables.js';
+import type { SensorState, SensorStateCause } from '../state/tables.js';
 import type {
   AcknowledgementView,
   CarriedGrants,
@@ -177,7 +177,7 @@ export interface DependencyLookup {
     now: Date,
   ): Promise<{
     sensorId: number;
-    state: string;
+    state: SensorState;
     clearAt: Date | null;
     untilEvaluated: boolean;
   } | null>;
@@ -216,7 +216,7 @@ export interface StateReevaluator {
     q: Queryable,
     sensorIds: readonly number[],
     acknowledgement: ResolvedAcknowledgement | null,
-    actor: { kind: string; label: string | null },
+    actor: { kind: ActorKind; label: string | null },
     at: Date,
   ): Promise<{ acknowledged: number[]; refused: number[]; transitions: number }>;
   simulate(

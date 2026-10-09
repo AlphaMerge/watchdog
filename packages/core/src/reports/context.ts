@@ -2,6 +2,7 @@ import type { Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
 import { atLeast, type AccessRight, type AccessService } from '../auth/access.js';
 import type { AccountRole } from '../auth/accounts.js';
+import type { ObjectKind } from '../objects/types.js';
 import { ReportError, contextLost } from './errors.js';
 import type { ReportRepository, ReportRow } from './repository.js';
 
@@ -66,7 +67,7 @@ export interface ReportPrincipal {
 /** One object a report will render. Identity only — see below on why there is no `params`. */
 export interface ReportSubject {
   readonly id: number;
-  readonly kind: string;
+  readonly kind: ObjectKind;
   readonly name: string;
 }
 
@@ -175,7 +176,7 @@ export class ReportContext {
       return { principal, visible: [], unavailable: [] };
     }
 
-    const rows = await q.query<{ id: string; kind: string; name: string }>(
+    const rows = await q.query<{ id: string; kind: ObjectKind; name: string }>(
       `SELECT id::text AS id, kind, name FROM object WHERE id = ANY($1::bigint[])`,
       [[...requested]],
     );

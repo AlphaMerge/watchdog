@@ -80,7 +80,12 @@ const registrationSchema = {
         peerVersion: { type: 'integer' },
         ownVersion: { type: 'integer' },
         missing: { type: 'array', items: { type: 'string' } },
-        reason: { type: 'string' },
+        reason: {
+          type: 'string',
+          description:
+            'Only on `incompatible`: a sentence for a person, naming both versions. Free text: ' +
+            'switch on `kind`.',
+        },
         // The same thing in one sentence, so a caller need not reassemble it.
         explanation: { type: 'string' },
       },

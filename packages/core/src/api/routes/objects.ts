@@ -29,7 +29,14 @@ import {
 } from '../schemas/pause.js';
 import { SENSOR_STATES } from '../../state/tables.js';
 import type { ChannelLimitsPatch } from '../../state/limits.js';
-import type { CarriedGrants, ChannelProcessing, ChannelRecord } from '../../objects/types.js';
+import {
+  OBJECT_KINDS,
+  WRITABLE_KINDS,
+  type CarriedGrants,
+  type ChannelProcessing,
+  type ChannelRecord,
+} from '../../objects/types.js';
+import { CREDENTIAL_SET_KINDS } from '../../settings/inheritance.js';
 import { decodeCursor } from '../pagination.js';
 import { etagFor, optionalIfMatch, requireIfMatch, viewedChain } from '../preconditions.js';
 import {
@@ -177,8 +184,6 @@ interface ListQuery {
 
 const asArray = (value: string | string[] | undefined): string[] =>
   value === undefined ? [] : Array.isArray(value) ? value : [value];
-
-const OBJECT_KINDS = ['root', 'probe', 'group', 'device', 'sensor'] as const;
 
 /** One kind or several, both validated against the same list. */
 const KIND_FILTER = {
@@ -868,7 +873,8 @@ export async function objectRoutes(
             required: ['id', 'kind', 'name', 'deleted'],
             properties: {
               id: { type: 'integer' },
-              kind: { type: 'string' },
+              // Never `root`, which cannot be deleted (`P-351`).
+              kind: { type: 'string', enum: [...WRITABLE_KINDS] },
               name: { type: 'string' },
               deleted: { type: 'object', additionalProperties: true },
             },
@@ -1955,9 +1961,9 @@ export async function objectRoutes(
                   required: ['objectId', 'objectKind', 'objectName', 'kind', 'updatedAt'],
                   properties: {
                     objectId: { type: 'integer' },
-                    objectKind: { type: 'string' },
+                    objectKind: { type: 'string', enum: [...OBJECT_KINDS] },
                     objectName: { type: 'string' },
-                    kind: { type: 'string' },
+                    kind: { type: 'string', enum: [...CREDENTIAL_SET_KINDS] },
                     updatedAt: { type: 'string' },
                   },
                 },
@@ -2113,7 +2119,9 @@ export async function objectRoutes(
             additionalProperties: false,
             required: ['kind', 'removed', 'sensors', 'nowInherited'],
             properties: {
-              kind: { type: 'string' },
+              // The kind asked to remove, which the vault refuses unless this build can use it,
+              // so one of the database's kinds (`P-351`).
+              kind: { type: 'string', enum: [...CREDENTIAL_SET_KINDS] },
               removed: { type: 'boolean' },
               sensors: {
                 type: 'integer',

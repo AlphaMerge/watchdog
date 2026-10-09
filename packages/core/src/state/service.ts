@@ -14,6 +14,7 @@
 
 import type { Logger } from '@ms/shared';
 import type { Database, Queryable } from '../db/pool.js';
+import type { ActorKind } from '../objects/audit.js';
 import { SCAN_RETRY_WARNINGS } from '../settings/registry.js';
 import {
   applyResult,
@@ -634,7 +635,7 @@ export class SensorStateService {
     q: Queryable,
     sensorIds: readonly number[],
     acknowledgement: ResolvedAcknowledgement | null,
-    actor: { kind: string; label: string | null },
+    actor: { kind: ActorKind; label: string | null },
     at: Date,
   ): Promise<{ acknowledged: number[]; refused: number[]; transitions: number }> {
     if (sensorIds.length === 0) return { acknowledged: [], refused: [], transitions: 0 };

@@ -1,12 +1,24 @@
 import type { CredentialKind, ResolvedSetting, SettingSource } from '../settings/inheritance.js';
 import type { ChannelLimits } from '../state/limits.js';
 import type { SensorState } from '../state/tables.js';
+import type { ActorKind } from './audit.js';
 
 export type { ChannelLimits, CredentialKind, ResolvedSetting, SensorState, SettingSource };
 
-export type ObjectKind = 'root' | 'probe' | 'group' | 'device' | 'sensor';
+/**
+ * Every object kind: the `object_kind` enum in migration 001. Response schemas take their enums
+ * from this list (`P-351`), so a schema and the type cannot drift apart.
+ */
+export const OBJECT_KINDS = ['root', 'probe', 'group', 'device', 'sensor'] as const;
+export type ObjectKind = (typeof OBJECT_KINDS)[number];
 /** Every kind the API can create. The root is seeded by migration 001 and there is only one. */
-export type WritableKind = Exclude<ObjectKind, 'root'>;
+export const WRITABLE_KINDS = [
+  'probe',
+  'group',
+  'device',
+  'sensor',
+] as const satisfies readonly ObjectKind[];
+export type WritableKind = (typeof WRITABLE_KINDS)[number];
 export type Priority = 1 | 2 | 3 | 4 | 5;
 export type IpVersion = 'auto' | 'v4' | 'v6';
 
@@ -198,7 +210,7 @@ export interface PauseView {
   /** `null` while paused indefinitely — until a person says otherwise. */
   readonly pausedUntil: string | null;
   readonly message: string;
-  readonly actor: { readonly kind: string; readonly label: string | null } | null;
+  readonly actor: { readonly kind: ActorKind; readonly label: string | null } | null;
   /** `name` is null when the reader cannot see the object the pause comes from (`A-12`). */
   readonly inheritedFrom: { readonly objectId: ObjectId; readonly name: string | null } | null;
   /**
@@ -230,7 +242,7 @@ export interface PauseView {
   readonly dependency: {
     readonly masterId: ObjectId;
     readonly masterName: string | null;
-    readonly masterState: string | null;
+    readonly masterState: SensorState | null;
     readonly holding: boolean;
     /**
      * When the recovery delay releases the dependents, or `null` if none is running. `null` too
@@ -578,7 +590,8 @@ export interface CountsByKind {
 
 export interface DeleteReport {
   readonly id: ObjectId;
-  readonly kind: ObjectKind;
+  /** Never `root`, which cannot be deleted. */
+  readonly kind: WritableKind;
   readonly name: string;
   readonly deleted: CountsByKind;
   /** The full pre-delete enumeration, handed to the audit sink. Not in the HTTP response. */

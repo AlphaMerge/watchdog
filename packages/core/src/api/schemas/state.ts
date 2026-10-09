@@ -1,3 +1,4 @@
+import { ACTOR_KINDS } from '../../objects/audit.js';
 import { PAUSE_SOURCES, SENSOR_STATES, SENSOR_STATE_CAUSES } from '../../state/tables.js';
 
 export const sensorStateSchema = {
@@ -41,7 +42,7 @@ export const sensorStateSchema = {
       type: ['object', 'null'],
       additionalProperties: false,
       required: ['kind', 'label'],
-      properties: { kind: { type: 'string' }, label: { type: ['string', 'null'] } },
+      properties: { kind: { enum: ACTOR_KINDS }, label: { type: ['string', 'null'] } },
     },
     simulatedError: { type: 'boolean' },
   },

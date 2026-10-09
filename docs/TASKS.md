@@ -12747,12 +12747,82 @@ because each is a decision rather than a defect:
       Found 2026-10-09 in `P-320`. **Done when** the catalogue (or a test) requires each type to
       set the flag or be on an explicit "keys from what it reads" list with a reason.
 
-- [ ] **P-351 — about fifteen more fixed-value response strings have no enum** · S · P-342 · Found
+- [x] **P-351 — about fifteen more fixed-value response strings have no enum** · S · P-342 · Found
       2026-10-09 in `P-342`. `actor.kind`, `dependency.masterState`, `objectKind` (audit,
       credentials), `acknowledgedBy.kind`, credentials `kind`, `DELETE /objects/{id}` `kind`,
       reports `adjustments[].kind` and `visible[].kind`, discovery plan `items[].kind`; check whether
       `adjustments[].reason` and `skew.reason` are free text first. **Done when** each fixed set is
       an `enum` from one constant, with P-335's serialise-every-value test.
+
+      **P-351 outcome. Every listed field is a closed set, and each is now an enum of one exported
+      constant; the two `reason`s are free text and say so.** No protocol or migration change.
+      - **A live `P-313` defect, found on the way: `mail` credential sets.** Migration 024 added
+        `mail` to `credential_kind` and the registry stores it, but `CredentialKind` and
+        `api/schemas/objects.ts`' private copy of the list did not have it. So
+        `ms:credentialView`, `credentialsChanged` and `droppedCredentialKinds` said a mail set
+        could not occur while one was served. Fixed by the same constant as the listed fields.
+      - **The lists, each with its type derived from it:**
+        - **Actor kinds** (`actor.kind` on `ms:pauseView`, `acknowledgedBy.kind` on
+          `ms:sensorState`): `ACTOR_KINDS` in `objects/audit.ts`, which is
+          `audit_log_actor_kind_check`. `object_pause.actor_kind` and
+          `sensor_runtime.acknowledged_by_kind` have no list CHECK, but both are written only
+          through `Actor` (`flattenActor`, `StateService.acknowledge`) and audited in the same
+          transaction, so a kind the audit log refuses rolls back. A compile-time check holds the
+          `Actor` union to the list, and the test holds `ms:auditActor`'s variants to it.
+          `api/schemas/audit.ts`' unused private copy is gone.
+        - **`dependency.masterState`** is `SENSOR_STATES` or null: it is `sensor_runtime.state`.
+          `MasterState.state` and `DependencyLookup` are now `SensorState`.
+        - **Object kinds** (audit `objectKind`, nullable; the unbounded list's `objectKind`;
+          report subjects' `visible[].kind`): `OBJECT_KINDS`, now exported from
+          `objects/types.ts` with `ObjectKind` derived. It is the `object_kind` enum. The two
+          private copies in `api/schemas/objects.ts` and `api/routes/objects.ts` are gone.
+          `ReportSubject.kind` is `ObjectKind`.
+        - **`DELETE /objects/{id}`'s `kind`** is `WRITABLE_KINDS`: the service refuses `root`.
+          `WritableKind` is derived and `DeleteReport.kind` uses it. The create and tree-node
+          request schemas' inline copies of that list read it too.
+        - **Credential kinds** (the unbounded list's `kind`, the credential DELETE's `kind`,
+          `ms:credentialView`): `CREDENTIAL_SET_KINDS` in `settings/inheritance.ts`, which is
+          the `credential_kind` enum, `mail` included. The DELETE echoes the path's kind, which
+          the vault refuses unless the registry has it, and the registry is a subset of the enum.
+          The test checks that.
+        - **Adjustment kinds** (`resolved.adjustments[].kind` in the reports):
+          `QUERY_ADJUSTMENT_KINDS` in `timeseries/query.ts`, held to the `QueryAdjustment` union
+          at compile time. They are computed per request and never stored.
+        - **The plan's `items[].kind`** is `DEVICE_KINDS`. `readFingerprint` drops a stored
+          fingerprint whose kind this build does not know, and that host gets the generic plan's
+          `unknown`. `discovery/fingerprint.ts`' private copy of the kinds now reads the constant.
+      - **Free text, and said so:** `adjustments[].reason` (the reports' and history's
+        `ms:queryAdjustment`) is a sentence built from the rule's numbers, and `skew.reason` is the
+        sentence `describeSkew` writes for `incompatible`. Each has a description saying it is
+        free text and to switch on `kind`. A test pins that a reason this build never wrote still
+        validates.
+      - **Test.** `fixed-value-fields.test.ts`, by `P-335`'s method. Every value is served through
+        each route on a bare Fastify with a stubbed service, and the answer is validated with Ajv
+        against the route's own 200 schema. A value outside each set is refused: `probe` as an
+        actor, `recovering` as a master state, `node` as an object kind, `telnet` as a credential
+        kind, `root` in a delete, `clipped` as an adjustment, and `toaster` as a device kind. The
+        writers are exercised where they fold: `flattenActor` over one actor of each kind, and
+        `readFingerprint` over an unknown stored kind. Against a migrated scratch database,
+        `ACTOR_KINDS` equals its CHECK, and `OBJECT_KINDS` and `CREDENTIAL_SET_KINDS` equal their
+        enum types in order.
+        The database probe now runs before any test is declared. Building the object routes'
+        validators a few dozen times otherwise held the event loop past its 3-second connect
+        timeout, and the database section skipped as "no PostgreSQL".
+      - **Mutations**, each failing `fixed-value-fields` and restored byte for byte:
+        - `anonymous` dropped from the pause actor enum failed its serve;
+        - `null` dropped from `masterState` failed its serve;
+        - `ms:credentialView` back to the old six-kind list failed the `mail` serve;
+        - the delete's `kind`, audit `objectKind`, `acknowledgedBy.kind`, `visible[].kind` and the
+          unbounded `objectKind` each back to a string failed their refusal;
+        - `unknown` dropped from the plan enum failed its serve;
+        - `resolution-coarsened` dropped from the adjustment enum failed its serve;
+        - `mail` dropped from `CREDENTIAL_SET_KINDS` failed 3: the enum-type check, the
+          registry-subset check and the DELETE serve.
+      - **Not done.** These response strings are still plain: `source` (history and report
+        `resolved`, a `SeriesSource`), the subjects' `runAs.role` (an `AccountRole`) and
+        `skew.missing[]` (capability names). Also not done: `GET /audit`'s `actorKind` query
+        filter, which takes any 40-character string. Listed as follow-ups. Trigger kinds are
+        `P-352`. `sensorType` stays open, as a registry.
 
 - [ ] **P-352 — trigger kinds are open-ended strings** · XS · P-342 · Found 2026-10-09 in `P-342`.
       `triggerKind` on notification requests, trigger `kind` on the trigger routes and

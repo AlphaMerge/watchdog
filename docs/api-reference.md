@@ -504,9 +504,9 @@ The credential sets with no `allowedTargets` and no SSH `hostKeys`, each with th
 | --- | --- | --- | --- |
 | `items` | object[] | **required** |  |
 | `items[].objectId` | integer | **required** |  |
-| `items[].objectKind` | string | **required** |  |
+| `items[].objectKind` | `root` · `probe` · `group` · `device` · `sensor` | **required** |  |
 | `items[].objectName` | string | **required** |  |
-| `items[].kind` | string | **required** |  |
+| `items[].kind` | `snmp` · `windows` · `ssh` · `vmware` · `database` · `http` · `mail` | **required** |  |
 | `items[].updatedAt` | string | **required** |  |
 
 ### `GET /api/v1/credential-kinds`
@@ -561,7 +561,7 @@ Removes the credential set defined *on this object*. It does not leave the objec
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `kind` | string | **required** |  |
+| `kind` | `snmp` · `windows` · `ssh` · `vmware` · `database` · `http` · `mail` | **required** |  |
 | `removed` | boolean | **required** |  |
 | `sensors` | integer, at least 0 | **required** | How many sensors at or beneath this object resolved this kind to the set removed, of those the caller can see. Zero when there was no set to remove. |
 | `nowInherited` | [ms:credentialView](#schema-ms-credentialview) | **required** nullable |  |
@@ -1108,7 +1108,7 @@ The whole run at once, which is what an operator wants to look at before letting
 | --- | --- | --- | --- |
 | `items` | object[] | **required** |  |
 | `items[].address` | string | **required** |  |
-| `items[].kind` | string |  |  |
+| `items[].kind` | `windows` · `linux` · `network` · `printer` · `hypervisor` · `nas` · `unknown` |  |  |
 | `items[].templates` | string[] | **required** |  |
 | `items[].sensors` | string[] | **required** |  |
 
@@ -2277,7 +2277,7 @@ Changes what it is given and keeps the rest. **Where a sensor sends its inherite
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `id` | integer | **required** |  |
-| `kind` | string | **required** |  |
+| `kind` | `probe` · `group` · `device` · `sensor` | **required** |  |
 | `name` | string | **required** |  |
 | `deleted` | object | **required** |  |
 
@@ -2522,7 +2522,7 @@ Includes the ones waiting for approval, which is the list worth opening: a probe
 | `items[].skew.peerVersion` | integer |  |  |
 | `items[].skew.ownVersion` | integer |  |  |
 | `items[].skew.missing` | string[] |  |  |
-| `items[].skew.reason` | string |  |  |
+| `items[].skew.reason` | string |  | Only on `incompatible`: a sentence for a person, naming both versions. Free text: switch on `kind`. |
 | `items[].skew.explanation` | string | **required** |  |
 
 ### `POST /api/v1/probes/{gid}/approve`
@@ -2568,7 +2568,7 @@ Binds this identity to a probe object. The probe is issued a key of its own at i
 | `skew.peerVersion` | integer |  |  |
 | `skew.ownVersion` | integer |  |  |
 | `skew.missing` | string[] |  |  |
-| `skew.reason` | string |  |  |
+| `skew.reason` | string |  | Only on `incompatible`: a sentence for a person, naming both versions. Free text: switch on `kind`. |
 | `skew.explanation` | string | **required** |  |
 
 ### `POST /api/v1/probes/{gid}/revoke`
@@ -2613,7 +2613,7 @@ The record is kept rather than deleted, so the same identity cannot come back by
 | `skew.peerVersion` | integer |  |  |
 | `skew.ownVersion` | integer |  |  |
 | `skew.missing` | string[] |  |  |
-| `skew.reason` | string |  |  |
+| `skew.reason` | string |  | Only on `incompatible`: a sentence for a person, naming both versions. Free text: switch on `kind`. |
 | `skew.explanation` | string | **required** |  |
 
 ### `PUT /api/v1/probes/{gid}/allow-from`
@@ -2658,7 +2658,7 @@ Ranges in the same spellings a discovery takes — `10.0.0.0/24`, `10.0.0.1-50`,
 | `skew.peerVersion` | integer |  |  |
 | `skew.ownVersion` | integer |  |  |
 | `skew.missing` | string[] |  |  |
-| `skew.reason` | string |  |  |
+| `skew.reason` | string |  | Only on `incompatible`: a sentence for a person, naming both versions. Free text: switch on `kind`. |
 | `skew.explanation` | string | **required** |  |
 
 ### `DELETE /api/v1/probes/{gid}`
@@ -2708,8 +2708,8 @@ By name. An administrator sees every report; everybody else sees the ones a grou
 | `items[].resolved.bucketSeconds` | integer | **required** |  |
 | `items[].resolved.source` | string | **required** |  |
 | `items[].resolved.adjustments` | object[] | **required** |  |
-| `items[].resolved.adjustments[].kind` | string | **required** |  |
-| `items[].resolved.adjustments[].reason` | string | **required** |  |
+| `items[].resolved.adjustments[].kind` | `range-shortened` · `resolution-coarsened` | **required** |  |
+| `items[].resolved.adjustments[].reason` | string | **required** | A sentence for a person, naming the rule and its numbers. Free text: switch on `kind`. |
 | `items[].unresolvable` | object |  |  |
 | `items[].unresolvable.code` | string | **required** |  |
 | `items[].unresolvable.message` | string | **required** |  |
@@ -2799,8 +2799,8 @@ The creator’s primary group is granted full access in the same transaction, or
 | `resolved.bucketSeconds` | integer | **required** |  |
 | `resolved.source` | string | **required** |  |
 | `resolved.adjustments` | object[] | **required** |  |
-| `resolved.adjustments[].kind` | string | **required** |  |
-| `resolved.adjustments[].reason` | string | **required** |  |
+| `resolved.adjustments[].kind` | `range-shortened` · `resolution-coarsened` | **required** |  |
+| `resolved.adjustments[].reason` | string | **required** | A sentence for a person, naming the rule and its numbers. Free text: switch on `kind`. |
 | `unresolvable` | object |  |  |
 | `unresolvable.code` | string | **required** |  |
 | `unresolvable.message` | string | **required** |  |
@@ -2863,8 +2863,8 @@ A report this account may not read answers 404 rather than 403, so the error can
 | `resolved.bucketSeconds` | integer | **required** |  |
 | `resolved.source` | string | **required** |  |
 | `resolved.adjustments` | object[] | **required** |  |
-| `resolved.adjustments[].kind` | string | **required** |  |
-| `resolved.adjustments[].reason` | string | **required** |  |
+| `resolved.adjustments[].kind` | `range-shortened` · `resolution-coarsened` | **required** |  |
+| `resolved.adjustments[].reason` | string | **required** | A sentence for a person, naming the rule and its numbers. Free text: switch on `kind`. |
 | `unresolvable` | object |  |  |
 | `unresolvable.code` | string | **required** |  |
 | `unresolvable.message` | string | **required** |  |
@@ -2958,8 +2958,8 @@ Change a report
 | `resolved.bucketSeconds` | integer | **required** |  |
 | `resolved.source` | string | **required** |  |
 | `resolved.adjustments` | object[] | **required** |  |
-| `resolved.adjustments[].kind` | string | **required** |  |
-| `resolved.adjustments[].reason` | string | **required** |  |
+| `resolved.adjustments[].kind` | `range-shortened` · `resolution-coarsened` | **required** |  |
+| `resolved.adjustments[].reason` | string | **required** | A sentence for a person, naming the rule and its numbers. Free text: switch on `kind`. |
 | `unresolvable` | object |  |  |
 | `unresolvable.code` | string | **required** |  |
 | `unresolvable.message` | string | **required** |  |
@@ -3019,7 +3019,7 @@ A report renders through a named account, not through whoever is asking (`§6`).
 | `runAs.role` | string | **required** |  |
 | `visible` | object[] | **required** |  |
 | `visible[].id` | integer | **required** |  |
-| `visible[].kind` | string | **required** |  |
+| `visible[].kind` | `root` · `probe` · `group` · `device` · `sensor` | **required** |  |
 | `visible[].name` | string | **required** |  |
 | `unavailable` | integer[] | **required** |  |
 
@@ -3979,7 +3979,7 @@ one of 4 shapes, by `kind`
 | `at` | string | **required** |  |
 | `action` | string | **required** |  |
 | `objectId` | integer | **required** nullable |  |
-| `objectKind` | string | **required** nullable |  |
+| `objectKind` | `root` · `probe` · `group` · `device` · `sensor` | **required** nullable |  |
 | `actor` | [ms:auditActor](#schema-ms-auditactor) | **required** |  |
 | `summary` | object | **required** |  |
 | `diff` | object[] | **required** |  |
@@ -4090,7 +4090,7 @@ one of 4 shapes, by `kind`
 | `clonedCount.setting` | integer | **required** |  |
 | `clonedCount.trigger` | integer | **required** | Notification triggers copied with the objects that own them (`P-141`). The clone already carried the trigger *fence* and none of the triggers behind it, so a cloned object with the fence up notified nobody and looked identical to one that did. |
 | `clonedCount.total` | integer | **required** |  |
-| `droppedCredentialKinds` | (`snmp` · `windows` · `ssh` · `vmware` · `database` · `http`)[] | **required** |  |
+| `droppedCredentialKinds` | (`snmp` · `windows` · `ssh` · `vmware` · `database` · `http` · `mail`)[] | **required** |  |
 | `settingsChanged` | object[] | **required** |  |
 | `settingsChanged[].key` | string | **required** |  |
 | `settingsChanged[].before` | [ms:resolvedSetting](#schema-ms-resolvedsetting) | **required** |  |
@@ -4148,7 +4148,7 @@ one of 4 shapes, by `kind`
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `kind` | `snmp` · `windows` · `ssh` · `vmware` · `database` · `http` | **required** |  |
+| `kind` | `snmp` · `windows` · `ssh` · `vmware` · `database` · `http` · `mail` | **required** |  |
 | `publicParams` | object | **required** |  |
 | `source` | [ms:settingSource](#schema-ms-settingsource) | **required** |  |
 | `updatedAt` | string | **required** |  |
@@ -4161,7 +4161,7 @@ one of 4 shapes, by `kind`
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `kind` | `snmp` · `windows` · `ssh` · `vmware` · `database` · `http` | **required** |  |
+| `kind` | `snmp` · `windows` · `ssh` · `vmware` · `database` · `http` · `mail` | **required** |  |
 | `publicParams` | object | **required** |  |
 | `source` | [ms:settingSource](#schema-ms-settingsource) | **required** |  |
 | `updatedAt` | string | **required** |  |
@@ -4388,7 +4388,7 @@ one of 4 shapes, by `kind`
 | `settingsChanged[].before` | [ms:resolvedSetting](#schema-ms-resolvedsetting) | **required** |  |
 | `settingsChanged[].after` | [ms:resolvedSetting](#schema-ms-resolvedsetting) | **required** |  |
 | `credentialsChanged` | object[] | **required** |  |
-| `credentialsChanged[].kind` | `snmp` · `windows` · `ssh` · `vmware` · `database` · `http` | **required** |  |
+| `credentialsChanged[].kind` | `snmp` · `windows` · `ssh` · `vmware` · `database` · `http` · `mail` | **required** |  |
 | `credentialsChanged[].before` | `own` · `inherited` · `none` | **required** |  |
 | `credentialsChanged[].after` | `own` · `inherited` · `none` | **required** |  |
 | `exceptionsCleared` | integer, at least 0 | **required** | Devices whose exception to the target policy the move cleared because it took them to another probe (`A-64`). Only an administrator’s move does; anybody else’s is refused. |
@@ -4510,7 +4510,7 @@ one of 4 shapes, by `kind`
 | `pausedUntil` | string | **required** nullable |  |
 | `message` | string | **required** |  |
 | `actor` | object | nullable |  |
-| `actor.kind` | string | **required** |  |
+| `actor.kind` | `user` · `token` · `system` · `anonymous` | **required** |  |
 | `actor.label` | string | **required** nullable |  |
 | `inheritedFrom` | object | **required** nullable |  |
 | `inheritedFrom.objectId` | integer | **required** |  |
@@ -4524,7 +4524,7 @@ one of 4 shapes, by `kind`
 | `dependency` | object | **required** nullable |  |
 | `dependency.masterId` | integer | **required** |  |
 | `dependency.masterName` | string | **required** nullable |  |
-| `dependency.masterState` | string | **required** nullable |  |
+| `dependency.masterState` | `unknown` · `up` · `warning` · `down` · `down_acknowledged` · `down_partial` · `unusual` · `paused` | **required** nullable |  |
 | `dependency.holding` | boolean | **required** |  |
 | `dependency.releasesAt` | string | **required** nullable |  |
 | `dependency.definedOn` | integer | **required** |  |
@@ -4548,12 +4548,12 @@ one of 2 shapes, by `kind`
 | --- | --- | --- | --- |
 | `{kind=range-shortened}` | object |  |  |
 | `{kind=range-shortened}.kind` | `range-shortened` | **required** |  |
-| `{kind=range-shortened}.reason` | string | **required** |  |
+| `{kind=range-shortened}.reason` | string | **required** | A sentence for a person, naming the rule and its numbers. Free text: switch on `kind`. |
 | `{kind=range-shortened}.requestedDays` | number | **required** |  |
 | `{kind=range-shortened}.effectiveDays` | number | **required** |  |
 | `{kind=resolution-coarsened}` | object |  |  |
 | `{kind=resolution-coarsened}.kind` | `resolution-coarsened` | **required** |  |
-| `{kind=resolution-coarsened}.reason` | string | **required** |  |
+| `{kind=resolution-coarsened}.reason` | string | **required** | A sentence for a person, naming the rule and its numbers. Free text: switch on `kind`. |
 | `{kind=resolution-coarsened}.requestedSeconds` | integer | **required** |  |
 | `{kind=resolution-coarsened}.effectiveSeconds` | integer | **required** |  |
 
@@ -4640,7 +4640,7 @@ one of 2 shapes, by `kind`
 | `acknowledged` | boolean | **required** |  |
 | `acknowledgedUntil` | string | nullable |  |
 | `acknowledgedBy` | object | **required** nullable |  |
-| `acknowledgedBy.kind` | string | **required** |  |
+| `acknowledgedBy.kind` | `user` · `token` · `system` · `anonymous` | **required** |  |
 | `acknowledgedBy.label` | string | **required** nullable |  |
 | `simulatedError` | boolean | **required** |  |
 

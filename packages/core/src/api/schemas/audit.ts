@@ -8,9 +8,12 @@
  * object field that can hold a secret before P-05's redaction lands.
  */
 
-const ACTOR_KINDS = ['user', 'token', 'system', 'anonymous'] as const;
-void ACTOR_KINDS;
+import { OBJECT_KINDS } from '../../objects/types.js';
 
+/**
+ * One variant per kind in `ACTOR_KINDS`, in its order, and `fixed-value-fields.test.ts` holds
+ * them to it (`P-351`). A `const` each rather than an enum, because the kind decides the fields.
+ */
 export const auditActorSchema = {
   $id: 'ms:auditActor',
   oneOf: [
@@ -56,7 +59,8 @@ export const auditEntrySchema = {
     at: { type: 'string' },
     action: { type: 'string' },
     objectId: { type: ['integer', 'null'] },
-    objectKind: { type: ['string', 'null'] },
+    // `audit_log.object_kind`, an `object_kind` (`P-351`). Null for an entry about no object.
+    objectKind: { enum: [...OBJECT_KINDS, null] },
     actor: { $ref: 'ms:auditActor' },
     summary: { type: 'object', additionalProperties: true },
     diff: {

@@ -1,6 +1,7 @@
 import type { Queryable } from '../db/pool.js';
 import { FACTORY_SENSOR_TYPE } from '../factory/reach.js';
 import type { ObjectId } from '../objects/types.js';
+import type { SensorState } from '../state/tables.js';
 import { DEPENDENCY_MASTER_ID } from '../settings/registry.js';
 
 const MAX_WALK_DEPTH = 1000;
@@ -15,7 +16,7 @@ export interface DependencyFlagChange {
 /** A master, as the reactor needs to see it. */
 export interface MasterState {
   readonly sensorId: number;
-  readonly state: string;
+  readonly state: SensorState;
   /** When its recovery delay ends. Never a hold with no end: that is `untilEvaluated`. */
   readonly clearAt: Date | null;
   /**
@@ -486,7 +487,11 @@ export class DependencyRepository {
   async stateOf(q: Queryable, sensorId: number, now: Date): Promise<MasterState | null> {
     // `infinity` is not a date, and pg reads it as the number `Infinity`, so it is answered as
     // a flag instead of in `clear_at`.
-    const rows = await q.query<{ state: string; clear_at: Date | null; until_evaluated: boolean }>(
+    const rows = await q.query<{
+      state: SensorState;
+      clear_at: Date | null;
+      until_evaluated: boolean;
+    }>(
       `SELECT sr.state,
               CASE WHEN sr.dependency_clear_at = '${UNTIL_EVALUATED}' THEN NULL
                    ELSE sr.dependency_clear_at END AS clear_at,

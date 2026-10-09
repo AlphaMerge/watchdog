@@ -1,6 +1,6 @@
 import type { Queryable } from '../db/pool.js';
 import type { ResolvedPause } from '../state/pause.js';
-import type { Actor } from './audit.js';
+import type { Actor, ActorKind } from './audit.js';
 import type { ObjectId } from './types.js';
 
 /** A pause as stored, plus whose it is. */
@@ -11,7 +11,7 @@ export interface StoredPause {
   readonly startsAt: Date;
   readonly pausedUntil: Date | null;
   readonly message: string;
-  readonly actor: { kind: string; ref: string | null; label: string | null };
+  readonly actor: { kind: ActorKind; ref: string | null; label: string | null };
 }
 
 /** Why an object is paused: its own pause, or an ancestor's. */
@@ -44,7 +44,7 @@ interface PauseRow {
   starts_at: Date;
   paused_until: Date | null;
   message: string;
-  actor_kind: string;
+  actor_kind: ActorKind;
   actor_ref: string | null;
   actor_label: string | null;
 }
@@ -401,7 +401,7 @@ export class PauseRepository {
  * flattenings of one union would eventually disagree about what a token's label is.
  */
 export function flattenActor(actor: Actor): {
-  kind: string;
+  kind: ActorKind;
   ref: string | null;
   label: string | null;
 } {

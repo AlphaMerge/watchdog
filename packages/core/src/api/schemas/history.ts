@@ -21,7 +21,11 @@ export const queryAdjustmentSchema = {
       required: ['kind', 'reason', 'requestedDays', 'effectiveDays'],
       properties: {
         kind: { const: 'range-shortened' },
-        reason: { type: 'string' },
+        reason: {
+          type: 'string',
+          description:
+            'A sentence for a person, naming the rule and its numbers. Free text: switch on `kind`.',
+        },
         requestedDays: { type: 'number' },
         effectiveDays: { type: 'number' },
       },
@@ -32,7 +36,11 @@ export const queryAdjustmentSchema = {
       required: ['kind', 'reason', 'requestedSeconds', 'effectiveSeconds'],
       properties: {
         kind: { const: 'resolution-coarsened' },
-        reason: { type: 'string' },
+        reason: {
+          type: 'string',
+          description:
+            'A sentence for a person, naming the rule and its numbers. Free text: switch on `kind`.',
+        },
         requestedSeconds: { type: 'integer' },
         effectiveSeconds: { type: 'integer' },
       },

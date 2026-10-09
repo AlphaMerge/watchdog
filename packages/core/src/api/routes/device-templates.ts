@@ -1,7 +1,7 @@
 // Side-effect import: @fastify/swagger augments FastifySchema with `description`.
 import '@fastify/swagger';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { AppError, type Fingerprint } from '@ms/shared';
+import { AppError, DEVICE_KINDS, type Fingerprint } from '@ms/shared';
 import type { DeviceTemplateCatalogue } from '../../device-templates/catalogue.js';
 import { templateFromDevice } from '../../device-templates/from-device.js';
 import { runNotFound } from '../../discovery/errors.js';
@@ -258,7 +258,9 @@ export function deviceTemplateRoutes(
                     required: ['address', 'templates', 'sensors'],
                     properties: {
                       address: { type: 'string' },
-                      kind: { type: 'string' },
+                      // The stored fingerprint's, which `readFingerprint` drops when this build
+                      // does not know its kind, and then the generic plan's `unknown` (`P-351`).
+                      kind: { type: 'string', enum: [...DEVICE_KINDS] },
                       templates: { type: 'array', items: { type: 'string' } },
                       sensors: { type: 'array', items: { type: 'string' } },
                     },

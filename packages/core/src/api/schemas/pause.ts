@@ -1,5 +1,7 @@
 import { PAUSE_PRESET_MINUTES, MAX_PAUSE_MINUTES } from '../../state/pause.js';
 import { ACK_PRESET_MINUTES, MAX_ACK_MINUTES } from '../../state/acknowledgement.js';
+import { ACTOR_KINDS } from '../../objects/audit.js';
+import { SENSOR_STATES } from '../../state/tables.js';
 
 /**
  * Why an object is paused (`M-08`).
@@ -43,7 +45,7 @@ export const pauseViewSchema = {
       type: ['object', 'null'],
       additionalProperties: false,
       required: ['kind', 'label'],
-      properties: { kind: { type: 'string' }, label: { type: ['string', 'null'] } },
+      properties: { kind: { enum: ACTOR_KINDS }, label: { type: ['string', 'null'] } },
     },
     inheritedFrom: {
       type: ['object', 'null'],
@@ -74,7 +76,8 @@ export const pauseViewSchema = {
         masterId: { type: 'integer' },
         // Both null when the caller cannot see the master (`A-12`); `holding` is this object's.
         masterName: { type: ['string', 'null'] },
-        masterState: { type: ['string', 'null'] },
+        // `sensor_runtime.state`, a `sensor_state_kind` (`P-351`).
+        masterState: { enum: [...SENSOR_STATES, null] },
         holding: { type: 'boolean' },
         releasesAt: { type: ['string', 'null'] },
         definedOn: { type: 'integer' },

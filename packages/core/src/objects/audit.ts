@@ -17,6 +17,16 @@ import type {
 } from './types.js';
 
 /**
+ * Every kind of actor: `audit_log_actor_kind_check` in migration 005 (`P-351`).
+ *
+ * The pause's and the acknowledgement's copies of the kind (`object_pause.actor_kind`,
+ * `sensor_runtime.acknowledged_by_kind`) have no CHECK of their own, but every write of one is
+ * audited in the same transaction, so a kind the audit log refuses rolls back with it.
+ */
+export const ACTOR_KINDS = ['user', 'token', 'system', 'anonymous'] as const;
+export type ActorKind = (typeof ACTOR_KINDS)[number];
+
+/**
  * Who made a change. Anonymous until accounts exist (A-01); the shape is already right so
  * A-01 fills it in at one place rather than threading a user through every service method.
  */
@@ -25,6 +35,15 @@ export type Actor =
   | { kind: 'token'; tokenId: number }
   | { kind: 'system'; component: string }
   | { kind: 'anonymous'; remoteAddress: string };
+
+/** Compiles only while `ACTOR_KINDS` and the union name the same kinds. */
+const actorKindsMatch: [
+  Exclude<ActorKind, Actor['kind']>,
+  Exclude<Actor['kind'], ActorKind>,
+] extends [never, never]
+  ? true
+  : never = true;
+void actorKindsMatch;
 
 /**
  * What changed, as a typed union rather than `Record<string, unknown>`.

@@ -42,6 +42,15 @@ export const ALLOWED_RESOLUTIONS: readonly number[] = [
   ...Array.from({ length: 23 }, (_, index) => (index + 2) * 3_600), // 2..24 hours
 ];
 
+/**
+ * What a query rule can change about a request (`P-351`). Computed per request and never stored,
+ * so this list is the whole set: `range-shortened` (rule 1, and a report span's own) and
+ * `resolution-coarsened` (rules 2 and 3).
+ */
+export const QUERY_ADJUSTMENT_KINDS = ['range-shortened', 'resolution-coarsened'] as const;
+export type QueryAdjustmentKind = (typeof QUERY_ADJUSTMENT_KINDS)[number];
+
+/** `reason` is a sentence for a person, built from the rule's numbers: free text, not a code. */
 export type QueryAdjustment =
   | {
       kind: 'range-shortened';
@@ -55,6 +64,15 @@ export type QueryAdjustment =
       requestedSeconds: number;
       effectiveSeconds: number;
     };
+
+/** Compiles only while `QUERY_ADJUSTMENT_KINDS` and the union name the same kinds. */
+const adjustmentKindsMatch: [
+  Exclude<QueryAdjustmentKind, QueryAdjustment['kind']>,
+  Exclude<QueryAdjustment['kind'], QueryAdjustmentKind>,
+] extends [never, never]
+  ? true
+  : never = true;
+void adjustmentKindsMatch;
 
 export interface SeriesRequest {
   from: Date;
