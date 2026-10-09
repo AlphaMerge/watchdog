@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useId } from 'react';
 import { Link } from 'react-router-dom';
 import type { ChannelRecord, ChannelValue, LookupSummary, SensorValues } from '../../api/types';
 import { Empty } from '../../components/Panels';
@@ -28,6 +28,8 @@ export function ChannelTable({
   values,
   lookups,
   now,
+  hideRetired,
+  onHideRetiredChange,
 }: {
   channels: readonly ChannelRecord[];
   /** The sensor's type, for a channel whose number has a page that lists what it counts. */
@@ -35,13 +37,16 @@ export function ChannelTable({
   values: SensorValues | null;
   lookups: readonly LookupSummary[] | null;
   now: number;
+  /**
+   * Whether retired channels are left out (`U-38`). Held by the page, in its URL, not here: this
+   * table is unmounted whenever a poll of its values fails, and a choice held inside it would go
+   * with it.
+   */
+  hideRetired: boolean;
+  onHideRetiredChange: (hide: boolean) => void;
 }): React.JSX.Element {
   // Before the early return: a hook is called on every render or on none.
   const retiredNote = useId();
-  // Shown by default (`U-38`), as the alarm list shows acknowledged alarms until asked not to:
-  // a channel an edit has just taken out stays in sight, marked, with its limits still settable
-  // for the day it is put back, rather than vanishing from the one table that says it is retired.
-  const [hideRetired, setHideRetired] = useState(false);
   if (channels.length === 0) {
     return (
       <Empty because="A sensor type declares its channels, so they exist from the moment the sensor does (P-05).">
@@ -72,7 +77,7 @@ export function ChannelTable({
               type="checkbox"
               checked={hideRetired}
               onChange={(event) => {
-                setHideRetired(event.target.checked);
+                onHideRetiredChange(event.target.checked);
               }}
             />
             Hide retired channels

@@ -1245,6 +1245,8 @@ describe('Core Health’s count of sets without bounds', () => {
           values={null}
           lookups={null}
           now={0}
+          hideRetired={false}
+          onHideRetiredChange={() => undefined}
         />
       </MemoryRouter>,
     );
@@ -1263,6 +1265,8 @@ describe('Core Health’s count of sets without bounds', () => {
           values={null}
           lookups={null}
           now={0}
+          hideRetired={false}
+          onHideRetiredChange={() => undefined}
         />
       </MemoryRouter>,
     );

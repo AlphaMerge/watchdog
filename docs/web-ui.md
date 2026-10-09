@@ -257,7 +257,8 @@ as an outage; a note under the table says what that means, and is each retired r
 description, so it does not depend on hovering. Its limits judge nothing, so it plays no part in
 the sensor's state. **Hide retired channels**, above the table where any channel is retired,
 takes them out of it and says how many it hid; it starts unticked, so a channel an edit has just
-retired stays in sight (`U-38`). On the **History** tab its line stops at the edit, as a gap, and
+retired stays in sight (`U-38`). Ticked, it is `?retired=hide` in the page's address, so it
+survives a failed poll of the readings, a change of tab and a reload. On the **History** tab its line stops at the edit, as a gap, and
 its legend entry (or, charted alone, its heading) and its column in the table view say
 **(retired)** in words, not by colour (`U-37`). `GET /sensors/:id/values` carries the same
 `retired` as the channel list. Put the column back and it is read again, with its history. Only a type that promises its readings name no channel it does not declare is

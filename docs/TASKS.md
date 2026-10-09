@@ -24570,7 +24570,8 @@ because each is a decision rather than a defect:
         list shows acknowledged alarms until asked not to: a channel an edit has just taken out
         stays in sight, marked (`P-310`), with its limits still settable for the day it is put
         back, and retired channels are rare enough that hiding them by default would mostly hide
-        the one row that explains an edit. Held in the component, not the URL.
+        the one row that explains an edit. Held in the page's URL (`?retired=hide`), amended on
+        review below.
       - **`/values`** (`routes/history.ts`). The route reads the values as before (so an object
         that is not a sensor is still its 404), then `ObjectService.channels`, the same call the
         list makes, which derives `retired` in `ObjectRepository.channelsWithRetirement`; the
@@ -24599,6 +24600,23 @@ because each is a decision rather than a defect:
         always `false` on `/values` fails the core test; the filter not applied fails 1 web test;
         the box shown when nothing is retired fails 1.
       - **Not done.** The History tab is not filtered (only marked, `U-37`).
+      - **Amended on review** (a second commit). **The choice was lost to one failed poll.** It
+        lived in `useState` inside `ChannelTable`, and `LiveChannels` swaps the table for an error
+        panel whenever `/values` fails, which the unattended 15 s poll can (a core restarting, a
+        network blip): the next good poll remounted the table unticked, every retired row back,
+        nothing said. It now lives in the URL as the alarm list's filters do: `ObjectDetailView`
+        reads `retired=hide` and passes `hideRetired` and `onHideRetiredChange` down, and the
+        table holds nothing. Each control writes its own parameter and keeps the rest, so
+        changing tab (which used to replace the whole query with `{ tab }`) keeps the filter;
+        both replace rather than push, as the tabs already did. Test
+        (`retired-filter-url.test.tsx`, the whole page with the stream stubbed): ticked, the URL
+        reads `?retired=hide`; a poll answering 503 takes the table away, the next good one brings
+        it back still ticked, the retired row still hidden and `1 retired channel hidden.`; to
+        History and back keeps it (`?retired=hide&tab=history`); the view mounted again from that
+        address is ticked; unticked, the parameter goes. **Mutations** (restored byte for byte):
+        the choice back in local state fails it (at the URL); local state that also writes the
+        URL fails it after the failed poll (the box unticked); a tab change replacing the whole
+        query fails it.
 
 - [x] **U-39 — "—" on an optional field inside an array entry does nothing** · XS · U-34 · Found
       2026-10-08 in `U-34`. `removeAt` in `packages/web/src/forms/schema.ts` returns the document

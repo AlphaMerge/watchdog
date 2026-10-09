@@ -85,11 +85,32 @@ export function ObjectDetailView(): React.JSX.Element {
   const tabs = tabsFor(detail);
   const requested = params.get('tab');
   const active = tabs.some((tab) => tab.id === requested) ? (requested ?? 'overview') : 'overview';
+  // In the URL, as the alarm list's filters are (`U-38` review): the channel table is swapped for
+  // an error panel whenever a poll of its values fails, so a choice held inside it was dropped by
+  // one failed poll and every retired row came back unannounced. Absent, they are shown, as the
+  // alarm list shows acknowledged alarms until asked not to: a channel an edit has just taken out
+  // stays in sight, marked, with its limits still settable for the day it is put back.
+  const hideRetired = params.get('retired') === 'hide';
 
+  // Each writes its own parameter and keeps the others, so changing tab keeps the filter.
+  // Replace rather than push: six tabs would otherwise leave the back button walking through
+  // every one somebody glanced at before it left the page.
+  const setParam = (name: string, value: string | null): void => {
+    setParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        if (value === null) next.delete(name);
+        else next.set(name, value);
+        return next;
+      },
+      { replace: true },
+    );
+  };
   const select = (tab: string): void => {
-    // Replace rather than push: six tabs would otherwise leave the back button walking through
-    // every one somebody glanced at before it left the page.
-    setParams(tab === 'overview' ? {} : { tab }, { replace: true });
+    setParam('tab', tab === 'overview' ? null : tab);
+  };
+  const setHideRetired = (hide: boolean): void => {
+    setParam('retired', hide ? 'hide' : null);
   };
 
   return (
@@ -113,6 +134,8 @@ export function ObjectDetailView(): React.JSX.Element {
                   sensorType={detail.sensorType}
                   channels={channels.status === 'ready' ? channels.data.items : null}
                   lookups={lookups.status === 'ready' ? lookups.data.items : null}
+                  hideRetired={hideRetired}
+                  onHideRetiredChange={setHideRetired}
                 />
               </Card>
             )}
@@ -331,11 +354,15 @@ function LiveChannels({
   sensorType,
   channels,
   lookups,
+  hideRetired,
+  onHideRetiredChange,
 }: {
   sensorId: number;
   sensorType: string | undefined;
   channels: readonly ChannelRecord[] | null;
   lookups: readonly LookupSummary[] | null;
+  hideRetired: boolean;
+  onHideRetiredChange: (hide: boolean) => void;
 }): React.JSX.Element {
   const values = useApi<SensorValues>(`/sensors/${String(sensorId)}/values`);
   // Only to force a re-render on the interval. The ages themselves come from `Date.now()` at
@@ -370,6 +397,8 @@ function LiveChannels({
       values={values.status === 'ready' ? values.data : null}
       lookups={lookups}
       now={Date.now()}
+      hideRetired={hideRetired}
+      onHideRetiredChange={onHideRetiredChange}
     />
   );
 }

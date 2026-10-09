@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
+import { useState } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelRecord, HistoryChannel, HistorySeries, SensorValues } from '../src/api/types';
@@ -90,6 +91,8 @@ describe('a retired channel in the channel table', () => {
           values={values({ 1: { value: 4, at: new Date(NOW - 30_000).toISOString() }, 2: null })}
           lookups={null}
           now={NOW}
+          hideRetired={false}
+          onHideRetiredChange={() => undefined}
         />
       </MemoryRouter>,
     );
@@ -109,6 +112,8 @@ describe('a retired channel in the channel table', () => {
           values={values({ 1: null, 2: null })}
           lookups={null}
           now={NOW}
+          hideRetired={false}
+          onHideRetiredChange={() => undefined}
         />
       </MemoryRouter>,
     );
@@ -136,6 +141,8 @@ describe('a retired channel in the channel table', () => {
           values={null}
           lookups={null}
           now={NOW}
+          hideRetired={false}
+          onHideRetiredChange={() => undefined}
         />
       </MemoryRouter>,
     );
@@ -151,6 +158,8 @@ describe('a retired channel in the channel table', () => {
           values={values({ 1: null, 2: null, 3: null })}
           lookups={null}
           now={NOW}
+          hideRetired={false}
+          onHideRetiredChange={() => undefined}
         />
       </MemoryRouter>,
     );
@@ -171,6 +180,8 @@ describe('a retired channel in the channel table', () => {
           values={null}
           lookups={null}
           now={NOW}
+          hideRetired={false}
+          onHideRetiredChange={() => undefined}
         />
       </MemoryRouter>,
     );
@@ -188,6 +199,8 @@ describe('a retired channel in the channel table', () => {
           values={values({ 1: null, 2: { value: 42, at: new Date(NOW - 20_000).toISOString() } })}
           lookups={null}
           now={NOW}
+          hideRetired={false}
+          onHideRetiredChange={() => undefined}
         />
       </MemoryRouter>,
     );
@@ -361,16 +374,25 @@ describe('hiding retired channels in the channel table (`U-38`)', () => {
     channel(2, 'b', { retired: true }),
     channel(3, 'c', { retired: true }),
   ];
+  /** The table with its choice held outside it, as the page holds it (in its URL). */
+  function Held({ channels }: { channels: ChannelRecord[] }): React.JSX.Element {
+    const [hide, setHide] = useState(false);
+    return (
+      <ChannelTable
+        channels={channels}
+        sensorType="snmp.table"
+        values={null}
+        lookups={null}
+        now={NOW}
+        hideRetired={hide}
+        onHideRetiredChange={setHide}
+      />
+    );
+  }
   const mount = (channels: ChannelRecord[]): void => {
     render(
       <MemoryRouter>
-        <ChannelTable
-          channels={channels}
-          sensorType="snmp.table"
-          values={null}
-          lookups={null}
-          now={NOW}
-        />
+        <Held channels={channels} />
       </MemoryRouter>,
     );
   };
