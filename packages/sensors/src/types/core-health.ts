@@ -514,6 +514,23 @@ const CHANNELS: readonly ChannelDef[] = [
     unit: 'channels',
     counter: { bits: 64 },
   },
+  // `P-358`. Sensors whose stored parameters their type's current `paramsSchema` refuses, found by
+  // a pass over every sensor at start-up with the validation a create or an edit meets. A build
+  // that tightened a schema (`P-348`, `P-349`) leaves such a sensor running as stored; what it
+  // costs is that an edit sending `params` is refused until the paths are mended, and the core log
+  // names each sensor, its type, the paths and the keywords, never a value. A sensor of a type this
+  // build does not register is not counted: there is no schema to judge it by.
+  //
+  // **A gauge as of this start**, a gap until the pass has gone over every sensor: it falls at the
+  // next start after the sensors are mended. **No limit**, as `channelsCreatedOutsideDeclaration`
+  // has none: every core upgraded to a tightening build would turn Warning on its own sensor for
+  // sensors that keep working, and stay so until a restart after the last edit. A number to read
+  // after an upgrade, with the log saying which.
+  {
+    key: 'sensorsWithInvalidParams',
+    name: 'Sensors with invalid parameters',
+    unit: 'sensors',
+  },
   // `P-247`. How far this core's clock is behind every remote probe's, when two or more are
   // connected: the smallest lead among them, 0 when any is not ahead, and a gap with fewer than two,
   // since one probe ahead cannot be told from one probe wrong. **The core's condition, not theirs**:

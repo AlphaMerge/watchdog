@@ -352,6 +352,12 @@ const CORE_METRICS: readonly Metric[] = [
     help: 'Channels ingestion created for a key the sensor type does not declare for the sensor’s stored parameters, though the type promises to declare every key it reports: a probe on a different build of the type than the core (newer, or older and still reporting a key the core renamed), or the type breaking its promise. Only readings taken under the current parameters count. The readings are kept; the core log names the sensor, the type and the key.',
     counter: true,
   },
+  // `P-358`: a gauge as of the core's start, absent until its pass has gone over every sensor.
+  {
+    key: 'sensorsWithInvalidParams',
+    name: 'ms_core_sensors_with_invalid_params',
+    help: 'Sensors whose stored parameters their type’s current schema refuses, found at the core’s start: each keeps running as stored, and an edit sending its parameters is refused until they are mended. The core log names each sensor, its type and the failing paths. Absent until the start-up pass has gone over every sensor.',
+  },
   {
     key: 'lateRefusalWritesGivenUp',
     name: 'ms_core_late_refusal_writes_given_up_total',

@@ -1018,6 +1018,7 @@ cost: **light** · evaluated by the core, never by a probe
 | `readingsDroppedUnfit` | Readings dropped fitting results | readings | 64-bit counter → rate |
 | `channelsCreatedUndeclared` | Channels created undeclared | channels | 64-bit counter → rate |
 | `channelsCreatedOutsideDeclaration` | Channels created outside declaration | channels | 64-bit counter → rate |
+| `sensorsWithInvalidParams` | Sensors with invalid parameters | sensors | — |
 | `clockBehind` | Clock behind the probes | s | default limits: warn above 60, error above 900 |
 | `reactionsDeferred` | Alarm reactions waiting on a catch-up | sensors | — |
 | `credentialsToReenter` | Credential sets to re-enter | sets | default limits: warn above 0 |

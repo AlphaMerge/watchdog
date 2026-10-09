@@ -211,6 +211,12 @@ export interface CoreHealthSources {
    */
   unboundedCredentials?: (q: Queryable) => Promise<number>;
   /**
+   * `StoredParamsCheck.invalid` — sensors whose stored parameters their type's current schema
+   * refuses, as the start-up pass found them (`P-358`): null until it has gone over every sensor.
+   * Absent where no pass runs, and the channel gaps.
+   */
+  sensorsWithInvalidParams?: () => number | null;
+  /**
    * `CredentialVouching.stats().withheld` — sensors not being scanned because of their
    * credentials (`A-41`, `A-41b`, `A-41c`): withheld from their probe by the core, or refused by
    * the probe, which found the device's name resolving outside the set's targets.
@@ -482,6 +488,9 @@ export class CoreHealthService {
       // Channels a promise of `declaresEveryChannel` did not name: a probe ahead of this core, or
       // a type breaking it (`P-321`).
       channelsCreatedOutsideDeclaration: discards.channelsCreatedOutsideDeclaration,
+      // Sensors an edit sending their own parameters back would be refused for, as of this start
+      // (`P-358`); a gap until the start-up pass has gone over every sensor.
+      sensorsWithInvalidParams: this.#sources.sensorsWithInvalidParams?.() ?? null,
       // Seconds behind every remote probe, two or more of them (`P-247`); a gap with fewer.
       clockBehind: coreClock.behindSeconds,
       reactionsDeferred: ingestion.deferredReactions,

@@ -117,6 +117,8 @@ describe('the metrics endpoint', { skip: available ? false : 'no database' }, ()
       assert.equal(metrics.get('ms_core_channels_created_undeclared_total'), 6);
       // `P-321`: channels created outside a declaration that promised every key.
       assert.equal(metrics.get('ms_core_channels_created_outside_declaration_total'), 7);
+      // `P-358`: sensors whose stored parameters their type's current schema refuses. A gauge.
+      assert.equal(metrics.get('ms_core_sensors_with_invalid_params'), 8);
     });
 
     it('carries each probe’s numbers, labelled by probe', async () => {

@@ -100,6 +100,12 @@ export interface ParamProblem {
   /** JSON Pointer-ish path into the params, `''` for the object itself. */
   readonly path: string;
   readonly message: string;
+  /**
+   * The schema keyword that refused it (`pattern`, `required`, `additionalProperties`, …), as Ajv
+   * names it; `paramProblems` for what the type's own `paramProblems` found (`A-42`). Never a
+   * value, so a log line can carry it where it cannot carry the message's subject (`P-358`).
+   */
+  readonly keyword?: string;
 }
 
 /**
@@ -364,7 +370,14 @@ export class SensorCatalogue {
       const problems = this.#require(id).paramProblems?.(candidate) ?? [];
       return problems.length === 0
         ? { valid: true, params: candidate }
-        : { valid: false, problems: [...problems] };
+        : {
+            valid: false,
+            problems: problems.map((problem) => ({
+              path: problem.path,
+              message: problem.message,
+              keyword: 'paramProblems',
+            })),
+          };
     }
 
     return {
@@ -372,6 +385,7 @@ export class SensorCatalogue {
       problems: (validate.errors ?? []).map((error) => ({
         path: error.instancePath,
         message: error.message ?? 'is invalid',
+        keyword: error.keyword,
       })),
     };
   }

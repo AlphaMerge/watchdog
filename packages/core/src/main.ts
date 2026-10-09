@@ -46,6 +46,7 @@ import {
   declaredLimitsLookup,
 } from './state/declared-limits.js';
 import { repairDeclaredPrimaries } from './state/declared-primary.js';
+import { StoredParamsCheck } from './objects/stored-params-check.js';
 import { DiskWatcher } from './timeseries/disk.js';
 import { CredentialVault } from './vault/service.js';
 import { VaultKeyring } from './vault/keyring.js';
@@ -725,6 +726,33 @@ async function serve(): Promise<void> {
     name: 'declared-primary-repair',
     timeoutMs: 5_000,
     run: () => primaryRepair,
+  });
+
+  // **Stored parameters a later build's schema refuses are named at every start** (`P-358`):
+  // one warning per sensor with its paths and keywords, never a value, and the count on Core
+  // Health. The object service's own gate, so "invalid" is what an edit would refuse. Not awaited,
+  // as the repair above: it reads every sensor's parameters in pages, takes no lock and writes
+  // nothing, so nothing waits for it. Shutdown stops it between pages; it never rejects, and the
+  // channel gaps until it has gone over every sensor.
+  const storedParams = new StoredParamsCheck({
+    db,
+    logger,
+    sensorTypes: sensorTypeGate,
+    signal: lifecycle.signal,
+  });
+  const storedParamsRun = storedParams.run().then(
+    () => undefined,
+    (error: unknown) => {
+      logger.error(
+        describeError(error),
+        'could not finish checking stored sensor parameters at startup; the next start tries again',
+      );
+    },
+  );
+  lifecycle.onShutdown({
+    name: 'stored-params-check',
+    timeoutMs: 5_000,
+    run: () => storedParamsRun,
   });
 
   // The library itself. Its own audit sink, so a schedule edit re-derives the flags in the same
@@ -1471,6 +1499,7 @@ async function serve(): Promise<void> {
       credentialsToReenter: async (q) => (await vault.setsWithUndeclaredKeys(q)).length,
       unboundedCredentials: (q) => vault.unboundedSets(q),
       credentialsWithheld: () => credentialVouching.stats().withheld,
+      sensorsWithInvalidParams: () => storedParams.invalid,
       lateRefusalWritesGivenUp: () => credentialVouching.stats().recordWritesGivenUp,
       probeHellosUnproven: () => probeRegistry.stats().hellosRefusedUnproven,
       database: () => db.timeouts(),

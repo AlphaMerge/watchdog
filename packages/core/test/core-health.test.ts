@@ -82,6 +82,7 @@ function sources(
     credentialsToReenter: number;
     unboundedCredentials: number;
     credentialsWithheld: number;
+    sensorsWithInvalidParams: number | null;
     lateRefusalWritesGivenUp: number;
     probeHellosUnproven: number;
     statementTimeouts: number;
@@ -155,6 +156,9 @@ function sources(
     ...(overrides.credentialsWithheld === undefined
       ? {}
       : { credentialsWithheld: () => overrides.credentialsWithheld ?? 0 }),
+    ...(overrides.sensorsWithInvalidParams === undefined
+      ? {}
+      : { sensorsWithInvalidParams: () => overrides.sensorsWithInvalidParams ?? null }),
     ...(overrides.lateRefusalWritesGivenUp === undefined
       ? {}
       : { lateRefusalWritesGivenUp: () => overrides.lateRefusalWritesGivenUp ?? 0 }),
@@ -632,6 +636,30 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       assert.equal((await build({ credentialsWithheld: 4 }).read())['credentialsWithheld'], 4);
       assert.equal((await build({ credentialsWithheld: 0 }).read())['credentialsWithheld'], 0);
       assert.equal((await build({}).read())['credentialsWithheld'], null);
+    });
+
+    it('counts the sensors whose stored parameters their type now refuses, a gauge with no limit, and gaps before the pass (P-358)', async () => {
+      // As of this start: the start-up pass's count once it has gone over every sensor, a gap
+      // until then (the source answers null) and where no pass runs (no source).
+      assert.equal(
+        (await build({ sensorsWithInvalidParams: 3 }).read())['sensorsWithInvalidParams'],
+        3,
+      );
+      assert.equal(
+        (await build({ sensorsWithInvalidParams: 0 }).read())['sensorsWithInvalidParams'],
+        0,
+      );
+      assert.equal(
+        (await build({ sensorsWithInvalidParams: null }).read())['sensorsWithInvalidParams'],
+        null,
+      );
+      assert.equal((await build({}).read())['sensorsWithInvalidParams'], null);
+      assert.equal(CORE_HEALTH_COUNTERS.has('sensorsWithInvalidParams'), false, 'a gauge');
+      const channel = coreHealth.channels({}).find((one) => one.key === 'sensorsWithInvalidParams');
+      assert.ok(channel, 'declared');
+      assert.equal(channel.unit, 'sensors');
+      assert.equal(channel.counter, undefined);
+      assert.equal(channel.limits, undefined, 'no limit: alarm volume is unchanged');
     });
 
     it('passes the late-refusal record’s given-up writes through as a counter, and gaps without a source to ask (A-68)', async () => {

@@ -54,6 +54,17 @@ export type StoredDeclaration =
       readonly message: string;
     };
 
+/** One reason stored parameters fail their type's schema (`P-358`). Never carries a value. */
+export interface StoredParamProblem {
+  /** A JSON pointer into the parameters, `''` for the object itself. */
+  readonly path: string;
+  /** The schema keyword that refused it; `paramProblems` for the type's own check, `params` for
+   * the structural bounds every sensor has. */
+  readonly keyword: string;
+  /** The validator's sentence, with every string the parameters hold cut out of it. */
+  readonly message: string;
+}
+
 /** Params fit to leave the process, and which secrets were taken out of them. */
 export interface RedactedParams {
   readonly params: Record<string, unknown>;
@@ -95,6 +106,23 @@ export interface SensorTypeGate {
    * those can be secrets.
    */
   storedChannelsFor(sensorType: string, params: Record<string, unknown>): StoredDeclaration;
+
+  /**
+   * What is wrong with a sensor's *stored* parameters by its type's schema as this build has it,
+   * `[]` when nothing is, or `null` for a type this build does not register (`P-358`).
+   *
+   * **The validation `normalise` does**, the same structural bounds and the same Ajv validator
+   * with the type's own `paramProblems` after it, answered instead of thrown: a schema tightened
+   * since the sensor was written (`P-348`, `P-349`) leaves it running with parameters an edit
+   * would now refuse, and the start-up pass that names those asks this. Neither refused nor
+   * logged here, as `storedChannelsFor`. **No value in the answer**: paths and keywords, and a
+   * message with every string the parameters hold cut out of it, secrets in each encoded form
+   * (`P-305`), since stored parameters carry the `writeOnly` ones.
+   */
+  storedParamProblems(
+    sensorType: string,
+    params: Record<string, unknown>,
+  ): readonly StoredParamProblem[] | null;
 
   /**
    * Every channel key a sensor of this type can report with these *stored* parameters, or `null`
@@ -210,25 +238,34 @@ function fail(sensorType: string, message: string, details?: Record<string, unkn
   });
 }
 
-function assertStructurallySane(sensorType: string, params: Record<string, unknown>): void {
+/**
+ * The first structural bound the params break, or null. Answered rather than thrown so that
+ * `normalise` and `storedParamProblems` hold stored and incoming params to the same bounds.
+ */
+function structuralProblem(
+  params: Record<string, unknown>,
+): { readonly message: string; readonly details?: Record<string, unknown> } | null {
   if (typeof params !== 'object' || Array.isArray(params)) {
-    fail(sensorType, 'sensor params must be a JSON object');
+    return { message: 'sensor params must be a JSON object' };
   }
   const keys = Object.keys(params);
   if (keys.length > MAX_PARAM_KEYS) {
-    fail(sensorType, `sensor params may not have more than ${String(MAX_PARAM_KEYS)} keys`, {
-      actual: keys.length,
-    });
+    return {
+      message: `sensor params may not have more than ${String(MAX_PARAM_KEYS)} keys`,
+      details: { actual: keys.length },
+    };
   }
   if (depthOf(params) > MAX_PARAM_DEPTH) {
-    fail(sensorType, `sensor params may not nest deeper than ${String(MAX_PARAM_DEPTH)} levels`);
+    return { message: `sensor params may not nest deeper than ${String(MAX_PARAM_DEPTH)} levels` };
   }
   const bytes = Buffer.byteLength(JSON.stringify(params), 'utf8');
   if (bytes > MAX_PARAM_BYTES) {
-    fail(sensorType, `sensor params may not exceed ${String(MAX_PARAM_BYTES)} bytes`, {
-      actual: bytes,
-    });
+    return {
+      message: `sensor params may not exceed ${String(MAX_PARAM_BYTES)} bytes`,
+      details: { actual: bytes },
+    };
   }
+  return null;
 }
 
 function draftsOf(defs: readonly ChannelDef[]): readonly ChannelDraft[] {
@@ -340,7 +377,8 @@ export function catalogueSensorTypeGate(
   };
   return {
     normalise(sensorType: string, params: Record<string, unknown>): Record<string, unknown> {
-      assertStructurallySane(sensorType, params);
+      const structural = structuralProblem(params);
+      if (structural !== null) fail(sensorType, structural.message, structural.details);
 
       if (!catalogue.has(sensorType)) {
         // Naming what *is* registered turns "invalid" into something an operator can act on,
@@ -384,6 +422,27 @@ export function catalogueSensorTypeGate(
         throw refusedDeclaration(sensorType, params, cause);
       }
       return draftsOf(defs);
+    },
+
+    storedParamProblems(
+      sensorType: string,
+      params: Record<string, unknown>,
+    ): readonly StoredParamProblem[] | null {
+      if (!catalogue.has(sensorType)) return null;
+      // `normalise`'s checks, in its order: the bounds every sensor has, then the type's schema.
+      const structural = structuralProblem(params);
+      if (structural !== null) {
+        return [{ path: '', keyword: 'params', message: structural.message }];
+      }
+      const result = catalogue.validate(sensorType, params);
+      if (result.valid) return [];
+      const secrets = catalogue.writeOnlyPaths(sensorType);
+      return result.problems.map((problem) => ({
+        path: problem.path,
+        keyword: problem.keyword ?? 'params',
+        // Ajv's sentences name the rule, not the value; a type's own `paramProblems` may not.
+        message: withoutParamValues(problem.message, params, secrets),
+      }));
     },
 
     storedChannelsFor(sensorType: string, params: Record<string, unknown>): StoredDeclaration {

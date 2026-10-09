@@ -79,6 +79,7 @@ export function fixedCoreHealth(
       }),
       delivery: () => Promise.resolve({ pending: 9, failed: 4, oldestPendingAgeMs: 125_000 }),
       credentialsToReenter: () => Promise.resolve(0),
+      sensorsWithInvalidParams: () => 8,
       ...(options.lateRefusalWritesGivenUp === undefined
         ? {}
         : { lateRefusalWritesGivenUp: options.lateRefusalWritesGivenUp }),

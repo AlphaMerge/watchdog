@@ -1404,6 +1404,7 @@ The same numbers the Core Health sensor records, read live. **A `null` is a gap 
 | `channels.readingsDroppedUnfit` | number | nullable |  |
 | `channels.channelsCreatedUndeclared` | number | nullable |  |
 | `channels.channelsCreatedOutsideDeclaration` | number | nullable |  |
+| `channels.sensorsWithInvalidParams` | number | nullable |  |
 | `channels.clockBehind` | number | nullable |  |
 | `channels.reactionsDeferred` | number | nullable |  |
 | `channels.credentialsToReenter` | number | nullable |  |

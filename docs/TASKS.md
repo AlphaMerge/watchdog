@@ -13043,13 +13043,78 @@ because each is a decision rather than a defect:
       is the same from either directory, or the web package's scripts never reach `docs/`, with
       the cause said in the outcome.
 
-- [ ] **P-358 — a stored sensor whose parameters no longer validate is not named** · S · P-348 ·
+- [x] **P-358 — a stored sensor whose parameters no longer validate is not named** · S · P-348 ·
       Found 2026-10-09 in `P-348`. Tightening a type's `paramsSchema` (`P-348`, `P-349`) leaves
       existing sensors running with parameters their type would now refuse; nothing re-validates
       on read, clone or start, and the operator finds out only when an edit is refused.
       **Done when** a core start-up pass checks each stored sensor against its type's current
       schema, logs those that fail with the sensor id and the failing path (never the value), and
       counts them on Core Health, with a database test.
+
+      **P-358 outcome. A start-up pass, every start, not awaited, in pages, that reads and writes
+      nothing else: `StoredParamsCheck` (`objects/stored-params-check.ts`), counted on Core Health
+      as `sensorsWithInvalidParams` (*Sensors with invalid parameters*, sensors).** No migration,
+      no protocol change.
+      - **The API's validation, not a second one.** `SensorTypeGate` gains `storedParamProblems`:
+        `normalise`'s structural bounds (now `structuralProblem`, answered rather than thrown, and
+        `normalise` throws on its answer) and the catalogue's Ajv validator with the type's own
+        `paramProblems` after it, returning problems instead of an `OBJECT_INVALID`; `null` for a
+        type this build does not register. So "invalid" is exactly "an edit sending these
+        parameters back would be refused". `ParamProblem` gains an optional `keyword` (Ajv's, or
+        `paramProblems` for the type's own check); the API's 400 still carries path and message
+        only.
+      - **One `warn` per failing sensor** with `sensorId`, `sensorType`, `phase:
+        'validate-stored-params'` and `problems: [{ path, keyword, message }]`, and **never a
+        value** (`P-305`): Ajv's sentences are built from the schema, never the data; a type's own
+        `paramProblems` sentence may quote what it read, so the gate cuts every string the
+        parameters hold out of it, secrets in each encoded form. No parameter is a field of any
+        line; a row whose check throws is logged with its id and the error's kind only, not its
+        message. One `info` line for the pass (counts, the failing types, the unregistered types)
+        when it found anything, `debug` otherwise.
+      - **A type this build does not register is skipped and counted only in the pass's own
+        line**, by type, not on Core Health: there is no schema here to judge it by, so "invalid"
+        would be a claim this core cannot make; where its probe lacks the type too the sensor is
+        already Down in the `unknown-type` phase on its own page, and where a newer probe has it
+        (ADR-001 Decision 13) it is a working sensor.
+      - **When, and what it costs — `P-323`'s answer, simpler.** Every start, no marker (`P-333`
+        is still the shared policy to settle). Keyset pages of 500 by `object_id`, so one page of
+        parameters is held at a time, never the tree; a short page ends it. **No lock is taken**,
+        so no `SKIP LOCKED` is needed: it cannot wait for a writer or make one wait, and it writes
+        nothing. `main.ts` starts it unawaited beside the declared-primary repair, with a shutdown
+        hook that waits for the page in flight; `lifecycle.signal` is checked between pages. One
+        sensor whose check throws is that sensor's (`failedSensors`); a page that cannot be read
+        stops the pass with `complete: false` and a `warn`; it never rejects. **Measured** (a
+        throwaway script against a scratch database in the toolchain container, not committed;
+        half `db.postgresql` with two extract keys, half `exe.script.advanced` with a secret, one
+        in ten invalid, warnings to a null sink): 5,000 sensors in 53–107 ms wall, 61–116 ms CPU;
+        20,000 in 123–312 ms wall, 124–314 ms CPU; heap under 50 MB throughout.
+      - **The channel.** A gauge as of this start, with no limit, `channelsCreatedOutsideDeclaration`'s
+        reasoning: a limit would turn every core upgraded to a tightening build Warning on its own
+        sensor for sensors that keep working, until a restart after the last edit — alarm volume
+        unchanged, so no M-17 scenario. **A gap until the pass has gone over every sensor**, and
+        for good if shutdown or a failed read stopped it, rather than a lower bound read as the
+        number. Exported as the gauge `ms_core_sensors_with_invalid_params`. `administration.md`'s
+        Core Health table has a row; `sensor-reference.md` and `api-reference.md` regenerated.
+      - **Tests** (`stored-params-check.test.ts`). Against a scratch database, in pages of two: a
+        valid `db.postgresql`; one stored with the `P-348`-reserved extract key `rows` (warned at
+        `/extract/0/key`, `pattern`); an `exe.script.advanced` stored with a `writeOnly` secret and
+        `P-349`'s `primaryChannel: runtime` (warned at `/primaryChannel`, `pattern`); a type whose
+        `paramProblems` quotes its `writeOnly` token (warned with both values cut); a type the
+        checking build does not register (no line, counted in the summary). Each warned once, the
+        valid and the unregistered never; neither secret in any line, as spelled or base64; no
+        `params` field; the count 3 for Core Health, null before the pass; and `sensor_config`,
+        `object` and `channel` identical down to each row's `xmin`. Without a database: 0, 1, 4
+        and 5 sensors in pages of two, each checked once in order and the pages asked for exactly
+        (`after` 0, 2, 4); a sensor whose check throws, the rest of its page and the next checked,
+        its error's text in no line; shutdown before the first page (nothing read, no count); a
+        page that cannot be read (stopped, said, no count). `core-health.test.ts`: carried, a gap
+        with null and with no source, a gauge with no limit. `metrics.test.ts`: exported.
+      - **Mutations** (restored byte for byte, `dist` rebuilt): the pass not validating fails 3;
+        `params` in the warning fails 2; the gate not scrubbing a type's message fails the database
+        test; one page only fails 4; publishing an incomplete pass's count fails 2; a throwing row
+        aborting the pass fails 1; Core Health not carrying the source fails its test.
+      - **Not done.** The count does not fall when an operator mends a sensor; it falls at the
+        next start. `main.ts`'s wiring is typechecked, not booted (`P-331`).
 
 - [ ] **P-359 — `exe.script.advanced` drops a script's own `runtime` reading silently** · XS ·
       P-349 · Found 2026-10-09 in `P-349`. A script that prints a non-primary `runtime` channel
