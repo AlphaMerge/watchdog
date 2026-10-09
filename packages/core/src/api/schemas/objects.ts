@@ -18,6 +18,7 @@ import { MAX_TAG, MAX_TAGS } from '../../libraries/nodes.js';
 // The catalogue's own id shape and its sentence, so a create naming a type is refused in the words
 // registration would use (`P-372`).
 import { SENSOR_TYPE_ID, SENSOR_TYPE_ID_MESSAGE } from '@ms/sensors';
+import { present } from '../validation.js';
 
 /**
  * A sensor type id in a request: the catalogue's shape, and what a value outside it is told.
@@ -534,17 +535,17 @@ export const createObjectSchema = {
         'an enrolment flow; until then it is how a probe is told which subtree it owns.',
     },
   },
-  // Each name a `then` or a `not` requires is declared there as `true`, which constrains nothing:
-  // strict mode refuses a `required` its own schema does not declare (`P-383`), and the root's
-  // `properties` is not that schema. The same in the tree node's and the update's below.
+  // Each name a `then` or a `not` requires is declared there, by `present` (`P-383`): strict mode
+  // refuses a `required` its own schema does not declare, and the root's `properties` is not that
+  // schema. The same in the tree node's and the update's below.
   allOf: [
     {
       if: { properties: { kind: { const: 'device' } }, required: ['kind'] },
-      then: { properties: { host: true }, required: ['host'] },
+      then: present('host'),
     },
     {
       if: { properties: { kind: { const: 'sensor' } }, required: ['kind'] },
-      then: { properties: { sensorType: true }, required: ['sensorType'] },
+      then: present('sensorType'),
     },
     // A group has no host and a device has no sensor type. Rejecting the mismatch here means
     // no handler has to hand-check it.
@@ -552,25 +553,22 @@ export const createObjectSchema = {
       if: { properties: { kind: { enum: ['probe', 'group'] } }, required: ['kind'] },
       then: {
         not: {
-          anyOf: [
-            { properties: { host: true }, required: ['host'] },
-            { properties: { sensorType: true }, required: ['sensorType'] },
-          ],
+          anyOf: [present('host'), present('sensorType')],
         },
       },
     },
     // Only a probe branch can be claimed by a probe. Rejecting it here means no handler has to.
     {
       if: { properties: { kind: { enum: ['group', 'device', 'sensor'] } }, required: ['kind'] },
-      then: { not: { properties: { gid: true }, required: ['gid'] } },
+      then: { not: present('gid') },
     },
     {
       if: { properties: { kind: { const: 'device' } }, required: ['kind'] },
-      then: { not: { properties: { sensorType: true }, required: ['sensorType'] } },
+      then: { not: present('sensorType') },
     },
     {
       if: { properties: { kind: { const: 'sensor' } }, required: ['kind'] },
-      then: { not: { properties: { host: true }, required: ['host'] } },
+      then: { not: present('host') },
     },
   ],
 } as const;
@@ -611,34 +609,31 @@ export const treeNodeSchema = {
   allOf: [
     {
       if: { properties: { kind: { const: 'device' } }, required: ['kind'] },
-      then: { properties: { host: true }, required: ['host'] },
+      then: present('host'),
     },
     {
       if: { properties: { kind: { const: 'sensor' } }, required: ['kind'] },
-      then: { properties: { sensorType: true }, required: ['sensorType'] },
+      then: present('sensorType'),
     },
     {
       if: { properties: { kind: { enum: ['probe', 'group'] } }, required: ['kind'] },
       then: {
         not: {
-          anyOf: [
-            { properties: { host: true }, required: ['host'] },
-            { properties: { sensorType: true }, required: ['sensorType'] },
-          ],
+          anyOf: [present('host'), present('sensorType')],
         },
       },
     },
     {
       if: { properties: { kind: { enum: ['group', 'device', 'sensor'] } }, required: ['kind'] },
-      then: { not: { properties: { gid: true }, required: ['gid'] } },
+      then: { not: present('gid') },
     },
     {
       if: { properties: { kind: { const: 'device' } }, required: ['kind'] },
-      then: { not: { properties: { sensorType: true }, required: ['sensorType'] } },
+      then: { not: present('sensorType') },
     },
     {
       if: { properties: { kind: { const: 'sensor' } }, required: ['kind'] },
-      then: { not: { properties: { host: true }, required: ['host'] } },
+      then: { not: present('host') },
     },
   ],
 } as const;
@@ -720,10 +715,7 @@ export const updateObjectSchema = {
       if: { properties: { kind: { enum: ['root', 'probe', 'group'] } }, required: ['kind'] },
       then: {
         not: {
-          anyOf: [
-            { properties: { host: true }, required: ['host'] },
-            { properties: { params: true }, required: ['params'] },
-          ],
+          anyOf: [present('host'), present('params')],
         },
       },
     },
@@ -732,20 +724,17 @@ export const updateObjectSchema = {
         properties: { kind: { enum: ['root', 'group', 'device', 'sensor'] } },
         required: ['kind'],
       },
-      then: { not: { properties: { gid: true }, required: ['gid'] } },
+      then: { not: present('gid') },
     },
     {
       if: { properties: { kind: { const: 'device' } }, required: ['kind'] },
-      then: { not: { properties: { params: true }, required: ['params'] } },
+      then: { not: present('params') },
     },
     {
       if: { properties: { kind: { const: 'sensor' } }, required: ['kind'] },
       then: {
         not: {
-          anyOf: [
-            { properties: { host: true }, required: ['host'] },
-            { properties: { ipVersion: true }, required: ['ipVersion'] },
-          ],
+          anyOf: [present('host'), present('ipVersion')],
         },
       },
     },

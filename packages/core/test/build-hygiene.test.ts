@@ -5,6 +5,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { describe, it } from 'node:test';
 import { coreHealth, probeHealth } from '@ms/sensors';
+import { sortedAliases, templateLiterals } from './support/sql-order-aliases.js';
 
 /**
  * `tsc -b` is incremental and never deletes output for a source file that has gone away.
@@ -1008,6 +1009,241 @@ describe('the CI workflows', () => {
     }
   });
 });
+
+/**
+ * No query sorts by a column it computed from the column of that name, or cast to text (`P-389`).
+ *
+ * A bare name in `ORDER BY` or `DISTINCT ON` resolves to an output column before an input one, so
+ * `SELECT object_id::text AS object_id … ORDER BY starts_at, object_id` sorts the text, and
+ * `'1000'` comes before `'999'`. `P-385` found that shape twice — the pause sweep, whose keyset
+ * skipped 995..999 so they alarmed through a maintenance window, and `AccessService`'s tiebreak —
+ * and both were wrong only across a power of ten, which a test database never reaches unless it is
+ * made to. The review found the rest with two scripts, by hand; this is those scripts, run on
+ * every suite. It reads source text, so it needs no database and takes a fraction of a second.
+ *
+ * The fix is to qualify the name (`ORDER BY object_pause.object_id`), which resolves the input
+ * column. What it reports, and what it cannot see, is in `test/support/sql-order-aliases.ts`.
+ */
+describe('SQL that sorts by its own computed column', () => {
+  /**
+   * Each one a query that does sort by such a column and is right to, with the reason. One entry
+   * per query: a second query of the same shape in the same file is not covered by the first.
+   */
+  const ALLOWED: readonly { where: string; column: string; reason: string }[] = [
+    {
+      where: 'notifications/health.ts ORDER BY',
+      column: "coalesce(t.method, '…') AS method",
+      reason:
+        "Delivery Health's rows, by method name (`ORDER BY 1`). The text is what is meant: the " +
+        'coalesce only names the requests that have no template.',
+    },
+    {
+      where: 'state/runtime.ts DISTINCT ON, ORDER BY',
+      column: 'sensor_id::text AS sensor_id',
+      reason:
+        "`orderedAfterLast`: each sensor's newest row. Text and bigint ids are one to one, so " +
+        '`DISTINCT ON` keeps the same row under either, and the rows are read into a map by id. ' +
+        'Whether the text key costs the index is `P-388`.',
+    },
+    {
+      where: 'timeseries/store.ts DISTINCT ON, ORDER BY',
+      column: 'sensor_id::text AS sensor_id',
+      reason:
+        "`stateAtHorizon`: each sensor's last state before the horizon, the same shape and the " +
+        'same reason as `orderedAfterLast`, also `P-388`.',
+    },
+  ];
+
+  const srcRoot = join(import.meta.dirname, '..', '..', 'src');
+
+  /** Every finding in `packages/core/src`, as `ALLOWED` names them, with how much was read. */
+  let scanned: Promise<{ found: Finding[]; literals: number }> | undefined;
+  const scan = (): Promise<{ found: Finding[]; literals: number }> => (scanned ??= read());
+  async function read(): Promise<{ found: Finding[]; literals: number }> {
+    const found: Finding[] = [];
+    let literals = 0;
+    const walk = async (dir: string): Promise<void> => {
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        const here = join(dir, entry.name);
+        if (entry.isDirectory()) await walk(here);
+        else if (entry.name.endsWith('.ts')) {
+          for (const literal of templateLiterals(await readFile(here, 'utf8'))) {
+            if (/\bSELECT\b/u.test(literal.text)) literals += 1;
+            for (const hit of sortedAliases(literal.text, literal.line)) {
+              found.push({
+                where: `${relative(srcRoot, here)} ${hit.clauses.join(', ')}`,
+                column: hit.column,
+                line: hit.line,
+              });
+            }
+          }
+        }
+      }
+    };
+    await walk(srcRoot);
+    return { found, literals };
+  }
+
+  /** Pairs each finding with an entry, each entry used once: what is left on either side. */
+  function unmatched(found: readonly Finding[]): { unexplained: Finding[]; stale: string[] } {
+    const left = [...ALLOWED];
+    const unexplained = found.filter((finding) => {
+      const index = left.findIndex(
+        (entry) => entry.where === finding.where && entry.column === finding.column,
+      );
+      if (index === -1) return true;
+      left.splice(index, 1);
+      return false;
+    });
+    return { unexplained, stale: left.map((entry) => `${entry.where}: ${entry.column}`) };
+  }
+
+  it('has none in packages/core/src that the allow-list does not explain', async () => {
+    const { found, literals } = await scan();
+    // A floor on the reading itself: a lexer that lost its place would find no SQL, and this would
+    // pass for ever while checking nothing.
+    assert.ok(literals > 300, `read only ${String(literals)} literals with a SELECT`);
+    const { unexplained } = unmatched(found);
+    assert.deepEqual(
+      unexplained.map((one) => `${one.where} (line ${String(one.line)}): ${one.column}`),
+      [],
+      'a query sorts by an output column computed from the column of its name, or cast to ' +
+        "text, so the sort is the computed value's — for `::text`, '1000' before '999'. Qualify the name in " +
+        '`ORDER BY` / `DISTINCT ON` (`t.x`) so it is the input column, or add the query to ' +
+        'ALLOWED with the reason its order is right.',
+    );
+  });
+
+  it('has every allow-listed query still in the source', async () => {
+    const { stale } = unmatched((await scan()).found);
+    assert.deepEqual(stale, [], 'ALLOWED names a query that is gone or fixed; remove its entry');
+  });
+
+  /** The shapes it must catch, each in a template literal of a TypeScript file. */
+  const CAUGHT: readonly { sql: string; column: string; clauses: string[] }[] = [
+    // `P-385`'s two, as they were.
+    {
+      sql: `SELECT object_id::text AS object_id, starts_at FROM object_pause
+            WHERE (starts_at, object_id) > ($1, $2) ORDER BY starts_at, object_id LIMIT $3`,
+      column: 'object_id::text AS object_id',
+      clauses: ['ORDER BY'],
+    },
+    {
+      sql: `WITH nearest AS (SELECT DISTINCT ON (group_id) group_id, depth FROM grant_ ORDER BY
+              group_id, depth)
+            SELECT group_id::text AS group_id, depth FROM nearest ORDER BY depth, group_id LIMIT 1`,
+      column: 'group_id::text AS group_id',
+      clauses: ['ORDER BY'],
+    },
+    {
+      sql: 'SELECT DISTINCT ON (sensor_id) sensor_id::text AS sensor_id FROM s ORDER BY sensor_id, time DESC',
+      column: 'sensor_id::text AS sensor_id',
+      clauses: ['DISTINCT ON', 'ORDER BY'],
+    },
+    // Qualified in the select list, by ordinal, with no alias (PostgreSQL still calls it `id`),
+    // as a `CAST`, inside a CTE, and in lower case.
+    {
+      sql: 'SELECT o.id::text AS id FROM object o ORDER BY id DESC NULLS LAST',
+      column: 'o.id::text AS id',
+      clauses: ['ORDER BY'],
+    },
+    {
+      sql: 'SELECT id::text AS id, name FROM object ORDER BY 1',
+      column: 'id::text AS id',
+      clauses: ['ORDER BY'],
+    },
+    {
+      sql: 'SELECT id::text FROM object ORDER BY id',
+      column: 'id::text AS id',
+      clauses: ['ORDER BY'],
+    },
+    {
+      sql: 'SELECT CAST(id AS text) AS id FROM object ORDER BY id',
+      // Words are compared, and so reported, in lower case.
+      column: 'cast(id as text) AS id',
+      clauses: ['ORDER BY'],
+    },
+    {
+      sql: `WITH page AS (SELECT id::text AS id FROM object ORDER BY id LIMIT 5) SELECT * FROM page`,
+      column: 'id::text AS id',
+      clauses: ['ORDER BY'],
+    },
+    {
+      sql: 'select lower(name) as name from object order by name',
+      column: 'lower(name) AS name',
+      clauses: ['ORDER BY'],
+    },
+    // Cast to text under another name, or none.
+    {
+      sql: 'SELECT o.id::text AS object_id FROM object o ORDER BY object_id',
+      column: 'o.id::text AS object_id',
+      clauses: ['ORDER BY'],
+    },
+    {
+      sql: 'SELECT (o.id + 1)::text FROM object o ORDER BY 1',
+      column: '(o.id + 1)::text',
+      clauses: ['ORDER BY'],
+    },
+  ];
+
+  /** The shapes that resolve an input column, or sort a value that is what it says. */
+  const PASSED: readonly string[] = [
+    'SELECT id::text AS id FROM object ORDER BY object.id',
+    'SELECT o.id::text AS id FROM object o ORDER BY o.id',
+    // An expression in `ORDER BY` reads input columns only.
+    'SELECT id::text AS id FROM object ORDER BY id + 0',
+    // A window's and an aggregate's `ORDER BY` read input columns only.
+    'SELECT id::text AS id, row_number() OVER (ORDER BY id) AS rn FROM object',
+    "SELECT string_agg(id::text, ',' ORDER BY id) AS id FROM object",
+    // A column under another name sorts as the column does.
+    'SELECT o.id AS object_id FROM object o ORDER BY object_id',
+    // Computed, but not from a column of its own name, and not made text.
+    'SELECT count(*)::int AS count FROM object GROUP BY kind ORDER BY count',
+    'SELECT 0 AS depth, id FROM object ORDER BY depth',
+    'SELECT lower(name) AS key FROM object ORDER BY key',
+    // `GROUP BY` resolves an input column first.
+    'SELECT id::text AS id FROM object GROUP BY id',
+    // The outer level reads the CTE's column as an input; this cannot see its type.
+    'WITH x AS (SELECT id::text AS id FROM object) SELECT id FROM x',
+    // In a comment or a string, not SQL.
+    "SELECT id FROM object -- id::text AS id ORDER BY id\n WHERE note = 'x::text AS x ORDER BY x'",
+  ];
+
+  it('catches each shape it was written for, planted in a source file', () => {
+    // Each in a template literal behind a substitution, a comment and a regular expression with a
+    // backtick in it, so the lexer has to find it as well as the parser.
+    const blocks = CAUGHT.map(
+      ({ sql }, index) =>
+        `// a \` in a comment\nconst re${String(index)} = /\`/u;\n` +
+        `const q${String(index)} = \`${sql.replace('FROM', 'FROM ${table}')}\`;\n`,
+    );
+    const literals = templateLiterals(blocks.join(''));
+    assert.deepEqual(
+      literals.map((literal) =>
+        sortedAliases(literal.text).map(({ column, clauses }) => ({ column, clauses })),
+      ),
+      CAUGHT.map(({ column, clauses }) => [{ column, clauses }]),
+    );
+    // Each on the line its literal starts on, the third of its block.
+    assert.deepEqual(
+      literals.map((literal) => literal.line),
+      blocks.map((_, index) => blocks.slice(0, index).join('').split('\n').length + 2),
+    );
+  });
+
+  it('passes the shapes that sort by what they mean', () => {
+    assert.deepEqual(
+      PASSED.map((sql) => ({ sql, found: sortedAliases(sql) })).filter(({ found }) => found.length),
+      [],
+    );
+  });
+});
+
+interface Finding {
+  readonly where: string;
+  readonly column: string;
+  readonly line: number;
+}
 
 describe('the smoke harnesses', () => {
   // Each boots privileged systemd containers on the machine CI shares with whoever is developing

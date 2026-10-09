@@ -14444,19 +14444,149 @@ because each is a decision rather than a defect:
       **Done when** both plans are read at 5,000 sensors and qualified to the input column if
       that helps, with the measurement in `docs/findings/`.
 
-- [ ] **P-389 — a build-hygiene check for an alias named in its own `ORDER BY`** · S · P-385 ·
+- [x] **P-389 — a build-hygiene check for an alias named in its own `ORDER BY`** · S · P-385 ·
       Found 2026-10-09 in `P-385` review. The pause sweep and access bugs were both a
       `::text AS x` read back by a bare `x` in `ORDER BY` / `DISTINCT ON`, which sorts 1000
       before 999. The review's two scan scripts found every case by hand. **Done when**
       `build-hygiene` fails on that shape in `packages/core/src`, with an allow-list for the
       harmless ones and a test that a planted case is caught.
 
-- [ ] **P-390 — response schemas are lax at runtime** · XS · P-383 · Found 2026-10-09 in
+      **P-389 outcome. `build-hygiene` reads every SQL template literal in `packages/core/src`
+      and fails on that shape. It found one more, the exporter's probe list, which is
+      qualified now. Three are allowed, each with its reason.** No database, protocol or
+      migration change.
+      - **What it reads.** `test/support/sql-order-aliases.ts` holds two parts:
+        - a small lexer that finds TypeScript template literals, skipping comments, quoted
+          strings and regular expressions, with each `${…}` replaced by a placeholder;
+        - a SQL reader that splits each literal into query levels (the statement, each CTE and
+          each subquery) and works out each level's output columns.
+
+        It uses no TypeScript compiler and no dependency. A scan of 329 files and 1,705
+        literals, 357 of them with a `SELECT`, took 150–300 ms on the host and 0.3–4.4 s in the
+        toolchain on a loaded VM.
+      - **What it reports.** A level whose `ORDER BY` or `DISTINCT ON` names an output column
+        bare, or by ordinal, where that column is one of these:
+        - computed from a column of its own name: `t.x::text AS x`, `lower(name) AS name`, or
+          `t.x::text` with no alias, which PostgreSQL still names `x`;
+        - cast to text under any name: `o.id::text AS object_id`. No query has this today. It is
+          included because the sort is the same text sort.
+
+        An expression in `ORDER BY`, a window's or an aggregate's `ORDER BY`, and `GROUP BY` all
+        resolve input columns, so they are not this shape. A column under another name
+        (`o.id AS object_id`), `count(*)::int AS count` and `0 AS depth` are not reported.
+      - **Checked against the bugs it was written for.** Run on the files as they were before
+        `P-385`, it reports all four: `access.ts`'s `group_id`, the pause sweep's `object_id`,
+        `rediscoveryUsing`'s `id` and `moveLocked`'s `id`. On today's source it reports what
+        the review listed and one more.
+      - **Found: `metrics/exporter.ts`'s probe list** (`SELECT id::text AS id … ORDER BY id`).
+        It listed probes in text order. It is now `ORDER BY object.id`. The `P-385` review had
+        left it because it only sets export order. Qualifying it removes the list entry, and
+        `metrics.test.ts` still passes. No test pins the order, since nothing reads it.
+      - **The allow-list (`ALLOWED`, three entries, each with a reason).** Each entry stands for
+        one query: two queries of the same shape in one file need two entries.
+        - Delivery Health's `ORDER BY 1` over `coalesce(t.method, '(none)') AS method`. A method
+          name is text and is meant to sort as text.
+        - `orderedAfterLast` (`state/runtime.ts`), which uses `DISTINCT ON` and `ORDER BY` over
+          `sensor_id::text`.
+        - `stateAtHorizon` (`timeseries/store.ts`), the same shape.
+
+        For the last two, text and bigint ids are one to one, so each sensor keeps its newest
+        row, and the rows are read into a map. Whether the text key costs the index is `P-388`.
+        **If `P-388` qualifies them, it must delete their entries, or "every allow-listed query
+        still in the source" fails.** That test is what keeps the list from rotting.
+      - **Tests (`build-hygiene.test.ts`, 4).**
+        - "None unexplained" also asserts a floor of 300 literals with a `SELECT`, so a lexer
+          that loses its place fails rather than passing with nothing read.
+        - "Every allow-listed query still in the source".
+        - Eleven planted shapes, each in a TypeScript source behind a `${…}`, a comment with a
+          backtick and a regular expression with a backtick, all caught on the right line.
+          They include `P-385`'s pause sweep and access query, an ordinal, a `CAST`, a CTE,
+          lower case, and text under another name.
+        - Twelve shapes that must pass.
+      - **Mutations** (each restored byte for byte, dist rebuilt with `tsc -b --force`):
+        - ordinals not read: 2 fail, including the stale Delivery Health entry;
+        - the pause sweep's `ORDER BY` unqualified again: "none unexplained" fails;
+        - the exporter's unqualified again: "none unexplained" fails;
+        - regular expressions not skipped: the planted test fails;
+        - text casts under another name not reported: the planted test fails.
+      - **Not seen**, as the module says:
+        - a column a CTE or subquery made text, sorted by an outer level, which reads it as an
+          input column of unknown type;
+        - a select list and `ORDER BY` in different literals, or spliced in by `${…}`;
+        - an alias written without `AS`;
+        - text made by `concat`, `to_char` or `||` rather than a cast.
+
+        `packages/core/test` is not scanned. Run over it, the check finds six test queries of
+        this shape (`backfill`, `credential-pinning`, `migrator`, `recipients`, and two in
+        `perf/visibility-performance`). See follow-ups.
+
+- [x] **P-390 — response schemas are lax at runtime** · XS · P-383 · Found 2026-10-09 in
       `P-383`. `fast-json-stringify` builds its own Ajv with `strictSchema: false`, so a typo in
       a response schema is caught by `api-strict-schemas` but not when a route registers.
       **Done when** `ApiServer` compiles each route's response schemas strict in `onRoute`, or
       the outcome says why the test is enough. The roughly 25 inline
       `{ properties: { x: true }, required: ['x'] }` pairs may become a helper at the same time.
+
+      **P-390 outcome. `ApiServer` compiles every response schema strict as its route
+      registers, and `build` refuses to start, naming each one that does not compile. The
+      test was not enough: it could not see a keyword with no type.** No protocol or
+      migration change.
+      - **The hook.** `strictResponseSchemas(refuse)` in `api/validation.ts` is an `onRoute`
+        hook installed in the constructor beside the access guard, so it sees every route,
+        including a plugin's. It compiles each response schema with `responseSchemaAjv()`, the
+        test helper's Ajv moved into `src` (`test/support/response-schema-ajv.ts` now
+        re-exports it): strict, `apiSchemaKeywords()`, `allowUnionTypes`, formats unchecked.
+        - It reads Fastify's per-media-type form (`{ content: { … schema } }`) too.
+        - A `$ref` resolves against the shared schemas of the route's own scope.
+        - It skips `HEAD`, because the one Fastify adds for a `GET` carries the `GET`'s schema.
+      - **Collected, then thrown after `ready()`**, as the response-schema and access guards
+        already are (`#assertEveryResponseSchemaCompiles`). A throw inside `onRoute` was tried
+        first: in a plugin that is not async, which is most of the core's route plugins, it
+        escapes avvio as an uncaught exception instead of rejecting `build`, and it names only
+        the first schema.
+      - **Why the existing walk was not enough.** It compiles the schemas after `ready()`, and
+        by then the serialiser has written types into them. `{ minimum: 1 }` in a response
+        came back as `{ minimum: 1, type: 'number' }`, checked on a bare Fastify. So a keyword
+        with no type, which strict refuses, was invisible to the walk. The hook runs before the
+        serialiser does, and catches it.
+      - **Start-up cost, measured.** The surface has 167 routes, which makes 249 `onRoute`
+        calls once `HEAD`s are counted, in 23 scopes. A child scope holds its parent's shared
+        schemas as the same objects, so scopes whose schemas agree share one Ajv: the server's
+        hook used one, and a scope that gives an `$id` a different schema would get its own.
+        - First version, one Ajv per scope: the hook's median was 554 ms against a 3.1 s
+          surface build.
+        - Shared Ajv: the hook took 193–262 ms in the quieter builds, with a median of 423 ms
+          across 10 warm builds, out of 1.4–3 s builds.
+        - Both were measured in the toolchain at a load of about 12 on 8 CPUs, by timing a
+          second instance of the hook over `surfaceServer`, so take them as an upper bound and
+          not a quiet-machine figure.
+      - **The helper.** `present(...names)` in `validation.ts` returns
+        `{ properties: { name: true, … }, required: [names] }`, with the reason written once on
+        it. All 24 inline pairs in `schemas/objects.ts`, `schemas/pause.ts` and
+        `routes/stream.ts` use it, so `then: present('host')` and
+        `not: present('minutes', 'until')` read as what they mean. The objects are the same, so
+        `node scripts/docs/api-reference.mjs --check` passes unchanged, and the 38 bodies of
+        `P-383`'s comparison answer as before. `lookups/definition.ts`'s two pairs are another
+        Ajv's and were left.
+      - **Tests (`api-strict-schemas.test.ts`, 4 new):**
+        - an `ApiServer` with one plugin holding a mistyped keyword (inline, in a shared schema
+          a `$ref` reaches, and in the per-media-type form), a keyword with no type, and one
+          good route. `build` rejects, naming the four once each, in order;
+        - the control: the same routes on a bare Fastify with `API_VALIDATOR_OPTIONS` register
+          without a word, and the hook on that Fastify finds four;
+        - an `$id`'d response schema two routes share, and a shared `$ref`, are not refused;
+        - two sibling plugins giving `ms:item` different schemas, where only the mistyped one
+          is refused.
+
+        The full surface building under the hook is the existing `before`.
+      - **Mutations** (each restored byte for byte, dist rebuilt with `tsc -b --force`):
+        - the hook not installed: 1 fails;
+        - the response Ajv `strict: false`: 3 fail;
+        - one Ajv whatever the scopes' schemas: the sibling-plugin test fails;
+        - `HEAD` not skipped: 3 fail, on lines told twice;
+        - the per-media-type form not read: 1 fails.
+      - **Not done.** `fast-json-stringify`'s own Ajv stays lax. It is not configurable, and
+        it does not need to be once every schema it reads has compiled strict first.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then

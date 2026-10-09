@@ -13,9 +13,15 @@ import {
   updateObjectSchema,
 } from '../src/api/schemas/objects.js';
 import { acknowledgeRequestSchema, pauseRequestSchema } from '../src/api/schemas/pause.js';
-import { API_VALIDATOR_OPTIONS, requestProblem } from '../src/api/validation.js';
-import { responseSchemaAjv } from './support/response-schema-ajv.js';
 import {
+  API_VALIDATOR_OPTIONS,
+  requestProblem,
+  responseSchemaAjv,
+  strictResponseSchemas,
+} from '../src/api/validation.js';
+import { ApiServer } from '../src/api/server.js';
+import {
+  baseOptions,
   surfaceServer,
   type RouteKey,
   type SurfaceRoute,
@@ -60,8 +66,12 @@ async function registrationError(
 
 /**
  * Each response schema and shared schema a route can reach, compiled as the request validator
- * would read it, with what refused it: `fast-json-stringify` compiles them with `strictSchema` off,
- * so nothing at registration would.
+ * would read it, with what refused it. `fast-json-stringify` compiles them with `strictSchema` off;
+ * since `P-390` `ApiServer` compiles each response schema strict as its route registers, and this
+ * walk also compiles the shared schemas no response reaches. It reads them after `ready()`, and
+ * by then the serialiser has written a `type` into a response subschema that had none
+ * (`{ minimum: 1 }` comes back `{ minimum: 1, type: 'number' }`), so a keyword with no type is the
+ * registration check's to find, not this walk's.
  */
 function uncompilable(routes: readonly SurfaceRoute[]): { refused: string[]; compiled: number } {
   const refused: string[] = [];
@@ -167,6 +177,158 @@ describe('the API validates requests under strict mode (P-383)', () => {
     const { refused } = uncompilable([typo]);
     assert.equal(refused.length, 1, refused.join('\n'));
     assert.match(refused[0] ?? '', /GET \/typo response 200: .*unknown keyword: "maxLenght"/u);
+  });
+});
+
+/**
+ * `ApiServer` compiles each response schema strict as its route registers, and `build` refuses to
+ * start on any it cannot (`P-390`), because `fast-json-stringify` compiles them lax whatever the
+ * server sets. The full surface building under it is the `before` above: every route of a full
+ * core, every v2 route with it.
+ */
+describe('a response schema strict mode refuses stops the build (P-390)', () => {
+  // Made afresh for each use: the serialiser fills in what a schema leaves out (`n` comes back
+  // typed), so a schema one app has compiled is not the schema it was.
+  const typo = () => ({ type: 'object', properties: { name: { type: 'string', maxLenght: 5 } } });
+  const untyped = () => ({ type: 'object', properties: { n: { minimum: 1 } } });
+  const anyone = { access: { kind: 'public' } } as const;
+
+  /**
+   * One of each: a mistyped keyword in a response schema, in a shared schema a response reaches,
+   * and in Fastify's per-media-type form, and a keyword with no type, which only strict refuses.
+   * One route besides that is fine. In a plugin, as every route of the core is.
+   */
+  function routes(scope: FastifyInstance): void {
+    scope.addSchema({ $id: 'ms:typo', ...typo() });
+    const route = (method: 'GET' | 'POST', url: string, response: Record<string, unknown>) => {
+      scope.route({ method, url, schema: { response }, config: anyone, handler: () => ({}) });
+    };
+    route('GET', '/typo', { 200: typo() });
+    route('GET', '/shared', { 200: { $ref: 'ms:typo#' } });
+    route('GET', '/media', { 200: { content: { 'application/json': { schema: typo() } } } });
+    route('POST', '/untyped', { 201: untyped() });
+    route('GET', '/fine', { 200: { type: 'object', properties: { id: { type: 'integer' } } } });
+  }
+
+  /** What `ready()` rejects with once a plugin of `plant` is loaded on `app`, or null. */
+  async function readyError(
+    app: FastifyInstance,
+    plant: (scope: FastifyInstance) => void,
+  ): Promise<string | null> {
+    try {
+      await app.register((scope, _options, done) => {
+        plant(scope);
+        done();
+      });
+      await app.ready();
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    } finally {
+      await app.close();
+    }
+  }
+
+  it('refuses to start, naming every one of them once', async () => {
+    const base = baseOptions(STAMP, false);
+    const server = new ApiServer(base);
+    await server.app.register((scope, _options, done) => {
+      routes(scope);
+      done();
+    });
+    try {
+      await assert.rejects(server.build(STAMP.version, base.service), (error: Error) => {
+        const [head, ...lines] = error.message.split('\n  ');
+        assert.equal(head, 'these response schemas do not compile strict:');
+        // Each once: the HEAD Fastify adds for each GET is not told again.
+        assert.deepEqual(
+          lines.map((line) => line.replace(/: .*/su, '')),
+          [
+            'GET /typo response 200',
+            'GET /shared response 200',
+            'GET /media response 200 application/json',
+            'POST /untyped response 201',
+          ],
+        );
+        for (const line of lines.slice(0, 3)) {
+          assert.match(line, /strict mode: unknown keyword: "maxLenght"/u);
+        }
+        assert.match(lines[3] ?? '', /missing type "number" for keyword "minimum"/u);
+        return true;
+      });
+    } finally {
+      await server.app.close();
+    }
+  });
+
+  it('where the server’s own validator options alone registered every one', async () => {
+    // The control: what `fast-json-stringify` does with the same routes when nothing else reads
+    // their response schemas. It serialises them without a word.
+    const bare = (): FastifyInstance =>
+      Fastify({ ajv: { customOptions: { ...API_VALIDATOR_OPTIONS } } });
+    assert.equal(await readyError(bare(), routes), null);
+
+    // And the hook on that bare Fastify is what finds them.
+    const refused: string[] = [];
+    const hooked = bare();
+    hooked.addHook(
+      'onRoute',
+      strictResponseSchemas((problem) => refused.push(problem)),
+    );
+    assert.equal(await readyError(hooked, routes), null);
+    assert.equal(refused.length, 4, refused.join('\n'));
+  });
+
+  it('passes a response schema with an $id two routes share, and a shared schema', async () => {
+    // Ajv caches a compiled schema by object, so the second route does not trip over the `$id`
+    // the first one added.
+    const named = { $id: 'ms:named', type: 'object', properties: { id: { type: 'integer' } } };
+    const refused: string[] = [];
+    const app = Fastify({ ajv: { customOptions: { ...API_VALIDATOR_OPTIONS } } });
+    app.addHook(
+      'onRoute',
+      strictResponseSchemas((problem) => refused.push(problem)),
+    );
+    const error = await readyError(app, (scope) => {
+      scope.addSchema({ $id: 'ms:shared', type: 'object' });
+      for (const url of ['/one', '/two']) {
+        scope.get(
+          url,
+          { schema: { response: { 200: named, 404: { $ref: 'ms:shared#' } } } },
+          () => ({}),
+        );
+      }
+    });
+    assert.equal(error, null);
+    assert.deepEqual(refused, []);
+  });
+
+  it('reads an $id two plugins give different schemas as each plugin gives it', async () => {
+    // The hook shares one Ajv between scopes whose shared schemas agree. Two sibling plugins that
+    // each add their own `ms:item` disagree, so each route's `$ref` must reach its own plugin's:
+    // the mistyped one is refused, and the other, compiled after it, is not.
+    const refused: string[] = [];
+    const app = Fastify({ ajv: { customOptions: { ...API_VALIDATOR_OPTIONS } } });
+    app.addHook(
+      'onRoute',
+      strictResponseSchemas((problem) => refused.push(problem)),
+    );
+    const plugin =
+      (url: string, item: Record<string, unknown>) =>
+      (scope: FastifyInstance, _options: unknown, done: () => void) => {
+        scope.addSchema({ $id: 'ms:item', ...item });
+        scope.get(url, { schema: { response: { 200: { $ref: 'ms:item#' } } } }, () => ({}));
+        done();
+      };
+    await app.register(plugin('/good', { type: 'object' }));
+    await app.register(plugin('/bad', typo()));
+    await app.register(plugin('/good-again', { type: 'object' }));
+    await app.ready();
+    await app.close();
+    assert.deepEqual(
+      refused.map((line) => line.replace(/: .*/su, '')),
+      ['GET /bad response 200'],
+    );
   });
 });
 

@@ -868,8 +868,10 @@ export class MetricsExporter {
     const probeHealth = this.#options.probeHealth();
     if (probeHealth === undefined) return;
 
+    // By the bigint: a bare `id` here would be the text column, and `'10'` would come before `'9'`
+    // (`P-389`).
     const probes = await this.#options.db.query<{ id: string; name: string }>(
-      `SELECT id::text AS id, name FROM object WHERE kind = 'probe' ORDER BY id`,
+      `SELECT id::text AS id, name FROM object WHERE kind = 'probe' ORDER BY object.id`,
     );
     // Reset before setting, so a probe that has been deleted stops being exported rather than
     // freezing at whatever it last said.

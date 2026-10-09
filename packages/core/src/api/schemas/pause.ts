@@ -2,6 +2,7 @@ import { PAUSE_PRESET_MINUTES, MAX_PAUSE_MINUTES } from '../../state/pause.js';
 import { ACK_PRESET_MINUTES, MAX_ACK_MINUTES } from '../../state/acknowledgement.js';
 import { ACTOR_KINDS } from '../../objects/audit.js';
 import { SENSOR_STATES } from '../../state/tables.js';
+import { present } from '../validation.js';
 
 /**
  * Why an object is paused (`M-08`).
@@ -110,12 +111,9 @@ export const pauseRequestSchema = {
   },
   // A duration and a moment are two answers to one question, and a window's start needs an end
   // — an outage with no end is not a window, it is a pause somebody will forget about.
-  // Each name a `not` requires is declared `true`, which constrains nothing, because strict mode
-  // refuses a `required` its own schema does not declare (`P-383`).
-  allOf: [
-    { not: { properties: { minutes: true, until: true }, required: ['minutes', 'until'] } },
-    { not: { properties: { minutes: true, from: true }, required: ['minutes', 'from'] } },
-  ],
+  // Each name a `not` requires is declared there, by `present`, because strict mode refuses a
+  // `required` its own schema does not declare (`P-383`).
+  allOf: [{ not: present('minutes', 'until') }, { not: present('minutes', 'from') }],
   dependencies: { from: ['until'] },
 } as const;
 
@@ -133,7 +131,7 @@ export const acknowledgeRequestSchema = {
     until: { type: 'string', minLength: 1, maxLength: 64 },
     message: { type: 'string', maxLength: 500 },
   },
-  not: { properties: { minutes: true, until: true }, required: ['minutes', 'until'] },
+  not: present('minutes', 'until'),
 } as const;
 
 export const acknowledgementViewSchema = {

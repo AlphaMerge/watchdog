@@ -23,7 +23,12 @@ import type { HistoryService } from '../timeseries/history.js';
 import { AlarmService } from '../state/alarms.js';
 import { StateLogService } from '../timeseries/state-log.js';
 import { logIfUnexpected, toHttpError, type HttpError } from './errors.js';
-import { API_VALIDATOR_OPTIONS, requestProblem, sayRequestRefusal } from './validation.js';
+import {
+  API_VALIDATOR_OPTIONS,
+  requestProblem,
+  sayRequestRefusal,
+  strictResponseSchemas,
+} from './validation.js';
 import { registerAuthentication } from './authentication.js';
 import {
   INSTALLATION,
@@ -365,6 +370,8 @@ export class ApiServer {
   /** What the rate limit has refused, once it is registered (`A-39`). */
   #rateLimit: { stats: () => RateLimitStats } | undefined;
   readonly #undeclared: string[] = [];
+  /** Response schemas that do not compile strict, and why, which makes `build` throw (`P-390`). */
+  readonly #uncompiled: string[] = [];
   /** Routes that declared no `access`, which makes `build` throw (`A-11`). */
   readonly #unauthorized: string[] = [];
   /**
@@ -483,6 +490,16 @@ export class ApiServer {
       }
       done();
     });
+
+    // **A response schema strict mode refuses stops the build, as a request schema does**
+    // (`P-390`). `fast-json-stringify` compiles response schemas lax whatever is set, so this
+    // compiles each one strict as its route registers, and `build` refuses after `ready()`.
+    // Collected rather than thrown: a throw in `onRoute` escapes a plugin that is not async as an
+    // uncaught exception, rather than as `build`'s rejection, and would name only the first.
+    this.#app.addHook(
+      'onRoute',
+      strictResponseSchemas((problem) => this.#uncompiled.push(problem)),
+    );
 
     // Installed in the constructor, not in build(), so it sees *every* route — including any
     // registered by a plugin before our own. A guard with a blind spot is not a guard.
@@ -1114,6 +1131,7 @@ export class ApiServer {
 
     await this.#app.ready();
     this.#assertEveryRouteDeclaresItsResponses();
+    this.#assertEveryResponseSchemaCompiles();
     this.#assertEveryRouteDeclaresItsAccess();
   }
 
@@ -1151,6 +1169,18 @@ export class ApiServer {
     if (this.#undeclared.length > 0) {
       throw new Error(
         `these routes have no response schema, so their bodies are not filtered: ${this.#undeclared.join(', ')}`,
+      );
+    }
+  }
+
+  /**
+   * A response schema the request validator would refuse is one the serialiser reads lax, so a
+   * mistyped keyword in it filters nothing (`P-390`). Every one is named, not only the first.
+   */
+  #assertEveryResponseSchemaCompiles(): void {
+    if (this.#uncompiled.length > 0) {
+      throw new Error(
+        `these response schemas do not compile strict:\n  ${this.#uncompiled.join('\n  ')}`,
       );
     }
   }

@@ -15,6 +15,7 @@ import type {
   StreamSight,
 } from '../../state/stream.js';
 import { credentialOf, READS, sightOf } from '../authorization.js';
+import { present } from '../validation.js';
 
 export interface StreamRouteOptions {
   db: Database;
@@ -131,9 +132,9 @@ export const clientFrameSchema = {
         objectId: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
         probeId: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
       },
-      // The two named again for strict mode's `strictRequired` (`P-379`), which looks for a
-      // required property beside the `required`; `true` constrains nothing.
-      not: { properties: { objectId: true, probeId: true }, required: ['objectId', 'probeId'] },
+      // `present` names the two again for strict mode's `strictRequired` (`P-379`), which looks
+      // for a required property beside the `required`.
+      not: present('objectId', 'probeId'),
     },
   },
 } as const;

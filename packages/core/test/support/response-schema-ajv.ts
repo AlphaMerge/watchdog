@@ -1,21 +1,7 @@
-import { Ajv } from 'ajv';
-import { apiSchemaKeywords } from '../../src/api/validation.js';
-
 /**
- * An Ajv for checking a body against a route's response schema, as the server's own validator
- * would read that schema (`P-383`): strict, with the same keywords declared, so a schema it
- * compiles is one the request validator would compile too, and a mistyped keyword in it is a
- * failure rather than a keyword nobody checks.
- *
- * Not `API_VALIDATOR_OPTIONS` itself: that coerces types and fills defaults, which would pass a
- * body the response schema does not describe. Union types are meant (`P-337`), and formats are not
- * checked, as these tests never did.
+ * The Ajv a route's response schema is checked with. Since `P-390` the server compiles every
+ * response schema with it as the route registers, so it lives beside the request validator's
+ * options in `src/api/validation.ts`, and the tests that check a body against a response schema
+ * read the schema the same way through here.
  */
-export function responseSchemaAjv(): Ajv {
-  return new Ajv({
-    strict: true,
-    allowUnionTypes: true,
-    validateFormats: false,
-    keywords: apiSchemaKeywords(),
-  });
-}
+export { responseSchemaAjv } from '../../src/api/validation.js';
