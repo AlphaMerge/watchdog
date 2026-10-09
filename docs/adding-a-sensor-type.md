@@ -77,6 +77,14 @@ second-guess an absent optional. Make sure a `default` satisfies its own schema:
 `''` under a `pattern` that rejects the empty string is a parameter nobody can leave alone, and
 the catalogue's "validates against its own declared defaults" test refuses to ship one.
 
+**A `pattern` says in words what it wants.** Put `'x-patternMessage'` beside it: a phrase that
+follows the parameter's name, as the other messages do — `'must be a numeric OID, digits
+separated by dots, such as 1.3.6.1.2.1.1.3.0'`. A value the pattern refuses is told that, in the
+form and in the core's 400, instead of `^\.?[0-9]+(\.[0-9]+)*$`, which tells an operator nothing.
+The catalogue refuses a `pattern` without one, anywhere in the schema (`U-53`). A pattern that
+reserves a key of the type's own (`P-348`) says which, as `db-shared.ts` builds its message from
+`DB_OWN_KEYS`.
+
 **What the generated form draws.** Strings, numbers, integers, booleans, enums and objects that
 declare their `properties` get a real control. Everything else — an array, a free-form object —
 falls back to an editable JSON box (`forms/Control.tsx`). That fallback exists so a save can
@@ -586,9 +594,10 @@ All of these fail at startup, loudly, rather than at runtime:
 | every `writeOnly` has a `secretDestinations` entry, naming visible properties | a secret stays with where it is sent (`A-40`) |
 | every kind in `credentialKinds` has a `kind:<id>` entry, and no other kind does | an inherited set goes only where somebody vouched (`A-41`) |
 | every kind in `pinnedKinds` is one of `credentialKinds` | a promise about a set the type is never sent is a typo (`A-41c`) |
-| at most one `isPrimary` channel                | the one-primary-per-sensor index                                |
+| every `pattern`, wherever it sits, has a non-blank `x-patternMessage`, and no `x-patternMessage` is without one | a refused value is told a sentence, not the expression, by the form and by the core's 400 alike (`U-53`) |
+| at most one `isPrimary` channel, and `channelsFor` holds each sensor's parameters to it too (`P-360`) | the one-primary-per-sensor index |
 | `limits` only on a `fixedChannels` type, which answers `{}` and the same with its defaults | a start keeps declared limits in step from `{}`, which speaks for every sensor only then (`P-293`) |
-| no repeated channel key                        | `(sensor_id, key)` is unique                                    |
+| no repeated channel key, in `{}` and, through `channelsFor`, in each sensor's parameters (`P-348`) | `(sensor_id, key)` is unique |
 | the schema validates its own declared defaults | a `default` a `pattern` rejects is a field nobody can fill in   |
 | `evaluatedBy: 'core'` declares `references` or `requires` | its readings are the core's own data, republished (`A-29`) |
 | `recoveryHoldSeconds` is whole seconds, 0 to 86,400 | a typo would be an alarm that never ends, or ends at the return it was meant to hold (`M-18`) |

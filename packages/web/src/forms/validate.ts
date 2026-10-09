@@ -112,7 +112,9 @@ export function problemsFor(field: FieldModel, value: unknown): FieldProblem[] {
       add(`must be at most ${String(schema.maxLength)} characters`);
     }
     if (schema.pattern !== undefined && !matches(schema.pattern, value)) {
-      add(`does not match ${schema.pattern}`);
+      // The sentence the type gives beside its pattern (`U-53`), which is what the core says too;
+      // the expression itself only for a schema without one, which the catalogue refuses.
+      add(schema['x-patternMessage'] ?? `does not match ${schema.pattern}`);
     }
   }
 

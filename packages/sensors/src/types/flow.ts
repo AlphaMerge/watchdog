@@ -247,6 +247,8 @@ export const flowCollector: SensorType = {
               type: 'string',
               maxLength: 40,
               pattern: '^[A-Za-z][A-Za-z0-9_]*$',
+              'x-patternMessage':
+                'must start with a letter, then letters, digits and underscores only',
               title: 'Key',
               description:
                 'Stable identifier, used in the stored data. Cannot be one of the built-in ' +

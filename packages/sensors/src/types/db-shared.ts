@@ -161,6 +161,8 @@ export const DB_SCHEMA: Readonly<Record<string, JsonSchema>> = {
     type: 'string',
     maxLength: 32,
     pattern: '^$|^\\d+$|^\\d+-\\d+$|^\\d+\\+$',
+    'x-patternMessage':
+      'must be empty, a count such as 1, a range such as 1-10, or a count and a plus, such as 1+',
     default: '',
     title: 'Expected rows',
     description:
@@ -192,6 +194,9 @@ export const DB_SCHEMA: Readonly<Record<string, JsonSchema>> = {
           // Not one of the sensor's own keys (`P-348`): a result would carry two readings under
           // it, of which the core keeps one, and `dbChannels` would declare it twice.
           pattern: `^(?!(?:${DB_OWN_KEYS.join('|')})$)[A-Za-z0-9_.-]+$`,
+          'x-patternMessage':
+            `must be letters, digits, "_", "." and "-", and not one of ${DB_OWN_KEYS.join(', ')}, ` +
+            'the sensor’s own channels',
           title: 'Channel key',
           description:
             'Stable. Renaming it starts a new channel with no history. Not ' +

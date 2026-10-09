@@ -1,4 +1,4 @@
-import { Ajv, type ValidateFunction } from 'ajv';
+import { Ajv, type ErrorObject, type ValidateFunction } from 'ajv';
 import * as ajvFormats from 'ajv-formats';
 import type { FormatsPlugin } from 'ajv-formats';
 import type {
@@ -60,6 +60,18 @@ export const CREATE_ONLY = 'x-createOnly';
  * form that locked "entry 2's mode" would lock the wrong column after the first move.
  */
 export const ENTRY_KEY = 'x-entryKey';
+
+/**
+ * What a value refused by its `pattern` is told (`U-53`): `'x-patternMessage'` beside the
+ * `pattern`, saying in words what the value must be — *must be a numeric OID, such as
+ * 1.3.6.1.2.1.1.3.0*. Written to follow the parameter's name, as the other messages are.
+ *
+ * **The expression is not a message.** Shown as one, `^(?!(?:value|rows)$)[A-Za-z0-9_.-]+$`
+ * tells an operator nothing they can act on. So the core's 400 (`validate` below) and the form
+ * (`web/src/forms/validate.ts`) both say this sentence in its place, and registration refuses a
+ * `pattern` anywhere in a `paramsSchema` without one, and one of these without a `pattern`.
+ */
+export const PATTERN_MESSAGE = 'x-patternMessage';
 
 /**
  * Subschema keywords holding a map of schemas the edit form does not draw as fields (`U-34`):
@@ -175,11 +187,15 @@ export class SensorCatalogue {
     this.#policy = options.targetPolicy ?? targetPolicyFrom();
     // useDefaults fills in what a type declares a default for, so what gets stored is complete
     // and `channels(params)` never has to second-guess an absent optional.
+    // `verbose` puts the failing keyword's schema on each error, which is where a `pattern`'s
+    // `x-patternMessage` is read from (`U-53`). It also puts the value there; `validate` takes
+    // only the path and the message out of an error.
     this.#ajv = new Ajv({
       allErrors: true,
       strict: true,
       allowUnionTypes: true,
       useDefaults: true,
+      verbose: true,
     });
     // ajv-formats is CommonJS with `module.exports = plugin` and `exports.default = plugin`;
     // `.default` is the callable at runtime while its typings describe a namespace. Same cast,
@@ -189,6 +205,10 @@ export class SensorCatalogue {
     // mode admits them, and refuses one given a value of the wrong type (`U-34`).
     this.#ajv.addKeyword({ keyword: CREATE_ONLY, metaSchema: { type: 'boolean' } });
     this.#ajv.addKeyword({ keyword: ENTRY_KEY, metaSchema: { type: 'string', minLength: 1 } });
+    this.#ajv.addKeyword({
+      keyword: PATTERN_MESSAGE,
+      metaSchema: { type: 'string', minLength: 1 },
+    });
   }
 
   register(type: SensorType): this {
@@ -222,6 +242,7 @@ export class SensorCatalogue {
 
     const writeOnly = collectWriteOnly(type.paramsSchema, type.id);
     assertCreateOnlyIsPlaced(type.paramsSchema, type.id);
+    assertPatternsSayWhatTheyMean(type.paramsSchema, type.id);
     assertSecretsSayWhereTheyGo(type, writeOnly);
     assertPinsWhatItUses(type);
     assertOnePrimaryChannel(type);
@@ -384,7 +405,7 @@ export class SensorCatalogue {
       valid: false,
       problems: (validate.errors ?? []).map((error) => ({
         path: error.instancePath,
-        message: error.message ?? 'is invalid',
+        message: messageOf(error),
         keyword: error.keyword,
       })),
     };
@@ -402,9 +423,22 @@ export class SensorCatalogue {
    * answer, and only here are the keys a parameter names seen (`P-348`, an `extract` key the same
    * as one of the type's own). The core turns this into a 400 naming the type on a create or an
    * edit, before anything is written, rather than a scan reporting two readings under one key.
+   *
+   * **So do two primaries** (`P-360`), the other half of what registration holds `{}` to
+   * (`assertOnePrimaryChannel`): two would make the one-primary-per-sensor index a coin toss at
+   * insert time, for this sensor alone. None is not refused, here or there — a sensor whose type
+   * marks no primary is one the core leaves without one (`state/declared-primary.ts`).
    */
   channelsFor(id: string, params: Readonly<Record<string, unknown>>): readonly ChannelDef[] {
     const defs = this.#require(id).channels(params);
+    const primaries = defs.filter((def) => def.isPrimary === true).length;
+    if (primaries > 1) {
+      throw new SensorTypeError(
+        'BAD_SENSOR_TYPE',
+        `sensor type "${id}" declares ${String(primaries)} primary channels for these ` +
+          'parameters; a sensor has at most one',
+      );
+    }
     const seen = new Set<string>();
     for (const def of defs) {
       if (seen.has(def.key)) {
@@ -1099,6 +1133,77 @@ function assertCreateOnlyIsPlaced(schema: JsonSchema, typeId: string): void {
       );
     }
     return true;
+  }
+}
+
+/**
+ * What a validation error says. A failed `pattern` says its `x-patternMessage` rather than Ajv's
+ * *must match pattern "…"* (`U-53`); registration guarantees every pattern has one, so the
+ * expression is said only by a schema that reached here some other way.
+ */
+function messageOf(error: ErrorObject): string {
+  if (error.keyword === 'pattern') {
+    const said: unknown = (error.parentSchema as Record<string, unknown> | undefined)?.[
+      PATTERN_MESSAGE
+    ];
+    if (typeof said === 'string' && said.trim() !== '') return said;
+  }
+  return error.message ?? 'is invalid';
+}
+
+/**
+ * Refuses a `pattern` that does not say in words what it wants (`U-53`), and an
+ * `x-patternMessage` with no `pattern` beside it to explain.
+ *
+ * **Everywhere a schema can sit**, not only where the form draws a field: the core's 400 says a
+ * refusal from any of them, so a pattern under `additionalProperties` or a `oneOf` branch would
+ * show its expression there just the same.
+ */
+function assertPatternsSayWhatTheyMean(schema: JsonSchema, typeId: string): void {
+  walk(schema, '');
+
+  function walk(node: unknown, path: string): void {
+    if (typeof node !== 'object' || node === null || Array.isArray(node)) return;
+    const record = node as Record<string, unknown>;
+    const where = path === '' ? 'its parameters' : `"${path}"`;
+    const said = record[PATTERN_MESSAGE];
+    if (record['pattern'] !== undefined && (typeof said !== 'string' || said.trim() === '')) {
+      throw new SensorTypeError(
+        'BAD_SENSOR_TYPE',
+        `sensor type "${typeId}" gives ${where} a pattern without ${PATTERN_MESSAGE}: a value it ` +
+          'refuses would be told the expression; say in words what the value must be',
+      );
+    }
+    if (said !== undefined && record['pattern'] === undefined) {
+      throw new SensorTypeError(
+        'BAD_SENSOR_TYPE',
+        `sensor type "${typeId}" gives ${where} ${PATTERN_MESSAGE} without a pattern, so ` +
+          'nothing would ever say it: put it beside the pattern it explains',
+      );
+    }
+
+    const properties = record['properties'];
+    if (typeof properties === 'object' && properties !== null) {
+      for (const [key, child] of Object.entries(properties as Record<string, unknown>)) {
+        walk(child, path === '' ? key : `${path}.${key}`);
+      }
+    }
+    const items = record['items'];
+    for (const child of Array.isArray(items) ? items : [items]) walk(child, `${path}.*`);
+    for (const keyword of [...COMBINATORS, ...UNRENDERED_SCHEMAS]) {
+      if (keyword === 'items') continue;
+      const branch = record[keyword];
+      for (const child of Array.isArray(branch) ? branch : [branch]) {
+        walk(child, `${path}.${keyword}`);
+      }
+    }
+    for (const keyword of UNRENDERED_MAPS) {
+      const map = record[keyword];
+      if (typeof map !== 'object' || map === null || Array.isArray(map)) continue;
+      for (const [key, child] of Object.entries(map as Record<string, unknown>)) {
+        walk(child, `${path}.${keyword}.${key}`);
+      }
+    }
   }
 }
 

@@ -44,6 +44,27 @@ const shifting: SensorType = {
   execute: () => Promise.resolve({ channels: [] }),
 };
 
+/**
+ * One primary for `{}`, which is what registration checks, and a second one when `also` is set,
+ * which only `channelsFor` sees (`P-360`).
+ */
+const promoting: SensorType = {
+  id: 'test.promoting',
+  category: 'Custom',
+  costHint: 'light',
+  channelsFromWhatItReads: 'a test type, left unflagged so that nothing of it is called retired',
+  paramsSchema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: { also: { type: 'boolean' } },
+  },
+  channels: (params) => [
+    { key: 'value', name: 'Value', isPrimary: true },
+    { key: 'other', name: 'Other', isPrimary: params['also'] === true },
+  ],
+  execute: () => Promise.resolve({ channels: [] }),
+};
+
 /** No `fixedChannels`, and declares limits on a channel only `limited` makes (`P-293`). */
 const limited: SensorType = {
   id: 'test.limited',
@@ -377,6 +398,31 @@ describe('the sensor-type gate, given a type that breaks its own channel declara
     assert.match(thrown.message, /twice/);
     // The key is a parameter value, cut as every one is (`P-305`).
     assert.ok(!thrown.message.includes('responseTime'), thrown.message);
+    assert.equal(lines.length, 1, 'and a warning for whoever ships the type');
+  });
+
+  it('refuses parameters that declare two primaries as a 400 naming the type (P-360)', () => {
+    const lines: string[] = [];
+    const gate = catalogueSensorTypeGate(testCatalogue([promoting]), {
+      logger: pino({ level: 'info' }, { write: (line: string) => lines.push(line) }),
+    });
+    assert.deepEqual(
+      gate.channelsFor('test.promoting', {}).map((draft) => draft.key),
+      ['value', 'other'],
+    );
+    assert.equal(lines.length, 0);
+
+    let thrown: unknown;
+    try {
+      gate.channelsFor('test.promoting', { also: true });
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown instanceof ObjectError, `expected an ObjectError, got ${String(thrown)}`);
+    assert.equal(thrown.status, 400);
+    assert.equal(thrown.code, 'OBJECT_INVALID');
+    assert.equal(thrown.details['sensorType'], 'test.promoting');
+    assert.match(thrown.message, /2 primary channels for these parameters/);
     assert.equal(lines.length, 1, 'and a warning for whoever ships the type');
   });
 

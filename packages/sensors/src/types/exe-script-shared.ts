@@ -94,6 +94,7 @@ export const SCRIPT_SCHEMA: Readonly<Record<string, JsonSchema>> = {
           minLength: 8,
           maxLength: 100,
           pattern: SENSOR_VARIABLE.source,
+          'x-patternMessage': 'must start with MS_VAR_, then capitals, digits and underscores only',
           title: 'Name',
           description:
             'Starts with `MS_VAR_`, then capitals, digits and underscores. Only these reach a ' +

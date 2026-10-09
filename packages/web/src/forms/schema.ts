@@ -36,6 +36,11 @@ export interface JsonSchema {
    * a fixed field is matched to what the sensor has by what the entry *is*, not where it sits.
    */
   readonly 'x-entryKey'?: string;
+  /**
+   * What a value `pattern` refuses is told, in words (`U-53`): shown in place of the expression,
+   * as the core's 400 shows it. The catalogue (`PATTERN_MESSAGE`) refuses a pattern without one.
+   */
+  readonly 'x-patternMessage'?: string;
 }
 
 /** What kind of control a property gets. `json` is the honest fallback, never a silent drop. */

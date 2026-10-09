@@ -1,6 +1,12 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import { CREATE_ONLY, ENTRY_KEY, SensorCatalogue, SensorTypeError } from '../src/catalogue.js';
+import {
+  CREATE_ONLY,
+  ENTRY_KEY,
+  PATTERN_MESSAGE,
+  SensorCatalogue,
+  SensorTypeError,
+} from '../src/catalogue.js';
 import type { ChannelDef, SensorType } from '../src/contract.js';
 import {
   sensorTypesFor,
@@ -1110,6 +1116,186 @@ describe('a parameter fixed once the sensor exists (U-34)', () => {
     refused(
       withSchema(columns({ [ENTRY_KEY]: 3, properties: { mode: { type: 'string' } } })),
       /unusable paramsSchema/,
+    );
+  });
+});
+
+describe('a pattern says in words what it wants (U-53)', () => {
+  const withSchema = (properties: Record<string, unknown>): SensorType =>
+    variant({ paramsSchema: { type: 'object', properties } });
+  const refused = (type: SensorType, said: RegExp, label?: string): void => {
+    assert.throws(
+      () => new SensorCatalogue().register(type),
+      (error: unknown) =>
+        error instanceof SensorTypeError &&
+        error.code === 'BAD_SENSOR_TYPE' &&
+        said.test(error.message),
+      label,
+    );
+  };
+  const KEY = '^(?!rtt$)[a-z]+$';
+  const SAID = 'must be lower-case letters, and not rtt, the sensor’s own channel';
+  const bare = { type: 'string', pattern: KEY };
+  const told = { ...bare, [PATTERN_MESSAGE]: SAID };
+
+  it('refuses a pattern without one, wherever in the schema it sits', () => {
+    const cases: [string, Record<string, unknown>, RegExp][] = [
+      ['a property', { key: bare }, /gives "key" a pattern without x-patternMessage/],
+      [
+        'a nested property',
+        { outer: { type: 'object', properties: { key: bare } } },
+        /gives "outer\.key" a pattern without/,
+      ],
+      [
+        'an array entry’s property',
+        { extract: { type: 'array', items: { type: 'object', properties: { key: bare } } } },
+        /gives "extract\.\*\.key" a pattern without/,
+      ],
+      ['an array of strings', { tags: { type: 'array', items: bare } }, /"tags\.\*" a pattern/],
+      [
+        'a combinator’s branch',
+        { key: { anyOf: [bare, { type: 'integer' }] } },
+        /"key\.anyOf" a pattern without/,
+      ],
+      [
+        'a map’s values',
+        { headers: { type: 'object', additionalProperties: bare } },
+        /"headers\.additionalProperties" a pattern without/,
+      ],
+      [
+        'property names',
+        { headers: { type: 'object', propertyNames: { type: 'string', pattern: KEY } } },
+        /"headers\.propertyNames" a pattern without/,
+      ],
+    ];
+    for (const [label, properties, said] of cases) refused(withSchema(properties), said, label);
+    // Each of them told, registered.
+    for (const [label, properties] of cases) {
+      const toldHere = JSON.parse(
+        JSON.stringify(properties).replaceAll(
+          `"pattern":${JSON.stringify(KEY)}`,
+          `"pattern":${JSON.stringify(KEY)},"${PATTERN_MESSAGE}":${JSON.stringify(SAID)}`,
+        ),
+      ) as Record<string, unknown>;
+      assert.doesNotThrow(() => new SensorCatalogue().register(withSchema(toldHere)), label);
+    }
+  });
+
+  it('refuses one that says nothing, or that has no pattern to explain', () => {
+    refused(withSchema({ key: { ...bare, [PATTERN_MESSAGE]: '  ' } }), /a pattern without/);
+    refused(
+      withSchema({ key: { type: 'string', [PATTERN_MESSAGE]: SAID } }),
+      /gives "key" x-patternMessage without a pattern/,
+    );
+  });
+
+  it('refuses one given a value of the wrong type, as strict mode does any keyword', () => {
+    refused(withSchema({ key: { ...bare, [PATTERN_MESSAGE]: 3 } }), /unusable paramsSchema/);
+    refused(withSchema({ key: { ...bare, [PATTERN_MESSAGE]: '' } }), /unusable paramsSchema/);
+  });
+
+  it('says the sentence for a refused value, at its path, in place of the expression', () => {
+    const c = new SensorCatalogue()
+      .register(
+        withSchema({
+          key: told,
+          extract: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { key: { ...told, [PATTERN_MESSAGE]: 'must be a word' } },
+            },
+          },
+          free: { type: 'string', minLength: 3 },
+        }),
+      )
+      .seal();
+    const result = c.validate('icmp.ping', {
+      key: 'rtt',
+      extract: [{ key: 'ok' }, { key: 'A1' }],
+      free: 'ab',
+    });
+    assert.equal(result.valid, false);
+    assert.deepEqual(result.problems, [
+      { path: '/key', message: SAID },
+      { path: '/extract/1/key', message: 'must be a word' },
+      // Every other keyword keeps Ajv's own words.
+      { path: '/free', message: 'must NOT have fewer than 3 characters' },
+    ]);
+    assert.equal(c.validate('icmp.ping', { key: 'lag', extract: [{ key: 'ok' }] }).valid, true);
+  });
+
+  it('is what the shipped types say, never their expression', () => {
+    // One of each kind the shipped patterns guard: a reserved key, an OID, a status.
+    const c = standardCatalogue(sensorTypesFor('full'));
+    const cases: [string, Record<string, unknown>, string, RegExp][] = [
+      [
+        'db.postgresql',
+        { query: 'SELECT 1', extract: [{ key: 'rows' }] },
+        '/extract/0/key',
+        /not one of value, rows, queryTime, connectTime/,
+      ],
+      [
+        'rest.custom',
+        { extract: [{ key: 'responseTime', path: '$.a' }] },
+        '/extract/0/key',
+        /not responseTime/,
+      ],
+      ['snmp.custom', { oid: 'sysUpTime' }, '/oid', /numeric OID/],
+      ['http.request', { expectStatus: '2x' }, '/expectStatus', /a class such as 2xx/],
+    ];
+    for (const [id, params, path, said] of cases) {
+      const result = c.validate(id, params);
+      assert.equal(result.valid, false, id);
+      const problem = result.problems.find((one) => one.path === path);
+      assert.ok(problem !== undefined, `${id}: ${JSON.stringify(result.problems)}`);
+      assert.match(problem.message, said, id);
+      assert.doesNotMatch(problem.message, /pattern|\^|\$/u, id);
+    }
+  });
+});
+
+describe('a sensor’s declaration with two primaries (P-360)', () => {
+  // A parameter that marks a second channel primary: `{}` declares one, so registration passes,
+  // and `channelsFor` is the first to see two.
+  const promoting = variant({
+    id: 'test.promoting',
+    paramsSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { also: { type: 'boolean' }, none: { type: 'boolean' } },
+    },
+    channels: (params) => [
+      { key: 'rtt', name: 'Response time', unit: 'ms', isPrimary: params['none'] !== true },
+      { key: 'loss', name: 'Packet loss', unit: '%', isPrimary: params['also'] === true },
+    ],
+  });
+
+  it('refuses it for the parameters that give it, and not for the others', () => {
+    const c = new SensorCatalogue().register(promoting).seal();
+    assert.deepEqual(
+      c.channelsFor('test.promoting', {}).map((def) => def.isPrimary),
+      [true, false],
+    );
+    assert.throws(
+      () => c.channelsFor('test.promoting', { also: true }),
+      (error: unknown) =>
+        error instanceof SensorTypeError &&
+        error.code === 'BAD_SENSOR_TYPE' &&
+        /"test\.promoting" declares 2 primary channels for these parameters/.test(error.message),
+    );
+  });
+
+  it('takes none, as registration does: a sensor the core then leaves without one', () => {
+    const c = new SensorCatalogue().register(promoting).seal();
+    assert.deepEqual(
+      c.channelsFor('test.promoting', { none: true }).map((def) => def.isPrimary),
+      [false, false],
+    );
+    assert.doesNotThrow(() =>
+      new SensorCatalogue().register(
+        variant({ channels: () => [{ key: 'rtt', name: 'Response time' }] }),
+      ),
     );
   });
 });

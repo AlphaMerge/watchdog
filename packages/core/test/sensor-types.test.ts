@@ -585,6 +585,41 @@ describe(
       assert.equal('listener' in ping, false, 'a type that runs its own check named a listener');
     });
 
+    it('publishes a pattern’s sentence, and says it in a 400 in place of the expression (U-53)', async () => {
+      // The form reads the annotation from here, so the closed response schema must not strip
+      // it; and the core says the same sentence for the same value.
+      const items = (await mapping.inject({ method: 'GET', url: '/api/v1/sensor-types' })).json<{
+        items: { id: string; paramsSchema: Record<string, unknown> }[];
+      }>().items;
+      const rest = items.find((item) => item.id === 'rest.custom')?.paramsSchema as {
+        properties: { extract: { items: { properties: { key: Record<string, unknown> } } } };
+      };
+      const key = rest.properties.extract.items.properties.key;
+      const said = key['x-patternMessage'];
+      assert.equal(typeof said, 'string');
+      assert.match(String(said), /not responseTime/);
+
+      const restCustom = BUILT_IN_SENSOR_TYPES.find((type) => type.id === 'rest.custom');
+      assert.ok(restCustom !== undefined);
+      const restful = await buildHarness(db, { types: [restCustom] });
+      const error = await rejects(() =>
+        restful.service.create(testActor, {
+          kind: 'sensor',
+          parentId: deviceId,
+          name: 'cluster',
+          sensorType: 'rest.custom',
+          params: { extract: [{ key: 'responseTime', path: '$.a' }] },
+        }),
+      );
+      assert.equal(error.code, 'OBJECT_INVALID');
+      const problems = error.details['problems'] as { path: string; message: string }[];
+      assert.deepEqual(
+        problems.find((one) => one.path === '/extract/0/key'),
+        { path: '/extract/0/key', message: said },
+      );
+      assert.ok(!JSON.stringify(problems).includes('(?!'), JSON.stringify(problems));
+    });
+
     // ── the mapping preview (`U-13`) ────────────────────────────────────────────────────────
 
     describe('previewing a mapping over HTTP', () => {

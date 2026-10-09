@@ -43,6 +43,8 @@ export const exeScriptAdvanced: SensorType = {
         // Not `runtime`, this sensor's own channel (`P-349`): the type's reading would replace
         // the program's, and the sensor would be judged by how long the program took.
         pattern: '^(?!runtime$)[A-Za-z0-9_.-]+$',
+        'x-patternMessage':
+          'must be letters, digits, "_", "." and "-", and not runtime, the sensor’s own channel',
         default: 'value',
         title: 'Primary channel',
         description:

@@ -266,39 +266,51 @@ export function AddSensor(): React.JSX.Element {
             </fieldset>
           )}
 
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="submit"
-              disabled={saving || !ready}
-              className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
-            >
-              {saving ? 'Creating…' : 'Create sensor'}
-            </button>
-            <button
-              type="button"
-              disabled={saving}
-              onClick={() => {
-                void navigate(`/objects/${String(parent.data.id)}`);
-              }}
-              className="border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
-            >
-              Cancel
-            </button>
-            {problems.length > 0 && (
-              <span className="text-xs text-text-muted">
-                {problems.length} {problems.length === 1 ? 'field needs' : 'fields need'} attention
-              </span>
-            )}
-          </div>
+          {/* The buttons and the refusal line together, as the form's last block: the line is
+              always there and `space-y-5` gives every child but the last a margin, so as a child
+              of its own it would put that margin under the buttons while it says nothing. */}
+          <div>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="submit"
+                disabled={saving || !ready}
+                className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
+              >
+                {saving ? 'Creating…' : 'Create sensor'}
+              </button>
+              <button
+                type="button"
+                disabled={saving}
+                onClick={() => {
+                  void navigate(`/objects/${String(parent.data.id)}`);
+                }}
+                className="border border-control px-3 py-1 text-sm text-text-muted hover:text-text disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              {problems.length > 0 && (
+                <span className="text-xs text-text-muted">
+                  {problems.length} {problems.length === 1 ? 'field needs' : 'fields need'}{' '}
+                  attention
+                </span>
+              )}
+            </div>
 
-          {failed !== null && (
-            <p className="text-xs text-down-fg">
-              {failed.message}
-              {failed.correlationId !== undefined && (
+            {/* A refused create, said as `SettingsPanel`'s refused save is (`U-48`, `U-52`).
+                Focus is on the button when the core refuses, and nothing moves it, so this
+                region is what says the sensor was not created: an alert, since it answers the
+                operator's own action. Always in the tree and empty until a refusal, because a
+                region added with its text already in it is not reliably announced (`U-41`);
+                `create` empties it as the next attempt starts, so a second refusal in the same
+                words is a change again. No space while it says nothing (`empty:mt-0`, `U-45`);
+                the correlation id beside the message, as `ParamsForm` gives it (`U-51`). */}
+            <p role="alert" className="mt-5 text-xs text-down-fg empty:mt-0">
+              {failed?.message}
+              {failed?.correlationId !== undefined && (
                 <span className="ml-2 font-mono"> {failed.correlationId}</span>
               )}
             </p>
-          )}
+          </div>
         </form>
       </Card>
     </div>

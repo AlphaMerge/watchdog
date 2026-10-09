@@ -186,6 +186,9 @@ export const restCustom: SensorType = {
               // Not the sensor's own (`P-348`): a result would carry two readings under it, of
               // which the core keeps one, and `channels()` would declare it twice.
               pattern: `^(?!(?:${REST_OWN_KEYS.join('|')})$)[A-Za-z0-9_.-]+$`,
+              'x-patternMessage':
+                `must be letters, digits, "_", "." and "-", and not ${REST_OWN_KEYS.join(', ')}, ` +
+                'the sensor’s own channel',
               title: 'Channel key',
               description:
                 'Stable. Renaming it starts a new channel with no history. Not ' +

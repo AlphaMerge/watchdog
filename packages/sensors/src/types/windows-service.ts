@@ -47,6 +47,8 @@ export const windowsService: SensorType = {
         // Defence in depth (`S-21`): the name never enters the script, but no service needs a
         // quote of any kind, a backtick, a slash or a control character, and each is something
         // PowerShell or WQL reads. `$` stays: `MSSQL$SQLEXPRESS` is an ordinary service name.
+        'x-patternMessage':
+          'must not hold a quote of any kind, a backtick, a slash, a backslash or a control character',
         pattern: String.raw`^[^'"\u0060\u2018-\u201F\\/\u0000-\u001F\u007F]+$`,
       },
     },

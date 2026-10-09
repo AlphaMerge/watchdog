@@ -47,6 +47,9 @@ const RELATIVE_OID = '^[0-9]+(\\.[0-9]+)*$';
  */
 const OPTIONAL_OID = '^$|^[0-9]+(\\.[0-9]+)*$';
 
+/** What a value `OPTIONAL_OID` refuses is told (`U-53`). */
+const OPTIONAL_OID_MESSAGE = 'must be empty, or digits separated by dots, such as 2';
+
 type MatchMode = 'exact' | 'contains' | 'regex';
 
 interface TableColumn {
@@ -114,6 +117,8 @@ const COLUMN_SCHEMA = {
     column: {
       type: 'string',
       pattern: RELATIVE_OID,
+      'x-patternMessage':
+        'must be the column’s position under the table, digits separated by dots, such as 6',
       maxLength: 64,
       title: 'Column',
       description:
@@ -180,6 +185,8 @@ export const snmpTable: SensorType = {
         minLength: 1,
         maxLength: 255,
         pattern: '^\\.?[0-9]+(\\.[0-9]+)*$',
+        'x-patternMessage':
+          'must be a numeric OID, digits separated by dots, such as 1.3.6.1.2.1.1.3.0',
         title: 'Table OID',
         description:
           'The table’s entry OID — 1.3.6.1.2.1.25.2.3.1 for hrStorageEntry, 1.3.6.1.2.1.2.2.1 ' +
@@ -200,6 +207,7 @@ export const snmpTable: SensorType = {
       indexColumn: {
         type: 'string',
         pattern: OPTIONAL_OID,
+        'x-patternMessage': OPTIONAL_OID_MESSAGE,
         maxLength: 64,
         default: '',
         title: 'Naming column',
@@ -231,6 +239,7 @@ export const snmpTable: SensorType = {
       rowIndex: {
         type: 'string',
         pattern: OPTIONAL_OID,
+        'x-patternMessage': OPTIONAL_OID_MESSAGE,
         maxLength: 128,
         default: '',
         title: 'Row index',

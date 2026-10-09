@@ -13160,11 +13160,29 @@ because each is a decision rather than a defect:
       loses that reading to the type's own `runtime`, and nothing says so. **Done when** the
       result message (or a counted warning) names the dropped key, with a test.
 
-- [ ] **P-360 — a per-sensor declaration with two primaries is refused only at registration** ·
+- [x] **P-360 — a per-sensor declaration with two primaries is refused only at registration** ·
       XS · P-348 · Found 2026-10-09 in `P-348`'s review. `SensorCatalogue.channelsFor` now refuses
       a key named twice for given parameters, but two channels marked primary are checked only on
       `channels({})` at registration. **Done when** `channelsFor` refuses that too, with the
       catalogue and gate tests `P-348` added extended to it.
+
+      **P-360 outcome. `channelsFor` throws `BAD_SENSOR_TYPE` for more than one primary, before
+      the key check, and the gate turns it into the same 400 naming the type.**
+      - **The message counts and does not name** (*declares 2 primary channels for these
+        parameters; a sensor has at most one*); the gate cuts parameter values out of whatever it
+        says anyway (`P-305`).
+      - **None is not refused**, here or at registration: `assertOnePrimaryChannel` refuses only
+        more than one, and a type that marks no primary is a case the core already handles — the
+        start-up pass and ingestion leave such a sensor as it is (`state/declared-primary.ts`).
+        Refusing it here alone would refuse a sensor whose type registered.
+      - **Tests.** `catalogue.test.ts`: a type whose `also` parameter marks a second channel
+        primary registers, answers `{}` with one, and is refused for `{ also: true }`; its `none`
+        parameter, which marks none, is answered, and a type with no primary registers.
+        `broken-sensor-type.test.ts` (core): the same through the gate, a 400 `OBJECT_INVALID`
+        naming `test.promoting`, one warning logged, and `{}` answered with no warning. Mutation:
+        the check disabled fails 2 (one in each).
+      - **Docs.** `adding-a-sensor-type.md`'s registration table says `channelsFor` holds both
+        this and `P-348`'s repeated key to each sensor's parameters.
 
 - [x] **P-361 — the closed sets `P-351` left as strings** · XS · P-351 · Found 2026-10-09 in
       `P-351`. `source` on history and the reports' `resolved` is a `SeriesSource`; `runAs.role`
@@ -24814,18 +24832,89 @@ because each is a decision rather than a defect:
       - **Not done.** `AddSensor`'s refusal line shows the id but is not `role="alert"` and is
         rendered only on failure.
 
-- [ ] **U-52 — AddSensor's refusal line is not announced** · XS · U-51 · Found 2026-10-09 in
+- [x] **U-52 — AddSensor's refusal line is not announced** · XS · U-51 · Found 2026-10-09 in
       `U-50`. The line around `routes/AddSensor.tsx:293` shows the message and correlation id but
       is not `role="alert"` and is only rendered after a failure, which `U-48` fixed for
       SettingsPanel. **Done when** it is always in the tree, empty until a refusal, with
       `role="alert"` and a test that the refusal is announced.
 
-- [ ] **U-53 — a pattern refusal shows the regex** · S · P-348 · Found 2026-10-09 in `P-348`. The
+      **U-52 outcome. The refusal line is `U-48`'s: always rendered, empty, `role="alert"`, with
+      `U-51`'s correlation id.**
+      - **An alert, for `U-48`'s reasons**: focus is on *Create sensor* when the core refuses,
+        nothing moves it, and what it says is that the sensor the operator thinks they made was
+        not. `create` already cleared `failed` as an attempt starts, so a second refusal in the
+        same words is a change and is announced again.
+      - **Spacing.** It was a child of the form's `space-y-5` stack, and Tailwind 4 gives every
+        child but the last a bottom margin, so an always-present last child would have put 20px
+        under the buttons while it said nothing (`U-45`). The buttons row and the line are now one
+        block, the form's last child; the line keeps the 20px it had (`mt-5`) and gives it back
+        while empty (`empty:mt-0`).
+      - **Tests.** New `add-sensor-refused.test.tsx`, rendered against a stubbed core: the alert
+        exists empty before anything is sent (no `aria-live`, assertive by its role); a 400
+        carrying `req-52` puts *message req-52* in that same node, the id in a `font-mono ml-2`
+        span; the next Create empties it as it starts and an accepted one navigates on; a second
+        409 in the same words empties it first and fills it again; one with no id gives the message
+        alone; while empty: `:empty`, `mt-5`, `empty:mt-0`, a parent with no `space-y-*` whose last
+        child it is, that parent the form's last child, not hidden in any of four ways.
+        Mutations, each failing: rendered only on failure 4; no role 4; no `empty:mt-0` 1.
+      - **Not done.** The other `role="alert"` refusals are still rendered only once they have
+        something to say, which `U-41` found is not reliably announced: `ParamsForm`,
+        `CredentialsPanel`, `RediscoveryPanel` (two), `DiscoveryView` (three), `LoginView`,
+        `ChangePasswordForm` and `RecipientsEditor` (searched).
+
+- [x] **U-53 — a pattern refusal shows the regex** · S · P-348 · Found 2026-10-09 in `P-348`. The
       form's message for a failed `pattern` is the expression itself ("does not match
       ^(?!…"), which `P-348` and `P-349` worked around by naming the reserved keys in the
       description. **Done when** a schema annotation (an `x-patternMessage`) gives a sentence the
       form and the API both show, the patterns in shipped types carry one, and the registration
       check refuses a pattern without one.
+
+      **U-53 outcome. `x-patternMessage` (`PATTERN_MESSAGE` in `catalogue.ts`) beside every
+      `pattern`, said by the core's 400 and by the form in place of the expression.**
+      - **A phrase that follows the parameter's name**, as Ajv's and the form's other messages do:
+        *must be a numeric OID, digits separated by dots, such as 1.3.6.1.2.1.1.3.0*. Reserved keys
+        are named from the same constants the patterns are built from (`DB_OWN_KEYS`,
+        `REST_OWN_KEYS`, `HTTP_CONTENT_OWN_KEYS`), so the two cannot drift.
+      - **The core.** `SensorCatalogue.validate` is where both the 400's `details.problems`
+        (`sensor-type-gate.ts`) and the device-template loader get their words, so it is the one
+        place: a `pattern` error says the `x-patternMessage` of the schema it failed in. Read
+        from the error's `parentSchema`, which takes Ajv's `verbose: true`; that also puts the
+        value on each error, and `validate` still takes only the path and the message out.
+        Every other keyword keeps Ajv's words. The keyword is declared to Ajv as `U-34`'s are
+        (a non-empty string), so strict mode admits it and refuses a wrong type.
+      - **The form.** `validate.ts` says `schema['x-patternMessage']`, and the expression only for
+        a schema without one, which the catalogue no longer registers. `GET /sensor-types`
+        carries it (asserted: the closed response schema does not strip it).
+      - **Registration** (`assertPatternsSayWhatTheyMean`) refuses, with `BAD_SENSOR_TYPE`, a
+        `pattern` with no or a blank message **anywhere a schema can sit** — properties, `items`,
+        combinators, `additionalProperties`, `propertyNames`, `$defs` and the rest — not only
+        where the form draws a field, since the 400 says a refusal from any of them; and a message
+        with no `pattern` beside it, which nothing would ever say.
+      - **Shipped.** 19 patterns in 14 files, and every type that shares one: the OIDs of
+        `snmp.custom`, `snmp.custom.string` and `snmp.table` (and its column, naming column and
+        row index), `snmp.diskfree`'s storage index, `expectStatus` (`http-shared.ts`,
+        `http.transaction`), a capture's name, the keys of `rest.custom`, `http.content`,
+        `core.factory`, `flow.netflow` and the database types, `exe.script.advanced`'s primary
+        channel, a script variable's name, `windows.service`'s name, and `expectRows`.
+      - **References.** Neither renderer shows it: `sensor-reference.md` shows no pattern at all
+        and `api-reference.md` renders the API's own schemas, where none appears. Both regenerate
+        unchanged (`--check`: current). `adding-a-sensor-type.md` says how to write one and has
+        the check in its registration table.
+      - **Tests.** `catalogue.test.ts`: a pattern without one refused at a property, a nested
+        property, an array entry's property, an array of strings, an `anyOf` branch,
+        `additionalProperties` and `propertyNames`, and each of those registered once told; a blank
+        one and one with no pattern refused; a number or `''` refused by strict mode; `validate`
+        says the sentence at `/key` and `/extract/1/key` and Ajv's words for a `minLength`; four
+        shipped types (`db.postgresql`, `rest.custom`, `snmp.custom`, `http.request`) say theirs,
+        with no `^`, `$` or "pattern" in it. `sensor-types.test.ts` (core, database): the
+        published `rest.custom` schema carries it and a create with `responseTime` as a key is
+        refused with exactly that message at `/extract/0/key`. `schema-form.test.ts`: the form
+        says it for two refused values and nothing for an accepted one. Mutations, each failing:
+        `validate` saying Ajv's words 3 (2 catalogue, 1 core); the registration check not called
+        2; the form saying the expression 1.
+      - **Not done.** The core's own API schemas (`api/schemas/objects.ts`'s `scaleMul`, the
+        audit cursor, a library node id) still answer a failed `pattern` with Ajv's *must match
+        pattern "…"*; they are not sensor parameters, and nothing here reads them.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

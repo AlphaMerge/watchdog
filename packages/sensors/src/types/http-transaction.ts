@@ -274,6 +274,8 @@ const STEP_SCHEMA: JsonSchema = {
       type: 'string',
       maxLength: 32,
       pattern: '^$|^[1-5](?:[0-9]{2}|xx)(?:-[1-5][0-9]{2})?$',
+      'x-patternMessage':
+        'must be empty, a status code such as 404, a class such as 2xx, or a range such as 200-204',
       default: '',
       title: 'Expected status',
       description: 'Empty accepts any 2xx, and any 3xx when redirects are not being followed.',
@@ -311,6 +313,7 @@ const STEP_SCHEMA: JsonSchema = {
             minLength: 1,
             maxLength: 40,
             pattern: '^[A-Za-z0-9_]+$',
+            'x-patternMessage': 'must be letters, digits and underscores only',
             title: 'Name',
           },
           pattern: {

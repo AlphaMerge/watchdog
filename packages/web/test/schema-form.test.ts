@@ -205,6 +205,22 @@ describe('checking a value against its schema', () => {
     expect(named && problemsFor(named, 'ABC')[0]?.message).toContain('does not match');
   });
 
+  it('says a refused pattern’s x-patternMessage, not the expression (U-53)', () => {
+    // The sentence the type gives, which is what the core's 400 says for the same value.
+    const PATTERN = '^(?!(?:value|rows)$)[A-Za-z0-9_.-]+$';
+    const SAID = 'must be letters, digits, "_", "." and "-", and not value or rows';
+    const key = fieldsOf({
+      type: 'object',
+      properties: { key: { type: 'string', pattern: PATTERN, 'x-patternMessage': SAID } },
+    })[0];
+    if (key === undefined) throw new Error('a field expected');
+    for (const refused of ['rows', 'a b']) {
+      expect(problemsFor(key, refused).map((problem) => problem.message)).toEqual([SAID]);
+    }
+    expect(problemsFor(key, 'rows2')).toEqual([]);
+    expect(JSON.stringify(problemsFor(key, 'rows'))).not.toContain(PATTERN);
+  });
+
   it('leaves an unparseable pattern to the server rather than failing the field', () => {
     // The pattern comes from a sensor type's declaration. One this engine cannot compile must
     // not take the form down; the core has the same string and Ajv's own opinion of it.

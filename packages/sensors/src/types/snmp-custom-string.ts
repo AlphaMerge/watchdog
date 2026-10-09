@@ -32,6 +32,8 @@ export const snmpCustomString: SensorType = {
         minLength: 1,
         maxLength: 255,
         pattern: '^\\.?[0-9]+(\\.[0-9]+)*$',
+        'x-patternMessage':
+          'must be a numeric OID, digits separated by dots, such as 1.3.6.1.2.1.1.3.0',
         title: 'OID',
         description:
           'The object to read, in numeric form. Include the instance — a scalar ends in .0.',

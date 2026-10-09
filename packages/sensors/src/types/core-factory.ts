@@ -90,6 +90,7 @@ export const coreFactory: SensorType = {
               minLength: 1,
               maxLength: 40,
               pattern: '^[A-Za-z0-9_.-]+$',
+              'x-patternMessage': 'must be letters, digits, "_", "." and "-" only',
               title: 'Channel key',
               description: 'Stable. Renaming it starts a new channel with no history.',
             },

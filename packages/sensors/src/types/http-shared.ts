@@ -34,6 +34,8 @@ export const HTTP_COMMON_SCHEMA: Readonly<Record<string, JsonSchema>> = {
     type: 'string',
     maxLength: 32,
     pattern: '^$|^[1-5](?:[0-9]{2}|xx)(?:-[1-5][0-9]{2})?$',
+    'x-patternMessage':
+      'must be empty, a status code such as 404, a class such as 2xx, or a range such as 200-204',
     default: '',
     title: 'Expected status',
     description:

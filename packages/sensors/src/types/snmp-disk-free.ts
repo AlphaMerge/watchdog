@@ -51,6 +51,7 @@ export const snmpDiskFree: SensorType = {
       storageIndex: {
         type: 'string',
         pattern: '^$|^[0-9]+(\\.[0-9]+)*$',
+        'x-patternMessage': 'must be empty, or digits separated by dots, such as 31',
         maxLength: 128,
         default: '',
         title: 'Storage index',

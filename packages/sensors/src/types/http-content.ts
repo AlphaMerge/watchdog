@@ -112,6 +112,7 @@ export const httpContent: SensorType = {
               // Not the sensor's own (`P-348`), with the spaces `readExtractions` trims: a result
               // would carry two readings under it, and `channels()` would declare it twice.
               pattern: `^(?!\\s*(?:${HTTP_CONTENT_OWN_KEYS.join('|')})\\s*$)`,
+              'x-patternMessage': `must not be ${HTTP_CONTENT_OWN_KEYS.join(', ')}, the sensor’s own channel`,
               title: 'Key',
               description: `Not ${HTTP_CONTENT_OWN_KEYS.map((key) => `\`${key}\``).join(', ')}: the sensor’s own channel.`,
             },
