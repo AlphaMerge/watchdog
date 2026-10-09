@@ -13600,6 +13600,42 @@ because each is a decision rather than a defect:
         registries' Ajv are not API schemas and were not changed; none of the latter three has a
         pattern today.
 
+- [ ] **P-373 — three waits `P-366` found and one it weakened** · XS · P-366 · Found 2026-10-09
+      in `P-366`. `probe/test/perf/sizing-pass.test.ts` (a 30 s `Date.now()` loop that falls
+      through to an assert) and the inform test in `sensors/test/snmp-receiver.test.ts` (a 3 s
+      `setTimeout` race whose timer is never cleared) are hand-rolled. And `syslog-sender`'s
+      cases now stop at the expected count, so a datagram or frame sent in excess is no longer
+      seen before the count is asserted. **Done when** the two are `pollWithin`/`within`, and the
+      sender's cases wait for the TCP connection's end (UDP: a short quiet window, said why),
+      with a mutation that sends one message too many and fails.
+
+- [ ] **P-374 — `/values` now reads the object and its channels on every poll** · XS · U-38 ·
+      Found 2026-10-09 in `U-38`. Carrying `retired` adds two queries per 15-second poll of an
+      open sensor, roughly doubling the route's database time (2–3 ms on the dev database, whose
+      busiest sensor has two channels). **Done when** measured at the v1 target with the result
+      in `docs/findings/`, and, if it matters, a path that reads only `sensor_type` and `params`
+      instead of the whole object.
+
+- [ ] **P-375 — the sensors past the cap are named nowhere** · XS · P-368 · Found 2026-10-09 in
+      `P-368`. The set of sensors whose parameters their type now refuses is held in memory, but
+      only ten per type are logged, and a sensor changed outside the object service (a hand
+      edit) is judged only at the next start. **Done when** the set can be listed (a filter on
+      the object listing, or a route) by anyone who can see those sensors, with a test, and the
+      hand-edit case is a line in `P-333`'s policy when that lands.
+
+- [ ] **P-376 — the probe protocol's patterns answer with the expression** · XS · P-372 · Found
+      2026-10-09 in `P-372`. `@ms/shared`'s protocol schemas still say "must match pattern …",
+      and `messages.test.ts` asserts it in a fitted result's reason. **Done when** decided: the
+      same `x-patternMessage` (the probe's own Ajv knows the keyword) or the expression kept on
+      purpose for a machine reader, said in the outcome.
+
+- [ ] **P-377 — three registries take a pattern without a sentence** · XS · P-372 · Found
+      2026-10-09 in `P-372`. The settings, trigger-kind and lookup registries build their own Ajv
+      with `strict: false` and no `unsaidPatterns` check at load; none has a pattern today, but
+      trigger settings are drawn by the web form. **Done when** each refuses an unsaid pattern at
+      load as `MethodRegistry` now does, and a test asserts `GET /notification-methods` serves
+      the webhook's `x-patternMessage`.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -25350,6 +25386,35 @@ because each is a decision rather than a defect:
         and were left; nor were the refusal lines that are not live regions at all: `AlarmsView`'s
         refused action on a row, `TriggersPanel`'s refused delete, and `TemplatesView`'s
         `Failure` and refused delete.
+
+- [ ] **U-55 — what is left of retired channels in the History tab** · S · U-37 · Found
+      2026-10-09 in `U-37`. The chart's hover tooltip shows the bare channel name where the legend
+      says retired; the History tab marks retired channels but cannot hide them; and both it and
+      the channel table use the channel list read when the page opened, so a channel a reading
+      makes live again still says retired until a reload. **Done when** the tooltip says it, the
+      History tab has the same hide control (held in the URL, as `U-38`'s is), and the channel
+      list is re-read when a reading arrives for a retired channel, with tests.
+
+- [ ] **U-56 — refusals with no live region at all** · XS · U-54 · Found 2026-10-09 in `U-54`.
+      A refused row action in `AlarmsView` (around line 361), a refused delete in `TriggersPanel`
+      (around 233) and in `TemplatesView` (around 612, and its `Failure` around 698), and
+      `DiscoveryView`'s `RunPanel` failing its first read, are plain text. **Done when** each is an
+      always-present region as `U-54`'s are, with a test each.
+
+- [ ] **U-57 — a discovery range refusal is an alert that changes as you type** · XS · U-54 ·
+      Found 2026-10-09 in `U-54`. `U-48` kept such regions polite; this one is `role="alert"`,
+      and a different range refused in the same words is not said again. **Done when** it is
+      `aria-live="polite"` and re-says a new refusal in the same words, with a test.
+
+- [ ] **U-58 — should a failed read be announced?** · XS · U-54 · Found 2026-10-09 in `U-54`.
+      About thirty `ErrorPanel`s are mounted with their text already in them when a read fails.
+      **Done when** decided (load failures announced through an always-present region, or left
+      as they are because the page has nothing else to say), and done if adopted.
+
+- [ ] **U-59 — five refusals show no correlation id** · XS · U-54 · Found 2026-10-09 in `U-54`.
+      `RediscoveryPanel`, `DiscoveryView`, `LoginView`, `ChangePasswordForm` and
+      `RecipientsEditor` refuse without the id `ParamsForm` and `CredentialsPanel` show. **Done
+      when** each shows it in the same `ml-2 font-mono` span, with a test each.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
