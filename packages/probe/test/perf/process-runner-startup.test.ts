@@ -5,6 +5,7 @@ import { pino } from 'pino';
 import { ProcessRunner } from '../../src/runner/process-runner.js';
 import type { ResultMeta } from '../../src/runner/types.js';
 import type { CheckResult } from '@ms/shared';
+import { pollWithin } from '../support/within.js';
 
 /**
  * What a process of its own costs (`P-03`).
@@ -28,6 +29,12 @@ const silent = pino({ level: 'silent' });
 const FIXTURES = join(import.meta.dirname, '..', 'support', 'check-fixtures.js');
 
 const RUNS = 20;
+
+/**
+ * How long to wait for one check's result (`P-330`): its 20 s timeout and some. Unbounded, a
+ * result that never came held the file's process for ever.
+ */
+const RESULT_MS = 30_000;
 
 interface Seen {
   result: CheckResult;
@@ -71,7 +78,7 @@ describe('process runner start-up cost', () => {
         timeoutMs: 20_000,
       });
       // Serially, so each measurement is one start-up rather than a share of several.
-      while (seen.length <= at) await new Promise((resolve) => setTimeout(resolve, 5));
+      await pollWithin(RESULT_MS, `result ${String(at)}`, () => seen.length > at, 5);
     }
 
     assert.equal(seen.length, RUNS);
@@ -126,7 +133,7 @@ describe('process runner start-up cost', () => {
         params: { count: 1, timeoutMs: 4_000, packetSize: 32 },
         timeoutMs: 20_000,
       });
-      while (seen.length <= at) await new Promise((resolve) => setTimeout(resolve, 5));
+      await pollWithin(RESULT_MS, `result ${String(at)}`, () => seen.length > at, 5);
     }
 
     const overheads = seen.map((one) => one.wallMs - one.durationMs).sort((a, b) => a - b);
@@ -161,7 +168,8 @@ describe('process runner start-up cost', () => {
         timeoutMs: 20_000,
       });
     }
-    while (results.length < 8) await new Promise((resolve) => setTimeout(resolve, 5));
+    // Two turns of four, and a check in either may run to its timeout.
+    await pollWithin(2 * RESULT_MS, 'eight results', () => results.length >= 8, 5);
     const totalMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
 
     process.stdout.write(

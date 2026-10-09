@@ -47,6 +47,7 @@ import {
 import { actorNamed, buildHarness, silent, testActor, type Harness } from './support/tree.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { connectedLink, fixedCoreHealth, probeHealthOver } from './support/health.js';
+import { pollWithin } from './support/within.js';
 
 /**
  * `A-12`'s exit criterion, as a sweep: **an account granted one branch, with `none` everywhere
@@ -1422,12 +1423,8 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         const states = () => frames.filter((frame) => frame['type'] === 'state');
         return { socket, frames, states };
       };
-      const until = async (done: () => boolean): Promise<void> => {
-        for (let i = 0; i < 300 && !done(); i += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 10));
-        }
-        assert.ok(done(), 'the stream did not deliver in time');
-      };
+      const until = (done: () => boolean): Promise<void> =>
+        pollWithin(3_000, 'the stream to deliver', done, 10);
       const hidden = [otherSensorId, carvedSensorId, lonelySensorId];
       const branch = await watch('watcher');
       const admin = await watch('admin');

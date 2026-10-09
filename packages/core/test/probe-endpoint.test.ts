@@ -29,7 +29,7 @@ import {
 } from '../src/transport/probe-endpoint.js';
 import { HostAllowList } from '../src/api/hardening.js';
 import { fingerprint, type ProbeAssignments } from '../src/probes/config.js';
-import { within } from './support/within.js';
+import { pollWithin, within } from './support/within.js';
 
 const silentLogger = pino({ level: 'silent' });
 
@@ -2841,10 +2841,6 @@ describe(
 );
 
 /** Polls a condition rather than sleeping a fixed time, so a slow machine is not a failure. */
-async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() > deadline) assert.fail('timed out waiting for a condition');
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
+function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  return pollWithin(timeoutMs, 'a condition', predicate, 5);
 }

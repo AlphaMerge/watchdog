@@ -15,6 +15,7 @@ import {
 } from './support/database.js';
 import { ReplayPacer } from '../src/ingestion/replay-pacer.js';
 import { buildHarness, silent, testActor } from './support/tree.js';
+import { pollWithin } from './support/within.js';
 
 const available = await databaseAvailable();
 
@@ -33,15 +34,6 @@ function ingestion(overrides: Partial<IngestionConfig> = {}): IngestionConfig {
 }
 
 const AT = new Date('2026-08-20T10:00:00.000Z');
-
-/** Waits for a condition, or fails rather than leaving the runner to sit on it. */
-async function until(predicate: () => boolean, what: string, timeoutMs = 10_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-}
 
 function samples(channelId: number, count: number, from = AT): SampleRow[] {
   return Array.from({ length: count }, (_, index) => ({
@@ -726,7 +718,12 @@ describe(
       // below read `results-ack` — and the test took *sixty seconds* getting there, because an
       // accepted batch of one row waits out `batchMaxDelayMs` before it is written. A test
       // whose failure mode is a minute of silence is one people stop waiting for.
-      await until(() => created.stats().queuedRows === 2, 'the first batch to fill the queue');
+      await pollWithin(
+        10_000,
+        'the first batch to fill the queue',
+        () => created.stats().queuedRows === 2,
+        5,
+      );
 
       const refused = await svc.acceptResults('probe-1', {
         type: 'results',

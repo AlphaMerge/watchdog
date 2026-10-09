@@ -14,6 +14,9 @@ import {
   type ProbeToCoreMessage,
   type SensorAssignment,
 } from '@ms/shared';
+import { within } from './within.js';
+
+export { within };
 
 /**
  * The probe as a process, with a core on the other end of its link (`B-07`).
@@ -85,23 +88,6 @@ export function generateCerts(dir: string): void {
   };
   issue('core', 'ms-core', 'DNS:localhost,IP:127.0.0.1');
   issue('probe', 'ms-probe', null);
-}
-
-/** Rejects after `ms`, naming what was being waited for: a test's own timeout does not stop it. */
-export async function within<T>(ms: number, what: string, promise: Promise<T>): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error(`timed out after ${String(ms)} ms waiting for ${what}`));
-        }, ms);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 /**

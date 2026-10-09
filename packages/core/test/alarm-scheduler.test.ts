@@ -16,6 +16,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
+import { pollWithin } from './support/within.js';
 import { Reach, Visibility } from '../src/auth/access.js';
 
 const available = await databaseAvailable();
@@ -32,13 +33,9 @@ const INITIAL = 401;
  */
 const PATIENCE_MS = 20_000;
 
-async function until(predicate: () => boolean | Promise<boolean>, what: string): Promise<void> {
-  const deadline = Date.now() + PATIENCE_MS;
-  for (;;) {
-    if (await predicate()) return;
-    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
-    await sleep(10);
-  }
+/** Until `predicate` holds, or a failure naming `what` at `PATIENCE_MS`, asking no more after. */
+function until(predicate: () => boolean | Promise<boolean>, what: string): Promise<void> {
+  return pollWithin(PATIENCE_MS, what, predicate, 10);
 }
 
 // -------------------------------------------------------------------------------------------

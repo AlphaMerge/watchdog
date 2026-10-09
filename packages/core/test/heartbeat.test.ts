@@ -13,6 +13,7 @@ import { ConfigError, type HousekeepingConfig, type Logger } from '@ms/shared';
 import type { Database } from '../src/db/pool.js';
 import { Heartbeat, HEARTBEAT_TIMEOUT_MS, heartbeatFor } from '../src/health/heartbeat.js';
 import { Housekeeper } from '../src/timeseries/housekeeper.js';
+import { pollWithin } from './support/within.js';
 
 /**
  * The core's outbound heartbeat (`H-18`).
@@ -101,13 +102,8 @@ const silent = pino({ level: 'silent' }) as unknown as Logger;
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Waits for `met`, and fails by name rather than by the test's own timeout (rule 22). */
-async function until(ms: number, what: string, met: () => boolean): Promise<void> {
-  const deadline = Date.now() + ms;
-  while (!met()) {
-    if (Date.now() > deadline)
-      throw new Error(`timed out after ${String(ms)} ms waiting for ${what}`);
-    await sleep(5);
-  }
+function until(ms: number, what: string, met: () => boolean): Promise<void> {
+  return pollWithin(ms, what, met, 5);
 }
 
 afterEach(async () => {

@@ -24,7 +24,7 @@ import {
 } from './support/database.js';
 import { testCatalogue } from './support/sensor-types.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
-import { within } from './support/within.js';
+import { pollWithin, within } from './support/within.js';
 
 /**
  * An open stream is closed when what authenticated it stops doing so (`A-34`).
@@ -1259,10 +1259,6 @@ describe('a stream whose credential lapses', { skip: available ? false : 'no dat
 });
 
 /** Waits for a condition the socket's events will make true, or fails naming it. */
-async function until(condition: () => boolean, what: string, ms = 5_000): Promise<void> {
-  const deadline = Date.now() + ms;
-  while (!condition()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+function until(condition: () => boolean, what: string, ms = 5_000): Promise<void> {
+  return pollWithin(ms, what, condition, 10);
 }

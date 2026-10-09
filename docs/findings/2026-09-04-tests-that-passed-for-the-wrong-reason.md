@@ -1161,6 +1161,8 @@ anything — and that structure, not more care, is what found them.
     for the far end to close, and each held a VM container for hours. Every wait on the far end of
     a socket or a process gets a bound of its own, shorter than the test's — `within` in
     `state-stream.test.ts` — so a misbehaving peer fails the test *and* reaches the cleanup.
+    A polling loop goes through `pollWithin` in `test/support/within.ts` (`P-325`): `within`
+    rejects at its bound and leaves the loop it was handed running, a query or a timer at a time.
 23. **Call a shell function in its test the way its callers call it.** Entry 45: `set -e` is off
     for everything under an `if`, a `!`, or the left side of `&&` or `||`, functions and the
     subshells inside them included, even where they set it again. A function that relies on it

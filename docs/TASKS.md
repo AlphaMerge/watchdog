@@ -12150,17 +12150,58 @@ because each is a decision rather than a defect:
       accepted. **Done when** U-32/U-33's reasons for keeping both are re-read and either one is
       dropped or the outcome says why both stay.
 
-- [ ] **P-329 — the testing rule names `within` but not `pollWithin`** · XS · P-325 · Found
+- [x] **P-329 — the testing rule names `within` but not `pollWithin`** · XS · P-325 · Found
       2026-10-08 in `P-325`. `within` alone does not stop a polling loop; CLAUDE.md's testing rule
       and rule 22 in `docs/findings/2026-09-04-tests-that-passed-for-the-wrong-reason.md` should say
       that a poll goes through `pollWithin`. **Done when** both say so.
 
-- [ ] **P-330 — polling helpers with their own deadlines, and other packages' polls** · S · P-325
+      **P-329 outcome.** One sentence each, nothing restructured: CLAUDE.md's testing rule gains a
+      line saying a poll goes through `pollWithin` in the same file, because `within` alone does
+      not stop a loop; rule 22 says the same and why — `within` rejects at its bound and leaves
+      the loop it was handed running. Rule 22 still names `within` "in `state-stream.test.ts`",
+      where it lived when the rule was written; left, as the new sentence names where both live.
+
+- [x] **P-330 — polling helpers with their own deadlines, and other packages' polls** · S · P-325
       · Found 2026-10-08 in `P-325`. `until` (ingestion, alarm-scheduler, heartbeat,
       stream-sign-out), `waitUntil` (probe-endpoint), `count` (state-stream) and `until`/`waitFor`
       (object-visibility) each re-implement a bounded poll, and the probe, sensors and web tests
       were not checked for the loop-after-`within` pattern. **Done when** they use `pollWithin` (or
       an equivalent per package) and the other packages are checked, with any found fixed.
+
+      **P-330 outcome. Six of the eight core helpers are now `pollWithin`; the probe and sensors
+      suites had three unbounded loops and two loops left running by `within`, all fixed.** Test
+      code only.
+      - **Swapped, same bound, same interval, still naming what it waited for** (the message now
+        also says the bound, as `pollWithin`'s does): `until` in `ingestion` (one call site,
+        inlined), `alarm-scheduler`, `heartbeat`, `stream-sign-out`, `waitUntil` in
+        `probe-endpoint`, and `until` in `object-visibility`. Each wrapper is now one call, kept so
+        its call sites and defaults did not move. `alarm-scheduler`'s predicate is a query, and
+        the old loop read its deadline only after the query answered, so a query that hung was
+        never bounded; it is now. `object-visibility`'s bound was 300 polls of 10 ms and is now
+        3 s of wall clock — the nominal figure; a loaded VM had stretched the old one.
+      - **Left alone, not straight swaps.** `count` in `state-stream` fails with how many frames
+        had come (`3 problem frames of 5`), which a `what` fixed at the call cannot say, and
+        returns them; its own deadline already stops it. `waitFor` in `object-visibility` is not
+        a poll: it checks on each message and its timer removes the listener at 10 s, naming the
+        frames it saw.
+      - **probe:** three loops in `test/perf/process-runner-startup.test.ts` waited for a result
+        with no bound at all (`while (seen.length <= at)`), so a result that never came held the
+        file for ever under a test with no timeout. They are `pollWithin` at 30 s a check (its
+        20 s timeout and some) and 60 s for two turns of four. The probe cannot import the core's
+        test support, so `test/support/within.ts` is new: `within`, moved from `probe-process.ts`
+        (which re-exports it, so its five importers are unchanged and the perf test does not run
+        `openssl` at import), and a copy of `pollWithin`. Every other probe poll (`until` in eleven
+        files, `waitUntil` in `core-client`, `goneWithin` in `process-runner`) has a deadline of
+        its own or a stop flag, and stops.
+      - **sensors:** `ssh-session.test.ts` handed `within` a loop twice (`waitFor`, which polled
+        until true, and an inline `while (!two.ended)`); a far end that never answered left both
+        running into the cleanup. Both are now the package's existing `until` in
+        `test/support/within.ts`, which stops its loop when it gives up (`P-279`); `waitFor` is
+        gone. The other polls there have deadlines of their own.
+      - **simulators:** none; the one loop is a deliberate 50 ms busy wait.
+      - **web:** none. The suites wait with `@testing-library/react`'s `waitFor` (not
+        `vi.waitFor`), which gives up at its timeout and clears its interval and observer; the
+        rest are fixed sleeps, not polls.
 
 - [ ] **P-331 — no test boots the core's start-up path** · S · P-323 · Found 2026-10-08 in
       `P-323`. The declared-primary repair is started unawaited from `main.ts`, with a shutdown

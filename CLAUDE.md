@@ -144,6 +144,7 @@ subsystem with a queue, a pool or a connection adds a metric to one of them.
   socket or process its own shorter bound (`within` in `packages/core/test/support/within.ts`),
   and put `timeout` inside the container — `scripts/dev.sh "timeout 900 …"` — never around
   `dev.sh`.
+  A poll goes through `pollWithin` in the same file, since `within` alone does not stop a loop.
   Rule 22 in `docs/findings/2026-09-04-tests-that-passed-for-the-wrong-reason.md`.
 - **`npm test` is the unit suites; `npm run test:perf` is the measured budgets.** They are
   separate because a budget measured while 1,300 other tests share the machine is not a
