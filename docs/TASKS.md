@@ -12646,11 +12646,61 @@ because each is a decision rather than a defect:
       `state-stream.test.ts`. **Done when** they use each package's shared helper and rule 22 names
       where the helpers live.
 
-- [ ] **P-347 — the `tag` and `effective` filters are only half bounded** · XS · P-337 · Found
+- [x] **P-347 — the `tag` and `effective` filters are only half bounded** · XS · P-337 · Found
       2026-10-09 in `P-337`. A single `tag` is limited to 100 characters, but the array form has no
       per-element `maxLength` or `maxItems`, and `effective` has no bounds in either form. **Done
       when** both forms are bounded alike (a validation change, said in the outcome), with route
       tests.
+
+      **P-347 outcome. Both forms of each are bounded alike. This is a validation change.**
+      - **The bounds.** `TAG_FILTER` and `EFFECTIVE_FILTER` in `routes/objects.ts`. Each puts one
+        `maxLength` on the string form and on every array element, and a `maxItems` on the array.
+        They stay a type list, which `P-337` kept so `coerceTypes` is untouched. Ajv applies
+        `maxLength` only to a string and `maxItems` only to an array.
+        - **`tag`: 100 characters, 50 tags.** These are an object's own tag limits
+          (`objectFields`), taken from `MAX_TAG` and `MAX_TAGS` in `libraries/nodes.ts`, which a
+          library rule's effective-tag filter already uses. The filter is all-of over own and
+          inherited tags. A tag longer than one an object can carry can match nothing, and 50 is
+          the most one object holds itself. The tree's search sends one or two.
+        - **`effective`: 100 characters, and as many keys as the registry has (7 today).** The
+          ticket suggested the longest key (23), but 100 was chosen instead. It is what
+          `/objects/{id}/settings/{key}` already takes, now a single `MAX_SETTING_KEY` in
+          `settings/registry.ts`, shared by that path and this filter. The registry refuses to
+          declare a longer key, so a key the API cannot name cannot exist. A 23-character bound
+          would send a 24-character typo to the schema's bare "too long" message, while a
+          23-character typo gets the handler's "unknown setting key", which lists the known keys.
+          It would also move the documented bound with each new key. The count is
+          `settingRegistry.keys.length`, as `kind` is held to `OBJECT_KINDS.length`. One more
+          value than there are keys is a repeat.
+      - **What a client exceeding one gets.** A 400 with `error.code` `OBJECT_INVALID`,
+        `context.phase` `validate-request`, and Fastify's message naming the parameter. The
+        messages are `querystring/tag must NOT have more than 100 characters`,
+        `querystring/tag/1 must NOT have more than 100 characters` (the element's index), and
+        `querystring/tag must NOT have more than 50 items`. `effective` gets the same with 100
+        and 7. Before this, a long `effective` key reached the handler and got its "unknown
+        setting key" 400, and any number of repeats was taken. An over-long `tag` in the array
+        form, or any number of tags, ran as a query.
+      - **The reference.** The renderer read a type list's `items` nowhere, so the bound on each
+        element would not have shown. It now writes `string or string[]` and says the elements'
+        bounds as `each …`, as it does for an array. All three rows now read
+        `string or string[], at most 100 characters, at most 50 items, each at most 100
+        characters` (7 items for `effective`).
+      - **Tests.** In `api-routes.test.ts`, beside `P-337`'s: each bound is accepted at the limit
+        and refused one past it, as a single value and as an element of several. The count is
+        accepted at 50 tags and at every registry key, and refused one past. `effective` is
+        tested on the listing and the tree. A 100-character key is shown to reach the handler,
+        whose refusal has phase `validate-query`, and a 101-character one to stop at the schema.
+        Each refusal's exact message is asserted. `api-reference-render.test.ts` adds a type-list
+        parameter to its fixture.
+      - **Mutations, one at a time, each restored.** Six schema mutations: `tag`'s element bound,
+        `tag`'s `maxItems`, `tag`'s string bound, `effective`'s element bound, `effective`'s
+        `maxItems` raised by one, and `effective`'s string bound. Each failed its route test.
+        `tag`'s string bound also failed `P-337`'s test. Two renderer mutations, the type list's
+        `each` dropped and `string[]` dropped, each failed the fixture test.
+      - **Not done.** There is still no `minLength` on either filter. `?tag=` is an empty tag that
+        matches nothing, and `?effective=` is the handler's "unknown setting key". That is a
+        separate validation change. `objectFields` keeps its own literal 100 and 50 rather than
+        `MAX_TAG` and `MAX_TAGS`.
 
 - [ ] **P-348 — a database sensor's `extract` key can take a built-in channel's name** · XS ·
       P-320 · Found 2026-10-09 in `P-320`. The schema (`^[A-Za-z0-9_.-]+$`) accepts `value`, `rows`,

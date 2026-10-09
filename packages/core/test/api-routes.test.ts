@@ -7,6 +7,7 @@ import { ApiServer, sensorsOfDevice } from '../src/api/server.js';
 import { Visibility } from '../src/auth/access.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import { SHARED_SCHEMAS } from '../src/api/schemas/objects.js';
+import { settingRegistry } from '../src/settings/registry.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -926,6 +927,83 @@ describe(
       // A key the registry does not have is refused by the handler, one or several.
       const unknown = await get('/api/v1/objects?effective=scan.intervalSeconds&effective=nope');
       assert.equal(unknown.statusCode, 400, unknown.body);
+    });
+
+    describe('bounds both forms of tag and effective alike (P-347)', () => {
+      interface Refusal {
+        error: { code: string; message: string; context: { phase: string } };
+      }
+      const query = (name: string, values: readonly string[]): string =>
+        values.map((value) => `${name}=${encodeURIComponent(value)}`).join('&');
+      /** A 400 from the route's schema, naming the parameter and the bound it broke. */
+      const refusedByTheSchema = async (url: string, message: string): Promise<void> => {
+        const res = await get(url);
+        assert.equal(res.statusCode, 400, `${url.slice(0, 120)}: ${res.body.slice(0, 300)}`);
+        const { error } = res.json<Refusal>();
+        assert.equal(error.code, 'OBJECT_INVALID');
+        assert.equal(error.context.phase, 'validate-request');
+        assert.equal(error.message, message);
+      };
+
+      it('a tag: 100 characters and 50 tags, one or several', async () => {
+        const at = 'x'.repeat(100);
+        const past = 'x'.repeat(101);
+        const fifty = Array.from({ length: 50 }, (_, i) => `t${String(i)}`);
+        for (const url of [
+          `/api/v1/objects?${query('tag', [at])}`,
+          `/api/v1/objects?${query('tag', ['alpha', at])}`,
+          `/api/v1/objects?${query('tag', fifty)}`,
+        ]) {
+          const res = await get(url);
+          assert.equal(res.statusCode, 200, `${url.slice(0, 120)}: ${res.body.slice(0, 300)}`);
+        }
+        await refusedByTheSchema(
+          `/api/v1/objects?${query('tag', [past])}`,
+          'querystring/tag must NOT have more than 100 characters',
+        );
+        await refusedByTheSchema(
+          `/api/v1/objects?${query('tag', ['alpha', past])}`,
+          'querystring/tag/1 must NOT have more than 100 characters',
+        );
+        await refusedByTheSchema(
+          `/api/v1/objects?${query('tag', [...fifty, 't50'])}`,
+          'querystring/tag must NOT have more than 50 items',
+        );
+      });
+
+      it('an effective key: 100 characters and as many keys as there are, on the listing and the tree', async () => {
+        const g = await createGroup(probeId, 'Bounded');
+        const keys = settingRegistry.keys;
+        assert.ok(keys.length >= 2 && keys.every((key) => key.length <= 100));
+        // At the bound the schema lets a key through, and the handler is what refuses one it
+        // does not know — which says so, and lists the known ones.
+        const at = 'x'.repeat(100);
+        const past = 'x'.repeat(101);
+        for (const route of ['/api/v1/objects', `/api/v1/objects/${String(g)}/tree`]) {
+          const all = await get(`${route}?${query('effective', keys)}`);
+          assert.equal(all.statusCode, 200, `${route}: ${all.body.slice(0, 300)}`);
+          for (const values of [[at], [keys[0] ?? '', at]]) {
+            const res = await get(`${route}?${query('effective', values)}`);
+            assert.equal(res.statusCode, 400, res.body.slice(0, 300));
+            const { error } = res.json<Refusal>();
+            assert.equal(error.context.phase, 'validate-query', `${route}: ${error.message}`);
+            assert.equal(error.message, `unknown setting key "${at}"`);
+          }
+          await refusedByTheSchema(
+            `${route}?${query('effective', [past])}`,
+            'querystring/effective must NOT have more than 100 characters',
+          );
+          await refusedByTheSchema(
+            `${route}?${query('effective', [keys[0] ?? '', past])}`,
+            'querystring/effective/1 must NOT have more than 100 characters',
+          );
+          // One more than there are keys is a repeat, and refused as too many.
+          await refusedByTheSchema(
+            `${route}?${query('effective', [...keys, keys[0] ?? ''])}`,
+            `querystring/effective must NOT have more than ${String(keys.length)} items`,
+          );
+        }
+      });
     });
 
     it('finds a device by a fragment of its host through ?q=, as the tree search asks', async () => {

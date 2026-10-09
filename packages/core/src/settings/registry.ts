@@ -132,6 +132,13 @@ export const DEPENDENCY_DELAY_SECONDS: SettingDefinition<number> = {
     'not produce an alarm on every bounce.',
 };
 
+/**
+ * The longest a setting key may be: what the API takes as one, in a path (`/settings/{key}`) or
+ * in `?effective=` (`P-347`). Room to grow — the longest today is 23 — and checked here as each
+ * key is registered, so a key the API could not name cannot be declared.
+ */
+export const MAX_SETTING_KEY = 100;
+
 const DEFINITIONS: readonly SettingDefinition<unknown>[] = [
   SCAN_INTERVAL_SECONDS,
   SCAN_TIMEOUT_MS,
@@ -152,6 +159,11 @@ class Registry {
     for (const definition of definitions) {
       if (this.#byKey.has(definition.key)) {
         throw new SettingError('duplicate setting key', { key: definition.key });
+      }
+      if (definition.key.length > MAX_SETTING_KEY) {
+        throw new SettingError('setting key too long for the API to name', {
+          key: definition.key,
+        });
       }
       this.#byKey.set(definition.key, definition);
       this.#validators.set(definition.key, ajv.compile(definition.schema));

@@ -2173,12 +2173,12 @@ Flat filtered listing, keyset-paginated. `q` searches names and device hosts as 
 | --- | --- | --- | --- | --- |
 | `parentId` | query | integer, at least 1 |  |  |
 | `kind` | query | `root` · `probe` · `group` · `device` · `sensor`, or an array of them, at most 5 items |  |  |
-| `tag` | query | string or array, at most 100 characters |  |  |
+| `tag` | query | string or string[], at most 100 characters, at most 50 items, each at most 100 characters |  |  |
 | `q` | query | string, at most 500 characters |  | Search: a case-insensitive substring of the name or, on a device, of its host. `%` and `_` are literal. |
 | `host` | query | string, at most 255 characters |  | A device's host exactly, case-insensitive. A substring is `q`'s job. |
 | `priorityMin` | query | integer, 1–5 |  |  |
 | `sort` | query | `name` · `id` · `manual` | default `name` |  |
-| `effective` | query | string or array |  |  |
+| `effective` | query | string or string[], at most 100 characters, at most 7 items, each at most 100 characters |  |  |
 | `include` | query | string, at most 200 characters |  | Comma-separated expansions. `path` gives every item its ancestors, root first and excluding the item — what `/objects/{id}/ancestors` returns, for the whole page in one walk. |
 | `cursor` | query | string, at most 2048 characters |  |  |
 | `limit` | query | integer, 1–500 | default `100` |  |
@@ -2377,7 +2377,7 @@ Applies one operation to a selection. **Each object is atomic and the batch is b
 | `maxDepth` | query | integer, 1–20 | default `3` |
 | `limit` | query | integer, 1–5000 | default `1000` |
 | `kind` | query | `root` · `probe` · `group` · `device` · `sensor`, or an array of them, at most 5 items |  |
-| `effective` | query | string or array |  |
+| `effective` | query | string or string[], at most 100 characters, at most 7 items, each at most 100 characters |  |
 | `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { items, truncated }

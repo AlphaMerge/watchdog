@@ -173,7 +173,12 @@ export function renderApiReference(doc, options = {}) {
       const plain = /^[a-z]+( \([a-z-]+\))?$/u.test(items) || items.startsWith('[');
       return plain ? `${items}[]` : `(${items})[]`;
     }
-    if (Array.isArray(schema.type)) return schema.type.join(' or ');
+    // `string or string[]`: a query parameter that takes one or several as a type list (`P-347`).
+    if (Array.isArray(schema.type)) {
+      return schema.type
+        .map((type) => (type === 'array' && schema.items !== undefined ? typeText({ type, items: schema.items }) : type))
+        .join(' or ');
+    }
     if (isObject(schema) || schema.additionalProperties !== undefined) {
       const map = schema.additionalProperties;
       if (map !== undefined && typeof map === 'object' && Object.keys(schema.properties ?? {}).length === 0) {
@@ -303,7 +308,8 @@ export function renderApiReference(doc, options = {}) {
       }
     }
     // Elements with no row of their own: an array of strings says how long each may be.
-    const items = schema.type === 'array' ? schema.items : undefined;
+    const array = schema.type === 'array' || (Array.isArray(schema.type) && schema.type.includes('array'));
+    const items = array ? schema.items : undefined;
     if (items !== undefined && items !== null && typeof items === 'object') {
       const { schema: element } = withoutNull(items);
       if (!(isObject(element) || element.additionalProperties !== undefined)) {

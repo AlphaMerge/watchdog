@@ -178,6 +178,17 @@ const fixture = {
               ],
             },
           },
+          // The same as a type list, as `tag` and `effective` are declared (`P-347`).
+          {
+            name: 'keys',
+            in: 'query',
+            schema: {
+              type: ['string', 'array'],
+              items: { type: 'string', maxLength: 20 },
+              maxLength: 20,
+              maxItems: 7,
+            },
+          },
         ],
         requestBody: {
           content: {
@@ -429,6 +440,13 @@ describe('the API reference renderer', () => {
       assert.equal(
         parameterRow('tag').split(' | ')[2],
         'string, or an array of them, at most 40 characters, at most 10 items',
+      );
+    });
+
+    it("the same as a type list, the array's elements and count said too (P-347)", () => {
+      assert.equal(
+        parameterRow('keys').split(' | ')[2],
+        'string or string[], at most 20 characters, at most 7 items, each at most 20 characters',
       );
     });
 

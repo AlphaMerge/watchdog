@@ -9,7 +9,8 @@ import type { ObjectService } from '../../objects/service.js';
 import type { BulkOperation, BulkService } from '../../objects/bulk.js';
 import type { TreePlanInput } from '../../objects/tree-plan.js';
 import { MAX_BULK } from '../../objects/bulk.js';
-import { settingRegistry } from '../../settings/registry.js';
+import { MAX_SETTING_KEY, settingRegistry } from '../../settings/registry.js';
+import { MAX_TAG, MAX_TAGS } from '../../libraries/nodes.js';
 import type {
   CreateObjectInput,
   DeleteExpectation,
@@ -187,6 +188,35 @@ const KIND_FILTER = {
   ],
 } as const;
 
+/**
+ * `tag` and `effective` take one value or several, and both forms are bounded alike (`P-347`):
+ * the string and each element of the array by `maxLength`, the array by `maxItems`. A type list
+ * rather than `KIND_FILTER`'s `oneOf`, which `P-337` kept so as not to change what Fastify's
+ * `coerceTypes` does with it; `maxLength` only reads a string and `maxItems` only an array.
+ *
+ * A tag is held to what an object's own tags are (`objectFields`: 100 characters, 50 of them),
+ * as a library rule's effective-tag filter is. The filter is all-of over own and inherited tags,
+ * and 50 is the most one object can carry itself: a search box sends one or two.
+ */
+const TAG_FILTER = {
+  type: ['string', 'array'],
+  items: { type: 'string', maxLength: MAX_TAG },
+  maxLength: MAX_TAG,
+  maxItems: MAX_TAGS,
+} as const;
+
+/**
+ * A setting key is held to the length the settings routes take one in a path, and the list to
+ * the number of keys there are: any more is a repeat. A key that fits and is unknown is still the
+ * handler's refusal, which lists the known ones.
+ */
+const EFFECTIVE_FILTER = {
+  type: ['string', 'array'],
+  items: { type: 'string', maxLength: MAX_SETTING_KEY },
+  maxLength: MAX_SETTING_KEY,
+  maxItems: settingRegistry.keys.length,
+} as const;
+
 function assertKnownSettingKeys(keys: readonly string[]): void {
   for (const key of keys) {
     if (!settingRegistry.has(key)) {
@@ -244,7 +274,7 @@ const settingKeyParams = {
   additionalProperties: false,
   properties: {
     id: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
-    key: { type: 'string', minLength: 1, maxLength: 100 },
+    key: { type: 'string', minLength: 1, maxLength: MAX_SETTING_KEY },
   },
 } as const;
 
@@ -260,7 +290,7 @@ const listQuery = {
     // array form failed validation and `?kind=device&kind=sensor` was a 400, even though the
     // handler has always called `asArray` on it. Found by `M-15`, which needed the same shape.
     kind: KIND_FILTER,
-    tag: { type: ['string', 'array'], items: { type: 'string' }, maxLength: 100 },
+    tag: TAG_FILTER,
     q: {
       type: 'string',
       maxLength: 500,
@@ -275,7 +305,7 @@ const listQuery = {
     },
     priorityMin: { type: 'integer', minimum: 1, maximum: 5 },
     sort: { enum: ['name', 'id', 'manual'], default: 'name' },
-    effective: { type: ['string', 'array'], items: { type: 'string' } },
+    effective: EFFECTIVE_FILTER,
     include: {
       type: 'string',
       maxLength: 200,
@@ -300,7 +330,7 @@ const treeQuery = {
     // array form failed validation and `?kind=device&kind=sensor` was a 400, even though the
     // handler has always called `asArray` on it. Found by `M-15`, which needed the same shape.
     kind: KIND_FILTER,
-    effective: { type: ['string', 'array'], items: { type: 'string' } },
+    effective: EFFECTIVE_FILTER,
   },
 } as const;
 
