@@ -12638,6 +12638,49 @@ because each is a decision rather than a defect:
       differ, or keep the channel's) with an M-17 scenario test over notification and summary
       bodies, since it changes notification text for every sensor.
 
+- [ ] **P-346 — the last hand-written polls and helpers in the tests** · XS · P-330 · Found
+      2026-10-09 in `P-330`. Three inline polls with their own deadlines (`flat-names.test.ts`,
+      `hardening.test.ts`, `migrator.test.ts`), about fifteen local `until`/`waitUntil` helpers in
+      probe and sensors, state-stream's hand-written `closed()` race, `ssh-session.test.ts`'s own
+      `within` with its arguments in another order, and rule 22 still placing `within` in
+      `state-stream.test.ts`. **Done when** they use each package's shared helper and rule 22 names
+      where the helpers live.
+
+- [ ] **P-347 — the `tag` and `effective` filters are only half bounded** · XS · P-337 · Found
+      2026-10-09 in `P-337`. A single `tag` is limited to 100 characters, but the array form has no
+      per-element `maxLength` or `maxItems`, and `effective` has no bounds in either form. **Done
+      when** both forms are bounded alike (a validation change, said in the outcome), with route
+      tests.
+
+- [ ] **P-348 — a database sensor's `extract` key can take a built-in channel's name** · XS ·
+      P-320 · Found 2026-10-09 in `P-320`. The schema (`^[A-Za-z0-9_.-]+$`) accepts `value`, `rows`,
+      `queryTime` or `connectTime`, which gives two readings under one key in one result and a
+      key `dbChannels` declares twice. **Done when** those names are reserved by the schema, with a
+      test, and existing sensors that use one are named in the outcome.
+
+- [ ] **P-349 — `exe.script.advanced` with `primaryChannel` `runtime` declares it twice** · XS ·
+      P-320 · Found 2026-10-09 in `P-320`. `channels()` declares `runtime` twice and `execute` drops
+      the script's `runtime` for its own. **Done when** the name is refused or the two are told
+      apart, with a test.
+
+- [ ] **P-350 — nothing makes a new sensor type consider `declaresEveryChannel`** · XS · P-320 ·
+      Found 2026-10-09 in `P-320`. **Done when** the catalogue (or a test) requires each type to
+      set the flag or be on an explicit "keys from what it reads" list with a reason.
+
+- [ ] **P-351 — about fifteen more fixed-value response strings have no enum** · S · P-342 · Found
+      2026-10-09 in `P-342`. `actor.kind`, `dependency.masterState`, `objectKind` (audit,
+      credentials), `acknowledgedBy.kind`, credentials `kind`, `DELETE /objects/{id}` `kind`,
+      reports `adjustments[].kind` and `visible[].kind`, discovery plan `items[].kind`; check whether
+      `adjustments[].reason` and `skew.reason` are free text first. **Done when** each fixed set is
+      an `enum` from one constant, with P-335's serialise-every-value test.
+
+- [ ] **P-352 — trigger kinds are open-ended strings** · XS · P-342 · Found 2026-10-09 in `P-342`.
+      `triggerKind` on notification requests, trigger `kind` on the trigger routes and
+      `used-by` `triggerKind` have no CHECK, and P-139 lists unknown kinds after a downgrade; the
+      log entry's `status` TS type is still `string`. **Done when** decided (a CHECK and an enum, or
+      open by design with a description), and the `status` type derived from
+      `NOTIFICATION_STATUSES`.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -24107,6 +24150,15 @@ because each is a decision rather than a defect:
         Move or a Remove: a 400 naming `steps.1.path` stays on Step 2 after Step 2 moves up, until
         the next save clears it. `replacing` is keyed by path as well, but cannot meet an entry:
         the catalogue refuses a `writeOnly` under `items`.
+
+- [ ] **U-50 — a server problem stays with the position after a Move** · XS · U-49 · Found
+      2026-10-09 in `U-49`. Server problems are keyed by path in each caller (ParamsForm, AddSensor,
+      CredentialsPanel), so a 400 naming `steps.1.path` stays on Step 2 after Step 2 moves up.
+      **Done when** they move with their entry via `movedPaths`, with a test.
+
+- [ ] **U-51 — a refused setting does not show its correlation id** · XS · U-48 · Found
+      2026-10-09 in `U-48`. ParamsForm shows it; SettingsPanel shows the message only. **Done when**
+      it does, with a test.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
