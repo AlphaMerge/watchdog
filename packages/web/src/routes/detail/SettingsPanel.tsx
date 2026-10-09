@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { ApiError, send } from '../../api/client';
 import type { SettingSource, SettingView } from '../../api/types';
 import { Empty } from '../../components/Panels';
-import { SchemaControl } from '../../forms/Control';
+import { ProblemRegion, SchemaControl } from '../../forms/Control';
 import { labelFor } from '../../forms/schema';
 import { problemsFor } from '../../forms/validate';
 import { fieldFor } from './model';
@@ -132,90 +132,92 @@ function Setting({
   };
 
   return (
-    <div className="space-y-1.5 border border-border px-3 py-2">
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <label htmlFor={id} className="text-sm font-medium text-text">
-          {labelFor(setting.key.slice(prefix.length + 1))}
-        </label>
-        <span className="font-mono text-xs text-text-muted">{setting.key}</span>
-        <Origin source={setting.effective.source} ancestors={ancestors} />
-      </div>
+    <div className="border border-border px-3 py-2">
+      <div className="space-y-1.5">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <label htmlFor={id} className="text-sm font-medium text-text">
+            {labelFor(setting.key.slice(prefix.length + 1))}
+          </label>
+          <span className="font-mono text-xs text-text-muted">{setting.key}</span>
+          <Origin source={setting.effective.source} ancestors={ancestors} />
+        </div>
 
-      <p className="text-xs text-text-muted">{setting.description}</p>
+        <p className="text-xs text-text-muted">{setting.description}</p>
 
-      <div className="flex flex-wrap items-center gap-3">
-        <label className="flex min-h-6 items-center gap-1.5 text-xs text-text-muted">
-          <input
-            type="checkbox"
-            checked={overridden}
-            disabled={busy}
-            onChange={(event) => {
-              override(event.target.checked);
-            }}
-          />
-          Override here
-        </label>
-
-        {overridden ? (
-          <>
-            <SchemaControl
-              id={id}
-              field={field}
-              value={draft}
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex min-h-6 items-center gap-1.5 text-xs text-text-muted">
+            <input
+              type="checkbox"
+              checked={overridden}
               disabled={busy}
-              describedBy=""
-              invalid={problems.length > 0}
-              onValue={setDraft}
-              onBlur={() => undefined}
-            />
-            <button
-              type="button"
-              disabled={busy || !dirty || problems.length > 0}
-              onClick={() => {
-                run(() =>
-                  send('PUT', `/objects/${String(objectId)}/settings/${setting.key}`, {
-                    value: draft,
-                  }),
-                );
+              onChange={(event) => {
+                override(event.target.checked);
               }}
-              className="border border-accent px-2 py-1 text-xs text-accent disabled:opacity-40"
-            >
-              {busy ? 'Saving…' : 'Save'}
-            </button>
-          </>
-        ) : (
-          // Disabled rather than absent: the value is the fact an operator came to read, and
-          // hiding it behind the toggle would make them turn the toggle on to find out what they
-          // are about to override.
-          <>
-            <SchemaControl
-              id={id}
-              field={field}
-              value={setting.inherited.value}
-              disabled
-              describedBy=""
-              invalid={false}
-              onValue={() => undefined}
-              onBlur={() => undefined}
             />
-            <span className="text-xs text-text-muted">inherited</span>
-          </>
+            Override here
+          </label>
+
+          {overridden ? (
+            <>
+              <SchemaControl
+                id={id}
+                field={field}
+                value={draft}
+                disabled={busy}
+                describedBy={problems.length > 0 ? `${id}-problem` : ''}
+                invalid={problems.length > 0}
+                onValue={setDraft}
+                onBlur={() => undefined}
+              />
+              <button
+                type="button"
+                disabled={busy || !dirty || problems.length > 0}
+                onClick={() => {
+                  run(() =>
+                    send('PUT', `/objects/${String(objectId)}/settings/${setting.key}`, {
+                      value: draft,
+                    }),
+                  );
+                }}
+                className="border border-accent px-2 py-1 text-xs text-accent disabled:opacity-40"
+              >
+                {busy ? 'Saving…' : 'Save'}
+              </button>
+            </>
+          ) : (
+            // Disabled rather than absent: the value is the fact an operator came to read, and
+            // hiding it behind the toggle would make them turn the toggle on to find out what they
+            // are about to override.
+            <>
+              <SchemaControl
+                id={id}
+                field={field}
+                value={setting.inherited.value}
+                disabled
+                describedBy=""
+                invalid={false}
+                onValue={() => undefined}
+                onBlur={() => undefined}
+              />
+              <span className="text-xs text-text-muted">inherited</span>
+            </>
+          )}
+        </div>
+
+        {overridden && (
+          <p className="text-xs text-text-muted">
+            Reverting restores <span className="font-mono">{show(setting.inherited.value)}</span>,
+            from {nameOf(setting.inherited.source, ancestors)}.
+          </p>
         )}
       </div>
 
-      {overridden && (
-        <p className="text-xs text-text-muted">
-          Reverting restores <span className="font-mono">{show(setting.inherited.value)}</span>,
-          from {nameOf(setting.inherited.source, ancestors)}.
-        </p>
-      )}
-
-      {problems.length > 0 && (
-        <p className="text-xs text-down-fg">
-          {problems.map((problem) => problem.message).join('; ')}
-        </p>
-      )}
-      {failed !== null && <p className="text-xs text-down-fg">{failed.message}</p>}
+      {/* **Always there, a polite live region, tied to the control only while it says
+          something** (`U-46`, as `U-41` did for the parameter form). A problem appears as the
+          value is typed, and a region rendered only with its text already in it is not
+          announced. Outside the stack above, so it takes no space while empty (`U-45`). */}
+      <ProblemRegion id={`${id}-problem`} problems={problems} />
+      {failed !== null && <p className="mt-1.5 text-xs text-down-fg">{failed.message}</p>}
     </div>
   );
 }

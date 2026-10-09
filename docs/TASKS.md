@@ -23700,16 +23700,71 @@ because each is a decision rather than a defect:
         rendered only with a problem, is not a live region, and is not tied to its control by
         `aria-describedby`.
 
-- [ ] **U-46 — the inheritable-settings problem is not announced or tied to its control** · XS ·
+- [x] **U-46 — the inheritable-settings problem is not announced or tied to its control** · XS ·
       U-41 · Found 2026-10-09 in `U-45`. In `routes/detail/SettingsPanel.tsx` the problem paragraph
       is rendered only when there is a problem, is not a live region and has `describedBy=""` — the
       WCAG 4.1.3 gap U-41 closed in `SchemaForm`. **Done when** it is a polite live region present
       before its text changes and tied by `aria-describedby` while it holds a problem, with tests.
 
-- [ ] **U-47 — a cleared JSON entry shows `""` after it is remounted** · XS · U-44 · Found
+      **U-46 outcome. One `ProblemRegion`, extracted from `SchemaForm`, now under each setting too.**
+      - **Extracted, not copied.** `ProblemRegion` (in `forms/Control.tsx`, beside the control it
+        belongs to) is the paragraph `U-41` and `U-45` built: always rendered, `aria-live="polite"`,
+        `mt-1 empty:mt-0`, never hidden. Its doc says what the caller owes it: naming it in
+        `aria-describedby` and setting `aria-invalid` only while it holds a problem, and keeping it
+        out of any `space-y-*` stack. `SchemaForm` renders it in place of its own `<p>`, unchanged
+        in markup, and its suites stay green.
+      - **In `SettingsPanel`** the override control is described by the region while `problems` is
+        non-empty and invalid with it, as before. The label, description, control row and "Reverting
+        restores…" note became their own `space-y-1.5` stack, so the empty region adds no gap; the
+        save-failure line after it took `mt-1.5` to keep its spacing. The region is rendered for an
+        inherited setting too, so it already exists when the override is turned on and typed into.
+      - **Tests.** `settings-panel.test.tsx` (new, rendered): the region exists empty and polite with
+        the control undescribed; typing 10 under `minimum: 30` puts *must be 30 or more* in that same
+        node, makes the control `aria-invalid` and described by it, and holds Save back; typing 45
+        empties the same node and takes both away. A 2-row table (overridden, inherited): `:empty`,
+        `mt-1` and `empty:mt-0`, no `space-y-*` parent, polite, not hidden in any of four ways.
+        Mutations, each failing: rendered only with a problem 3; `describedBy=""` back 1; the region
+        put back inside the stack 2.
+      - **Not done.** The save-failure line (`failed`) is still rendered only on failure and is not a
+        live region; focus is on Save when the core refuses, so the refusal is not announced.
+
+- [x] **U-47 — a cleared JSON entry shows `""` after it is remounted** · XS · U-44 · Found
       2026-10-09 in `U-44`. `JsonBox` sets its text from the value only on mount, so a cleared
       entry moved or remounted shows `""`, which the operator never typed. **Done when** a cleared
       entry shows an empty box after a remount, with a test.
+
+      **U-47 outcome. A JSON box's text follows its value, and an entry's `''` is shown empty.**
+      - **Worse than found: a Move did not remount at all.** Entries are keyed by position
+        (`U-12`), so Move and Remove keep each box mounted and hand it another entry's value; the
+        text, set only on mount, stayed where it was. After a Move the boxes showed the entries in
+        the old order while the form held and would save the new one; after removing Row 1, Row 1
+        still showed the removed entry. The tests written first failed that way on `e7a02393`.
+      - **The fix.** `JsonBox` remembers the value its text stands for — what it was built from, or
+        what the text last parsed to — and when the value it is given is a different one (same
+        reference or same JSON is the same), it rebuilds the text in the same render (React's
+        adjust-state-while-rendering pattern) and drops "not valid JSON". What is typed, valid in
+        the operator's own spelling or unparseable, is kept through any render that leaves the
+        value alone, as before.
+      - **Decided: `''` in an entry is a cleared box, shown empty; anywhere else it is the string,
+        shown `""`.** An entry's clear writes `''` (`U-41`), and typing `""` into a JSON entry
+        stores the same `''`, so an entry cannot hold the JSON string apart from a clear; `U-44`
+        already judges it as emptied (*cannot be empty*), and showing it empty shows it as the form
+        treats it. Outside an entry a clear removes the value, so `''` there is only ever the
+        string. `jsonTextOf(value, entry)` says this, from `FieldModel.entry`, which `SchemaControl`
+        now passes down; `SettingsPanel`'s fields are never entries.
+      - **Tests.** `repeating-field.test.tsx`, 6 rendered: a cleared entry moved up shows an empty
+        box, the other box shows the entry now beside it, and leaving it says *cannot be empty* and
+        is `aria-invalid`; a form mounted afresh on the stored `['…', '']` shows the box empty and
+        says the same on leaving; Row 1 after a Remove above shows the entry now there; unparseable
+        text and a valid `{"b":3}` survive a render of the other entry unchanged; `""` typed into an
+        entry stays as typed and is judged emptied; a non-entry JSON field holding `''` shows `""`,
+        and clearing it removes the key. Mutations, each failing: no resync 2; `''` in an entry
+        serialised 2; the typed value not remembered 2; `''` shown empty outside an entry too 1.
+      - **Not done.** `touched` is keyed by path, so a problem on an entry stays with the position
+        through a Move: the moved cleared entry says nothing until it is left again. Unparseable text
+        in a box is replaced by the new entry's value on a Move or Remove, since it belongs to the
+        entry that moved. A JSON entry whose schema takes the string `""` (an untyped `items`) cannot
+        be saved holding it; no shipped type has one.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

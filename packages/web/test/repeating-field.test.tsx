@@ -492,3 +492,90 @@ describe('the problem region, while it says nothing (U-45)', () => {
     expect(region.matches(':empty')).toBe(true);
   });
 });
+
+describe('a JSON entry’s text follows its value (U-47)', () => {
+  // An object entry without properties is a JSON box per entry. Entries are keyed by position, so
+  // a Move or a Remove keeps every box mounted and hands it another entry's value; and a form
+  // mounted afresh builds each box's text from what is stored.
+  const ROWS: JsonSchema = {
+    type: 'object',
+    properties: {
+      rows: { type: 'array', title: 'Rows', items: { type: 'object', title: 'Row' } },
+    },
+  };
+  const EMPTY = 'cannot be empty: type a value, or remove the entry';
+  const box = (name: string): HTMLTextAreaElement =>
+    screen.getByRole<HTMLTextAreaElement>('textbox', { name });
+  const problemOf = (name: string): string | null | undefined =>
+    document.getElementById(`${box(name).id}-problem`)?.textContent;
+  const shown = (value: unknown): string => JSON.stringify(value, null, 2);
+
+  it('shows a cleared entry, moved, as an empty box, and still says why', () => {
+    render(<Harness schema={ROWS} initial={{ rows: [{ a: 1 }, { b: 2 }] }} />);
+    fireEvent.change(box('Row 2'), { target: { value: '' } });
+    fireEvent.blur(box('Row 2'));
+    expect(problemOf('Row 2')).toBe(EMPTY);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Move Row 2 up' }));
+    expect(stored()).toStrictEqual({ rows: ['', { a: 1 }] });
+    // Not `""`, which the operator never typed; and the other box shows the entry now beside it.
+    expect(box('Row 1').value).toBe('');
+    expect(box('Row 2').value).toBe(shown({ a: 1 }));
+
+    fireEvent.blur(box('Row 1'));
+    expect(problemOf('Row 1')).toBe(EMPTY);
+    expect(box('Row 1').getAttribute('aria-invalid')).toBe('true');
+  });
+
+  it('shows a cleared entry as an empty box in a form mounted afresh', () => {
+    const first = render(<Harness schema={ROWS} initial={{ rows: [{ a: 1 }, { b: 2 }] }} />);
+    fireEvent.change(box('Row 2'), { target: { value: '' } });
+    const held = stored() as Record<string, unknown>;
+    expect(held).toStrictEqual({ rows: [{ a: 1 }, ''] });
+    first.unmount();
+
+    render(<Harness schema={ROWS} initial={held} />);
+    expect(box('Row 1').value).toBe(shown({ a: 1 }));
+    expect(box('Row 2').value).toBe('');
+    fireEvent.blur(box('Row 2'));
+    expect(problemOf('Row 2')).toBe(EMPTY);
+  });
+
+  it('shows the entry now at its position after a Remove above it', () => {
+    render(<Harness schema={ROWS} initial={{ rows: [{ a: 1 }, { b: 2 }] }} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Row 1' }));
+    expect(stored()).toStrictEqual({ rows: [{ b: 2 }] });
+    expect(box('Row 1').value).toBe(shown({ b: 2 }));
+  });
+
+  it('keeps what is typed, valid or not, through a render that leaves its value alone', () => {
+    render(<Harness schema={ROWS} initial={{ rows: [{ a: 1 }, { b: 2 }] }} />);
+    // Unparseable: the value stays the last valid one, and the text is the operator's.
+    fireEvent.change(box('Row 1'), { target: { value: '{"a": ' } });
+    // Valid, in a spelling of its own: kept as typed, not re-serialised.
+    fireEvent.change(box('Row 2'), { target: { value: '{"b":3}' } });
+    expect(stored()).toStrictEqual({ rows: [{ a: 1 }, { b: 3 }] });
+    expect(box('Row 1').value).toBe('{"a": ');
+    expect(box('Row 2').value).toBe('{"b":3}');
+  });
+
+  it('takes `""` typed into an entry as the cleared value it stores, and keeps the text', () => {
+    // An entry cannot hold the JSON string "" apart from a clear: both store `''` (`U-41`), and
+    // `U-44` judges an entry's `''` as emptied. The text stays as typed while it is typed.
+    render(<Harness schema={ROWS} initial={{ rows: [{ a: 1 }] }} />);
+    fireEvent.change(box('Row 1'), { target: { value: '""' } });
+    fireEvent.blur(box('Row 1'));
+    expect(stored()).toStrictEqual({ rows: [''] });
+    expect(box('Row 1').value).toBe('""');
+    expect(problemOf('Row 1')).toBe(EMPTY);
+  });
+
+  it('shows `""` outside an entry, where a clear removes the value and `\'\'` is a string', () => {
+    const schema: JsonSchema = { type: 'object', properties: { extra: { title: 'Extra' } } };
+    render(<Harness schema={schema} initial={{ extra: '' }} />);
+    expect(box('Extra').value).toBe('""');
+    fireEvent.change(box('Extra'), { target: { value: '' } });
+    expect(stored()).toStrictEqual({});
+    expect(box('Extra').value).toBe('');
+  });
+});

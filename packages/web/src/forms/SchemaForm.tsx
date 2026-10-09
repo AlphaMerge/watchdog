@@ -16,7 +16,7 @@ import {
   type FieldModel,
   type JsonSchema,
 } from './schema';
-import { SchemaControl } from './Control';
+import { ProblemRegion, SchemaControl } from './Control';
 import { problemsFor, type FieldProblem } from './validate';
 
 export interface SchemaFormProps {
@@ -271,19 +271,10 @@ function Control({
 
       {/* **Always there, and a polite live region** (`U-41`, WCAG 4.1.3). A problem appears when
           the field is left, by which time focus is on the next control and the description tied
-          to this one is not read again; a live region is announced only if it existed before
-          its text changed, so it is rendered empty rather than not at all. Named by
-          `aria-describedby` only while it says something.
-
-          **Empty, it takes no space** (`U-45`). Inside `space-y-1` it gave every control a 4px
-          gap for a sentence nobody could see. So it sits outside that stack and brings its own
-          `mt-1`, which `empty:mt-0` takes away while it has no children at all (React renders no
-          text node for `''`; the test checks `:empty`). An empty block has no line box, so no
-          height either. Never `hidden` or `display: none`: either takes it out of the
-          accessibility tree, and a live region must be in it before its text changes. */}
-      <p id={`${id}-problem`} className="mt-1 text-xs text-down-fg empty:mt-0" aria-live="polite">
-        {problems.map((problem) => problem.message).join('; ')}
-      </p>
+          to this one is not read again. Named by `aria-describedby` only while it says
+          something. Outside the `space-y-1` stack above, which would give it a gap while empty
+          (`U-45`); `ProblemRegion` says why it is never hidden. */}
+      <ProblemRegion id={`${id}-problem`} problems={problems} />
     </div>
   );
 }

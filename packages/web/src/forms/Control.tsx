@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { FieldModel } from './schema';
+import type { FieldProblem } from './validate';
 
 /**
  * One control for one schema-described value (`U-08`).
@@ -155,7 +156,9 @@ export function SchemaControl({
   }
 
   if (field.kind === 'json') {
-    return <JsonBox {...shared} value={value} border={border} onValue={onValue} />;
+    return (
+      <JsonBox {...shared} value={value} entry={field.entry} border={border} onValue={onValue} />
+    );
   }
 
   return (
@@ -172,27 +175,93 @@ export function SchemaControl({
 }
 
 /**
+ * A control's problem: always there, a polite live region, taking no space while it says nothing
+ * (`U-41`, `U-45`). Shared by the parameter form and the inheritable settings (`U-46`).
+ *
+ * **Always there.** A problem appears when the field is left, or as a setting is typed, and a
+ * live region is announced only if it existed before its text changed (WCAG 4.1.3) — so it is
+ * rendered empty rather than not at all. The caller names it in the control's `aria-describedby`
+ * and sets `aria-invalid` only while it holds a problem.
+ *
+ * **Empty, it takes no space.** Its own `mt-1`, which `empty:mt-0` takes away while it has no
+ * children at all (React renders no text node for `''`), and an empty block has no line box. The
+ * caller puts it **outside** any `space-y-*` stack: Tailwind 4 gives every child of one but the
+ * last a bottom margin, which would bring the gap back. Never `hidden` or `display: none`: either
+ * takes it out of the accessibility tree, and a live region must be in it before its text changes.
+ */
+export function ProblemRegion({
+  id,
+  problems,
+}: {
+  id: string;
+  problems: readonly FieldProblem[];
+}): React.JSX.Element {
+  return (
+    <p id={id} className="mt-1 text-xs text-down-fg empty:mt-0" aria-live="polite">
+      {problems.map((problem) => problem.message).join('; ')}
+    </p>
+  );
+}
+
+/**
+ * A JSON box's text for a value it is given (`U-47`).
+ *
+ * **In an entry, `''` is an emptied box and is shown as one.** A cleared entry holds `''` (`U-41`)
+ * because an entry cannot be absent, and serialising it would show `""`, which nobody typed.
+ * The JSON string `""` typed into an entry stores that same `''`: an entry cannot hold it apart
+ * from a clear, and `U-44` already judges an entry's `''` as emptied ("cannot be empty"), so
+ * showing it as empty is showing it as the form treats it. **Anywhere else `''` is only ever the
+ * string**, since clearing a box that is not an entry removes the value (`undefined`), so it is
+ * shown as `""`.
+ */
+function jsonTextOf(value: unknown, entry: boolean): string {
+  if (value === undefined || (entry && value === '')) return '';
+  return JSON.stringify(value, null, 2);
+}
+
+/** The same value for a JSON box's purposes: the same reference, or the same JSON. */
+function sameJson(a: unknown, b: unknown): boolean {
+  return Object.is(a, b) || JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
  * The fallback for a parameter these controls cannot draw.
  *
  * Its existence is the point: `params` is replaced wholesale on save, so a form that rendered
  * nothing for an array or a free-form object would delete it the moment somebody pressed Save.
  * The operator gets the value and can edit it; unparseable text is left in the box rather than
  * discarded, so a half-finished edit is not thrown away by a re-render.
+ *
+ * **The text follows the value whenever the value changes from outside** (`U-47`). The box keeps
+ * its own text — what was typed, in the operator's spelling, valid or not — for as long as the
+ * value it was given is the one that text stands for. A different value is a different entry:
+ * array entries are keyed by position, so a Move or a Remove hands a mounted box another entry's
+ * value, and a box that kept its text would show one entry while the form saved another.
  */
 function JsonBox({
   value,
+  entry,
   border,
   onValue,
   ...shared
 }: {
   value: unknown;
+  /** An entry of an array (`FieldModel.entry`), whose `''` is a cleared box (`U-41`). */
+  entry: boolean;
   border: string;
   onValue: (next: unknown) => void;
 } & Record<string, unknown>): React.JSX.Element {
-  const [text, setText] = useState(() =>
-    value === undefined ? '' : JSON.stringify(value, null, 2),
-  );
+  const [text, setText] = useState(() => jsonTextOf(value, entry));
   const [broken, setBroken] = useState(false);
+  // The value `text` stands for: what it was built from, or what it last parsed to.
+  const [stands, setStands] = useState<unknown>(value);
+  if (!sameJson(stands, value)) {
+    // React's adjust-state-while-rendering pattern: the render this happens in is thrown away
+    // and redone with the new text, so the box never paints the old entry's text over the value.
+    setStands(value);
+    setText(jsonTextOf(value, entry));
+    setBroken(false);
+  }
 
   return (
     <div className="space-y-1">
@@ -204,11 +273,14 @@ function JsonBox({
           setText(event.target.value);
           if (event.target.value.trim() === '') {
             setBroken(false);
+            setStands(undefined);
             onValue(undefined);
             return;
           }
           try {
-            onValue(JSON.parse(event.target.value));
+            const parsed: unknown = JSON.parse(event.target.value);
+            setStands(parsed);
+            onValue(parsed);
             setBroken(false);
           } catch {
             setBroken(true);
