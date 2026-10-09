@@ -1217,10 +1217,10 @@ describe('a pattern says in words what it wants (U-53)', () => {
     });
     assert.equal(result.valid, false);
     assert.deepEqual(result.problems, [
-      { path: '/key', message: SAID },
-      { path: '/extract/1/key', message: 'must be a word' },
+      { path: '/key', message: SAID, keyword: 'pattern' },
+      { path: '/extract/1/key', message: 'must be a word', keyword: 'pattern' },
       // Every other keyword keeps Ajv's own words.
-      { path: '/free', message: 'must NOT have fewer than 3 characters' },
+      { path: '/free', message: 'must NOT have fewer than 3 characters', keyword: 'minLength' },
     ]);
     assert.equal(c.validate('icmp.ping', { key: 'lag', extract: [{ key: 'ok' }] }).valid, true);
   });
