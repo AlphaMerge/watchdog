@@ -57,7 +57,7 @@ import { sshLoad } from '../src/types/ssh-load.js';
 import { tlsCertificate } from '../src/types/tls-certificate.js';
 import { tlsSecurity } from '../src/types/tls-security.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
-import { until } from './support/within.js';
+import { pollWithin } from './support/within.js';
 
 /**
  * The probe's target policy on every transport that connects to a device (`A-57`).
@@ -1193,7 +1193,7 @@ describe('TCP port', () => {
     assert.ok((valueOf(execution, 'connectTime') ?? -1) >= 0);
     assert.equal(dns.calls.length, 1);
     // The far end counts a connection when it accepts it, which is after the near end has it.
-    await until(3_000, 'the listener’s accept', () => listener.connections() === earlier + 1);
+    await pollWithin(3_000, 'the listener’s accept', () => listener.connections() === earlier + 1);
   });
 
   it('passes a first address that refuses the connection', async () => {

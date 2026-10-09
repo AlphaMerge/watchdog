@@ -28,7 +28,7 @@ import { mailSmtp } from '../src/types/mail-smtp.js';
 import { portTcp } from '../src/types/port-tcp.js';
 import { sshLoad } from '../src/types/ssh-load.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
-import { until } from './support/within.js';
+import { pollWithin } from './support/within.js';
 
 /**
  * One device's exception to its probe's target policy (`A-64`).
@@ -504,13 +504,13 @@ describe('TCP port, under `private`', () => {
     const execution = await execute(portTcp, dns, { params: params(), exception: ['127.0.0.1'] });
     assert.ok((execution.channels.find((one) => one.key === 'connectTime')?.value ?? -1) >= 0);
     assert.deepEqual(dns.calls, [NAME]);
-    await until(3_000, 'the listener’s accept', () => listener.connections() === 1);
+    await pollWithin(3_000, 'the listener’s accept', () => listener.connections() === 1);
     await execute(portTcp, answering(), {
       params: params(),
       host: '127.0.0.1',
       exception: ['127.0.0.1'],
     });
-    await until(3_000, 'the second accept', () => listener.connections() === 2);
+    await pollWithin(3_000, 'the second accept', () => listener.connections() === 2);
   });
 });
 

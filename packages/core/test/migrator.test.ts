@@ -2216,7 +2216,7 @@ describe(
         // Until three reports, however slow the machine: the count is the claim, not the timing.
         await pollWithin(
           10_000,
-          'three reports: one at once and one on every interval',
+          () => `three reports, one at once and one on every interval; got ${String(waits.length)}`,
           () => waits.length >= 3,
           25,
         );

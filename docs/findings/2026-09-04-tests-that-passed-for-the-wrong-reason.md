@@ -1160,10 +1160,12 @@ anything — and that structure, not more care, is what found them.
     test: nothing reports anything. Two drafts of `A-30`'s socket-bound test waited, unbounded,
     for the far end to close, and each held a VM container for hours. Every wait on the far end of
     a socket or a process gets a bound of its own, shorter than the test's — `within` in each
-    package's `test/support/within.ts` (core, probe, sensors) — so a misbehaving peer fails the
-    test *and* reaches the cleanup. A polling loop goes through the poller beside it, `pollWithin`
-    in core and probe and `until` in sensors (`P-325`, `P-330`, `P-346`): `within` rejects at its
-    bound and leaves the loop it was handed running, a query or a timer at a time.
+    package's `test/support/within.ts` (core, probe, sensors, simulators) — so a misbehaving peer
+    fails the test *and* reaches the cleanup. A polling loop goes through `pollWithin` beside it,
+    the same name and signature in all four (`P-325`, `P-330`, `P-346`, `P-354`, `P-355`):
+    `within` rejects at its bound and leaves the loop it was handed running, a query or a timer at
+    a time. Either takes its `what` as a function when the failure should say what was seen by
+    the bound — "3 snapshot frames; got 1" — and not only what was wanted (`P-356`).
 23. **Call a shell function in its test the way its callers call it.** Entry 45: `set -e` is off
     for everything under an `if`, a `!`, or the left side of `&&` or `||`, functions and the
     subshells inside them included, even where they set it again. A function that relies on it

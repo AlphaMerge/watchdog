@@ -12967,23 +12967,67 @@ because each is a decision rather than a defect:
         from both forms failed its test (1 failed). The same for `effective` (1 failed).
         `objectFields` was a refactor with equal values, so there was nothing to mutate.
 
-- [ ] **P-354 — the simulators package keeps its own `within`** · XS · P-346 · Found 2026-10-09
+- [x] **P-354 — the simulators package keeps its own `within`** · XS · P-346 · Found 2026-10-09
       in `P-346`. `simulators/test/ssh-server.test.ts` has a local `within(promise, ms, what)`,
       the shape `P-346` removed from `ssh-session`, and the package has no
       `test/support/within.ts`. **Done when** the package has the shared helper and the file uses
       it, with rule 22 naming it.
 
-- [ ] **P-355 — the testing rule names one package's helper** · XS · P-346 · Found 2026-10-09 in
+      **P-354 outcome. The simulators package has `test/support/within.ts` with the core's
+      `within` and `pollWithin`, and its tests use nothing else.** Test code only.
+      - **`ssh-server.test.ts`:** the local `within(promise, ms, what)` is gone and its fifteen
+        calls take the shared order `(ms, what, promise)`, every one at its old 2 s. The failure
+        read "X did not happen within N ms"; it now reads "timed out after N ms waiting for X",
+        and the descriptions are reworded to follow "waiting for" ("the simulator stopping" is
+        "the simulator to stop"). The `P-257` case slept a fixed 50 ms after `stop()` before
+        reading what the connection recorded; it now polls until something is recorded, at 2 s,
+        and the claim on what that was is unchanged. The deliberate 50 ms busy-wait before
+        `stop()` holds the event loop on purpose and is not a wait; it stays.
+      - **`http-server.test.ts`:** both "shuts down" cases raced `stop()` against a 5 s timer
+        that resolved "still waiting" and then asserted on it. Each is now `within(5_000, …)`, in
+        a `try` whose `finally` aborts the hanging client or destroys the silent one, so the
+        order the comment requires (aborted only after the race is over) is kept and a hang still
+        reaches the cleanup.
+      - **Not changed:** `syslog-sender.test.ts`'s `settle()`, a fixed 120 ms sleep before
+        counting what arrived, is not a deadline or a poll; listed as a follow-up.
+
+- [x] **P-355 — the testing rule names one package's helper** · XS · P-346 · Found 2026-10-09 in
       `P-346`. CLAUDE.md's testing rule points at core's `test/support/within.ts` and says a poll
       goes through `pollWithin`; the sensors package calls its poller `until`. **Done when** one
       name is used in every package (renaming sensors' `until` to `pollWithin`, or the rule naming
       both), and CLAUDE.md and rule 22 agree.
 
-- [ ] **P-356 — three waits cannot say what they saw** · XS · P-346 · Found 2026-10-09 in `P-346`.
+      **P-355 outcome. `pollWithin` is the poller's name in core, probe, sensors and simulators,
+      with one signature.** Test code and docs only.
+      - **sensors:** `until(ms, what, predicate)` is now `pollWithin(ms, what, met, intervalMs =
+        20)`, the core's body: it takes an async predicate, and it stops asking at the bound by
+        an abort rather than a flag. Its interval was a fixed 10 ms and is now the core's 20 ms
+        default; no call site passes one. The 22 call sites in seven files (`exe-script`,
+        `ssh-sensors`, `ssh-session`, `syslog`, `target-policy-exception`,
+        `target-policy-transports`, `windows-transport`) changed name only.
+      - **Rule 22** names `within` and `pollWithin` in each package's `test/support/within.ts`,
+        all four packages, and the describable `what` from `P-356`. **CLAUDE.md**'s testing
+        bullet says each package's `test/support/within.ts` has `within` and `pollWithin`, where
+        it named the core's file alone; nothing else in it changed.
+
+- [x] **P-356 — three waits cannot say what they saw** · XS · P-346 · Found 2026-10-09 in `P-346`.
       `count` in `state-stream.test.ts` (it reports how many frames came) and `waitFor` in
       `object-visibility.test.ts` still hand-roll a deadline, and `migrator.test.ts`'s failure lost
       "got N" when it moved to `pollWithin`. **Done when** `pollWithin` takes an optional message
       callback evaluated at the bound, and the three use it.
+
+      **P-356 outcome. `what` may be a string or a `() => string`, asked once when the bound
+      passes, in `within` and `pollWithin` in all four packages.** Test code only. It is taken by
+      `within` too, since that is where the message is made; a description that throws still
+      fails the wait, saying so.
+      - **`state-stream`'s `count`** is `pollWithin` at its old 10 s and 10 ms. It failed with
+        "1 snapshot frames of 2"; it now fails with "timed out after 10000 ms waiting for 2
+        snapshot frames; got 1".
+      - **`object-visibility`'s `waitFor`** was event-driven, a `message` listener and its own
+        10 s timer. It is now `pollWithin` at 10 s, every 10 ms, failing with every frame seen
+        from `from` on, as before. It no longer needs the socket, and its 28 call sites lost that
+        argument.
+      - **`migrator`**'s three-reports wait says how many had come again: "…; got 2".
 
 - [ ] **P-357 — prettier gives two verdicts on `docs/TASKS.md`** · XS · U-50 · Found 2026-10-09
       in `U-50`. Run from the repo root it passes the file; run from `packages/web` it flags it,

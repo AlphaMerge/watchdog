@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { Socket } from 'node:net';
 import { after, before, describe, it } from 'node:test';
 import { HttpSimulator } from '../src/http-server.js';
+import { within } from './support/within.js';
 
 /**
  * The harness's own tests (`P-06`).
@@ -129,19 +130,14 @@ describe('the HTTP simulator', () => {
       // finds a server with nothing attached to it.
       await new Promise((resolve) => setTimeout(resolve, waitMs));
 
-      const stopped = await Promise.race([
-        hanging.stop().then(() => 'stopped'),
-        new Promise((resolve) => {
-          // Generous on purpose: the claim is that it does not hang, and a hang is unbounded, so
-          // a bigger number catches the defect just as surely and never fires on a busy machine.
-          setTimeout(() => {
-            resolve('still waiting');
-          }, 5_000).unref();
-        }),
-      ]);
-      controller.abort();
-      await pending;
-      assert.equal(stopped, 'stopped');
+      try {
+        // Generous on purpose: the claim is that it does not hang, and a hang is unbounded, so a
+        // bigger number catches the defect just as surely and never fires on a busy machine.
+        await within(5_000, 'the simulator to stop with a request hanging', hanging.stop());
+      } finally {
+        controller.abort();
+        await pending;
+      }
     });
   }
 
@@ -159,16 +155,11 @@ describe('the HTTP simulator', () => {
       idle.connect(port, '127.0.0.1');
     });
 
-    const stopped = await Promise.race([
-      hanging.stop().then(() => 'stopped'),
-      new Promise((resolve) => {
-        setTimeout(() => {
-          resolve('still waiting');
-        }, 5_000).unref();
-      }),
-    ]);
-    idle.destroy();
-    assert.equal(stopped, 'stopped');
+    try {
+      await within(5_000, 'the simulator to stop with a silent connection open', hanging.stop());
+    } finally {
+      idle.destroy();
+    }
   });
 
   it('resets the connection when told to, which is not a status code', async () => {

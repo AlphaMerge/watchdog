@@ -141,9 +141,9 @@ subsystem with a queue, a pool or a connection adds a metric to one of them.
 - Anything touching alarm volume needs a scenario test (see `M-17` in `TASKS.md`).
 - Performance claims need a measurement committed to the repo, not an assertion.
 - **A test's `timeout` fails it and does not stop it.** Give every wait on the far end of a
-  socket or process its own shorter bound (`within` in `packages/core/test/support/within.ts`),
-  and put `timeout` inside the container — `scripts/dev.sh "timeout 900 …"` — never around
-  `dev.sh`.
+  socket or process its own shorter bound (each package's `test/support/within.ts` has `within`
+  and `pollWithin`), and put `timeout` inside the container — `scripts/dev.sh "timeout 900 …"` —
+  never around `dev.sh`.
   A poll goes through `pollWithin` in the same file, since `within` alone does not stop a loop.
   Rule 22 in `docs/findings/2026-09-04-tests-that-passed-for-the-wrong-reason.md`.
 - **`npm test` is the unit suites; `npm run test:perf` is the measured budgets.** They are

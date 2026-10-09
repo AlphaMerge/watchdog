@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { connect, type Socket } from 'node:net';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { MuteSshServer, TestSshServer } from '../src/ssh-server.js';
+import { pollWithin, within } from './support/within.js';
 
 /**
  * The SSH simulator's silent mode (`A-73`).
@@ -13,23 +14,6 @@ import { MuteSshServer, TestSshServer } from '../src/ssh-server.js';
  * attached. That a real SSH client waits out its connect timeout against it is `A-65`'s cases in
  * `packages/sensors/test/ssh-session.test.ts`, which run on this.
  */
-
-/** `promise`, or a failure naming `what` once `ms` have passed. */
-async function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error(`${what} did not happen within ${String(ms)} ms`));
-        }, ms);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -43,7 +27,7 @@ describe('the SSH simulator that accepts and never speaks', () => {
 
   afterEach(async () => {
     for (const client of clients.splice(0)) client.destroy();
-    await within(mute.stop(), 2_000, 'the simulator stopping');
+    await within(2_000, 'the simulator to stop', mute.stop());
   });
 
   /** A TCP client, connected, with everything it is sent collected. */
@@ -54,13 +38,13 @@ describe('the SSH simulator that accepts and never speaks', () => {
     socket.on('data', (chunk: Buffer) => heard.push(chunk));
     socket.on('error', () => undefined);
     await within(
+      2_000,
+      'the client to connect',
       new Promise<void>((resolve) => {
         socket.once('connect', () => {
           resolve();
         });
       }),
-      2_000,
-      'connecting',
     );
     return { socket, heard };
   }
@@ -70,7 +54,7 @@ describe('the SSH simulator that accepts and never speaks', () => {
     assert.ok(mute.port > 0);
     const arriving = mute.next();
     const { socket, heard } = await dial();
-    await within(arriving, 2_000, 'the simulator accepting');
+    await within(2_000, 'the simulator to accept', arriving);
     assert.equal(mute.connections, 1);
     assert.equal(mute.open, 1);
 
@@ -84,11 +68,11 @@ describe('the SSH simulator that accepts and never speaks', () => {
   it('hears the client go, and hands over the connection that was asked for', async () => {
     const first = mute.next();
     const one = await dial();
-    const accepted = await within(first, 2_000, 'the first connection');
+    const accepted = await within(2_000, 'the first connection', first);
     // Asked for after the first was accepted: this is the second, not the first again.
     const second = mute.next();
     const two = await dial();
-    const other = await within(second, 2_000, 'the second connection');
+    const other = await within(2_000, 'the second connection', second);
     assert.notEqual(other.socket, accepted.socket);
     assert.equal(mute.connections, 2);
 
@@ -96,7 +80,7 @@ describe('the SSH simulator that accepts and never speaks', () => {
     // not read never sees the end behind it.
     one.socket.write('x'.repeat(4_096));
     one.socket.end();
-    await within(accepted.closed, 2_000, 'the simulator hearing the first client go');
+    await within(2_000, 'the simulator to hear the first client go', accepted.closed);
     assert.equal(mute.open, 1);
     assert.equal(two.socket.destroyed, false, 'the other connection is untouched');
   });
@@ -104,7 +88,7 @@ describe('the SSH simulator that accepts and never speaks', () => {
   it('stops with a client still attached, and the port stops answering', async () => {
     const arriving = mute.next();
     const { socket } = await dial();
-    const { closed } = await within(arriving, 2_000, 'the simulator accepting');
+    const { closed } = await within(2_000, 'the simulator to accept', arriving);
     const gone = new Promise<void>((resolve) => {
       socket.once('close', () => {
         resolve();
@@ -112,12 +96,14 @@ describe('the SSH simulator that accepts and never speaks', () => {
     });
     const { port, host } = mute;
 
-    await within(mute.stop(), 2_000, 'stopping with a client attached');
-    await within(closed, 2_000, 'the connection closing at the simulator');
-    await within(gone, 2_000, 'the client being hung up on');
+    await within(2_000, 'the simulator to stop with a client attached', mute.stop());
+    await within(2_000, 'the connection to close at the simulator', closed);
+    await within(2_000, 'the client to be hung up on', gone);
     assert.equal(mute.open, 0);
 
     const refused = await within(
+      2_000,
+      'the port to answer the second dial',
       new Promise<string>((resolve) => {
         const again = connect(port, host);
         again.once('connect', () => {
@@ -128,8 +114,6 @@ describe('the SSH simulator that accepts and never speaks', () => {
           resolve(error.code ?? 'error');
         });
       }),
-      2_000,
-      'the port refusing',
     );
     assert.equal(refused, 'ECONNREFUSED');
     // Stopped twice is the afterEach's business, and must not hang or throw.
@@ -154,6 +138,8 @@ describe('the SSH simulator, stopped after its client has gone (P-257)', () => {
       socket.on('error', () => undefined);
       const heard: Buffer[] = [];
       const pastHeader = within(
+        2_000,
+        'the server to read the client identification',
         new Promise<void>((resolve) => {
           socket.on('data', (chunk: Buffer) => {
             heard.push(chunk);
@@ -164,8 +150,6 @@ describe('the SSH simulator, stopped after its client has gone (P-257)', () => {
             if (lineEnd >= 0 && all.length > lineEnd + 2) resolve();
           });
         }),
-        2_000,
-        'the server reading the client identification',
       );
       socket.write('SSH-2.0-p257\r\n');
       await pastHeader;
@@ -185,8 +169,14 @@ describe('the SSH simulator, stopped after its client has gone (P-257)', () => {
         `the simulator heard the reset before stop(): ${JSON.stringify(server.connectionErrors)}`,
       );
       stopped = true;
-      await within(server.stop(), 2_000, 'stopping after the client reset');
-      await sleep(50);
+      await within(2_000, 'the simulator to stop after the client reset', server.stop());
+      // Until the connection has recorded something, not a fixed 50 ms a loaded machine can
+      // overrun; what it was is the claim below (`P-354`).
+      await pollWithin(
+        2_000,
+        'the connection to record an error',
+        () => server.connectionErrors.length > 0,
+      );
 
       // **A failed write, and the first thing heard.** `ssh2` re-emits a failed read the same
       // way, so a run where the simulator merely read the reset would also record ECONNRESET;
@@ -200,7 +190,7 @@ describe('the SSH simulator, stopped after its client has gone (P-257)', () => {
         JSON.stringify(server.connectionErrors),
       );
     } finally {
-      if (!stopped) await within(server.stop(), 2_000, 'stopping');
+      if (!stopped) await within(2_000, 'the simulator to stop', server.stop());
     }
   });
 
@@ -211,7 +201,7 @@ describe('the SSH simulator, stopped after its client has gone (P-257)', () => {
       server.reset();
       assert.deepEqual(server.connectionErrors, []);
     } finally {
-      await within(server.stop(), 2_000, 'stopping');
+      await within(2_000, 'the simulator to stop', server.stop());
     }
   });
 });

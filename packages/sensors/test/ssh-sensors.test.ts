@@ -8,7 +8,7 @@ import { standardCatalogue } from '../src/index.js';
 import type { CheckContext, CheckExecution, SensorType } from '../src/contract.js';
 import { TestSshServer } from '@ms/simulators';
 import { assertDeclaresEveryKey } from './support/declared-keys.js';
-import { until, within } from './support/within.js';
+import { pollWithin, within } from './support/within.js';
 
 let server: TestSshServer;
 
@@ -431,7 +431,7 @@ describe('all four types', () => {
       () => undefined,
       (error: unknown) => error,
     );
-    await until(10_000, 'the device to be holding the command', () =>
+    await pollWithin(10_000, 'the device to be holding the command', () =>
       server.seen.includes('cat /proc/meminfo'),
     );
     controller.abort();

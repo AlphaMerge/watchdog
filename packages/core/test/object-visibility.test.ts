@@ -1354,7 +1354,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       });
       try {
         const next = (type: string, from = 0): Promise<Record<string, unknown>> =>
-          waitFor(socket, frames, type, from);
+          waitFor(frames, type, from);
 
         socket.send(JSON.stringify({ subscribe: {} }));
         const snapshot = await next('snapshot');
@@ -2329,15 +2329,15 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       try {
         branch.send(JSON.stringify({ subscribe: {} }));
         admin.send(JSON.stringify({ subscribe: {} }));
-        await waitFor(branch, branchFrames, 'snapshot');
-        await waitFor(admin, adminFrames, 'snapshot');
+        await waitFor(branchFrames, 'snapshot');
+        await waitFor(adminFrames, 'snapshot');
 
         // The branch is taken away while the socket is open, and then something in it changes.
         await access.grant(branchId, teamId, 'none', actorNamed('visibility'));
         const mark = branchFrames.length;
         await scan([pingId], true);
 
-        const overflow = await waitFor(branch, branchFrames, 'overflow', mark);
+        const overflow = await waitFor(branchFrames, 'overflow', mark);
         assert.match(String(overflow['reason']), /may see has changed/);
         assert.equal(
           branchFrames.slice(mark).some((frame) => frame.includes('"type":"state"')),
@@ -2348,7 +2348,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         // Subscribing again is the resync, and it takes a snapshot of the new view.
         const again = branchFrames.length;
         branch.send(JSON.stringify({ subscribe: {} }));
-        const fresh = await waitFor(branch, branchFrames, 'snapshot', again);
+        const fresh = await waitFor(branchFrames, 'snapshot', again);
         assert.deepEqual(
           (fresh['entries'] as { sensorId: number }[])
             .map((entry) => entry.sensorId)
@@ -2391,16 +2391,16 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         // Refused, and in one answer whatever the id is: a probe out of view, an id nobody used,
         // and an object it can read that is not a probe.
         watch(branch, probeId);
-        const refused = await waitFor(branch, branchFrames, 'problem');
+        const refused = await waitFor(branchFrames, 'problem');
         assert.match(String(refused['reason']), /may not read a probe with that id/);
         for (const id of [2_000_000_000, deviceId]) {
           const at = branchFrames.length;
           watch(branch, id);
-          assert.deepEqual(await waitFor(branch, branchFrames, 'problem', at), refused);
+          assert.deepEqual(await waitFor(branchFrames, 'problem', at), refused);
         }
 
         watch(admin, probeId);
-        assert.deepEqual(await waitFor(admin, adminFrames, 'watching'), {
+        assert.deepEqual(await waitFor(adminFrames, 'watching'), {
           type: 'watching',
           probeId,
         });
@@ -2410,7 +2410,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         for (let edge = 0; edge < 3; edge += 1) {
           const at = adminFrames.length;
           await stream.publishProbe(db, probeId);
-          assert.deepEqual(await waitFor(admin, adminFrames, 'probe', at), {
+          assert.deepEqual(await waitFor(adminFrames, 'probe', at), {
             type: 'probe',
             probeId,
           });
@@ -2418,7 +2418,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         // The branch account is not, and a frame it can be waited on proves it had the chance.
         const barrier = branchFrames.length;
         branch.send(JSON.stringify({ subscribe: {} }));
-        await waitFor(branch, branchFrames, 'snapshot', barrier);
+        await waitFor(branchFrames, 'snapshot', barrier);
         assert.deepEqual(about(branchFrames, 0), [], 'a reader who cannot see the probe was told');
         // Nor is a subscription to sensors a watch: the administrator's other probe says nothing
         // to a socket watching this one.
@@ -2429,16 +2429,16 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         await access.grant(probeId, teamId, 'read', actorNamed('visibility'));
         const granted = branchFrames.length;
         watch(branch, probeId);
-        assert.deepEqual(await waitFor(branch, branchFrames, 'watching', granted), {
+        assert.deepEqual(await waitFor(branchFrames, 'watching', granted), {
           type: 'watching',
           probeId,
         });
         await stream.publishProbe(db, probeId);
-        assert.deepEqual(await waitFor(branch, branchFrames, 'probe', granted), {
+        assert.deepEqual(await waitFor(branchFrames, 'probe', granted), {
           type: 'probe',
           probeId,
         });
-        await waitFor(admin, adminFrames, 'probe', quiet);
+        await waitFor(adminFrames, 'probe', quiet);
         assert.deepEqual(
           about(adminFrames, quiet).map((frame) => frame['probeId']),
           [probeId],
@@ -2456,12 +2456,12 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         for (let edge = 0; edge < 3; edge += 1) {
           const at = adminFrames.length;
           await stream.publishProbe(db, probeId);
-          await waitFor(admin, adminFrames, 'probe', at);
+          await waitFor(adminFrames, 'probe', at);
         }
         // A frame the socket can be waited on, sent after the edges, bounds the wait: anything
         // the edges sent it would have arrived first.
         branch.send('not a subscription');
-        await waitFor(branch, branchFrames, 'problem', revoked);
+        await waitFor(branchFrames, 'problem', revoked);
         assert.deepEqual(
           branchFrames.slice(revoked).map((frame) => (JSON.parse(frame) as { type: string }).type),
           ['problem'],
@@ -2471,17 +2471,17 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         // The sweep's tick, run by hand, is what sends it back to the start.
         const tick = branchFrames.length;
         await stream.sweep();
-        const overflow = await waitFor(branch, branchFrames, 'overflow', tick);
+        const overflow = await waitFor(branchFrames, 'overflow', tick);
         assert.match(String(overflow['reason']), /may see has changed/);
         // Watching again is refused as it was at first, and later edges and ticks say nothing.
         const again = branchFrames.length;
         watch(branch, probeId);
-        assert.deepEqual(await waitFor(branch, branchFrames, 'problem', again), refused);
+        assert.deepEqual(await waitFor(branchFrames, 'problem', again), refused);
         const after = branchFrames.length;
         await stream.publishProbe(db, probeId);
         await stream.sweep();
         branch.send('not a subscription');
-        await waitFor(branch, branchFrames, 'problem', after);
+        await waitFor(branchFrames, 'problem', after);
         assert.equal(branchFrames.length, after + 1, 'something followed the refusal');
         assert.deepEqual(
           about(branchFrames, revoked),
@@ -2503,7 +2503,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         // A subtree and a probe are two subscriptions, and a socket has one.
         const both = adminFrames.length;
         admin.send(JSON.stringify({ subscribe: { objectId: probeId, probeId } }));
-        const problem = await waitFor(admin, adminFrames, 'problem', both);
+        const problem = await waitFor(adminFrames, 'problem', both);
         assert.match(String(problem['reason']), /the only message this stream takes/);
       } finally {
         branch.terminate();
@@ -2519,7 +2519,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       branch.on('message', (raw: Buffer) => frames.push(raw.toString('utf8')));
       try {
         branch.send(JSON.stringify({ subscribe: {} }));
-        await waitFor(branch, frames, 'snapshot');
+        await waitFor(frames, 'snapshot');
         const [counter] = await db.query<{ value: string }>(
           'SELECT value::text AS value FROM access_epoch',
         );
@@ -2534,7 +2534,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         const mark = frames.length;
         await scan([pingId], false);
 
-        const overflow = await waitFor(branch, frames, 'overflow', mark);
+        const overflow = await waitFor(frames, 'overflow', mark);
         assert.match(String(overflow['reason']), /may see has changed/);
         assert.equal(
           frames.slice(mark).some((frame) => frame.includes('"type":"state"')),
@@ -2589,12 +2589,12 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       const { socket, frames } = await watching();
       try {
         socket.send(JSON.stringify({ subscribe: {} }));
-        const snapshot = await waitFor(socket, frames, 'snapshot');
+        const snapshot = await waitFor(frames, 'snapshot');
         const entries = snapshot['entries'] as { sensorId: number; state: string }[];
         assert.equal(entries.find((entry) => entry.sensorId === pingId)?.state, 'up');
 
         const at = frames.findIndex((frame) => frame.includes('"type":"snapshot"'));
-        const change = await waitFor(socket, frames, 'state', at + 1);
+        const change = await waitFor(frames, 'state', at + 1);
         assert.equal(change['sensorId'], pingId);
         assert.equal(
           frames.slice(0, at).some((frame) => frame.includes('"type":"state"')),
@@ -2619,7 +2619,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
       const { socket, frames } = await watching();
       try {
         socket.send(JSON.stringify({ subscribe: {} }));
-        const overflow = await waitFor(socket, frames, 'overflow');
+        const overflow = await waitFor(frames, 'overflow');
         assert.match(String(overflow['reason']), /may see has changed/);
         assert.deepEqual(typed(frames, 'snapshot'), [], 'a snapshot of the old view was sent');
         assert.equal(frames.join('').includes('a-ping'), false);
@@ -2652,7 +2652,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         // Replaced once its read has begun, not before: earlier, it never reaches the read at all.
         await reached;
         socket.send(JSON.stringify({ subscribe: {} }));
-        const replacement = await waitFor(socket, frames, 'snapshot');
+        const replacement = await waitFor(frames, 'snapshot');
         assert.equal(replacement['objectId'], null);
 
         release();
@@ -2660,7 +2660,7 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         // A change after it, so whatever the replaced read would send has gone out before this.
         const mark = frames.length;
         await scan([pingId], false);
-        await waitFor(socket, frames, 'state', mark);
+        await waitFor(frames, 'state', mark);
         assert.deepEqual(
           typed(frames, 'snapshot').map((frame) => frame['objectId']),
           [null],
@@ -2695,13 +2695,13 @@ describe('what a branch account can see', { skip: available ? false : 'no databa
         // Replaced once its read has begun, not before: earlier, it never reaches the read at all.
         await reached;
         socket.send(JSON.stringify({ subscribe: {} }));
-        await waitFor(socket, frames, 'snapshot');
+        await waitFor(frames, 'snapshot');
 
         release();
         await first;
         const mark = frames.length;
         await scan([pingId], false);
-        const change = await waitFor(socket, frames, 'state', mark);
+        const change = await waitFor(frames, 'state', mark);
         assert.equal(change['sensorId'], pingId, 'the replacement was detached by the failure');
         assert.deepEqual(typed(frames, 'problem'), [], 'the client was told to resubscribe');
       } finally {
@@ -5074,38 +5074,27 @@ interface OpenApi {
   paths: Record<string, { get?: { parameters?: { in: string; name: string }[] } } | undefined>;
 }
 
-/** The first frame of this type at or after index `from`, however long it takes to arrive. */
-function waitFor(
-  socket: WebSocket,
+/**
+ * The first frame of this type at or after index `from`, or a failure at 10 s that lists every
+ * frame from `from` on, as they stood then (`P-356`).
+ */
+async function waitFor(
   frames: readonly string[],
   type: string,
   from = 0,
 ): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
-    const check = (): boolean => {
-      for (const frame of frames.slice(from)) {
-        const parsed = JSON.parse(frame) as Record<string, unknown>;
-        if (parsed['type'] === type) {
-          resolve(parsed);
-          return true;
-        }
-      }
-      return false;
-    };
-    if (check()) return;
-    const timer = setTimeout(() => {
-      socket.off('message', onMessage);
-      reject(new Error(`no ${type} frame; saw ${frames.slice(from).join(' | ')}`));
-    }, 10_000);
-    const onMessage = (): void => {
-      // After the recorder pushed it: listeners run in registration order.
-      setImmediate(() => {
-        if (check()) {
-          clearTimeout(timer);
-          socket.off('message', onMessage);
-        }
-      });
-    };
-    socket.on('message', onMessage);
-  });
+  const first = (): Record<string, unknown> | undefined =>
+    frames
+      .slice(from)
+      .map((frame) => JSON.parse(frame) as Record<string, unknown>)
+      .find((parsed) => parsed['type'] === type);
+  await pollWithin(
+    10_000,
+    () => `a ${type} frame; saw ${frames.slice(from).join(' | ') || 'none'}`,
+    () => first() !== undefined,
+    10,
+  );
+  const frame = first();
+  assert.ok(frame !== undefined, `a ${type} frame was seen and then was not`);
+  return frame;
 }

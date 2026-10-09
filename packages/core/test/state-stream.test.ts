@@ -2460,15 +2460,17 @@ describe(
         }),
       );
       const count = async (type: string, n: number): Promise<Record<string, unknown>[]> => {
-        const deadline = Date.now() + 10_000;
-        for (;;) {
-          const found = frames.filter((frame) => frame['type'] === type);
-          if (found.length >= n) return found;
-          if (Date.now() > deadline) {
-            throw new Error(`${String(found.length)} ${type} frames of ${String(n)}`);
-          }
-          await new Promise((resolve) => setTimeout(resolve, 10));
-        }
+        let found: Record<string, unknown>[] = [];
+        await pollWithin(
+          10_000,
+          () => `${String(n)} ${type} frames; got ${String(found.length)}`,
+          () => {
+            found = frames.filter((frame) => frame['type'] === type);
+            return found.length >= n;
+          },
+          10,
+        );
+        return found;
       };
       await count('hello', 1);
       return { socket, frames, count, closed };

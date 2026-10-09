@@ -24,7 +24,7 @@ import { queryCim, whereOf } from '../src/types/windows-shared.js';
 import { windowsService } from '../src/types/windows-service.js';
 import { CHECK_ABORT_GRACE_MIN_MS, WORKER_PROGRAM_GRACE_MAX_MS } from '@ms/shared';
 import { installFakePowerShell } from '@ms/simulators';
-import { until, within } from './support/within.js';
+import { pollWithin, within } from './support/within.js';
 
 /**
  * The Windows transport (`T-09`).
@@ -309,7 +309,7 @@ describe('running it', () => {
       timeoutMs: 60_000,
       signal: controller.signal,
     });
-    await until(20_000, 'the fake to say it ignores SIGTERM', () => existsSync(ready));
+    await pollWithin(20_000, 'the fake to say it ignores SIGTERM', () => existsSync(ready));
     const abortedAt = performance.now();
     controller.abort(new Error('the check exceeded its timeout'));
     // **Bounded by what it waits for, not timed against the pool** (`P-286`). That the kill

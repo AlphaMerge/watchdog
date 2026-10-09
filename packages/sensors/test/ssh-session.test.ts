@@ -13,7 +13,7 @@ import {
 } from '../src/support/ssh/credentials.js';
 import { fingerprintOf, matchesFingerprint, verifyHostKey } from '../src/support/ssh/host-key.js';
 import { keyPair, MuteSshServer, TestSshServer } from '@ms/simulators';
-import { until, within } from './support/within.js';
+import { pollWithin, within } from './support/within.js';
 
 let server: TestSshServer;
 /** Learned from the first connection, so the strict-policy tests have something real to match. */
@@ -550,7 +550,7 @@ describe('a device that resets the connection mid-command (P-259)', () => {
     server.behave({ password: 'monitor', hang: true });
     const session = await SshSession.open(target(), credentials(), { commandTimeoutMs: 30_000 });
     const running = session.exec('sleep 9999', signal());
-    await until(5_000, 'the command', () => server.seen.includes('sleep 9999'));
+    await pollWithin(5_000, 'the command', () => server.seen.includes('sleep 9999'));
     session.close();
     await assert.rejects(within(5_000, 'the command ending', running), closedByProbe);
   });
@@ -565,7 +565,7 @@ describe('a device that resets the connection mid-command (P-259)', () => {
     );
     const running = lease.session.exec('sleep 9999', signal());
     try {
-      await until(5_000, 'the command', () => server.seen.includes('sleep 9999'));
+      await pollWithin(5_000, 'the command', () => server.seen.includes('sleep 9999'));
       pool.closeAll();
       await assert.rejects(within(5_000, 'the command ending', running), closedByProbe);
     } finally {
@@ -959,7 +959,7 @@ describe('reusing connections', () => {
           assert.equal(socket.destroyed, false, 'for a handshake that is still going');
 
           // It ends as an open nobody cancelled ends: at the connect timeout, saying so.
-          await until(5_000, 'the second caller’s open ending', () => two.ended);
+          await pollWithin(5_000, 'the second caller’s open ending', () => two.ended);
           assert.match(String(two.error), /could not connect to 127\.0\.0\.1/);
           assert.ok(two.at - startedAt >= 1_400, 'not early');
         } finally {
