@@ -1004,6 +1004,50 @@ describe(
           );
         }
       });
+
+      it('an empty tag is refused and a one-character tag taken, one or several (P-353)', async () => {
+        // `?tag=` was a tag no object can carry, so it matched nothing with a 200.
+        for (const url of [
+          `/api/v1/objects?${query('tag', ['x'])}`,
+          `/api/v1/objects?${query('tag', ['alpha', 'x'])}`,
+        ]) {
+          const res = await get(url);
+          assert.equal(res.statusCode, 200, `${url}: ${res.body.slice(0, 300)}`);
+        }
+        await refusedByTheSchema(
+          `/api/v1/objects?${query('tag', [''])}`,
+          'querystring/tag must NOT have fewer than 1 characters',
+        );
+        await refusedByTheSchema(
+          `/api/v1/objects?${query('tag', ['alpha', ''])}`,
+          'querystring/tag/1 must NOT have fewer than 1 characters',
+        );
+      });
+
+      it('an empty effective key is refused and a one-character key reaches the handler, on the listing and the tree (P-353)', async () => {
+        // `?effective=` reached the handler as an unknown setting key. A one-character key still
+        // does, which is how this shows the schema let it through.
+        const g = await createGroup(probeId, 'Unnamed keys');
+        const key = settingRegistry.keys[0] ?? '';
+        assert.ok(!settingRegistry.has('x'));
+        for (const route of ['/api/v1/objects', `/api/v1/objects/${String(g)}/tree`]) {
+          for (const values of [['x'], [key, 'x']]) {
+            const res = await get(`${route}?${query('effective', values)}`);
+            assert.equal(res.statusCode, 400, res.body.slice(0, 300));
+            const { error } = res.json<Refusal>();
+            assert.equal(error.context.phase, 'validate-query', `${route}: ${error.message}`);
+            assert.equal(error.message, 'unknown setting key "x"');
+          }
+          await refusedByTheSchema(
+            `${route}?${query('effective', [''])}`,
+            'querystring/effective must NOT have fewer than 1 characters',
+          );
+          await refusedByTheSchema(
+            `${route}?${query('effective', [key, ''])}`,
+            'querystring/effective/1 must NOT have fewer than 1 characters',
+          );
+        }
+      });
     });
 
     it('finds a device by a fragment of its host through ?q=, as the tree search asks', async () => {

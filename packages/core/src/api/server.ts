@@ -303,6 +303,27 @@ export interface ApiServerOptions {
 }
 
 /**
+ * What Fastify's validator compiler builds its Ajv with, for every route's body, querystring,
+ * params and headers alike (`@fastify/ajv-compiler` keeps one instance per set of options).
+ *
+ * Exported so that a test building routes on a bare Fastify validates as the server does
+ * (`P-363`): a bare `Fastify()` has Ajv's defaults, which coerce differently and print a
+ * strict-mode warning for every union type each time the routes are built.
+ */
+export const API_VALIDATOR_OPTIONS = {
+  coerceTypes: true,
+  allErrors: true,
+  removeAdditional: false,
+  useDefaults: true,
+  // **`type: ['string', 'array']` is meant (`P-337`).** A repeatable query parameter (`tag`,
+  // `effective`) is a string for one occurrence and an array for several, and the handler reads
+  // both through `asArray`. Without this, strict mode logs "use allowUnionTypes" each time the
+  // object routes are built, once for each. It only lets the schema compile quietly: Ajv
+  // validates a type list the same with it as without, and OpenAPI 3.1 carries the list as it is.
+  allowUnionTypes: true,
+} as const;
+
+/**
  * The HTTP API.
  *
  * Fastify serialises every 2xx body with `fast-json-stringify` against the route's declared
@@ -446,21 +467,7 @@ export class ApiServer {
 
     this.#app = Fastify({
       logger: false, // pino is configured centrally; Fastify's own instance would double-log
-      ajv: {
-        customOptions: {
-          coerceTypes: true,
-          allErrors: true,
-          removeAdditional: false,
-          useDefaults: true,
-          // **`type: ['string', 'array']` is meant (`P-337`).** A repeatable query parameter
-          // (`tag`, `effective`) is a string for one occurrence and an array for several, and
-          // the handler reads both through `asArray`. Without this, strict mode logs "use
-          // allowUnionTypes" on every start for each one. It only lets the schema compile
-          // quietly: Ajv validates a type list the same with it as without, and OpenAPI 3.1
-          // carries the list as it is.
-          allowUnionTypes: true,
-        },
-      },
+      ajv: { customOptions: { ...API_VALIDATOR_OPTIONS } },
       // A request id per request, so every log line from a handler ties back to it.
       genReqId: () => newCorrelationId(),
       // Whose `X-Forwarded-For` and `X-Forwarded-Proto` to believe (`A-36`). Nobody's by default,

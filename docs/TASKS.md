@@ -12933,13 +12933,39 @@ because each is a decision rather than a defect:
       open by design with a description), and the `status` type derived from
       `NOTIFICATION_STATUSES`.
 
-- [ ] **P-353 — an empty `tag` or `effective` filter is not refused** · XS · P-347 · Found
+- [x] **P-353 — an empty `tag` or `effective` filter is not refused** · XS · P-347 · Found
       2026-10-09 in `P-347`. Neither filter has a `minLength`: `?tag=` matches nothing and
       `?effective=` reaches the handler as an unknown setting key. `objectFields` in
       `schemas/objects.ts` still writes the literals 100 and 50 where `MAX_TAG` and `MAX_TAGS`
       exist. **Done when** an empty value is refused at `validate-request` in both forms (a
       validation change, said in the outcome) and `objectFields` reads the constants, with route
       tests.
+
+      **P-353 outcome. An empty `tag` or `effective` is refused in both forms. This is a
+      validation change.**
+      - **The bound.** `TAG_FILTER` and `EFFECTIVE_FILTER` in `routes/objects.ts` gain
+        `minLength: 1` on the string form and on each array element, beside `P-347`'s
+        `maxLength`. They cover every route that takes either: the listing (`tag`, `effective`)
+        and the tree (`effective`). The web client never sends an empty one (`TreeView` sets
+        `tag` only when it is not empty).
+      - **What a client now gets.** A 400 with `error.code` `OBJECT_INVALID`, `context.phase`
+        `validate-request`, and the messages `querystring/tag must NOT have fewer than 1
+        characters` and `querystring/tag/1 must NOT have fewer than 1 characters` (the element's
+        index), and the same for `effective`. Before, `?tag=` was a 200 that matched nothing and
+        `?effective=` was the handler's `validate-query` 400, "unknown setting key". A
+        one-character value is taken: a tag runs as a query, and a key reaches the handler.
+      - **`objectFields`** in `schemas/objects.ts` reads `MAX_TAGS` and `MAX_TAG` from
+        `libraries/nodes.ts` for an object's own tags. The values were the same, 50 and 100, so
+        the create and update bodies do not change.
+      - **The reference.** All three rows now read `string or string[], 1–100 characters, at most
+        50 items, each 1–100 characters` (7 items for `effective`).
+      - **Tests.** In `api-routes.test.ts`, inside `P-347`'s block: an empty value is refused as
+        one value and as an element of several, with the exact message; one character is taken
+        in both forms. `effective` is tested on the listing and the tree, and a one-character
+        key gets the handler's refusal, which shows it got past the schema.
+      - **Mutations, one at a time, each restored byte for byte.** `tag`'s `minLength` removed
+        from both forms failed its test (1 failed). The same for `effective` (1 failed).
+        `objectFields` was a refactor with equal values, so there was nothing to mutate.
 
 - [ ] **P-354 — the simulators package keeps its own `within`** · XS · P-346 · Found 2026-10-09
       in `P-346`. `simulators/test/ssh-server.test.ts` has a local `within(promise, ms, what)`,
@@ -12991,17 +13017,65 @@ because each is a decision rather than a defect:
       when** each is an enum of one constant or described as open on purpose, with
       `fixed-value-fields.test.ts` covering the enums.
 
-- [ ] **P-362 — the audit `actorKind` filter takes any string** · XS · P-351 · Found 2026-10-09
+- [x] **P-362 — the audit `actorKind` filter takes any string** · XS · P-351 · Found 2026-10-09
       in `P-351`. `GET /audit?actorKind=` accepts up to 40 characters of anything, where
       `ACTOR_KINDS` is now one constant. **Done when** the filter is that enum (a validation
       change, said in the outcome), with a route test.
 
-- [ ] **P-363 — building the object routes prints Ajv strict-mode warnings** · XS · P-347 · Found
+      **P-362 outcome. `actorKind` is an enum of `ACTOR_KINDS`, one or several. This is a
+      validation change.**
+      - **Checked first.** `GET /audit` reads `audit_log` alone, and its
+        `audit_log_actor_kind_check` (migration 005, never altered) is exactly `ACTOR_KINDS`,
+        which `fixed-value-fields.test.ts` asserts against a migrated database. No document names
+        another kind. The web's log view passes on the kind it was given from an entry's actor.
+        So a kind outside the list could only ever match nothing.
+      - **The schema** is `category`'s shape: `oneOf` an enum of `ACTOR_KINDS`, or an array of
+        them with `maxItems: ACTOR_KINDS.length` (was any string up to 40 characters, 10 of
+        them). The handler's type is `ActorKind | ActorKind[]`.
+      - **What a client now gets.** A 400 with `error.code` `OBJECT_INVALID`, `context.phase`
+        `validate-request` and, for `?actorKind=probe`, the message `querystring/actorKind must
+        be equal to one of the allowed values, querystring/actorKind must be array,
+        querystring/actorKind must match exactly one schema in oneOf`. In the array form the
+        second part names the element (`querystring/actorKind/1 must be equal to one of the
+        allowed values`). Before, it was a 200 with no entries. The reference reads `` `user` ·
+        `token` · `system` · `anonymous`, or an array of them, at most 4 items ``.
+      - **Test.** `audit.test.ts`, beside the category refusal: each kind is taken alone and all
+        four together; `probe` is refused alone and as the second of two, with the exact message.
+      - **Mutation.** The filter back to a 40-character string failed the test (1 failed),
+        restored byte for byte.
+
+- [x] **P-363 — building the object routes prints Ajv strict-mode warnings** · XS · P-347 · Found
       2026-10-09 in `P-351`. The `tag` and `effective` querystrings (`type: ['string', 'array']`)
       make Fastify's validator print "use allowUnionTypes" whenever the routes are built, in
       tests and at start-up; `P-337` set the option on the route Ajv only. **Done when** the
       querystring compiler has the same option and a test asserts no strict-mode warning is
       printed when the object routes are built.
+
+      **P-363 outcome. The warnings came from tests' bare Fastify, which now validates with the
+      server's options; start-up was already quiet. No validation change for a client.**
+      - **Where they came from.** `@fastify/ajv-compiler` compiles every part of a route's
+        request, querystring included, with one Ajv per set of `ajv.customOptions`. `ApiServer`
+        already passed `allowUnionTypes` there (`P-337`), and `P-337`'s test that the
+        generator's stderr is empty holds that for the server's own build, so start-up printed
+        nothing. The printer was `fixed-value-fields.test.ts` (`P-351`), whose `serve` builds the
+        object routes on a bare `Fastify()` with Ajv's defaults: 90 "use allowUnionTypes" lines a
+        run, now 0. `api-routes.test.ts` builds `ApiServer` and printed none.
+      - **The fix.** The options are one exported constant, `API_VALIDATOR_OPTIONS` in
+        `api/server.ts`, which `ApiServer` passes as its `customOptions`. The bare Fastify in
+        `fixed-value-fields.test.ts` passes the same, so the test also validates requests as the
+        server does (`coerceTypes`, `allErrors`, `useDefaults`). The generated validator is
+        unchanged.
+      - **What a client gets.** Nothing new: the option only stops strict mode logging, so
+        every request is answered as before.
+      - **Test.** `fixed-value-fields.test.ts`, "building the object routes": building them with
+        `API_VALIDATOR_OPTIONS` logs no strict-mode line to `console.warn`, which is Ajv's
+        default logger. A control builds them with only `allowUnionTypes` off and hears the
+        warning for `#/properties/tag` and `#/properties/effective`, so an empty capture is the
+        option's doing.
+      - **Mutation.** `allowUnionTypes` removed from `API_VALIDATOR_OPTIONS` failed the new test
+        and `P-337`'s stderr test (2 failed), restored byte for byte.
+      - **Not done.** `probe-registry.test.ts` and `hardening.test.ts` build bare `Fastify()`
+        too, for routes with no union type, and were not changed.
 
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then

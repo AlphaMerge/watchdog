@@ -5,6 +5,7 @@ import type { Visibility } from '../../auth/access.js';
 import type { FieldChange } from '../../audit/diff.js';
 import { AUDIT_CATEGORIES, type AuditEntry, type AuditRepository } from '../../audit/store.js';
 import type { Database, Queryable } from '../../db/pool.js';
+import { ACTOR_KINDS, type ActorKind } from '../../objects/audit.js';
 import { DEPENDENCY_MASTER_ID } from '../../settings/registry.js';
 import { ADMIN, clears, onObject, visibilityOf } from '../authorization.js';
 
@@ -53,10 +54,12 @@ const logQuery = {
         },
       ],
     },
+    // One of `ACTOR_KINDS`, which is `audit_log_actor_kind_check`, so a kind outside it can match
+    // no entry (`P-362`). As `category` is: one value or several, at most one of each.
     actorKind: {
       oneOf: [
-        { type: 'string', maxLength: 40 },
-        { type: 'array', items: { type: 'string', maxLength: 40 }, maxItems: 10 },
+        { enum: [...ACTOR_KINDS] },
+        { type: 'array', items: { enum: [...ACTOR_KINDS] }, maxItems: ACTOR_KINDS.length },
       ],
     },
     actorRef: {
@@ -78,7 +81,7 @@ const logQuery = {
 interface LogQueryString extends AuditQueryString {
   objectId?: number;
   category?: string | string[];
-  actorKind?: string | string[];
+  actorKind?: ActorKind | ActorKind[];
   actorRef?: string;
   from?: string;
   to?: string;

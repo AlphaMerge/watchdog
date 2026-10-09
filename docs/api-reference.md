@@ -173,7 +173,7 @@ Configuration history across the whole installation, newest first — the object
 | --- | --- | --- | --- | --- |
 | `objectId` | query | integer, at least 1 |  |  |
 | `category` | query | `object` · `setting` · `credential` · `channel` · `trigger` · `template` · `schedule` · `sensor` · `report` · `library` · `map` · `grant` · `probe` · `discovery` · `account` · `group` · `token`, or an array of them, at most 17 items |  |  |
-| `actorKind` | query | string, or an array of them, at most 40 characters, at most 10 items |  |  |
+| `actorKind` | query | `user` · `token` · `system` · `anonymous`, or an array of them, at most 4 items |  |  |
 | `actorRef` | query | string, at most 64 characters |  | One specific actor — a user id, a token id, a component name. "Everything this person did" is the question an audit log gets opened for, and `actorKind` cannot answer it: it narrows to all users, which during an incident is everybody. Pair it with `actorKind`, because an id is only unique within a kind. |
 | `from` | query | string, at most 64 characters |  |  |
 | `to` | query | string, at most 64 characters |  |  |
@@ -2173,12 +2173,12 @@ Flat filtered listing, keyset-paginated. `q` searches names and device hosts as 
 | --- | --- | --- | --- | --- |
 | `parentId` | query | integer, at least 1 |  |  |
 | `kind` | query | `root` · `probe` · `group` · `device` · `sensor`, or an array of them, at most 5 items |  |  |
-| `tag` | query | string or string[], at most 100 characters, at most 50 items, each at most 100 characters |  |  |
+| `tag` | query | string or string[], 1–100 characters, at most 50 items, each 1–100 characters |  |  |
 | `q` | query | string, at most 500 characters |  | Search: a case-insensitive substring of the name or, on a device, of its host. `%` and `_` are literal. |
 | `host` | query | string, at most 255 characters |  | A device's host exactly, case-insensitive. A substring is `q`'s job. |
 | `priorityMin` | query | integer, 1–5 |  |  |
 | `sort` | query | `name` · `id` · `manual` | default `name` |  |
-| `effective` | query | string or string[], at most 100 characters, at most 7 items, each at most 100 characters |  |  |
+| `effective` | query | string or string[], 1–100 characters, at most 7 items, each 1–100 characters |  |  |
 | `include` | query | string, at most 200 characters |  | Comma-separated expansions. `path` gives every item its ancestors, root first and excluding the item — what `/objects/{id}/ancestors` returns, for the whole page in one walk. |
 | `cursor` | query | string, at most 2048 characters |  |  |
 | `limit` | query | integer, 1–500 | default `100` |  |
@@ -2377,7 +2377,7 @@ Applies one operation to a selection. **Each object is atomic and the batch is b
 | `maxDepth` | query | integer, 1–20 | default `3` |
 | `limit` | query | integer, 1–5000 | default `1000` |
 | `kind` | query | `root` · `probe` · `group` · `device` · `sensor`, or an array of them, at most 5 items |  |
-| `effective` | query | string or string[], at most 100 characters, at most 7 items, each at most 100 characters |  |
+| `effective` | query | string or string[], 1–100 characters, at most 7 items, each 1–100 characters |  |
 | `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { items, truncated }

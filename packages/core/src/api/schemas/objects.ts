@@ -14,6 +14,7 @@ import { SENSOR_STATES } from '../../state/tables.js';
 // serializer does not check an enum, while the document said it could not occur (`P-313`).
 import { OBJECT_KINDS, WRITABLE_KINDS } from '../../objects/types.js';
 import { CREDENTIAL_SET_KINDS } from '../../settings/inheritance.js';
+import { MAX_TAG, MAX_TAGS } from '../../libraries/nodes.js';
 
 export const settingSourceSchema = {
   $id: 'ms:settingSource',
@@ -474,10 +475,12 @@ export const credentialWriteSchema = {
 
 const objectFields = {
   name: { type: 'string', minLength: 1, maxLength: 500 },
+  // One pair of limits for an object's own tags, a library rule's tag filter and the listing's
+  // `tag` filter (`P-353`).
   tags: {
     type: 'array',
-    maxItems: 50,
-    items: { type: 'string', minLength: 1, maxLength: 100 },
+    maxItems: MAX_TAGS,
+    items: { type: 'string', minLength: 1, maxLength: MAX_TAG },
   },
   priority: { type: 'integer', minimum: 1, maximum: 5 },
   comments: { type: 'string', maxLength: 10_000 },

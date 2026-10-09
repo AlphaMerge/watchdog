@@ -195,9 +195,12 @@ const KIND_FILTER = {
 
 /**
  * `tag` and `effective` take one value or several, and both forms are bounded alike (`P-347`):
- * the string and each element of the array by `maxLength`, the array by `maxItems`. A type list
- * rather than `KIND_FILTER`'s `oneOf`, which `P-337` kept so as not to change what Fastify's
- * `coerceTypes` does with it; `maxLength` only reads a string and `maxItems` only an array.
+ * the string and each element of the array by `minLength` and `maxLength`, the array by
+ * `maxItems`. An empty value is refused in either form (`P-353`): `?tag=` is a tag no object
+ * can carry, so it matched nothing, and `?effective=` reached the handler as an unknown key. A
+ * type list rather than `KIND_FILTER`'s `oneOf`, which `P-337` kept so as not to change what
+ * Fastify's `coerceTypes` does with it; the length bounds only read a string and `maxItems` only
+ * an array.
  *
  * A tag is held to what an object's own tags are (`objectFields`: 100 characters, 50 of them),
  * as a library rule's effective-tag filter is. The filter is all-of over own and inherited tags,
@@ -205,7 +208,8 @@ const KIND_FILTER = {
  */
 const TAG_FILTER = {
   type: ['string', 'array'],
-  items: { type: 'string', maxLength: MAX_TAG },
+  items: { type: 'string', minLength: 1, maxLength: MAX_TAG },
+  minLength: 1,
   maxLength: MAX_TAG,
   maxItems: MAX_TAGS,
 } as const;
@@ -217,7 +221,8 @@ const TAG_FILTER = {
  */
 const EFFECTIVE_FILTER = {
   type: ['string', 'array'],
-  items: { type: 'string', maxLength: MAX_SETTING_KEY },
+  items: { type: 'string', minLength: 1, maxLength: MAX_SETTING_KEY },
+  minLength: 1,
   maxLength: MAX_SETTING_KEY,
   maxItems: settingRegistry.keys.length,
 } as const;

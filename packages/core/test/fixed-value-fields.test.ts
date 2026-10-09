@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { after, before, describe, it } from 'node:test';
+import { after, before, describe, it, mock } from 'node:test';
 import { Ajv } from 'ajv';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { DEVICE_KINDS, DISCOVERY_LEVEL_IDS, DISCOVERY_LEVELS } from '@ms/shared';
@@ -9,6 +9,7 @@ import { auditRoutes } from '../src/api/routes/audit.js';
 import { deviceTemplateRoutes } from '../src/api/routes/device-templates.js';
 import { discoveryRoutes } from '../src/api/routes/discovery.js';
 import { objectRoutes } from '../src/api/routes/objects.js';
+import { API_VALIDATOR_OPTIONS } from '../src/api/server.js';
 import { reportRoutes, type ReportRouteOptions } from '../src/api/routes/reports.js';
 import { stateRoutes } from '../src/api/routes/state.js';
 import { AUDIT_SCHEMAS, auditActorSchema } from '../src/api/schemas/audit.js';
@@ -108,7 +109,9 @@ async function serve(
   method: 'GET' | 'DELETE' = 'GET',
 ): Promise<Served> {
   let declared: unknown;
-  const app = Fastify();
+  // Validated as the server validates (`P-363`), which also keeps this file from printing a
+  // strict-mode warning for `tag` and `effective` each time it builds the object routes.
+  const app = Fastify({ ajv: { customOptions: { ...API_VALIDATOR_OPTIONS } } });
   app.addHook('onRoute', (one) => {
     if (one.url === route && one.method === method) declared = one.schema?.response;
   });
@@ -1042,3 +1045,44 @@ describe(
     });
   },
 );
+
+/**
+ * Building the object routes printed Ajv's "strict mode: use allowUnionTypes" for `tag` and
+ * `effective` (`P-363`), each `type: ['string', 'array']`, in every test that built them on a
+ * bare Fastify. Ajv writes it to `console.warn`, its default logger, when it compiles the
+ * querystring, so that is where this listens.
+ */
+describe('building the object routes', () => {
+  const strictWarnings = async (customOptions: Record<string, unknown>): Promise<string[]> => {
+    const warn = mock.method(console, 'warn', () => undefined);
+    const app = Fastify({ ajv: { customOptions } });
+    try {
+      await withObjects({})(app);
+      await app.ready();
+      return warn.mock.calls
+        .map((call) => call.arguments.map(String).join(' '))
+        .filter((line) => line.includes('strict mode'));
+    } finally {
+      warn.mock.restore();
+      await app.close();
+    }
+  };
+
+  it('prints no strict-mode warning with the options the server validates with', async () => {
+    assert.deepEqual(await strictWarnings({ ...API_VALIDATOR_OPTIONS }), []);
+  });
+
+  it('would print one for each union type without allowUnionTypes, so the listening works', async () => {
+    // The control: the same build with only that option off is heard, so the empty list above
+    // is the option's doing and not a capture that hears nothing.
+    const heard = await strictWarnings({ ...API_VALIDATOR_OPTIONS, allowUnionTypes: false });
+    assert.ok(
+      heard.some((line) => line.includes('allowUnionTypes') && line.includes('#/properties/tag')),
+      heard.join('\n'),
+    );
+    assert.ok(
+      heard.some((line) => line.includes('#/properties/effective')),
+      heard.join('\n'),
+    );
+  });
+});

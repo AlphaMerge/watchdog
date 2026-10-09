@@ -11,7 +11,7 @@ import {
 } from '../src/audit/store.js';
 import { changedParamKeys, describeCreated, diffObjects } from '../src/audit/diff.js';
 import type { Database } from '../src/db/pool.js';
-import { LoggingAuditSink, type Actor } from '../src/objects/audit.js';
+import { ACTOR_KINDS, LoggingAuditSink, type Actor } from '../src/objects/audit.js';
 import { ObjectRepository } from '../src/objects/repository.js';
 import { ObjectService } from '../src/objects/service.js';
 import { asInstallation } from '../src/objects/sensor-reads.js';
@@ -812,6 +812,44 @@ describe(
           query: { actorRef: 'x'.repeat(65) },
         });
         assert.equal(response.statusCode, 400);
+      });
+
+      it('takes every actor kind as actorKind, one or several, and refuses any other (P-362)', async () => {
+        // The filter was any string of up to 40 characters. `audit_log_actor_kind_check` is
+        // `ACTOR_KINDS`, so a kind outside it could only ever match nothing.
+        const get = (actorKind: string | string[]) =>
+          app.inject({ method: 'GET', url: '/api/v1/audit', query: { actorKind } });
+        for (const kind of ACTOR_KINDS) {
+          const one = await get(kind);
+          assert.equal(one.statusCode, 200, `${kind}: ${one.body}`);
+        }
+        const all = await get([...ACTOR_KINDS]);
+        assert.equal(all.statusCode, 200, all.body);
+
+        interface Refusal {
+          error: { code: string; message: string; context: { phase: string } };
+        }
+        for (const [actorKind, message] of [
+          [
+            'probe',
+            'querystring/actorKind must be equal to one of the allowed values, ' +
+              'querystring/actorKind must be array, ' +
+              'querystring/actorKind must match exactly one schema in oneOf',
+          ],
+          [
+            ['user', 'probe'],
+            'querystring/actorKind must be equal to one of the allowed values, ' +
+              'querystring/actorKind/1 must be equal to one of the allowed values, ' +
+              'querystring/actorKind must match exactly one schema in oneOf',
+          ],
+        ] as const) {
+          const res = await get(typeof actorKind === 'string' ? actorKind : [...actorKind]);
+          assert.equal(res.statusCode, 400, res.body);
+          const { error } = res.json<Refusal>();
+          assert.equal(error.code, 'OBJECT_INVALID');
+          assert.equal(error.context.phase, 'validate-request');
+          assert.equal(error.message, message);
+        }
       });
 
       it('refuses a category that is not one', async () => {
