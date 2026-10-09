@@ -13600,7 +13600,7 @@ because each is a decision rather than a defect:
         registries' Ajv are not API schemas and were not changed; none of the latter three has a
         pattern today.
 
-- [ ] **P-373 — three waits `P-366` found and one it weakened** · XS · P-366 · Found 2026-10-09
+- [x] **P-373 — three waits `P-366` found and one it weakened** · XS · P-366 · Found 2026-10-09
       in `P-366`. `probe/test/perf/sizing-pass.test.ts` (a 30 s `Date.now()` loop that falls
       through to an assert) and the inform test in `sensors/test/snmp-receiver.test.ts` (a 3 s
       `setTimeout` race whose timer is never cleared) are hand-rolled. And `syslog-sender`'s
@@ -13608,6 +13608,33 @@ because each is a decision rather than a defect:
       seen before the count is asserted. **Done when** the two are `pollWithin`/`within`, and the
       sender's cases wait for the TCP connection's end (UDP: a short quiet window, said why),
       with a mutation that sends one message too many and fails.
+
+      **P-373 outcome. Both waits are bounded helpers now, and every case of the syslog sender
+      over the wire fails when the sender sends one message too many.** Test code only.
+      - **`sizing-pass`:** the loop is `pollWithin(30_000, …, 100)` at the bound and interval it
+        had, and its `what` carries the count, so the assert it fell through to is gone.
+      - **`snmp-receiver`'s inform:** `within(3_000, 'the sender to see the inform
+        acknowledged', …)` around the callback, with the session closed in a `finally`; the
+        callback's error is asserted to be `null` and named if not. 3 s stays the bound because
+        `net-snmp`'s own 5 s timeout and one retry run past it, so the bound is what fails first.
+      - **`syslog-sender`:** the TCP collector records the connection's `end`, which `sendTcp`
+        sends only after its last write, and each TCP case waits for that (5 s) instead of for
+        the expected bytes, so a frame in excess is in hand before the assert. The split case
+        asked only for "more than one chunk"; it now also asks for exactly one message. UDP has
+        no end, so after the two datagrams arrive the case waits a 100 ms quiet window before
+        asserting exactly two: `sendUdp` returns only after every send's callback, so an excess
+        datagram has left the sender and on loopback is already queued, needing a turn of the
+        event loop to be read. A machine slow enough to outrun 100 ms would let an excess
+        datagram go unseen, which weakens the check and never fails a correct sender.
+      - **Mutations.** `sendUdp` and `sendTcp` sending their last message twice: all five wire
+        cases fail (UDP 3 against 2; octet count 59 against 121; newline frames 3 against 2;
+        split "one message, whole" 2 against 1; one connection 4 against 3). The same mutation
+        against `P-366`'s test failed four and passed the split case — on an idle machine the
+        excess still landed before the old poll finished, so the gap was a race and not a sure
+        miss. `ended` never set: the four TCP cases fail at 5,000 ms naming the bytes they had,
+        and the file ends. The inform callback never resolving fails at 3,000 ms and the file
+        ends. The sizing poll asked for 1,000,000: "timed out after 30000 ms waiting for enough
+        completed checks to fill the window, 1,000; 1016 completed".
 
 - [ ] **P-374 — `/values` now reads the object and its channels on every poll** · XS · U-38 ·
       Found 2026-10-09 in `U-38`. Carrying `retired` adds two queries per 15-second poll of an

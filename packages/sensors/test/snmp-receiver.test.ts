@@ -6,7 +6,7 @@ import {
   openTrapReceiver,
   type ReceivedTrap,
 } from '../src/support/snmp/receiver.js';
-import { pollWithin } from './support/within.js';
+import { pollWithin, within } from './support/within.js';
 
 /**
  * A real socket, a real sender, and both wire formats.
@@ -110,19 +110,26 @@ describe('receiving notifications over a real socket', () => {
     // An unacknowledged inform is retransmitted until the sender gives up, so a receiver that
     // only counted them would turn one event into a burst. The assertion is the *sender's*
     // callback reporting success — nothing else proves the acknowledgement went back.
+    // `net-snmp`'s own 5 s timeout and one retry run past this 3 s bound, so the bound is what
+    // fails first when no acknowledgement comes back; a refusal inside it is the callback's error.
     received = [];
     const session = sender(snmp.Version2c);
-    const acked = await new Promise<boolean>((resolve) => {
-      session.inform(LINK_DOWN, [], (error: Error | null) => {
-        resolve(error === null);
-      });
-      setTimeout(() => {
-        resolve(false);
-      }, 3_000);
-    });
-    session.close();
+    let refused: Error | null;
+    try {
+      refused = await within(
+        3_000,
+        'the sender to see the inform acknowledged',
+        new Promise<Error | null>((resolve) => {
+          session.inform(LINK_DOWN, [], (error: Error | null) => {
+            resolve(error);
+          });
+        }),
+      );
+    } finally {
+      session.close();
+    }
 
-    assert.equal(acked, true, 'the sender never saw an acknowledgement');
+    assert.equal(refused, null, `the sender's inform failed: ${String(refused)}`);
     const [trap] = received;
     assert.ok(trap);
     assert.equal(trap.detail.kind, 'inform');

@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { createServer, type Server, type Socket } from 'node:net';
 import { createSocket, type Socket as UdpSocket } from 'node:dgram';
 import { describe, it } from 'node:test';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { close, listen } from '../src/net.js';
 import { renderMessage, sendTcp, sendUdp } from '../src/syslog-sender.js';
 import { pollWithin } from './support/within.js';
@@ -70,13 +71,27 @@ describe('the syslog sender', () => {
       return { port, lines, socket };
     };
 
-    const collectTcp = async (): Promise<{ port: number; chunks: string[]; server: Server }> => {
+    /**
+     * `ended` turns true when the sender's end of the connection arrives, which `sendTcp` sends
+     * only after its last write: everything it sent, and anything it sent in excess, is in
+     * `chunks` by then.
+     */
+    const collectTcp = async (): Promise<{
+      port: number;
+      chunks: string[];
+      ended: () => boolean;
+      server: Server;
+    }> => {
       const chunks: string[] = [];
+      let ended = false;
       const server = createServer((connection: Socket) => {
         connection.on('data', (data: Buffer) => chunks.push(data.toString('utf8')));
+        connection.on('end', () => {
+          ended = true;
+        });
       });
       const port = await listen(server);
-      return { port, chunks, server };
+      return { port, chunks, ended: () => ended, server };
     };
 
     /**
@@ -87,6 +102,17 @@ describe('the syslog sender', () => {
     const arrived = (what: () => string, met: () => boolean): Promise<void> =>
       pollWithin(5_000, what, met);
 
+    /**
+     * How long UDP is watched for a datagram past the expected count (`P-373`). UDP has no end to
+     * wait for, so this is a window, and it is short because it has little to cover: `sendUdp`
+     * returns only once every send's callback has fired, so an excess datagram has left the
+     * sender before the window opens, and on loopback it is already queued for the collector,
+     * which needs only a turn of the event loop to read it. A machine slow enough to outrun the
+     * window lets an excess datagram go unseen — the check weakens, it never fails a correct
+     * sender — and the cases over TCP, which wait for the connection's end, do not depend on it.
+     */
+    const QUIET_MS = 100;
+
     it('sends one datagram per message over UDP', async () => {
       const { port, lines, socket } = await collectUdp();
       try {
@@ -95,6 +121,7 @@ describe('the syslog sender', () => {
           () => `2 datagrams; got ${String(lines.length)}`,
           () => lines.length >= 2,
         );
+        await sleep(QUIET_MS);
       } finally {
         socket.close();
       }
@@ -105,12 +132,12 @@ describe('the syslog sender', () => {
     });
 
     it('frames TCP by octet count, which is RFC 6587 and unambiguous', async () => {
-      const { port, chunks, server } = await collectTcp();
+      const { port, chunks, ended, server } = await collectTcp();
       try {
         await sendTcp(port, [{ message: 'counted' }], { framing: 'octet-counting' });
         await arrived(
-          () => `the frame; got ${JSON.stringify(chunks.join(''))}`,
-          () => chunks.join('').endsWith('counted'),
+          () => `the connection's end after the frame; got ${JSON.stringify(chunks.join(''))}`,
+          ended,
         );
       } finally {
         await close(server);
@@ -125,14 +152,14 @@ describe('the syslog sender', () => {
     it('frames TCP by a trailing newline when asked, which is the other legal framing', async () => {
       // A receiver that assumes the wrong one silently corrupts message boundaries — which gets
       // blamed on the sender for weeks. Being able to send both is how that is tested.
-      const { port, chunks, server } = await collectTcp();
+      const { port, chunks, ended, server } = await collectTcp();
       try {
         await sendTcp(port, [{ message: 'one' }, { message: 'two' }], {
           framing: 'non-transparent',
         });
         await arrived(
-          () => `two frames; got ${JSON.stringify(chunks.join(''))}`,
-          () => chunks.join('').split('\n').length > 2,
+          () => `the connection's end after two frames; got ${JSON.stringify(chunks.join(''))}`,
+          ended,
         );
       } finally {
         await close(server);
@@ -146,17 +173,24 @@ describe('the syslog sender', () => {
     it('splits a frame across two writes when asked, because TCP is a stream', async () => {
       // A receiver that assumes one `data` event is one message works perfectly until the day
       // the network disagrees. This makes that day reproducible.
-      const { port, chunks, server } = await collectTcp();
+      const { port, chunks, ended, server } = await collectTcp();
       try {
         await sendTcp(port, [{ message: 'split me down the middle' }], { splitAt: 12 });
         await arrived(
-          () => `the whole message; got ${JSON.stringify(chunks.join(''))}`,
-          () => /split me down the middle$/.test(chunks.join('')),
+          () => `the connection's end after the message; got ${JSON.stringify(chunks.join(''))}`,
+          ended,
         );
       } finally {
         await close(server);
       }
 
+      const wire = chunks.join('');
+      assert.equal(
+        wire.match(/<\d+>1 /g)?.length,
+        1,
+        `one message, whole: ${JSON.stringify(wire)}`,
+      );
+      assert.match(wire, /split me down the middle$/);
       assert.ok(
         chunks.length >= 2,
         `expected the send to arrive in pieces, got ${String(chunks.length)}`,
@@ -164,12 +198,12 @@ describe('the syslog sender', () => {
     });
 
     it('sends every message down one connection, so boundaries are exercised', async () => {
-      const { port, chunks, server } = await collectTcp();
+      const { port, chunks, ended, server } = await collectTcp();
       try {
         await sendTcp(port, [{ message: 'a' }, { message: 'b' }, { message: 'c' }]);
         await arrived(
-          () => `three messages; got ${JSON.stringify(chunks.join(''))}`,
-          () => chunks.join('').endsWith(' - - - c'),
+          () => `the connection's end after three messages; got ${JSON.stringify(chunks.join(''))}`,
+          ended,
         );
       } finally {
         await close(server);

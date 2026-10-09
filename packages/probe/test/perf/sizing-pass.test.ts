@@ -5,6 +5,7 @@ import { pino } from 'pino';
 import { CheckPool } from '../../src/runner/pool.js';
 import { poolDemand, type DemandInput } from '../../src/runner/demand.js';
 import { V1_TARGET_SENSORS, V1_TARGET_INTERVAL_SECONDS } from '../../src/measured.js';
+import { pollWithin } from '../support/within.js';
 
 /**
  * What one pass of the auto-sizing loop costs (`P-48`).
@@ -62,11 +63,13 @@ describe('one sizing pass at the v1 target (P-48)', () => {
         timeoutMs: 5_000,
       });
     }
-    const deadline = Date.now() + 30_000;
-    while (pool.stats().completed < 1_000 && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    assert.ok(pool.stats().completed >= 1_000, 'enough completed checks to fill the window');
+    await pollWithin(
+      30_000,
+      () =>
+        `enough completed checks to fill the window, 1,000; ${String(pool.stats().completed)} completed`,
+      () => pool.stats().completed >= 1_000,
+      100,
+    );
 
     const assignments: DemandInput[] = Array.from({ length: V1_TARGET_SENSORS }, () => ({
       sensorType: 'test.slow',
