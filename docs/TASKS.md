@@ -11636,7 +11636,7 @@ because each is a decision rather than a defect:
         No column says which. `last_seen_at` is no help either: until `P-319` every hello moved it
         before its key was checked, so it dates any hello, not a refusal. Backfilling from it
         would put a refusal's time beside rows that were never refused. That would turn the
-        upgrade's "nothing recorded" into `incompatible`, *its last hello was refused*, which is
+        upgrade's "nothing recorded" into `incompatible`, *a hello was refused over it*, which is
         the red mark `R-01` kept off carried-over probes. A version above 0 was never refused,
         because the floor has been 1 throughout. So there is nothing to backfill there either.
       - **What it costs, and why that is small.** Such a probe reads `unknown` in `GET /probes`,
@@ -11651,8 +11651,8 @@ because each is a decision rather than a defect:
         this probe* with `protocol-version`.
       - **Test.** `probe-registry.test.ts`: a row refused at 0, with its refusal time taken away
         as the build before 074 left it, reads `unknown` with no refusal time. The same probe's
-        next hello at 0 is refused, records its time, and reads `incompatible`, *its last hello
-        was refused*. The health side (that 0 is served as `null`, and the message says nothing
+        next hello at 0 is refused, records its time, and reads `incompatible`, *a hello was
+        refused over it*. The health side (that 0 is served as `null`, and the message says nothing
         of it) is in `P-317`'s third test.
       - **Mutation:** `skewFor` reading every 0 as a version, as a backfill from
         `last_seen_at` would, failed 2 (this test, and `R-01`'s carried-over row).
@@ -11665,8 +11665,9 @@ because each is a decision rather than a defect:
       **P-317 outcome. The message names the refusal, its version and its time.**
       - **The sentence.** `withLastRefusal` (`probe-health.ts`) appends it to what the link
         says whenever `lastProtocolRefusedAt` is set, in the clause style of the other
-        messages: *not connected to the core; its last hello, at 2026-10-07T06:00:00.000Z, was
-        refused over its version: it spoke protocol 0, and this core accepts protocol 1 or newer*.
+        messages: *not connected to the core; the last hello refused over its version, at
+        2026-10-07T06:00:00.000Z, spoke protocol 0; this core accepts protocol 1 or newer*
+        (reworded on review, below).
         - **The time is ISO 8601, the same value as `lastProtocolRefusedAt`.** Not "2 hours ago":
           an API message is logged and read later, and a relative time in it is wrong once
           written. The form still says "ago" in its own sentence, from the answer's fields.
@@ -11693,6 +11694,36 @@ because each is a decision rather than a defect:
       - **Mutations** (each restored byte for byte, `dist` rebuilt):
         - the route passing no refusal failed 2;
         - the sentence ignoring whether a refusal is recorded failed 2.
+      - **Amended on review** (a second commit). **The sentence said "its last hello … was
+        refused over its version", which the row cannot support.** `protocol_refused_at` moves
+        only on a version refusal. Since `P-319`, a later hello that does not prove it is this
+        probe (a wrong key, an address its filter refuses) writes nothing. So a probe upgraded
+        since and now refused for its address was told its last hello was a version refusal,
+        while its journal said `source-not-allowed`.
+        - **The health message** now reads *the last hello refused over its version, at <ISO>,
+          spoke protocol N; this core accepts protocol M or newer*.
+        - **The same claim is fixed in two more places:**
+          - `/probes`' skew explanation (`U-35`), *…so its last hello was refused…*, now reads
+            *…so a hello was refused over it, and it will be refused again until it is upgraded*;
+          - the add-sensor form's *Its last hello, 2 hours ago (…), was refused…* now reads
+            *A hello, 2 hours ago (…), was refused…*.
+        - **The route description** now says the message names the last hello refused over the
+          version, not the last hello. `lastProtocolRefusedAt` now says "no handshake has been
+          accepted since" instead of "the probe has not connected since", which was false beside
+          a live link. `api-reference.md` is regenerated.
+        - **Tests.**
+          - `probe-registry.test.ts` (new): a version refusal, approval, then the upgraded probe
+            refused for its key. The row keeps the version refusal, the skew says *a hello was
+            refused over it* and not "last hello", and the health message built from the same
+            row (`lastProtocol` + `withLastRefusal`) is the new sentence, with no "its last
+            hello" and no date of the unproven hello.
+          - `probe-health.test.ts`: `said()` updated, plus a "no 'its last hello'" assert.
+          - The registry's regexes and the web form's word-for-word sentences are updated, and
+            the form asserts no "last hello".
+        - **Mutations** (each restored byte for byte, core `dist` rebuilt):
+          - the old health wording failed 3;
+          - the old skew wording failed 4;
+          - the old form wording failed 3.
 
 - [x] **P-318 — the generated API reference hides nested enums and field descriptions** · S ·
       P-313 · Found 2026-10-08 in `P-313`. `docs/api-reference.md` renders top-level fields only,

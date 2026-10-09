@@ -196,6 +196,13 @@ const NO_LAST_PROTOCOL: LastProtocol = { version: null, at: null, refusedAt: nul
  * message that said only "not connected to the core", so a reader of the sentence alone was not
  * told the probe is refused at every hello.
  *
+ * **The last hello refused over its version, not the last hello.** `protocol_refused_at` is moved
+ * only by a version refusal. Since `P-319` a later hello that does not prove it is this probe (a
+ * wrong key, an address its filter refuses) writes nothing to the row, so a probe upgraded since
+ * and now refused for its address still has the old refusal recorded. "Its last hello was refused
+ * over its version" would send the operator after a version while the probe's journal says
+ * `source-not-allowed`.
+ *
  * **The time is the refusal's own, as ISO 8601**, the same value as `lastProtocolRefusedAt`. Not
  * "2 hours ago": an API message is logged, stored and read later, and a relative time in it is
  * wrong from the moment it is written. **And no claim about the next hello**: the refusal may have
@@ -208,8 +215,8 @@ const NO_LAST_PROTOCOL: LastProtocol = { version: null, at: null, refusedAt: nul
 export function withLastRefusal(message: string, last: LastProtocol): string {
   if (last.refusedAt === null || last.version === null) return message;
   return (
-    `${message}; its last hello, at ${last.refusedAt}, was refused over its version: it spoke ` +
-    `protocol ${String(last.version)}, and this core accepts protocol ` +
+    `${message}; the last hello refused over its version, at ${last.refusedAt}, spoke ` +
+    `protocol ${String(last.version)}; this core accepts protocol ` +
     `${String(MIN_PROTOCOL_VERSION)} or newer`
   );
 }

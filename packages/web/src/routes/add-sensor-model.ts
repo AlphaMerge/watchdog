@@ -189,8 +189,9 @@ export function listenerNotice(
   // version, because a refused probe will not report anything, whatever its version says of the
   // counter. The test is the handshake's own, from the same table, not a copy of the floor. Then
   // which of two things the core recorded:
-  // - **its last hello was refused over it**, which the core says with the refusal's time. A
-  //   refusal at 0 is served as 0 beside it, and not as nothing recorded (`U-35`);
+  // - **a hello was refused over it**, which the core says with the refusal's time. A refusal at
+  //   0 is served as 0 beside it, and not as nothing recorded (`U-35`). Not "its last hello": a
+  //   later hello refused for its key or its address writes nothing (`P-319`);
   // - **a core with a lower floor accepted it**, and this one has not seen the probe since. It
   //   will be refused when it tries, and before `U-35` it was given the `U-31` or `U-32` sentence,
   //   which said it would connect and not report.
@@ -328,15 +329,20 @@ function tooOldWhenLastConnected(
 }
 
 /**
- * A probe that is not connected, whose last hello was refused over the version it spoke (`U-33`).
+ * A probe that is not connected, and a hello of which was refused over the version it spoke
+ * (`U-33`).
  *
  * **Refused, not "when it last connected"**: no accepted handshake spoke that version, and none has
  * since, or the core would have recorded that one. So it is said as a refusal, with the version on
  * each end, and that an upgrade is what lets it in.
  *
- * **And when, where the core says** (`U-35`): the last refusal's time, the newest hello, so a probe
- * that keeps retrying reads as still trying. Not the time it was last seen, which a hello refused
- * for its key or its address moves too, and which is not given to a reader of the probe.
+ * **And when, where the core says** (`U-35`): the last refusal's time, so a probe that keeps
+ * retrying reads as still trying. Not the time it was last seen, which is not given to a reader of
+ * the probe.
+ *
+ * **"A hello", not "its last hello"** (`P-317` review). The refusal's time moves only on a version
+ * refusal, and since `P-319` a later hello refused for its key or its address writes nothing, so a
+ * probe upgraded since may have been refused for something else at its last hello.
  */
 function refusedOverVersion(
   spec: ListenerSpec,
@@ -344,10 +350,10 @@ function refusedOverVersion(
   spoke: number,
   when: { readonly shown: string } | null,
 ): string {
-  const lastHello = when === null ? 'Its last hello' : `Its last hello, ${when.shown},`;
+  const aHello = when === null ? 'A hello' : `A hello, ${when.shown},`;
   return (
     `Probe “${probeName}” is not connected, so whether its ${spec.name} is running cannot be ` +
-    `checked. ${lastHello} was refused over its version: it spoke protocol ${String(spoke)}, ` +
+    `checked. ${aHello} was refused over its version: it spoke protocol ${String(spoke)}, ` +
     `and this core accepts protocol ${String(MIN_PROTOCOL_VERSION)} or newer, so unless it has ` +
     `been upgraded since, it will be refused again when it tries. ${checkByHand(spec)}`
   );

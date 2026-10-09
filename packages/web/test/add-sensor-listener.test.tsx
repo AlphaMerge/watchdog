@@ -431,7 +431,7 @@ describe('whether a probe’s listener is running', () => {
     });
   });
 
-  describe('when its last hello was refused over its version (U-33, U-35)', () => {
+  describe('when a hello was refused over its version (U-33, U-35)', () => {
     // What the core records for a hello it refused over the version: the version, no accepted
     // time, and when it was refused (`U-35`). One below the floor is the one it refuses, which
     // today is 0: served as 0 beside the refusal, where it used to be served as nothing at all.
@@ -445,7 +445,7 @@ describe('whether a probe’s listener is running', () => {
       expect(notice?.kind).toBe('unknown');
       expect(notice?.text).toBe(
         'Probe “Berlin” is not connected, so whether its syslog listener is running cannot be ' +
-          `checked. Its last hello, 2 hours ago (${absolute}), was refused over its version: it ` +
+          `checked. A hello, 2 hours ago (${absolute}), was refused over its version: it ` +
           `spoke protocol ${String(REFUSED)}, and this core accepts protocol ` +
           `${String(MIN_PROTOCOL_VERSION)} or newer, so unless it has been upgraded since, it ` +
           'will be refused again when it tries. Check that syslogListener.enabled is true in ' +
@@ -457,9 +457,11 @@ describe('whether a probe’s listener is running', () => {
       });
       expect(notice?.text).not.toContain('When it last connected');
       expect(notice?.text).not.toContain('This updates when it connects');
+      // Not the last hello: one refused later for its key or address is not recorded (`P-317`).
+      expect(notice?.text).not.toMatch(/last hello/i);
       // Each listener its own setting, and flow its caveat.
       const flow = text('flow', downAt(REFUSED, null, REFUSED_AT));
-      expect(flow).toContain('Its last hello, 2 hours ago (');
+      expect(flow).toContain('A hello, 2 hours ago (');
       expect(flow).toContain('was refused over its version');
       expect(flow).toContain('Check that flowListener.enabled is true');
       expect(flow).toContain('A probe on the v1 build has no flow collector');
@@ -467,7 +469,7 @@ describe('whether a probe’s listener is running', () => {
 
     it('says it without a time when the refusal’s does not parse', () => {
       const notice = say('syslog', downAt(REFUSED, null, 'not a time'));
-      expect(notice?.text).toContain('checked. Its last hello was refused over its version: it');
+      expect(notice?.text).toContain('checked. A hello was refused over its version: it');
       expect(notice?.time).toBeUndefined();
     });
 
@@ -944,7 +946,7 @@ describe('the add-sensor form on a probe that was too old when it last connected
     });
     const absolute = new Date(refusedAt).toLocaleString();
     expect(notice().textContent).toContain(
-      `Its last hello, 2 hours ago (${absolute}), was refused over its version: it spoke ` +
+      `A hello, 2 hours ago (${absolute}), was refused over its version: it spoke ` +
         `protocol ${String(MIN_PROTOCOL_VERSION - 1)}`,
     );
     expect(notice().textContent).not.toContain('When it last connected');

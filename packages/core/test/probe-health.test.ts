@@ -2057,8 +2057,8 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
           // the core". The time in the sentence is the wall clock's, as ISO 8601: never "ago".
           const ACCEPTED = '2026-10-01T08:30:00.000Z';
           const said = (version: number, at: string): string =>
-            `its last hello, at ${at}, was refused over its version: it spoke protocol ` +
-            `${String(version)}, and this core accepts protocol ${String(MIN_PROTOCOL_VERSION)} ` +
+            `the last hello refused over its version, at ${at}, spoke protocol ` +
+            `${String(version)}; this core accepts protocol ${String(MIN_PROTOCOL_VERSION)} ` +
             'or newer';
           // What `ProbeRegistry.#speaks` writes for an accepted handshake.
           const accept = (version: number, at: string): Promise<unknown> =>
@@ -2085,6 +2085,9 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
               answer.body,
             );
             assert.doesNotMatch(answer.json['message'], /\bago\b/);
+            // Not "its last hello": a later hello refused before it proved it is this probe
+            // writes nothing, so the row cannot say what the last hello was (`P-317` review).
+            assert.doesNotMatch(answer.json['message'], /its last hello/i);
           });
 
           it('names a refusal after an earlier accept, by the refusal’s time and not the accept’s', async () => {

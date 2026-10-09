@@ -119,7 +119,8 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
           `${String(versionFor('healthReporting'))} cannot send its own numbers either; the ` +
           'message says so in words rather than leaving the channels silently absent, and it ' +
           'names the last hello refused over the version, with `lastProtocolRefusedAt` as its ' +
-          'time, whenever that is set. ' +
+          'time, whenever that is set: not the last hello, since one refused before it proved ' +
+          'it is this probe (its key, its address) is not recorded. ' +
           '`numbersUnavailable` says why the probe’s own numbers are gaps, as a value: ' +
           '`not-connected`; `protocol`, the only reason that is about versions, with the ' +
           'version it speaks and the one its numbers need; `no-heartbeat`, connected and none ' +
@@ -136,8 +137,8 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
           'too. `null` whenever `lastProtocolVersion` is, beside a version a hello was refused ' +
           'over, and for one recorded before the core kept the time. ' +
           '`lastProtocolRefusedAt` is when a hello was last refused over that version, as ISO ' +
-          '8601: the probe has not connected since, and a core with the same floor will refuse ' +
-          'it again. Never beside `lastProtocolVersionAt`, and `null` whenever ' +
+          '8601: no handshake has been accepted since, and a core with the same floor will ' +
+          'refuse that version again. Never beside `lastProtocolVersionAt`, and `null` whenever ' +
           '`lastProtocolVersion` is, beside an accepted version, and for one recorded before the ' +
           'core kept the time. A `lastProtocolVersion` of 0 is served only beside it: a 0 ' +
           'without it is nothing recorded, and is `null`.',

@@ -3,7 +3,8 @@ import { Ajv } from 'ajv';
 import Fastify from 'fastify';
 import { DatabaseAuditSink } from '../src/audit/store.js';
 import { after, before, beforeEach, describe, it } from 'node:test';
-import { createLogger, PROTOCOL_VERSION, withCorrelation } from '@ms/shared';
+import { createLogger, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, withCorrelation } from '@ms/shared';
+import { ProbeHealthService, withLastRefusal } from '../src/health/probe-health.js';
 import { ProbeRegistry } from '../src/probes/registry.js';
 import { probeRoutes } from '../src/api/routes/probes.js';
 import { IN_PROCESS_SOURCES } from '../src/ingestion/sources.js';
@@ -15,6 +16,7 @@ import {
   type ScratchDatabase,
 } from './support/database.js';
 import { buildHarness, testActor } from './support/tree.js';
+import { everyVoucherHolds } from './support/vouching.js';
 
 /**
  * Which probes an installation trusts (`R-01`).
@@ -769,7 +771,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       // now: this one was refused, and says so.
       assert.equal(stored.skew.kind, 'incompatible');
       assert.match(stored.skew.explanation, /speaks protocol 0/);
-      assert.match(stored.skew.explanation, /its last hello was refused/);
+      assert.match(stored.skew.explanation, /a hello was refused over it,/);
       assert.equal(typeof stored.protocolRefusedAt, 'string');
       assert.equal(stored.protocolAcceptedAt, null);
     });
@@ -1044,7 +1046,54 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       assert.ok(told !== null);
       assert.equal(told.protocolRefusedAt, '2026-01-09T10:00:00.000Z');
       assert.equal(told.skew.kind, 'incompatible');
-      assert.match(told.skew.explanation, /its last hello was refused/);
+      assert.match(told.skew.explanation, /a hello was refused over it,/);
+    });
+
+    it('never calls a version refusal the last hello once a later one failed its proof (P-317 review)', async () => {
+      // The refusal's time moves only on a version refusal, and since `P-319` a hello that does
+      // not prove it is this probe writes nothing. So a probe upgraded since, now refused for its
+      // key, still has the old version refusal recorded, and "its last hello was refused over its
+      // version" would send the operator after a version while its journal says the key.
+      at('2026-01-01T10:00:00.000Z');
+      const first = await clocked.admit(hello({ protocolVersion: PROTOCOL_VERSION - 9 }));
+      assert.ok(first.kind === 'pending');
+      at('2026-01-02T10:00:00.000Z');
+      const refused = await clocked.admit(hello({ gid: first.gid, protocolVersion: 0 }));
+      assert.ok(refused.kind === 'refused' && refused.code === 'protocol-version');
+      await clocked.approve(first.gid, probeId, testActor);
+
+      // Upgraded, and presenting a key that is not its own: refused before it proved anything.
+      at('2026-01-03T10:00:00.000Z');
+      const unproven = await clocked.admit(
+        hello({ gid: first.gid, protocolVersion: PROTOCOL_VERSION, accessKey: 'nope' }),
+      );
+      assert.ok(unproven.kind === 'refused' && unproven.code === 'bad-access-key');
+
+      const row = await clocked.get(first.gid);
+      assert.ok(row !== null);
+      assert.equal(row.protocolRefusedAt, '2026-01-02T10:00:00.000Z', 'the version refusal stays');
+      assert.match(row.skew.explanation, /a hello was refused over it,/);
+      assert.doesNotMatch(row.skew.explanation, /last hello/);
+
+      // And the health answer's message, from the same row, as the route builds it.
+      const health = new ProbeHealthService({
+        vouching: everyVoucherHolds,
+        db,
+        logger: silentLogger,
+        sources: { link: () => ({ connected: false }) },
+        ingest: () => Promise.resolve(),
+      });
+      const last = await health.lastProtocol(probeId);
+      assert.deepEqual(last, { version: 0, at: null, refusedAt: '2026-01-02T10:00:00.000Z' });
+      const message = withLastRefusal(health.read(probeId).message, last);
+      assert.equal(
+        message,
+        'not connected to the core; the last hello refused over its version, at ' +
+          `2026-01-02T10:00:00.000Z, spoke protocol 0; this core accepts protocol ` +
+          `${String(MIN_PROTOCOL_VERSION)} or newer`,
+      );
+      assert.doesNotMatch(message, /its last hello/i);
+      assert.ok(!message.includes('2026-01-03'), 'the unproven hello is not dated as a refusal');
     });
 
     /**
@@ -1088,7 +1137,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
         assert.equal(refused['protocolRefusedAt'], '2026-01-02T10:00:00.000Z');
         const refusedSkew = refused['skew'] as Record<string, unknown>;
         assert.equal(refusedSkew['kind'], 'incompatible');
-        assert.match(String(refusedSkew['explanation']), /its last hello was refused/);
+        assert.match(String(refusedSkew['explanation']), /a hello was refused over it,/);
         assert.equal(enrolled['protocolRefusedAt'], null);
 
         // Accepted again, then refused for its key: the accepted time stays, and since `P-319`
@@ -1440,7 +1489,7 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       const stored = await registry.get('accepted-then');
       assert.equal(stored?.skew.kind, 'incompatible');
       assert.match(stored.skew.explanation, /will be refused when it next connects/);
-      assert.doesNotMatch(stored.skew.explanation, /last hello was refused/);
+      assert.doesNotMatch(stored.skew.explanation, /hello was refused/);
     });
   });
 });

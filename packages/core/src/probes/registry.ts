@@ -1023,17 +1023,22 @@ function read(row: Record<string, unknown>): ProbeRegistration {
  * `incompatible` like any other version below the floor.
  *
  * **And `incompatible` says what happens next, from what the row says happened** (`U-35`). A
- * version this build refuses was either refused at the probe's last hello, or accepted by a core
- * whose floor was lower and recorded before this one started: that probe is not connected,
- * because this core has refused it at every hello since, and will be refused at its next one.
- * The reason alone said neither.
+ * version this build refuses was either refused at a hello, or accepted by a core whose floor
+ * was lower and recorded before this one started: that probe is not connected, because this core
+ * has refused it at every hello since, and will be refused at its next one. The reason alone said
+ * neither.
+ *
+ * **"A hello was refused over it", never "its last hello"** (`P-317` review). The refusal's time
+ * moves only on a version refusal, and since `P-319` a later hello that does not prove it is this
+ * probe (a wrong key, an address its filter refuses) writes nothing, so the probe's last hello
+ * may have been refused for something else, by a probe upgraded since.
  */
 function skewFor(protocolVersion: number, refused: boolean): RegistrationSkew {
   const skew: ProtocolSkew =
     protocolVersion === 0 && !refused ? { kind: 'unknown' } : describeSkew(protocolVersion);
   if (skew.kind !== 'incompatible') return { ...skew, explanation: explainSkew(skew) };
   const next = refused
-    ? 'so its last hello was refused, and it will be refused again until it is upgraded'
+    ? 'so a hello was refused over it, and it will be refused again until it is upgraded'
     : 'so it will be refused when it next connects, unless it has been upgraded since';
   return { ...skew, explanation: `${explainSkew(skew)}, ${next}` };
 }

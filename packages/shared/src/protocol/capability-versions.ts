@@ -63,7 +63,7 @@ export function versionFor(capability: keyof ProbeCapabilities): number {
  * point of negotiating at all.
  *
  * **Here, beside the capability table, so the browser can read it** (`U-33`). The add-sensor form
- * says a probe's last hello was refused over its version, and decides that by the test the
+ * says a hello of a probe's was refused over its version, and decides that by the test the
  * handshake refuses by, rather than by a copy of this number.
  */
 export const MIN_PROTOCOL_VERSION = 1;
