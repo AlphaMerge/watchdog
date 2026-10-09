@@ -14387,6 +14387,38 @@ because each is a decision rather than a defect:
             9996..9999, 99994.. unpaused) and the scenario fails (994..999).
           - The bare `id` restored in `rediscoveryUsing`: `[10, 11, 8, 9]`.
 
+- [ ] **P-386 — re-approving a gid onto another object answers 500** · XS · P-382 · Found
+      2026-10-09 in `P-382`. `probe_config_gid_unique` raises 23505 when an approved gid is
+      approved onto a different probe object, and nothing maps it, so the operator most likely
+      sees a 500. **Done when** it is a 409 `PROBE_CONFLICT` naming the object the gid is on, with
+      a test.
+
+- [ ] **P-387 — `localProbeLog` has no test** · XS · P-382 · Found 2026-10-09 in `P-382`. It is
+      inline in `main.ts`, so nothing checks that Core Health's log line follows the one local
+      row `P-382` leaves. **Done when** it is extracted and tested with zero, one and a moved
+      local row.
+
+- [ ] **P-388 — `DISTINCT ON` over a text alias may skip the `(sensor_id, time)` index** · S ·
+      P-385 · Found 2026-10-09 in `P-385` review. `timeseries/store.ts` `stateAtHorizon` and
+      `state/runtime.ts` `orderedAfterLast` key `DISTINCT ON` by `sensor_id::text`. The result is
+      right, since text and number map one to one, but the plan may not use the index.
+      **Done when** both plans are read at 5,000 sensors and qualified to the input column if
+      that helps, with the measurement in `docs/findings/`.
+
+- [ ] **P-389 — a build-hygiene check for an alias named in its own `ORDER BY`** · S · P-385 ·
+      Found 2026-10-09 in `P-385` review. The pause sweep and access bugs were both a
+      `::text AS x` read back by a bare `x` in `ORDER BY` / `DISTINCT ON`, which sorts 1000
+      before 999. The review's two scan scripts found every case by hand. **Done when**
+      `build-hygiene` fails on that shape in `packages/core/src`, with an allow-list for the
+      harmless ones and a test that a planted case is caught.
+
+- [ ] **P-390 — response schemas are lax at runtime** · XS · P-383 · Found 2026-10-09 in
+      `P-383`. `fast-json-stringify` builds its own Ajv with `strictSchema: false`, so a typo in
+      a response schema is caught by `api-strict-schemas` but not when a route registers.
+      **Done when** `ApiServer` compiles each route's response schemas strict in `onRoute`, or
+      the outcome says why the test is enough. The roughly 25 inline
+      `{ properties: { x: true }, required: ['x'] }` pairs may become a helper at the same time.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -26912,6 +26944,44 @@ because each is a decision rather than a defect:
         failing). What no test produces is the case it exists for, the page's own late write
         read back after a later key: jsdom's `act` commits each transition before the next key,
         so that lag needs a browser.
+
+- [ ] **U-71 — the channel table's readings drop on every poll** · S · U-61 · Found
+      2026-10-09 in `U-61`. Each `/values` poll reloads, `useApi` answers `loading`, and the
+      table is handed `null` values for the length of the request, every 15 seconds. **Done
+      when** the last readings stay in sight while the next are read (held from `ready`, as the
+      channel list is), and a failed poll is said without dropping them, with a
+      MutationObserver test. The same poll firing while the values panel's *Try again* is out
+      takes the panel away and sends focus to the heading (`U-68` review); it should wait.
+
+- [ ] **U-72 — repeats of an automatic failure are announced every minute** · S · U-67, U-66 ·
+      Found 2026-10-09. A held list's automatic re-read empties and refills its region, so a
+      failure that persists is said again each minute. The shared map's first read failing
+      other than with a 404 makes a new alert every minute. **Decision first**: should a repeat
+      of the same failure from a read nobody asked for stay silent? Then do it for both, with
+      tests.
+
+- [ ] **U-73 — *Save template* is `disabled` while it saves** · XS · U-69 · Found 2026-10-09 in
+      `U-69`. A refused save can lose focus before the refusal is said. `U-64` used
+      `aria-disabled` on *Yes, delete* for this. **Done when** *Save* and *Create* do the same,
+      with a focus test.
+
+- [ ] **U-74 — the shared map after a 404, and its age** · S · U-66 · Found 2026-10-09 in
+      `U-66`. Once a link has 404'd, the page still asks every minute though the answer cannot
+      change, which costs the public route's rate limit. A map that has failed to refresh for an
+      hour looks the same as one that failed a minute ago. **Done when** polling stops for a gone
+      token, and the page says when the map was last read, with tests.
+
+- [ ] **U-75 — the tree's address is written on every key** · XS · U-70 · Found 2026-10-09 in
+      `U-70`. One `replace` per key can reach Safari's and Firefox's history-write limits when a
+      key is held down. The late-write lag the `REPLACE` guard exists for has no browser test.
+      `ModeRefusal`'s id is now the paragraph's colour, not muted. **Done when** writes are
+      debounced and flushed on blur, the lag is covered in a real browser if one is available
+      to the suite, and the id's colour is decided.
+
+- [ ] **U-76 — a sub-panel's Try again sends focus to the page heading** · XS · U-68 · Found
+      2026-10-09 in `U-68`. When a History tab or Overview card panel goes, focus goes to the
+      page's `h1`, far from where the operator was. **Done when** `ErrorPanel` takes an optional
+      nearer focus target and the sensor page's tabs use it, with tests.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
