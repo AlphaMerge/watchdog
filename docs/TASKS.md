@@ -11618,16 +11618,81 @@ because each is a decision rather than a defect:
       when** a test raises the floor through the same seam a release would, or the sentence is
       removed until a floor above 1 exists, said in the outcome.
 
-- [ ] **P-316 — a version refused before migration 074 still reads as nothing recorded** · XS ·
+- [x] **P-316 — a version refused before migration 074 still reads as nothing recorded** · XS ·
       U-35 · Found 2026-10-08 in `U-35`. 074 leaves `protocol_refused_at` NULL on existing rows,
       so an old refused 0 reads `unknown` until the probe's next refused hello. **Done when**
       decided: backfill (and from what), or leave it and say so in the upgrade notes, with a test
       either way.
 
-- [ ] **P-317 — the probe health answer's message does not mention a refusal** · XS · U-35 ·
+      **P-316 outcome. Decided: no backfill, and the upgrade notes say so.** No migration was
+      added, so 075 is unused.
+      - **Why the data cannot tell.** A carried-over row with protocol 0 and no accepted time is
+        one of three things:
+        - a refusal at 0;
+        - the `R-01` upgrade's 0 for a probe not accepted since (refused for its key, its address
+          or a revocation, or never heard from);
+        - before `P-319`, a 0 a forged hello wrote under another probe's name.
+
+        No column says which. `last_seen_at` is no help either: until `P-319` every hello moved it
+        before its key was checked, so it dates any hello, not a refusal. Backfilling from it
+        would put a refusal's time beside rows that were never refused. That would turn the
+        upgrade's "nothing recorded" into `incompatible`, *its last hello was refused*, which is
+        the red mark `R-01` kept off carried-over probes. A version above 0 was never refused,
+        because the floor has been 1 throughout. So there is nothing to backfill there either.
+      - **What it costs, and why that is small.** Such a probe reads `unknown` in `GET /probes`,
+        has no `lastProtocolVersion` (and no refusal in the `message`) in its health answer, and
+        gets *This updates when it connects* in the add-sensor form. A refused probe keeps
+        retrying (`core-client.ts`: retries slowly after a `reject`), so one still running is
+        recorded at its next hello. Only one that has stopped trying stays `unknown`.
+      - **`docs/installation.md` → Upgrading** gains *From a release before `U-35`*, written
+        beside the other per-release notes there: what such a probe reads as in all three places,
+        why 074 cannot date it, and how to find one: `GET /probes` at `protocolVersion` 0 with
+        `protocolAcceptedAt` `null`, then the host's `journalctl -u ms-probe` for *core rejected
+        this probe* with `protocol-version`.
+      - **Test.** `probe-registry.test.ts`: a row refused at 0, with its refusal time taken away
+        as the build before 074 left it, reads `unknown` with no refusal time. The same probe's
+        next hello at 0 is refused, records its time, and reads `incompatible`, *its last hello
+        was refused*. The health side (that 0 is served as `null`, and the message says nothing
+        of it) is in `P-317`'s third test.
+      - **Mutation:** `skewFor` reading every 0 as a version, as a backfill from
+        `last_seen_at` would, failed 2 (this test, and `R-01`'s carried-over row).
+
+- [x] **P-317 — the probe health answer's message does not mention a refusal** · XS · U-35 ·
       Found 2026-10-08 in `U-35`. `GET /probes/{id}/health` carries `lastProtocolRefusedAt`, but
       its `message` text says nothing of it. **Done when** the message names a refused version and
       when, with a test.
+
+      **P-317 outcome. The message names the refusal, its version and its time.**
+      - **The sentence.** `withLastRefusal` (`probe-health.ts`) appends it to what the link
+        says whenever `lastProtocolRefusedAt` is set, in the clause style of the other
+        messages: *not connected to the core; its last hello, at 2026-10-07T06:00:00.000Z, was
+        refused over its version: it spoke protocol 0, and this core accepts protocol 1 or newer*.
+        - **The time is ISO 8601, the same value as `lastProtocolRefusedAt`.** Not "2 hours ago":
+          an API message is logged and read later, and a relative time in it is wrong once
+          written. The form still says "ago" in its own sentence, from the answer's fields.
+        - **No claim about the next hello.** The refusal may have been made by a core with a
+          higher floor, so the sentence gives both numbers and leaves the comparison to the reader.
+        - **Said beside a live link too.** An accepted handshake clears the refusal, so a refusal
+          beside a link came after that link's handshake, from another process speaking for this
+          probe.
+      - **The route** builds it from `read()`'s sentence and `lastProtocol()`, which it already
+        read. The description says the message names the refusal; `api-reference.md` is
+        regenerated. No new route and no new field.
+      - **Not changed:** the Probe Health *sensor's* message (the sweep) still says only "not
+        connected to the core". It reads no registration row, and adding one per probe per sweep
+        was not this ticket.
+      - **Nothing parses `message`.** Nothing in `packages/web` reads the health answer's
+        `message` (the add-sensor form builds its own sentences from the fields), and there is no
+        `/probes` view in the web app (`U-33`).
+      - **Tests** (`probe-health.test.ts`, through the route; each asserts the whole message):
+        - refused at 0 and never accepted: named with the refusal's time, and no "ago";
+        - refused after an earlier accept: plain before the refusal, then named by the refusal's
+          time and not the accept's; a refused 12 named as 12; beside a live link, after what
+          the link says;
+        - accepted again after a refusal: no mention, and none for a 0 with no refusal beside it.
+      - **Mutations** (each restored byte for byte, `dist` rebuilt):
+        - the route passing no refusal failed 2;
+        - the sentence ignoring whether a refusal is recorded failed 2.
 
 - [x] **P-318 — the generated API reference hides nested enums and field descriptions** · S ·
       P-313 · Found 2026-10-08 in `P-313`. `docs/api-reference.md` renders top-level fields only,

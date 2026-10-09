@@ -4,7 +4,11 @@ import { CORE_HEALTH_CHANNELS, PROBE_HEALTH_CHANNELS } from '@ms/sensors';
 import { AppError, versionFor } from '@ms/shared';
 import type { FastifyInstance } from 'fastify';
 import type { CoreHealthService } from '../../health/core-health.js';
-import { PROBE_NUMBERS_UNAVAILABLE, type ProbeHealthService } from '../../health/probe-health.js';
+import {
+  PROBE_NUMBERS_UNAVAILABLE,
+  withLastRefusal,
+  type ProbeHealthService,
+} from '../../health/probe-health.js';
 import { toHttpError } from '../errors.js';
 import { INSTALLATION, onObject } from '../authorization.js';
 
@@ -113,7 +117,9 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
           'zero, they are unknown, and a scheduler lag of 0 ms from a probe that is gone would ' +
           'be the most misleading reading this system could produce. A probe below protocol ' +
           `${String(versionFor('healthReporting'))} cannot send its own numbers either; the ` +
-          'message says so in words rather than leaving the channels silently absent. ' +
+          'message says so in words rather than leaving the channels silently absent, and it ' +
+          'names the last hello refused over the version, with `lastProtocolRefusedAt` as its ' +
+          'time, whenever that is set. ' +
           '`numbersUnavailable` says why the probe’s own numbers are gaps, as a value: ' +
           '`not-connected`; `protocol`, the only reason that is about versions, with the ' +
           'version it speaks and the one its numbers need; `no-heartbeat`, connected and none ' +
@@ -215,7 +221,8 @@ export function healthRoutes(app: FastifyInstance, options: HealthRoutesOptions)
       return {
         at: new Date().toISOString(),
         probeId: request.params.id,
-        message,
+        // `P-317`: the sentence names a recorded refusal, which the probe's link cannot know.
+        message: withLastRefusal(message, last),
         numbersUnavailable: unavailable,
         protocolVersion,
         lastProtocolVersion: last.version,

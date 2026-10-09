@@ -5,6 +5,7 @@ import {
   describeError,
   describeSkew,
   explainSkew,
+  MIN_PROTOCOL_VERSION,
   versionFor,
   type ChannelReading,
   type CheckResult,
@@ -188,6 +189,30 @@ export interface LastProtocol {
 }
 
 const NO_LAST_PROTOCOL: LastProtocol = { version: null, at: null, refusedAt: null };
+
+/**
+ * A probe's health sentence, with the last refusal over its version named when the registry
+ * recorded one (`P-317`). `GET /probes/{id}/health` served `lastProtocolRefusedAt` beside a
+ * message that said only "not connected to the core", so a reader of the sentence alone was not
+ * told the probe is refused at every hello.
+ *
+ * **The time is the refusal's own, as ISO 8601**, the same value as `lastProtocolRefusedAt`. Not
+ * "2 hours ago": an API message is logged, stored and read later, and a relative time in it is
+ * wrong from the moment it is written. **And no claim about the next hello**: the refusal may have
+ * been a core's with a higher floor than this one, so the sentence gives the version spoken and
+ * the version this core accepts, and leaves the comparison to the reader.
+ *
+ * Said whether or not the probe is connected. An accepted handshake clears the refusal, so one
+ * beside a live link is a hello refused after it: another process speaking for this probe.
+ */
+export function withLastRefusal(message: string, last: LastProtocol): string {
+  if (last.refusedAt === null || last.version === null) return message;
+  return (
+    `${message}; its last hello, at ${last.refusedAt}, was refused over its version: it spoke ` +
+    `protocol ${String(last.version)}, and this core accepts protocol ` +
+    `${String(MIN_PROTOCOL_VERSION)} or newer`
+  );
+}
 
 /** One reading of every channel. `null` is a gap and stays one — never a zero (`CLAUDE.md`). */
 export type ProbeHealthReading = Readonly<Record<string, number | null>>;

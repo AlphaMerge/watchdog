@@ -2051,6 +2051,94 @@ describe('the Probe Health sensor', { skip: available ? false : 'no database' },
           assert.equal(watcher.json['lastProtocolVersion'], null, watcher.body);
           assert.equal(watcher.json['lastProtocolRefusedAt'], null, watcher.body);
         });
+
+        describe('and the message says so (P-317)', () => {
+          // The answer carried the refusal's time while its sentence said only "not connected to
+          // the core". The time in the sentence is the wall clock's, as ISO 8601: never "ago".
+          const ACCEPTED = '2026-10-01T08:30:00.000Z';
+          const said = (version: number, at: string): string =>
+            `its last hello, at ${at}, was refused over its version: it spoke protocol ` +
+            `${String(version)}, and this core accepts protocol ${String(MIN_PROTOCOL_VERSION)} ` +
+            'or newer';
+          // What `ProbeRegistry.#speaks` writes for an accepted handshake.
+          const accept = (version: number, at: string): Promise<unknown> =>
+            db.query(
+              `UPDATE probe_registration
+               SET protocol_version = $1, protocol_accepted_at = $2, protocol_refused_at = NULL
+               WHERE gid = 'u31-live'`,
+              [version, at],
+            );
+          afterEach(async () => {
+            await refuse('u31-live', 12, null);
+          });
+
+          it('names a version refused at a probe’s every hello, and when', async () => {
+            await refuse('u31-live', 0, REFUSED);
+            const answer = await ask(
+              build(() => ({ connected: false })),
+              probeId,
+            );
+            assert.equal(answer.status, 200, answer.body);
+            assert.equal(
+              answer.json['message'],
+              `not connected to the core; ${said(0, REFUSED)}`,
+              answer.body,
+            );
+            assert.doesNotMatch(answer.json['message'], /\bago\b/);
+          });
+
+          it('names a refusal after an earlier accept, by the refusal’s time and not the accept’s', async () => {
+            await accept(12, ACCEPTED);
+            const service = build(() => ({ connected: false }));
+            assert.equal(
+              (await ask(service, probeId)).json['message'],
+              'not connected to the core',
+            );
+
+            // Then refused over its version, which clears the accepted time, as `#speaks` does.
+            await refuse('u31-live', 0, REFUSED);
+            const answer = await ask(service, probeId);
+            assert.equal(
+              answer.json['message'],
+              `not connected to the core; ${said(0, REFUSED)}`,
+              answer.body,
+            );
+            assert.ok(!answer.json['message'].includes(ACCEPTED), answer.body);
+
+            // A nonzero version refused (by a core whose floor was higher) is named as it is.
+            await refuse('u31-live', 12, REFUSED);
+            assert.equal(
+              (await ask(service, probeId)).json['message'],
+              `not connected to the core; ${said(12, REFUSED)}`,
+            );
+
+            // Beside a live link it is a hello refused after that link's handshake, from another
+            // process speaking for this probe, and is said after what the link says.
+            const live = await ask(
+              build(() => connected({ protocolVersion: PROTOCOL_VERSION })),
+              probeId,
+            );
+            const message = String(live.json['message']);
+            assert.ok(message.startsWith('connected'), live.body);
+            assert.ok(message.endsWith(`; ${said(12, REFUSED)}`), live.body);
+          });
+
+          it('says nothing of a refusal once a handshake is accepted again', async () => {
+            await refuse('u31-live', 0, REFUSED);
+            await accept(PROTOCOL_VERSION, '2026-10-08T09:00:00.000Z');
+            const service = build(() => ({ connected: false }));
+            const answer = await ask(service, probeId);
+            assert.equal(answer.json['lastProtocolRefusedAt'], null, answer.body);
+            assert.equal(answer.json['message'], 'not connected to the core', answer.body);
+
+            // Nor of a 0 with no refusal beside it, which is nothing recorded (`P-316`).
+            await refuse('u31-live', 0, null);
+            assert.equal(
+              (await ask(service, probeId)).json['message'],
+              'not connected to the core',
+            );
+          });
+        });
       });
 
       it('answers null rather than refusing when the database cannot be asked', async () => {

@@ -394,6 +394,27 @@ Set it to 1500 or more, or remove it to take the default, before you upgrade. Th
 the setting and says why, in the installer's output for the file and in `journalctl -u ms-probe`
 for the drop-in.
 
+**From a release before `U-35`**, a probe the core refused over its protocol version still reads
+as one with nothing recorded, until it is refused again. Migration 074 records when a hello is
+refused over its version, and `GET /probes`, the probe's health answer and the add-sensor form
+all say so. It cannot date a refusal made before it, and does not guess one. A stored protocol 0
+with no accepted time is either such a refusal, or a probe an earlier upgrade carried over that
+has not been accepted since (refused for its key, its address or a revocation, or not heard from
+at all). Nothing in the row says which. Before `P-319` every hello moved `last_seen_at` before
+its key was checked, so that time dates any hello, not a refusal. Until it is refused again, such a
+probe shows:
+
+- a skew of `unknown` in `GET /probes`: *has not connected since this core started recording
+  protocol versions*;
+- no `lastProtocolVersion` in its health answer, and no refusal in its `message`;
+- *This updates when it connects* in the add-sensor form.
+
+A refused probe keeps retrying, so one that is still running is recorded at its next hello, and
+from then on every place says it was refused. One that has stopped trying stays like this until
+it is started again or upgraded. To find them, list the probes `GET /probes` shows at
+`protocolVersion` 0 with `protocolAcceptedAt` `null`, and look in each one's
+`journalctl -u ms-probe` for *core rejected this probe* with the code `protocol-version`.
+
 ### The units are the release's
 
 The systemd units live in `/usr/lib/systemd/system`, and every upgrade replaces them: `ms-core`,

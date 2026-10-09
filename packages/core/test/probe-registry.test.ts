@@ -1015,6 +1015,38 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
       );
     });
 
+    it('reads a refusal from before migration 074 as nothing recorded, until the probe is refused again (P-316)', async () => {
+      // **Not backfilled, and this is what that costs.** What the build before 074 left of a
+      // refusal at 0 is the 0 and no accepted time, which is also the `R-01` upgrade's row for a
+      // probe not accepted since; `last_seen_at` was moved before the key was checked until
+      // `P-319`, so it dates any hello at all. Migration 074 leaves the refusal's time NULL, and
+      // the row reads `unknown` until the next refused hello writes one. A refused probe keeps
+      // retrying, so a running one is told apart at its next hello.
+      at('2026-01-01T10:00:00.000Z');
+      const first = await clocked.admit(hello({ protocolVersion: PROTOCOL_VERSION - 9 }));
+      assert.ok(first.kind === 'pending');
+      at('2026-01-02T10:00:00.000Z');
+      await clocked.admit(hello({ gid: first.gid, protocolVersion: 0 }));
+      await db.query('UPDATE probe_registration SET protocol_refused_at = NULL WHERE gid = $1', [
+        first.gid,
+      ]);
+      const carried = await clocked.get(first.gid);
+      assert.ok(carried !== null);
+      assert.equal(carried.protocolVersion, 0);
+      assert.equal(carried.protocolAcceptedAt, null);
+      assert.equal(carried.protocolRefusedAt, null);
+      assert.equal(carried.skew.kind, 'unknown', 'what the upgrade note says it reads as');
+
+      at('2026-01-09T10:00:00.000Z');
+      const again = await clocked.admit(hello({ gid: first.gid, protocolVersion: 0 }));
+      assert.ok(again.kind === 'refused' && again.code === 'protocol-version');
+      const told = await clocked.get(first.gid);
+      assert.ok(told !== null);
+      assert.equal(told.protocolRefusedAt, '2026-01-09T10:00:00.000Z');
+      assert.equal(told.skew.kind, 'incompatible');
+      assert.match(told.skew.explanation, /its last hello was refused/);
+    });
+
     /**
      * `GET /probes` carries the time beside the version (`U-33`). It showed `protocolVersion`
      * beside `lastSeenAt` only, and every hello moves that, so a probe refused at one time read as
