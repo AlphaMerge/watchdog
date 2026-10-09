@@ -27044,17 +27044,36 @@ because each is a decision rather than a defect:
         **Mutations** (restored byte for byte; the web package has no `dist`): nothing held 5;
         no ageing 2; held for any path 1; the poll not waiting 1; the poll always reloading 2;
         the failure not passed to the region 4.
-      - **Not done.** A core that keeps failing is said again every fifteen seconds while
-        readings are held, since each poll empties and refills the region (`U-72`'s question,
-        now four times a minute here). Coming back to the Overview with a failure in hand mounts
-        the region with its text already in it.
+      - **Not done.** Coming back to the Overview with a failure in hand mounts the region with
+        its text already in it.
+      - **Amended on review** (a second commit). **A core that kept failing was said four times a
+        minute**: each poll emptied the region as it started and filled it as it failed, every
+        failure a new error with a new id. The values poll now follows `U-59`'s rule for
+        `RunPanel`'s polls (and the shared map's): the failure shown is the first of a run in the
+        same words (code and message), id and all, kept through each poll's read and each repeat;
+        a failure in other words replaces it and is said; a good read empties it. *Try again*,
+        pressed, sets the failure aside as its read starts (the region empties, the button stays
+        focused and unavailable), so the same failure after it is said again: the operator asked.
+        The page does this itself (a kept failure, filed with the path, set during render), so
+        `HeldListFailure` is unchanged and the channel list and templates keep their behaviour
+        (`U-72`). Test (`readings-held.test.tsx`, fake timers, mutation records over the region):
+        three polls refused in the same words with ids `req-2`, `req-3`, `req-4` record one
+        change, `…restarting req-2`, which stays; one in other words is said (`…disk full
+        req-5`); *Try again* empties it with focus kept and the same failure is said again
+        (`req-6`), so the region's states are exactly those four; a good poll empties it.
+        **Mutations** (restored byte for byte), each failing 1: every new error replacing the one
+        shown; other words kept; *Try again* setting nothing aside; the failure dropped while a
+        poll reads; the set-aside failure filed again on the press's render; the press's render
+        not counted as reading (the button went, with its focus).
 
 - [ ] **U-72 — repeats of an automatic failure are announced every minute** · S · U-67, U-66 ·
       Found 2026-10-09. A held list's automatic re-read empties and refills its region, so a
       failure that persists is said again each minute. The shared map's first read failing
       other than with a 404 makes a new alert every minute. **Decision first**: should a repeat
       of the same failure from a read nobody asked for stay silent? Then do it for both, with
-      tests.
+      tests. The channel table's values poll already follows `U-59`'s rule (a repeat in the same
+      words keeps the one shown; `U-71` review), so this decision covers only the channel list,
+      the templates list and the shared map.
 
 - [x] **U-73 — *Save template* is `disabled` while it saves** · XS · U-69 · Found 2026-10-09 in
       `U-69`. A refused save can lose focus before the refusal is said. `U-64` used

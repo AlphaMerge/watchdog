@@ -154,6 +154,44 @@ export function ObjectDetailView(): React.JSX.Element {
           shownValues.data,
           shownValues.at === null ? 0 : performance.now() - shownValues.at,
         );
+  // The poll's failure said beside the held readings, **the first of a run in the same words,
+  // until a read succeeds** (`U-71` review; `U-59`'s rule for `RunPanel`'s polls, and the shared
+  // map's). Each poll fails with a new error and a new id, and handing `HeldListFailure` the
+  // hook's own error would empty its region as every poll starts and fill it as it fails: the
+  // same failure said four times a minute, to nobody who asked. So it is kept through the poll's
+  // read and through a repeat in the same words, first id and all; a failure in other words
+  // replaces it, and is said; a good read empties it. Filed with the path, so it is never another
+  // sensor's. Set during render from the answer in hand, so never a render behind it. *Try
+  // again*, pressed by the operator, sets it aside as its read starts, so the same failure after
+  // it is said again: they asked.
+  const [pollFailure, setPollFailure] = useState<{ path: string; error: ApiError } | null>(null);
+  // The failure *Try again* set aside: the hook still holds it on the render the press makes,
+  // before its read starts, and filed again then it would never leave the region.
+  const [setAside, setSetAside] = useState<ApiError | null>(null);
+  const failedNow =
+    values.status === 'error' &&
+    readings !== null &&
+    valuesPath !== null &&
+    values.error !== setAside
+      ? values.error
+      : null;
+  if (values.status === 'ready' && pollFailure !== null) setPollFailure(null);
+  if (
+    failedNow !== null &&
+    valuesPath !== null &&
+    (pollFailure === null ||
+      pollFailure.path !== valuesPath ||
+      !sameWords(pollFailure.error, failedNow))
+  ) {
+    setPollFailure({ path: valuesPath, error: failedNow });
+  }
+  const heldFailure =
+    pollFailure !== null && pollFailure.path === valuesPath ? pollFailure.error : null;
+  const readAgain = (): void => {
+    setPollFailure(null);
+    if (values.status === 'error') setSetAside(values.error);
+    values.reload();
+  };
   // *Try again* on the values' error panel (no readings held), pressed for the error it shows:
   // out until that read answers, as `ErrorPanel` counts busy, since every failed read parses a
   // new error.
@@ -294,9 +332,14 @@ export function ObjectDetailView(): React.JSX.Element {
                   onRetryList={channels.reload}
                   readings={readings}
                   readingsError={values.status === 'error' ? values.error : null}
-                  reading={values.status === 'loading'}
+                  reading={
+                    values.status === 'loading' ||
+                    // Pressed, and the hook not yet `loading`: its read is starting.
+                    (values.status === 'error' && values.error === setAside)
+                  }
                   onRetryReadings={retryValues}
-                  onReadAgain={values.reload}
+                  heldFailure={heldFailure}
+                  onReadAgain={readAgain}
                   lookups={lookups.status === 'ready' ? lookups.data.items : null}
                   hideRetired={hideRetired}
                   onHideRetiredChange={setHideRetired}
@@ -525,6 +568,7 @@ function LiveChannels({
   onRetryList,
   readings,
   readingsError,
+  heldFailure,
   reading,
   onRetryReadings,
   onReadAgain,
@@ -543,13 +587,15 @@ function LiveChannels({
    * read and aged by how long it has been held (`U-71`), or null while none has been read.
    */
   readings: SensorValues | null;
-  /** The last poll's failure. */
+  /** The last poll's failure, for the error panel when no readings are held. */
   readingsError: ApiError | null;
+  /** The poll's failure said beside held readings: the first of a run in the same words. */
+  heldFailure: ApiError | null;
   /** A poll is out. */
   reading: boolean;
   /** The error panel's *Try again*, which keeps the failure in hand while it re-reads (`U-68`). */
   onRetryReadings: () => void;
-  /** The held readings' *Try again*, which reads again as the poll does. */
+  /** The held readings' *Try again*, which sets the failure shown aside and reads again. */
   onReadAgain: () => void;
   lookups: readonly LookupSummary[] | null;
   hideRetired: boolean;
@@ -588,7 +634,7 @@ function LiveChannels({
         <HeldListFailure
           what="The readings"
           held="these are the ones read before, each as old as it says"
-          error={readingsError}
+          error={heldFailure}
           reading={reading}
           onRetry={onReadAgain}
           focusAfter={() => {
@@ -755,4 +801,9 @@ function PausedBanner({ view }: { view: PauseView }): React.JSX.Element {
       )}
     </div>
   );
+}
+
+/** Two failures a reader could not tell apart, ids aside (`U-59`). */
+function sameWords(a: ApiError, b: ApiError): boolean {
+  return a.code === b.code && a.message === b.message;
 }

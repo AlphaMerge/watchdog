@@ -415,7 +415,9 @@ change on every scan whether the state does or not, and a frame on the wire for 
 every sensor would be a stream nobody could keep up with — so the page re-reads them every
 15 seconds instead, while the Overview or the History tab is open. The readings in hand stay on
 screen while the next are read, and when a read fails a line above the table says so, with
-**Try again**, while they stay (`U-71`). A reading kept that way is never passed off as current:
+**Try again**, while they stay (`U-71`). A poll that keeps failing in the same words keeps the
+line it first showed rather than saying it again every 15 seconds; other words replace it, and
+**Try again** says it afresh. A reading kept that way is never passed off as current:
 once it has been held past the core's own window (three scan intervals) it says *no recent
 reading*, as a fresh answer would. If the first read of a sensor's readings fails, an error panel
 takes the table's place, and the 15-second poll does not ask again while its **Try again** is

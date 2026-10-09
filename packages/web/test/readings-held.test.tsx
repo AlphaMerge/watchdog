@@ -119,19 +119,21 @@ const json = (body: unknown, status = 200): Response =>
     status,
     headers: { 'content-type': 'application/json' },
   });
-const refused = (): Response =>
-  json(
+/** The refusal the nth read of the values is given: its words, and its id. */
+let failure: (read: number) => { message: string; id: string } = () => ({
+  message: 'restarting',
+  id: 'req-71',
+});
+let lastRead = 0;
+const refused = (): Response => {
+  const { message, id } = failure(lastRead);
+  return json(
     {
-      error: {
-        code: 'UNAVAILABLE',
-        message: 'restarting',
-        correlationId: 'req-71',
-        context: {},
-        details: {},
-      },
+      error: { code: 'UNAVAILABLE', message, correlationId: id, context: {}, details: {} },
     },
     503,
   );
+};
 
 /** How the nth read of a sensor's values is answered: at once, refused, or held until released. */
 let valuesReply: (id: number, read: number) => 'answer' | 'fail' | 'hold' = () => 'answer';
@@ -210,6 +212,8 @@ const SAID =
 
 beforeEach(() => {
   valuesReply = () => 'answer';
+  failure = () => ({ message: 'restarting', id: 'req-71' });
+  lastRead = 0;
   release = () => undefined;
   reads = { 9: 0, 12: 0 };
   skipped = 0;
@@ -230,6 +234,7 @@ beforeEach(() => {
       const id = Number(values[1]);
       const read = (reads[id] ?? 0) + 1;
       reads[id] = read;
+      lastRead = read;
       const reply = valuesReply(id, read);
       if (reply === 'fail') return Promise.resolve(refused());
       if (reply === 'hold') {
@@ -490,6 +495,88 @@ describe('the poll and the values’ error panel (U-71)', () => {
         expect(reading()).toBe(shown(9, 3));
       });
       expect(alert.isConnected).toBe(false);
+    } finally {
+      observer.disconnect();
+    }
+  });
+});
+
+/** What the region says for a failure in `message` with `id`. */
+const saying = (message: string, id: string): string =>
+  'The readings could not be read again, so these are the ones read before, each as old as it ' +
+  `says: ${message} ${id}`;
+
+describe('a poll failing again (U-71 review, U-59’s rule)', () => {
+  it('keeps the one shown in the same words, says other words, and says it again after Try again', async () => {
+    // Read once; every poll after that is refused, each with its own id.
+    valuesReply = (_id, read) => (read === 1 ? 'answer' : 'fail');
+    failure = (read) => ({
+      message: read <= 4 ? 'restarting' : 'disk full',
+      id: `req-${String(read)}`,
+    });
+    mount('/objects/9');
+    await waitFor(() => {
+      expect(reading()).toBe(shown(9, 1));
+    });
+    const region = readingsRegion();
+
+    // Every state the region is in, in order.
+    const seen: string[] = [];
+    const observer = new MutationObserver(() => {
+      seen.push(region.textContent);
+    });
+    observer.observe(region, { childList: true, subtree: true, characterData: true });
+    try {
+      // Three polls refused in the same words: said once, the first id kept, never emptied.
+      await onePoll();
+      await waitFor(() => {
+        expect(region.textContent).toBe(saying('restarting', 'req-2'));
+      });
+      await onePoll();
+      await onePoll();
+      // Its answer, already resolved, given real time to land (`setTimeout` is not faked).
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      });
+      expect(reads[9]).toBe(4);
+      expect(region.textContent).toBe(saying('restarting', 'req-2'));
+      expect(seen).toEqual([saying('restarting', 'req-2')]);
+      expect(reading()).toBe(shown(9, 1));
+
+      // A failure in other words replaces it, and is said.
+      await onePoll();
+      await waitFor(() => {
+        expect(region.textContent).toBe(saying('disk full', 'req-5'));
+      });
+      expect(seen).toEqual([saying('restarting', 'req-2'), saying('disk full', 'req-5')]);
+
+      // Try again, pressed: emptied as its read starts, and the same failure is said again.
+      const retry = within(channelsCard()).getByRole('button', { name: 'Try again' });
+      act(() => {
+        retry.focus();
+      });
+      fireEvent.click(retry);
+      expect(region.matches(':empty')).toBe(true);
+      await waitFor(() => {
+        expect(region.textContent).toBe(saying('disk full', 'req-6'));
+      });
+      expect(reads[9]).toBe(6);
+      expect(seen).toEqual([
+        saying('restarting', 'req-2'),
+        saying('disk full', 'req-5'),
+        '',
+        saying('disk full', 'req-6'),
+      ]);
+      expect(document.activeElement).toBe(retry);
+      expect(speaking()).toEqual([]);
+
+      // A good poll empties it.
+      valuesReply = () => 'answer';
+      await onePoll();
+      await waitFor(() => {
+        expect(reading()).toBe(shown(9, 7));
+      });
+      expect(region.matches(':empty')).toBe(true);
     } finally {
       observer.disconnect();
     }
