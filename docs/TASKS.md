@@ -3928,6 +3928,85 @@ because each is a decision rather than a defect:
         - the CGJ kept before any mark, default-ignorable ones included: failed 5;
         - the Khmer vowels kept after a Khmer letter: failed 4.
 
+- [x] **N-31 — a claimed batch is sent in whatever order `UPDATE … RETURNING` gives** · S · N-22
+      · Found 2026-10-09 in round 17's suite. `NotificationDispatcher.#claimWhere`
+      (`packages/core/src/notifications/dispatcher.ts`) ordered the rows it claims inside the
+      `claimed` CTE (`ORDER BY next_attempt_at NULLS FIRST, id`), but `dispatch()` sends them in
+      the order the outer `UPDATE … FROM claimed RETURNING` hands back, and PostgreSQL promises
+      none. A nested loop over `claimed` keeps the claim's order by accident. A hash join that
+      hashes `claimed` and scans the table returns heap order, which is the order the rows were
+      last written in. Table statistics alone choose between them. Once, in the full suite,
+      `notification-summaries.test.ts`' "drops a recovery or a clear claimed in the same batch as
+      the newer alarm" got the hash join: the recovery, written first, was sent before the newer
+      alarm, so `N-22`'s check at send found nothing delivered yet. **Done when** the batch is
+      sent in the claim's order under any plan, with a deterministic test and a scenario test.
+
+      **N-31 outcome. The claim sorts what it returns.**
+      - **The change.** `claimed` also carries `next_attempt_at` as `was_due`, since the
+        `UPDATE` overwrites that column with the lease. The `UPDATE` becomes a second CTE,
+        `updated`, and the statement ends with
+        `SELECT updated.* FROM updated JOIN claimed … ORDER BY claimed.was_due NULLS FIRST, claimed.id`.
+        The row shape is unchanged, and the comment says `RETURNING` promises no order. A digest's
+        members were already sorted by id in `#claimMembers`, so they needed nothing.
+      - **In the statement, not in JavaScript.** A sort in the dispatcher would still need
+        `was_due` returned, so it would mean an extra column on `ClaimRow` and the order rule in
+        two places. An `ORDER BY` on the statement that returns the rows is the one guarantee
+        PostgreSQL gives.
+      - **Production was affected.** Two things were lost on a core whose statistics favoured
+        the hash join:
+        - **`N-22`'s same-batch drop.** The case is a recovery due its retry, claimed together
+          with a newer, never-tried alarm of the same trigger on another template. The recovery
+          could be sent first, and its recipients' last word was *up* about a sensor that was
+          Down again. That is one message too many to them. It is not two alarms for one
+          outage: the alarm still went once, to its own recipients.
+        - **Never tried first.** A fresh alarm could wait behind up to 24 retries in its batch,
+          and each of those may be a relay's timeout.
+      - **What was ruled out.** Neither clocks nor load could cause it:
+        - the alarm's `next_attempt_at` really is NULL. The column has no default, and
+          `SummaryRepository.decide` does not touch it;
+        - a late `now` can only leave the recovery unclaimed. It cannot put it first.
+      - **The deterministic flip.** `test/support/flipped-claim-plan.ts` wraps the dispatcher's
+        `Database`:
+        - every transaction issues `SET LOCAL enable_nestloop = off` and
+          `SET LOCAL enable_mergejoin = off`;
+        - each claim is `EXPLAIN`ed in the same transaction before it runs, and the plan is kept.
+          `returnsInHeapOrder()` checks that the plan hashes `claimed` and scans the table, so a
+          planner that changes its mind fails the test rather than letting it pass;
+        - the tests empty `notification_request` with `TRUNCATE`, so the heap has nothing to
+          prune and its order is write order. Each test also asserts by `ctid` that the heap
+          holds the rows in the opposite order to the claim before the pass runs.
+        - The same failure was first reproduced 5/5 with real statistics: 500 claimable rows,
+          `ANALYZE`, then deleted. That is what autovacuum can leave behind. It was not kept as
+          the test because it depends on the planner's costs.
+      - **Tests.**
+        - `notification-summaries.test.ts`:
+          - "sends a claimed batch in the claim's order whatever plan the claim gets": the
+            recovery and the clear, each claimed beside its newer alarm under the flipped plan.
+            Only the alarm goes, and the recovery is `discarded` with `superseded:`.
+          - "sends a never-tried request ahead of the retries claimed with it": four retries
+            written first and a fresh request last. The send order is the fresh one, then the
+            retries by id.
+        - `retry-recovery-scenario.test.ts` (M-17), with the real engine, scheduler and
+          dispatcher:
+          - "does not deliver a recovery claimed beside the newer Down, whatever plan the claim
+            gets": one Down per outage, no recovery, the recovery's reason, and nothing more by
+            +3600.
+          - "sends a fresh Down ahead of the retries due in the same pass": three sensors'
+            refused Downs fall due as a fourth sensor's first Down is tried. All four go, once
+            each, the fresh one first.
+          - `scan` takes a sensor, `freshDispatcher` a database, and `overtakenRecovery` a hook
+            that runs before its last pass.
+      - **Mutations**, each with the four new tests run against it:
+        - the outer `ORDER BY` removed: all 4 failed;
+        - the dispatcher as it was before: all 4 failed;
+        - `ORDER BY claimed.id` alone: 6 failed, the 4 new tests and 2 existing same-batch
+          tests;
+        - the helper without its `SET LOCAL`s: all 4 failed on the plan assertion.
+
+        The sources were restored, checked against backups with `cmp`, and `dist` rebuilt.
+      - **Not done.** The wider suite was not re-run by this ticket. Nothing else reads a claimed
+        batch's order. `#claimMembers` sorts its own, and `supersede` returns a set.
+
 ## Phase 5 — Web UI
 
 - [x] **U-01 — Frontend scaffold** · M · F-01 · React 19 + TypeScript + Vite 8, routing, design

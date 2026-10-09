@@ -319,6 +319,13 @@ export class NotificationDispatcher {
    * left alone rather than failed. The same for a template switched off — `CAPABILITIES.MD §5.2`'s
    * activation schedules make "collect and send when reactivated" a first-class choice (`N-12`),
    * and leaving the rows queued is that behaviour arrived at early.
+   *
+   * **Returned in the claim's order, said in so many words (`N-31`).** Never tried first, then
+   * the longest due, then by id: a fresh alarm is not sent behind a batch of retries, and a newer
+   * alarm claimed beside a recovery it overtakes goes first, so the recovery is dropped at its
+   * send (`N-22`). The `ORDER BY` inside `claimed` only chooses the rows. `UPDATE ... RETURNING`
+   * promises no order, and with a hash join over the table it hands them back in heap order,
+   * which is the order they were last written in: a plan that statistics alone can bring on.
    */
   async #claimWhere(
     now: Date,
@@ -331,7 +338,8 @@ export class NotificationDispatcher {
       const rows = await q.query<ClaimRow>(
         `
         WITH claimed AS (
-          SELECT r.id
+          -- When it was due, kept because the UPDATE below overwrites it with the lease.
+          SELECT r.id, r.next_attempt_at AS was_due
           FROM notification_request r
           LEFT JOIN notification_template t ON t.id = r.template_id
           WHERE r.status = 'pending'
@@ -346,24 +354,31 @@ export class NotificationDispatcher {
           ORDER BY r.next_attempt_at NULLS FIRST, r.id
           LIMIT $3
           FOR UPDATE OF r SKIP LOCKED
+        ),
+        updated AS (
+          UPDATE notification_request r
+          -- A lease, not a retry delay: this is how long the row waits if this process dies
+          -- between the claim and the record. The real backoff is written by #record.
+          SET attempts = r.attempts + 1, next_attempt_at = $4
+          FROM claimed
+          WHERE r.id = claimed.id
+          RETURNING
+            r.id::text AS id, r.sensor_id::text AS sensor_id, r.at, r.state, r.message, r.observed,
+            r.reason, r.attempts - 1 AS attempts, r.template_id::text AS template_id,
+            (SELECT name FROM notification_template WHERE id = r.template_id) AS t_name,
+            (SELECT method FROM notification_template WHERE id = r.template_id) AS t_method,
+            (SELECT settings FROM notification_template WHERE id = r.template_id) AS t_settings,
+            (SELECT subject FROM notification_template WHERE id = r.template_id) AS t_subject,
+            (SELECT body FROM notification_template WHERE id = r.template_id) AS t_body,
+            (SELECT recipients FROM notification_template WHERE id = r.template_id) AS t_recipients,
+            (SELECT priority FROM notification_template WHERE id = r.template_id) AS t_priority,
+            (SELECT enabled FROM notification_template WHERE id = r.template_id) AS t_enabled
         )
-        UPDATE notification_request r
-        -- A lease, not a retry delay: this is how long the row waits if this process dies
-        -- between the claim and the record. The real backoff is written by #record.
-        SET attempts = r.attempts + 1, next_attempt_at = $4
-        FROM claimed
-        WHERE r.id = claimed.id
-        RETURNING
-          r.id::text AS id, r.sensor_id::text AS sensor_id, r.at, r.state, r.message, r.observed,
-          r.reason, r.attempts - 1 AS attempts, r.template_id::text AS template_id,
-          (SELECT name FROM notification_template WHERE id = r.template_id) AS t_name,
-          (SELECT method FROM notification_template WHERE id = r.template_id) AS t_method,
-          (SELECT settings FROM notification_template WHERE id = r.template_id) AS t_settings,
-          (SELECT subject FROM notification_template WHERE id = r.template_id) AS t_subject,
-          (SELECT body FROM notification_template WHERE id = r.template_id) AS t_body,
-          (SELECT recipients FROM notification_template WHERE id = r.template_id) AS t_recipients,
-          (SELECT priority FROM notification_template WHERE id = r.template_id) AS t_priority,
-          (SELECT enabled FROM notification_template WHERE id = r.template_id) AS t_enabled
+        -- UPDATE ... RETURNING promises no order (N-31): the batch is sent in the claim's.
+        SELECT updated.*
+        FROM updated
+        JOIN claimed ON claimed.id = updated.id::bigint
+        ORDER BY claimed.was_due NULLS FIRST, claimed.id
         `,
         [
           now,

@@ -18,6 +18,7 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
+import { flippedClaimPlan, returnsInHeapOrder } from './support/flipped-claim-plan.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
 
 const available = await databaseAvailable();
@@ -76,11 +77,12 @@ describe(
      */
     let refuse: (subject: string, attempt: number, requestId: number) => DeliveryResult | null;
     let sensor: number;
+    let device: number;
 
     /** A dispatcher of its own, which is what a core that has just started has. */
-    function freshDispatcher(): NotificationDispatcher {
+    function freshDispatcher(on: Database = db): NotificationDispatcher {
       return new NotificationDispatcher({
-        db,
+        db: on,
         logger: silent,
         contexts,
         transports: [
@@ -151,16 +153,18 @@ describe(
         parentId: h.rootId,
         name: `probe-${String(process.hrtime.bigint())}`,
       });
-      const device = await h.service.create(testActor, {
-        kind: 'device',
-        parentId: probe.id,
-        name: 'retry-target',
-        host: '192.0.2.41',
-      });
+      device = (
+        await h.service.create(testActor, {
+          kind: 'device',
+          parentId: probe.id,
+          name: 'retry-target',
+          host: '192.0.2.41',
+        })
+      ).id;
       sensor = (
         await h.service.create(testActor, {
           kind: 'sensor',
-          parentId: device.id,
+          parentId: device,
           name: 'ping',
           sensorType: 'icmp.ping',
         })
@@ -195,13 +199,13 @@ describe(
       await triggers.create(testActor, h.rootId, { kind: 'state', settings });
     }
 
-    /** One scan of the sensor, the way ingestion writes it. */
-    async function scan(ok: boolean, seconds: number): Promise<void> {
+    /** One scan of the sensor, or of another one, the way ingestion writes it. */
+    async function scan(ok: boolean, seconds: number, which = sensor): Promise<void> {
       const states = h.states;
       assert.ok(states !== undefined);
       const results: SensorResult[] = [
         {
-          sensorId: sensor,
+          sensorId: which,
           at: at(seconds),
           outcome: ok ? 'ok' : 'error',
           message: ok ? 'reachable' : 'no ICMP reply',
@@ -211,7 +215,7 @@ describe(
       await db.tx(async (q) => {
         await writeStateHistory(q, decisions.transitions);
         await writeRuntimes(q, decisions.runtimes);
-        await engine.react(q, [sensor], at(seconds));
+        await engine.react(q, [which], at(seconds));
       });
     }
 
@@ -556,7 +560,10 @@ describe(
      * sensor goes Down, comes back — that recovery refused and waiting out its retry minute — and
      * goes Down again at `again`.
      */
-    async function overtakenRecovery(again: number): Promise<void> {
+    async function overtakenRecovery(
+      again: number,
+      armed: () => Promise<void> = () => Promise.resolve(),
+    ): Promise<void> {
       const pages = await template('%sensor is %status', 'always-immediate');
       const recoveries = await template('Recovered: %sensor is %status', 'always-immediate');
       await trigger({
@@ -580,7 +587,23 @@ describe(
 
       await scan(false, again - 10);
       await scan(false, again);
+      await armed();
       await tick(again + 1);
+    }
+
+    /** The ids of what is still owed, in the order the table's heap holds them. */
+    async function heapOrder(): Promise<number[]> {
+      const rows = await db.query<{ id: string }>(
+        "SELECT id::text AS id FROM notification_request WHERE status = 'pending' ORDER BY ctid",
+      );
+      return rows.map((row) => Number(row.id));
+    }
+
+    /** Every claim's plan was the one that hands the batch back in heap order. */
+    function everyClaimInHeapOrder(plans: readonly string[]): void {
+      assert.ok(plans.length > 0, 'a claim was made');
+      for (const plan of plans)
+        assert.ok(returnsInHeapOrder(plan), `the claim's plan was\n${plan}`);
     }
 
     it('does not deliver a recovery after a newer Down has gone out to another template', async () => {
@@ -627,6 +650,106 @@ describe(
       assert.equal(recovery?.attempts, 1, 'the one refused try, not the claim that never sent');
       await tick(3_600);
       assert.deepEqual(inbox, ['ping is down', 'ping is down']);
+    });
+
+    it('does not deliver a recovery claimed beside the newer Down, whatever plan the claim gets', async () => {
+      // `N-31`: the pass above, under the plan whose `RETURNING` comes back in heap order. The
+      // recovery was written before the second Down was queued, so in the heap it comes first;
+      // sent in that order, B's recipients would hear *up* about a sensor that is Down again.
+      // A heap with nothing to prune, so its order is the order the rows were written in.
+      await db.query('TRUNCATE notification_request');
+      const flipped = flippedClaimPlan(db);
+      dispatcher = freshDispatcher(flipped.db);
+      await overtakenRecovery(150, async () => {
+        // The sweep queues the second Down; the pass that follows sweeps again and finds it done.
+        await scheduler.sweep(at(151));
+        const [, recovery, secondDown] = await db.query<{ id: string }>(
+          'SELECT id::text AS id FROM notification_request ORDER BY id',
+        );
+        assert.deepEqual(
+          await heapOrder(),
+          [Number(recovery?.id), Number(secondDown?.id)],
+          'the heap holds the recovery first, the opposite of the claim',
+        );
+      });
+      everyClaimInHeapOrder(flipped.plans);
+
+      // One outage, one alarm: the second Down once, and nothing for the recovery.
+      assert.deepEqual(inbox, ['ping is down', 'ping is down']);
+      assert.deepEqual(await requests(), [
+        'initial/immediate/sent',
+        'recovery/immediate/discarded',
+        'initial/immediate/sent',
+      ]);
+      assert.match((await reasons())[1] ?? '', /^superseded: a newer alarm/);
+      await tick(3_600);
+      assert.deepEqual(inbox, ['ping is down', 'ping is down']);
+      assert.equal(
+        attempts.filter((subject) => subject.startsWith('Recovered')).length,
+        1,
+        'the recovery was not tried again',
+      );
+    });
+
+    it('sends a fresh Down ahead of the retries due in the same pass', async () => {
+      // `N-31`: three sensors' Downs are refused once and fall due again at +121, the moment a
+      // fourth sensor's Down is first tried. The fresh one goes first, not behind three relay
+      // conversations that may each be a timeout. Under the plan that returns the batch in heap
+      // order it was last, written after them.
+      await db.query('TRUNCATE notification_request');
+      const flipped = flippedClaimPlan(db);
+      dispatcher = freshDispatcher(flipped.db);
+      const pages = await template('%sensor is %status', 'always-immediate');
+      await trigger({
+        state: 'down',
+        initialLatencySeconds: 0,
+        initialTemplateId: pages,
+        recoveryTemplateId: pages,
+      });
+      const others: number[] = [];
+      for (const name of ['http', 'ssh', 'dns']) {
+        const created = await h.service.create(testActor, {
+          kind: 'sensor',
+          parentId: device,
+          name,
+          sensorType: 'icmp.ping',
+        });
+        others.push(created.id);
+      }
+      refuse = (subject, attempt) =>
+        subject !== 'ping is down' && attempt === 1
+          ? { ok: false, retryable: true, error: '451 try again later' }
+          : null;
+
+      for (const other of others) await scan(false, 0, other);
+      for (const other of others) await scan(false, 60, other);
+      await tick(61); // each refused: due again at +121
+      assert.deepEqual(inbox, []);
+      assert.equal(attempts.length, 3, 'the three Downs were tried');
+      const retries = await heapOrder();
+      assert.equal(retries.length, 3);
+
+      await scan(false, 100);
+      await scan(false, 120);
+      await scheduler.sweep(at(121)); // queues the fresh Down, as the pass would
+      const owed = await heapOrder();
+      assert.equal(owed.length, 4);
+      assert.deepEqual(owed.slice(0, 3), retries, 'the heap holds the fresh Down last');
+      await tick(121);
+      everyClaimInHeapOrder(flipped.plans);
+
+      // Presence first, then the order.
+      assert.deepEqual(
+        [...inbox].sort(),
+        ['dns is down', 'http is down', 'ping is down', 'ssh is down'],
+        'every Down went, once',
+      );
+      assert.equal(inbox[0], 'ping is down', 'the never-tried Down first');
+      assert.deepEqual(inbox.slice(1), ['http is down', 'ssh is down', 'dns is down']);
+
+      // One outage, one alarm each: nothing follows.
+      await tick(3_600);
+      assert.equal(inbox.length, 4);
     });
 
     it('does not put a recovery in a digest after a newer Down has gone out', async () => {

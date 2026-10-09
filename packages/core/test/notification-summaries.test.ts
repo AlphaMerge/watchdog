@@ -15,6 +15,7 @@ import {
   databaseAvailable,
   type ScratchDatabase,
 } from './support/database.js';
+import { flippedClaimPlan, returnsInHeapOrder } from './support/flipped-claim-plan.js';
 import { buildHarness, silent, testActor, type Harness } from './support/tree.js';
 
 const available = await databaseAvailable();
@@ -1307,6 +1308,149 @@ describe(
         );
         assert.deepEqual({ ...row }, { status: 'discarded', attempts: 1 }, entry.name);
       }
+    });
+
+    it('sends a claimed batch in the claim’s order whatever plan the claim gets', async () => {
+      // `N-31`: the same batch as above, under the plan round 17's suite once got — a hash join
+      // whose `RETURNING` comes back in heap order, which puts the recovery, written first,
+      // ahead of the alarm that should drop it.
+      type Queued = Parameters<typeof queue>[1];
+      const cases: { name: string; recovery: Queued; alarm: Queued; subject: string }[] = [
+        {
+          name: 'a recovery',
+          recovery: { sensor: sensorAt(0), reason: 'recovery', state: 'up' },
+          alarm: { sensor: sensorAt(0) },
+          subject: 'Ping on edge-router is down',
+        },
+        {
+          name: 'a clear',
+          recovery: {
+            sensor: sensorAt(0),
+            reason: 'clear',
+            state: 'up',
+            triggerKind: 'threshold',
+            channelKey: 'loss',
+          },
+          alarm: {
+            sensor: sensorAt(0),
+            reason: 'threshold',
+            state: 'warning',
+            triggerKind: 'threshold',
+            channelKey: 'loss',
+          },
+          subject: 'Ping on edge-router is warning',
+        },
+      ];
+      for (const entry of cases) {
+        // A heap with nothing to prune, so its order is the order the rows were written in.
+        await db.query('TRUNCATE notification_request');
+        const pages = await template({ summarisation: 'always-immediate' });
+        const recoveries = await template({ summarisation: 'always-immediate' });
+        const triggerId = await triggerRow();
+        const recovery = await queue(recoveries, { ...entry.recovery, triggerId });
+        await db.query(
+          `UPDATE notification_request
+           SET disposition = 'immediate', attempts = 1,
+               next_attempt_at = now() - interval '1 second'
+           WHERE id = $1`,
+          [recovery],
+        );
+        // Decided here rather than by the pass, so nothing rewrites it between the check below
+        // and the claim.
+        const alarm = await queue(pages, { ...entry.alarm, triggerId });
+        await db.query("UPDATE notification_request SET disposition = 'immediate' WHERE id = $1", [
+          alarm,
+        ]);
+        const heap = await db.query<{ id: string }>(
+          'SELECT id::text AS id FROM notification_request ORDER BY ctid',
+        );
+        assert.deepEqual(
+          heap.map((row) => Number(row.id)),
+          [recovery, alarm],
+          `${entry.name}: the heap holds the recovery first, the opposite of the claim`,
+        );
+
+        const { seen, transport } = recorder();
+        const flipped = flippedClaimPlan(db);
+        await new NotificationDispatcher({
+          db: flipped.db,
+          logger: silent,
+          contexts,
+          transports: [transport],
+          retry: { firstDelayMs: 0, maxDelayMs: 0 },
+          leaseMs: 0,
+        }).dispatch();
+        assert.ok(flipped.plans.length > 0, `${entry.name}: a claim was made`);
+        for (const plan of flipped.plans) {
+          assert.ok(returnsInHeapOrder(plan), `${entry.name}: the claim's plan was\n${plan}`);
+        }
+        assert.deepEqual(
+          seen.map((message) => message.subject),
+          [entry.subject],
+          `${entry.name}: only the alarm went`,
+        );
+        const [row] = await db.query<{ status: string; attempts: number; last_error: string }>(
+          'SELECT status, attempts, last_error FROM notification_request WHERE id = $1',
+          [recovery],
+        );
+        assert.deepEqual(
+          { status: row?.status, attempts: row?.attempts },
+          { status: 'discarded', attempts: 1 },
+          entry.name,
+        );
+        assert.match(row?.last_error ?? '', /^superseded: /, `${entry.name}: why`);
+      }
+    });
+
+    it('sends a never-tried request ahead of the retries claimed with it', async () => {
+      // `N-31`: retries written first, a fresh Down last. In heap order the fresh one would wait
+      // behind every retry in the batch, each of which may be a relay's timeout.
+      await db.query('TRUNCATE notification_request');
+      const templateId = await template({ summarisation: 'always-immediate' });
+      const retries: number[] = [];
+      for (const index of [1, 2, 3, 4]) {
+        const id = await queue(templateId, { sensor: sensorAt(index) });
+        await db.query(
+          `UPDATE notification_request
+           SET disposition = 'immediate', attempts = 1,
+               next_attempt_at = now() - interval '1 second'
+           WHERE id = $1`,
+          [id],
+        );
+        retries.push(id);
+      }
+      const fresh = await queue(templateId, { sensor: sensorAt(0) });
+      await db.query("UPDATE notification_request SET disposition = 'immediate' WHERE id = $1", [
+        fresh,
+      ]);
+      const heap = await db.query<{ id: string }>(
+        'SELECT id::text AS id FROM notification_request ORDER BY ctid',
+      );
+      assert.deepEqual(
+        heap.map((row) => Number(row.id)),
+        [...retries, fresh],
+        'the heap holds the fresh request last',
+      );
+
+      const { seen, transport } = recorder();
+      const flipped = flippedClaimPlan(db);
+      await new NotificationDispatcher({
+        db: flipped.db,
+        logger: silent,
+        contexts,
+        transports: [transport],
+        retry: { firstDelayMs: 0, maxDelayMs: 0 },
+        leaseMs: 0,
+      }).dispatch();
+      assert.ok(flipped.plans.length > 0, 'a claim was made');
+      for (const plan of flipped.plans) {
+        assert.ok(returnsInHeapOrder(plan), `the claim's plan was\n${plan}`);
+      }
+      assert.deepEqual(
+        seen.map((message) => message.requestId),
+        [fresh, ...retries],
+        'never tried first, then the retries by id',
+      );
     });
 
     it('leaves a recovery out of its digest once a newer alarm went in an earlier one', async () => {
