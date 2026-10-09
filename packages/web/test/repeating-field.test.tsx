@@ -246,6 +246,71 @@ describe('a repeating parameter', () => {
     expect(box.getAttribute('aria-describedby') ?? '').not.toContain(region.id);
   });
 
+  it.each([
+    // [label, schema, initial, role, name, stored after the clear, typed again]
+    [
+      'a number entry',
+      {
+        type: 'object',
+        properties: {
+          ports: {
+            type: 'array',
+            title: 'Ports',
+            items: { type: 'integer', title: 'Port', minimum: 1 },
+          },
+        },
+      },
+      { ports: [80, 443] },
+      'spinbutton',
+      'Port 2',
+      { ports: [80, ''] },
+      '8443',
+    ],
+    [
+      'a JSON entry',
+      {
+        type: 'object',
+        properties: {
+          rows: { type: 'array', title: 'Rows', items: { type: 'object', title: 'Row' } },
+        },
+      },
+      { rows: [{ a: 1 }, { b: 2 }] },
+      'textbox',
+      'Row 2',
+      { rows: [{ a: 1 }, ''] },
+      '{"c": 3}',
+    ],
+  ] as const)(
+    'says what to do with %s cleared, announced and tied to it (U-44)',
+    (_label, schema, initial, role, name, cleared, typed) => {
+      // It used to read "required", which is true of every entry and says nothing to someone who
+      // has just emptied the box.
+      render(<Harness schema={schema as JsonSchema} initial={structuredClone(initial)} />);
+      const box = screen.getByRole<HTMLInputElement>(role, { name });
+      const region = document.getElementById(`${box.id}-problem`);
+      if (region === null) throw new Error('the problem region should exist before a problem');
+      expect(region.getAttribute('aria-live')).toBe('polite');
+      expect(region.textContent).toBe('');
+
+      fireEvent.change(box, { target: { value: '' } });
+      fireEvent.blur(box);
+      expect(stored()).toStrictEqual(cleared);
+      expect(screen.getByRole('button', { name: `Remove ${name}` })).toBeDefined();
+      // The same node, which existed empty before: a live region added with its text already in
+      // it is not announced.
+      expect(document.getElementById(`${box.id}-problem`)).toBe(region);
+      expect(region.textContent).toBe('cannot be empty: type a value, or remove the entry');
+      expect(screen.getByText('cannot be empty: type a value, or remove the entry')).toBe(region);
+      expect(box.getAttribute('aria-invalid')).toBe('true');
+      expect((box.getAttribute('aria-describedby') ?? '').split(' ')).toContain(region.id);
+
+      fireEvent.change(box, { target: { value: typed } });
+      expect(region.textContent).toBe('');
+      expect(box.hasAttribute('aria-invalid')).toBe(false);
+      expect(box.getAttribute('aria-describedby') ?? '').not.toContain(region.id);
+    },
+  );
+
   it('still shows a JSON box for an array whose entries are undescribed', () => {
     // Where "add an entry" has nothing to add, the honest control is the one that hands the
     // operator the value — the same rule a free-form object follows, and the reason `U-08`'s
@@ -364,5 +429,66 @@ describe('a cleared entry, saved (U-41)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Remove Blocklist 2' }));
     expect(save.hasAttribute('disabled')).toBe(false);
     expect(screen.queryByText('1 field needs attention')).toBeNull();
+  });
+});
+
+describe('the problem region, while it says nothing (U-45)', () => {
+  // jsdom lays nothing out, so what is asserted is what the layout rests on: no stack around the
+  // region to give it or its neighbour a margin, its own margin only while it has children, and
+  // nothing that would take it out of the accessibility tree.
+  const BOTH: JsonSchema = {
+    type: 'object',
+    properties: {
+      host: { type: 'string', title: 'Host', minLength: 3, description: 'Where it is.' },
+      zones: {
+        type: 'array',
+        title: 'Blocklists',
+        items: { type: 'string', title: 'Blocklist', minLength: 3 },
+      },
+    },
+  };
+
+  const regionOf = (box: HTMLElement): HTMLElement => {
+    const region = document.getElementById(`${box.id}-problem`);
+    if (region === null) throw new Error('the problem region should always be rendered');
+    return region;
+  };
+
+  it('is in the DOM, empty and taking no space, under a field and under an entry', () => {
+    render(<Harness schema={BOTH} initial={{ host: 'core', zones: ['zen.spamhaus.org'] }} />);
+    const boxes = [
+      screen.getByRole('textbox', { name: 'Host' }),
+      screen.getByRole('textbox', { name: 'Blocklist 1' }),
+    ];
+    for (const box of boxes) {
+      const region = regionOf(box);
+      // No children at all, not even an empty text node, or `empty:` would not match.
+      expect(region.matches(':empty')).toBe(true);
+      expect(region.classList.contains('mt-1')).toBe(true);
+      expect(region.classList.contains('empty:mt-0')).toBe(true);
+      // Outside any stack: `space-y-*` puts a margin on every child but the last.
+      expect(region.parentElement?.className ?? '').not.toContain('space-y-');
+      // Still there to be announced.
+      expect(region.getAttribute('aria-live')).toBe('polite');
+      expect(region.hidden).toBe(false);
+      expect(region.hasAttribute('aria-hidden')).toBe(false);
+      expect(region.classList.contains('hidden')).toBe(false);
+      expect(region.classList.contains('sr-only')).toBe(false);
+      expect(getComputedStyle(region).display).not.toBe('none');
+    }
+  });
+
+  it('takes its margin while it says something, and gives it back after', () => {
+    render(<Harness schema={BOTH} initial={{ host: 'core' }} />);
+    const box = screen.getByRole<HTMLInputElement>('textbox', { name: 'Host' });
+    const region = regionOf(box);
+    fireEvent.change(box, { target: { value: 'ab' } });
+    fireEvent.blur(box);
+    expect(region.textContent).toBe('must be at least 3 characters');
+    expect(region.matches(':empty')).toBe(false);
+
+    fireEvent.change(box, { target: { value: 'core.example' } });
+    expect(document.getElementById(`${box.id}-problem`)).toBe(region);
+    expect(region.matches(':empty')).toBe(true);
   });
 });

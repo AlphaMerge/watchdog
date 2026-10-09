@@ -319,6 +319,14 @@ export function readAt(source: Record<string, unknown>, path: string): unknown {
  * find it. The form never asks for one (`U-39` checked): an entry's controls exist only for
  * entries the array holds, and Add appends, so every index it writes is one the array has or the
  * next one — which is still written, and is how an entry is appended.
+ *
+ * **So is a container of the other shape** (`U-43`): a property name where an array is
+ * (`tags.x`), or an index where an object is (`auth.0`). Taking the container's shape from the
+ * path there would replace the array or the object with a fresh one, and every entry or key it
+ * held would go with it, for one value written somewhere the schema does not have. The form never
+ * writes such a path. What is not a container — a string, a number, `null`, nothing — holds no
+ * entries to lose, and is still replaced with the container the path needs ("wrong shape": a
+ * parameter whose type's schema changed under a stored value).
  */
 export function writeAt(
   target: Record<string, unknown>,
@@ -335,7 +343,9 @@ export function writeAt(
     if (segment === undefined || lookahead === undefined) break;
     if (!writable(cursor, segment)) return target;
     const child = readChild(cursor, segment);
-    const copy = copyContainer(child, isIndex(lookahead));
+    const wantArray = isIndex(lookahead);
+    if (isContainer(child) && Array.isArray(child) !== wantArray) return target;
+    const copy = copyContainer(child, wantArray);
     writeChild(cursor, segment, copy);
     cursor = copy;
   }
@@ -367,7 +377,10 @@ function writeChild(container: Container, segment: string, value: unknown): void
   else container[segment] = value;
 }
 
-/** A copy of what is there, or a fresh container of the shape the path needs. */
+/**
+ * A copy of what is there, or a fresh container of the shape the path needs where nothing that
+ * holds anything is (`writeAt` has already refused a container of the other shape, `U-43`).
+ */
 function copyContainer(child: unknown, wantArray: boolean): Container {
   if (wantArray) return Array.isArray(child) ? [...(child as unknown[])] : [];
   return typeof child === 'object' && child !== null && !Array.isArray(child)

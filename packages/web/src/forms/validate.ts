@@ -5,6 +5,9 @@ export interface FieldProblem {
   readonly message: string;
 }
 
+/** What a cleared entry the schema will not take is told (`U-41`, `U-44`). */
+const EMPTY_ENTRY = 'cannot be empty: type a value, or remove the entry';
+
 /**
  * Checks a value against the constraints its schema declares.
  *
@@ -37,7 +40,14 @@ export function problemsFor(field: FieldModel, value: unknown): FieldProblem[] {
   if (missing) {
     // A write-only field left alone is not missing: the value is on the server, where this form
     // is never allowed to see it.
-    if (field.required && !field.writeOnly) add('required');
+    //
+    // **A cleared entry is told what to do, not that it is "required"** (`U-44`). A number or
+    // JSON entry emptied holds `''` (`U-41`), which is no number and no JSON; "required" is true
+    // of every entry and says nothing to someone who has just emptied the box, while the entry's
+    // own Remove sits above it. The same sentence a cleared string entry gets.
+    if (field.required && !field.writeOnly) {
+      add(field.entry && value === '' ? EMPTY_ENTRY : 'required');
+    }
     return problems;
   }
 
@@ -68,7 +78,7 @@ export function problemsFor(field: FieldModel, value: unknown): FieldProblem[] {
     // least 3 characters" for a box the operator has just emptied reads as a complaint about
     // something they did not type.
     if (stringEntry && value === '' && (schema.minLength ?? 0) > 0) {
-      add('cannot be empty: type a value, or remove the entry');
+      add(EMPTY_ENTRY);
       return problems;
     }
     if (schema.minLength !== undefined && value.length < schema.minLength) {

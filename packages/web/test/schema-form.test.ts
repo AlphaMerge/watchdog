@@ -503,6 +503,10 @@ describe('writing and reading a path, checked beside removing one (U-39)', () =>
       'u',
       { auth: { user: 'u' } },
     ],
+    // Nothing in these to lose, so they are still replaced (`U-43` refuses only a container).
+    ['through null', { auth: null }, 'auth.user', 'u', { auth: { user: 'u' } }],
+    ['through a string, as an array', { tags: 'a' }, 'tags.0', 'b', { tags: ['b'] }],
+    ['through a number, as an array', { tags: 3 }, 'tags.0', 'b', { tags: ['b'] }],
   ] as const)(
     'writes %s, as an array where the path says index',
     (_label, before, path, value, after) => {
@@ -522,6 +526,37 @@ describe('writing and reading a path, checked beside removing one (U-39)', () =>
     ['past the end where no array is yet', {}, 'steps.1.method', 'GET'],
   ] as const)(
     'refuses %s, and hands back what it was given (U-42)',
+    (_label, before, path, value) => {
+      const given = deepFreeze(structuredClone(before)) as Record<string, unknown>;
+      const written = writeAt(given, path, value);
+      expect(written).toBe(given);
+      expect(written).toStrictEqual(before);
+    },
+  );
+
+  it.each([
+    // Each of these used to replace the container with one of the path's shape, and everything
+    // it held went with it: `tags.x` turned `['a', 'b']` into `{x: …}`.
+    ['a property name where an array is', { tags: ['a', 'b'] }, 'tags.x', 'v'],
+    ['a property name where an empty array is', { tags: [] }, 'tags.x', 'v'],
+    ['a property name where an array is, on the way to a key', { tags: ['a'] }, 'tags.x.y', 'v'],
+    [
+      'a property name where an array inside an entry is',
+      { steps: [{ headers: ['accept: json'] }] },
+      'steps.0.headers.name',
+      'v',
+    ],
+    ['an index where an object is', { auth: { user: 'u' } }, 'auth.0', 'v'],
+    ['an index where an empty object is', { auth: {} }, 'auth.0', 'v'],
+    [
+      'an index where an object is, on the way to a key',
+      { auth: { user: 'u' } },
+      'auth.0.user',
+      'v',
+    ],
+    ['an index where an object entry is', { steps: [{ method: 'GET' }] }, 'steps.0.0', 'v'],
+  ] as const)(
+    'refuses %s, and hands back what it was given (U-43)',
     (_label, before, path, value) => {
       const given = deepFreeze(structuredClone(before)) as Record<string, unknown>;
       const written = writeAt(given, path, value);
@@ -646,7 +681,29 @@ describe('an entry of an array of scalars (U-41)', () => {
     ],
     ['a drive too long', DRIVE, 'drives', 'C:\\x\\', ['must be at most 4 characters']],
     ['a hole, which is not a value', ARGUMENT, 'args', undefined, ['required']],
-    ['a cleared number, which is not a number', { type: 'integer' }, 'ports', '', ['required']],
+    // A cleared number or JSON entry holds `''` too, and is told what to do (`U-44`).
+    [
+      'a cleared number',
+      { type: 'integer' },
+      'ports',
+      '',
+      ['cannot be empty: type a value, or remove the entry'],
+    ],
+    [
+      'a cleared JSON entry',
+      { type: 'object' },
+      'ports',
+      '',
+      ['cannot be empty: type a value, or remove the entry'],
+    ],
+    ['a JSON entry', { type: 'object' }, 'ports', { a: 1 }, []],
+    [
+      'a JSON entry that is null, which is not a cleared box',
+      { type: 'object' },
+      'ports',
+      null,
+      ['required'],
+    ],
     ['a number', { type: 'integer', minimum: 1 }, 'ports', 0, ['must be 1 or more']],
   ] as const)('judges %s', (_label, items, array, value, messages) => {
     const entry = scalarEntryOf(items, field(array), 0);
@@ -673,7 +730,7 @@ describe('an entry of an array of scalars (U-41)', () => {
     expect(problems).toStrictEqual([
       { path: 'zones.1', message: 'cannot be empty: type a value, or remove the entry' },
       { path: 'zones.2', message: 'must be at least 3 characters' },
-      { path: 'ports.0', message: 'required' },
+      { path: 'ports.0', message: 'cannot be empty: type a value, or remove the entry' },
     ]);
   });
 

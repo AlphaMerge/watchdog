@@ -23175,20 +23175,78 @@ because each is a decision rather than a defect:
         walk takes the container's shape from the path, so it replaces the array with an object, as
         its "wrong shape" rule says. The form never writes such a path.
 
-- [ ] **U-43 — `writeAt` turns an array into an object for a property-name segment** · XS · U-42
+- [x] **U-43 — `writeAt` turns an array into an object for a property-name segment** · XS · U-42
       · Found 2026-10-08 in `U-42`. `tags.x` replaces the whole array with an object under the
       "wrong shape" rule, destroying its entries. The form never writes such a path. **Done when**
       it is refused like U-42's past-the-end index, with a test.
 
-- [ ] **U-44 — a cleared JSON or number entry says "required" without saying why** · XS · U-41 ·
+      **U-43 outcome. A container of the other shape is refused, both ways, and the same object
+      handed back.**
+      - **Both directions.** A property name where an array is (`tags.x`, `tags.x.y`,
+        `steps.0.headers.name`) and an index where an object is (`auth.0`, `auth.0.user`, and
+        `steps.0.0` on an object entry) each used to replace the container with a fresh one of the
+        path's shape, losing every entry or key in it. Now the walk refuses wherever it would
+        meet one, at any depth, and returns what it was given, as `U-42` does for an index past
+        the end. An empty array or object is refused too: the rule is about the shape, and a
+        shape the path contradicts is not the schema's.
+      - **"Wrong shape" still holds for what holds nothing.** A string, a number or `null` where
+        the path needs a container is still replaced with that container: that is a stored value
+        whose type's schema changed under it, and nothing in it is lost. The existing test for it
+        stays, beside new rows for `null`, a string and a number becoming an array.
+      - **Tests.** `schema-form.test.ts`: a refusal table of 8 rows on deep-frozen inputs, each
+        `toBe` the input and `toStrictEqual` to it; 3 new write rows. Mutations, each failing: no
+        guard 8; refusing only the array-where-name direction 4; refusing every non-`undefined`
+        child of the other shape (strings, numbers) 3.
+
+- [x] **U-44 — a cleared JSON or number entry says "required" without saying why** · XS · U-41 ·
       Found 2026-10-08 in `U-41`. A cleared JSON entry holds `''` and is refused as "required"
       while the JSON box's own sentence is silent; a cleared number entry reads "required" with no
       rendered test. **Done when** both say what to do (type a value or remove the entry), with
       rendered tests.
 
-- [ ] **U-45 — the always-present problem paragraph adds a gap under every control** · XS · U-41 ·
+      **U-44 outcome. A cleared entry of any kind reads *cannot be empty: type a value, or remove
+      the entry*.**
+      - **One sentence, one place.** `problemsFor` says it for an entry holding `''` where it used
+        to say "required" — which is true of every entry and tells someone who has just emptied
+        the box nothing — and the string entry's `U-41` sentence is now the same constant. Only
+        `''`, the value a cleared control leaves (`U-41`): a hole (`undefined`) and a JSON entry
+        typed as `null` still read "required", since neither is a box the operator emptied.
+      - **The JSON box's own sentence is left as it is.** It describes the box, is not tied to the
+        control, and is not announced; the problem paragraph is all three, so it is where the
+        instruction goes. Two sentences saying one thing under one box would be noise.
+      - **Tests.** `schema-form.test.ts`: rows for a cleared number and a cleared JSON entry, a
+        JSON entry, and a `null` JSON entry; the before-submit check now expects the sentence at
+        `ports.0`. `repeating-field.test.tsx`: a number entry and a JSON entry cleared, each
+        storing `''` and keeping its Remove; on leaving, the region that existed empty before
+        (same node, polite) shows the sentence, the control is `aria-invalid` and described by it;
+        typing a value takes all three away. Mutations, each failing: "required" back 5; the
+        sentence for every missing entry, not just `''`, 2.
+
+- [x] **U-45 — the always-present problem paragraph adds a gap under every control** · XS · U-41 ·
       Found 2026-10-08 in `U-41`. `space-y-1` puts 4px under each control for an empty live region.
       **Done when** the empty region takes no space while staying in the DOM to be announced.
+
+      **U-45 outcome. The region sits outside the control's stack and carries `mt-1 empty:mt-0`.**
+      - **Why outside.** Tailwind 4's `space-y-1` gives every child but the last a bottom margin,
+        so a region at the end of the stack put 4px under whatever came before it. The label,
+        hint, control and fixed-field reason are now their own `space-y-1` stack; the region
+        follows it with its own `mt-1`, which `empty:mt-0` takes away while it has no children
+        (React renders no text node for `''`). An empty block has no line box, so no height. The
+        built CSS was checked: `.empty\:mt-0:empty{margin-top:0}` comes after `.mt-1`.
+      - **Not `hidden`, `display: none` or `sr-only`.** The first two take it out of the
+        accessibility tree, and a live region has to be in it before its text changes (`U-41`);
+        `sr-only` would hide the problem from sighted users.
+      - **Tests.** `repeating-field.test.tsx`, asserting what the layout rests on since jsdom lays
+        nothing out: under a top-level field and under an entry, the empty region matches
+        `:empty`, carries `mt-1` and `empty:mt-0`, has no `space-y-*` parent, and is polite, not
+        `hidden`, not `aria-hidden`, not `display: none`; with a problem it is not `:empty`, and
+        after the fix it is the same node and `:empty` again. Mutations, each failing: the
+        wrapper made a `space-y-1` stack again 1; no `empty:mt-0` 1; `hidden` while empty 1.
+        `null` in place of `''` for no problem was tried and makes no difference, so it was not
+        kept.
+      - **Not done.** `SettingsPanel`'s problem paragraph (inheritable settings, `U-09`) is still
+        rendered only with a problem, is not a live region, and is not tied to its control by
+        `aria-describedby`.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

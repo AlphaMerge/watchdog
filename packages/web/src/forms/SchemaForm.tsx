@@ -199,80 +199,89 @@ function Control({
   });
 
   return (
-    <div className="space-y-1" ref={wrapper}>
-      <div className="flex flex-wrap items-baseline gap-2">
-        <label htmlFor={id} className="text-sm font-medium text-text">
-          {field.label}
-        </label>
-        {field.required && (
-          <span className="text-xs text-text-muted" aria-hidden="true">
-            required
-          </span>
+    <div ref={wrapper}>
+      <div className="space-y-1">
+        <div className="flex flex-wrap items-baseline gap-2">
+          <label htmlFor={id} className="text-sm font-medium text-text">
+            {field.label}
+          </label>
+          {field.required && (
+            <span className="text-xs text-text-muted" aria-hidden="true">
+              required
+            </span>
+          )}
+          <span className="font-mono text-xs text-text-muted">{field.path}</span>
+        </div>
+
+        {field.description !== undefined && (
+          <p id={`${id}-hint`} className="text-xs text-text-muted">
+            {field.description}
+          </p>
         )}
-        <span className="font-mono text-xs text-text-muted">{field.path}</span>
+
+        {field.writeOnly ? (
+          <WriteOnly
+            id={id}
+            field={field}
+            isSet={isSet}
+            replacing={beingReplaced}
+            value={typeof value === 'string' ? value : ''}
+            disabled={disabled}
+            describedBy={describedBy}
+            onReplace={onReplace}
+            onValue={(next) => {
+              set(next);
+              markTouched(field.path);
+            }}
+            onClear={() => {
+              // `null` is the API's explicit unset. Omitting the key would instead keep the stored
+              // secret, which is the opposite of what "clear" means.
+              set(null);
+              markTouched(field.path);
+            }}
+          />
+        ) : (
+          <SchemaControl
+            id={id}
+            field={field}
+            value={fixed.kind === 'locked' ? fixed.value : value}
+            disabled={disabled}
+            describedBy={describedBy}
+            invalid={problems.length > 0}
+            readOnly={fixed.kind === 'locked'}
+            onValue={(next) => {
+              refocus.current = wrapper.current?.contains(document.activeElement) ?? false;
+              set(next);
+            }}
+            onBlur={() => {
+              markTouched(field.path);
+            }}
+          />
+        )}
+
+        {fixed.kind !== 'open' && (
+          // Polite live region as well as a description: going from `changed` to `locked` keeps this
+          // element and changes its sentence, which is announced even where moving focus onto the
+          // read-only box does not read its description again.
+          <p id={`${id}-fixed`} className="text-xs text-text-muted" aria-live="polite">
+            {fixed.kind === 'locked' ? FIXED_REASON : fixedChangedReason(fixed.stored)}
+          </p>
+        )}
       </div>
-
-      {field.description !== undefined && (
-        <p id={`${id}-hint`} className="text-xs text-text-muted">
-          {field.description}
-        </p>
-      )}
-
-      {field.writeOnly ? (
-        <WriteOnly
-          id={id}
-          field={field}
-          isSet={isSet}
-          replacing={beingReplaced}
-          value={typeof value === 'string' ? value : ''}
-          disabled={disabled}
-          describedBy={describedBy}
-          onReplace={onReplace}
-          onValue={(next) => {
-            set(next);
-            markTouched(field.path);
-          }}
-          onClear={() => {
-            // `null` is the API's explicit unset. Omitting the key would instead keep the stored
-            // secret, which is the opposite of what "clear" means.
-            set(null);
-            markTouched(field.path);
-          }}
-        />
-      ) : (
-        <SchemaControl
-          id={id}
-          field={field}
-          value={fixed.kind === 'locked' ? fixed.value : value}
-          disabled={disabled}
-          describedBy={describedBy}
-          invalid={problems.length > 0}
-          readOnly={fixed.kind === 'locked'}
-          onValue={(next) => {
-            refocus.current = wrapper.current?.contains(document.activeElement) ?? false;
-            set(next);
-          }}
-          onBlur={() => {
-            markTouched(field.path);
-          }}
-        />
-      )}
-
-      {fixed.kind !== 'open' && (
-        // Polite live region as well as a description: going from `changed` to `locked` keeps this
-        // element and changes its sentence, which is announced even where moving focus onto the
-        // read-only box does not read its description again.
-        <p id={`${id}-fixed`} className="text-xs text-text-muted" aria-live="polite">
-          {fixed.kind === 'locked' ? FIXED_REASON : fixedChangedReason(fixed.stored)}
-        </p>
-      )}
 
       {/* **Always there, and a polite live region** (`U-41`, WCAG 4.1.3). A problem appears when
           the field is left, by which time focus is on the next control and the description tied
           to this one is not read again; a live region is announced only if it existed before
           its text changed, so it is rendered empty rather than not at all. Named by
-          `aria-describedby` only while it says something. */}
-      <p id={`${id}-problem`} className="text-xs text-down-fg" aria-live="polite">
+          `aria-describedby` only while it says something.
+
+          **Empty, it takes no space** (`U-45`). Inside `space-y-1` it gave every control a 4px
+          gap for a sentence nobody could see. So it sits outside that stack and brings its own
+          `mt-1`, which `empty:mt-0` takes away while it has no children at all (React renders no
+          text node for `''`; the test checks `:empty`). An empty block has no line box, so no
+          height either. Never `hidden` or `display: none`: either takes it out of the
+          accessibility tree, and a live region must be in it before its text changes. */}
+      <p id={`${id}-problem`} className="mt-1 text-xs text-down-fg empty:mt-0" aria-live="polite">
         {problems.map((problem) => problem.message).join('; ')}
       </p>
     </div>
