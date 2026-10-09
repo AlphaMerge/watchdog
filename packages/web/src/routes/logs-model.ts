@@ -30,6 +30,8 @@ export function usePaged<T, C>(
   status: 'loading' | 'ready' | 'error';
   error: ApiError | null;
   reload: () => void;
+  /** Reads the first page again with the failure kept in hand (`useApi`'s, `U-68`). */
+  retry: () => void;
   more: (() => void) | null;
   loadingMore: boolean;
 } {
@@ -97,6 +99,7 @@ export function usePaged<T, C>(
     status: first.status,
     error: first.status === 'error' ? first.error : null,
     reload: first.reload,
+    retry: first.retry,
     more: cursor === null ? null : more,
     loadingMore,
   };

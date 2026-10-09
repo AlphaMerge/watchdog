@@ -148,7 +148,7 @@ export function MapSharePanel({ mapId }: { readonly mapId: number }): React.JSX.
       )}
 
       {shares.status === 'loading' && <Loading what="links" />}
-      {shares.status === 'error' && <ErrorPanel error={shares.error} retry={shares.reload} />}
+      {shares.status === 'error' && <ErrorPanel error={shares.error} retry={shares.retry} />}
       {shares.status === 'ready' && live.length === 0 && (
         <p className="text-xs text-text-muted">No public links.</p>
       )}

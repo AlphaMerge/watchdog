@@ -243,7 +243,7 @@ function StatusChanges({
       </div>
 
       {log.status === 'loading' && <Loading what="the status log" />}
-      {log.error !== null && <ErrorPanel error={log.error} retry={log.reload} />}
+      {log.error !== null && <ErrorPanel error={log.error} retry={log.retry} />}
       {log.status === 'ready' && (
         <Card>
           {log.items.length === 0 ? (
@@ -402,7 +402,7 @@ function ObjectHistory({
       </div>
 
       {log.status === 'loading' && <Loading what="the object history" />}
-      {log.error !== null && <ErrorPanel error={log.error} retry={log.reload} />}
+      {log.error !== null && <ErrorPanel error={log.error} retry={log.retry} />}
       {log.status === 'ready' && (
         <Card>
           {log.items.length === 0 ? (
@@ -589,7 +589,7 @@ function SystemEvents({
       </p>
 
       {log.status === 'loading' && <Loading what="system events" />}
-      {log.error !== null && <ErrorPanel error={log.error} retry={log.reload} />}
+      {log.error !== null && <ErrorPanel error={log.error} retry={log.retry} />}
       {log.status === 'ready' && (
         <Card>
           {log.items.length === 0 ? (

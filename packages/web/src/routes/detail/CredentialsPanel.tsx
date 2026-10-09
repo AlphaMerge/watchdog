@@ -121,7 +121,7 @@ export function CredentialsPanel({
     return <Loading what="credentials" />;
   }
   if (sets.status === 'error') return <ErrorPanel error={sets.error} retry={reload} />;
-  if (kinds.status === 'error') return <ErrorPanel error={kinds.error} retry={kinds.reload} />;
+  if (kinds.status === 'error') return <ErrorPanel error={kinds.error} retry={kinds.retry} />;
 
   const items = sets.data;
   const catalogue = kinds.data.items;

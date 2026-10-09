@@ -49,9 +49,9 @@ export function TriggersPanel({
   if (triggers.status === 'loading' || kinds.status === 'loading')
     return <Loading what="triggers" />;
   if (triggers.status === 'error') {
-    return <ErrorPanel error={triggers.error} retry={triggers.reload} />;
+    return <ErrorPanel error={triggers.error} retry={triggers.retry} />;
   }
-  if (kinds.status === 'error') return <ErrorPanel error={kinds.error} retry={kinds.reload} />;
+  if (kinds.status === 'error') return <ErrorPanel error={kinds.error} retry={kinds.retry} />;
 
   const items = triggers.data.items;
   const own = items.filter((trigger) => !trigger.inherited);

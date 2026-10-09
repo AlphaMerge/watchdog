@@ -68,10 +68,10 @@ export function DiscoveryView(): React.JSX.Element {
   ) {
     return <Loading what="discovery" />;
   }
-  if (probes.status === 'error') return <ErrorPanel error={probes.error} retry={probes.reload} />;
-  if (groups.status === 'error') return <ErrorPanel error={groups.error} retry={groups.reload} />;
+  if (probes.status === 'error') return <ErrorPanel error={probes.error} retry={probes.retry} />;
+  if (groups.status === 'error') return <ErrorPanel error={groups.error} retry={groups.retry} />;
   if (templates.status === 'error') {
-    return <ErrorPanel error={templates.error} retry={templates.reload} />;
+    return <ErrorPanel error={templates.error} retry={templates.retry} />;
   }
 
   return (
@@ -633,7 +633,7 @@ function RecentRuns({
   const runs = useApi<{ items: DiscoveryRun[] }>(`/objects/${String(groupId)}/discovery?limit=10`);
 
   if (runs.status === 'loading') return <Loading what="earlier runs" />;
-  if (runs.status === 'error') return <ErrorPanel error={runs.error} retry={runs.reload} />;
+  if (runs.status === 'error') return <ErrorPanel error={runs.error} retry={runs.retry} />;
 
   const others = runs.data.items.filter((run) => run.id !== watching);
   if (others.length === 0) {

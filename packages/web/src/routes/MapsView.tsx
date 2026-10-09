@@ -74,7 +74,7 @@ export function MapsView(): React.JSX.Element {
 
       <Card title="Maps">
         {maps.status === 'loading' && <Loading what="maps" />}
-        {maps.status === 'error' && <ErrorPanel error={maps.error} retry={maps.reload} />}
+        {maps.status === 'error' && <ErrorPanel error={maps.error} retry={maps.retry} />}
         {maps.status === 'ready' && maps.data.items.length === 0 && (
           <Empty because="A map is a canvas of widgets — make one above.">No maps yet.</Empty>
         )}

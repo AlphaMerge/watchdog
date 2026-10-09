@@ -107,7 +107,7 @@ export function ReportsView(): React.JSX.Element {
 
       <Card title="Reports">
         {reports.status === 'loading' && <Loading what="reports" />}
-        {reports.status === 'error' && <ErrorPanel error={reports.error} retry={reports.reload} />}
+        {reports.status === 'error' && <ErrorPanel error={reports.error} retry={reports.retry} />}
         {reports.status === 'ready' && reports.data.items.length === 0 && (
           <Empty because="A report is a saved question about a period — make one above.">
             No reports yet.

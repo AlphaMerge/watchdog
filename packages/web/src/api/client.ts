@@ -239,16 +239,29 @@ export type Loadable<T> =
  * refresh) holds it itself, in a ref filled only from `ready`, which this does not change; none
  * relied on the one stale render. A path set to null asks nothing, and keeps whatever it last had,
  * with the path it was read from: nothing on screen should be drawn from it.
+ *
+ * **`retry` reads again with the failure still in hand** (`U-68`). It is what an `ErrorPanel`'s
+ * *Try again* is given: the hook stays `error`, with the same error, until the new answer, so the
+ * panel stays mounted and its button keeps the focus that pressing it put there, rather than
+ * giving way to a loading line and dropping focus to the page. The panel empties itself while it
+ * waits, so a second failure is said again. From any state but `error` it is `reload`.
  */
 export function useApi<T>(
   path: string | null,
-): Loadable<T> & { reload: () => void; answered: string | null } {
+): Loadable<T> & { reload: () => void; retry: () => void; answered: string | null } {
   const [state, setState] = useState<Loadable<T>>({ status: 'loading' });
   const [answered, setAnswered] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
   const reload = useCallback(() => {
     setNonce((n) => n + 1);
   }, []);
+  /** Set by `retry` for the read it asks for, and taken by that read's effect. */
+  const holding = useRef(false);
+  const erred = state.status === 'error';
+  const retry = useCallback(() => {
+    holding.current = erred;
+    setNonce((n) => n + 1);
+  }, [erred]);
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -260,9 +273,15 @@ export function useApi<T>(
 
   useEffect(() => {
     if (path === null) return;
+    const hold = holding.current;
+    holding.current = false;
     const controller = new AbortController();
-    setState({ status: 'loading' });
-    setAnswered(null);
+    // A retry keeps the failure, and the path it was read from, until this read answers. If the
+    // path moved in the same render, `answered` is not it and the render below says `loading`.
+    if (!hold) {
+      setState({ status: 'loading' });
+      setAnswered(null);
+    }
 
     request<T>(path, controller.signal)
       .then((data) => {
@@ -288,6 +307,8 @@ export function useApi<T>(
   }, [path, nonce]);
 
   // From the render the path changes on, not from the one after the effect (`U-62`).
-  if (path !== null && answered !== path) return { status: 'loading', reload, answered: null };
-  return { ...state, reload, answered };
+  if (path !== null && answered !== path) {
+    return { status: 'loading', reload, retry, answered: null };
+  }
+  return { ...state, reload, retry, answered };
 }

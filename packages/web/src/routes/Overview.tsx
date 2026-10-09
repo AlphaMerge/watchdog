@@ -94,7 +94,7 @@ export function Overview(): React.JSX.Element {
 
       <Card title="Sensor health">
         {counts.status === 'loading' && <Loading what="the totals" />}
-        {counts.status === 'error' && <ErrorPanel error={counts.error} retry={counts.reload} />}
+        {counts.status === 'error' && <ErrorPanel error={counts.error} retry={counts.retry} />}
         {states !== null &&
           (sensorCount === 0 ? (
             <Empty because="Add a device and a sensor, or see the Tree.">
@@ -146,7 +146,7 @@ export function Overview(): React.JSX.Element {
           }
         >
           {types.status === 'loading' && <Loading what="sensor types" />}
-          {types.status === 'error' && <ErrorPanel error={types.error} retry={types.reload} />}
+          {types.status === 'error' && <ErrorPanel error={types.error} retry={types.retry} />}
           {types.status === 'ready' &&
             (typeCount === 0 ? (
               <Empty because="P-05 shipped the contract and the registry; P-08 through P-11 are the first four types.">

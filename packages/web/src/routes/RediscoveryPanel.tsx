@@ -81,7 +81,7 @@ export function RediscoveryPanel({
   );
 
   if (rules.status === 'loading') return <Loading what="rediscovery rules" />;
-  if (rules.status === 'error') return <ErrorPanel error={rules.error} retry={rules.reload} />;
+  if (rules.status === 'error') return <ErrorPanel error={rules.error} retry={rules.retry} />;
   const windowList = windows.status === 'ready' ? windows.data.items : [];
 
   return (

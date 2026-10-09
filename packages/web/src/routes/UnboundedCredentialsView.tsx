@@ -32,7 +32,7 @@ export function UnboundedCredentialsView(): React.JSX.Element {
       </p>
 
       {sets.status === 'loading' && <Loading what="the sets without bounds" />}
-      {sets.status === 'error' && <ErrorPanel error={sets.error} retry={sets.reload} />}
+      {sets.status === 'error' && <ErrorPanel error={sets.error} retry={sets.retry} />}
       {sets.status === 'ready' && (
         <Card>
           {sets.data.items.length === 0 ? (

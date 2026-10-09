@@ -88,7 +88,7 @@ export function SensorTypesView(): React.JSX.Element {
       </div>
 
       {types.status === 'loading' && <Loading what="the catalogue" />}
-      {types.status === 'error' && <ErrorPanel error={types.error} retry={types.reload} />}
+      {types.status === 'error' && <ErrorPanel error={types.error} retry={types.retry} />}
 
       {types.status === 'ready' &&
         (catalogue.length === 0 ? (

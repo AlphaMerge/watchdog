@@ -43,7 +43,7 @@ export function MapDesignView(): React.JSX.Element {
         )}
       </div>
       {map.status === 'loading' && <Loading what="the map" />}
-      {map.status === 'error' && <ErrorPanel error={map.error} retry={map.reload} />}
+      {map.status === 'error' && <ErrorPanel error={map.error} retry={map.retry} />}
       {map.status === 'ready' && (
         <Designer
           key={map.data.id}

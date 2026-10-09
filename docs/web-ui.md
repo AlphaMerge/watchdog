@@ -218,7 +218,9 @@ not read is absent from the list rather than refused.
   and stored only as a hash. A shared map draws the current readings rather than history, and
   **only what the account that made the link can see** — as it stands now, so a link shrinks when
   its maker loses a grant, and stops opening at all, as a revoked link does, when the maker's
-  account is disabled or deleted.
+  account is disabled or deleted. It reads the map again each minute with the last one still on
+  screen; a read that fails is said under the map's name and the map stays, until the link itself
+  stops working.
 - **Five-star maps surface in the Home menu.** Priority is set on the map itself.
 - **A name is unique among the maps you can read, not across the installation.** Two groups can
   each have a "Core Network" without either learning the other's exists, and a list that holds two
@@ -453,6 +455,9 @@ The UI targets WCAG 2.1 AA, and this is a requirement rather than an aspiration
 - The layout reflows to 320px.
 - **Dark theme** is a toggle in the header. It keeps one name and reports its state, rather than
   renaming itself underneath the state it is reporting.
+- **Try again keeps focus.** A failed read's **Try again** stays where it is while it asks again,
+  saying *Trying again…*; a second failure is said again in the same alert, and a read that
+  succeeds puts focus on the page's heading rather than dropping it to the page.
 
 ## What is not here
 

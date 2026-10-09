@@ -32,7 +32,7 @@ export function StateLogPanel({
   );
 
   if (log.status === 'loading') return <Loading what="the state log" />;
-  if (log.status === 'error') return <ErrorPanel error={log.error} retry={log.reload} />;
+  if (log.status === 'error') return <ErrorPanel error={log.error} retry={log.retry} />;
   if (log.data.items.length === 0) {
     return (
       <Empty because="A row is written when a state changes, so a sensor that has never changed state has none.">

@@ -160,7 +160,7 @@ export function HistoryPanel({
       </div>
 
       {history.status === 'error' && !kept && (
-        <ErrorPanel error={history.error} retry={history.reload} />
+        <ErrorPanel error={history.error} retry={history.retry} />
       )}
       {history.status === 'loading' && showing === null && <Loading what="history" />}
       {showing !== null && (history.status !== 'error' || kept) && (

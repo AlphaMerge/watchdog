@@ -84,7 +84,7 @@ export function ReportView(): React.JSX.Element {
       </div>
 
       {report.status === 'loading' && <Loading what="the report" />}
-      {report.status === 'error' && <ErrorPanel error={report.error} retry={report.reload} />}
+      {report.status === 'error' && <ErrorPanel error={report.error} retry={report.retry} />}
 
       {report.status === 'ready' && (
         <>
@@ -158,7 +158,7 @@ export function ReportView(): React.JSX.Element {
 
           <Card title="Runs">
             {runs.status === 'loading' && <Loading what="runs" />}
-            {runs.status === 'error' && <ErrorPanel error={runs.error} retry={runs.reload} />}
+            {runs.status === 'error' && <ErrorPanel error={runs.error} retry={runs.retry} />}
             {runs.status === 'ready' && runs.data.items.length === 0 && (
               <p className="text-sm text-text-muted">
                 This report has not run yet. “Run now” renders it against the period above.

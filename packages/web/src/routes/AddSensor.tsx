@@ -129,8 +129,8 @@ export function AddSensor(): React.JSX.Element {
   }, []);
 
   if (parent.status === 'loading' || types.status === 'loading') return <Loading what="the form" />;
-  if (parent.status === 'error') return <ErrorPanel error={parent.error} retry={parent.reload} />;
-  if (types.status === 'error') return <ErrorPanel error={types.error} retry={types.reload} />;
+  if (parent.status === 'error') return <ErrorPanel error={parent.error} retry={parent.retry} />;
+  if (types.status === 'error') return <ErrorPanel error={types.error} retry={types.retry} />;
 
   const catalogue = types.data.items;
   const ready = name.trim() !== '' && typeId !== '' && problems.length === 0;

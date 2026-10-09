@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MapShare } from '../src/api/types';
 import { MapSharePanel } from '../src/maps/MapSharePanel';
 import { shareLinkFor, sharedBackgroundUrl, sharedMapPath } from '../src/maps/shareUrl';
@@ -226,6 +226,162 @@ describe('the page a stranger opens', () => {
     // Expired, revoked and never-existed are one answer on purpose: the difference is the only
     // useful thing a guesser could learn.
     expect(screen.getByText(/may have expired, or been revoked/)).toBeDefined();
+  });
+
+  /**
+   * The minute's re-read (`U-66`). The clock is faked alone, so the page's own promises and
+   * `waitFor` run as they do everywhere else; each read is held until the test answers it.
+   */
+  describe('each minute', () => {
+    type Reply = { body: unknown; status?: number } | 'hold';
+    let replies: Reply[] = [];
+    let waiting: ((reply: { body: unknown; status?: number }) => void)[] = [];
+    let reads = 0;
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+      replies = [];
+      waiting = [];
+      reads = 0;
+      vi.stubGlobal('fetch', () => {
+        reads += 1;
+        const reply = replies.shift() ?? 'hold';
+        if (reply !== 'hold') return Promise.resolve(json(reply.body, reply.status));
+        return new Promise<Response>((resolve) => {
+          waiting.push((answer) => {
+            resolve(json(answer.body, answer.status));
+          });
+        });
+      });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    const failure = (id: string, status = 500): { body: unknown; status: number } => ({
+      status,
+      body: { error: { code: 'INTERNAL', message: 'the database went away', correlationId: id } },
+    });
+
+    /** The next minute, and its read answered with `reply` once it has been asked. */
+    const minute = async (reply: { body: unknown; status?: number }): Promise<void> => {
+      const before = reads;
+      act(() => {
+        vi.advanceTimersByTime(60_000);
+      });
+      await waitFor(() => {
+        expect(reads).toBe(before + 1);
+        expect(waiting).toHaveLength(1);
+      });
+      // Asked, and not answered: the map is what is on the page meanwhile.
+      expect(screen.getByRole('heading', { name: 'Floor 1' })).toBeDefined();
+      expect(screen.getByText('Router')).toBeDefined();
+      expect(screen.queryByText('Loading the map…')).toBeNull();
+      act(() => {
+        waiting.shift()?.(reply);
+      });
+    };
+
+    /** Everything taken off or put on the page, from the first map on. */
+    const watch = (): MutationRecord[] => {
+      const records: MutationRecord[] = [];
+      const observer = new MutationObserver((batch) => {
+        records.push(...batch);
+      });
+      observer.observe(document.body, { subtree: true, childList: true, characterData: true });
+      return records;
+    };
+    const dropped = (records: MutationRecord[]): string[] =>
+      records.flatMap((record) =>
+        [...record.removedNodes]
+          .map((node) => node.textContent ?? '')
+          .filter((text) => text.includes('Router') || text.includes('Floor 1')),
+      );
+    const loadingShown = (records: MutationRecord[]): boolean =>
+      records.some((record) =>
+        [...record.addedNodes].some((node) => (node.textContent ?? '').includes('Loading')),
+      );
+    const region = (): HTMLElement =>
+      screen
+        .getAllByRole('status')
+        .find(
+          (one) =>
+            one.getAttribute('aria-live') === 'polite' && !one.textContent.startsWith('Loading'),
+        ) as HTMLElement;
+
+    it('keeps the map on the page while the next one is read', async () => {
+      replies = [{ body: shared }];
+      openAt('abc');
+      await screen.findByRole('heading', { name: 'Floor 1' });
+      const heading = screen.getByRole('heading', { name: 'Floor 1' });
+      const records = watch();
+
+      await minute({ body: shared });
+      await minute({ body: { ...shared, description: 'Second floor too' } });
+      await screen.findByText('Second floor too');
+      await minute({ body: shared });
+      await waitFor(() => {
+        expect(screen.queryByText('Second floor too')).toBeNull();
+      });
+
+      expect(reads).toBe(4);
+      expect(heading.isConnected).toBe(true);
+      await waitFor(() => {
+        expect(records.length).toBeGreaterThan(0);
+      });
+      expect(dropped(records)).toEqual([]);
+      expect(loadingShown(records)).toBe(false);
+    });
+
+    it('says a failed refresh without taking the map away, once, until a read succeeds', async () => {
+      replies = [{ body: shared }];
+      openAt('abc');
+      await screen.findByRole('heading', { name: 'Floor 1' });
+      const said = region();
+      expectQuiet(said, ['mt-2', 'empty:mt-0'], 'polite');
+      const records = watch();
+
+      await minute(failure('req-1'));
+      await waitFor(() => {
+        expect(said.textContent).toContain('could not be read again');
+      });
+      expect(said.textContent).toContain('may be out of date (the database went away)');
+      expect(said.textContent).toContain(' req-1');
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(screen.getByText('Router')).toBeDefined();
+
+      // The same failure a minute later is not news: the one said stays, id and all.
+      await minute(failure('req-2'));
+      await waitFor(() => {
+        expect(reads).toBe(3);
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(said.textContent).toContain(' req-1');
+      expect(said.textContent).not.toContain('req-2');
+
+      await minute({ body: shared });
+      await waitFor(() => {
+        expect(said.textContent).toBe('');
+      });
+      expect(region()).toBe(said);
+      expect(dropped(records)).toEqual([]);
+      expect(loadingShown(records)).toBe(false);
+    });
+
+    it('drops the map when the link stops working', async () => {
+      replies = [{ body: shared }];
+      openAt('abc');
+      await screen.findByRole('heading', { name: 'Floor 1' });
+
+      await minute({
+        status: 404,
+        body: { error: { code: 'MAP_NOT_FOUND', message: 'this link is not valid' } },
+      });
+      await screen.findByRole('heading', { name: 'This link does not work' });
+      expect(screen.queryByText('Router')).toBeNull();
+    });
   });
 });
 

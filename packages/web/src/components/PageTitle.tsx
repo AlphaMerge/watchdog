@@ -1,5 +1,6 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
+import { takeOwedFocus } from './keep-focus';
 import { takeFocusOn } from './page-title-model';
 
 const SITE = 'MonitoringSystem';
@@ -47,6 +48,12 @@ export function PageTitle({
   useEffect(() => {
     document.title = title === '' ? SITE : `${title} — ${SITE}`;
   }, [title]);
+
+  // A page that was only an error panel, whose *Try again* had focus, is owed it as its heading
+  // comes (`U-68`): taken here, in the commit that removed the panel, so it is never on the body.
+  useLayoutEffect(() => {
+    if (takeOwedFocus()) heading.current?.focus({ preventScroll: true });
+  }, []);
 
   useEffect(() => {
     if (takeFocusOn(pathname)) {

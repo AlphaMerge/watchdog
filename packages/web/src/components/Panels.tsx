@@ -1,5 +1,6 @@
-import type { ReactNode } from 'react';
+import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { ApiError } from '../api/client';
+import { keepFocusOnThePage } from './keep-focus';
 
 export function Card({
   title,
@@ -87,6 +88,26 @@ export function Loading({ what }: { what: string }): React.JSX.Element {
  *
  * The correlation id is shown because the core logs it against every request: it is the one
  * string that turns "it broke" into a line in the journal.
+ *
+ * **Pressing *Try again* never drops focus to the page** (`U-68`, WCAG 2.4.3). Two parts, because
+ * a retry can end two ways:
+ * - **While it re-reads, and when it fails again, the panel stays.** A caller that gives it a
+ *   retry which keeps the failure in hand (`useApi`'s `retry`, or a hook that holds its error the
+ *   same way) leaves the panel mounted, so the button that has focus is the one still there. It
+ *   says *Trying again…*, `aria-disabled` rather than `disabled` (which would drop the focus it
+ *   holds), and a press then asks nothing. The message is taken out of the region while it waits
+ *   and put back with the next failure, so a failure in the same words is said again, as `U-63`'s
+ *   *Try again* does. Busy is "pressed for the error shown": every read that fails parses a new
+ *   one, so the next failure ends it without the caller saying so.
+ * - **When the panel goes, focus goes to the page's heading** (`keep-focus.ts`). A read that
+ *   succeeds takes the panel away with it, and a caller whose retry goes back to a loading line
+ *   takes it at once. Either way, if focus was in the panel, it is put on the page's `h1`
+ *   (`PageTitle`'s, which is focusable for exactly this and is where focus goes on arriving at a
+ *   page, `U-11`): it is the one target every page has that outlives every state of its reads,
+ *   and the panel cannot know which of the caller's controls will be there. A page that is only
+ *   the panel until its read succeeds has no heading yet, and its heading takes focus as it is
+ *   put on the page. A caller that moves focus somewhere nearer in its own effect wins, since
+ *   that runs after.
  */
 export function ErrorPanel({
   error,
@@ -98,35 +119,57 @@ export function ErrorPanel({
   /** Shown inside a region that is already an alert (`RefusalPanel`), so not one of its own. */
   inRegion?: boolean;
 }): React.JSX.Element {
+  const panel = useRef<HTMLDivElement>(null);
+  const [pressedFor, setPressedFor] = useState<ApiError | null>(null);
+  const busy = retry !== undefined && pressedFor === error;
+
+  useLayoutEffect(() => {
+    const node = panel.current;
+    return () => {
+      if (node !== null && node.contains(document.activeElement)) keepFocusOnThePage(node);
+    };
+  }, []);
+
   const unreachable = error.code === 'UNREACHABLE';
   return (
     <div
+      ref={panel}
       role={inRegion ? undefined : 'alert'}
       className="border border-down-border bg-down-bg p-4 text-sm text-down-fg"
     >
-      <p className="ms-label text-down-fg">
-        {unreachable ? 'The core is not reachable' : `Request failed — ${error.code}`}
-      </p>
-      <p className="mt-1.5">{error.message}</p>
-      {unreachable && (
-        <p className="mt-2">
-          Start it with{' '}
-          <code className="font-mono">
-            scripts/dev.sh &quot;node packages/core/dist/src/main.js --config dev/core.json&quot;
-          </code>
-          .
-        </p>
-      )}
-      {error.correlationId !== undefined && (
-        <p className="mt-2 font-mono text-xs">correlation {error.correlationId}</p>
+      {!busy && (
+        <>
+          <p className="ms-label text-down-fg">
+            {unreachable ? 'The core is not reachable' : `Request failed — ${error.code}`}
+          </p>
+          <p className="mt-1.5">{error.message}</p>
+          {unreachable && (
+            <p className="mt-2">
+              Start it with{' '}
+              <code className="font-mono">
+                scripts/dev.sh &quot;node packages/core/dist/src/main.js --config
+                dev/core.json&quot;
+              </code>
+              .
+            </p>
+          )}
+          {error.correlationId !== undefined && (
+            <p className="mt-2 font-mono text-xs">correlation {error.correlationId}</p>
+          )}
+        </>
       )}
       {retry !== undefined && (
         <button
           type="button"
-          onClick={retry}
-          className="ms-label mt-3 border border-down-fg px-2 py-1 text-down-fg hover:bg-surface"
+          aria-disabled={busy}
+          onClick={() => {
+            if (busy) return;
+            setPressedFor(error);
+            retry();
+          }}
+          className={`ms-label border border-down-fg px-2 py-1 text-down-fg hover:bg-surface aria-disabled:opacity-60 ${busy ? '' : 'mt-3'}`}
         >
-          Try again
+          {busy ? 'Trying again…' : 'Try again'}
         </button>
       )}
     </div>

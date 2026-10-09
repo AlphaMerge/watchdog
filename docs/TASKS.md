@@ -26645,10 +26645,43 @@ because each is a decision rather than a defect:
       - **Not done.** `ParamsForm`'s channel-mode refusal (`ModeRefusal`) says the id in a
         paragraph of its own, as `ErrorPanel` does, and was left with it.
 
-- [ ] **U-66 — the shared map blanks every minute** · S · U-62 · Found 2026-10-09 in `U-62`.
+- [x] **U-66 — the shared map blanks every minute** · S · U-62 · Found 2026-10-09 in `U-62`.
       `SharedMapView` puts the clock tick in its request path, so each minute the map is replaced
       by "Loading the map…" while the request runs. **Done when** it keeps the last map in sight
       while the next is read, as `MapBoard` does, with a test that no frame drops the map.
+
+      **U-66 outcome. The shared page draws the last map it read until the next one comes, and a
+      refresh that fails is said under the map's name with the map left in place.** Web only.
+      - **Held as `MapBoard`'s graph tile holds its chart**: a ref filled only from `ready`, keyed
+        by the token, drawn whenever the hook is not `ready`. The tick stays in the path, so
+        `useApi` still says `loading` each minute (`U-62`); the page no longer draws that.
+        *Loading the map…* is only for a page with no map yet.
+      - **A failed refresh.** A polite region (`role="status"`, `aria-atomic`), in one plain block
+        with the name, there and empty while the map is (`mt-2 empty:mt-0`), says the map could
+        not be read again and may be out of date, the core's words, that it is asked for again
+        each minute, and the correlation id through `CorrelationId`. Not an alert: nobody pressed
+        anything, and a wall display has no one to interrupt. The first failure is kept, id and
+        all, while later ones are in the same words, so a core that stays down is said once and
+        not once a minute (as `RunPanel`'s poll region does, `U-64`); a read that succeeds
+        empties it. Set during render from the answer in hand, so it is never a render late.
+      - **A 404 is not a failed refresh.** It is the link revoked or expired, so the map goes and
+        the page says *This link does not work*, as it does when such a link is opened. Chosen
+        over keeping the picture: whoever revoked a link meant the display to stop showing it.
+      - **Docs.** `web-ui.md`'s Maps section.
+      - **Tests** (`map-share.test.tsx`, three under a faked `setInterval` alone, each minute's read
+        held until the test answers it). Three minutes, one changing the description: while each
+        read is out the heading, the widget and no loading line are on the page, and a
+        `MutationObserver` from the first map on records no node holding the map's name or widget
+        removed and no loading line added. A failed refresh: the region quiet before
+        (`expectQuiet`, polite), then the words and ` req-1` in that node with no alert and the
+        widget still there; a second failure in the same words keeps ` req-1` and never says
+        `req-2`; a good read empties the same node; the map never dropped. A 404 a minute later
+        takes the map away and says the link does not work. **Mutations**, each failing,
+        restored byte for byte (the web package has no `dist`): the map not held 3; a failed
+        refresh dropping the map 1; each failure replacing the one shown 1; the failure never
+        emptied 1; a 404 keeping the map 1.
+      - **Not done.** The page does not say when the map it shows was read; a wall display that
+        has been failing for an hour says the same as one that failed a minute ago.
 
 - [x] **U-67 — a failed re-read of a held list says nothing** · S · U-60 · Found 2026-10-09 in
       `U-60`. When the channel list (or the templates list, since `U-64`'s review) is re-read and
@@ -26704,11 +26737,64 @@ because each is a decision rather than a defect:
         focus still move it. **Mutations** (restored byte for byte): the old rule (moved when on
         the page) fails 1; the button's focus never recorded fails 3.
 
-- [ ] **U-68 — "Try again" in an error panel removes itself and drops focus** · S · U-60 ·
+- [x] **U-68 — "Try again" in an error panel removes itself and drops focus** · S · U-60 ·
       Found 2026-10-09 in `U-60`. Every `ErrorPanel` retry is replaced by a loading line, so
       focus falls to the page (WCAG 2.4.3), the shape `U-64` and `U-63` fixed locally. **Done
       when** `ErrorPanel`'s retry keeps focus somewhere stable for every caller (kept mounted
       with `aria-disabled`, or a declared focus target), with a test.
+
+      **U-68 outcome. Both: the panel stays while it re-reads, and when it goes, focus goes to the
+      page's heading.** Web only. Either alone left a hole. Kept mounted alone, a read that
+      succeeds still takes the panel and its focused button away. A focus target alone, a second
+      failure is a new alert mounted with its text already in it, which is not reliably said
+      (`U-41`).
+      - **`ErrorPanel` keeps the button while it re-reads.** Pressed, *Try again* says *Trying
+        again…*, is `aria-disabled` (not `disabled`, which drops the focus it holds), and asks
+        nothing on a second press. The message, code and id are taken out of the alert, and the
+        next failure puts them back in the same node, so the same words are said again, as
+        `U-63`'s *Try again* does. Busy means "pressed for the error shown". Every failed read
+        parses a new `ApiError`, so the next failure ends it without the caller doing anything.
+      - **`useApi` gains `retry`**, which `reload`s with the failure kept: from `error`, its effect
+        leaves the state and `answered` alone until the new read answers, so the hook stays
+        `error` with the same error and every `if (x.status === 'error') return <ErrorPanel…/>`
+        keeps the panel mounted. From any other state it is `reload`. A path that changes at the
+        same time still says `loading` (`U-62`). `usePaged` passes it on. Opt-in, so nothing that
+        reloads for another reason (a save, a poll) changes.
+      - **Converted**: every `retry={x.reload}` outside the two files below became `x.retry`, 28
+        panels in 19 files, and the tree search's panel takes `asked.retry`. The tree's first
+        level (`Branches`) now keeps its failure until the root's children answer.
+        `CredentialsPanel`'s sets and the session's *Cannot reach the core* already held
+        their error while re-reading and needed nothing.
+      - **When the panel goes with focus in it** (a read that succeeds, or a caller whose retry
+        still goes to a loading line), focus goes to `PageTitle`'s `h1`. That is the one target
+        every page has that outlives every state of its reads, and it is where focus goes on
+        arriving at a page (`U-11`). The panel cannot know which of its caller's controls will be
+        there. It is moved in the commit that removes the panel. A page that is only the panel
+        until its read succeeds (*Add a sensor*, the object page) has no heading yet, so focus is
+        owed and `PageTitle` takes it in its layout effect, in that same commit. A plain `h1`
+        that comes later is found after the commit (`keep-focus.ts`). A caller that moves focus
+        somewhere nearer in its own effect wins.
+      - **Docs.** `web-ui.md`'s Accessibility section.
+      - **Tests** (`try-again-focus.test.tsx`, 9). The panel: same button, focused,
+        `aria-disabled` and not `disabled`, the region only *Trying again…*, a second press asks
+        nothing, and a new error comes back into the same alert with its id. A panel replaced by
+        a loading line puts focus on the heading, focus elsewhere is left alone, and a heading
+        that comes with the answer gets it. `useApi`'s `retry` and four callers go through one
+        round: *Sensor types*, *Add a sensor* (heading comes with the answer), the status log
+        (`usePaged`) and the tree's first level. In that round, *Try again* re-reads with no
+        loading line, the same button focused and unavailable and the message out of the alert.
+        A second failure in the same words is added back to the same alert (mutation records).
+        A press while busy asks nothing. A read that succeeds leaves focus on the `h1`. A
+        `MutationObserver` from the first press finds focus on the body after no change at all.
+        The 35 files around the converted callers pass. **Mutations**, each failing, restored
+        byte for byte (no `dist`): never busy 6; message kept while busy 6; a press while busy
+        asking again 6; no focus move on removal 7; `PageTitle` not taking owed focus 1;
+        `retry` not holding 4; *Sensor types* back on `reload` 1; the tree dropping its failure
+        at once 1; `usePaged`'s `retry` being `reload` 1.
+      - **Not done.** `TemplatesView` (2 panels) and `ObjectDetailView` (5, plus the held channel
+        list's own `inRegion` retry) were being changed by another ticket and were left on
+        `reload`. They get the move to the heading, from `ErrorPanel`, but not the kept panel or
+        the second failure said again.
 
 - [x] **U-69 — an accepted *Save template* drops focus** · XS · U-64 · Found 2026-10-09 in
       `U-64` review. Saving closes the editor and focus on *Save template* falls to the page with

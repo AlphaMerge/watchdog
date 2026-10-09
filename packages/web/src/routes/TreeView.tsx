@@ -225,7 +225,7 @@ export function TreeView(): React.JSX.Element {
         </p>
       </div>
 
-      {tops.status === 'error' && <ErrorPanel error={tops.error} retry={tops.reload} />}
+      {tops.status === 'error' && <ErrorPanel error={tops.error} retry={tops.retry} />}
       {tops.status === 'loading' && <Loading what="the tree" />}
       {start?.kind === 'nothing' && (
         <Empty because="An administrator grants access to parts of the tree.">
@@ -238,7 +238,7 @@ export function TreeView(): React.JSX.Element {
         (searching ? (
           <SearchResults
             found={found}
-            reload={asked.reload}
+            reload={asked.retry}
             retry={retry}
             retrying={retrying}
             invalidParams={invalidParams}
@@ -353,34 +353,39 @@ function Branches({
   const [tree, setTree] = useState<TreeState>(EMPTY_TREE);
   const [failed, setFailed] = useState<ApiError | null>(null);
 
-  const load = useCallback((parentId: number) => {
-    setTree((held) => {
-      if (held.children.has(parentId) || held.loading.has(parentId)) return held;
-      return { ...held, loading: new Set(held.loading).add(parentId) };
-    });
-    request<ObjectPage>(`/objects?parentId=${String(parentId)}&sort=manual&limit=${String(PAGE)}`)
-      .then((page) => {
-        setTree((held) => {
-          const children = new Map(held.children);
-          children.set(parentId, page.items);
-          const loading = new Set(held.loading);
-          loading.delete(parentId);
-          return { ...held, children, loading };
-        });
-      })
-      .catch((error: unknown) => {
-        setTree((held) => {
-          const loading = new Set(held.loading);
-          loading.delete(parentId);
-          return { ...held, loading };
-        });
-        setFailed(
-          error instanceof ApiError
-            ? error
-            : new ApiError(0, 'UNKNOWN', error instanceof Error ? error.message : String(error)),
-        );
+  const load = useCallback(
+    (parentId: number) => {
+      setTree((held) => {
+        if (held.children.has(parentId) || held.loading.has(parentId)) return held;
+        return { ...held, loading: new Set(held.loading).add(parentId) };
       });
-  }, []);
+      request<ObjectPage>(`/objects?parentId=${String(parentId)}&sort=manual&limit=${String(PAGE)}`)
+        .then((page) => {
+          setTree((held) => {
+            const children = new Map(held.children);
+            children.set(parentId, page.items);
+            const loading = new Set(held.loading);
+            loading.delete(parentId);
+            return { ...held, children, loading };
+          });
+          // The first level read again by *Try again*: the failure it was showing is over.
+          if (parentId === rootId) setFailed(null);
+        })
+        .catch((error: unknown) => {
+          setTree((held) => {
+            const loading = new Set(held.loading);
+            loading.delete(parentId);
+            return { ...held, loading };
+          });
+          setFailed(
+            error instanceof ApiError
+              ? error
+              : new ApiError(0, 'UNKNOWN', error instanceof Error ? error.message : String(error)),
+          );
+        });
+    },
+    [rootId],
+  );
 
   const reset = useCallback(() => {
     if (start.kind === 'branches') {
@@ -455,7 +460,10 @@ function Branches({
       <ErrorPanel
         error={failed}
         retry={() => {
-          setFailed(null);
+          // Read again from the first level with the panel kept, so the button keeps focus and a
+          // second failure is said again; the first level answering ends it (`U-68`). Tops in
+          // hand are not read again, so there the panel goes at once.
+          if (start.kind === 'branches') setFailed(null);
           reset();
         }}
       />
@@ -613,7 +621,7 @@ function SearchResults({
   live,
 }: {
   found: Loadable<ObjectPage>;
-  /** Reads again, for a failure the error panel says. */
+  /** Reads again with the failure kept, for a failure the error panel says (`U-68`). */
   reload: () => void;
   /** Reads again for *Try again*, which stays on the page while it does. */
   retry: () => void;

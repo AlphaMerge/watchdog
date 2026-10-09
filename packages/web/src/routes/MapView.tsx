@@ -35,7 +35,7 @@ export function MapView(): React.JSX.Element {
       </div>
 
       {view.status === 'loading' && <Loading what="the map" />}
-      {view.status === 'error' && <ErrorPanel error={view.error} retry={view.reload} />}
+      {view.status === 'error' && <ErrorPanel error={view.error} retry={view.retry} />}
       {view.status === 'ready' && (
         <>
           {/*

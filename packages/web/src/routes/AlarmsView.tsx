@@ -115,7 +115,7 @@ export function AlarmsView(): React.JSX.Element {
         onChange={set}
       />
 
-      {alarms.status === 'error' && <ErrorPanel error={alarms.error} retry={alarms.reload} />}
+      {alarms.status === 'error' && <ErrorPanel error={alarms.error} retry={alarms.retry} />}
       {alarms.status === 'loading' && showing === null && <Loading what="alarms" />}
       {showing !== null && alarms.status !== 'error' && (
         <div
