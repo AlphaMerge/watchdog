@@ -224,6 +224,9 @@ function Editor({
   }, []);
 
   const save = (): void => {
+    // Pressed again, or the form submitted by Enter in a field, while the request is out: the
+    // button only says it is unavailable (below), so this is what keeps it to one request.
+    if (saving) return;
     setSaving(true);
     setFailed(null);
     const write =
@@ -447,10 +450,17 @@ function Editor({
               buttons (`U-52`). */}
           <div>
             <div className="flex flex-wrap items-center gap-3 border-t border-border pt-4">
+              {/* **Unavailable while the request is out, not `disabled`** (`U-73`, as *Yes,
+                  delete* is since `U-64`): a button disabled while it has focus can lose it, and
+                  a refusal then comes back to focus on the page, the alert below the only thing
+                  that says where it was. It keeps focus and its place, says *Saving…*, and a
+                  press sends nothing more. A blank name is still `disabled`: focus is in the
+                  *Name* box then, not here. */}
               <button
                 type="submit"
-                disabled={saving || draft.name.trim() === ''}
-                className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50"
+                disabled={draft.name.trim() === ''}
+                aria-disabled={saving}
+                className="border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast disabled:opacity-50 aria-disabled:opacity-50"
               >
                 {saving ? 'Saving…' : template === undefined ? 'Create template' : 'Save template'}
               </button>

@@ -26999,10 +26999,29 @@ because each is a decision rather than a defect:
       of the same failure from a read nobody asked for stay silent? Then do it for both, with
       tests.
 
-- [ ] **U-73 — *Save template* is `disabled` while it saves** · XS · U-69 · Found 2026-10-09 in
+- [x] **U-73 — *Save template* is `disabled` while it saves** · XS · U-69 · Found 2026-10-09 in
       `U-69`. A refused save can lose focus before the refusal is said. `U-64` used
       `aria-disabled` on *Yes, delete* for this. **Done when** *Save* and *Create* do the same,
       with a focus test.
+
+      **U-73 outcome. *Save template* and *Create template* are `aria-disabled` while the request
+      is out, as *Yes, delete* is; focus stays on the button through a refusal.** Web only.
+      - The button says *Saving…*, keeps focus and its place, and `save` returns at once while a
+        request is out, so neither a second press nor Enter in a field submitting the form sends
+        another. `aria-disabled:opacity-50` beside `disabled:opacity-50`, so it looks as it did.
+      - **A blank name is still `disabled`.** Focus is in the *Name* box then, never on the button,
+        so nothing is lost, and implicit submission stays blocked.
+      - **Tests** (`templates-refused.test.tsx`): for each of *Save template* and *Create
+        template*, focused and pressed with the request held: the same node reads *Saving…*, is
+        `aria-disabled`, not `disabled`, and has focus; pressing it and submitting the form send
+        nothing more; refused, the alert says it, focus is still on it, it is available again and
+        one more press sends one request. The `U-56` save test now waits for `aria-disabled`, not
+        `disabled`. **Mutations** (restored byte for byte; the web package has no `dist`):
+        `disabled` while saving again 3; no guard on a second press 2.
+      - **Not done.** The editor's settings fields (`SchemaForm disabled={saving}`) are still
+        disabled while it saves, so Enter in one submits the form and disables the field that has
+        focus. The focused button's name changing from *Saving…* back to *Save template* may be
+        read out by some screen readers alongside the alert; not measured.
 
 - [x] **U-74 — the shared map after a 404, and its age** · S · U-66 · Found 2026-10-09 in
       `U-66`. Once a link has 404'd, the page still asks every minute though the answer cannot
@@ -27056,12 +27075,61 @@ because each is a decision rather than a defect:
         It gives no warning when the time is old, beyond the failure the region says. The
         device's clock is trusted: a display whose clock is wrong shows a wrong time.
 
-- [ ] **U-75 — the tree's address is written on every key** · XS · U-70 · Found 2026-10-09 in
+- [x] **U-75 — the tree's address is written on every key** · XS · U-70 · Found 2026-10-09 in
       `U-70`. One `replace` per key can reach Safari's and Firefox's history-write limits when a
       key is held down. The late-write lag the `REPLACE` guard exists for has no browser test.
       `ModeRefusal`'s id is now the paragraph's colour, not muted. **Done when** writes are
       debounced and flushed on blur, the lag is covered in a real browser if one is available
       to the suite, and the id's colour is decided.
+
+      **U-75 outcome. The tree writes its search and tag 300 ms after the last key and when the box
+      is left, never over an entry the operator has gone to, and the id's colour is left as it
+      is.** Web only. No route, migration or protocol change.
+      - **`useAddressLater`** (`tree/address-later.ts`): `later` (the boxes), `now` (the
+        checkbox, one press being one change) and `flush` (both boxes' `onBlur`). Still `replace`,
+        so still one history entry for the tree. Mouse and Tab leave the box before a link is
+        pressed, so what was typed is in the address before a result is followed.
+      - **What waits never lands on another entry.** A `replace` goes to the current entry, and
+        the router resolves `?…` against the tree's path, so a write that waited through a
+        navigation would have put the tree back over the page gone to. A write is sent only while
+        the history's current entry, by `key`, is the one the page last showed or last wrote. The
+        history is read through the router's navigator (`UNSAFE_NavigationContext`; `BrowserRouter`
+        and `MemoryRouter` both hand it their history, which has `location`), because it has moved
+        before the page draws the move. A navigation the page did not make, once drawn, drops what
+        was waiting.
+      - **Flushed on unmount under the same rule**: the tree taken away without a navigation
+        (signing out) writes what was typed; taken away by one writes nothing. A navigator without
+        `location` is written to as before and never on unmount.
+      - **The `REPLACE` guard, re-read.** Every own write is still a `replace`, and only a
+        `REPLACE` is skipped, so a late own write is never read back. With the pause it matters
+        more, not less: a write goes out while the operator may already be typing again.
+      - **The lag, tested without a browser.** No real-browser runner exists in the repository (no
+        Playwright or WebdriverIO configuration or dependency; vitest runs jsdom only). The lag is
+        made in jsdom instead: the write's timer is run outside `act`, so the router's transition
+        is not drawn, and the next key is typed inside it, so the write is drawn after that key.
+        Without the guard the box goes back to *Disk*; with it it keeps *Disk C*. The same way, a
+        *Back* not yet drawn when the timer fires is shown not to be written over.
+      - **`ModeRefusal`'s id stays the paragraph's colour.** No other refusal id is muted:
+        `CorrelationId` sets no colour anywhere and takes its line's (`text-down-fg` on every
+        refusal line, the panel's in `ErrorPanel`), so muting this one would make it the odd one
+        out. Both pass AA on `down-bg` (`text` 14.4:1 light and dark; `text-muted` would have been
+        4.80:1 light, 6.15:1 dark), so contrast does not decide it. `Panels.tsx` is unchanged.
+      - **Docs.** `web-ui.md`'s Tree section.
+      - **Tests** (`tree-address-pause.test.tsx`, 9, fake timeouts once the tree is open): four
+        keys under the pause write nothing, and one write follows the last; leaving each box writes
+        at once and nothing more after; a result followed after the box is left, *Back* finding
+        the search and one more *Back* leaving the tree; a result followed without leaving the box
+        and the pause run out stays on the object page; *Back* not yet drawn when the pause ends
+        stays on `/start`; the navigation bar's *Tree* link empties the boxes and the waiting
+        search is not written after it; signing out writes what was typed; the late own write is
+        not read back; under `BrowserRouter`, forty keys 30 ms apart are one `replaceState`, a blur
+        one more, no `pushState`, and `history.length` unchanged. **Mutations** (restored byte for
+        byte): written on every key 4; no flush on blur 3; no gate 2; timer and blur not gated 1;
+        no flush on unmount 1; a drawn navigation keeping what waited 1; `U-70`'s `REPLACE` guard
+        removed 2 (one new, and the blank-box test).
+      - **Not done.** *Back* pressed from the keyboard within the pause, and a reload within it,
+        leave the last keys out of the address (*Back* cannot write to an entry no longer current;
+        `pagehide` was not tried). The listing is still asked for on every key.
 
 - [ ] **U-76 — a sub-panel's Try again sends focus to the page heading** · XS · U-68 · Found
       2026-10-09 in `U-68`. When a History tab or Overview card panel goes, focus goes to the

@@ -84,8 +84,12 @@ The object tree in the operator's own arrangement — root, probes, groups, devi
   below `?invalidParams=true`, the names `GET /objects` gives them, so a filtered tree is a link
   you can send, and reload or *Back* after opening a result brings the same search back. Typing
   rewrites the address in place (`replace`, as the alarm filters do) rather than adding a history
-  entry per key, so *Back* from the tree still leaves it. A blank box is left out, so the plain
-  tree is `/tree`. When something else moves the address while the tree is open — the
+  entry per key, so *Back* from the tree still leaves it. The search and tag are written a moment
+  (300 ms) after the last key, and at once when you leave the box, so a held key cannot run into
+  the browser's limit on history writes (`U-75`); the checkbox is written as it is pressed. Only
+  *Back* pressed from the keyboard within that moment leaves the last keys typed out of the tree's
+  address, so *Forward* comes back to the search without them. A blank box is left out, so the
+  plain tree is `/tree`. When something else moves the address while the tree is open — the
   navigation bar's **Tree** link, or *Back* and *Forward* between two tree addresses — the
   boxes follow it.
 - **Invalid parameters only** lists the sensors whose stored parameters their type now refuses
@@ -167,7 +171,9 @@ Notification templates — what a message says, who receives it, and when it is 
   template that is switched off, outside its activation schedule, or folded into a digest can
   deliver a test and still never deliver an alarm.
 - **A save, a create or a delete closes the editor and says so** under the title ("Template
-  Alert hook saved."), with focus on **New template** (`U-64`, `U-69`). The list is then read
+  Alert hook saved."), with focus on **New template** (`U-64`, `U-69`). While it is being sent,
+  **Save template** or **Create template** reads *Saving…*, keeps focus and does nothing if pressed
+  again; refused, focus is still on it (`U-73`). The list is then read
   again; if that read fails, the list in hand stays and a line above it says it may be out of
   date, with **Try again** (`U-67`).
 - **A recipient is an address, a user or a group.** Users and groups are picked by typing a name,

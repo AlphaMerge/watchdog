@@ -68,6 +68,12 @@ const UNKNOWN_PLACEHOLDER = 'the draft names a placeholder that does not exist';
 
 interface Script {
   saves?: Refusal[];
+  /** Each `POST /templates` (a create): refused with these in turn, then accepted. */
+  creates?: Refusal[];
+  /** Each save or create waits for this before it is answered. */
+  holdSave?: Promise<void>;
+  /** Counts the saves and creates sent. */
+  written?: { count: number };
   tests?: Refusal[];
   deletes?: Refusal[];
   /** Each DELETE waits for this before it is answered. */
@@ -119,8 +125,20 @@ function core(script: Script): void {
           });
     }
     if (method === 'PUT' && path === '/templates/9') {
+      if (script.written !== undefined) script.written.count += 1;
       const next = script.saves?.shift();
-      return next === undefined ? reply(200, TEMPLATE) : refuse(next, 'the template was refused');
+      return (script.holdSave ?? Promise.resolve()).then(() =>
+        next === undefined ? reply(200, TEMPLATE) : refuse(next, 'the template was refused'),
+      );
+    }
+    if (method === 'POST' && path === '/templates') {
+      if (script.written !== undefined) script.written.count += 1;
+      const next = script.creates?.shift();
+      return (script.holdSave ?? Promise.resolve()).then(() =>
+        next === undefined
+          ? reply(201, { ...TEMPLATE, id: 10 })
+          : refuse(next, 'the template was refused'),
+      );
     }
     if (method === 'POST' && path === '/templates/9/test') {
       const next = script.tests?.shift();
@@ -174,15 +192,15 @@ const SESSION: SessionContextValue = {
   askToSignIn: () => undefined,
 };
 
-async function open(): Promise<void> {
+async function open(at = '/templates?id=9', heading = 'Editing Alert hook'): Promise<void> {
   render(
     <SessionContext.Provider value={SESSION}>
-      <MemoryRouter initialEntries={['/templates?id=9']}>
+      <MemoryRouter initialEntries={[at]}>
         <TemplatesView />
       </MemoryRouter>
     </SessionContext.Provider>,
   );
-  await screen.findByRole('heading', { name: 'Editing Alert hook' });
+  await screen.findByRole('heading', { name: heading });
 }
 
 beforeEach(() => {
@@ -216,7 +234,7 @@ describe('a refused template save (U-56)', () => {
     expect(region.textContent).toBe('the template was refused req-56/subject must not be empty');
     expectCorrelation(region, 'req-56');
     await waitFor(() => {
-      expect(save.disabled).toBe(false);
+      expect(save.getAttribute('aria-disabled')).toBe('false');
     });
 
     fireEvent.click(save);
@@ -227,7 +245,7 @@ describe('a refused template save (U-56)', () => {
     });
     expect(within(form).getAllByRole('alert').at(-1)).toBe(region);
     await waitFor(() => {
-      expect(save.disabled).toBe(false);
+      expect(save.getAttribute('aria-disabled')).toBe('false');
     });
 
     // Accepted: emptied as it starts, and the editor closes.
@@ -237,6 +255,82 @@ describe('a refused template save (U-56)', () => {
       expect(screen.queryByRole('heading', { name: 'Editing Alert hook' })).toBeNull();
     });
     expect(speaking()).toEqual([]);
+  });
+});
+
+/**
+ * Focus through a refused save or create (`U-73`).
+ *
+ * *Save template* and *Create template* were `disabled` while the request was out, and a button
+ * disabled while it has focus can lose it, so the refusal could come back to focus on the page.
+ * They are `aria-disabled` instead, as *Yes, delete* is (`U-64`): focus stays on the button
+ * throughout, it says *Saving…*, and pressing it again, or Enter in a field submitting the form,
+ * sends nothing more.
+ */
+describe('focus through a refused save or create (U-73)', () => {
+  /** Holds every save until `answer` is called. */
+  function held(): { hold: Promise<void>; answer: () => void } {
+    let answer: () => void = () => undefined;
+    const hold = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+    return { hold, answer };
+  }
+
+  async function refusedKeepsFocus(name: 'Save template' | 'Create template'): Promise<void> {
+    const written = { count: 0 };
+    const { hold, answer } = held();
+    core({ saves: [{ id: 'req-73' }], creates: [{ id: 'req-73' }], holdSave: hold, written });
+    if (name === 'Save template') {
+      await open();
+    } else {
+      await open('/templates?new=1', 'New template');
+      fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Pager' } });
+    }
+    const pressed = button(name);
+    const form = pressed.closest('form');
+    if (form === null) throw new Error('no form');
+    pressed.focus();
+    expect(document.activeElement).toBe(pressed);
+    fireEvent.click(pressed);
+    await waitFor(() => {
+      expect(written.count).toBe(1);
+    });
+
+    // Out: the same button, saying so, unavailable but not disabled, and still focused.
+    expect(button('Saving…')).toBe(pressed);
+    expect(pressed.getAttribute('aria-disabled')).toBe('true');
+    expect(pressed.disabled).toBe(false);
+    expect(document.activeElement).toBe(pressed);
+
+    // Pressed again, and the form submitted as Enter in a field would: nothing more is sent.
+    fireEvent.click(pressed);
+    fireEvent.submit(form);
+    expect(written.count).toBe(1);
+
+    answer();
+    await alertSaying('the template was refused');
+    expect(document.activeElement).toBe(pressed);
+    await waitFor(() => {
+      expect(pressed.getAttribute('aria-disabled')).toBe('false');
+    });
+    expect(button(name)).toBe(pressed);
+    expect(document.activeElement).toBe(pressed);
+    expect(written.count).toBe(1);
+
+    // Available again: a press sends one more.
+    fireEvent.click(pressed);
+    await waitFor(() => {
+      expect(written.count).toBe(2);
+    });
+  }
+
+  it('keeps focus on Save template while it saves and when it is refused', async () => {
+    await refusedKeepsFocus('Save template');
+  });
+
+  it('keeps focus on Create template while it creates and when it is refused', async () => {
+    await refusedKeepsFocus('Create template');
   });
 });
 
