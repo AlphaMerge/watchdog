@@ -452,6 +452,13 @@ export class ApiServer {
           allErrors: true,
           removeAdditional: false,
           useDefaults: true,
+          // **`type: ['string', 'array']` is meant (`P-337`).** A repeatable query parameter
+          // (`tag`, `effective`) is a string for one occurrence and an array for several, and
+          // the handler reads both through `asArray`. Without this, strict mode logs "use
+          // allowUnionTypes" on every start for each one. It only lets the schema compile
+          // quietly: Ajv validates a type list the same with it as without, and OpenAPI 3.1
+          // carries the list as it is.
+          allowUnionTypes: true,
         },
       },
       // A request id per request, so every log line from a handler ties back to it.

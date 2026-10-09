@@ -12336,11 +12336,56 @@ because each is a decision rather than a defect:
       - **The summary line stays.** The renderer's comment no longer says build-hygiene reads it.
         Nothing does now.
 
-- [ ] **P-337 — the API reference leaves out constraints, and its generator warns** · XS · P-318 ·
+- [x] **P-337 — the API reference leaves out constraints, and its generator warns** · XS · P-318 ·
       Found 2026-10-09 in `P-318`. `minimum`, `maxLength` and `pattern` are not rendered, and
       registering routes prints Ajv "strict mode: use allowUnionTypes" for `#/properties/tag` and
       `#/properties/effective`. **Done when** constraints are rendered and the warnings are gone or
       explained.
+
+      **P-337 outcome. Constraints are in the type cell, in words; the warnings are gone because
+      the union types are meant.**
+      - **Constraints.** `api-reference-render.mjs` writes them after the type, in a fixed order:
+        `integer, 1–65535`, `number, more than 0 and less than 1`, `a multiple of 5`,
+        `string, 1–64 characters`, `matches ^[a-z]+$` (as code, a backtick in it included),
+        `string[], at least 1 item, unique items, each 1–100 characters`. They show in field
+        tables, parameter tables, a body that is not an object, and a shared schema that is not.
+        `format` stays where it was, as `string (date-time)`.
+        - Both spellings of an exclusive bound are read: draft 4's `exclusiveMinimum: true` beside
+          `minimum`, and 2019-09's number.
+        - An array of scalars says its elements' constraints as `each …`, since the elements have
+          no row. A query parameter that takes one value or several (`actorKind`) says the
+          element's once: `string, or an array of them, at most 40 characters, at most 10 items`.
+        - Any other keyword on a field that is not an object is printed raw beside them, as
+          `P-318`'s review does for an object, so nothing is silently dropped. The real document
+          has none.
+      - **Size.** 240,001 → 247,533 bytes (1.03×), lines unchanged at 4,931: no compact form.
+      - **Warnings: `allowUnionTypes: true` on Fastify's route validator** (`ApiServer`'s `ajv.
+        customOptions`, the instance `@fastify/ajv-compiler` builds), not a rewrite to `anyOf`.
+        The three are the listing's `tag` and `effective` and the tree's `effective`, each
+        `type: ['string', 'array']`. Fastify passes one occurrence as a string and several as an
+        array, and the handlers read both through `asArray`, so the union is intended. In Ajv
+        8.20 the option is read in one place, `checkStrictTypes`, to skip the "use
+        allowUnionTypes" message. The generated validator is the same. An `anyOf` rewrite would
+        have changed the generated code under `coerceTypes`, which is what this was asked not to
+        risk. OpenAPI 3.1 carries the list as it is. No other route schema has a union of two
+        non-null types.
+      - **Tests.** `api-reference-render.test.ts` gains a fixture route with every constraint on a
+        parameter, a field, an array's elements and a one-or-several union. It also runs the
+        generator's `--openapi` and asserts stderr is empty, so any strict-mode warning from any
+        schema fails it. `api-routes.test.ts` gains the route test those schemas had none of:
+        one tag and several, a 101-character tag refused, and one `effective` key and several on
+        the listing and the tree. It passes with the option and without it.
+      - **Mutations.**
+        - Option removed: the stderr test failed, printing the three warnings; the route test
+          passed.
+        - Constraints not rendered: 8 failed.
+        - Elements' `each` dropped: 1 failed.
+        - One-or-several dedupe off: 1 failed.
+        - Draft-4 boolean ignored: 1 failed.
+        - Raw fallback off: 1 failed.
+      - **Not done.** The array form of `tag` has no per-element `maxLength` and no `maxItems`,
+        and `effective` has neither in either form. Bounding them changes validation, which this
+        ticket was not to do.
 
 - [x] **P-338 — the Probe Health sensor's message does not say a probe was refused** · S · P-317 ·
       Found 2026-10-09 in `P-317`. The sweep says only "not connected to the core" for a probe

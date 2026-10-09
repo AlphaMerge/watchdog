@@ -146,6 +146,12 @@ export function renderApiReference(doc, options = {}) {
     return { key, labels: alternatives.map((one) => `${key}=${String(pinned(one, key))}`) };
   }
 
+  /** `[x, x[]]`: one value or an array of the same values, as a repeatable query parameter takes. */
+  const isOneOrSeveral = (alternatives) =>
+    alternatives.length === 2 &&
+    alternatives[1].type === 'array' &&
+    JSON.stringify(alternatives[1].items) === JSON.stringify(alternatives[0]);
+
   /** How a value's type reads in one cell: `string (date-time)`, `` `a` · `b` ``, a link. */
   function typeText(raw) {
     const { schema } = withoutNull(raw);
@@ -156,15 +162,8 @@ export function renderApiReference(doc, options = {}) {
     }
     const alternatives = unionOf(schema);
     if (alternatives !== undefined) {
-      const [first, second] = alternatives;
       // `kind=probe` or `kind=[probe, group]`: a query parameter that takes one or several.
-      if (
-        alternatives.length === 2 &&
-        second.type === 'array' &&
-        JSON.stringify(second.items) === JSON.stringify(first)
-      ) {
-        return `${typeText(first)}, or an array of them`;
-      }
+      if (isOneOrSeveral(alternatives)) return `${typeText(alternatives[0])}, or an array of them`;
       const by = discriminatorOf(alternatives);
       if (by !== undefined) return `one of ${String(alternatives.length)} shapes, by \`${by.key}\``;
       return alternatives.map((one) => typeText(one)).join(' or ');
@@ -185,6 +184,154 @@ export function renderApiReference(doc, options = {}) {
     if (schema.type === undefined) return 'any';
     return schema.format === undefined ? schema.type : `${schema.type} (${schema.format})`;
   }
+
+  // ---- constraints: the bounds a value must keep (`P-337`) --------------------------------
+
+  /**
+   * Keywords a value's schema may carry that this renders somewhere: as its type, its flags, its
+   * description, its constraints, or as fields and rules of their own. Anything else on a field
+   * that is not an object is printed raw beside its constraints, as `rulesOf` does for an object,
+   * so a keyword this renderer has not learnt is shown rather than silently left out.
+   */
+  const RENDERED = new Set([
+    'type',
+    'format',
+    'enum',
+    'const',
+    'items',
+    '$ref',
+    'oneOf',
+    'anyOf',
+    'title',
+    'description',
+    '$id',
+    '$schema',
+    '$comment',
+    'nullable',
+    'readOnly',
+    'writeOnly',
+    'deprecated',
+    'default',
+    'examples',
+    'example',
+    'minimum',
+    'maximum',
+    'exclusiveMinimum',
+    'exclusiveMaximum',
+    'multipleOf',
+    'minLength',
+    'maxLength',
+    'pattern',
+    'minItems',
+    'maxItems',
+    'uniqueItems',
+  ]);
+
+  /** A code span that holds any text, backticks included (a `pattern` may have one). */
+  const literal = (text) => {
+    const longest = Math.max(0, ...[...String(text).matchAll(/`+/gu)].map(([run]) => run.length));
+    const fence = '`'.repeat(longest + 1);
+    const pad = /^`|`$/u.test(text) ? ' ' : '';
+    return `${fence}${pad}${text}${pad}${fence}`;
+  };
+  const isNumber = (value) => typeof value === 'number' && Number.isFinite(value);
+
+  /**
+   * `1–65535`, `at least 1 and less than 100`: a numeric range, inclusive or not. Draft 4 spells
+   * an exclusive bound as `exclusiveMinimum: true` beside `minimum`; 2019-09 and OpenAPI 3.1 as
+   * `exclusiveMinimum: 0` alone. Both are read.
+   */
+  function rangeOf(low, high, unit = (text) => text) {
+    if (low === undefined && high === undefined) return undefined;
+    if (low !== undefined && high !== undefined && !low.exclusive && !high.exclusive) {
+      return low.value === high.value
+        ? `exactly ${unit(String(low.value), low.value)}`
+        : unit(`${String(low.value)}–${String(high.value)}`, high.value);
+    }
+    const parts = [];
+    if (low !== undefined) {
+      parts.push(`${low.exclusive ? 'more than' : 'at least'} ${unit(String(low.value), low.value)}`);
+    }
+    if (high !== undefined) {
+      parts.push(`${high.exclusive ? 'less than' : 'at most'} ${unit(String(high.value), high.value)}`);
+    }
+    return parts.join(' and ');
+  }
+
+  const bound = (schema, inclusive, exclusive) => {
+    if (isNumber(schema[exclusive])) return { value: schema[exclusive], exclusive: true };
+    if (isNumber(schema[inclusive])) return { value: schema[inclusive], exclusive: schema[exclusive] === true };
+    return undefined;
+  };
+  const counted = (word) => (text, last) => `${text} ${word}${last === 1 ? '' : 's'}`;
+
+  /**
+   * A value's constraints in words, in a fixed order: `1–65535`, `at most 255 characters`,
+   * `matches ^[a-z]+$`, `at least 1 item`, `unique items`, `a multiple of 5`. An array of
+   * scalars says its elements' as `each …`, since the elements have no row of their own; so do
+   * the alternatives of a union that have none (`withAlternatives`), as a query parameter's do.
+   */
+  function constraintsOf(raw, withAlternatives) {
+    const { schema } = withoutNull(raw);
+    if (schema.$ref !== undefined) return [];
+    const said = [];
+    const numbers = rangeOf(
+      bound(schema, 'minimum', 'exclusiveMinimum'),
+      bound(schema, 'maximum', 'exclusiveMaximum'),
+    );
+    if (numbers !== undefined) said.push(numbers);
+    if (isNumber(schema.multipleOf)) said.push(`a multiple of ${String(schema.multipleOf)}`);
+    const length = rangeOf(
+      isNumber(schema.minLength) && schema.minLength > 0 ? { value: schema.minLength } : undefined,
+      isNumber(schema.maxLength) ? { value: schema.maxLength } : undefined,
+      counted('character'),
+    );
+    if (length !== undefined) said.push(length);
+    if (typeof schema.pattern === 'string') said.push(`matches ${literal(schema.pattern)}`);
+    const count = rangeOf(
+      isNumber(schema.minItems) && schema.minItems > 0 ? { value: schema.minItems } : undefined,
+      isNumber(schema.maxItems) ? { value: schema.maxItems } : undefined,
+      counted('item'),
+    );
+    if (count !== undefined) said.push(count);
+    if (schema.uniqueItems === true) said.push('unique items');
+
+    const object = isObject(schema) || schema.additionalProperties !== undefined;
+    if (!object) {
+      for (const [keyword, value] of Object.entries(schema)) {
+        if (!RENDERED.has(keyword)) said.push(`${code(keyword)}: ${code(value)}`);
+      }
+    }
+    // Elements with no row of their own: an array of strings says how long each may be.
+    const items = schema.type === 'array' ? schema.items : undefined;
+    if (items !== undefined && items !== null && typeof items === 'object') {
+      const { schema: element } = withoutNull(items);
+      if (!(isObject(element) || element.additionalProperties !== undefined)) {
+        const each = constraintsOf(element, true);
+        if (each.length > 0) said.push(`each ${each.join(', ')}`);
+      }
+    }
+    const alternatives = unionOf(schema);
+    if (alternatives !== undefined) {
+      // `string, or an array of them, at most 40 characters, at most 10 items`: the elements are
+      // the first alternative, whose constraints are already said once.
+      const [first, several] = alternatives;
+      const own = isOneOrSeveral(alternatives) ? [first, { ...several, items: undefined }] : alternatives;
+      for (const alternative of own) {
+        const { schema: inner } = withoutNull(alternative);
+        // A field's object or array alternative is a row of its own, with these in its cell.
+        if (!withAlternatives && (isObject(inner) || inner.type === 'array')) continue;
+        for (const text of constraintsOf(inner, withAlternatives)) {
+          if (!said.includes(text)) said.push(text);
+        }
+      }
+    }
+    return said;
+  }
+
+  /** A type cell: the type, then its constraints. `integer, 1–500`. */
+  const typeCell = (schema, withAlternatives = false) =>
+    [typeText(schema), ...constraintsOf(schema, withAlternatives)].join(', ');
 
   // ---- rules: the `if`/`then`/`not` that constrain which fields appear --------------------
 
@@ -388,7 +535,7 @@ export function renderApiReference(doc, options = {}) {
       for (const row of rows) {
         const described = row.schema.description ?? withoutNull(row.schema).schema.description ?? '';
         say(
-          `| \`${cell(row.path)}\` | ${cell(typeText(row.schema))} | ${flagsOf(row)} | ${cell(described)} |`,
+          `| \`${cell(row.path)}\` | ${cell(typeCell(row.schema))} | ${flagsOf(row)} | ${cell(described)} |`,
         );
       }
       say('');
@@ -506,7 +653,7 @@ export function renderApiReference(doc, options = {}) {
           }
           const text = withText ? ` ${cell(describedOf(parameter))} |` : '';
           say(
-            `| \`${parameter.name}\` | ${parameter.in} | ${cell(typeText(parameter.schema ?? {}))} | ${flags.join(' ')} |${text}`,
+            `| \`${parameter.name}\` | ${parameter.in} | ${cell(typeCell(parameter.schema ?? {}, true))} | ${flags.join(' ')} |${text}`,
           );
         }
         say('');
@@ -516,7 +663,7 @@ export function renderApiReference(doc, options = {}) {
       if (body !== undefined) {
         const fields = fieldsOf(body);
         if (fields.rows.length === 0) {
-          say(`**Body** — ${typeText(body)}`, '');
+          say(`**Body** — ${typeCell(body, true)}`, '');
           if (fields.rules.length > 0) sayFields(fields);
         } else {
           say('**Body**', '');
@@ -579,7 +726,9 @@ export function renderApiReference(doc, options = {}) {
       const fields = fieldsOf(schema);
       // A shared schema that is not a plain object (a union, a bare enum) says so before its fields.
       const text = typeText(schema);
-      if (fields.rows.length === 0 || text !== 'object') say(text, '');
+      if (fields.rows.length === 0 || text !== 'object') {
+        say(typeCell(schema, fields.rows.length === 0), '');
+      }
       sayFields(fields);
       sections.push({ key, schema, body: lines.splice(saved) });
     }

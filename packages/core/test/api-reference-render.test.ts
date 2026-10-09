@@ -156,6 +156,65 @@ const fixture = {
         responses: { 200: { description: 'Default Response' } },
       },
     },
+    // Every constraint keyword, on parameters, on fields, on array elements and on a union
+    // (`P-337`). Field names say what each carries, so a failure names the one that went missing.
+    '/api/v1/limits/{port}': {
+      put: {
+        tags: ['limits'],
+        parameters: [
+          {
+            name: 'port',
+            in: 'path',
+            required: true,
+            schema: { type: 'integer', minimum: 1, maximum: 65535 },
+          },
+          {
+            name: 'tag',
+            in: 'query',
+            schema: {
+              oneOf: [
+                { type: 'string', maxLength: 40 },
+                { type: 'array', items: { type: 'string', maxLength: 40 }, maxItems: 10 },
+              ],
+            },
+          },
+        ],
+        requestBody: {
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  ratio: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1 },
+                  draft4: { type: 'number', minimum: 0, exclusiveMinimum: true, maximum: 10 },
+                  floor: { type: 'integer', minimum: 0 },
+                  ceiling: { type: 'integer', maximum: 5 },
+                  pinned: { type: 'integer', minimum: 3, maximum: 3 },
+                  step: { type: 'integer', multipleOf: 5 },
+                  label: { type: 'string', maxLength: 255 },
+                  login: { type: 'string', minLength: 1, maxLength: 64 },
+                  passphrase: { type: 'string', minLength: 12 },
+                  code: { type: 'string', minLength: 6, maxLength: 6 },
+                  slug: { type: 'string', pattern: '^[a-z]+$' },
+                  ticked: { type: 'string', pattern: 'a`b' },
+                  names: {
+                    type: 'array',
+                    items: { type: 'string', minLength: 1, maxLength: 100 },
+                    minItems: 1,
+                    uniqueItems: true,
+                  },
+                  few: { type: 'array', items: { type: 'integer' }, maxItems: 3 },
+                  maybe: { type: ['string', 'null'], maxLength: 8 },
+                  stamp: { type: 'string', format: 'date-time' },
+                  odd: { type: 'string', contentEncoding: 'base64' },
+                },
+              },
+            },
+          },
+        },
+        responses: { 204: { description: 'Default Response' } },
+      },
+    },
     // A union beside fields of its own, and one with nothing beside it.
     '/api/v1/readings': {
       get: {
@@ -320,6 +379,70 @@ describe('the API reference renderer', () => {
     assert.ok(page.indexOf('| `at` |') < page.indexOf('| `{kind=up}` |'));
   });
 
+  describe('says the constraints in words (P-337)', () => {
+    /** The type cell of a field's row: what the constraints are rendered into. */
+    const typeOf = (path: string): string => rowFor(path).split(' | ')[1] ?? '';
+    const parameterRow = (name: string): string => {
+      const row = page
+        .split('\n')
+        .find((line) =>
+          ['path', 'query'].some((where) => line.startsWith(`| \`${name}\` | ${where} |`)),
+        );
+      assert.ok(row !== undefined, `no parameter row for ${name} in:\n${page}`);
+      return row;
+    };
+
+    it('a numeric range, inclusive or not, in either draft', () => {
+      assert.equal(parameterRow('port').split(' | ')[2], 'integer, 1–65535');
+      assert.equal(typeOf('ratio'), 'number, more than 0 and less than 1');
+      assert.equal(typeOf('draft4'), 'number, more than 0 and at most 10');
+      assert.equal(typeOf('floor'), 'integer, at least 0');
+      assert.equal(typeOf('ceiling'), 'integer, at most 5');
+      assert.equal(typeOf('pinned'), 'integer, exactly 3');
+    });
+
+    it('a multiple', () => {
+      assert.equal(typeOf('step'), 'integer, a multiple of 5');
+    });
+
+    it('a length in characters', () => {
+      assert.equal(typeOf('label'), 'string, at most 255 characters');
+      assert.equal(typeOf('login'), 'string, 1–64 characters');
+      assert.equal(typeOf('passphrase'), 'string, at least 12 characters');
+      assert.equal(typeOf('code'), 'string, exactly 6 characters');
+    });
+
+    it('a pattern, as code even when it holds a backtick', () => {
+      assert.equal(typeOf('slug'), 'string, matches `^[a-z]+$`');
+      assert.equal(typeOf('ticked'), 'string, matches ``a`b``');
+    });
+
+    it("an array's count, its uniqueness and its elements' own", () => {
+      assert.equal(
+        typeOf('names'),
+        'string[], at least 1 item, unique items, each 1–100 characters',
+      );
+      assert.equal(typeOf('few'), 'integer[], at most 3 items');
+    });
+
+    it('a parameter that takes one value or several, its elements said once', () => {
+      assert.equal(
+        parameterRow('tag').split(' | ')[2],
+        'string, or an array of them, at most 40 characters, at most 10 items',
+      );
+    });
+
+    it('beside nullable and format, which keep their places', () => {
+      assert.equal(typeOf('maybe'), 'string, at most 8 characters');
+      assert.ok(rowFor('maybe').includes('nullable'));
+      assert.equal(typeOf('stamp'), 'string (date-time)');
+    });
+
+    it('and a keyword it has no words for, raw rather than dropped', () => {
+      assert.equal(typeOf('odd'), 'string, `contentEncoding`: `base64`');
+    });
+  });
+
   it('lists each alternative of a union with nothing beside it', () => {
     rowFor('{#1}.left');
     rowFor('{#2}.right');
@@ -350,6 +473,23 @@ describe('the API reference renderer', () => {
     };
     assert.ok(at('## ch\n') < at('## h\n'));
     assert.ok(at('### `ms:ch`') < at('### `ms:h`'));
+  });
+
+  /**
+   * Registering every route used to print Ajv's "strict mode: use allowUnionTypes" three times,
+   * for `tag` and `effective` (`P-337`). A warning printed on every run is one nobody reads, and
+   * the next one hides behind it, so generating the document now prints nothing at all to
+   * stderr: any strict-mode warning, from any schema, fails here.
+   */
+  it('builds the document from the real routes without a warning', () => {
+    const run = spawnSync(
+      process.execPath,
+      [join(repoRoot, 'scripts', 'docs', 'api-reference.mjs'), '--openapi'],
+      { cwd: repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 120_000 },
+    );
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.stderr, '', 'generating the API reference printed to stderr');
+    assert.ok(run.stdout.includes('"openapi"'), 'no document was printed');
   });
 
   /**

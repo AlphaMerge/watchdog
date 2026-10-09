@@ -890,6 +890,44 @@ describe(
       assert.equal(bad.statusCode, 400);
     });
 
+    it('takes one tag or effective key or several, as their union types say (P-337)', async () => {
+      // `tag` and `effective` are declared `type: ['string', 'array']`, which Ajv's strict mode
+      // used to log about on every start until `allowUnionTypes` said the union is meant. That
+      // option is a strict-mode switch and nothing more, so these answers are the same with it
+      // and without it: one occurrence and several are taken, and a long single tag is refused.
+      const g = await createGroup(probeId, 'Tagged');
+      const tagged = await post('/api/v1/objects', {
+        kind: 'group',
+        parentId: g,
+        name: 'Both tags',
+        tags: ['alpha', 'beta'],
+      });
+      assert.equal(tagged.statusCode, 201, tagged.body);
+      const names = async (url: string): Promise<string[]> => {
+        const res = await get(url);
+        assert.equal(res.statusCode, 200, `${url}: ${res.body}`);
+        return res.json<{ items: { name: string }[] }>().items.map((item) => item.name);
+      };
+      assert.deepEqual(await names('/api/v1/objects?tag=alpha'), ['Both tags']);
+      assert.deepEqual(await names('/api/v1/objects?tag=alpha&tag=beta'), ['Both tags']);
+      assert.deepEqual(await names('/api/v1/objects?tag=alpha&tag=gamma'), []);
+      const long = await get(`/api/v1/objects?tag=${'x'.repeat(101)}`);
+      assert.equal(long.statusCode, 400, long.body);
+
+      for (const url of [
+        '/api/v1/objects?effective=scan.intervalSeconds',
+        '/api/v1/objects?effective=scan.intervalSeconds&effective=dependency.masterId',
+        `/api/v1/objects/${String(g)}/tree?effective=scan.intervalSeconds`,
+        `/api/v1/objects/${String(g)}/tree?effective=scan.intervalSeconds&effective=dependency.masterId`,
+      ]) {
+        const res = await get(url);
+        assert.equal(res.statusCode, 200, `${url}: ${res.body}`);
+      }
+      // A key the registry does not have is refused by the handler, one or several.
+      const unknown = await get('/api/v1/objects?effective=scan.intervalSeconds&effective=nope');
+      assert.equal(unknown.statusCode, 400, unknown.body);
+    });
+
     it('finds a device by a fragment of its host through ?q=, as the tree search asks', async () => {
       // `P-212`. `TreeView`'s search box says "Search names and hosts" and sends `q` and nothing
       // else, with `limit=200` — so this is its request, and `q` used to match names alone.

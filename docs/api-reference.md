@@ -36,7 +36,7 @@ Only the explicit ones. What an account may actually do here is the *resolved* r
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { items }
 
@@ -58,8 +58,8 @@ Resolves the three rules — inheritance up the tree, explicit beats inherited, 
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `userId` | query | integer |  |
-| `id` | path | integer | **required** |
+| `userId` | query | integer, at least 1 |  |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { right, sourceObjectId, sourceGroupId, inherited, viaAdminGroup, cappedByRole, cappedByToken }
 
@@ -83,8 +83,8 @@ Replaces any grant this group already had here. Everything beneath inherits it, 
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
-| `groupId` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
+| `groupId` | path | integer, at least 1 | **required** |
 
 **Body**
 
@@ -112,8 +112,8 @@ Not the same as granting `none`, which overrides inheritance rather than restori
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
-| `groupId` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
+| `groupId` | path | integer, at least 1 | **required** |
 
 **200** { removed, items }
 
@@ -157,9 +157,9 @@ An object's configuration history, newest first: who changed it, when, and what 
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `before` | query | string |  |
-| `limit` | query | integer | default `100` |
-| `id` | path | integer | **required** |
+| `before` | query | string, matches `^[0-9]{1,19}$` |  |
+| `limit` | query | integer, 1–500 | default `100` |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { items, nextBefore }
 
@@ -171,14 +171,14 @@ Configuration history across the whole installation, newest first — the object
 
 | Parameter | In | Type | | Description |
 | --- | --- | --- | --- | --- |
-| `objectId` | query | integer |  |  |
-| `category` | query | `object` · `setting` · `credential` · `channel` · `trigger` · `template` · `schedule` · `sensor` · `report` · `library` · `map` · `grant` · `probe` · `discovery` · `account` · `group` · `token`, or an array of them |  |  |
-| `actorKind` | query | string, or an array of them |  |  |
-| `actorRef` | query | string |  | One specific actor — a user id, a token id, a component name. "Everything this person did" is the question an audit log gets opened for, and `actorKind` cannot answer it: it narrows to all users, which during an incident is everybody. Pair it with `actorKind`, because an id is only unique within a kind. |
-| `from` | query | string |  |  |
-| `to` | query | string |  |  |
-| `before` | query | string |  |  |
-| `limit` | query | integer | default `100` |  |
+| `objectId` | query | integer, at least 1 |  |  |
+| `category` | query | `object` · `setting` · `credential` · `channel` · `trigger` · `template` · `schedule` · `sensor` · `report` · `library` · `map` · `grant` · `probe` · `discovery` · `account` · `group` · `token`, or an array of them, at most 17 items |  |  |
+| `actorKind` | query | string, or an array of them, at most 40 characters, at most 10 items |  |  |
+| `actorRef` | query | string, at most 64 characters |  | One specific actor — a user id, a token id, a component name. "Everything this person did" is the question an audit log gets opened for, and `actorKind` cannot answer it: it narrows to all users, which during an incident is everybody. Pair it with `actorKind`, because an id is only unique within a kind. |
+| `from` | query | string, at most 64 characters |  |  |
+| `to` | query | string, at most 64 characters |  |  |
+| `before` | query | string, matches `^[0-9]{1,19}$` |  |  |
+| `limit` | query | integer, 1–500 | default `100` |  |
 
 **200** { items, nextBefore }
 
@@ -196,9 +196,9 @@ Every failure answers 401 with the same code and the same sentence. Distinguishi
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `login` | string | **required** |  |
-| `password` | string | **required** **write-only** |  |
-| `code` | string | **write-only** | A TOTP code or a recovery code, when the account needs one. A login without it answers 401 MFA_REQUIRED, which is how a client knows to ask. |
+| `login` | string, 1–64 characters | **required** |  |
+| `password` | string, 1–512 characters | **required** **write-only** |  |
+| `code` | string, at most 64 characters | **write-only** | A TOTP code or a recovery code, when the account needs one. A login without it answers 401 MFA_REQUIRED, which is how a client knows to ask. |
 
 **200** { userId, login, role, mustChangePassword }
 
@@ -296,7 +296,7 @@ The recovery codes are in this response and nowhere else, ever again. They exist
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `code` | string | **required** **write-only** |  |
+| `code` | string, 1–64 characters | **required** **write-only** |  |
 
 **200** { recoveryCodes }
 
@@ -316,7 +316,7 @@ Needs the account password. Turning off a second factor from a session alone wou
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `password` | string | **required** **write-only** |  |
+| `password` | string, 1–512 characters | **required** **write-only** |  |
 
 **204**
 
@@ -344,8 +344,8 @@ Ends every *other* session this account holds. The reason somebody changes a pas
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `currentPassword` | string | **required** **write-only** |  |
-| `newPassword` | string | **required** **write-only** |  |
+| `currentPassword` | string, 1–512 characters | **required** **write-only** |  |
+| `newPassword` | string, 12–512 characters | **required** **write-only** |  |
 
 **200** { endedSessions }
 
@@ -389,7 +389,7 @@ The secret is in this response and nowhere else, ever again — only its hash is
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `name` | string | **required** |  |
+| `name` | string, 1–100 characters | **required** |  |
 | `scope` | `none` · `read` · `write` · `full` | default `read` |  |
 | `expiresAt` | string (date-time) |  |  |
 
@@ -418,7 +418,7 @@ Scoped to the caller’s own tokens: a token id is a small integer, and revoking
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **204**
 
@@ -428,7 +428,7 @@ Scoped to the caller’s own tokens: a token id is a small integer, and revoking
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { items }
 
@@ -444,8 +444,8 @@ Sets a channel’s error and warning limits, the lookup that decides its state, 
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
-| `key` | path | string | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
+| `key` | path | string, 1–100 characters | **required** |
 
 **Body**
 
@@ -457,13 +457,13 @@ Sets a channel’s error and warning limits, the lookup that decides its state, 
 | `limits.upperWarning` | number | nullable |  |
 | `limits.lowerWarning` | number | nullable |  |
 | `limits.lowerError` | number | nullable |  |
-| `limits.errorMessage` | string |  |  |
-| `limits.warningMessage` | string |  |  |
-| `lookupId` | string | nullable |  |
+| `limits.errorMessage` | string, at most 500 characters |  |  |
+| `limits.warningMessage` | string, at most 500 characters |  |  |
+| `lookupId` | string, 1–100 characters | nullable |  |
 | `processing` | object |  |  |
-| `processing.scaleMul` | string |  |  |
-| `processing.scaleDiv` | string |  |  |
-| `processing.decimals` | integer | nullable |  |
+| `processing.scaleMul` | string, at most 40 characters, matches `^-?[0-9]+(\.[0-9]+)?$` |  |  |
+| `processing.scaleDiv` | string, at most 40 characters, matches `^-?[0-9]+(\.[0-9]+)?$` |  |  |
+| `processing.decimals` | integer, 0–10 | nullable |  |
 | `processing.spikeMin` | number | nullable |  |
 | `processing.spikeMax` | number | nullable |  |
 
@@ -482,7 +482,7 @@ Sets a channel’s error and warning limits, the lookup that decides its state, 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
 | `effective` | query | `true` · `false` |  |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { items }
 
@@ -532,8 +532,8 @@ Stores the credential set of this kind on this object, where everything below it
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
 | `dryRun` | query | `true` · `false` |  |
-| `id` | path | integer | **required** |
-| `kind` | path | string | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
+| `kind` | path | string, 1–40 characters | **required** |
 
 **Body**
 
@@ -552,8 +552,8 @@ Removes the credential set defined *on this object*. It does not leave the objec
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
 | `dryRun` | query | `true` · `false` |  |
-| `id` | path | integer | **required** |
-| `kind` | path | string | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
+| `kind` | path | string, 1–40 characters | **required** |
 
 **200** { kind, removed, sensors, nowInherited }
 
@@ -563,7 +563,7 @@ Removes the credential set defined *on this object*. It does not leave the objec
 | --- | --- | --- | --- |
 | `kind` | string | **required** |  |
 | `removed` | boolean | **required** |  |
-| `sensors` | integer | **required** | How many sensors at or beneath this object resolved this kind to the set removed, of those the caller can see. Zero when there was no set to remove. |
+| `sensors` | integer, at least 0 | **required** | How many sensors at or beneath this object resolved this kind to the set removed, of those the caller can see. Zero when there was no set to remove. |
 | `nowInherited` | [ms:credentialView](#schema-ms-credentialview) | **required** nullable |  |
 
 ## dependencies
@@ -574,15 +574,15 @@ Sets what this object depends on. `parent` inherits from above, `object` names a
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `mode` | `parent` · `object` · `device` · `none` | **required** |  |
-| `masterId` | integer |  |  |
-| `delaySeconds` | integer |  |  |
+| `masterId` | integer, at least 1 |  |  |
+| `delaySeconds` | integer, 0–86400 |  |  |
 
 **200** { objectId, paused, pending, resumable, source, pausedAt, startsAt, pausedUntil, message, actor, inheritedFrom, schedule, dependency }
 
@@ -600,9 +600,9 @@ Parses a range and estimates every level, so an operator picks one knowing what 
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `range` | string | **required** |  |
-| `timeoutMs` | integer | default `1000` |  |
-| `concurrency` | integer | default `32` |  |
+| `range` | string, 1–4000 characters | **required** |  |
+| `timeoutMs` | integer, 100–60000 | default `1000` |  |
+| `concurrency` | integer, 1–512 | default `32` |  |
 
 **200** { range, total, levels }
 
@@ -630,15 +630,15 @@ Sweeps a range from one probe into one group. The probe is named rather than cho
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `groupId` | integer | **required** |  |
-| `probeId` | integer |  | The probe the group is under. Left out, that probe is used; named, it has to be that one and one the caller can read (`A-77`). |
-| `range` | string | **required** |  |
-| `timeoutMs` | integer |  |  |
-| `concurrency` | integer |  |  |
-| `ratePerSecond` | number |  |  |
+| `groupId` | integer, at least 1 | **required** |  |
+| `probeId` | integer, at least 1 |  | The probe the group is under. Left out, that probe is used; named, it has to be that one and one the caller can read (`A-77`). |
+| `range` | string, 1–4000 characters | **required** |  |
+| `timeoutMs` | integer, 100–60000 |  |  |
+| `concurrency` | integer, 1–512 |  |  |
+| `ratePerSecond` | number, 0–100000 |  |  |
 | `level` | `ping` · `standard` · `detailed` | default `standard` | How hard to look. `POST /discovery/preview` reports what each one costs on this range, which is worth reading before starting a detailed sweep of a /16. |
-| `templates` | string[] | default `[]` | Template ids this run may use. Empty means all of them. A filter rather than a fourth level, because “detailed, but only these templates” is a thing somebody wants and a level could not express it. |
-| `snmpCommunity` | string | **write-only** default `` | Tried read-only against every host during identification, and skipped when empty. `sysDescr` and `sysObjectID` are the two most informative things a device will tell you, and this is the only credential identification has: it runs before anybody has told the system anything about these hosts, so v3 — which needs a username and a passphrase per device — is not available to it. |
+| `templates` | string[], at most 100 items, each 1–100 characters | default `[]` | Template ids this run may use. Empty means all of them. A filter rather than a fourth level, because “detailed, but only these templates” is a thing somebody wants and a level could not express it. |
+| `snmpCommunity` | string, at most 128 characters | **write-only** default `` | Tried read-only against every host during identification, and skipped when empty. `sysDescr` and `sysObjectID` are the two most informative things a device will tell you, and this is the only credential identification has: it runs before anybody has told the system anything about these hosts, so v3 — which needs a username and a passphrase per device — is not available to it. |
 
 **201** { id, groupId, probeId, range, total, cursor, found, failed, status, level, templates, identified, scheduleId, devicesCreated, devicesMatched, sensorsCreated, provisionedAt, message, timeoutMs, concurrency, ratePerSecond, createdAt, startedAt, finishedAt }
 
@@ -650,7 +650,7 @@ A run and how far it has got
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { id, groupId, probeId, range, total, cursor, found, failed, status, level, templates, identified, scheduleId, devicesCreated, devicesMatched, sensorsCreated, provisionedAt, message, timeoutMs, concurrency, ratePerSecond, createdAt, startedAt, finishedAt }
 
@@ -664,7 +664,7 @@ Derived from the run and its hosts rather than stored, so it cannot drift from w
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { runId, groupId, probeId, scheduleId, range, level, status, headline, scanned, found, created, errors, timing }
 
@@ -718,8 +718,8 @@ In address order rather than the order they answered, because an operator readin
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `limit` | query | integer | default `1000` |
-| `id` | path | integer | **required** |
+| `limit` | query | integer, 1–65536 | default `1000` |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { items }
 
@@ -740,7 +740,7 @@ Recorded immediately and sent to the probe as well, so a cancel works even while
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { id, groupId, probeId, range, total, cursor, found, failed, status, level, templates, identified, scheduleId, devicesCreated, devicesMatched, sensorsCreated, provisionedAt, message, timeoutMs, concurrency, ratePerSecond, createdAt, startedAt, finishedAt }
 
@@ -754,7 +754,7 @@ Create the devices and sensors this run found
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { devicesCreated, matched, sensorsCreated, sensorsSkipped, mastersSet, problems, devices }
 
@@ -782,7 +782,7 @@ What a run could not create, and why
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { items }
 
@@ -800,8 +800,8 @@ What this group has been discovering, newest first
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `limit` | query | integer | default `25` |
-| `id` | path | integer | **required** |
+| `limit` | query | integer, 1–200 | default `25` |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { items }
 
@@ -819,7 +819,7 @@ Empty on almost every installation, because there is no schedule until somebody 
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `groupId` | query | integer |  |
+| `groupId` | query | integer, at least 1 |  |
 
 **200** { items }
 
@@ -862,20 +862,20 @@ Created **disabled** unless `enabled` says otherwise, and with `autoProvision` o
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `groupId` | integer | **required** |  |
-| `probeId` | integer |  | The probe the group is under. Left out, that probe is used; named, it has to be that one and one the caller can read (`A-77`). |
-| `name` | string | **required** |  |
-| `range` | string | **required** |  |
+| `groupId` | integer, at least 1 | **required** |  |
+| `probeId` | integer, at least 1 |  | The probe the group is under. Left out, that probe is used; named, it has to be that one and one the caller can read (`A-77`). |
+| `name` | string, 1–200 characters | **required** |  |
+| `range` | string, 1–4000 characters | **required** |  |
 | `cadence` | `hourly` · `daily` · `weekly` | **required** |  |
-| `cadenceMinute` | integer | default `0` | Minutes past the hour for an hourly cadence, past midnight for the others. |
-| `cadenceWeekday` | integer | default `0` | 0 is Monday. Read only for a weekly cadence. |
+| `cadenceMinute` | integer, 0–1439 | default `0` | Minutes past the hour for an hourly cadence, past midnight for the others. |
+| `cadenceWeekday` | integer, 0–6 | default `0` | 0 is Monday. Read only for a weekly cadence. |
 | `timezone` | string | nullable default `null` | A cadence is a statement about local time — 02:30 has to be 02:30 in both halves of the year — so it is stored as one. Null is the core’s own zone. |
 | `level` | `ping` · `standard` · `detailed` | default `standard` |  |
 | `templates` | string[] | default `[]` |  |
-| `snmpCommunity` | string | **write-only** default `` |  |
-| `timeoutMs` | integer | default `1000` |  |
-| `concurrency` | integer | default `32` |  |
-| `ratePerSecond` | number | default `0` |  |
+| `snmpCommunity` | string, at most 128 characters | **write-only** default `` |  |
+| `timeoutMs` | integer, 100–60000 | default `1000` |  |
+| `concurrency` | integer, 1–512 | default `32` |  |
+| `ratePerSecond` | number, 0–100000 | default `0` |  |
 | `autoProvision` | boolean | default `false` |  |
 | `scheduleId` | integer | nullable default `null` | A schedule (`M-09`) used as a *permission window*: “weekly, but not during the change freeze”. It answers a different question from the cadence — is it allowed now, versus when is it next due — which is why both exist. |
 | `enabled` | boolean | default `false` |  |
@@ -918,7 +918,7 @@ Enabling computes the next run; disabling clears it, so a schedule that is off c
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **Body**
 
@@ -964,25 +964,25 @@ Change a schedule
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `probeId` | integer |  |  |
-| `name` | string |  |  |
-| `range` | string |  |  |
+| `probeId` | integer, at least 1 |  |  |
+| `name` | string, 1–200 characters |  |  |
+| `range` | string, 1–4000 characters |  |  |
 | `cadence` | `hourly` · `daily` · `weekly` |  |  |
-| `cadenceMinute` | integer |  |  |
-| `cadenceWeekday` | integer |  |  |
+| `cadenceMinute` | integer, 0–1439 |  |  |
+| `cadenceWeekday` | integer, 0–6 |  |  |
 | `timezone` | string | nullable |  |
 | `level` | `ping` · `standard` · `detailed` |  |  |
 | `templates` | string[] |  |  |
-| `snmpCommunity` | string | **write-only** |  |
-| `timeoutMs` | integer |  |  |
-| `concurrency` | integer |  |  |
-| `ratePerSecond` | number |  |  |
+| `snmpCommunity` | string, at most 128 characters | **write-only** |  |
+| `timeoutMs` | integer, 100–60000 |  |  |
+| `concurrency` | integer, 1–512 |  |  |
+| `ratePerSecond` | number, 0–100000 |  |  |
 | `autoProvision` | boolean |  |  |
 | `scheduleId` | integer | nullable |  |
 
@@ -1024,7 +1024,7 @@ Delete a schedule
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **204**
 
@@ -1058,7 +1058,7 @@ One template, in full
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `templateId` | path | string | **required** |
+| `templateId` | path | string, 1–100 characters | **required** |
 
 **200** object
 
@@ -1073,7 +1073,7 @@ The answer `D-04` will act on, before it acts on it. Takes a fingerprint — one
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `fingerprint` | object | **required** |  |
-| `credentials` | string[] | default `[]` | The credential kinds this device could resolve. A sensor whose kind is not here is left out rather than created and left failing. |
+| `credentials` | string[], each at most 40 characters | default `[]` | The credential kinds this device could resolve. A sensor whose kind is not here is left out rather than created and left failing. |
 
 **200** { templates, sensors, tags }
 
@@ -1096,9 +1096,9 @@ The whole run at once, which is what an operator wants to look at before letting
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `credentials` | query | string | default `` |
-| `limit` | query | integer | default `500` |
-| `id` | path | integer | **required** |
+| `credentials` | query | string, at most 200 characters | default `` |
+| `limit` | query | integer, 1–5000 | default `500` |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { items }
 
@@ -1120,15 +1120,15 @@ Returns the JSON to save under the template directory — it is not registered h
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `id` | string | **required** |  |
-| `name` | string | **required** |  |
-| `description` | string |  |  |
+| `id` | string, 3–100 characters | **required** |  |
+| `name` | string, 1–200 characters | **required** |  |
+| `description` | string, at most 1000 characters |  |  |
 | `match` | object |  |  |
 
 **200** object
@@ -1162,8 +1162,8 @@ Create a user group
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `name` | string | **required** |  |
-| `description` | string |  |  |
+| `name` | string, 1–100 characters | **required** |  |
+| `description` | string, at most 1000 characters |  |  |
 | `isAdmin` | boolean | default `false` |  |
 
 **201** { id, name, description, isAdmin, isDefault, isBuiltin, memberCount }
@@ -1188,14 +1188,14 @@ A built-in group accepts only a description. Renaming Administrators or clearing
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `name` | string |  |  |
-| `description` | string |  |  |
+| `name` | string, 1–100 characters |  |  |
+| `description` | string, at most 1000 characters |  |  |
 | `isAdmin` | boolean |  |  |
 
 **200** { id, name, description, isAdmin, isDefault, isBuiltin, memberCount }
@@ -1220,7 +1220,7 @@ Members are not deleted with it, and anybody whose primary group this was is giv
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **204**
 
@@ -1230,7 +1230,7 @@ Who is in this group
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { items }
 
@@ -1251,8 +1251,8 @@ Idempotent. The first group an account joins becomes its primary one; adding it 
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
-| `userId` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
+| `userId` | path | integer, at least 1 | **required** |
 
 **Body**
 
@@ -1278,8 +1278,8 @@ Remove an account from a group
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
-| `userId` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
+| `userId` | path | integer, at least 1 | **required** |
 
 **200** { items }
 
@@ -1299,7 +1299,7 @@ Every group an account belongs to, primary first
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { items }
 
@@ -1321,8 +1321,8 @@ Refused for a group the account does not belong to — a rule the schema cannot 
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
-| `groupId` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
+| `groupId` | path | integer, at least 1 | **required** |
 
 **200** { items }
 
@@ -1430,7 +1430,7 @@ How one probe is doing, right now
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { at, probeId, message, numbersUnavailable, protocolVersion, lastProtocolVersion, lastProtocolVersionAt, lastProtocolRefusedAt, channels } · **503** { error }
 
@@ -1578,7 +1578,7 @@ The document, not what it shows: each node’s rule is evaluated when the librar
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { id, name, description, priority, nodes, version, createdAt, updatedAt }
 
@@ -1592,16 +1592,16 @@ Change a library
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `name` | string |  |  |
-| `description` | string |  |  |
-| `priority` | integer |  |  |
-| `nodes` | [ms:libraryNode](#schema-ms-librarynode)[] |  |  |
+| `name` | string, 1–100 characters |  |  |
+| `description` | string, at most 1000 characters |  |  |
+| `priority` | integer, 1–5 |  |  |
+| `nodes` | [ms:libraryNode](#schema-ms-librarynode)[], at most 200 items |  |  |
 
 **200** { id, name, description, priority, nodes, version, createdAt, updatedAt }
 
@@ -1615,7 +1615,7 @@ Needs full access. The grants on it go with it; no sensor does, because a librar
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **204**
 
@@ -1627,7 +1627,7 @@ Needs full access: who else can see a thing is not a read.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { items }
 
@@ -1650,8 +1650,8 @@ Needs full access, so a write holder may arrange the nodes without deciding who 
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
-| `groupId` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
+| `groupId` | path | integer, 1–9007199254740991 | **required** |
 
 **Body**
 
@@ -1667,8 +1667,8 @@ Take a group’s access away
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
-| `groupId` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
+| `groupId` | path | integer, 1–9007199254740991 | **required** |
 
 **204**
 
@@ -1697,7 +1697,7 @@ What each value maps to. `undefinedState` is what a value no entry covers become
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | string, 1–100 characters | **required** |
 
 **200** { id, name, description, type, undefinedState, entries }
 
@@ -1721,7 +1721,7 @@ Highest priority first, then by name. An administrator sees every map; everybody
 | `items[].id` | integer | **required** |  |
 | `items[].name` | string | **required** |  |
 | `items[].description` | string | **required** |  |
-| `items[].priority` | integer | **required** |  |
+| `items[].priority` | integer, 1–5 | **required** |  |
 | `items[].layout` | object | **required** |  |
 | `items[].version` | integer | **required** |  |
 | `items[].createdAt` | string (date-time) | **required** |  |
@@ -1737,9 +1737,9 @@ The creator’s primary group is granted full access in the same transaction —
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `name` | string | **required** |  |
-| `description` | string |  |  |
-| `priority` | integer |  |  |
+| `name` | string, 1–100 characters | **required** |  |
+| `description` | string, at most 1000 characters |  |  |
+| `priority` | integer, 1–5 |  |  |
 | `layout` | object |  |  |
 
 **201** { id, name, description, priority, layout, version, createdAt, updatedAt }
@@ -1751,7 +1751,7 @@ The creator’s primary group is granted full access in the same transaction —
 | `id` | integer | **required** |  |
 | `name` | string | **required** |  |
 | `description` | string | **required** |  |
-| `priority` | integer | **required** |  |
+| `priority` | integer, 1–5 | **required** |  |
 | `layout` | object | **required** |  |
 | `version` | integer | **required** |  |
 | `createdAt` | string (date-time) | **required** |  |
@@ -1765,7 +1765,7 @@ A map this account may not read answers 404 rather than 403, so the error cannot
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { id, name, description, priority, layout, version, createdAt, updatedAt }
 
@@ -1776,7 +1776,7 @@ A map this account may not read answers 404 rather than 403, so the error cannot
 | `id` | integer | **required** |  |
 | `name` | string | **required** |  |
 | `description` | string | **required** |  |
-| `priority` | integer | **required** |  |
+| `priority` | integer, 1–5 | **required** |  |
 | `layout` | object | **required** |  |
 | `version` | integer | **required** |  |
 | `createdAt` | string (date-time) | **required** |  |
@@ -1790,15 +1790,15 @@ Change a map
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `name` | string |  |  |
-| `description` | string |  |  |
-| `priority` | integer |  |  |
+| `name` | string, 1–100 characters |  |  |
+| `description` | string, at most 1000 characters |  |  |
+| `priority` | integer, 1–5 |  |  |
 | `layout` | object |  |  |
 
 **200** { id, name, description, priority, layout, version, createdAt, updatedAt }
@@ -1810,7 +1810,7 @@ Change a map
 | `id` | integer | **required** |  |
 | `name` | string | **required** |  |
 | `description` | string | **required** |  |
-| `priority` | integer | **required** |  |
+| `priority` | integer, 1–5 | **required** |  |
 | `layout` | object | **required** |  |
 | `version` | integer | **required** |  |
 | `createdAt` | string (date-time) | **required** |  |
@@ -1824,7 +1824,7 @@ Needs full access. The grants on it go with it.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **204**
 
@@ -1836,7 +1836,7 @@ What a map draws, rather than the document it is stored as. A widget naming an o
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { map, widgets, connectors, problems, geo, tiles }
 
@@ -1848,7 +1848,7 @@ What a map draws, rather than the document it is stored as. A widget naming an o
 | `map.id` | integer | **required** |  |
 | `map.name` | string | **required** |  |
 | `map.description` | string | **required** |  |
-| `map.priority` | integer | **required** |  |
+| `map.priority` | integer, 1–5 | **required** |  |
 | `map.layout` | object | **required** |  |
 | `map.version` | integer | **required** |  |
 | `map.createdAt` | string (date-time) | **required** |  |
@@ -1878,7 +1878,7 @@ Needs full access: a share link is a grant to everybody, and `full` is the right
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { items }
 
@@ -1904,13 +1904,13 @@ Answers with the URL’s token **once**. Only its hash is stored, so it cannot b
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `label` | string | **required** |  |
+| `label` | string, 1–100 characters | **required** |  |
 | `expiresAt` | string (date-time) | **required** |  |
 
 **201** { share, token }
@@ -1938,8 +1938,8 @@ The link stops working immediately. The row stays, revoked, so the record of wha
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
-| `shareId` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
+| `shareId` | path | integer, 1–9007199254740991 | **required** |
 
 **204**
 
@@ -1951,7 +1951,7 @@ The stored bytes, with the SHA-256 of them as a strong ETag. Send `If-None-Match
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200**
 
@@ -1963,7 +1963,7 @@ PNG, JPEG or WebP, at most 2 MiB and 4096 pixels on a side. The format is decide
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { mediaType, digest, width, height, bytes, uploadedAt, uploadedBy }
 
@@ -1987,7 +1987,7 @@ Silent when there was none: the map ends up without one either way.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **204**
 
@@ -1999,7 +1999,7 @@ Needs full access: who else can see a thing is not a read.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { items }
 
@@ -2022,8 +2022,8 @@ Needs full access, so a write holder may edit the canvas without deciding who el
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
-| `groupId` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
+| `groupId` | path | integer, 1–9007199254740991 | **required** |
 
 **Body**
 
@@ -2039,8 +2039,8 @@ Take a group’s access away
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
-| `groupId` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
+| `groupId` | path | integer, 1–9007199254740991 | **required** |
 
 **204**
 
@@ -2148,11 +2148,11 @@ Newest first, paged by `before` rather than by offset — notifications arrive w
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `status` | query | `pending` · `sent` · `failed` · `discarded`, or an array of them |  |
-| `sensorId` | query | integer |  |
-| `templateId` | query | integer |  |
-| `before` | query | integer |  |
-| `limit` | query | integer | default `50` |
+| `status` | query | `pending` · `sent` · `failed` · `discarded`, or an array of them, at most 4 items |  |
+| `sensorId` | query | integer, at least 1 |  |
+| `templateId` | query | integer, at least 1 |  |
+| `before` | query | integer, at least 1 |  |
+| `limit` | query | integer, 1–200 | default `50` |
 
 **200** { items, nextBefore }
 
@@ -2171,17 +2171,17 @@ Flat filtered listing, keyset-paginated. `q` searches names and device hosts as 
 
 | Parameter | In | Type | | Description |
 | --- | --- | --- | --- | --- |
-| `parentId` | query | integer |  |  |
-| `kind` | query | `root` · `probe` · `group` · `device` · `sensor`, or an array of them |  |  |
-| `tag` | query | string or array |  |  |
-| `q` | query | string |  | Search: a case-insensitive substring of the name or, on a device, of its host. `%` and `_` are literal. |
-| `host` | query | string |  | A device's host exactly, case-insensitive. A substring is `q`'s job. |
-| `priorityMin` | query | integer |  |  |
+| `parentId` | query | integer, at least 1 |  |  |
+| `kind` | query | `root` · `probe` · `group` · `device` · `sensor`, or an array of them, at most 5 items |  |  |
+| `tag` | query | string or array, at most 100 characters |  |  |
+| `q` | query | string, at most 500 characters |  | Search: a case-insensitive substring of the name or, on a device, of its host. `%` and `_` are literal. |
+| `host` | query | string, at most 255 characters |  | A device's host exactly, case-insensitive. A substring is `q`'s job. |
+| `priorityMin` | query | integer, 1–5 |  |  |
 | `sort` | query | `name` · `id` · `manual` | default `name` |  |
 | `effective` | query | string or array |  |  |
-| `include` | query | string |  | Comma-separated expansions. `path` gives every item its ancestors, root first and excluding the item — what `/objects/{id}/ancestors` returns, for the whole page in one walk. |
-| `cursor` | query | string |  |  |
-| `limit` | query | integer | default `100` |  |
+| `include` | query | string, at most 200 characters |  | Comma-separated expansions. `path` gives every item its ancestors, root first and excluding the item — what `/objects/{id}/ancestors` returns, for the whole page in one walk. |
+| `cursor` | query | string, at most 2048 characters |  |  |
+| `limit` | query | integer, 1–500 | default `100` |  |
 
 **200** { items, nextCursor }
 
@@ -2204,7 +2204,7 @@ Flat filtered listing, keyset-paginated. `q` searches names and device hosts as 
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `include` | query | string |  |
+| `include` | query | string, at most 200 characters |  |
 
 **200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
 
@@ -2242,8 +2242,8 @@ One object. Send the `ETag` back as `If-None-Match` for a 304 when nothing in th
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `include` | query | string |  |
-| `id` | path | integer | **required** |
+| `include` | query | string, at most 200 characters |  |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
 
@@ -2255,7 +2255,7 @@ Changes what it is given and keeps the rest. **Where a sensor sends its inherite
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **Body** — [ms:updateObject](#schema-ms-updateobject)
 
@@ -2267,8 +2267,8 @@ Changes what it is given and keeps the rest. **Where a sensor sends its inherite
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `expectedDescendants` | query | integer |  |
-| `id` | path | integer | **required** |
+| `expectedDescendants` | query | integer, at least 0 |  |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { id, kind, name, deleted }
 
@@ -2287,7 +2287,7 @@ Moves an object within its parent's children, the way PRTG's move up / move down
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **Body**
 
@@ -2303,13 +2303,13 @@ Moves an object within its parent's children, the way PRTG's move up / move down
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `targetParentId` | integer | **required** |  |
+| `targetParentId` | integer, at least 1 | **required** |  |
 
 **200** { object, fromParentId, toParentId, movedCount, probeChanged, settingsChanged, credentialsChanged, exceptionsCleared }
 
@@ -2319,14 +2319,14 @@ Moves an object within its parent's children, the way PRTG's move up / move down
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `targetParentId` | integer |  |  |
-| `name` | string |  |  |
+| `targetParentId` | integer, at least 1 |  |  |
+| `name` | string, 1–500 characters |  |  |
 
 **201** { object, grantsNotCarried, clonedCount, droppedCredentialKinds, settingsChanged }
 
@@ -2340,16 +2340,16 @@ Applies one operation to a selection. **Each object is atomic and the batch is b
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `ids` | integer[] | **required** |  |
+| `ids` | integer[], 1–500 items, each at least 1 | **required** |  |
 | `operation` | `pause` · `resume` · `move` · `clone` · `delete` · `setting` · `revertSetting` | **required** |  |
-| `targetParentId` | integer |  | Required by `move` and `clone`. |
+| `targetParentId` | integer, at least 1 |  | Required by `move` and `clone`. |
 | `cascade` | boolean | default `false` | `delete` only. False refuses an object that has children, which is the safe default: a selection of six groups is six subtrees and nobody counted them. |
 | `key` | string |  | Required by `setting` and `revertSetting`. |
 | `value` | any |  | `setting` only. To go back to the inherited value use `revertSetting` — the same split the single-object routes make between `PUT` and `DELETE`, and not a null here, which is a legitimate stored value for a setting whose schema allows one. |
-| `minutes` | integer |  | `pause` only. |
+| `minutes` | integer, at least 1 |  | `pause` only. |
 | `until` | string (date-time) |  | `pause` only. |
 | `from` | string (date-time) |  | `pause` only. |
-| `message` | string |  | `pause` only. |
+| `message` | string, at most 500 characters |  | `pause` only. |
 
 **200** { requested, succeeded, failed, duplicates, outcomes }
 
@@ -2374,11 +2374,11 @@ Applies one operation to a selection. **Each object is atomic and the batch is b
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `maxDepth` | query | integer | default `3` |
-| `limit` | query | integer | default `1000` |
-| `kind` | query | `root` · `probe` · `group` · `device` · `sensor`, or an array of them |  |
+| `maxDepth` | query | integer, 1–20 | default `3` |
+| `limit` | query | integer, 1–5000 | default `1000` |
+| `kind` | query | `root` · `probe` · `group` · `device` · `sensor`, or an array of them, at most 5 items |  |
 | `effective` | query | string or array |  |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { items, truncated }
 
@@ -2397,7 +2397,7 @@ How many objects of each kind are under this one, and what state its sensors are
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { objects, sensorStates }
 
@@ -2453,7 +2453,7 @@ The same totals as `/objects/:id/counts`, over every object the caller can read 
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { items }
 
@@ -2471,13 +2471,13 @@ The addresses of this device its probe may connect to although `probe.targetPoli
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `addresses` | string[] | **required** |  |
+| `addresses` | string[], at most 16 items, each 1–64 characters | **required** |  |
 
 **200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
 
@@ -2533,13 +2533,13 @@ Binds this identity to a probe object. The probe is issued a key of its own at i
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `gid` | path | string | **required** |
+| `gid` | path | string, 1–128 characters | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `objectId` | integer | **required** | The probe object this identity owns from now on. |
+| `objectId` | integer, at least 1 | **required** | The probe object this identity owns from now on. |
 | `local` | boolean | default `false` | Whether this is the probe running beside the core. A local probe cannot be deleted, matching PRTG. Said explicitly rather than guessed: an address proves nothing on a host with several interfaces, and "the first one approved" is wrong for anybody who stood up a remote probe first. |
 
 **200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, protocolRefusedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
@@ -2579,13 +2579,13 @@ The record is kept rather than deleted, so the same identity cannot come back by
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `gid` | path | string | **required** |
+| `gid` | path | string, 1–128 characters | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `note` | string | default `` | Why, for the operator who finds this months later. |
+| `note` | string, at most 1000 characters | default `` | Why, for the operator who finds this months later. |
 
 **200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, protocolRefusedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
 
@@ -2624,13 +2624,13 @@ Ranges in the same spellings a discovery takes — `10.0.0.0/24`, `10.0.0.1-50`,
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `gid` | path | string | **required** |
+| `gid` | path | string, 1–128 characters | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `allowFrom` | string[] | **required** |  |
+| `allowFrom` | string[], at most 64 items, each at most 200 characters | **required** |  |
 
 **200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, protocolRefusedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
 
@@ -2669,7 +2669,7 @@ Different from revoking: a forgotten probe that connects again enrols as a stran
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `gid` | path | string | **required** |
+| `gid` | path | string, 1–128 characters | **required** |
 
 **204**
 
@@ -2695,11 +2695,11 @@ By name. An administrator sees every report; everybody else sees the ones a grou
 | `items[].subjects` | object | **required** |  |
 | `items[].span` | object | **required** |  |
 | `items[].span.kind` | `day` · `week` · `month` · `quarter` · `year` · `custom` | **required** |  |
-| `items[].span.offset` | integer |  |  |
-| `items[].span.timezone` | string |  |  |
+| `items[].span.offset` | integer, 0–1000 |  |  |
+| `items[].span.timezone` | string, at most 64 characters |  |  |
 | `items[].span.from` | string |  |  |
 | `items[].span.to` | string |  |  |
-| `items[].span.resolutionSeconds` | integer |  |  |
+| `items[].span.resolutionSeconds` | integer, at least 1 |  |  |
 | `items[].resolved` | object |  |  |
 | `items[].resolved.from` | string (date-time) | **required** |  |
 | `items[].resolved.to` | string (date-time) | **required** |  |
@@ -2714,18 +2714,18 @@ By name. An administrator sees every report; everybody else sees the ones a grou
 | `items[].unresolvable.code` | string | **required** |  |
 | `items[].unresolvable.message` | string | **required** |  |
 | `items[].outputs` | object | **required** |  |
-| `items[].outputs.formats` | (`html` · `csv` · `xml` · `pdf`)[] |  |  |
+| `items[].outputs.formats` | (`html` · `csv` · `xml` · `pdf`)[], at least 1 item |  |  |
 | `items[].outputs.delivery` | `store` · `store-and-email` · `email` |  |  |
-| `items[].outputs.recipients` | string[] |  |  |
+| `items[].outputs.recipients` | string[], at most 50 items, each at most 320 characters |  |  |
 | `items[].outputs.zip` | boolean |  |  |
 | `items[].schedule` | object | **required** |  |
 | `items[].schedule.kind` | `manual` · `hourly` · `daily` · `weekly` · `monthly` · `quarterly` · `annual` | **required** |  |
-| `items[].schedule.minute` | integer |  |  |
-| `items[].schedule.weekday` | integer |  |  |
-| `items[].schedule.dayOfMonth` | integer |  |  |
-| `items[].schedule.month` | integer |  |  |
-| `items[].schedule.timezone` | string |  |  |
-| `items[].schedule.scheduleId` | integer |  |  |
+| `items[].schedule.minute` | integer, 0–1439 |  |  |
+| `items[].schedule.weekday` | integer, 0–6 |  |  |
+| `items[].schedule.dayOfMonth` | integer, 1–31 |  |  |
+| `items[].schedule.month` | integer, 1–12 |  |  |
+| `items[].schedule.timezone` | string, at most 64 characters |  |  |
+| `items[].schedule.scheduleId` | integer, at least 1 |  |  |
 | `items[].scheduleSummary` | string | **required** |  |
 | `items[].nextRunAt` | string (date-time) | **required** nullable |  |
 | `items[].lastRunAt` | string (date-time) | **required** nullable |  |
@@ -2746,32 +2746,32 @@ The creator’s primary group is granted full access in the same transaction, or
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `name` | string | **required** |  |
-| `description` | string |  |  |
+| `name` | string, 1–100 characters | **required** |  |
+| `description` | string, at most 1000 characters |  |  |
 | `kind` | `graph_and_table` · `table_only` · `graph_only` · `sensor_list` · `installation` · `top_values` · `top_uptime` | **required** |  |
 | `subjects` | object |  |  |
 | `subjects.objectIds` | integer[] | **required** |  |
 | `span` | object |  |  |
 | `span.kind` | `day` · `week` · `month` · `quarter` · `year` · `custom` | **required** |  |
-| `span.offset` | integer |  |  |
-| `span.timezone` | string |  |  |
+| `span.offset` | integer, 0–1000 |  |  |
+| `span.timezone` | string, at most 64 characters |  |  |
 | `span.from` | string |  |  |
 | `span.to` | string |  |  |
-| `span.resolutionSeconds` | integer |  |  |
+| `span.resolutionSeconds` | integer, at least 1 |  |  |
 | `outputs` | object |  |  |
-| `outputs.formats` | (`html` · `csv` · `xml` · `pdf`)[] |  |  |
+| `outputs.formats` | (`html` · `csv` · `xml` · `pdf`)[], at least 1 item |  |  |
 | `outputs.delivery` | `store` · `store-and-email` · `email` |  |  |
-| `outputs.recipients` | string[] |  |  |
+| `outputs.recipients` | string[], at most 50 items, each at most 320 characters |  |  |
 | `outputs.zip` | boolean |  |  |
 | `schedule` | object |  |  |
 | `schedule.kind` | `manual` · `hourly` · `daily` · `weekly` · `monthly` · `quarterly` · `annual` | **required** |  |
-| `schedule.minute` | integer |  |  |
-| `schedule.weekday` | integer |  |  |
-| `schedule.dayOfMonth` | integer |  |  |
-| `schedule.month` | integer |  |  |
-| `schedule.timezone` | string |  |  |
-| `schedule.scheduleId` | integer |  |  |
-| `runAs` | string |  |  |
+| `schedule.minute` | integer, 0–1439 |  |  |
+| `schedule.weekday` | integer, 0–6 |  |  |
+| `schedule.dayOfMonth` | integer, 1–31 |  |  |
+| `schedule.month` | integer, 1–12 |  |  |
+| `schedule.timezone` | string, at most 64 characters |  |  |
+| `schedule.scheduleId` | integer, at least 1 |  |  |
+| `runAs` | string, at most 64 characters |  |  |
 
 **201** { id, name, description, kind, subjects, span, resolved, unresolvable, outputs, schedule, scheduleSummary, nextRunAt, lastRunAt, runAs, version, createdAt, updatedAt }
 
@@ -2786,11 +2786,11 @@ The creator’s primary group is granted full access in the same transaction, or
 | `subjects` | object | **required** |  |
 | `span` | object | **required** |  |
 | `span.kind` | `day` · `week` · `month` · `quarter` · `year` · `custom` | **required** |  |
-| `span.offset` | integer |  |  |
-| `span.timezone` | string |  |  |
+| `span.offset` | integer, 0–1000 |  |  |
+| `span.timezone` | string, at most 64 characters |  |  |
 | `span.from` | string |  |  |
 | `span.to` | string |  |  |
-| `span.resolutionSeconds` | integer |  |  |
+| `span.resolutionSeconds` | integer, at least 1 |  |  |
 | `resolved` | object |  |  |
 | `resolved.from` | string (date-time) | **required** |  |
 | `resolved.to` | string (date-time) | **required** |  |
@@ -2805,18 +2805,18 @@ The creator’s primary group is granted full access in the same transaction, or
 | `unresolvable.code` | string | **required** |  |
 | `unresolvable.message` | string | **required** |  |
 | `outputs` | object | **required** |  |
-| `outputs.formats` | (`html` · `csv` · `xml` · `pdf`)[] |  |  |
+| `outputs.formats` | (`html` · `csv` · `xml` · `pdf`)[], at least 1 item |  |  |
 | `outputs.delivery` | `store` · `store-and-email` · `email` |  |  |
-| `outputs.recipients` | string[] |  |  |
+| `outputs.recipients` | string[], at most 50 items, each at most 320 characters |  |  |
 | `outputs.zip` | boolean |  |  |
 | `schedule` | object | **required** |  |
 | `schedule.kind` | `manual` · `hourly` · `daily` · `weekly` · `monthly` · `quarterly` · `annual` | **required** |  |
-| `schedule.minute` | integer |  |  |
-| `schedule.weekday` | integer |  |  |
-| `schedule.dayOfMonth` | integer |  |  |
-| `schedule.month` | integer |  |  |
-| `schedule.timezone` | string |  |  |
-| `schedule.scheduleId` | integer |  |  |
+| `schedule.minute` | integer, 0–1439 |  |  |
+| `schedule.weekday` | integer, 0–6 |  |  |
+| `schedule.dayOfMonth` | integer, 1–31 |  |  |
+| `schedule.month` | integer, 1–12 |  |  |
+| `schedule.timezone` | string, at most 64 characters |  |  |
+| `schedule.scheduleId` | integer, at least 1 |  |  |
 | `scheduleSummary` | string | **required** |  |
 | `nextRunAt` | string (date-time) | **required** nullable |  |
 | `lastRunAt` | string (date-time) | **required** nullable |  |
@@ -2835,7 +2835,7 @@ A report this account may not read answers 404 rather than 403, so the error can
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { id, name, description, kind, subjects, span, resolved, unresolvable, outputs, schedule, scheduleSummary, nextRunAt, lastRunAt, runAs, version, createdAt, updatedAt }
 
@@ -2850,11 +2850,11 @@ A report this account may not read answers 404 rather than 403, so the error can
 | `subjects` | object | **required** |  |
 | `span` | object | **required** |  |
 | `span.kind` | `day` · `week` · `month` · `quarter` · `year` · `custom` | **required** |  |
-| `span.offset` | integer |  |  |
-| `span.timezone` | string |  |  |
+| `span.offset` | integer, 0–1000 |  |  |
+| `span.timezone` | string, at most 64 characters |  |  |
 | `span.from` | string |  |  |
 | `span.to` | string |  |  |
-| `span.resolutionSeconds` | integer |  |  |
+| `span.resolutionSeconds` | integer, at least 1 |  |  |
 | `resolved` | object |  |  |
 | `resolved.from` | string (date-time) | **required** |  |
 | `resolved.to` | string (date-time) | **required** |  |
@@ -2869,18 +2869,18 @@ A report this account may not read answers 404 rather than 403, so the error can
 | `unresolvable.code` | string | **required** |  |
 | `unresolvable.message` | string | **required** |  |
 | `outputs` | object | **required** |  |
-| `outputs.formats` | (`html` · `csv` · `xml` · `pdf`)[] |  |  |
+| `outputs.formats` | (`html` · `csv` · `xml` · `pdf`)[], at least 1 item |  |  |
 | `outputs.delivery` | `store` · `store-and-email` · `email` |  |  |
-| `outputs.recipients` | string[] |  |  |
+| `outputs.recipients` | string[], at most 50 items, each at most 320 characters |  |  |
 | `outputs.zip` | boolean |  |  |
 | `schedule` | object | **required** |  |
 | `schedule.kind` | `manual` · `hourly` · `daily` · `weekly` · `monthly` · `quarterly` · `annual` | **required** |  |
-| `schedule.minute` | integer |  |  |
-| `schedule.weekday` | integer |  |  |
-| `schedule.dayOfMonth` | integer |  |  |
-| `schedule.month` | integer |  |  |
-| `schedule.timezone` | string |  |  |
-| `schedule.scheduleId` | integer |  |  |
+| `schedule.minute` | integer, 0–1439 |  |  |
+| `schedule.weekday` | integer, 0–6 |  |  |
+| `schedule.dayOfMonth` | integer, 1–31 |  |  |
+| `schedule.month` | integer, 1–12 |  |  |
+| `schedule.timezone` | string, at most 64 characters |  |  |
+| `schedule.scheduleId` | integer, at least 1 |  |  |
 | `scheduleSummary` | string | **required** |  |
 | `nextRunAt` | string (date-time) | **required** nullable |  |
 | `lastRunAt` | string (date-time) | **required** nullable |  |
@@ -2899,38 +2899,38 @@ Change a report
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `name` | string |  |  |
-| `description` | string |  |  |
+| `name` | string, 1–100 characters |  |  |
+| `description` | string, at most 1000 characters |  |  |
 | `kind` | `graph_and_table` · `table_only` · `graph_only` · `sensor_list` · `installation` · `top_values` · `top_uptime` |  |  |
 | `subjects` | object |  |  |
 | `subjects.objectIds` | integer[] | **required** |  |
 | `span` | object |  |  |
 | `span.kind` | `day` · `week` · `month` · `quarter` · `year` · `custom` | **required** |  |
-| `span.offset` | integer |  |  |
-| `span.timezone` | string |  |  |
+| `span.offset` | integer, 0–1000 |  |  |
+| `span.timezone` | string, at most 64 characters |  |  |
 | `span.from` | string |  |  |
 | `span.to` | string |  |  |
-| `span.resolutionSeconds` | integer |  |  |
+| `span.resolutionSeconds` | integer, at least 1 |  |  |
 | `outputs` | object |  |  |
-| `outputs.formats` | (`html` · `csv` · `xml` · `pdf`)[] |  |  |
+| `outputs.formats` | (`html` · `csv` · `xml` · `pdf`)[], at least 1 item |  |  |
 | `outputs.delivery` | `store` · `store-and-email` · `email` |  |  |
-| `outputs.recipients` | string[] |  |  |
+| `outputs.recipients` | string[], at most 50 items, each at most 320 characters |  |  |
 | `outputs.zip` | boolean |  |  |
 | `schedule` | object |  |  |
 | `schedule.kind` | `manual` · `hourly` · `daily` · `weekly` · `monthly` · `quarterly` · `annual` | **required** |  |
-| `schedule.minute` | integer |  |  |
-| `schedule.weekday` | integer |  |  |
-| `schedule.dayOfMonth` | integer |  |  |
-| `schedule.month` | integer |  |  |
-| `schedule.timezone` | string |  |  |
-| `schedule.scheduleId` | integer |  |  |
-| `runAs` | string |  |  |
+| `schedule.minute` | integer, 0–1439 |  |  |
+| `schedule.weekday` | integer, 0–6 |  |  |
+| `schedule.dayOfMonth` | integer, 1–31 |  |  |
+| `schedule.month` | integer, 1–12 |  |  |
+| `schedule.timezone` | string, at most 64 characters |  |  |
+| `schedule.scheduleId` | integer, at least 1 |  |  |
+| `runAs` | string, at most 64 characters |  |  |
 
 **200** { id, name, description, kind, subjects, span, resolved, unresolvable, outputs, schedule, scheduleSummary, nextRunAt, lastRunAt, runAs, version, createdAt, updatedAt }
 
@@ -2945,11 +2945,11 @@ Change a report
 | `subjects` | object | **required** |  |
 | `span` | object | **required** |  |
 | `span.kind` | `day` · `week` · `month` · `quarter` · `year` · `custom` | **required** |  |
-| `span.offset` | integer |  |  |
-| `span.timezone` | string |  |  |
+| `span.offset` | integer, 0–1000 |  |  |
+| `span.timezone` | string, at most 64 characters |  |  |
 | `span.from` | string |  |  |
 | `span.to` | string |  |  |
-| `span.resolutionSeconds` | integer |  |  |
+| `span.resolutionSeconds` | integer, at least 1 |  |  |
 | `resolved` | object |  |  |
 | `resolved.from` | string (date-time) | **required** |  |
 | `resolved.to` | string (date-time) | **required** |  |
@@ -2964,18 +2964,18 @@ Change a report
 | `unresolvable.code` | string | **required** |  |
 | `unresolvable.message` | string | **required** |  |
 | `outputs` | object | **required** |  |
-| `outputs.formats` | (`html` · `csv` · `xml` · `pdf`)[] |  |  |
+| `outputs.formats` | (`html` · `csv` · `xml` · `pdf`)[], at least 1 item |  |  |
 | `outputs.delivery` | `store` · `store-and-email` · `email` |  |  |
-| `outputs.recipients` | string[] |  |  |
+| `outputs.recipients` | string[], at most 50 items, each at most 320 characters |  |  |
 | `outputs.zip` | boolean |  |  |
 | `schedule` | object | **required** |  |
 | `schedule.kind` | `manual` · `hourly` · `daily` · `weekly` · `monthly` · `quarterly` · `annual` | **required** |  |
-| `schedule.minute` | integer |  |  |
-| `schedule.weekday` | integer |  |  |
-| `schedule.dayOfMonth` | integer |  |  |
-| `schedule.month` | integer |  |  |
-| `schedule.timezone` | string |  |  |
-| `schedule.scheduleId` | integer |  |  |
+| `schedule.minute` | integer, 0–1439 |  |  |
+| `schedule.weekday` | integer, 0–6 |  |  |
+| `schedule.dayOfMonth` | integer, 1–31 |  |  |
+| `schedule.month` | integer, 1–12 |  |  |
+| `schedule.timezone` | string, at most 64 characters |  |  |
+| `schedule.scheduleId` | integer, at least 1 |  |  |
 | `scheduleSummary` | string | **required** |  |
 | `nextRunAt` | string (date-time) | **required** nullable |  |
 | `lastRunAt` | string (date-time) | **required** nullable |  |
@@ -2994,7 +2994,7 @@ Needs full access, because deleting one takes its grants with it.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **204**
 
@@ -3006,7 +3006,7 @@ A report renders through a named account, not through whoever is asking (`§6`).
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { runAs, visible, unavailable }
 
@@ -3031,7 +3031,7 @@ Newest first, at most 50 of them. A run that failed carries the same code the AP
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { items }
 
@@ -3076,7 +3076,7 @@ Renders the report against its span and its security context, and records the ou
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **201** { id, reportId, trigger, requestedBy, state, queuedAt, startedAt, finishedAt, durationMs, spanLabel, sections, unavailable, cells, errorCode, errorMessage, delivery, outputs }
 
@@ -3120,7 +3120,7 @@ Needs full access: who else can read a report is not a read-only detail.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { items }
 
@@ -3143,8 +3143,8 @@ Needs full access, so a write holder may edit what a report measures without dec
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
-| `groupId` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
+| `groupId` | path | integer, 1–9007199254740991 | **required** |
 
 **Body**
 
@@ -3160,8 +3160,8 @@ Take a group’s access away
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
-| `groupId` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
+| `groupId` | path | integer, 1–9007199254740991 | **required** |
 
 **204**
 
@@ -3173,7 +3173,7 @@ Runs the report against its span and its security context and answers the docume
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200**
 
@@ -3185,8 +3185,8 @@ The stored document, as `html`, `csv`, `xml`, `pdf` or `zip` depending on what t
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
-| `runId` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
+| `runId` | path | integer, 1–9007199254740991 | **required** |
 | `format` | path | `html` · `csv` · `xml` · `pdf` · `zip` | **required** |
 
 **200**
@@ -3225,7 +3225,7 @@ One schedule
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { id, name, description, polarity, authoredAs, timezone, effectiveTimezone, periods, grid, gridIsExact, builtIn, active, nextChangeAt, usedBy, createdAt, updatedAt }
 
@@ -3239,7 +3239,7 @@ Whole-document: a partial update of a period list is a merge nobody can define. 
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **Body** — [ms:scheduleInput](#schema-ms-scheduleinput)
 
@@ -3255,7 +3255,7 @@ Refused while any object still assigns it — the refusal names them — and ref
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { id, deleted }
 
@@ -3296,14 +3296,14 @@ For types whose parameters contain paths into a document — `rest.custom`’s `
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | string | **required** |
+| `id` | path | string, at most 100 characters | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `document` | string | **required** | The response, pasted verbatim. Bounded well below what the sensor itself will read: this one is walked once per path while somebody types, and a preview is for finding out whether a path is right, not for proving a sensor can survive the whole document. |
-| `contentType` | string | default `` | What the server called it, where that is known. Empty is honest and common — the format is then guessed from the document exactly as the sensor guesses it. |
+| `document` | string, at most 262144 characters | **required** | The response, pasted verbatim. Bounded well below what the sensor itself will read: this one is walked once per path while somebody types, and a preview is for finding out whether a path is right, not for proving a sensor can survive the whole document. |
+| `contentType` | string, at most 200 characters | default `` | What the server called it, where that is known. Empty is honest and common — the format is then guessed from the document exactly as the sensor guesses it. |
 | `params` | object | **required** | The parameters as the form currently holds them. **Not validated first**: the form asking for this has a half-finished parameter set in it by definition, and a preview that refused until everything was valid would be unavailable exactly when it is needed. |
 
 **200** { format, error, rows, expectations, problems }
@@ -3338,7 +3338,7 @@ Each channel's current reading, for a sensor detail page's channel table. A `nul
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { sensorId, readAt, notBefore, intervalSeconds, channels }
 
@@ -3350,10 +3350,10 @@ Historic channel data for a sensor. The resolution is snapped up to a supported 
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `from` | query | string |  |
-| `to` | query | string |  |
-| `resolutionSeconds` | query | integer |  |
-| `id` | path | integer | **required** |
+| `from` | query | string, at most 64 characters |  |
+| `to` | query | string, at most 64 characters |  |
+| `resolutionSeconds` | query | integer, 1–86400 |  |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { sensorId, from, to, resolutionSeconds, bucketCount, source, segments, adjustments, buckets, channels }
 
@@ -3367,13 +3367,13 @@ Asks the probe that owns the sensor to run **exactly** the check a scheduled sca
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `timeoutMs` | integer |  | How long to wait. Bounded well below the sensor’s own timeout allowance because a person is waiting: a check that may run for an hour is not something to hold an HTTP request open for. The probe is told the same number and abandons the work when it expires. |
+| `timeoutMs` | integer, 1000–120000 |  | How long to wait. Bounded well below the sensor’s own timeout allowance because a person is waiting: a check that may run for an hour is not something to hold an HTTP request open for. The probe is told the same number and abandons the work when it expires. |
 
 **200** { sensorId, at, outcome, message, durationMs, channels, stored }
 
@@ -3385,7 +3385,7 @@ A sensor’s current state, why it is in it, and since when. `pausedBy` lists ev
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { sensorId, state, cause, message, since, lastResultAt, consecutiveFailures, pausedBy, acknowledged, acknowledgedUntil, acknowledgedBy, simulatedError }
 
@@ -3413,8 +3413,8 @@ Effective and own values together. ?asChildOf=<parentId> projects what the objec
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `asChildOf` | query | integer |  |
-| `id` | path | integer | **required** |
+| `asChildOf` | query | integer, at least 1 |  |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { objectId, asChildOf, settings }
 
@@ -3430,8 +3430,8 @@ Effective and own values together. ?asChildOf=<parentId> projects what the objec
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
-| `key` | path | string | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
+| `key` | path | string, 1–100 characters | **required** |
 
 **Body**
 
@@ -3447,8 +3447,8 @@ Effective and own values together. ?asChildOf=<parentId> projects what the objec
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
-| `key` | path | string | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
+| `key` | path | string, 1–100 characters | **required** |
 
 **200** { key, reverted, effective, own }
 
@@ -3471,7 +3471,7 @@ Whether this object is paused, why, until when, and whether this is the one that
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { objectId, paused, pending, resumable, source, pausedAt, startsAt, pausedUntil, message, actor, inheritedFrom, schedule, dependency }
 
@@ -3483,16 +3483,16 @@ Pauses an object and every sensor beneath it. Give `minutes` for a duration, `un
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `minutes` | integer |  |  |
-| `until` | string |  |  |
-| `from` | string |  |  |
-| `message` | string |  |  |
+| `minutes` | integer, 1–525600 |  |  |
+| `until` | string, 1–64 characters |  |  |
+| `from` | string, 1–64 characters |  |  |
+| `message` | string, at most 500 characters |  |  |
 
 - `minutes` and `until` are not allowed together
 - `minutes` and `from` are not allowed together
@@ -3508,7 +3508,7 @@ Resumes an object, or cancels a maintenance window it has not reached yet. Only 
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { objectId, paused, pending, resumable, source, pausedAt, startsAt, pausedUntil, message, actor, inheritedFrom, schedule, dependency }
 
@@ -3520,15 +3520,15 @@ Acknowledges a Down alarm: the sensor reads Down (Acknowledged), notifications s
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `minutes` | integer |  |  |
-| `until` | string |  |  |
-| `message` | string |  |  |
+| `minutes` | integer, 1–525600 |  |  |
+| `until` | string, 1–64 characters |  |  |
+| `message` | string, at most 500 characters |  |  |
 
 - `minutes` and `until` are not allowed together
 
@@ -3542,7 +3542,7 @@ Withdraws an acknowledgement, so the alarm reads Down again and notifications re
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { objectId, acknowledged, refused, skipped, acknowledgedAt, acknowledgedUntil, message }
 
@@ -3554,13 +3554,13 @@ Forces sensors Down so a notification chain can be tested end to end. **This fir
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `message` | string |  |  |
+| `message` | string, at most 500 characters |  |  |
 
 **200** { objectId, simulated, sensors, skipped, message }
 
@@ -3572,7 +3572,7 @@ Lifts a simulated error. The sensors return to what they actually measure straig
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, 1–9007199254740991 | **required** |
 
 **200** { objectId, simulated, sensors, skipped, message }
 
@@ -3586,13 +3586,13 @@ What changed, when, from what, why, and how long it lasted. Scope to a branch wi
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `objectId` | query | integer |  |
-| `from` | query | string |  |
-| `to` | query | string |  |
-| `state` | query | `unknown` · `up` · `warning` · `down` · `down_acknowledged` · `down_partial` · `unusual` · `paused`, or an array of them |  |
-| `cause` | query | `scan` · `limit` · `lookup` · `user` · `schedule` · `dependency` · `parent` · `probe` · `access` · `simulated`, or an array of them |  |
-| `before` | query | string |  |
-| `limit` | query | integer | default `100` |
+| `objectId` | query | integer, at least 1 |  |
+| `from` | query | string, at most 64 characters |  |
+| `to` | query | string, at most 64 characters |  |
+| `state` | query | `unknown` · `up` · `warning` · `down` · `down_acknowledged` · `down_partial` · `unusual` · `paused`, or an array of them, at most 8 items |  |
+| `cause` | query | `scan` · `limit` · `lookup` · `user` · `schedule` · `dependency` · `parent` · `probe` · `access` · `simulated`, or an array of them, at most 10 items |  |
+| `before` | query | string, at most 40 characters |  |
+| `limit` | query | integer, 1–500 | default `100` |
 
 **200** { items, nextBefore }
 
@@ -3606,12 +3606,12 @@ Down, Down (Partial), Down (Acknowledged), Warning and Unusual — the five stat
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `objectId` | query | integer |  |
-| `state` | query | `down` · `down_partial` · `down_acknowledged` · `warning` · `unusual` · `recovering`, or an array of them |  |
-| `priorityMin` | query | integer |  |
+| `objectId` | query | integer, at least 1 |  |
+| `state` | query | `down` · `down_partial` · `down_acknowledged` · `warning` · `unusual` · `recovering`, or an array of them, at most 6 items |  |
+| `priorityMin` | query | integer, 1–5 |  |
 | `includeAcknowledged` | query | boolean | default `true` |
 | `sort` | query | `priority` · `duration` | default `priority` |
-| `limit` | query | integer | default `100` |
+| `limit` | query | integer, 1–500 | default `100` |
 
 **200** { items, total, counts, now }
 
@@ -3700,7 +3700,7 @@ One template
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { id, name, description, method, methodName, settings, redactedSettings, subject, body, recipients, priority, enabled, summary, summarisable, summarisation, summaryWindowSeconds, scheduleId, scheduleName, whenInactive, createdAt, updatedAt }
 
@@ -3714,7 +3714,7 @@ Whole-document, with one exception: a secret the request does not carry is **kep
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **Body** — [ms:templateInput](#schema-ms-templateinput)
 
@@ -3730,7 +3730,7 @@ Refused while a trigger still names it, with the list of triggers to fix: deleti
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { id, deleted }
 
@@ -3749,7 +3749,7 @@ Which triggers name this template
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { templateId, items }
 
@@ -3763,8 +3763,8 @@ Rendered against the sensor’s actual state, not an invented one. An operator w
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `sensorId` | query | integer | **required** |
-| `id` | path | integer | **required** |
+| `sensorId` | query | integer, at least 1 | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { templateId, sensorId, subject, body, unknown }
 
@@ -3781,7 +3781,7 @@ The same rendering as the saved preview, against a template that does not exist 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `template` | [ms:templateInput](#schema-ms-templateinput) | **required** |  |
-| `sensorId` | integer | **required** |  |
+| `sensorId` | integer, at least 1 | **required** |  |
 
 **200** { templateId, sensorId, subject, body, unknown }
 
@@ -3795,13 +3795,13 @@ Send a test notification through this template
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **Body**
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `sensorId` | integer |  |  |
+| `sensorId` | integer, at least 1 |  |  |
 
 **200** { templateId, templateName, method, methodName, sensorId, sensorName, subject, body, recipients, unknownPlaceholders, delivered, detail, error, retryable, durationMs, notes }
 
@@ -3831,7 +3831,7 @@ Own and inherited together, nearest first, each naming the object it is defined 
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { objectId, items }
 
@@ -3850,7 +3850,7 @@ The settings are validated against the kind’s own schema, with its defaults fi
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **Body** — [ms:triggerInput](#schema-ms-triggerinput)
 
@@ -3866,7 +3866,7 @@ Whole-document: a latency without the notification it delays is not half a trigg
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **Body** — [ms:triggerInput](#schema-ms-triggerinput)
 
@@ -3882,7 +3882,7 @@ From the object it is defined on. Deleting an inherited trigger means deleting i
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `id` | path | integer | **required** |
+| `id` | path | integer, at least 1 | **required** |
 
 **200** { id, deleted }
 
@@ -4081,7 +4081,7 @@ one of 4 shapes, by `kind`
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `object` | [ms:objectDetail](#schema-ms-objectdetail) | **required** |  |
-| `grantsNotCarried` | integer | **required** | How many positive grants on what was copied the copy did not carry, because only a caller who may grant (the admin role with full scope) carries them (`A-76`). Anybody else’s copy carries each `none`, and each `read` that narrows what its group holds where the copy landed, and no other group’s `write` or `full`. This counts the `write` and `full` grants left behind. A `read` left behind because it would widen where the copy landed is not counted, since whether it would depends on grants there the caller may not read. Every grant left behind is in the copy’s history as `grant.notCarried`. Always 0 for a caller who may grant, whose copy carries every grant. |
+| `grantsNotCarried` | integer, at least 0 | **required** | How many positive grants on what was copied the copy did not carry, because only a caller who may grant (the admin role with full scope) carries them (`A-76`). Anybody else’s copy carries each `none`, and each `read` that narrows what its group holds where the copy landed, and no other group’s `write` or `full`. This counts the `write` and `full` grants left behind. A `read` left behind because it would widen where the copy landed is not counted, since whether it would depends on grants there the caller may not read. Every grant left behind is in the copy’s history as `grant.notCarried`. Always 0 for a caller who may grant, whose copy carries every grant. |
 | `clonedCount` | object | **required** |  |
 | `clonedCount.group` | integer | **required** |  |
 | `clonedCount.device` | integer | **required** |  |
@@ -4104,15 +4104,15 @@ one of 4 shapes, by `kind`
 | --- | --- | --- | --- |
 | `kind` | `probe` · `group` · `device` · `sensor` | **required** |  |
 | `parentId` | integer | **required** |  |
-| `name` | string | **required** |  |
-| `tags` | string[] |  |  |
-| `priority` | integer |  |  |
-| `comments` | string |  |  |
-| `host` | string |  |  |
+| `name` | string, 1–500 characters | **required** |  |
+| `tags` | string[], at most 50 items, each 1–100 characters |  |  |
+| `priority` | integer, 1–5 |  |  |
+| `comments` | string, at most 10000 characters |  |  |
+| `host` | string, 1–255 characters |  |  |
 | `ipVersion` | `auto` · `v4` · `v6` |  |  |
-| `sensorType` | string |  |  |
+| `sensorType` | string, at most 100 characters, matches `^[a-z0-9]+(\.[a-z0-9-]+)+$` |  |  |
 | `params` | object |  |  |
-| `gid` | string | nullable | Binds this probe branch to a connected probe. R-01 replaces setting it by hand with an enrolment flow; until then it is how a probe is told which subtree it owns. |
+| `gid` | string, 1–128 characters | nullable | Binds this probe branch to a connected probe. R-01 replaces setting it by hand with an enrolment flow; until then it is how a probe is told which subtree it owns. |
 
 - when `kind` is `device`, `host` is required
 - when `kind` is `sensor`, `sensorType` is required
@@ -4127,8 +4127,8 @@ one of 4 shapes, by `kind`
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `parentId` | integer | **required** |  |
-| `nodes` | [ms:treeNode](#schema-ms-treenode)[] | **required** |  |
+| `parentId` | integer, at least 1 | **required** |  |
+| `nodes` | [ms:treeNode](#schema-ms-treenode)[], 1–5000 items | **required** |  |
 
 <a id="schema-ms-createtreeresult"></a>
 
@@ -4167,21 +4167,21 @@ one of 4 shapes, by `kind`
 | `updatedAt` | string | **required** |  |
 | `bounded` | boolean | **required** | Whether `allowedTargets`, or an SSH set's `hostKeys` with strict checking, bound where the set goes (`A-41b`). False means `write` on the object it is stored on is trust with it. |
 | `secretsSet` | string[] |  | The names of the secret fields that hold a value, never the values (`U-21`). Only on a set stored on the object asked about, for its form to offer keep, replace and clear. |
-| `withholds` | integer | **required** | How many sensors beneath this set its allowed targets keep it from now, of those the caller can see: a sensor whose device's address is outside them, or whose device is entered by name where the targets are addresses and the sensor’s type cannot be held to an address its probe checked. They are not sent the set and read Unknown. Zero for a set with no targets. |
-| `withheldBefore` | integer | **required** | Of the sensors this set reaches now and the caller can see, how many a set’s targets kept it from before this write (`A-55`): this set’s as it was, or an ancestor’s where this write stores the first set of the kind here. `withholds` is this, plus `newlyWithheld`, less `noLongerWithheld`. |
-| `newlyWithheld` | integer | **required** | How many sensors this write puts outside (`A-55`): kept from the set after it and not before, of those the caller can see. What a narrowing takes to Unknown. |
-| `noLongerWithheld` | integer | **required** | How many sensors this write brings back inside (`A-55`): kept from a set before it and sent this one after, of those the caller can see. |
+| `withholds` | integer, at least 0 | **required** | How many sensors beneath this set its allowed targets keep it from now, of those the caller can see: a sensor whose device's address is outside them, or whose device is entered by name where the targets are addresses and the sensor’s type cannot be held to an address its probe checked. They are not sent the set and read Unknown. Zero for a set with no targets. |
+| `withheldBefore` | integer, at least 0 | **required** | Of the sensors this set reaches now and the caller can see, how many a set’s targets kept it from before this write (`A-55`): this set’s as it was, or an ancestor’s where this write stores the first set of the kind here. `withholds` is this, plus `newlyWithheld`, less `noLongerWithheld`. |
+| `newlyWithheld` | integer, at least 0 | **required** | How many sensors this write puts outside (`A-55`): kept from the set after it and not before, of those the caller can see. What a narrowing takes to Unknown. |
+| `noLongerWithheld` | integer, at least 0 | **required** | How many sensors this write brings back inside (`A-55`): kept from a set before it and sent this one after, of those the caller can see. |
 | `byReason` | object | **required** | The four counts above for each of the two reasons a sensor is outside (`A-59`), over the same sensors the caller can see, so each count above is the sum of its two parts. A sensor outside after the write is counted for the reason that holds after it, and one outside before for the reason that held then, so a sensor that stays outside for another reason moves between the two without being newly outside. |
 | `byReason.outside` | object | **required** | Sensors on a device whose address, or whose name, the allowed targets do not cover. |
-| `byReason.outside.withholds` | integer | **required** |  |
-| `byReason.outside.withheldBefore` | integer | **required** |  |
-| `byReason.outside.newlyWithheld` | integer | **required** |  |
-| `byReason.outside.noLongerWithheld` | integer | **required** |  |
+| `byReason.outside.withholds` | integer, at least 0 | **required** |  |
+| `byReason.outside.withheldBefore` | integer, at least 0 | **required** |  |
+| `byReason.outside.newlyWithheld` | integer, at least 0 | **required** |  |
+| `byReason.outside.noLongerWithheld` | integer, at least 0 | **required** |  |
 | `byReason.unpinnable` | object | **required** | Sensors on a device entered by name, where the targets that could cover it are addresses and the sensor’s type cannot be held to an address its probe checked: the set is not sent whatever the name resolves to. |
-| `byReason.unpinnable.withholds` | integer | **required** |  |
-| `byReason.unpinnable.withheldBefore` | integer | **required** |  |
-| `byReason.unpinnable.newlyWithheld` | integer | **required** |  |
-| `byReason.unpinnable.noLongerWithheld` | integer | **required** |  |
+| `byReason.unpinnable.withholds` | integer, at least 0 | **required** |  |
+| `byReason.unpinnable.withheldBefore` | integer, at least 0 | **required** |  |
+| `byReason.unpinnable.newlyWithheld` | integer, at least 0 | **required** |  |
+| `byReason.unpinnable.noLongerWithheld` | integer, at least 0 | **required** |  |
 | `secretsCleared` | string[] | **required** | The secrets this write cleared because it widened where the set may go and did not send them again. |
 
 <a id="schema-ms-deliveryhealth"></a>
@@ -4289,7 +4289,7 @@ one of 4 shapes, by `kind`
 | `id` | integer | **required** |  |
 | `name` | string | **required** |  |
 | `description` | string | **required** |  |
-| `priority` | integer | **required** |  |
+| `priority` | integer, 1–5 | **required** |  |
 | `nodes` | [ms:libraryNode](#schema-ms-librarynode)[] | **required** |  |
 | `version` | integer | **required** |  |
 | `createdAt` | string (date-time) | **required** |  |
@@ -4301,10 +4301,10 @@ one of 4 shapes, by `kind`
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `name` | string | **required** |  |
-| `description` | string |  |  |
-| `priority` | integer |  |  |
-| `nodes` | [ms:libraryNode](#schema-ms-librarynode)[] |  |  |
+| `name` | string, 1–100 characters | **required** |  |
+| `description` | string, at most 1000 characters |  |  |
+| `priority` | integer, 1–5 |  |  |
+| `nodes` | [ms:libraryNode](#schema-ms-librarynode)[], at most 200 items |  |  |
 
 <a id="schema-ms-librarynode"></a>
 
@@ -4312,14 +4312,14 @@ one of 4 shapes, by `kind`
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `id` | string | **required** |  |
-| `name` | string | **required** |  |
+| `id` | string, matches `^[A-Za-z0-9_-]{1,40}$` | **required** |  |
+| `name` | string, 1–100 characters | **required** |  |
 | `rule` | object | nullable |  |
-| `rule.roots` | integer[] |  |  |
-| `rule.types` | string[] |  |  |
-| `rule.tags` | string[] |  |  |
-| `rule.states` | (`unknown` · `up` · `warning` · `down` · `down_acknowledged` · `down_partial` · `unusual` · `paused`)[] |  |  |
-| `children` | [ms:libraryNode](#schema-ms-librarynode)[] |  |  |
+| `rule.roots` | integer[], at most 50 items, each at least 1 |  |  |
+| `rule.types` | string[], at most 50 items, each matches `^[a-z0-9]+(\.[a-z0-9-]+)+$` |  |  |
+| `rule.tags` | string[], at most 50 items, each 1–100 characters |  |  |
+| `rule.states` | (`unknown` · `up` · `warning` · `down` · `down_acknowledged` · `down_partial` · `unusual` · `paused`)[], at most 8 items |  |  |
+| `children` | [ms:libraryNode](#schema-ms-librarynode)[], at most 200 items |  |  |
 
 <a id="schema-ms-lookupdetail"></a>
 
@@ -4391,7 +4391,7 @@ one of 4 shapes, by `kind`
 | `credentialsChanged[].kind` | `snmp` · `windows` · `ssh` · `vmware` · `database` · `http` | **required** |  |
 | `credentialsChanged[].before` | `own` · `inherited` · `none` | **required** |  |
 | `credentialsChanged[].after` | `own` · `inherited` · `none` | **required** |  |
-| `exceptionsCleared` | integer | **required** | Devices whose exception to the target policy the move cleared because it took them to another probe (`A-64`). Only an administrator’s move does; anybody else’s is refused. |
+| `exceptionsCleared` | integer, at least 0 | **required** | Devices whose exception to the target policy the move cleared because it took them to another probe (`A-64`). Only an administrator’s move does; anybody else’s is refused. |
 
 <a id="schema-ms-notificationmethod"></a>
 
@@ -4596,12 +4596,12 @@ one of 2 shapes, by `kind`
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `name` | string | **required** |  |
-| `description` | string |  |  |
+| `name` | string, 1–200 characters | **required** |  |
+| `description` | string, at most 500 characters |  |  |
 | `polarity` | `active` · `inactive` | default `active` |  |
-| `timezone` | string | nullable |  |
-| `periods` | string |  |  |
-| `grid` | (boolean[])[] |  |  |
+| `timezone` | string, at most 80 characters | nullable |  |
+| `periods` | string, at most 4000 characters |  |  |
+| `grid` | (boolean[])[], exactly 7 items, each exactly 24 items |  |  |
 
 <a id="schema-ms-sensorhistory"></a>
 
@@ -4755,7 +4755,7 @@ one of 3 shapes, by `kind`
 | `body` | string | **required** |  |
 | `recipients` | object[] | **required** |  |
 | `recipients[].kind` | `address` · `user` · `userGroup` | **required** |  |
-| `recipients[].value` | string | **required** |  |
+| `recipients[].value` | string, 1–320 characters | **required** |  |
 | `priority` | integer | **required** |  |
 | `enabled` | boolean | **required** |  |
 | `summary` | string | **required** |  |
@@ -4774,20 +4774,20 @@ one of 3 shapes, by `kind`
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `name` | string | **required** |  |
-| `description` | string |  |  |
-| `method` | string | **required** |  |
+| `name` | string, 1–200 characters | **required** |  |
+| `description` | string, at most 1000 characters |  |  |
+| `method` | string, 1–40 characters | **required** |  |
 | `settings` | object | **required** |  |
-| `subject` | string |  |  |
-| `body` | string |  |  |
-| `recipients` | object[] |  |  |
+| `subject` | string, at most 500 characters |  |  |
+| `body` | string, at most 20000 characters |  |  |
+| `recipients` | object[], at most 200 items |  |  |
 | `recipients[].kind` | `address` · `user` · `userGroup` | **required** |  |
-| `recipients[].value` | string | **required** |  |
-| `priority` | integer |  |  |
+| `recipients[].value` | string, 1–320 characters | **required** |  |
+| `priority` | integer, 1–5 |  |  |
 | `enabled` | boolean |  |  |
 | `summarisation` | `always-immediate` · `first-down` · `first-down-and-up` · `downs-immediate` · `downs-and-ups-immediate` · `always-summarise` |  |  |
-| `summaryWindowSeconds` | integer |  |  |
-| `scheduleId` | integer | nullable |  |
+| `summaryWindowSeconds` | integer, 60–86400 |  |  |
+| `scheduleId` | integer, at least 1 | nullable |  |
 | `whenInactive` | `queue` · `discard` |  |  |
 
 <a id="schema-ms-templatepreview"></a>
@@ -4818,7 +4818,7 @@ one of 3 shapes, by `kind`
 | `body` | string | **required** |  |
 | `recipients` | object[] | **required** |  |
 | `recipients[].kind` | `address` · `user` · `userGroup` | **required** |  |
-| `recipients[].value` | string | **required** |  |
+| `recipients[].value` | string, 1–320 characters | **required** |  |
 | `unknownPlaceholders` | string[] | **required** |  |
 | `delivered` | boolean | **required** |  |
 | `detail` | string | **required** nullable |  |
@@ -4848,17 +4848,17 @@ one of 3 shapes, by `kind`
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `kind` | `probe` · `group` · `device` · `sensor` | **required** |  |
-| `ref` | string |  | A handle for this node, unique in the request, so later nodes can hang off it. |
-| `parentRef` | string |  | The `ref` of this node’s parent. Absent means the request’s own `parentId`. |
-| `name` | string | **required** |  |
-| `tags` | string[] |  |  |
-| `priority` | integer |  |  |
-| `comments` | string |  |  |
-| `host` | string |  |  |
+| `ref` | string, 1–128 characters |  | A handle for this node, unique in the request, so later nodes can hang off it. |
+| `parentRef` | string, 1–128 characters |  | The `ref` of this node’s parent. Absent means the request’s own `parentId`. |
+| `name` | string, 1–500 characters | **required** |  |
+| `tags` | string[], at most 50 items, each 1–100 characters |  |  |
+| `priority` | integer, 1–5 |  |  |
+| `comments` | string, at most 10000 characters |  |  |
+| `host` | string, 1–255 characters |  |  |
 | `ipVersion` | `auto` · `v4` · `v6` |  |  |
-| `sensorType` | string |  |  |
+| `sensorType` | string, at most 100 characters, matches `^[a-z0-9]+(\.[a-z0-9-]+)+$` |  |  |
 | `params` | object |  |  |
-| `gid` | string | nullable |  |
+| `gid` | string, 1–128 characters | nullable |  |
 
 - when `kind` is `device`, `host` is required
 - when `kind` is `sensor`, `sensorType` is required
@@ -4892,7 +4892,7 @@ one of 3 shapes, by `kind`
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `kind` | string | **required** |  |
+| `kind` | string, 1–40 characters | **required** |  |
 | `settings` | object | **required** |  |
 | `enabled` | boolean | default `true` |  |
 
@@ -4914,15 +4914,15 @@ one of 3 shapes, by `kind`
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `kind` | `root` · `probe` · `group` · `device` · `sensor` | **required** |  |
-| `name` | string |  |  |
-| `tags` | string[] |  |  |
-| `priority` | integer |  |  |
-| `comments` | string |  |  |
+| `name` | string, 1–500 characters |  |  |
+| `tags` | string[], at most 50 items, each 1–100 characters |  |  |
+| `priority` | integer, 1–5 |  |  |
+| `comments` | string, at most 10000 characters |  |  |
 | `inheritsTriggers` | boolean |  |  |
-| `host` | string |  |  |
+| `host` | string, 1–255 characters |  |  |
 | `ipVersion` | `auto` · `v4` · `v6` |  |  |
 | `params` | object |  |  |
-| `gid` | string | nullable |  |
+| `gid` | string, 1–128 characters | nullable |  |
 
 - at least 2 fields must be given
 - when `kind` is `root` or `probe` or `group`, neither `host` nor `params` is allowed
