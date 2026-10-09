@@ -468,6 +468,8 @@ export interface ChannelValue {
    */
   value: number | null;
   at: string | null;
+  /** The channel list's `retired` (`ChannelRecord.retired`), from the same derivation (`U-38`). */
+  retired: boolean;
 }
 
 export interface SensorValues {

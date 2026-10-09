@@ -785,7 +785,7 @@ export class ApiServer {
             ? {}
             : { access: this.#auth.access, authorizing: this.#auth.required }),
         });
-        await scope.register(historyRoutes, { history: this.#history });
+        await scope.register(historyRoutes, { history: this.#history, objects: service });
         if (this.#queries !== undefined && this.#probeConfig !== undefined) {
           await scope.register(queryRoutes, {
             db: this.#db,

@@ -18,14 +18,21 @@ import type { ChartSeries } from './time-series-model';
  *
  * Each entry also carries its latest value, which is the "direct label, selectively" rule: one
  * number per series, at the end, rather than a number on every point.
+ *
+ * **A retired series says so in words** (`U-37`): "(retired)" is part of its label, in the same
+ * text ink, so the entry's text — what a screen reader reads — names it, and nothing rests on
+ * the line's colour or on where the line happens to end.
  */
 export function SeriesLegend({
   series,
   latest,
+  retired = [],
 }: {
   series: readonly ChartSeries[];
   /** The last reading of each series, already formatted, or null for a series that ends in a gap. */
   latest: readonly (string | null)[];
+  /** Whether each series is a retired channel (`P-310`), aligned to `series`. */
+  retired?: readonly boolean[];
 }): React.JSX.Element | null {
   if (series.length < 2) return null;
 
@@ -38,7 +45,9 @@ export function SeriesLegend({
             className="h-0.5 w-3 shrink-0"
             style={{ background: seriesVar(entry.slot) }}
           />
-          <span className="text-text-muted">{entry.label}</span>
+          <span className="text-text-muted">
+            {retired[index] === true ? `${entry.label} (retired)` : entry.label}
+          </span>
           <span className="font-medium tabular-nums text-text">{latest[index] ?? '—'}</span>
         </li>
       ))}

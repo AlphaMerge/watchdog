@@ -140,7 +140,10 @@ export function ObjectDetailView(): React.JSX.Element {
 
       {active === 'history' && (
         <TabPanel id="history">
-          <HistoryPanel sensorId={detail.id} />
+          <HistoryPanel
+            sensorId={detail.id}
+            channels={channels.status === 'ready' ? channels.data.items : null}
+          />
         </TabPanel>
       )}
 

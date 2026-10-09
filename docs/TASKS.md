@@ -24530,13 +24530,75 @@ because each is a decision rather than a defect:
       logs a warning, but the reply and the form say nothing. **Done when** the reply names the
       channels whose lookup was kept and the form shows it, with a test (WCAG 2.1 AA).
 
-- [ ] **U-37 — the History tab's legend does not mark a retired channel** · XS · P-310 · Found
+- [x] **U-37 — the History tab's legend does not mark a retired channel** · XS · P-310 · Found
       2026-10-08 in `P-310`. Its line just ends at the edit. **Done when** the legend marks it in
       text, not colour alone, with a test.
 
-- [ ] **U-38 — retired channels cannot be filtered, and `/values` does not say retired** · XS ·
+      **U-37 outcome. "(retired)" is part of the entry's label, in text ink, from the channel
+      list's `retired`.** No migration, no protocol change.
+      - **Where it comes from.** The history answer does not say which channels are retired, and
+        a second derivation could disagree with the list, so `HistoryPanel` takes the channel list
+        the detail page already reads (`GET /objects/:id/channels`) and marks the series whose
+        channel id is retired there.
+      - **How it is said.** `SeriesLegend` takes a `retired` array aligned to its series and
+        writes `Column b (retired)` as the label, in the same `text-text-muted` ink as every
+        label (the `dataviz` rule: text in text tokens, the series colour only in the key), so the
+        entry's text, which is what a screen reader reads, carries it. A line under the legend
+        says what retired means. A unit charted alone has no legend (one series, the heading
+        names it), so its heading says `(retired)` instead; the table view's column heading says
+        it too, since the table is the chart's accessible twin.
+      - **Tests** (`retired-channels.test.tsx`, the History tab rendered from a stubbed history
+        answer, uPlot's canvas stubbed): the retired entry reads `Column b (retired)`, the live
+        one has no "retired", the label has no inline style and is in text ink; nothing says
+        retired when no channel is; a single-series panel's heading; the table view's column
+        heading. **Mutations** (restored byte for byte): the legend not given `retired` fails 1;
+        the heading not marked fails 1; the table heading not marked fails 1.
+      - **Not done.** The chart's tooltip (uPlot series label) still shows the bare name; the
+        legend beside it says retired.
+
+- [x] **U-38 — retired channels cannot be filtered, and `/values` does not say retired** · XS ·
       P-310 · Found 2026-10-08 in `P-310`. **Done when** the channel list can hide retired channels
       and the `/values` route carries `retired`, with tests.
+
+      **U-38 outcome. A "Hide retired channels" box over the channel table, unticked by default;
+      `/values` carries the list's `retired`, from the list's own derivation.** No migration, no
+      protocol change.
+      - **The filter** (`ChannelTable.tsx`). The channel table has no filter row, so the box sits
+        above it, and only when some channel is retired (a control that hides nothing is noise).
+        Ticked, the retired rows go and a live region says `2 retired channels hidden.`, so a
+        shorter table is never read as the sensor's whole. **Shown by default**, as the alarm
+        list shows acknowledged alarms until asked not to: a channel an edit has just taken out
+        stays in sight, marked (`P-310`), with its limits still settable for the day it is put
+        back, and retired channels are rare enough that hiding them by default would mostly hide
+        the one row that explains an edit. Held in the component, not the URL.
+      - **`/values`** (`routes/history.ts`). The route reads the values as before (so an object
+        that is not a sensor is still its 404), then `ObjectService.channels`, the same call the
+        list makes, which derives `retired` in `ObjectRepository.channelsWithRetirement`; the
+        answer copies it per channel id. Nothing reimplemented. A channel created between the two
+        reads answers `false`, which is what `false` already means. `ms:channelValue.retired`
+        is a required boolean, as on `ms:channelRecord`; `HistoryService` (also the maps'
+        source) is unchanged. `api-reference.md` regenerated, `--check` clean.
+      - **No ETag to move.** `/values` is not cached or tagged (it is polled every 15 s), nor is
+        `/objects/:id/channels`; the detail's `?include=channels` tag already folds in the retired
+        ids (`P-322`).
+      - **Cost, measured** (a throwaway timing loop against the dev database, 85.4 million
+        samples, its widest sensor of 2 channels, 300 calls after 30 warm, while another agent's
+        runs shared the VM, so noisy): `latestForSensor` alone 1.7–2.5 ms median; the two
+        statements added (the object read and the channel query) 2.3–2.9 ms with every key
+        declared and 2.5–3.5 ms with none (the `sample` subquery on every channel); split, the
+        object read 1.0 ms and the channel query 2.6 ms. So the route's database time roughly
+        doubles, by a couple of milliseconds, per poll of an open sensor page. Not committed to
+        `docs/findings/`: the follow-up below is where it would be.
+      - **Tests.** Core (`retired-channels.test.ts`, through the API and real ingestion): `/values`
+        says `false`/`false`, then after an edit `false`/`true` and agrees with the list, then a
+        reading after the edit flips it to `false` and the list agrees again. Web
+        (`retired-channels.test.tsx`): shown by default with the box unticked and an empty live
+        region; ticked, both retired rows gone, the live one kept, `2 retired channels hidden.`
+        and the explanatory note gone; unticked, back; `1 retired channel hidden.` for one; no box
+        when nothing is retired. **Mutations** (restored byte for byte, `dist` rebuilt): `retired`
+        always `false` on `/values` fails the core test; the filter not applied fails 1 web test;
+        the box shown when nothing is retired fails 1.
+      - **Not done.** The History tab is not filtered (only marked, `U-37`).
 
 - [x] **U-39 — "—" on an optional field inside an array entry does nothing** · XS · U-34 · Found
       2026-10-08 in `U-34`. `removeAt` in `packages/web/src/forms/schema.ts` returns the document

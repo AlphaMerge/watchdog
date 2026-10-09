@@ -1127,7 +1127,9 @@ describe('source and segments[].table in GET /sensors/{id}/history', () => {
       const service = {
         forSensor: () => Promise.resolve(history(source)),
       } as unknown as HistoryService;
-      await app.register(historyRoutes, { history: service });
+      // `/values` only (`U-38`); this route never asks it.
+      const objects = { channels: () => Promise.resolve([]) };
+      await app.register(historyRoutes, { history: service, objects });
     });
 
   for (const source of SERIES_SOURCES) {

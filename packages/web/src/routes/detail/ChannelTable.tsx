@@ -1,4 +1,4 @@
-import { useId } from 'react';
+import { useId, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { ChannelRecord, ChannelValue, LookupSummary, SensorValues } from '../../api/types';
 import { Empty } from '../../components/Panels';
@@ -38,6 +38,10 @@ export function ChannelTable({
 }): React.JSX.Element {
   // Before the early return: a hook is called on every render or on none.
   const retiredNote = useId();
+  // Shown by default (`U-38`), as the alarm list shows acknowledged alarms until asked not to:
+  // a channel an edit has just taken out stays in sight, marked, with its limits still settable
+  // for the day it is put back, rather than vanishing from the one table that says it is retired.
+  const [hideRetired, setHideRetired] = useState(false);
   if (channels.length === 0) {
     return (
       <Empty because="A sensor type declares its channels, so they exist from the moment the sensor does (P-05).">
@@ -52,12 +56,39 @@ export function ChannelTable({
   // What `retired` and `not read` mean, as text on the page and as the description of each
   // retired row's header and reading. A title alone reaches nobody who cannot hover: not a
   // keyboard, not a touch screen, not a screen reader.
-  const anyRetired = channels.some((channel) => channel.retired);
+  const retiredCount = channels.filter((channel) => channel.retired).length;
+  const shown = hideRetired ? channels.filter((channel) => !channel.retired) : channels;
+  const anyRetired = shown.some((channel) => channel.retired);
   const describedBy = (channel: ChannelRecord): string | undefined =>
     channel.retired ? retiredNote : undefined;
 
   return (
     <div className="overflow-x-auto">
+      {/* Only where there is something to hide: a control that changes nothing is noise. */}
+      {retiredCount > 0 && (
+        <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+          <label className="flex min-h-6 items-center gap-1.5 text-sm text-text-muted">
+            <input
+              type="checkbox"
+              checked={hideRetired}
+              onChange={(event) => {
+                setHideRetired(event.target.checked);
+              }}
+            />
+            Hide retired channels
+          </label>
+          {/* Said in text, so a table that is shorter than the sensor's channel count is never
+              mistaken for the whole of it; a live region present before it changes, so the
+              count is announced when the box is ticked. */}
+          <p className="text-xs text-text-muted" role="status">
+            {!hideRetired
+              ? ''
+              : retiredCount === 1
+                ? '1 retired channel hidden.'
+                : `${String(retiredCount)} retired channels hidden.`}
+          </p>
+        </div>
+      )}
       <table className="w-full min-w-[36rem] text-sm">
         <caption className="sr-only">
           Channels, their current readings and the thresholds each is judged against
@@ -76,7 +107,7 @@ export function ChannelTable({
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
-          {channels.map((channel) => (
+          {shown.map((channel) => (
             <tr key={channel.id}>
               <th
                 scope="row"

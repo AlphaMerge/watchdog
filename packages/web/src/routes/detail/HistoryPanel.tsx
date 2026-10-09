@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApi } from '../../api/client';
-import type { HistoryChannel, HistorySeries } from '../../api/types';
+import type { ChannelRecord, HistoryChannel, HistorySeries } from '../../api/types';
 import { Card, Empty, ErrorPanel, Loading } from '../../components/Panels';
 import { groupByUnit, groupExtent, hasReadings, type ChartGroup } from '@ms/shared/charts';
 import { SeriesLegend } from '../../charts/SeriesLegend';
@@ -24,7 +24,17 @@ import {
  * it: every panel re-renders against the same slice, so two panels can never disagree about what
  * period they are showing. A per-panel range control would guarantee that they eventually do.
  */
-export function HistoryPanel({ sensorId }: { sensorId: number }): React.JSX.Element {
+export function HistoryPanel({
+  sensorId,
+  channels = null,
+}: {
+  sensorId: number;
+  /**
+   * The channel list, for which channels are retired (`U-37`). The history answer does not say,
+   * and asking the list rather than a second derivation keeps the two from disagreeing.
+   */
+  channels?: readonly ChannelRecord[] | null;
+}): React.JSX.Element {
   const [range, setRange] = useState<RangeId>('2d');
   const [asTable, setAsTable] = useState(false);
   const days = RANGES.find((entry) => entry.id === range)?.days ?? 2;
@@ -47,6 +57,11 @@ export function HistoryPanel({ sensorId }: { sensorId: number }): React.JSX.Elem
     if (history.status === 'ready') held.current = history.data;
   }, [history]);
   const showing = history.status === 'ready' ? history.data : held.current;
+  const retired = useMemo(
+    () =>
+      new Set((channels ?? []).filter((channel) => channel.retired).map((channel) => channel.id)),
+    [channels],
+  );
 
   return (
     <div className="space-y-4">
@@ -95,7 +110,7 @@ export function HistoryPanel({ sensorId }: { sensorId: number }): React.JSX.Elem
           className={history.status === 'loading' ? 'opacity-50 transition-opacity' : undefined}
           aria-busy={history.status === 'loading'}
         >
-          <Series series={showing} asTable={asTable} />
+          <Series series={showing} asTable={asTable} retired={retired} />
         </div>
       )}
     </div>
@@ -105,9 +120,11 @@ export function HistoryPanel({ sensorId }: { sensorId: number }): React.JSX.Elem
 function Series({
   series,
   asTable,
+  retired,
 }: {
   series: HistorySeries;
   asTable: boolean;
+  retired: ReadonlySet<number>;
 }): React.JSX.Element {
   const groups = useMemo(() => groupByUnit(series.channels), [series.channels]);
   // uPlot's time scale wants epoch seconds.
@@ -134,12 +151,13 @@ function Series({
             buckets={series.buckets}
             format={(channel, value) => formatValue(value, channel.unit, null)}
             caption={`Every bucket from ${new Date(series.from).toLocaleString()} to ${new Date(series.to).toLocaleString()}, one column per channel. A dash is a bucket with no reading.`}
+            retired={retired}
           />
         </Card>
       ) : (
         groups.map((group) => (
           <Card key={group.unit === '' ? '(none)' : group.unit}>
-            <Panel group={group} times={times} buckets={series.buckets} />
+            <Panel group={group} times={times} buckets={series.buckets} retired={retired} />
           </Card>
         ))
       )}
@@ -158,10 +176,12 @@ function Panel({
   group,
   times,
   buckets,
+  retired,
 }: {
   group: ChartGroup<HistoryChannel>;
   times: readonly number[];
   buckets: readonly string[];
+  retired: ReadonlySet<number>;
 }): React.JSX.Element {
   const chartSeries = useMemo<ChartSeries[]>(
     () =>
@@ -180,9 +200,13 @@ function Panel({
 
   const extent = groupExtent(group);
   const drawable = group.series.filter(({ channel }) => hasReadings(channel));
+  // Which series are retired channels (`U-37`): the legend says so in words, and a panel of one
+  // series, which has no legend, says so in its heading.
+  const retiredSeries = group.series.map(({ channel }) => retired.has(channel.id));
+  const only = group.series.length === 1 ? group.series[0]?.channel : undefined;
   const heading =
     group.series.length === 1
-      ? (group.series[0]?.channel.name ?? '')
+      ? `${only?.name ?? ''}${retiredSeries[0] === true ? ' (retired)' : ''}`
       : `${group.unit === '' ? 'Unitless' : group.unit} channels`;
 
   const latest = group.series.map(({ channel }) => {
@@ -218,7 +242,13 @@ function Panel({
         </figure>
       )}
 
-      <SeriesLegend series={chartSeries} latest={latest} />
+      <SeriesLegend series={chartSeries} latest={latest} retired={retiredSeries} />
+      {retiredSeries.includes(true) && (
+        <p className="mt-2 text-xs text-text-muted">
+          A retired channel was taken out of the sensor’s parameters by an edit; nothing reads it
+          any more, so its line ends there.
+        </p>
+      )}
 
       <p className="mt-2 text-xs text-text-muted">
         Breaks in a line are gaps, not zeroes — a Down sensor records no channel values at all.

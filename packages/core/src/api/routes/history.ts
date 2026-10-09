@@ -1,7 +1,8 @@
 // Side-effect import: @fastify/swagger augments FastifySchema with `description`.
 import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
-import type { HistoryService } from '../../timeseries/history.js';
+import type { ObjectService } from '../../objects/service.js';
+import type { ChannelValue, HistoryService, SensorValues } from '../../timeseries/history.js';
 import { onObject } from '../authorization.js';
 import {
   ALLOWED_RESOLUTIONS,
@@ -13,6 +14,13 @@ import {
 
 export interface HistoryRoutesOptions {
   history: HistoryService;
+  /** Where a channel's `retired` is worked out (`P-310`, `P-322`), for `/values` to carry it. */
+  objects: Pick<ObjectService, 'channels'>;
+}
+
+/** `GET /sensors/:id/values`: each channel's reading, and whether it is retired (`U-38`). */
+export interface SensorValuesAnswer extends Omit<SensorValues, 'channels'> {
+  channels: (ChannelValue & { retired: boolean })[];
 }
 
 /** The sensor detail page's first tab (CAPABILITIES.MD §8) — two days, when nothing is asked. */
@@ -52,7 +60,7 @@ export async function historyRoutes(
   app: FastifyInstance,
   options: HistoryRoutesOptions,
 ): Promise<void> {
-  const { history } = options;
+  const { history, objects } = options;
 
   app.get<{ Params: { id: number } }>(
     '/sensors/:id/values',
@@ -65,12 +73,33 @@ export async function historyRoutes(
           'A `null` value means no reading inside the window, which is a gap and never a zero: ' +
           'the window is three scan intervals (at least a minute), so a sensor that has stopped ' +
           'reporting shows nothing rather than its last healthy figure dressed as current. ' +
-          '`at` is when the reading shown was actually taken.',
+          '`at` is when the reading shown was actually taken. `retired` is the channel list’s ' +
+          '(`GET /objects/{id}/channels`), worked out by the same query on every read.',
         params: idParams,
         response: { 200: { $ref: 'ms:sensorValues' } },
       },
     },
-    async (request) => history.latestForSensor(request.params.id),
+    async (request): Promise<SensorValuesAnswer> => {
+      // The readings first: a sensor that does not exist, or an object that is not a sensor, is
+      // the 404 this route has always answered, not the channel list's own refusal.
+      const values = await history.latestForSensor(request.params.id);
+      // `retired` is not reimplemented here: it is the channel list's, from the one query that
+      // derives it (`ObjectRepository.channelsWithRetirement`). A channel created between the two
+      // reads is absent from the list and answers `false`, which is what `false` already means:
+      // not known to be retired.
+      const retired = new Set(
+        (await objects.channels(request.params.id))
+          .filter((channel) => channel.retired)
+          .map((channel) => channel.id),
+      );
+      return {
+        ...values,
+        channels: values.channels.map((channel) => ({
+          ...channel,
+          retired: retired.has(channel.id),
+        })),
+      };
+    },
   );
 
   app.get<{ Params: { id: number }; Querystring: HistoryQuery }>(

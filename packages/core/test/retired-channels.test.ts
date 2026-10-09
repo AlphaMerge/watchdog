@@ -472,6 +472,53 @@ describe(
       assert.equal(String(retiredAgain.headers['etag']), tag, 'the same answer, the same tag');
     });
 
+    // `U-38`. The channel table polls `/values`; it carries the list's `retired`, from the same
+    // derivation, so a client reading only the values is told the same thing as the list.
+    it('is carried by `/values`, as the list says it, and moves with a reading after the edit', async () => {
+      const id = await create('test.columns', { columns: [{ key: 'a' }, { key: 'b' }] });
+      const url = `/api/v1/sensors/${String(id)}/values`;
+      const valuesRetirement = async (): Promise<Record<string, boolean>> => {
+        const response = await app.inject({ method: 'GET', url });
+        assert.equal(response.statusCode, 200, response.body);
+        return Object.fromEntries(
+          response
+            .json<{ channels: Channel[] }>()
+            .channels.map((channel) => [channel.key, channel.retired]),
+        );
+      };
+
+      assert.deepEqual(await valuesRetirement(), { a: false, b: false });
+      await edit(id, { columns: [{ key: 'a' }] });
+      assert.deepEqual(await valuesRetirement(), { a: false, b: true }, 'no reading since');
+      assert.deepEqual(await retirement(id), await valuesRetirement(), 'the list agrees');
+
+      // A reading of `b` after the edit, as a probe ahead of the core sends (`P-322`): live.
+      const rows = await db.query<{ at: Date }>(
+        'SELECT updated_at AS at FROM sensor_config WHERE object_id = $1',
+        [id],
+      );
+      const changedAt = rows[0]?.at;
+      assert.ok(changedAt !== undefined);
+      await deliver(
+        [
+          {
+            sensorId: id,
+            at: new Date(changedAt.getTime() + 1).toISOString(),
+            outcome: 'ok',
+            message: '',
+            durationMs: 1,
+            channels: [
+              { key: 'a', value: 1 },
+              { key: 'b', value: 2 },
+            ],
+          },
+        ],
+        `values-${String(id)}`,
+      );
+      assert.deepEqual(await valuesRetirement(), { a: false, b: false }, 'read since the edit');
+      assert.deepEqual(await retirement(id), await valuesRetirement(), 'the list agrees again');
+    });
+
     it('is exact for the shipped `snmp.table`', async () => {
       const id = await create('snmp.table', {
         tableOid: '1.3.6.1.2.1.25.2.3.1',

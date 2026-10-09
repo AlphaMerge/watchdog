@@ -1,10 +1,15 @@
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { describe, expect, it } from 'vitest';
-import type { ChannelRecord, HistoryChannel, SensorValues } from '../src/api/types';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { ChannelRecord, HistoryChannel, HistorySeries, SensorValues } from '../src/api/types';
 import { SeriesTable } from '../src/charts/SeriesTable';
 import { dataFor, rowsFor } from '../src/charts/time-series-model';
 import { ChannelTable } from '../src/routes/detail/ChannelTable';
+import { HistoryPanel } from '../src/routes/detail/HistoryPanel';
+
+// The canvas is uPlot's and carries no text (it is `aria-hidden`); what is read is the legend,
+// the heading and the table view, which is what these tests are about.
+vi.mock('../src/charts/TimeSeriesChart', () => ({ TimeSeriesChart: () => null }));
 
 /**
  * A channel an edit took out of a sensor's parameters (`P-310`), as the sensor page shows it.
@@ -59,6 +64,7 @@ function values(readings: Record<number, { value: number; at: string } | null>):
       decimals: null,
       value: reading?.value ?? null,
       at: reading?.at ?? null,
+      retired: false,
     })),
   };
 }
@@ -259,5 +265,145 @@ describe('a retired channel’s history', () => {
       expect(within(row).getAllByRole('cell')[1]?.textContent).toMatch(/^4[0-2]$/);
     }
     expect(screen.queryByText('0')).toBeNull();
+  });
+});
+
+describe('a retired channel in the History tab’s legend (`U-37`)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const buckets = [0, 1, 2].map((minute) => new Date(NOW - (2 - minute) * 60_000).toISOString());
+  const series = (id: number, key: string, unit = ''): HistoryChannel => ({
+    id,
+    key,
+    name: `Column ${key}`,
+    unit,
+    decimals: null,
+    avg: [1, 2, id === 2 ? null : 3],
+    min: [1, 2, id === 2 ? null : 3],
+    max: [1, 2, id === 2 ? null : 3],
+    count: [1, 1, id === 2 ? null : 1],
+  });
+
+  /** The History tab, its history answered with these channels. */
+  const mount = (history: HistoryChannel[], channels: ChannelRecord[]): void => {
+    const answer: HistorySeries = {
+      sensorId: 9,
+      from: buckets[0] ?? '',
+      to: new Date(NOW).toISOString(),
+      resolutionSeconds: 60,
+      bucketCount: buckets.length,
+      source: 'sample',
+      buckets,
+      channels: history,
+      segments: [],
+      adjustments: [],
+    };
+    vi.stubGlobal('fetch', (url: string) =>
+      Promise.resolve(
+        url.includes('/sensors/9/history')
+          ? new Response(JSON.stringify(answer), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            })
+          : new Response('{}', { status: 404 }),
+      ),
+    );
+    render(<HistoryPanel sensorId={9} channels={channels} />);
+  };
+
+  it('says retired in the entry’s text, and a live channel’s entry does not', async () => {
+    mount(
+      [series(1, 'a'), series(2, 'b')],
+      [channel(1, 'a', { isPrimary: true }), channel(2, 'b', { retired: true })],
+    );
+    const entries = await screen.findAllByRole('listitem');
+    const retired = entries.find((entry) => entry.textContent.includes('Column b'));
+    const live = entries.find((entry) => entry.textContent.includes('Column a'));
+    expect(retired?.textContent).toContain('Column b (retired)');
+    expect(live?.textContent).not.toContain('retired');
+    // In text ink, never the series colour: the words carry it, the key carries identity.
+    const label = screen.getByText('Column b (retired)');
+    expect(label.getAttribute('style')).toBeNull();
+    expect(label.className).toContain('text-text-muted');
+    // And what it means, in words on the page.
+    expect(screen.getByText(/nothing reads it any more, so its line ends there/)).toBeDefined();
+  });
+
+  it('says nothing of retirement when no channel is retired', async () => {
+    mount([series(1, 'a'), series(2, 'b')], [channel(1, 'a'), channel(2, 'b')]);
+    expect(await screen.findAllByRole('listitem')).toHaveLength(2);
+    expect(screen.queryByText(/retired/)).toBeNull();
+  });
+
+  it('says it in the heading of a panel of one, which has no legend', async () => {
+    // Its own unit, so it is charted alone and the heading is what names it.
+    mount(
+      [series(1, 'a'), series(3, 'c', 'ms')],
+      [channel(1, 'a'), channel(3, 'c', { unit: 'ms', retired: true })],
+    );
+    expect(await screen.findByRole('heading', { name: /Column c \(retired\)/ })).toBeDefined();
+    expect(screen.getByRole('heading', { name: 'Column a' })).toBeDefined();
+  });
+
+  it('says it in the table view’s column heading too', async () => {
+    mount([series(1, 'a'), series(2, 'b')], [channel(1, 'a'), channel(2, 'b', { retired: true })]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show table' }));
+    expect(screen.getByRole('columnheader', { name: 'Column b (retired)' })).toBeDefined();
+    expect(screen.getByRole('columnheader', { name: 'Column a' })).toBeDefined();
+  });
+});
+
+describe('hiding retired channels in the channel table (`U-38`)', () => {
+  const CHANNELS = [
+    channel(1, 'a', { isPrimary: true }),
+    channel(2, 'b', { retired: true }),
+    channel(3, 'c', { retired: true }),
+  ];
+  const mount = (channels: ChannelRecord[]): void => {
+    render(
+      <MemoryRouter>
+        <ChannelTable
+          channels={channels}
+          sensorType="snmp.table"
+          values={null}
+          lookups={null}
+          now={NOW}
+        />
+      </MemoryRouter>,
+    );
+  };
+
+  it('shows them by default, marked, and hides them when asked, saying how many', () => {
+    mount(CHANNELS);
+    const hide = screen.getByRole('checkbox', { name: 'Hide retired channels' });
+    expect((hide as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByText('Column b')).toBeDefined();
+    expect(screen.getByText('Column c')).toBeDefined();
+    expect(screen.getByRole('status').textContent).toBe('');
+
+    fireEvent.click(hide);
+    expect(screen.queryByText('Column b')).toBeNull();
+    expect(screen.queryByText('Column c')).toBeNull();
+    expect(screen.getByText('Column a')).toBeDefined();
+    expect(screen.getByRole('status').textContent).toBe('2 retired channels hidden.');
+    // The note explains a mark no longer on the page, so it goes with them.
+    expect(screen.queryByText(/history is kept/i)).toBeNull();
+
+    fireEvent.click(hide);
+    expect(screen.getByText('Column b')).toBeDefined();
+    expect(screen.getByRole('status').textContent).toBe('');
+  });
+
+  it('counts one in the singular', () => {
+    mount([channel(1, 'a'), channel(2, 'b', { retired: true })]);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Hide retired channels' }));
+    expect(screen.getByRole('status').textContent).toBe('1 retired channel hidden.');
+  });
+
+  it('offers no control when nothing is retired', () => {
+    mount([channel(1, 'a'), channel(2, 'b')]);
+    expect(screen.queryByRole('checkbox')).toBeNull();
   });
 });

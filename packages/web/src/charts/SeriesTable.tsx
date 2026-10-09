@@ -19,11 +19,14 @@ export function SeriesTable({
   buckets,
   format,
   caption,
+  retired,
 }: {
   channels: readonly HistoryChannel[];
   buckets: readonly string[];
   format: (channel: HistoryChannel, value: number) => string;
   caption: string;
+  /** The ids of retired channels (`P-310`), whose column heading says so as the legend does. */
+  retired?: ReadonlySet<number>;
 }): React.JSX.Element {
   // Newest first: the question a table is opened with is almost always about the recent end.
   const order = Array.from({ length: buckets.length }, (_, index) => index).reverse();
@@ -42,6 +45,7 @@ export function SeriesTable({
               <th key={channel.id} scope="col" className="py-1.5 pr-3 text-right font-medium">
                 {channel.name}
                 {channel.unit !== '' && <span className="ml-1">({channel.unit})</span>}
+                {retired?.has(channel.id) === true && <span className="ml-1">(retired)</span>}
               </th>
             ))}
           </tr>

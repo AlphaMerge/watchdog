@@ -255,9 +255,12 @@ row and its history and is no longer read. The channel table marks it **retired*
 and says **not read** where the reading goes, rather than *no recent reading*, which would read
 as an outage; a note under the table says what that means, and is each retired row's accessible
 description, so it does not depend on hovering. Its limits judge nothing, so it plays no part in
-the sensor's state. On the
-**History** tab its line stops at the edit, as a gap. Put the column back and it is read again,
-with its history. Only a type that promises its readings name no channel it does not declare is
+the sensor's state. **Hide retired channels**, above the table where any channel is retired,
+takes them out of it and says how many it hid; it starts unticked, so a channel an edit has just
+retired stays in sight (`U-38`). On the **History** tab its line stops at the edit, as a gap, and
+its legend entry (or, charted alone, its heading) and its column in the table view say
+**(retired)** in words, not by colour (`U-37`). `GET /sensors/:id/values` carries the same
+`retired` as the channel list. Put the column back and it is read again, with its history. Only a type that promises its readings name no channel it does not declare is
 marked this way (`P-310`): every shipped type but three (`P-320`). An advanced script's extra
 channels, and Windows CPU's per-processor and Windows Volume's per-drive channels, come from what
 was read, so no channel of those three types is ever called retired. Nor is a channel

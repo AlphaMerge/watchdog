@@ -3335,7 +3335,7 @@ For types whose parameters contain paths into a document — `rest.custom`’s `
 
 ### `GET /api/v1/sensors/{id}/values`
 
-Each channel's current reading, for a sensor detail page's channel table. A `null` value means no reading inside the window, which is a gap and never a zero: the window is three scan intervals (at least a minute), so a sensor that has stopped reporting shows nothing rather than its last healthy figure dressed as current. `at` is when the reading shown was actually taken.
+Each channel's current reading, for a sensor detail page's channel table. A `null` value means no reading inside the window, which is a gap and never a zero: the window is three scan intervals (at least a minute), so a sensor that has stopped reporting shows nothing rather than its last healthy figure dressed as current. `at` is when the reading shown was actually taken. `retired` is the channel list’s (`GET /objects/{id}/channels`), worked out by the same query on every read.
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
@@ -4047,6 +4047,7 @@ one of 4 shapes, by `kind`
 | `decimals` | integer | **required** nullable |  |
 | `value` | number | **required** nullable |  |
 | `at` | string | **required** nullable |  |
+| `retired` | boolean | **required** | The channel list’s `retired` (`ms:channelRecord`), from the same derivation: nothing will read this channel again. `false` where that is not known. |
 
 <a id="schema-ms-checkchannel"></a>
 

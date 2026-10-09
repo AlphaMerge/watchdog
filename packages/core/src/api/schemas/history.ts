@@ -129,7 +129,7 @@ export const channelValueSchema = {
   $id: 'ms:channelValue',
   type: 'object',
   additionalProperties: false,
-  required: ['id', 'key', 'name', 'unit', 'decimals', 'value', 'at'],
+  required: ['id', 'key', 'name', 'unit', 'decimals', 'value', 'at', 'retired'],
   properties: {
     id: { type: 'integer' },
     key: { type: 'string' },
@@ -138,6 +138,12 @@ export const channelValueSchema = {
     decimals: { type: ['integer', 'null'] },
     value: { type: ['number', 'null'] },
     at: { type: ['string', 'null'] },
+    retired: {
+      type: 'boolean',
+      description:
+        'The channel list’s `retired` (`ms:channelRecord`), from the same derivation: nothing ' +
+        'will read this channel again. `false` where that is not known.',
+    },
   },
 } as const;
 
