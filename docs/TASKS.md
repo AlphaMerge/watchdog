@@ -12178,6 +12178,55 @@ because each is a decision rather than a defect:
       policy for when such passes run (always, on a build change, or behind a version marker), with
       the reason written down.
 
+- [ ] **P-334 — no request schema marks a password `writeOnly`** · XS · P-318 · Found 2026-10-09
+      in `P-318`. `POST /auth/login` `password`, `/auth/password` `currentPassword`/`newPassword` and
+      the account-create `password` are plain strings, so neither the OpenAPI document nor the
+      reference tells a client they are write-only. **Done when** each secret in a request schema
+      is `writeOnly`, the reference shows it, and a build-hygiene check refuses a request field named
+      like a secret without it.
+
+- [ ] **P-335 — state fields with a fixed set of values are plain strings** · XS · P-318 · Found
+      2026-10-09 in `P-318`. `ms:alarm.state`, `ms:notificationRequest.status` and `status` in
+      `GET /discovery/{id}/summary` are `string` although their query filters list the values — the
+      P-313 kind of gap. **Done when** each is an `enum` matching what the code writes, with a test
+      that serialises every value.
+
+- [ ] **P-336 — the credential-shaped-field check reads too little** · XS · P-318 · Found
+      2026-10-09 in `P-318`. `build-hygiene.test.ts` matches only a summary line ending in `}`, so a
+      line listing more than one response is skipped, and it reads top-level names only. **Done
+      when** it reads the reference's field tables, nested fields included, with a test that a
+      nested credential-shaped response field fails it.
+
+- [ ] **P-337 — the API reference leaves out constraints, and its generator warns** · XS · P-318 ·
+      Found 2026-10-09 in `P-318`. `minimum`, `maxLength` and `pattern` are not rendered, and
+      registering routes prints Ajv "strict mode: use allowUnionTypes" for `#/properties/tag` and
+      `#/properties/effective`. **Done when** constraints are rendered and the warnings are gone or
+      explained.
+
+- [ ] **P-338 — the Probe Health sensor's message does not say a probe was refused** · S · P-317 ·
+      Found 2026-10-09 in `P-317`. The sweep says only "not connected to the core" for a probe
+      refused over its version; naming the refusal needs the registration row per disconnected
+      probe per sweep. **Done when** it names it without a query per probe per sweep, with a test.
+
+- [ ] **P-339 — a key first reported in the minute after an edit is never counted** · XS · P-321 ·
+      Found 2026-10-09 in `P-321`. The count runs only when a channel is created, and the 60 s
+      `DECLARATION_SETTLE_MS` skips a key created inside it; a broken type's key that already has a
+      row is never counted either. **Done when** decided whether a later reading of such a key is
+      counted (once per channel), with a test either way.
+
+- [ ] **P-340 — the retired window grows with a voucher write and with a probe clock behind** · S ·
+      P-322 · Found 2026-10-09 in `P-322`. `retired` compares readings with
+      `sensor_config.updated_at`, which `recordVoucher` also moves, and a probe clock behind the
+      database lengthens the window by its offset. **Done when** a column that only a parameters
+      change moves, and/or the probe's clock offset stored where the query can use it (a
+      migration), or the reason not to is written down.
+
+- [ ] **P-341 — the channel list and a conditional GET now cost more** · XS · P-322 · Found
+      2026-10-09 in `P-322`. The list plans against `sample` even when no key needs it (about 0.9 ms
+      warm, 13 ms cold), and a conditional GET with `?include=channels` now reads the channels.
+      **Done when** measured at the v1 target and either the subquery is dropped when nothing needs
+      it or the numbers say it does not matter, committed to `docs/findings/`.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -23504,6 +23553,17 @@ because each is a decision rather than a defect:
       - **Not done.** `SettingsPanel`'s problem paragraph (inheritable settings, `U-09`) is still
         rendered only with a problem, is not a live region, and is not tied to its control by
         `aria-describedby`.
+
+- [ ] **U-46 — the inheritable-settings problem is not announced or tied to its control** · XS ·
+      U-41 · Found 2026-10-09 in `U-45`. In `routes/detail/SettingsPanel.tsx` the problem paragraph
+      is rendered only when there is a problem, is not a live region and has `describedBy=""` — the
+      WCAG 4.1.3 gap U-41 closed in `SchemaForm`. **Done when** it is a polite live region present
+      before its text changes and tied by `aria-describedby` while it holds a problem, with tests.
+
+- [ ] **U-47 — a cleared JSON entry shows `""` after it is remounted** · XS · U-44 · Found
+      2026-10-09 in `U-44`. `JsonBox` sets its text from the value only on mount, so a cleared
+      entry moved or remounted shows `""`, which the operator never typed. **Done when** a cleared
+      entry shows an empty box after a remount, with a test.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
