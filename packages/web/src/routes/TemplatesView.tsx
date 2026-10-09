@@ -45,18 +45,38 @@ export function TemplatesView(): React.JSX.Element {
   const editing = params.get('id');
   const creating = params.get('new') === '1';
 
+  // **A deleted template, said, and focus somewhere that stays** (`U-64` review). An accepted
+  // delete closes the editor, and *Yes, delete* — which had focus — goes with it. Focus goes to
+  // *New template*: a real control, at the top of the page, there whether the list is empty or
+  // not, one Tab after the heading; and a polite region that was there from the start says what
+  // happened, since nothing else on the page does (the template just leaves the list). Emptied
+  // and filled through `sayAgain`, so a second template deleted under the same name is said too,
+  // and emptied when an editor is opened.
+  const [deleted, setDeleted, sayDeleted] = useRefusal<string>();
+  const newButton = useRef<HTMLButtonElement>(null);
+
   const open = useCallback(
     (id: number | null) => {
+      setDeleted(null);
       setParams(id === null ? { new: '1' } : { id: String(id) }, { replace: true });
     },
-    [setParams],
+    [setParams, setDeleted],
   );
 
   const close = useCallback(() => {
     setParams({}, { replace: true });
   }, [setParams]);
 
-  if (templates.status === 'loading' || methods.status === 'loading') {
+  // The list last read, kept while it is read again after a save or a delete: otherwise the page
+  // is *Loading templates…* for the length of the request, and *New template*, the region that
+  // says the delete, and the focus on it go with it.
+  const heldTemplates = useRef<readonly TemplateView[] | null>(null);
+  useEffect(() => {
+    if (templates.status === 'ready') heldTemplates.current = templates.data.items;
+  }, [templates]);
+  const items = templates.status === 'ready' ? templates.data.items : heldTemplates.current;
+
+  if ((templates.status === 'loading' && items === null) || methods.status === 'loading') {
     return <Loading what="templates" />;
   }
   if (templates.status === 'error') {
@@ -64,23 +84,30 @@ export function TemplatesView(): React.JSX.Element {
   }
   if (methods.status === 'error')
     return <ErrorPanel error={methods.error} retry={methods.reload} />;
+  if (items === null) return <Loading what="templates" />;
 
-  const chosen =
-    editing === null ? undefined : templates.data.items.find((t) => String(t.id) === editing);
+  const chosen = editing === null ? undefined : items.find((t) => String(t.id) === editing);
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <PageTitle title="Notification templates" />
-        <button
-          type="button"
-          onClick={() => {
-            open(null);
-          }}
-          className="ml-auto border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast"
-        >
-          New template
-        </button>
+      {/* One block, so the region below never ends up as an empty child of the page's stack. */}
+      <div>
+        <div className="flex flex-wrap items-center gap-3">
+          <PageTitle title="Notification templates" />
+          <button
+            ref={newButton}
+            type="button"
+            onClick={() => {
+              open(null);
+            }}
+            className="ml-auto border border-accent bg-accent px-3 py-1 text-sm font-medium text-accent-contrast"
+          >
+            New template
+          </button>
+        </div>
+        <p role="status" className="mt-2 text-sm text-text-muted empty:mt-0">
+          {deleted}
+        </p>
       </div>
 
       {(creating || chosen !== undefined) && (
@@ -92,18 +119,24 @@ export function TemplatesView(): React.JSX.Element {
             templates.reload();
             close();
           }}
+          onDeleted={(name) => {
+            sayDeleted(`Template ${name} deleted.`);
+            templates.reload();
+            close();
+            newButton.current?.focus();
+          }}
           onCancel={close}
         />
       )}
 
       <Card>
-        {templates.data.items.length === 0 ? (
+        {items.length === 0 ? (
           <Empty because="Without one, a trigger has nothing to send and an alarm reaches nobody.">
             No templates yet.
           </Empty>
         ) : (
           <ul className="divide-y divide-border">
-            {templates.data.items.map((template) => (
+            {items.map((template) => (
               <li key={template.id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 py-2">
                 <button
                   type="button"
@@ -142,11 +175,14 @@ function Editor({
   template,
   methods,
   onSaved,
+  onDeleted,
   onCancel,
 }: {
   template: TemplateView | undefined;
   methods: readonly NotificationMethod[];
   onSaved: () => void;
+  /** The template was deleted; its name, for the page to say so. */
+  onDeleted: (name: string) => void;
   onCancel: () => void;
 }): React.JSX.Element {
   const placeholders = useApi<{ items: PlaceholderInfo[] }>('/notification-placeholders');
@@ -408,7 +444,14 @@ function Editor({
               >
                 Cancel
               </button>
-              {template !== undefined && <Delete template={template} onDeleted={onSaved} />}
+              {template !== undefined && (
+                <Delete
+                  template={template}
+                  onDeleted={() => {
+                    onDeleted(template.name);
+                  }}
+                />
+              )}
             </div>
 
             <Failure error={failed} className="mt-4 empty:mt-0" />
@@ -614,27 +657,40 @@ function Delete({
 }): React.JSX.Element {
   const [failed, setFailed] = useState<ApiError | null>(null);
   const [confirming, setConfirming] = useState(false);
+  // The request is out (`U-64` review). *Keep it* is not offered while it is: a delete that has
+  // been sent cannot be called back, so a *Keep it* pressed now would close the question and then
+  // delete the template anyway when the core accepted it — or, refused, leave a refusal with no
+  // question to come back to. *Yes, delete* stays where it is, saying so, and does nothing more.
+  const [deleting, setDeleting] = useState(false);
 
-  // **Where focus goes when the button that had it is taken away** (`U-64`). A refused delete
-  // replaces the question with the refusal, so *Yes, delete* — which had focus — is gone, and
-  // focus would fall to the page: a keyboard user starts again from the top, and a screen reader
-  // may say nothing of where they are. It goes to *Close*, the one control the refusal leaves,
-  // rather than to the region: the alert already says the refusal, a focused region would say it
-  // a second time and is not something the operator can act on, and *Close* is described by the
-  // region, so a reader whose focus change cut the alert short still hears why it is there. The
-  // triggers that still name the template are links just before it, one Shift+Tab away. *Close*
-  // and *Keep it* go too, and send focus back to *Delete*, which takes their place.
-  const focusNext = useRef<'close' | 'delete' | null>(null);
+  // **Where focus goes when the button that had it is taken away** (`U-64`), so that no step
+  // here leaves it on the page, where a keyboard user starts again from the top and a screen
+  // reader may say nothing of where they are.
+  // - **Asking the question puts it on *Keep it*.** *Delete* is gone, and of the two answers the
+  //   one a second press of Enter or Space should land on is the one that loses nothing: with
+  //   focus on *Yes, delete*, pressing *Delete* twice would delete. *Keep it* is described by the
+  //   question, and *Yes, delete* is one Shift+Tab away.
+  // - **A refusal puts it on *Close***, the one control the refusal leaves, rather than on the
+  //   region: the alert already says the refusal, a focused region would say it a second time and
+  //   is not something the operator can act on, and *Close* is described by the region, so a
+  //   reader whose focus change cut the alert short still hears why it is there. The triggers
+  //   that still name the template are links just before it, one Shift+Tab away.
+  // - ***Close* and *Keep it* put it back on *Delete***, which takes their place.
+  // An accepted delete closes the editor; the page puts focus on *New template* and says so.
+  const focusNext = useRef<'keep' | 'close' | 'delete' | null>(null);
   const yesButton = useRef<HTMLButtonElement>(null);
+  const keepButton = useRef<HTMLButtonElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   const deleteButton = useRef<HTMLButtonElement>(null);
   const region = useId();
+  const question = useId();
 
   useEffect(() => {
     const target = focusNext.current;
     if (target === null) return;
     focusNext.current = null;
-    (target === 'close' ? closeButton : deleteButton).current?.focus();
+    const button = { keep: keepButton, close: closeButton, delete: deleteButton }[target];
+    button.current?.focus();
   }, [failed, confirming]);
 
   // The core refuses a template a trigger still names, and returns the list (`N-05`). That list
@@ -649,6 +705,9 @@ function Delete({
           ref={deleteButton}
           type="button"
           onClick={() => {
+            focusNext.current = 'keep';
+            // The question is always asked: nothing refused is left standing in its place.
+            setFailed(null);
             setConfirming(true);
           }}
           className="border border-down-fg px-3 py-1 text-sm text-down-fg"
@@ -657,24 +716,31 @@ function Delete({
         </button>
       ) : failed === null ? (
         <span className="flex items-center gap-2">
-          <span className="text-xs text-text-muted">Delete it?</span>
+          <span id={question} className="text-xs text-text-muted">
+            Delete it?
+          </span>
           <button
+            ref={yesButton}
             type="button"
+            // Not `disabled`: a button disabled while it has focus can lose it.
+            aria-disabled={deleting}
             onClick={() => {
+              if (deleting) return;
               // Emptied as the attempt starts (`U-56`); it already is, since the question is
               // only asked while nothing is refused, but this does not rest on that.
               setFailed(null);
+              setDeleting(true);
               send('DELETE', `/templates/${String(template.id)}`)
                 .then(onDeleted)
                 .catch((error: unknown) => {
                   // Only from *Yes, delete*: an operator who moved on while the core answered
-                  // keeps their focus where they took it.
-                  // A click that did not focus the button (Safari's) leaves it on the page, and
-                  // that is moved too.
+                  // keeps their focus where they took it. A click that did not focus the button
+                  // (Safari's) leaves it on the page, and that is moved too.
                   const at = document.activeElement;
                   if (at === yesButton.current || at === null || at === document.body) {
                     focusNext.current = 'close';
                   }
+                  setDeleting(false);
                   setFailed(
                     error instanceof ApiError
                       ? error
@@ -686,22 +752,25 @@ function Delete({
                   );
                 });
             }}
-            ref={yesButton}
-            className="border border-down-fg bg-down-bg px-2 py-1 text-xs text-down-fg"
+            className="border border-down-fg bg-down-bg px-2 py-1 text-xs text-down-fg aria-disabled:opacity-50"
           >
-            Yes, delete
+            {deleting ? 'Deleting…' : 'Yes, delete'}
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              focusNext.current = 'delete';
-              setConfirming(false);
-              setFailed(null);
-            }}
-            className="border border-control px-2 py-1 text-xs text-text-muted"
-          >
-            Keep it
-          </button>
+          {!deleting && (
+            <button
+              ref={keepButton}
+              type="button"
+              aria-describedby={question}
+              onClick={() => {
+                focusNext.current = 'delete';
+                setConfirming(false);
+                setFailed(null);
+              }}
+              className="border border-control px-2 py-1 text-xs text-text-muted"
+            >
+              Keep it
+            </button>
+          )}
         </span>
       ) : null}
 

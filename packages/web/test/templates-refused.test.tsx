@@ -70,6 +70,10 @@ interface Script {
   saves?: Refusal[];
   tests?: Refusal[];
   deletes?: Refusal[];
+  /** Each DELETE waits for this before it is answered. */
+  hold?: Promise<void>;
+  /** Counts the DELETEs sent. */
+  deleted?: { count: number };
 }
 
 function core(script: Script): void {
@@ -139,10 +143,13 @@ function core(script: Script): void {
         : refuse(next, 'the test could not be sent');
     }
     if (method === 'DELETE' && path === '/templates/9') {
+      if (script.deleted !== undefined) script.deleted.count += 1;
       const next = script.deletes?.shift();
-      return next === undefined
-        ? Promise.resolve(new Response(null, { status: 204 }))
-        : refuse(next, 'a trigger still names this template');
+      return (script.hold ?? Promise.resolve()).then(() =>
+        next === undefined
+          ? new Response(null, { status: 204 })
+          : refuse(next, 'a trigger still names this template'),
+      );
     }
     if (path === '/templates') return reply(200, { items: [TEMPLATE] });
     if (path === '/notification-methods') return reply(200, { items: [METHOD] });
@@ -368,6 +375,104 @@ describe('focus after a refused template delete (U-64)', () => {
     await alertSaying('a trigger still names this template');
     expect(button('Close')).toBeDefined();
     expect(document.activeElement).toBe(subject);
+  });
+
+  it('puts it on Keep it when the question is asked, which the question describes', async () => {
+    core({});
+    await open();
+    press('Delete');
+    await waitFor(() => {
+      expect(document.activeElement).toBe(button('Keep it'));
+    });
+    const asked = screen.getByText('Delete it?');
+    expect(asked.id).not.toBe('');
+    expect(button('Keep it').getAttribute('aria-describedby')).toBe(asked.id);
+  });
+
+  it('never leaves it on the page while a delete is out, refused or asked again', async () => {
+    let answer: () => void = () => undefined;
+    const hold = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+    const deleted = { count: 0 };
+    core({ deletes: [{ id: 'req-64' }], hold, deleted });
+    await open();
+    const onPage = (): boolean =>
+      document.activeElement === null || document.activeElement === document.body;
+
+    press('Delete');
+    await waitFor(() => {
+      expect(document.activeElement).toBe(button('Keep it'));
+    });
+    press('Yes, delete');
+    await waitFor(() => {
+      expect(deleted.count).toBe(1);
+    });
+
+    // Out: Keep it is not offered, since the request cannot be called back; Yes, delete keeps
+    // focus, says so, and sends nothing more.
+    const out = screen.getByRole('button', { name: 'Deleting…' });
+    expect(screen.queryByRole('button', { name: 'Keep it' })).toBeNull();
+    expect(out.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(out);
+    fireEvent.click(out);
+    expect(deleted.count).toBe(1);
+
+    // Refused: Close. Closed: Delete. Asked again: the question, and Keep it.
+    answer();
+    await alertSaying('a trigger still names this template');
+    await waitFor(() => {
+      expect(document.activeElement).toBe(button('Close'));
+    });
+    press('Close');
+    await waitFor(() => {
+      expect(document.activeElement).toBe(button('Delete'));
+    });
+    press('Delete');
+    await waitFor(() => {
+      expect(document.activeElement).toBe(button('Keep it'));
+    });
+    expect(screen.getByText('Delete it?')).toBeDefined();
+    expect(onPage()).toBe(false);
+  });
+});
+
+/**
+ * An accepted delete (`U-64` review).
+ *
+ * It closes the editor and takes *Yes, delete* with it. Focus goes to *New template*, and a polite
+ * region that was there, empty, from the start says which template went — the same node
+ * throughout, since the list is held while it is read again rather than the page going back to
+ * *Loading templates…*. Opening an editor empties it.
+ */
+describe('an accepted template delete (U-64)', () => {
+  it('puts focus on New template and says the template was deleted', async () => {
+    core({});
+    await open();
+    const newTemplate = button('New template');
+    const region = newTemplate.parentElement?.nextElementSibling;
+    if (!(region instanceof HTMLElement)) throw new Error('no deleted region');
+    expectQuiet(region, ['mt-2', 'empty:mt-0'], 'polite');
+
+    button('Delete').focus();
+    fireEvent.click(button('Delete'));
+    button('Yes, delete').focus();
+    fireEvent.click(button('Yes, delete'));
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { name: 'Editing Alert hook' })).toBeNull();
+    });
+    expect(document.activeElement).toBe(newTemplate);
+    await waitFor(() => {
+      expect(region.textContent).toBe('Template Alert hook deleted.');
+    });
+    expect(newTemplate.parentElement?.nextElementSibling).toBe(region);
+    expect(button('New template')).toBe(newTemplate);
+    expect(speaking()).toEqual([]);
+
+    // Opening an editor empties it.
+    fireEvent.click(button('Alert hook'));
+    await screen.findByRole('heading', { name: 'Editing Alert hook' });
+    expect(region.matches(':empty')).toBe(true);
   });
 });
 

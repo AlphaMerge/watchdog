@@ -26012,7 +26012,46 @@ because each is a decision rather than a defect:
         alert 3; a repeated poll failure replacing the one shown 2; focus not moved 1; *Close* not
         described 1; focus taken whatever had it 1; *Close* and *Keep it* dropping focus 1.
       - **Not done.** *Delete* asking its question still removes itself with focus on it; focus
-        could go to *Keep it*.
+        could go to *Keep it*. (Done on review, below.)
+      - **Amended on review** (a second commit).
+        - **The run card is keyed by its run.** `RunPanel` was rendered without a key, so a second
+          start kept the first run's refused cancel, its id and its summary under the new run's
+          heading for good (`refused` is emptied only by a cancel, and the summary is read only
+          once a run stops). Keyed by `startedId`, everything the card holds starts again.
+        - ***Keep it* is not offered while a delete is out.** A sent `DELETE` cannot be called
+          back: pressing *Keep it* then closed the question and the template was deleted anyway if
+          the core accepted; if it refused, the refusal stood with no question, and pressing
+          *Delete* rendered nothing in its place, so focus fell to the page. Chosen over clearing
+          the refusal on *Delete* because it removes the lie, not just the dead end: *Yes, delete*
+          says *Deleting…*, is `aria-disabled` (not `disabled`, which can drop the focus it holds)
+          and sends nothing more. *Delete* also empties any refusal as it asks, so the question is
+          always asked; with *Keep it* gone while a request is out no path reaches that state any
+          more, so no test can fail it.
+        - **Asking the question puts focus on *Keep it*** (the follow-up above), described by
+          *Delete it?*: of the two answers it is the one a second press of Enter or Space should
+          land on, since with focus on *Yes, delete* pressing *Delete* twice would delete.
+          *Yes, delete* is one Shift+Tab away.
+        - **An accepted delete puts focus on *New template* and says so.** The editor closed and
+          took focus with it, and nothing said what happened. *New template* is a real control at
+          the top of the page, there whether the list is empty or not; *Template … deleted.* is
+          said by a polite region below the title, there and empty from the start, filled through
+          `sayAgain` and emptied when an editor is opened. For either to survive, the page now
+          holds the list it last read while reading it again, rather than going back to
+          *Loading templates…* (which also unmounted everything after a save).
+        - **Tests.** `discovery-view.test.tsx`: a refused cancel on run 7, run 7 finishing and its
+          summary shown, then run 8 started: run 8's alert is empty and neither the summary nor
+          `req-cancel` is on the page. `templates-refused.test.tsx`: the question puts focus on
+          *Keep it*, described by the question; with the `DELETE` held, *Keep it* is gone,
+          *Deleting…* has focus and is `aria-disabled`, pressing it sends nothing, and then the
+          refusal, *Close*, *Delete* and the question again each take focus, never the page; an
+          accepted delete leaves focus on *New template*, says *Template Alert hook deleted.*
+          politely in the region that was there before (the same node after the re-read), and
+          opening an editor empties it. Mutations, each failing (restored byte for byte):
+          the card not keyed 1; *Keep it* offered while out 1; *Yes, delete* sending again 1;
+          the question leaving focus on the page 2; *Keep it* not described 1; an accepted delete
+          leaving focus on the page 1; said by nothing 1; the list not held 1.
+        - **Not done.** An accepted save closes the editor the same way, and focus on *Save
+          template* falls to the page.
 
 - [x] **U-65 — four components write the correlation id themselves** · XS · U-59 · Found
       2026-10-09 in `U-59`. `ParamsForm`, `SettingsPanel`, `AddSensor` and `CredentialsPanel`

@@ -66,6 +66,20 @@ const RUN: DiscoveryRun = {
   finishedAt: null,
 };
 
+/** A second run, started after the first, into another range. */
+const RUN_8: DiscoveryRun = { ...RUN, id: 8, range: '10.0.1.0/29' };
+
+/** Run 7 finished, and what its summary says. */
+const RUN_7_DONE: DiscoveryRun = {
+  ...RUN,
+  status: 'done',
+  cursor: 6,
+  startedAt: '2026-10-09T00:00:00.000Z',
+  finishedAt: '2026-10-09T00:00:05.000Z',
+};
+const HEADLINE_7 = 'Run seven swept 6 addresses and found nothing';
+const SUMMARY_7 = { runId: 7, headline: HEADLINE_7, errors: [] };
+
 /**
  * A refusal the core sends — with its correlation id when `id` is given — `null` for an attempt
  * it accepts, or `'unreachable'` for a core that never answered.
@@ -98,11 +112,17 @@ function core({
   starts = [],
   cancels = [],
   reads = [],
+  started = [],
+  bodies = [],
 }: {
   starts?: Answer[];
   cancels?: Answer[];
   /** The run's reads in turn, each held until its promise settles; read as it is once spent. */
   reads?: Promise<Answer>[];
+  /** The runs accepted starts answer with, in turn; `RUN` once spent. */
+  started?: DiscoveryRun[];
+  /** What run 7's accepted reads answer with, in turn; `RUN` once spent. */
+  bodies?: DiscoveryRun[];
 }): void {
   const reply = (status: number, data: unknown): Promise<Response> =>
     Promise.resolve(
@@ -151,7 +171,12 @@ function core({
             ],
           });
     }
-    if (method === 'POST' && path === '/discovery') return answer(starts, RUN);
+    if (method === 'POST' && path === '/discovery') {
+      const next = starts.shift() ?? null;
+      return said(next, next === null ? (started.shift() ?? RUN) : RUN);
+    }
+    if (path === '/discovery/8') return reply(200, RUN_8);
+    if (path === '/discovery/7/summary') return reply(200, SUMMARY_7);
     if (method === 'POST' && path === '/discovery/7/cancel') return answer(cancels, RUN);
     if (path.startsWith('/objects?kind=probe')) {
       return reply(200, { items: [object(10, 1, 'probe', 'probe-a')] });
@@ -161,7 +186,9 @@ function core({
     }
     if (path === '/discovery/7') {
       const next = reads.shift();
-      return next === undefined ? reply(200, RUN) : next.then((one) => said(one, RUN));
+      return next === undefined
+        ? reply(200, bodies.shift() ?? RUN)
+        : next.then((one) => said(one, one === null ? (bodies.shift() ?? RUN) : RUN));
     }
     if (path.startsWith('/objects/20/discovery')) return reply(200, { items: [] });
     if (path === '/device-templates' || path === '/discovery/schedules' || path === '/schedules') {
@@ -474,6 +501,48 @@ describe('the run card’s refused cancel and its polls (U-64)', () => {
       expect(refusal.textContent).toBe(`${NO_CANCEL} req-cancel`);
       expect(within(panel).getByRole('alert')).toBe(refusal);
       expect(polls.matches(':empty')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves nothing of run 7 — its refused cancel or its summary — under run 8', async () => {
+    core({
+      cancels: [{ status: 409, message: NO_CANCEL, id: 'req-cancel' }],
+      started: [RUN, RUN_8],
+      bodies: [RUN, RUN_7_DONE],
+    });
+    const card = await open();
+    const start = await ready(card);
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { panel, refusal } = await watching(start);
+      fireEvent.click(within(panel).getByRole('button', { name: 'Cancel' }));
+      await turnUntil(() => refusal.textContent !== '', 'the refusal was not said');
+
+      // Run 7 finishes on the next read, and its summary is shown under the refusal.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      await turnUntil(
+        () => panel.textContent.includes(HEADLINE_7),
+        'run 7’s summary was not shown',
+      );
+      expect(refusal.textContent).toBe(`${NO_CANCEL} req-cancel`);
+
+      // Run 8: a card of its own, with nothing of run 7's in it.
+      fireEvent.click(start);
+      await turnUntil(
+        () => screen.queryByRole('heading', { name: 'Run 8 — 10.0.1.0/29' }) !== null,
+        'run 8 was not shown',
+      );
+      const next = screen.getByRole('heading', { name: 'Run 8 — 10.0.1.0/29' }).closest('section');
+      if (next === null) throw new Error('no card for run 8');
+      expect(within(next).getByRole('alert').matches(':empty')).toBe(true);
+      expect(screen.queryByText(HEADLINE_7)).toBeNull();
+      expect(screen.queryByText('req-cancel', { exact: false })).toBeNull();
+      expect(speaking()).toEqual([]);
     } finally {
       vi.useRealTimers();
     }

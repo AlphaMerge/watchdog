@@ -92,7 +92,10 @@ export function DiscoveryView(): React.JSX.Element {
         onError={setStartError}
       />
 
-      {startedId !== null && <RunPanel runId={startedId} />}
+      {/* Keyed by the run (`U-64` review): everything the card holds — the run as last read, its
+          summary, a refused cancel, a failed poll — is about that run, and a second start would
+          otherwise show run 7's refusal and summary under run 8's heading for good. */}
+      {startedId !== null && <RunPanel key={startedId} runId={startedId} />}
 
       {draft.groupId !== null && <RecentRuns groupId={draft.groupId} watching={startedId} />}
 
