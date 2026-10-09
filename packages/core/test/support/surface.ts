@@ -133,6 +133,9 @@ export function baseOptions(stamp: BuildStamp, required: boolean): ApiServerOpti
     build: stamp,
     service,
     history: new HistoryService({ db: unusable, logger: silent }),
+    // As `main.ts` passes its `StoredParamsCheck` (`P-375`); a pass that has not finished, so the
+    // listing's `invalidParams` filter answers that the set is not known yet.
+    invalidParams: { failing: () => ({ kind: 'checking' }) },
     db: unusable,
     audit: new AuditRepository(),
     catalogue,
