@@ -23,6 +23,13 @@ const code = (value) => `\`${typeof value === 'string' ? value : JSON.stringify(
 const MAX_DEPTH = 12;
 
 /**
+ * Orders by UTF-16 code unit, never by locale. `localeCompare` reads the collation from `LANG`,
+ * so under `cs_CZ.UTF-8` `ch` sorts after `h`, and `--check` would fail on one machine for a page
+ * another generated (`P-318` review).
+ */
+export const byCodePoint = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
  * @param {object} doc the OpenAPI document, as `@fastify/swagger` produces it
  * @param {{ extra?: Array<{ path: string, method: string, operation: object }> }} [options]
  *   operations Fastify serves that the document does not carry (the WebSocket stream)
@@ -240,11 +247,50 @@ export function renderApiReference(doc, options = {}) {
     return code(schema);
   }
 
+  /**
+   * Object-level keywords this renders as fields, flags or prose, or that say nothing about what
+   * may be sent. Any other keyword on an object is printed as it is (`rulesOf`'s last step), so a
+   * constraint this renderer has not learnt is shown raw rather than silently left out.
+   */
+  const UNDERSTOOD = new Set([
+    'type',
+    'properties',
+    'required',
+    'additionalProperties',
+    'minProperties',
+    'maxProperties',
+    'allOf',
+    'oneOf',
+    'anyOf',
+    'not',
+    'if',
+    'then',
+    'else',
+    'dependencies',
+    'dependentRequired',
+    'title',
+    'description',
+    '$id',
+    '$schema',
+    '$comment',
+    'nullable',
+    'readOnly',
+    'writeOnly',
+    'deprecated',
+    'default',
+    'examples',
+    'example',
+  ]);
+  const plural = (count, word) => `${String(count)} ${word}${count === 1 ? '' : 's'}`;
+
   /** The rules an object schema carries beside its fields, one sentence each. */
   function rulesOf(schema) {
     const rules = [];
     if (typeof schema.minProperties === 'number') {
-      rules.push(`at least ${String(schema.minProperties)} field${schema.minProperties === 1 ? '' : 's'} must be given`);
+      rules.push(`at least ${plural(schema.minProperties, 'field')} must be given`);
+    }
+    if (typeof schema.maxProperties === 'number') {
+      rules.push(`at most ${plural(schema.maxProperties, 'field')} may be given`);
     }
     for (const member of schema.allOf ?? []) rules.push(rule(member));
     if (schema.not !== undefined) rules.push(rule({ not: schema.not }));
@@ -252,6 +298,20 @@ export function renderApiReference(doc, options = {}) {
     for (const union of ['oneOf', 'anyOf']) {
       const alternatives = schema[union];
       if (Array.isArray(alternatives) && !alternatives.every(isShape)) rules.push(rule({ [union]: alternatives }));
+    }
+    // `dependencies` (draft 7) and `dependentRequired` (2019-09): a field that needs others.
+    // The pause body's `from` needs `until`, and a client that sends `from` alone gets a 400.
+    for (const keyword of ['dependencies', 'dependentRequired']) {
+      for (const [key, needs] of Object.entries(schema[keyword] ?? {})) {
+        rules.push(
+          Array.isArray(needs)
+            ? `${code(key)} requires ${andList(names(needs))}`
+            : `when ${code(key)} is given, ${rule(needs)}`,
+        );
+      }
+    }
+    for (const [keyword, value] of Object.entries(schema)) {
+      if (!UNDERSTOOD.has(keyword)) rules.push(`${code(keyword)}: ${code(value)}`);
     }
     return rules;
   }
@@ -277,33 +337,34 @@ export function renderApiReference(doc, options = {}) {
         walk(shape.items, `${path}[]`, depth + 1);
         return;
       }
-      const alternatives = unionOf(shape);
-      if (alternatives !== undefined) {
-        const by = discriminatorOf(alternatives);
-        alternatives.forEach((alternative, index) => {
-          const label = by === undefined ? `#${String(index + 1)}` : by.labels[index];
-          const branch = `${path}{${label}}`;
-          const { schema: inner } = withoutNull(alternative);
-          // A scalar alternative has no fields; it is already named in the parent's type.
-          if (inner.$ref !== undefined || !(isObject(inner) || inner.type === 'array')) return;
-          rows.push({ path: branch, schema: alternative, required: false });
-          walk(alternative, branch, depth + 1);
-        });
-        return;
+      // An object's own fields and rules first: they hold whichever alternative of a union
+      // beside them matches, so they are listed even when there is one (`P-318` review).
+      if (isObject(shape) || shape.additionalProperties !== undefined) {
+        for (const text of rulesOf(shape)) rules.push(path === '' ? text : `${code(path)}: ${text}`);
+        const required = new Set(shape.required ?? []);
+        for (const [key, property] of Object.entries(shape.properties ?? {})) {
+          rows.push({ path: `${prefix}${key}`, schema: property, required: required.has(key) });
+          walk(property, `${prefix}${key}`, depth + 1);
+        }
+        const map = shape.additionalProperties;
+        if (map !== undefined && typeof map === 'object' && Object.keys(map).length > 0) {
+          rows.push({ path: `${prefix}*`, schema: map, required: false, map: true });
+          walk(map, `${prefix}*`, depth + 1);
+        }
       }
-      if (!isObject(shape) && shape.additionalProperties === undefined) return;
 
-      for (const text of rulesOf(shape)) rules.push(path === '' ? text : `${code(path)}: ${text}`);
-      const required = new Set(shape.required ?? []);
-      for (const [key, property] of Object.entries(shape.properties ?? {})) {
-        rows.push({ path: `${prefix}${key}`, schema: property, required: required.has(key) });
-        walk(property, `${prefix}${key}`, depth + 1);
-      }
-      const map = shape.additionalProperties;
-      if (map !== undefined && typeof map === 'object' && Object.keys(map).length > 0) {
-        rows.push({ path: `${prefix}*`, schema: map, required: false, map: true });
-        walk(map, `${prefix}*`, depth + 1);
-      }
+      const alternatives = unionOf(shape);
+      if (alternatives === undefined) return;
+      const by = discriminatorOf(alternatives);
+      alternatives.forEach((alternative, index) => {
+        const label = by === undefined ? `#${String(index + 1)}` : by.labels[index];
+        const branch = `${path}{${label}}`;
+        const { schema: inner } = withoutNull(alternative);
+        // A scalar alternative has no fields; it is already named in the parent's type.
+        if (inner.$ref !== undefined || !(isObject(inner) || inner.type === 'array')) return;
+        rows.push({ path: branch, schema: alternative, required: false });
+        walk(alternative, branch, depth + 1);
+      });
     };
     walk(schema, '', 0);
     return { rows, rules };
@@ -363,7 +424,7 @@ export function renderApiReference(doc, options = {}) {
       }
     }
     for (const route of options.extra ?? []) add(route.operation.tags?.[0] ?? 'Other', route);
-    return [...seen.entries()].sort(([a], [b]) => a.localeCompare(b));
+    return [...seen.entries()].sort(([a], [b]) => byCodePoint(a, b));
   }
 
   const groups = groupsOf();
@@ -526,7 +587,7 @@ export function renderApiReference(doc, options = {}) {
   if (sections.length > 0) {
     say('---', '', '## Schemas', '');
     say('The shapes routes share, each declared once in the code and rendered once here.', '');
-    sections.sort((a, b) => nameOf(a.key).localeCompare(nameOf(b.key)));
+    sections.sort((a, b) => byCodePoint(nameOf(a.key), nameOf(b.key)));
     for (const { key, schema, body } of sections) {
       say(`<a id="${anchorOf(key)}"></a>`, '', `### \`${nameOf(key)}\``, '');
       if (typeof schema.description === 'string') say(collapse(schema.description), '');

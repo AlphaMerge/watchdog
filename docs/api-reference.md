@@ -3495,6 +3495,7 @@ Pauses an object and every sensor beneath it. Give `minutes` for a duration, `un
 
 - `minutes` and `until` are not allowed together
 - `minutes` and `from` are not allowed together
+- `from` requires `until`
 
 **200** { objectId, paused, pending, resumable, source, pausedAt, startsAt, pausedUntil, message, actor, inheritedFrom, schedule, dependency }
 

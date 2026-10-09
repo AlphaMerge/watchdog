@@ -11664,6 +11664,14 @@ because each is a decision rather than a defect:
         unflagged 1.
       - **Not done.** Constraints (`minimum`, `maxLength`, `pattern`) are not rendered; the
         OpenAPI document at `/api/v1/openapi.json` carries them.
+      - **Review.** Three fixes. `dependencies`/`dependentRequired` are rendered ("`from` requires
+        `until`", the pause body's, which was missing), and any object keyword the renderer has no
+        prose for is printed raw instead of dropped. Tags and schemas sort by code point, not
+        `localeCompare`, which under `cs_CZ.UTF-8` put `h` before `ch` and failed `--check`. An
+        object's own fields, map and rules are listed beside its union's alternatives. The
+        regenerated reference changes by that one pause line. Mutations: each fix reverted
+        failed 1 (four mutations); the locale test runs the renderer in a Czech-locale child and
+        first asserts the child really collates that way.
 
 - [x] **P-319 — a refused hello rewrites a probe's row before its key is checked** · S · U-35 ·
       Found 2026-10-08 reviewing `U-35`. mTLS proves only that the peer holds a certificate the
