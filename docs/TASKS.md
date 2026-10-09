@@ -13178,6 +13178,12 @@ because each is a decision rather than a defect:
       message (2,000 exactly, ending `m…` and the note), and a script without one (no note).
       **Mutations** (restored byte for byte, `dist` rebuilt): no note fails it; the note not kept
       clear of the clip fails it (2,189 characters).
+      **Amended on review.** The cut was a plain `slice` in UTF-16 units, so an astral character
+      across it left a lone high surrogate, which `fitResult` stores as U+FFFD. It is now the wire's
+      own `clip` (`P-277`), exported from `@ms/shared` as `clipText` rather than copied: it backs
+      off half a pair, so the message is then one unit under the limit. **Test**: a message whose
+      emoji straddles the cut ends `x…` and the note, within the limit, with no U+FFFD and no lone
+      surrogate. **Mutation**: back to `slice` fails it.
 
 - [x] **P-360 — a per-sensor declaration with two primaries is refused only at registration** ·
       XS · P-348 · Found 2026-10-09 in `P-348`'s review. `SensorCatalogue.channelsFor` now refuses

@@ -989,6 +989,28 @@ describe('exe.script.advanced', () => {
     assert.equal(plain.message, 'two channels');
   });
 
+  it('cuts a message for the note without halving a character across the cut (P-359 review)', async () => {
+    // An astral character whose high surrogate is the last unit a plain slice would keep.
+    const room = RESULT_LIMITS.message - RUNTIME_NOT_KEPT.length;
+    const printed = JSON.stringify({
+      channels: [
+        { key: 'value', value: 3 },
+        { key: 'runtime', value: 987654 },
+      ],
+      message: `${'x'.repeat(room - 2)}😀 and more after it`,
+    });
+    script('own-runtime-astral.sh', `cat <<'JSON'\n${printed}\nJSON`);
+    const execution = await run(exeScriptAdvanced, { program: 'own-runtime-astral.sh' });
+    const said = execution.message ?? '';
+    assert.equal(said.endsWith(`x…${RUNTIME_NOT_KEPT}`), true, 'the character left out whole');
+    assert.ok(said.length <= RESULT_LIMITS.message, String(said.length));
+    assert.equal(said.includes('�'), false);
+    assert.equal(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(said),
+      false,
+    );
+  });
+
   it('declares the primary the operator named', () => {
     const defs = exeScriptAdvanced.channels({
       primaryChannel: 'free_space',

@@ -1,4 +1,4 @@
-import { RESULT_LIMITS } from '@ms/shared';
+import { clipText, RESULT_LIMITS } from '@ms/shared';
 import type { ChannelDef, CheckContext, CheckExecution, SensorType } from '../contract.js';
 import { scrubberOf } from '../support/secrets.js';
 import { SCRIPT_SCHEMA, SCRIPT_SECRET_DESTINATIONS, runScript } from './exe-script-shared.js';
@@ -133,12 +133,14 @@ export const exeScriptAdvanced: SensorType = {
  * value the program printed.
  *
  * **The note survives the wire's clip** (`RESULT_LIMITS.message`), as `withDropped`'s does: the
- * program's words end in the ellipsis instead. A clip of the program's words is scrubbed first
+ * program's words end in the ellipsis instead, cut by that same clip, so an astral character
+ * across the cut is left out whole rather than halved (`P-359` review). A clip of the program's words is scrubbed first
  * (`CheckContext.scrub`): a cut can leave half a secret the catalogue's scrub no longer finds.
  */
 function withRuntimeNotKept(message: string, scrub: (text: string) => string): string {
-  const room = RESULT_LIMITS.message - RUNTIME_NOT_KEPT.length;
-  const said = scrub(message);
-  if (said.length <= room) return said + RUNTIME_NOT_KEPT;
-  return said.slice(0, room - 1) + '…' + RUNTIME_NOT_KEPT;
+  // `clipText` is the wire's own clip (`P-277`): never ends in half a surrogate pair, which
+  // `fitResult` would store as U+FFFD.
+  return (
+    clipText(scrub(message), RESULT_LIMITS.message - RUNTIME_NOT_KEPT.length) + RUNTIME_NOT_KEPT
+  );
 }

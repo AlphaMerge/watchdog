@@ -201,8 +201,12 @@ function textOf(text: string): string {
 /**
  * At most `limit` characters, the last an ellipsis when anything was cut. Counted in UTF-16
  * units, so never more code points than the schema allows, and never ending in half a pair.
+ *
+ * Exported (as `clipText` from the package) for a type that leaves room in its message for a note
+ * of its own (`P-359`), so that its cut cannot leave the lone surrogate `textOf` would store as
+ * U+FFFD.
  */
-function clip(text: string, limit: number): string {
+export function clip(text: string, limit: number): string {
   if (text.length <= limit) return text;
   let end = limit - ELLIPSIS.length;
   const last = text.charCodeAt(end - 1);
