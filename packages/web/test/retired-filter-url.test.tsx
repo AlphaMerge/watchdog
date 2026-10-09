@@ -177,7 +177,10 @@ describe('hiding retired channels on the sensor page', () => {
     expect(await screen.findByText('Column a')).toBeDefined();
     expect(box().checked).toBe(true);
     expect(screen.queryByText('Column b')).toBeNull();
-    expect(screen.getByRole('status').textContent).toBe('1 retired channel hidden.');
+    // The box's own region: the page has another, for a re-read of the list that fails (`U-67`).
+    expect(box().closest('label')?.nextElementSibling?.textContent).toBe(
+      '1 retired channel hidden.',
+    );
 
     // Another tab and back keeps it: changing tab writes its own parameter and no other.
     fireEvent.click(screen.getByRole('tab', { name: 'History' }));

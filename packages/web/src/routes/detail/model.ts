@@ -281,7 +281,7 @@ export function modeChangesOf(error: {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Whether the channel list the page holds has gone stale about retirement (`U-55`).
+ * Whether the channel list the page holds has gone stale (`U-55`, `U-61`).
  *
  * The page reads the list once, when it opens, and polls `/values`, which carries the list's own
  * `retired` from the same derivation (`U-38`). A channel is retired until a reading newer than
@@ -292,14 +292,21 @@ export function modeChangesOf(error: {
  *
  * Compared on `retired`, not on whether a reading is present: a reading a probe took before the
  * edit is still shown while it is recent, and it does not make the channel live, so a re-read
- * for it would answer the same and be asked for again. A channel `/values` names and the list
- * does not hold is not compared: `false` is what the route says of one it has not worked out.
+ * for it would answer the same and be asked for again.
+ *
+ * **A channel `/values` names and the list does not hold is stale too** (`U-61`): an edit since
+ * the page opened gave the sensor a channel (a table column added), and the list read before it
+ * has no row for it, so it stayed out of the table until a reload. Its `retired` is not compared
+ * — `false` is what the route says of a channel it has not worked out — only that the list lacks
+ * it. Both answers come from the sensor's own channel rows, so a list read after the poll holds
+ * it and the next poll agrees; the page's once-a-minute bound covers a list read just before the
+ * channel was made.
  */
 export function channelListIsStale(list: readonly ChannelRecord[], values: SensorValues): boolean {
   const held = new Map(list.map((channel) => [channel.id, channel.retired]));
   return values.channels.some((channel) => {
     const retired = held.get(channel.id);
-    return retired !== undefined && retired !== channel.retired;
+    return retired === undefined || retired !== channel.retired;
   });
 }
 

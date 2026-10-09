@@ -26366,12 +26366,50 @@ because each is a decision rather than a defect:
       - **Not done.** *Try again* takes itself away, and focus with it, as every `ErrorPanel` retry
         in the app does (the panel is replaced by a loading line).
 
-- [ ] **U-61 — the History tab learns of a revived channel late, and of a new one never** · S ·
+- [x] **U-61 — the History tab learns of a revived channel late, and of a new one never** · S ·
       U-55 · Found 2026-10-09 in `U-55`. The History tab does not poll, so a channel a reading makes
       live again is noticed only at the next Overview poll and its chart only on a range change;
       and a channel `/values` names that the list does not hold never causes a re-read, so it
       stays out of the table until a reload. **Done when** both are noticed while the page is
       open, within the same once-a-minute bound, with tests.
+
+      **U-61 outcome. The page polls `/values` itself, on the Overview and the History tab alike;
+      a channel the poll names and the list lacks makes the list stale; and each re-read of the
+      list reads the History tab's series again, up to now.** Web only; no route, migration or
+      protocol change.
+      - **The poll moved up from `LiveChannels` to `ObjectDetailView`**, with its fifteen-second
+        interval, its hidden-tab pause and the `channelListIsStale` check; the table is handed the
+        hook's answer. Only while a tab that shows channels is open: on Log, Settings, Triggers or
+        Changes the path is null and nothing is asked, and coming back asks at once (the path
+        returning from null is a new read). The History tab used to ask nothing between ranges.
+      - **A new channel.** `channelListIsStale` is also true for a channel `/values` names that
+        the list does not hold (an edit added a table column), whatever its `retired` says. Both
+        answers come from the sensor's own channel rows, so the re-read holds it and the next poll
+        agrees. A channel the list holds and the poll does not name is still not stale; nothing in
+        the core takes a channel away rather than retiring it.
+      - **The chart.** `relist`, when its minute allows, also counts `relisted`, which
+        `HistoryPanel` takes as `refreshed`: each change sets the range's end to now and reloads,
+        so a revived channel's line or a new channel's chart appears with the re-read, and the
+        answer in hand is held, dimmed, meanwhile, as for a range change. The end is now state
+        (set on a range change too, and a press of the range already chosen asks nothing, as
+        before); `reload` beside the new end because within the same millisecond the path would
+        not change and nothing would be asked. Bounded by `RELIST_MIN_MS`, the same minute as the
+        list.
+      - **Tests** (`retired-history-poll.test.tsx`, under fake `setInterval`/`Date`, with
+        `performance.now` moved with them): on History, a reading reviving Column b is noticed at
+        the next poll, the list read again, the `(retired)` mark gone from the legend and the
+        series read again with its end 15 s later, and an agreeing poll after reads neither; a
+        channel an edit added is charted from the poll that first names it; with the two
+        disagreeing, the list and the series are each read once on arrival, not on the next three
+        polls, once on the fourth (a minute on), not on the fifth; on the Log tab two intervals
+        pass with no poll, and History asks at once; on the Overview a new channel gets its row.
+        `retired-history.test.tsx`'s rule cases: a channel the poll names and the list lacks is
+        stale, retired or not; one the list holds and the poll lacks is not. **Mutations**
+        (restored byte for byte; the web package has no `dist`): History not polling fails 5;
+        polling on every tab 1; the new channel not stale 3; no series re-read on a re-read 3; the
+        new end without `reload` 1; no once-a-minute bound 3 (one new, two `U-55`'s).
+      - **Not done.** The poll's answer still drops for the length of each request (the table is
+        handed `null` values while it is `loading`), as before.
 
 - [x] **U-62 — moving between sensors shows the previous one for a render** · XS · U-55 · Found
       2026-10-09 in `U-55`'s review. Every `useApi` keeps its old answer until its effect runs,
@@ -26598,10 +26636,48 @@ because each is a decision rather than a defect:
       by "Loading the map…" while the request runs. **Done when** it keeps the last map in sight
       while the next is read, as `MapBoard` does, with a test that no frame drops the map.
 
-- [ ] **U-67 — a failed re-read of a held list says nothing** · S · U-60 · Found 2026-10-09 in
+- [x] **U-67 — a failed re-read of a held list says nothing** · S · U-60 · Found 2026-10-09 in
       `U-60`. When the channel list (or the templates list, since `U-64`'s review) is re-read and
       the read fails, the held list stays with no sign that it may be stale. **Done when** a
       failed re-read is said in a polite region beside the held list, with a retry, and tests.
+
+      **U-67 outcome. One component, `HeldListFailure` (`components/HeldListFailure.tsx`), says
+      it beside both lists, with a *Try again* that keeps focus.** Web only.
+      - **The region.** A `<p role="status">` (polite, said whole), in the tree and empty from the
+        moment a list is held, `mb-2 empty:mb-0`, first in the list's block: in the Channels card
+        above the table, at the top of the History tab's panel (its retired marks are the held
+        list's too), and in the templates card above the list. It says *The channel list could not
+        be read again, so this is the one read before and may be out of date:* the message and the
+        core's id (`CorrelationId`). In warning ink, not the down colours: nothing was refused,
+        and what is shown is still worth reading. Emptied as each read starts (the hook's `error`
+        is null while one is out), so the same failure twice is said twice, and left empty by the
+        next good read. On the sensor page the minute's automatic re-reads do the same, so a core
+        that keeps failing is said once a minute while the list disagrees with the poll.
+      - ***Try again*** is outside the region, so the region can be empty while it stays: one
+        element from the failure until a read answers, `aria-disabled` (not `disabled`) while a
+        read is out, a press then asking nothing, and kept through a read the page starts on its
+        own while it is offered. It is the hook's `reload`, not the capped `relist` (`U-60`). When
+        a good read takes it away and focus fell to the page, focus goes to the tab's panel on the
+        sensor page (focusable, named by its tab, holding the list) and to *New template* on the
+        templates page; focus taken elsewhere meanwhile is left there.
+      - **`TemplatesView` no longer gives way to an error panel** when a re-read fails with a list
+        held (after a save or a delete): that took the list, *New template*, the page's region and
+        the focus with it. A first read that fails is still the error panel.
+      - **Tests.** `retired-history-poll.test.tsx`: the region quiet and polite before; a re-read
+        refused, said with its id while the table and its `retired` mark stay and no alert
+        speaks; *Try again* focused and pressed empties the region, stays the same element,
+        `aria-disabled`, focused, and a second press reads nothing; refused again, the region's
+        recorded states are `['', said]`; answered, the region empties, the button goes and focus
+        is on `panel-overview`; on the History tab the same words, with the legend's held marks.
+        `templates-held.test.tsx`: after a save, the read refused keeps the list, *New template*
+        and its focus and the *saved* line, and says the failure beside the list; the same retry
+        sequence, ending with focus on *New template*; and focus moved to a template's button while
+        the read is out stays there. `retired-filter-url` and `retired-history-page` now find the
+        hide box's own region (the page has two `role="status"` now). **Mutations** (restored byte
+        for byte): the region mounted only with a failure fails 3; *Try again* unmounted while
+        reading 2; focus not moved after 2; focus taken whatever had it 1; a press while busy
+        reading again 2; the channel failure not passed 2; the templates error panel back 2.
+      - **Not done.** `ErrorPanel`'s own retries are still `U-68`'s.
 
 - [ ] **U-68 — "Try again" in an error panel removes itself and drops focus** · S · U-60 ·
       Found 2026-10-09 in `U-60`. Every `ErrorPanel` retry is replaced by a loading line, so
@@ -26609,10 +26685,27 @@ because each is a decision rather than a defect:
       when** `ErrorPanel`'s retry keeps focus somewhere stable for every caller (kept mounted
       with `aria-disabled`, or a declared focus target), with a test.
 
-- [ ] **U-69 — an accepted *Save template* drops focus** · XS · U-64 · Found 2026-10-09 in
+- [x] **U-69 — an accepted *Save template* drops focus** · XS · U-64 · Found 2026-10-09 in
       `U-64` review. Saving closes the editor and focus on *Save template* falls to the page with
       nothing said, as an accepted delete did. **Done when** it goes where the delete's does and
       is said in the same region, with a test.
+
+      **U-69 outcome. An accepted save puts focus on *New template* and the page's region says
+      *Template Alert hook saved.*; an accepted create says *Template Pager created.* the same
+      way.** Web only.
+      - The region is the one an accepted delete uses (`U-64` review), renamed `done`, filled
+        through `sayAgain` so the same template saved twice is said twice, and emptied when an
+        editor opens. The name is the core's answer's, not the draft's. *Create template* closes
+        the editor the same way, so it is done too, with its own verb.
+      - **Tests** (`templates-held.test.tsx`): renamed and saved with *Save template* focused,
+        focus is on *New template*, the region says *Template Alert hook v2 saved.* in the node
+        that was there, quiet and polite, before, and no alert speaks; opened again it is emptied,
+        and a second save is said again; a create says *created* and puts focus on *New
+        template*. **Mutations** (restored byte for byte): focus not moved fails 3; nothing said
+        fails 3.
+      - **Not done.** *Save template* is `disabled` while the request is out, so on a refused save
+        focus on it can be lost before the refusal is said; `U-64` chose `aria-disabled` for
+        *Yes, delete* for that reason.
 
 - [x] **U-70 — `ModeRefusal` and the tree's filters** · XS · U-65, U-63 · Found 2026-10-09.
       `ParamsForm`'s `ModeRefusal` says its correlation id in a paragraph of its own instead of

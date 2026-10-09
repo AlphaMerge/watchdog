@@ -28,6 +28,7 @@ import {
 export function HistoryPanel({
   sensorId,
   channels = null,
+  refreshed = 0,
   hideRetired,
   onHideRetiredChange,
 }: {
@@ -38,6 +39,12 @@ export function HistoryPanel({
    */
   channels?: readonly ChannelRecord[] | null;
   /**
+   * How many times the page has read the channel list again (`U-61`). Each change reads the
+   * series again, up to now: what made the list stale (a reading for a retired channel, a channel
+   * an edit added) is a line this chart did not have. Bounded by the page's once-a-minute re-read.
+   */
+  refreshed?: number;
+  /**
    * Whether retired channels are left out (`U-55`): the page's `?retired=hide`, the same choice
    * the channel table makes, held by the page so it survives what unmounts this panel.
    */
@@ -47,15 +54,31 @@ export function HistoryPanel({
   const [range, setRange] = useState<RangeId>('2d');
   const [asTable, setAsTable] = useState(false);
   const days = RANGES.find((entry) => entry.id === range)?.days ?? 2;
+  // Where the range ends: set when a range is chosen, and again when the page reads its channel
+  // list again (`U-61`), never on every render.
+  const [end, setEnd] = useState(() => Date.now());
 
-  // Anchored on the range rather than on every render, so the request path is stable and
-  // `useApi` does not refetch itself into a loop.
+  // Anchored on the range's end rather than on every render, so the request path is stable and
+  // `useApi` does not refetch itself into a loop. A new end is a new path, so the answer in hand
+  // is held, dimmed, while the next is read, as it is for a range change.
   const path = useMemo(() => {
-    const to = new Date();
+    const to = new Date(end);
     const from = new Date(to.getTime() - days * 86_400_000);
     return `/sensors/${String(sensorId)}/history?from=${from.toISOString()}&to=${to.toISOString()}`;
-  }, [sensorId, days]);
+  }, [sensorId, days, end]);
   const history = useApi<HistorySeries>(path);
+
+  // Read again when the page has read its list again. `reload` as well as a new end: within the
+  // same millisecond the end, and so the path, would be the one already read, and nothing would
+  // be asked. Both land in one render, so it is one request either way.
+  const refreshedSeen = useRef(refreshed);
+  const reloadHistory = history.reload;
+  useEffect(() => {
+    if (refreshedSeen.current === refreshed) return;
+    refreshedSeen.current = refreshed;
+    setEnd(Date.now());
+    reloadHistory();
+  }, [refreshed, reloadHistory]);
 
   // The last answer, kept so a range change holds the frame instead of flashing a skeleton. A
   // chart that vanishes and comes back moves everything below it twice, and the reader loses
@@ -88,7 +111,9 @@ export function HistoryPanel({
                 type="button"
                 aria-pressed={entry.id === range}
                 onClick={() => {
+                  if (entry.id === range) return;
                   setRange(entry.id);
+                  setEnd(Date.now());
                 }}
                 className={`border px-2 py-1 text-sm ${
                   entry.id === range

@@ -12,6 +12,7 @@ import type {
   TemplateTestResult,
   TemplateView,
 } from '../api/types';
+import { HeldListFailure } from '../components/HeldListFailure';
 import { Card, CorrelationId, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { useRefusal } from '../components/refusal';
 import { SchemaForm } from '../forms/SchemaForm';
@@ -45,22 +46,26 @@ export function TemplatesView(): React.JSX.Element {
   const editing = params.get('id');
   const creating = params.get('new') === '1';
 
-  // **A deleted template, said, and focus somewhere that stays** (`U-64` review). An accepted
-  // delete closes the editor, and *Yes, delete* — which had focus — goes with it. Focus goes to
-  // *New template*: a real control, at the top of the page, there whether the list is empty or
-  // not, one Tab after the heading; and a polite region that was there from the start says what
-  // happened, since nothing else on the page does (the template just leaves the list). Emptied
-  // and filled through `sayAgain`, so a second template deleted under the same name is said too,
-  // and emptied when an editor is opened.
-  const [deleted, setDeleted, sayDeleted] = useRefusal<string>();
+  // **A deleted or saved template, said, and focus somewhere that stays** (`U-64` review,
+  // `U-69`). An accepted delete or save closes the editor, and the button that had focus goes
+  // with it. Focus goes to *New template*: a real control, at the top of the page, there whether
+  // the list is empty or not, one Tab after the heading; and a polite region that was there from
+  // the start says what happened, since nothing else on the page does (the template just leaves
+  // the list, or stays in it as it was). Emptied and filled through `sayAgain`, so a second
+  // template deleted or saved under the same name is said too, and emptied when an editor is
+  // opened.
+  const [done, setDone, sayDone] = useRefusal<string>();
   const newButton = useRef<HTMLButtonElement>(null);
+  const focusNew = useCallback(() => {
+    newButton.current?.focus();
+  }, []);
 
   const open = useCallback(
     (id: number | null) => {
-      setDeleted(null);
+      setDone(null);
       setParams(id === null ? { new: '1' } : { id: String(id) }, { replace: true });
     },
-    [setParams, setDeleted],
+    [setParams, setDone],
   );
 
   const close = useCallback(() => {
@@ -69,7 +74,9 @@ export function TemplatesView(): React.JSX.Element {
 
   // The list last read, kept while it is read again after a save or a delete: otherwise the page
   // is *Loading templates…* for the length of the request, and *New template*, the region that
-  // says the delete, and the focus on it go with it.
+  // says the delete, and the focus on it go with it. **Kept when that read fails, too** (`U-67`),
+  // with the failure said beside it: the page used to give way to an error panel, taking the
+  // list, *New template*, the region and the focus with it.
   const heldTemplates = useRef<readonly TemplateView[] | null>(null);
   useEffect(() => {
     if (templates.status === 'ready') heldTemplates.current = templates.data.items;
@@ -79,7 +86,7 @@ export function TemplatesView(): React.JSX.Element {
   if ((templates.status === 'loading' && items === null) || methods.status === 'loading') {
     return <Loading what="templates" />;
   }
-  if (templates.status === 'error') {
+  if (templates.status === 'error' && items === null) {
     return <ErrorPanel error={templates.error} retry={templates.reload} />;
   }
   if (methods.status === 'error')
@@ -106,7 +113,7 @@ export function TemplatesView(): React.JSX.Element {
           </button>
         </div>
         <p role="status" className="mt-2 text-sm text-text-muted empty:mt-0">
-          {deleted}
+          {done}
         </p>
       </div>
 
@@ -115,21 +122,30 @@ export function TemplatesView(): React.JSX.Element {
           key={chosen?.id ?? 'new'}
           template={chosen}
           methods={methods.data.items}
-          onSaved={() => {
+          onSaved={(saved, created) => {
+            sayDone(`Template ${saved.name} ${created ? 'created' : 'saved'}.`);
             templates.reload();
             close();
+            focusNew();
           }}
           onDeleted={(name) => {
-            sayDeleted(`Template ${name} deleted.`);
+            sayDone(`Template ${name} deleted.`);
             templates.reload();
             close();
-            newButton.current?.focus();
+            focusNew();
           }}
           onCancel={close}
         />
       )}
 
       <Card>
+        <HeldListFailure
+          what="The template list"
+          error={templates.status === 'error' ? templates.error : null}
+          reading={templates.status === 'loading'}
+          onRetry={templates.reload}
+          focusAfter={focusNew}
+        />
         {items.length === 0 ? (
           <Empty because="Without one, a trigger has nothing to send and an alarm reaches nobody.">
             No templates yet.
@@ -180,7 +196,8 @@ function Editor({
 }: {
   template: TemplateView | undefined;
   methods: readonly NotificationMethod[];
-  onSaved: () => void;
+  /** The template was written; what the core answered, and whether it was a new one. */
+  onSaved: (saved: TemplateView, created: boolean) => void;
   /** The template was deleted; its name, for the page to say so. */
   onDeleted: (name: string) => void;
   onCancel: () => void;
@@ -215,7 +232,9 @@ function Editor({
         ? send<TemplateView>('POST', '/templates', draft)
         : send<TemplateView>('PUT', `/templates/${String(template.id)}`, draft);
     write
-      .then(onSaved)
+      .then((saved) => {
+        onSaved(saved, template === undefined);
+      })
       .catch((error: unknown) => {
         setFailed(
           error instanceof ApiError

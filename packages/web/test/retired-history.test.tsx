@@ -225,7 +225,7 @@ describe('hiding retired channels in the History tab', () => {
   });
 });
 
-describe('when the channel list is stale about retirement', () => {
+describe('when the channel list is stale', () => {
   const values = (
     retired: Record<number, boolean>,
     reading: number | null = null,
@@ -263,7 +263,13 @@ describe('when the channel list is stale about retirement', () => {
     expect(channelListIsStale(LIST, values({ 1: true, 2: true }))).toBe(true);
   });
 
-  it('is not for a channel the poll names and it does not hold', () => {
-    expect(channelListIsStale(LIST, values({ 1: false, 2: true, 3: false }))).toBe(false);
+  // `U-61`: an edit gave the sensor a channel since the list was read, and the poll names it.
+  it('is for a channel the poll names and it does not hold, retired or not', () => {
+    expect(channelListIsStale(LIST, values({ 1: false, 2: true, 3: false }))).toBe(true);
+    expect(channelListIsStale(LIST, values({ 1: false, 2: true, 3: true }))).toBe(true);
+  });
+
+  it('is not for a channel it holds that the poll does not name', () => {
+    expect(channelListIsStale(LIST, values({ 1: false }))).toBe(false);
   });
 });

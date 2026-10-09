@@ -244,7 +244,10 @@ describe('hiding retired channels on the History tab', () => {
     fireEvent.click(box());
     expect(where).toBe('/objects/9?tab=history&retired=hide');
     expect(legend()).toEqual(['Column a', 'Column c']);
-    expect(screen.getByRole('status').textContent).toBe('1 retired channel hidden.');
+    // The box's own region: the page has another, for a re-read of the list that fails (`U-67`).
+    expect(box().closest('label')?.nextElementSibling?.textContent).toBe(
+      '1 retired channel hidden.',
+    );
 
     // The history read fails (another range, the core restarting): the charts go for an error
     // panel. The next read that answers brings them back still hidden.

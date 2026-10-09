@@ -166,6 +166,10 @@ Notification templates — what a message says, who receives it, and when it is 
 - **A test send really sends** — and the result says what a green tick does *not* prove: a
   template that is switched off, outside its activation schedule, or folded into a digest can
   deliver a test and still never deliver an alarm.
+- **A save, a create or a delete closes the editor and says so** under the title ("Template
+  Alert hook saved."), with focus on **New template** (`U-64`, `U-69`). The list is then read
+  again; if that read fails, the list in hand stays and a line above it says it may be out of
+  date, with **Try again** (`U-67`).
 - **A recipient is an address, a user or a group.** Users and groups are picked by typing a name,
   and the template keeps the one picked even if it is renamed later. The list warns about an
   account that is disabled or has no address, and about a group with no members, because a
@@ -290,7 +294,12 @@ opens both the same way. Hiding one keeps every other channel's colour, since a 
 channel and not its place on screen. `GET /sensors/:id/values` carries the same `retired` as the
 channel list, and when a poll answers otherwise than the list the page holds, about any channel,
 the list is read again (at most once a minute), so a channel a new reading makes live stops
-saying retired without a reload. An ordinary poll does not ask for the list. Put the column back
+saying retired without a reload; so is a channel the poll names that the list does not hold,
+one an edit added since the page opened (`U-61`). The page polls on the Overview and the History
+tab alike, and each re-read of the list reads the History tab's series again, up to now, so the
+chart shows the new line too. An ordinary poll does not ask for the list. If a re-read fails, the
+list in hand stays and a line beside it says it could not be read again, with **Try again**
+(`U-67`). Put the column back
 and it is read again, with its history. Only a type that promises its readings name no channel it does not declare is
 marked this way (`P-310`): every shipped type but three (`P-320`). An advanced script's extra
 channels, and Windows CPU's per-processor and Windows Volume's per-drive channels, come from what
@@ -391,8 +400,8 @@ resolved in one place ([administration.md](administration.md)).
 **The badge is live and the numbers refresh on a timer**, and the split is deliberate. State
 changes arrive over the WebSocket stream, because those have to be immediate. Channel *values*
 change on every scan whether the state does or not, and a frame on the wire for every reading of
-every sensor would be a stream nobody could keep up with — so the channel table re-reads every
-15 seconds instead.
+every sensor would be a stream nobody could keep up with — so the page re-reads them every
+15 seconds instead, while the Overview or the History tab is open.
 
 ### Graphs
 

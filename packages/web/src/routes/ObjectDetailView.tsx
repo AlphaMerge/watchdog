@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { useApi, type ApiError } from '../api/client';
+import { useApi, type ApiError, type Loadable } from '../api/client';
 import { useStateStream, type LiveState } from '../api/stream';
 import type {
   AncestorsView,
@@ -14,6 +14,7 @@ import type {
   SensorValues,
   SettingView,
 } from '../api/types';
+import { HeldListFailure } from '../components/HeldListFailure';
 import { Card, Empty, ErrorPanel, Loading } from '../components/Panels';
 import { StatusBadge } from '../components/StatusBadge';
 import { TabPanel, Tabs } from '../components/Tabs';
@@ -62,6 +63,9 @@ export function ObjectDetailView(): React.JSX.Element {
   const isSensor = object.status === 'ready' && object.data.kind === 'sensor';
 
   const [params, setParams] = useSearchParams();
+  const tabs = object.status === 'ready' ? tabsFor(object.data) : [];
+  const requested = params.get('tab');
+  const active = tabs.some((tab) => tab.id === requested) ? (requested ?? 'overview') : 'overview';
 
   const ancestors = useApi<AncestorsView>(
     object.status === 'ready' ? `/objects/${id}/ancestors` : null,
@@ -88,11 +92,16 @@ export function ObjectDetailView(): React.JSX.Element {
         : heldChannels.current?.path === channelsPath
           ? heldChannels.current.items
           : null;
-  // Re-read when the values poll says the list is stale about a retired channel (`U-55`), at
-  // most once a minute: a channel flapping, or a list and a poll that keep disagreeing, cannot
-  // turn every poll into a second request. Monotonic, as anything measuring an interval is.
-  // Per sensor: the last re-read is the previous sensor's, and holds nothing back here.
+  // Re-read when the values poll says the list is stale (`U-55`, `U-61`), at most once a minute:
+  // a channel flapping, or a list and a poll that keep disagreeing, cannot turn every poll into a
+  // second request. Monotonic, as anything measuring an interval is. Per sensor: the last re-read
+  // is the previous sensor's, and holds nothing back here. **Each re-read also re-reads the
+  // History tab's series** (`U-61`), through `relisted`: what made the list stale — a reading for
+  // a retired channel, a channel an edit added — is a line its chart did not have, and a series
+  // read once per range would not show it until the range changed. So it is bounded by the same
+  // minute.
   const lastRelist = useRef<{ id: string; at: number } | null>(null);
+  const [relisted, setRelisted] = useState(0);
   const reloadChannels = channels.reload;
   const relist = useCallback(() => {
     const now = performance.now();
@@ -100,7 +109,52 @@ export function ObjectDetailView(): React.JSX.Element {
     if (last !== null && last.id === id && now - last.at < RELIST_MIN_MS) return;
     lastRelist.current = { id, at: now };
     reloadChannels();
+    setRelisted((count) => count + 1);
   }, [reloadChannels, id]);
+
+  // The readings, polled (see above), **by the page and not by the channel table** (`U-61`), so
+  // that the History tab, which shows the list's retired marks and a chart per channel, learns
+  // of a revived or a new channel while it is the tab open, as the Overview does. Only while one
+  // of the two is open: no other tab shows a channel, and a tab returned to asks at once, since
+  // its path coming back from null is a new read. The interval is cleared while the browser tab
+  // is hidden, so a page left open on a second monitor is not asking every fifteen seconds for a
+  // table nobody is looking at.
+  const showsChannels = isSensor && (active === 'overview' || active === 'history');
+  const values = useApi<SensorValues>(showsChannels ? `/sensors/${id}/values` : null);
+  // Only to force a re-render on the interval. The ages themselves come from `Date.now()` at
+  // render time — holding "now" in state means a component that re-renders for any other reason
+  // redraws with a stale clock, and "58s ago" that has stopped counting is worse than no age.
+  const [, tick] = useState(0);
+  const reloadValues = values.reload;
+  useEffect(() => {
+    if (!showsChannels) return;
+    const refresh = (): void => {
+      // Nothing is asked for while nobody is looking. `visibilitychange` fires on the way back,
+      // so a tab returned to is current within a frame rather than fifteen seconds later.
+      if (document.visibilityState !== 'visible') return;
+      tick((count) => count + 1);
+      reloadValues();
+    };
+    const handle = window.setInterval(refresh, VALUES_POLL_MS);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.clearInterval(handle);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [reloadValues, showsChannels]);
+  // Once per answer: keyed on the answer itself, not on every render. `useApi` never returns an
+  // answer read for another sensor's path as this one's (`U-62`), and the list is this sensor's
+  // or null.
+  const valuesAnswer = values.status === 'ready' ? values.data : null;
+  useEffect(() => {
+    if (
+      valuesAnswer !== null &&
+      channelList !== null &&
+      channelListIsStale(channelList, valuesAnswer)
+    ) {
+      relist();
+    }
+  }, [valuesAnswer, channelList, relist]);
   const settings = useApi<{ settings: SettingView[] }>(
     object.status === 'ready' ? `/objects/${id}/settings` : null,
   );
@@ -116,9 +170,6 @@ export function ObjectDetailView(): React.JSX.Element {
   if (object.status === 'error') return <ErrorPanel error={object.error} retry={object.reload} />;
 
   const detail = object.data;
-  const tabs = tabsFor(detail);
-  const requested = params.get('tab');
-  const active = tabs.some((tab) => tab.id === requested) ? (requested ?? 'overview') : 'overview';
   // In the URL, as the alarm list's filters are (`U-38` review): the channel table is swapped for
   // an error panel whenever a poll of its values fails, so a choice held inside it was dropped by
   // one failed poll and every retired row came back unannounced. Absent, they are shown, as the
@@ -147,6 +198,23 @@ export function ObjectDetailView(): React.JSX.Element {
     setParam('retired', hide ? 'hide' : null);
   };
 
+  // A re-read of the held list that failed (`U-67`), said beside it on either tab that shows it.
+  // The retry is the hook's own `reload`, not `relist`, whose minute would hold it back (`U-60`).
+  // When a good read takes *Try again* away, focus goes to the tab's panel, which is focusable,
+  // named by its tab, and holds the list.
+  const listFailure =
+    channelList !== null ? (
+      <HeldListFailure
+        what="The channel list"
+        error={channels.status === 'error' ? channels.error : null}
+        reading={channels.status === 'loading'}
+        onRetry={channels.reload}
+        focusAfter={() => {
+          document.getElementById(`panel-${active}`)?.focus();
+        }}
+      />
+    ) : null;
+
   return (
     <div className="space-y-5">
       <Header
@@ -163,18 +231,18 @@ export function ObjectDetailView(): React.JSX.Element {
           <div className="space-y-4">
             {detail.kind === 'sensor' && (
               <Card title="Channels">
+                {listFailure}
                 <LiveChannels
-                  sensorId={detail.id}
                   sensorType={detail.sensorType}
                   channels={channelList}
                   listError={
                     channelList === null && channels.status === 'error' ? channels.error : null
                   }
                   onRetryList={channels.reload}
+                  values={values}
                   lookups={lookups.status === 'ready' ? lookups.data.items : null}
                   hideRetired={hideRetired}
                   onHideRetiredChange={setHideRetired}
-                  onListStale={relist}
                 />
               </Card>
             )}
@@ -202,10 +270,12 @@ export function ObjectDetailView(): React.JSX.Element {
 
       {active === 'history' && (
         <TabPanel id="history">
+          {listFailure}
           {/* The same `?retired=hide` as the channel table (`U-55`): one choice for the page. */}
           <HistoryPanel
             sensorId={detail.id}
             channels={channelList}
+            refreshed={relisted}
             hideRetired={hideRetired}
             onHideRetiredChange={setHideRetired}
           />
@@ -387,72 +457,34 @@ function Breadcrumb({
 /**
  * The channel table, kept current.
  *
- * Polled rather than streamed — see the note on the page above. The interval is cleared while
- * the tab is hidden, so a page left open on a second monitor is not asking every fifteen
- * seconds for a table nobody is looking at.
- *
- * The poll is also how the page learns its channel list is stale (`U-55`): the list is read once,
- * and `/values` carries the list's own `retired`, so an answer that disagrees with it (a reading
- * has made a retired channel live) asks the page to read the list again. An answer that agrees
- * asks for nothing.
+ * Polled rather than streamed — see the note on the page above. The page polls (`U-61`), since
+ * the poll is also how it learns its channel list is stale (`U-55`) whichever tab is open: the
+ * list is read once, and `/values` carries the list's own `retired`, so an answer that disagrees
+ * with it (a reading has made a retired channel live, an edit has added one) asks the page to
+ * read the list again. An answer that agrees asks for nothing.
  */
 function LiveChannels({
-  sensorId,
   sensorType,
   channels,
   listError,
   onRetryList,
+  values,
   lookups,
   hideRetired,
   onHideRetiredChange,
-  onListStale,
 }: {
-  sensorId: number;
   sensorType: string | undefined;
   channels: readonly ChannelRecord[] | null;
   /** Why there is no list, when its read failed and none is held for this sensor (`U-60`). */
   listError: ApiError | null;
-  /** Reads the list again: not `onListStale`, whose once-a-minute cap would hold a retry back. */
+  /** Reads the list again: not the page's `relist`, whose once-a-minute cap would hold it back. */
   onRetryList: () => void;
+  /** The page's poll of the readings. */
+  values: Loadable<SensorValues> & { reload: () => void };
   lookups: readonly LookupSummary[] | null;
   hideRetired: boolean;
   onHideRetiredChange: (hide: boolean) => void;
-  /** Called when a poll answers otherwise than the list about a channel's retirement. */
-  onListStale: () => void;
 }): React.JSX.Element {
-  const values = useApi<SensorValues>(`/sensors/${String(sensorId)}/values`);
-  // Once per answer: keyed on the answer itself, not on every render of this component. An
-  // answer held over from the sensor the page showed before cannot disagree with this one's
-  // list: channel ids are not shared between sensors, and on that render the list is not this
-  // sensor's yet, so it is null.
-  const answer = values.status === 'ready' ? values.data : null;
-  useEffect(() => {
-    if (answer !== null && channels !== null && channelListIsStale(channels, answer)) {
-      onListStale();
-    }
-  }, [answer, channels, onListStale]);
-  // Only to force a re-render on the interval. The ages themselves come from `Date.now()` at
-  // render time — holding "now" in state means a component that re-renders for any other reason
-  // redraws with a stale clock, and "58s ago" that has stopped counting is worse than no age.
-  const [, tick] = useState(0);
-  const reload = values.reload;
-
-  useEffect(() => {
-    const refresh = (): void => {
-      // Nothing is asked for while nobody is looking. `visibilitychange` fires on the way back,
-      // so a tab returned to is current within a frame rather than fifteen seconds later.
-      if (document.visibilityState !== 'visible') return;
-      tick((count) => count + 1);
-      reload();
-    };
-    const handle = window.setInterval(refresh, VALUES_POLL_MS);
-    document.addEventListener('visibilitychange', refresh);
-    return () => {
-      window.clearInterval(handle);
-      document.removeEventListener('visibilitychange', refresh);
-    };
-  }, [reload]);
-
   if (channels === null) {
     return (
       <>
