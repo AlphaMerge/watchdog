@@ -66,30 +66,41 @@ export function ObjectDetailView(): React.JSX.Element {
   const ancestors = useApi<AncestorsView>(
     object.status === 'ready' ? `/objects/${id}/ancestors` : null,
   );
-  const channels = useApi<{ items: ChannelRecord[] }>(isSensor ? `/objects/${id}/channels` : null);
-  // The list last read for this object, kept while it is read again (`U-55`), so a re-read does
-  // not take the table away, and the hide box with it, for the length of a request.
-  const heldChannels = useRef<{ id: string; items: readonly ChannelRecord[] } | null>(null);
+  const channelsPath = isSensor ? `/objects/${id}/channels` : null;
+  const channels = useApi<{ items: ChannelRecord[] }>(channelsPath);
+  // The list last read, kept while it is read again (`U-55`), so a re-read does not take the
+  // table away, and the hide box with it, for the length of a request. **Held against the path
+  // it was read from, never against the page's id** (`U-55` review): this view stays mounted
+  // from one sensor to the next, and on the first render after the id changes `useApi` still
+  // holds the previous sensor's answer, so an id taken from the page then would file sensor 9's
+  // channels under sensor 12, and keep them there if sensor 12's list could not be read.
+  const heldChannels = useRef<{ path: string; items: readonly ChannelRecord[] } | null>(null);
   useEffect(() => {
-    if (channels.status === 'ready') heldChannels.current = { id, items: channels.data.items };
-  }, [channels, id]);
+    if (channels.status === 'ready' && channels.answered !== null) {
+      heldChannels.current = { path: channels.answered, items: channels.data.items };
+    }
+  }, [channels]);
   const channelList =
-    channels.status === 'ready'
-      ? channels.data.items
-      : heldChannels.current?.id === id
-        ? heldChannels.current.items
-        : null;
+    channelsPath === null
+      ? null
+      : channels.status === 'ready' && channels.answered === channelsPath
+        ? channels.data.items
+        : heldChannels.current?.path === channelsPath
+          ? heldChannels.current.items
+          : null;
   // Re-read when the values poll says the list is stale about a retired channel (`U-55`), at
   // most once a minute: a channel flapping, or a list and a poll that keep disagreeing, cannot
   // turn every poll into a second request. Monotonic, as anything measuring an interval is.
-  const lastRelist = useRef<number | null>(null);
+  // Per sensor: the last re-read is the previous sensor's, and holds nothing back here.
+  const lastRelist = useRef<{ id: string; at: number } | null>(null);
   const reloadChannels = channels.reload;
   const relist = useCallback(() => {
     const now = performance.now();
-    if (lastRelist.current !== null && now - lastRelist.current < RELIST_MIN_MS) return;
-    lastRelist.current = now;
+    const last = lastRelist.current;
+    if (last !== null && last.id === id && now - last.at < RELIST_MIN_MS) return;
+    lastRelist.current = { id, at: now };
     reloadChannels();
-  }, [reloadChannels]);
+  }, [reloadChannels, id]);
   const settings = useApi<{ settings: SettingView[] }>(
     object.status === 'ready' ? `/objects/${id}/settings` : null,
   );
@@ -400,7 +411,10 @@ function LiveChannels({
   onListStale: () => void;
 }): React.JSX.Element {
   const values = useApi<SensorValues>(`/sensors/${String(sensorId)}/values`);
-  // Once per answer: keyed on the answer itself, not on every render of this component.
+  // Once per answer: keyed on the answer itself, not on every render of this component. An
+  // answer held over from the sensor the page showed before cannot disagree with this one's
+  // list: channel ids are not shared between sensors, and on that render the list is not this
+  // sensor's yet, so it is null.
   const answer = values.status === 'ready' ? values.data : null;
   useEffect(() => {
     if (answer !== null && channels !== null && channelListIsStale(channels, answer)) {

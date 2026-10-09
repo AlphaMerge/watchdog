@@ -228,9 +228,17 @@ export type Loadable<T> =
  * Deliberately not a data-fetching library: U-01 needs one request per view and U-02 replaces
  * polling with a WebSocket stream anyway. A cache layer added now would be a cache layer to
  * unpick then.
+ *
+ * **`answered` is the path the answer in hand was read from** (`U-55` review), null while one is
+ * loading. On the render after `path` changes the hook still holds the previous path's answer
+ * (its effect has not run yet), and a path set to null keeps it indefinitely; a caller that
+ * must never show one object's answer under another's name compares the two.
  */
-export function useApi<T>(path: string | null): Loadable<T> & { reload: () => void } {
+export function useApi<T>(
+  path: string | null,
+): Loadable<T> & { reload: () => void; answered: string | null } {
   const [state, setState] = useState<Loadable<T>>({ status: 'loading' });
+  const [answered, setAnswered] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
   const reload = useCallback(() => {
     setNonce((n) => n + 1);
@@ -248,13 +256,17 @@ export function useApi<T>(path: string | null): Loadable<T> & { reload: () => vo
     if (path === null) return;
     const controller = new AbortController();
     setState({ status: 'loading' });
+    setAnswered(null);
 
     request<T>(path, controller.signal)
       .then((data) => {
-        if (!controller.signal.aborted) setState({ status: 'ready', data });
+        if (controller.signal.aborted) return;
+        setState({ status: 'ready', data });
+        setAnswered(path);
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
+        setAnswered(path);
         setState({
           status: 'error',
           error:
@@ -269,5 +281,5 @@ export function useApi<T>(path: string | null): Loadable<T> & { reload: () => vo
     };
   }, [path, nonce]);
 
-  return { ...state, reload };
+  return { ...state, reload, answered };
 }

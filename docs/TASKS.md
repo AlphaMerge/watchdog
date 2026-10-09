@@ -25652,6 +25652,28 @@ because each is a decision rather than a defect:
       - **Not done.** The History tab does not poll, so a channel made live while only that tab
         is open is noticed when the Overview tab polls again; its history is read once per range
         anyway.
+      - **Amended on review** (a second commit). **The held list could be another sensor's.**
+        The `objects/:id` route has no key, so sensor 9 to sensor 12 keeps the view mounted, and
+        on the first render after the id changes `useApi` still holds sensor 9's answer (its
+        effect has not run). The held list was filed under the page's id, so it recorded sensor
+        9's channels as sensor 12's: they stood under sensor 12's header (with sensor 9's hide
+        box, and as the History tab's retired set) until sensor 12's list arrived, and for good if
+        it could not be read. Fixed by filing the answer under the path it was **read from**:
+        `useApi` now also returns `answered`, the path of the answer in hand (null while
+        loading), and the page uses a ready list or a held one only when that path is the one it
+        is asking for now. Not by keying the route on the id, which would also have reset
+        everything: it remounts the page's live-state stream too, a socket reconnect (and an
+        "offline" moment) on every move through the tree, for a bug confined to one list. The
+        once-a-minute cap on re-reads is now per sensor (follow-up 2), so the previous sensor's
+        re-read holds nothing back. Tests (`retired-navigation.test.tsx`): sensor 9 to 12 with 12's
+        list held back shows "Loading channels…", none of sensor 9's channel names and no hide
+        box, then 12's own; the same with 12's list refused; a `MutationObserver` also checks
+        nothing of sensor 9's channels was put on the page after leaving, not for one render; and
+        a re-read on sensor 12 within the minute after one on sensor 9 is made. **Mutations**
+        (restored byte for byte): the held list filed under the page's path (the finding) fails
+        2; a ready list used whatever path it answered fails 1; the cap not per sensor fails 1. A
+        guard on the values answer's path was tried and dropped: no test could fail it, since
+        channel ids are not shared between sensors and the list is null on that render.
 
 - [ ] **U-56 — refusals with no live region at all** · XS · U-54 · Found 2026-10-09 in `U-54`.
       A refused row action in `AlarmsView` (around line 361), a refused delete in `TriggersPanel`
