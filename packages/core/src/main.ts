@@ -75,7 +75,7 @@ import { DeliveryHealthReader } from './notifications/health.js';
 import { TemplateActivation } from './notifications/activation.js';
 import { ProbeDeliveryWatch } from './probes/delivery-watch.js';
 import { remoteClockOffsets } from './health/core-clock.js';
-import { CoreHealthService } from './health/core-health.js';
+import { CoreHealthService, readLocalProbeLog } from './health/core-health.js';
 import { heartbeatFor } from './health/heartbeat.js';
 import { ProbeHealthService, ProbeHealthTargets } from './health/probe-health.js';
 import { MetricsExporter } from './metrics/exporter.js';
@@ -1519,20 +1519,7 @@ async function serve(): Promise<void> {
       // local probe's drops beside it: one journal, one alarm, and Core Health owns it (`M-21`).
       ...(logOutput === undefined ? {} : { log: () => logOutput.stats() }),
       // The one row there is: migration 075 holds the flag to one object (`P-382`).
-      localProbeLog: async (q) => {
-        const rows = await q.query<{ object_id: string }>(
-          'SELECT object_id::text AS object_id FROM probe_config WHERE is_local',
-        );
-        const local = rows[0];
-        if (local === undefined) return null;
-        const link = probeEndpoint.linkFor(Number(local.object_id));
-        if (!link.connected) return null;
-        const dropped = link.health?.logDropped;
-        const uptimeSeconds = link.health?.uptimeSeconds;
-        return dropped === undefined || uptimeSeconds === undefined
-          ? null
-          : { droppedLines: dropped, uptimeSeconds, session: link.connectedAt.getTime() };
-      },
+      localProbeLog: (q) => readLocalProbeLog(q, (id) => probeEndpoint.linkFor(id)),
       // The remote probes' clocks, to say whether this core's own is the one behind (`P-247`).
       // The local probe reads this core's clock, so it is left out, as Probe Health leaves it.
       probeClocks: async (q) => {

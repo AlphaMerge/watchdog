@@ -289,6 +289,41 @@ export interface LocalProbeLog {
   readonly session: number;
 }
 
+/** What `readLocalProbeLog` reads of a probe's live link: `ProbeLink`, narrowed to its use. */
+export type LocalProbeLink =
+  | { readonly connected: false }
+  | {
+      readonly connected: true;
+      readonly connectedAt: Date;
+      readonly health?: { readonly logDropped?: number; readonly uptimeSeconds?: number };
+    };
+
+/**
+ * `CoreHealthSources.localProbeLog`: the local probe object's latest log counts, or null when no
+ * object is local, its probe is not connected, or its heartbeat does not carry them (`P-387`).
+ *
+ * **The one row there is.** Migration 075 holds `is_local` to one object and the registry moves it
+ * (`P-382`), so the row read is the local probe wherever the flag went, and never a choice between
+ * two. A moved flag is a new session here, so its part of `logDropped` gaps once (`P-250`).
+ */
+export async function readLocalProbeLog(
+  q: Queryable,
+  linkFor: (probeObjectId: number) => LocalProbeLink,
+): Promise<LocalProbeLog | null> {
+  const rows = await q.query<{ object_id: string }>(
+    'SELECT object_id::text AS object_id FROM probe_config WHERE is_local',
+  );
+  const local = rows[0];
+  if (local === undefined) return null;
+  const link = linkFor(Number(local.object_id));
+  if (!link.connected) return null;
+  const dropped = link.health?.logDropped;
+  const uptimeSeconds = link.health?.uptimeSeconds;
+  return dropped === undefined || uptimeSeconds === undefined
+    ? null
+    : { droppedLines: dropped, uptimeSeconds, session: link.connectedAt.getTime() };
+}
+
 /**
  * One reader's baselines (`CpuMeter`'s reason, `P-216` part 3): CPU, the log's drops and refused
  * `Host`s are each the difference between two readings, and each reading consumes the one before.

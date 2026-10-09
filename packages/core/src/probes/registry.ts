@@ -10,7 +10,7 @@ import {
   type ProtocolSkew,
   type WithdrawnCode,
 } from '@ms/shared';
-import type { Database, Queryable } from '../db/pool.js';
+import { DatabaseError, savepoint, type Database, type Queryable } from '../db/pool.js';
 import type {
   Actor,
   AuditSink,
@@ -139,6 +139,19 @@ export class ProbeRegistryError extends AppError {
     this.name = 'ProbeRegistryError';
     this.status = code === 'PROBE_NOT_FOUND' ? 404 : code === 'PROBE_CONFLICT' ? 409 : 400;
   }
+}
+
+/**
+ * A probe approved onto one object, asked onto another (`P-386`). One probe holds one branch, as
+ * one branch holds one probe: moving it is revoking it, so the branch it leaves stops being
+ * scanned by a decision somebody took, and then approving it where it goes.
+ */
+function boundElsewhere(gid: string, held: number, asked: number): ProbeRegistryError {
+  return new ProbeRegistryError(
+    'PROBE_CONFLICT',
+    `probe ${gid} is already approved onto probe object ${String(held)}; revoke it first, ` +
+      `then approve it onto probe object ${String(asked)}`,
+  );
 }
 
 /**
@@ -471,6 +484,9 @@ export class ProbeRegistry {
           `that probe object already belongs to ${claimed[0]?.gid ?? 'another probe'}`,
         );
       }
+      // The other half of that rule (`P-386`): this probe on another branch already.
+      const held = await this.#boundElsewhere(q, gid, objectId);
+      if (held !== undefined) throw boundElsewhere(gid, held, objectId);
 
       // `access_key_hash` is cleared rather than set: a re-approved probe is issued a fresh key
       // at its next handshake, so a key that leaked before it was revoked does not survive the
@@ -494,12 +510,29 @@ export class ProbeRegistry {
       // The tree's own side of the binding, so `R-04`'s config push finds this probe's subtree.
       // `is_local` is only ever raised, never cleared by an approval: re-approving the core's own
       // probe after replacing the machine must not quietly make it deletable.
-      await q.query(
-        `INSERT INTO probe_config (object_id, gid, is_local) VALUES ($1, $2, $3)
-         ON CONFLICT (object_id) DO UPDATE
-           SET gid = EXCLUDED.gid, is_local = probe_config.is_local OR EXCLUDED.is_local`,
-        [objectId, gid, local],
-      );
+      //
+      // **`probe_config_gid_unique` is the backstop for the check above**, mapped rather than
+      // left to answer `OBJECT_INVALID` with a constraint name: a binding committed between the
+      // two (this transaction waits at `#takeLocal`'s lock in between) still names the object.
+      // In a savepoint, so the object can be read after the failure (`P-249`).
+      try {
+        await savepoint(q, (inner) =>
+          inner.query(
+            `INSERT INTO probe_config (object_id, gid, is_local) VALUES ($1, $2, $3)
+             ON CONFLICT (object_id) DO UPDATE
+               SET gid = EXCLUDED.gid, is_local = probe_config.is_local OR EXCLUDED.is_local`,
+            [objectId, gid, local],
+          ),
+        );
+      } catch (error: unknown) {
+        if (!(error instanceof DatabaseError)) throw error;
+        if (error.sqlstate !== '23505' || error.constraint !== 'probe_config_gid_unique') {
+          throw error;
+        }
+        const raced = await this.#boundElsewhere(q, gid, objectId);
+        if (raced === undefined) throw error;
+        throw boundElsewhere(gid, raced, objectId);
+      }
       const after = readOne(rows, gid);
       await this.#record(q, actor, {
         action: 'probe.approved',
@@ -700,6 +733,22 @@ export class ProbeRegistry {
       holder.object_id,
     ]);
     return Number(holder.object_id);
+  }
+
+  /**
+   * The probe object other than `objectId` this gid is bound to, if any (`P-386`).
+   *
+   * Read from `probe_config`, whose `gid` is the binding `probe_config_gid_unique` holds to one
+   * object, and which revoking and forgetting a probe clear: so a gid found here is approved there.
+   */
+  async #boundElsewhere(q: Queryable, gid: string, objectId: number): Promise<number | undefined> {
+    const rows = await q.query<{ object_id: string }>(
+      `SELECT object_id::text AS object_id FROM probe_config
+       WHERE gid = $1 AND object_id <> $2`,
+      [gid, objectId],
+    );
+    const row = rows[0];
+    return row === undefined ? undefined : Number(row.object_id);
   }
 
   async #record(q: Queryable, actor: Actor, mutation: Mutation): Promise<void> {

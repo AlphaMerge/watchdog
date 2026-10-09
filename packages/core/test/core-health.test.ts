@@ -3,17 +3,20 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { Client } from 'pg';
 import { CORE_HEALTH_CHANNELS, CORE_HEALTH_COUNTERS, coreHealth } from '@ms/sensors';
-import type { AvailableMemoryLow, CheckResult } from '@ms/shared';
+import { PROTOCOL_VERSION, type AvailableMemoryLow, type CheckResult } from '@ms/shared';
 import {
   CoreHealthService,
+  type LocalProbeLink,
   type LocalProbeLog,
+  readLocalProbeLog,
   readingsFrom,
   type CoreHealthReading,
   type CoreHealthSources,
 } from '../src/health/core-health.js';
 import type { FastifyInstance } from 'fastify';
 import { ApiServer } from '../src/api/server.js';
-import { AuditRepository } from '../src/audit/store.js';
+import { AuditRepository, DatabaseAuditSink } from '../src/audit/store.js';
+import { ProbeRegistry } from '../src/probes/registry.js';
 import { HistoryService } from '../src/timeseries/history.js';
 import type { Database } from '../src/db/pool.js';
 import {
@@ -217,11 +220,12 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
   let db: Database;
   let rootId = 0;
   let deviceId = 0;
+  let harness: Awaited<ReturnType<typeof buildHarness>>;
 
   before(async () => {
     scratch = await createScratchDatabase('corehealth');
     db = scratch.db;
-    const harness = await buildHarness(db);
+    harness = await buildHarness(db);
     rootId = harness.rootId;
     const probe = await harness.service.create(testActor, {
       kind: 'probe',
@@ -856,6 +860,133 @@ describe('the Core Health sensor', { skip: available ? false : 'no database' }, 
       const service = build();
       assert.equal((await service.read())['logDropped'], null);
       assert.equal((await service.read())['logBacklog'], null);
+    });
+  });
+
+  /**
+   * **Which probe's log it counts** (`P-387`). `localProbeLog` read the first `is_local` row inline
+   * in `main.ts`, so nothing checked it followed the one row `P-382` leaves, or the flag when an
+   * approval moves it. The links are stand-ins; the rows are the registry's own.
+   */
+  describe('the local probe whose log it counts (P-387)', () => {
+    const links = new Map<number, LocalProbeLink>();
+    const linkFor = (probeObjectId: number): LocalProbeLink =>
+      links.get(probeObjectId) ?? { connected: false };
+    const up = (droppedLines: number, uptimeSeconds: number, since: number): LocalProbeLink => ({
+      connected: true,
+      connectedAt: new Date(since),
+      health: { logDropped: droppedLines, uptimeSeconds },
+    });
+    let registry: ProbeRegistry;
+    let first = 0;
+    let second = 0;
+
+    const approveLocal = async (gid: string, objectId: number): Promise<void> => {
+      await registry.admit({
+        gid,
+        displayName: gid,
+        agentVersion: '0.1.0',
+        protocolVersion: PROTOCOL_VERSION,
+        accessKey: 'shared-key',
+        remoteAddress: '127.0.0.1',
+      });
+      await registry.approve(gid, objectId, testActor, { local: true });
+    };
+
+    const forget = async (): Promise<void> => {
+      await db.query('UPDATE probe_config SET is_local = false, gid = NULL');
+      await db.query('DELETE FROM probe_registration');
+    };
+
+    beforeEach(async () => {
+      links.clear();
+      await forget();
+      registry = new ProbeRegistry({
+        db,
+        audit: new DatabaseAuditSink(),
+        logger: silent,
+        enrolmentKeys: ['shared-key'],
+      });
+      const probe = async (name: string): Promise<number> =>
+        (
+          await harness.service.create(testActor, {
+            kind: 'probe',
+            parentId: rootId,
+            name: `${name}-${String(process.hrtime.bigint())}`,
+          })
+        ).id;
+      first = await probe('first');
+      second = await probe('second');
+    });
+
+    after(forget);
+
+    it('reads nothing with no local row, whatever is connected', async () => {
+      links.set(first, up(10, 100, 1));
+      links.set(second, up(20, 200, 2));
+      assert.equal(await readLocalProbeLog(db, linkFor), null);
+    });
+
+    it('reads the one local row, and nothing while it is down or says nothing', async () => {
+      await approveLocal(`one-${String(process.hrtime.bigint())}`, first);
+      links.set(first, up(40, 9_000, 1_000));
+      links.set(second, up(99, 9_999, 2_000));
+      assert.deepEqual(await readLocalProbeLog(db, linkFor), {
+        droppedLines: 40,
+        uptimeSeconds: 9_000,
+        session: 1_000,
+      });
+      links.set(first, { connected: false });
+      assert.equal(await readLocalProbeLog(db, linkFor), null, 'not the other connected probe');
+      links.set(first, { connected: true, connectedAt: new Date(3_000) });
+      assert.equal(await readLocalProbeLog(db, linkFor), null, 'a heartbeat without the counts');
+    });
+
+    it('follows the flag when an approval moves it, and Core Health’s log line with it', async () => {
+      const service = new CoreHealthService({
+        vouching: everyVoucherHolds,
+        db,
+        logger: silent,
+        sources: {
+          ...sources(),
+          log: () => ({ droppedLines: 0, droppedBytes: 0, backlogBytes: 0 }),
+          localProbeLog: (q) => readLocalProbeLog(q, linkFor),
+        },
+        ingest: () => Promise.resolve(),
+        process: fakeProcess({ cpuUs: [], elapsedNs: [], uptime: 1_000 }),
+      });
+      const firstGid = `first-${String(process.hrtime.bigint())}`;
+      await approveLocal(firstGid, first);
+      links.set(first, up(100, 9_000, 1_000));
+      links.set(second, up(7_000, 9_000, 2_000));
+      // Running from before this core, so its part gaps once, and the core's own is nothing.
+      assert.equal((await service.read())['logDropped'], 0);
+      links.set(first, up(130, 9_030, 1_000));
+      assert.equal((await service.read())['logDropped'], 30, 'the first object’s probe');
+
+      // The machine beside the core is replaced onto a new object: `#takeLocal` moves the flag.
+      await registry.revoke(firstGid, 'replaced', testActor);
+      await approveLocal(`second-${String(process.hrtime.bigint())}`, second);
+      const local = await db.query<{ object_id: string }>(
+        'SELECT object_id::text AS object_id FROM probe_config WHERE is_local',
+      );
+      assert.deepEqual(
+        local.map((row) => Number(row.object_id)),
+        [second],
+      );
+
+      links.set(first, up(5_000, 9_060, 1_000));
+      links.set(second, up(7_010, 9_060, 2_000));
+      assert.deepEqual(await readLocalProbeLog(db, linkFor), {
+        droppedLines: 7_010,
+        uptimeSeconds: 9_060,
+        session: 2_000,
+      });
+      // Another probe's session, so its part gaps once rather than counting 7,010 as new.
+      assert.equal((await service.read())['logDropped'], 0);
+      links.set(first, up(9_000, 9_090, 1_000));
+      links.set(second, up(7_050, 9_090, 2_000));
+      assert.equal((await service.read())['logDropped'], 40, 'the second’s, not the first’s');
     });
   });
 

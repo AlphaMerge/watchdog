@@ -14387,16 +14387,55 @@ because each is a decision rather than a defect:
             9996..9999, 99994.. unpaused) and the scenario fails (994..999).
           - The bare `id` restored in `rediscoveryUsing`: `[10, 11, 8, 9]`.
 
-- [ ] **P-386 — re-approving a gid onto another object answers 500** · XS · P-382 · Found
+- [x] **P-386 — re-approving a gid onto another object answers 500** · XS · P-382 · Found
       2026-10-09 in `P-382`. `probe_config_gid_unique` raises 23505 when an approved gid is
       approved onto a different probe object, and nothing maps it, so the operator most likely
       sees a 500. **Done when** it is a 409 `PROBE_CONFLICT` naming the object the gid is on, with
       a test.
 
-- [ ] **P-387 — `localProbeLog` has no test** · XS · P-382 · Found 2026-10-09 in `P-382`. It is
+      **P-386 outcome. It was not a 500: `toHttpError` answers any 23505 with `409
+      OBJECT_INVALID`, and the test written first read `query failed: duplicate key value
+      violates unique constraint "probe_config_gid_unique"`, a constraint name and not the
+      object. It is `409 PROBE_CONFLICT` now:** `probe <gid> is already approved onto probe object
+      <A>; revoke it first, then approve it onto probe object <B>`.
+      - **Who sees it.** `POST /probes/:gid/approve` is `ADMIN`, like `GET /probes`, which
+        already lists every probe's `objectId`; naming the object tells the caller nothing new.
+      - **Checked before the write** (`#boundElsewhere`, reading `probe_config.gid`, which revoking
+        and forgetting clear): after the one-probe-per-branch check and before `#takeLocal`.
+        Before `#takeLocal` matters: moving the local probe to a new object was otherwise told
+        that its own object was "held by" it and to approve it onto that object.
+      - **The constraint stays the backstop.** The `probe_config` write runs in a savepoint
+        (`P-249`); a 23505 on `probe_config_gid_unique` reads the object and throws the same
+        refusal. Any other error, and that one with no object to name, is rethrown as it was.
+      - **Moving a probe** is still revoking it and approving it again, now with a test; not
+        made a move in one call, since the branch it leaves stops being scanned.
+      - **Tests.** `probe-registry.test.ts` 6: refused with the exact sentence and nothing changed;
+        the route answering 409 `PROBE_CONFLICT` through `toHttpError`; the local probe asked
+        onto another object as local gets this sentence, not `#takeLocal`'s; the same object again
+        is not a move; it moves after a revoke; and the backstop, by holding `#takeLocal`'s
+        advisory lock in another session, binding the gid there and committing, so the approval
+        passes the check and reaches the constraint.
+      - **Mutations.** The check removed fails 1 (the local one: `#takeLocal` answers first; the
+        others fall to the backstop and still pass, which is what a backstop is for). The
+        backstop's constraint name changed fails the race test with the raw `DatabaseError`.
+
+- [x] **P-387 — `localProbeLog` has no test** · XS · P-382 · Found 2026-10-09 in `P-382`. It is
       inline in `main.ts`, so nothing checks that Core Health's log line follows the one local
       row `P-382` leaves. **Done when** it is extracted and tested with zero, one and a moved
       local row.
+
+      **P-387 outcome. `readLocalProbeLog(q, linkFor)` in `health/core-health.ts`, beside
+      `LocalProbeLog`; `main.ts` passes it `probeEndpoint.linkFor`.** The link is typed as
+      `LocalProbeLink`, `ProbeLink` narrowed to what is read, so a test builds one in a line.
+      Unchanged in behaviour.
+      - **Tests.** `core-health.test.ts` 3, on the registry's own rows: no local row reads
+        nothing with two probes connected; one reads its link's counts and session, and nothing
+        while it is down or its heartbeat lacks the counts, never the other connected probe; and
+        moved, by revoking the first and approving a second object as local (`#takeLocal`), through
+        a `CoreHealthService`: `logDropped` counts the first's 30, gaps once on the move (a new
+        session), then counts the second's 40 while the first's total jumps by thousands.
+      - **Mutations.** `WHERE is_local` replaced by the highest object id fails all 3; the session
+        fixed at 0 fails 2.
 
 - [ ] **P-388 — `DISTINCT ON` over a text alias may skip the `(sensor_id, time)` index** · S ·
       P-385 · Found 2026-10-09 in `P-385` review. `timeseries/store.ts` `stateAtHorizon` and

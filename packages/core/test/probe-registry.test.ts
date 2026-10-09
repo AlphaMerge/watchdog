@@ -7,6 +7,7 @@ import { ProbeHealthService, withLastRefusal } from '../src/health/probe-health.
 import { ProbeRegistry, ProbeRegistryError } from '../src/probes/registry.js';
 import { probeRoutes } from '../src/api/routes/probes.js';
 import { API_VALIDATOR_OPTIONS } from '../src/api/server.js';
+import { toHttpError } from '../src/api/errors.js';
 import { IN_PROCESS_SOURCES } from '../src/ingestion/sources.js';
 import type { Database } from '../src/db/pool.js';
 import {
@@ -17,6 +18,8 @@ import {
 } from './support/database.js';
 import { buildHarness, testActor } from './support/tree.js';
 import { everyVoucherHolds } from './support/vouching.js';
+import { somebodyWaits } from './support/waits-for-lock.js';
+import { within } from './support/within.js';
 import { responseSchemaAjv } from './support/response-schema-ajv.js';
 
 /**
@@ -834,6 +837,149 @@ describe('the probe registry', { skip: available ? false : 'no database' }, () =
         db.query('UPDATE probe_config SET is_local = true WHERE object_id = $1', [secondObject]),
         /probe_config_one_local/,
       );
+    });
+  });
+
+  /**
+   * **A probe approved onto one object is not approved onto another by asking** (`P-386`).
+   * `probe_config_gid_unique` refused it, and nothing said which object the gid was on: the
+   * operator read `OBJECT_INVALID` and a constraint name. Refused before the write now, naming
+   * the object, and the constraint stays behind it for a write that slips past the check.
+   */
+  describe('a probe approved onto another object (P-386)', () => {
+    const elsewhere = async (): Promise<number> =>
+      (
+        await harness.service.create(testActor, {
+          kind: 'probe',
+          parentId: harness.rootId,
+          name: `elsewhere-${String(process.hrtime.bigint())}`,
+        })
+      ).id;
+
+    const refusal = (gid: string, held: number, asked: number): string =>
+      `probe ${gid} is already approved onto probe object ${String(held)}; revoke it first, ` +
+      `then approve it onto probe object ${String(asked)}`;
+
+    /** Where the gid is bound, by object id: `probe_config`'s side of the binding. */
+    const boundTo = async (gid: string): Promise<number[]> =>
+      (
+        await db.query<{ object_id: string }>(
+          'SELECT object_id::text AS object_id FROM probe_config WHERE gid = $1',
+          [gid],
+        )
+      ).map((row) => Number(row.object_id));
+
+    it('is refused 409 PROBE_CONFLICT, naming the object, and changes nothing', async () => {
+      const other = await elsewhere();
+      const first = await registry.admit(hello());
+      assert.ok(first.kind === 'pending');
+      await registry.approve(first.gid, probeId, testActor);
+
+      await assert.rejects(
+        registry.approve(first.gid, other, testActor),
+        (error: unknown) =>
+          error instanceof ProbeRegistryError &&
+          error.code === 'PROBE_CONFLICT' &&
+          error.status === 409 &&
+          error.message === refusal(first.gid, probeId, other),
+      );
+      assert.equal((await registry.get(first.gid))?.objectId, probeId, 'still where it was');
+      assert.deepEqual(await boundTo(first.gid), [probeId]);
+    });
+
+    it('is answered 409 PROBE_CONFLICT by the route, not OBJECT_INVALID', async () => {
+      const other = await elsewhere();
+      const first = await registry.admit(hello());
+      assert.ok(first.kind === 'pending');
+      await registry.approve(first.gid, probeId, testActor);
+
+      const app = Fastify({ ajv: { customOptions: { ...API_VALIDATOR_OPTIONS } } });
+      // The server's own translation of a thrown error, without the rest of the server.
+      app.setErrorHandler((error, _request, reply) => {
+        const answer = toHttpError(error);
+        return reply.status(answer.status).send(answer.body);
+      });
+      await app.register(probeRoutes, { registry });
+      try {
+        const response = await app.inject({
+          method: 'POST',
+          url: `/probes/${first.gid}/approve`,
+          payload: { objectId: other },
+        });
+        assert.equal(response.statusCode, 409, response.body);
+        const body = response.json<{ error: { code: string; message: string } }>();
+        assert.equal(body.error.code, 'PROBE_CONFLICT', response.body);
+        assert.equal(body.error.message, refusal(first.gid, probeId, other));
+      } finally {
+        await app.close();
+      }
+    });
+
+    it('says so before the local flag, when the local probe is asked onto another object', async () => {
+      // Checked before the write and before `#takeLocal`: otherwise the operator moving the
+      // local probe is told its own object is "held by" it, and to approve it onto that object.
+      const other = await elsewhere();
+      const first = await registry.admit(hello());
+      assert.ok(first.kind === 'pending');
+      await registry.approve(first.gid, probeId, testActor, { local: true });
+      await assert.rejects(
+        registry.approve(first.gid, other, testActor, { local: true }),
+        (error: unknown) =>
+          error instanceof ProbeRegistryError &&
+          error.message === refusal(first.gid, probeId, other),
+      );
+    });
+
+    it('is approved onto the same object again, which is not a move', async () => {
+      const first = await registry.admit(hello());
+      assert.ok(first.kind === 'pending');
+      await registry.approve(first.gid, probeId, testActor);
+      const again = await registry.approve(first.gid, probeId, testActor);
+      assert.equal(again.objectId, probeId);
+      assert.deepEqual(await boundTo(first.gid), [probeId]);
+    });
+
+    it('moves once it is revoked', async () => {
+      const other = await elsewhere();
+      const first = await registry.admit(hello());
+      assert.ok(first.kind === 'pending');
+      await registry.approve(first.gid, probeId, testActor);
+      await registry.revoke(first.gid, 'moving it', testActor);
+      const moved = await registry.approve(first.gid, other, testActor);
+      assert.equal(moved.objectId, other);
+      assert.deepEqual(await boundTo(first.gid), [other]);
+    });
+
+    it('is refused the same way when the binding lands after the check', async () => {
+      // The check reads `probe_config` before the write, so a binding committed in between
+      // reaches `probe_config_gid_unique` instead. Held here at `#takeLocal`'s lock, which a
+      // local approval waits on after the check and before its write: the other session binds
+      // the gid to another object and commits, and the approval goes on into the constraint.
+      const other = await elsewhere();
+      const first = await registry.admit(hello());
+      assert.ok(first.kind === 'pending');
+
+      let approving: Promise<unknown> = Promise.resolve();
+      await db.tx(async (q) => {
+        await q.query(
+          `SELECT pg_advisory_xact_lock(hashtext('probe_config'), hashtext('is_local'))`,
+        );
+        approving = registry.approve(first.gid, other, testActor, { local: true }).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        await somebodyWaits(db, 'the approval to wait on the local-probe lock');
+        await q.query('UPDATE probe_config SET gid = $1 WHERE object_id = $2', [
+          first.gid,
+          probeId,
+        ]);
+      });
+      const error = await within(10_000, 'the approval to finish', approving);
+      assert.ok(error instanceof ProbeRegistryError, String(error));
+      assert.equal(error.code, 'PROBE_CONFLICT');
+      assert.equal(error.message, refusal(first.gid, probeId, other));
+      assert.equal((await registry.get(first.gid))?.status, 'pending', 'and decided nothing');
+      assert.deepEqual(await boundTo(first.gid), [probeId]);
     });
   });
 
