@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { ApiError, problemPath, send, useApi } from '../api/client';
 import { useProbeStream, useSettledReload } from '../api/stream';
 import type { AncestorsView, ObjectDetail, ProbeHealthView, SensorTypeSummary } from '../api/types';
-import { Card, ErrorPanel, Loading } from '../components/Panels';
+import { Card, CorrelationId, ErrorPanel, Loading } from '../components/Panels';
 import { MappingPreview } from '../forms/MappingPreview';
 import { SchemaForm } from '../forms/SchemaForm';
 import { fieldsOf, readAt, seedDefaults, type JsonSchema } from '../forms/schema';
@@ -306,9 +306,7 @@ export function AddSensor(): React.JSX.Element {
                 the correlation id beside the message, as `ParamsForm` gives it (`U-51`). */}
             <p role="alert" className="mt-5 text-xs text-down-fg empty:mt-0">
               {failed?.message}
-              {failed?.correlationId !== undefined && (
-                <span className="ml-2 font-mono"> {failed.correlationId}</span>
-              )}
+              <CorrelationId id={failed?.correlationId} />
             </p>
           </div>
         </form>

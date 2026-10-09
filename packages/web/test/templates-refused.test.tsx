@@ -296,6 +296,81 @@ describe('a refused template delete (U-56)', () => {
   });
 });
 
+/**
+ * Focus after a refused delete (`U-64`).
+ *
+ * The refusal takes the question's place, so *Yes, delete* — which had focus — is removed with it,
+ * and focus fell to the page. It goes to *Close*, the control the refusal leaves, described by the
+ * region so the refusal is said with it; *Close* and *Keep it* send it back to *Delete*. An
+ * operator who moved elsewhere while the core answered keeps their focus where they took it.
+ * `fireEvent.click` does not move focus in jsdom, so each button is focused first, as a keyboard
+ * or a screen reader would.
+ */
+describe('focus after a refused template delete (U-64)', () => {
+  const press = (name: string): void => {
+    const one = button(name);
+    one.focus();
+    expect(document.activeElement).toBe(one);
+    fireEvent.click(one);
+  };
+
+  it('goes to Close, which the refusal describes, and from Close and Keep it back to Delete', async () => {
+    core({ deletes: [{ id: 'req-64' }, { id: 'req-64b' }] });
+    await open();
+    const wrapper = button('Delete').parentElement;
+    if (wrapper === null) throw new Error('no delete');
+    const region = within(wrapper).getByRole('alert');
+
+    press('Delete');
+    press('Yes, delete');
+    expect(await alertSaying('a trigger still names this template')).toBe(region);
+    expect(screen.queryByRole('button', { name: 'Yes, delete' })).toBeNull();
+    await waitFor(() => {
+      expect(document.activeElement).toBe(button('Close'));
+    });
+    // Described by the region, so a reader whose focus change cut the alert short hears it.
+    expect(region.id).not.toBe('');
+    expect(button('Close').getAttribute('aria-describedby')).toBe(region.id);
+    expect(region.textContent).toBe('a trigger still names this template req-64');
+
+    // Close goes, and so would its focus: it is given to Delete, which takes its place.
+    press('Close');
+    await waitFor(() => {
+      expect(document.activeElement).toBe(button('Delete'));
+    });
+
+    // Keep it, likewise.
+    press('Delete');
+    press('Keep it');
+    await waitFor(() => {
+      expect(document.activeElement).toBe(button('Delete'));
+    });
+
+    // Refused again: Close again.
+    press('Delete');
+    press('Yes, delete');
+    await waitFor(() => {
+      expect(region.textContent).toBe('a trigger still names this template req-64b');
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(button('Close'));
+    });
+  });
+
+  it('is left where the operator took it while the core answered', async () => {
+    core({ deletes: [{ id: 'req-64' }] });
+    await open();
+    press('Delete');
+    press('Yes, delete');
+    // Moved on before the answer: the refusal is said, and focus stays in the subject box.
+    const subject = screen.getByLabelText('Subject');
+    subject.focus();
+    await alertSaying('a trigger still names this template');
+    expect(button('Close')).toBeDefined();
+    expect(document.activeElement).toBe(subject);
+  });
+});
+
 describe('a refused preview (U-56)', () => {
   it('is said politely in a region that was there before, again for a different draft in the same words, and emptied by one accepted', async () => {
     core({});

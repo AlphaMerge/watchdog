@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ObjectDetail, SensorTypeSummary } from '../src/api/types';
 import { ParamsForm } from '../src/routes/detail/ParamsForm';
-import { alertSaying, expectQuiet, speaking } from './support/refusal-region';
+import { alertSaying, expectCorrelation, expectQuiet, speaking } from './support/refusal-region';
 
 /**
  * A save of a sensor's parameters the core refused, announced (`U-54`).
@@ -118,11 +118,9 @@ describe('a save the core refused (U-54)', () => {
 
     save();
     expect(await alertSaying(REFUSED)).toBe(region);
+    // The id said after the message and a space, in `CorrelationId` (`U-65`).
     expect(region.textContent).toBe(`${REFUSED} req-54`);
-    const id = within(region).getByText('req-54');
-    expect(id.tagName).toBe('SPAN');
-    expect(id.classList.contains('font-mono')).toBe(true);
-    expect(id.classList.contains('ml-2')).toBe(true);
+    expectCorrelation(region, 'req-54');
     await settled();
 
     // Accepted: emptied as it starts, and left empty.

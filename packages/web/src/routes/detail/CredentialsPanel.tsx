@@ -10,7 +10,7 @@ import type {
   ObjectRef,
 } from '../../api/types';
 import { useSession } from '../../auth/session';
-import { Card, Empty, ErrorPanel, Loading } from '../../components/Panels';
+import { Card, CorrelationId, Empty, ErrorPanel, Loading } from '../../components/Panels';
 import { SchemaForm } from '../../forms/SchemaForm';
 import { fieldsOf, readAt } from '../../forms/schema';
 import { allProblems, type FieldProblem } from '../../forms/validate';
@@ -675,9 +675,7 @@ function Refusal({
   return (
     <p role="alert" className={`text-sm text-down-fg ${className}`}>
       {error?.message}
-      {error?.correlationId !== undefined && (
-        <span className="ml-2 font-mono text-xs">{error.correlationId}</span>
-      )}
+      <CorrelationId id={error?.correlationId} size="text-xs" />
     </p>
   );
 }

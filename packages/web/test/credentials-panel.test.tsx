@@ -16,7 +16,7 @@ import { ChannelTable } from '../src/routes/detail/ChannelTable';
 import { CredentialsPanel } from '../src/routes/detail/CredentialsPanel';
 import { OUTSIDE_MEANS } from '../src/routes/detail/credentials-model';
 import { UnboundedCredentialsView } from '../src/routes/UnboundedCredentialsView';
-import { alertSaying, expectQuiet, speaking } from './support/refusal-region';
+import { alertSaying, expectCorrelation, expectQuiet, speaking } from './support/refusal-region';
 
 /**
  * The Credentials tab, rendered (`U-21`).
@@ -1298,12 +1298,15 @@ describe('a refused credential change (U-54)', () => {
     nowInherited: null,
   };
 
-  /** The id in the alert itself, so it is said with the message, set apart as elsewhere. */
+  /**
+   * The id in the alert itself, in `CorrelationId` (`U-65`): said with the message and after a
+   * space — the span this panel wrote had none, so a screen reader read `probereq-54` — and still
+   * set smaller than the message, as it was.
+   */
   const expectId = (region: HTMLElement): void => {
-    const id = within(region).getByText('req-54');
-    expect(id.tagName).toBe('SPAN');
-    expect(id.classList.contains('font-mono')).toBe(true);
-    expect(id.classList.contains('ml-2')).toBe(true);
+    expect(region.textContent).toBe(`${SAID} req-54`);
+    expectCorrelation(region, 'req-54');
+    expect(region.querySelector('span.font-mono')?.classList.contains('text-xs')).toBe(true);
   };
 
   it('says a refused removal check in the row’s region, again on the next, and empties on one accepted', async () => {
@@ -1319,7 +1322,7 @@ describe('a refused credential change (U-54)', () => {
 
     remove();
     expect(await alertSaying(SAID)).toBe(region);
-    expect(region.textContent).toBe(`${SAID}req-54`);
+    expect(region.textContent).toBe(`${SAID} req-54`);
     expectId(region);
     await waitFor(() => {
       expect(
@@ -1331,7 +1334,7 @@ describe('a refused credential change (U-54)', () => {
     // Committed empty before the core answers: React did not fold the two into one.
     expect(region.matches(':empty')).toBe(true);
     await waitFor(() => {
-      expect(region.textContent).toBe(`${SAID}req-54`);
+      expect(region.textContent).toBe(`${SAID} req-54`);
     });
     expect(within(row('SNMP')).getByRole('alert')).toBe(region);
     await waitFor(() => {
@@ -1379,7 +1382,7 @@ describe('a refused credential change (U-54)', () => {
     save();
     expect(region.matches(':empty')).toBe(true);
     await waitFor(() => {
-      expect(region.textContent).toBe(`${SAID}req-54`);
+      expect(region.textContent).toBe(`${SAID} req-54`);
     });
     await waitFor(() => {
       expect(within(form).getByRole('button', { name: 'Save changes' })).toHaveProperty(

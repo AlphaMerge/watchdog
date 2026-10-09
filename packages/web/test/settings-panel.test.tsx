@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SettingView } from '../src/api/types';
 import { SettingsPanel } from '../src/routes/detail/SettingsPanel';
+import { expectCorrelation } from './support/refusal-region';
 
 /**
  * An inheritable setting's problem, announced and tied to its control (`U-46`).
@@ -207,11 +208,9 @@ describe('a save the core refused (U-48)', () => {
     await waitFor(() => {
       expect(region.textContent).toBe(`${REFUSED} req-51`);
     });
-    // In the alert itself, so it is said with the message, and set apart as `ParamsForm` sets it.
-    const id = within(region).getByText('req-51');
-    expect(id.tagName).toBe('SPAN');
-    expect(id.classList.contains('font-mono')).toBe(true);
-    expect(id.classList.contains('ml-2')).toBe(true);
+    // In the alert itself, in `CorrelationId` (`U-65`): said with the message, after a space, so
+    // a screen reader does not run it into the message's last word.
+    expectCorrelation(region, 'req-51');
     expect(alertOf()).toBe(region);
     // The spacing `U-46` gave the line is unchanged by what it holds.
     expect(region.classList.contains('mt-1.5')).toBe(true);

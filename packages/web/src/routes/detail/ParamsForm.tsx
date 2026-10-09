@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { ApiError, problemPath, send } from '../../api/client';
 import type { ObjectDetail, SensorTypeSummary } from '../../api/types';
+import { CorrelationId } from '../../components/Panels';
 import { MappingPreview } from '../../forms/MappingPreview';
 import { SchemaForm } from '../../forms/SchemaForm';
 import { fieldsOf, readAt, type JsonSchema } from '../../forms/schema';
@@ -186,9 +187,7 @@ export function ParamsForm({
               {failed.status === 412 &&
                 ' — somebody else changed this sensor since this form was opened. Reload to see' +
                   ' their change before saving over it.'}
-              {failed.correlationId !== undefined && (
-                <span className="ml-2 font-mono"> {failed.correlationId}</span>
-              )}
+              <CorrelationId id={failed.correlationId} />
             </p>
           )}
         </div>

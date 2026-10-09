@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { ApiError, send, useApi } from '../api/client';
 import type {
@@ -615,6 +615,28 @@ function Delete({
   const [failed, setFailed] = useState<ApiError | null>(null);
   const [confirming, setConfirming] = useState(false);
 
+  // **Where focus goes when the button that had it is taken away** (`U-64`). A refused delete
+  // replaces the question with the refusal, so *Yes, delete* — which had focus — is gone, and
+  // focus would fall to the page: a keyboard user starts again from the top, and a screen reader
+  // may say nothing of where they are. It goes to *Close*, the one control the refusal leaves,
+  // rather than to the region: the alert already says the refusal, a focused region would say it
+  // a second time and is not something the operator can act on, and *Close* is described by the
+  // region, so a reader whose focus change cut the alert short still hears why it is there. The
+  // triggers that still name the template are links just before it, one Shift+Tab away. *Close*
+  // and *Keep it* go too, and send focus back to *Delete*, which takes their place.
+  const focusNext = useRef<'close' | 'delete' | null>(null);
+  const yesButton = useRef<HTMLButtonElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  const deleteButton = useRef<HTMLButtonElement>(null);
+  const region = useId();
+
+  useEffect(() => {
+    const target = focusNext.current;
+    if (target === null) return;
+    focusNext.current = null;
+    (target === 'close' ? closeButton : deleteButton).current?.focus();
+  }, [failed, confirming]);
+
   // The core refuses a template a trigger still names, and returns the list (`N-05`). That list
   // is the useful part — a bare "cannot delete" leaves somebody hunting through every object for
   // the reference — so it is shown, with a link to each trigger's object.
@@ -624,6 +646,7 @@ function Delete({
     <div className="ml-auto max-w-md">
       {!confirming ? (
         <button
+          ref={deleteButton}
           type="button"
           onClick={() => {
             setConfirming(true);
@@ -644,6 +667,14 @@ function Delete({
               send('DELETE', `/templates/${String(template.id)}`)
                 .then(onDeleted)
                 .catch((error: unknown) => {
+                  // Only from *Yes, delete*: an operator who moved on while the core answered
+                  // keeps their focus where they took it.
+                  // A click that did not focus the button (Safari's) leaves it on the page, and
+                  // that is moved too.
+                  const at = document.activeElement;
+                  if (at === yesButton.current || at === null || at === document.body) {
+                    focusNext.current = 'close';
+                  }
                   setFailed(
                     error instanceof ApiError
                       ? error
@@ -655,6 +686,7 @@ function Delete({
                   );
                 });
             }}
+            ref={yesButton}
             className="border border-down-fg bg-down-bg px-2 py-1 text-xs text-down-fg"
           >
             Yes, delete
@@ -662,6 +694,7 @@ function Delete({
           <button
             type="button"
             onClick={() => {
+              focusNext.current = 'delete';
               setConfirming(false);
               setFailed(null);
             }}
@@ -677,7 +710,7 @@ function Delete({
           already in it is not reliably announced (`U-41`). An alert, for `U-48`'s reason: the
           template the operator thinks they removed is still there. It takes the question's place
           and needs no margin of its own, so an empty one takes no space. */}
-      <div role="alert" className="space-y-1 text-xs text-down-fg">
+      <div id={region} role="alert" className="space-y-1 text-xs text-down-fg">
         {failed !== null && (
           <p>
             {failed.message}
@@ -703,8 +736,11 @@ function Delete({
 
       {failed !== null && (
         <button
+          ref={closeButton}
           type="button"
+          aria-describedby={region}
           onClick={() => {
+            focusNext.current = 'delete';
             setConfirming(false);
             setFailed(null);
           }}

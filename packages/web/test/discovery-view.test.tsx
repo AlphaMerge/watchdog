@@ -415,6 +415,107 @@ describe('a cancel the core refused (U-54)', () => {
 });
 
 /**
+ * The run card's two regions (`U-64`).
+ *
+ * A refused cancel and a failed poll shared one alert, so the next good poll emptied a refusal
+ * the operator may not have heard yet, and a poll failure was assertive where the first read's is
+ * polite. The cancel has its own alert, emptied only by the next cancel; the polls have their own
+ * polite region, emptied by a read that succeeds, and a poll failing again in the same words keeps
+ * the one shown (`U-59`). Under fake timers, so the polls come when the test says.
+ */
+describe('the run card’s refused cancel and its polls (U-64)', () => {
+  /** The run's card, once its first read has been answered. */
+  async function watching(start: HTMLButtonElement): Promise<{
+    panel: HTMLElement;
+    refusal: HTMLElement;
+    polls: HTMLElement;
+  }> {
+    fireEvent.click(start);
+    await turnUntil(
+      () => screen.queryByRole('heading', { name: 'Run 7 — 10.0.0.0/29' }) !== null,
+      'the run was not shown',
+    );
+    const panel = screen.getByRole('heading', { name: 'Run 7 — 10.0.0.0/29' }).closest('section');
+    if (panel === null) throw new Error('no run card');
+    const refusal = within(panel).getByRole('alert');
+    const polls = within(panel).getByRole('status');
+    expectQuiet(refusal, ['mt-3', 'empty:mt-0']);
+    expectQuiet(polls, ['mt-3', 'empty:mt-0'], 'polite');
+    return { panel, refusal, polls };
+  }
+
+  /** Five seconds on, until the read it sends has been answered and the next one is due. */
+  async function nextPoll(reads: readonly unknown[], left: number): Promise<void> {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    await turnUntil(
+      () => reads.length === left && vi.getTimerCount() === 1,
+      `the poll leaving ${String(left)} reads was not answered`,
+    );
+  }
+
+  it('keeps a refused cancel through the good poll that follows it', async () => {
+    const reads = [Promise.resolve<Answer>(null), Promise.resolve<Answer>(null)];
+    core({ cancels: [{ status: 409, message: NO_CANCEL, id: 'req-cancel' }], reads });
+    const card = await open();
+    const start = await ready(card);
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { panel, refusal, polls } = await watching(start);
+      fireEvent.click(within(panel).getByRole('button', { name: 'Cancel' }));
+      await turnUntil(() => refusal.textContent !== '', 'the refusal was not said');
+      expect(refusal.textContent).toBe(`${NO_CANCEL} req-cancel`);
+      expectCorrelation(refusal, 'req-cancel');
+
+      // The run is read again, and read well: the refusal stands, in the same node.
+      await nextPoll(reads, 0);
+      expect(refusal.textContent).toBe(`${NO_CANCEL} req-cancel`);
+      expect(within(panel).getByRole('alert')).toBe(refusal);
+      expect(polls.matches(':empty')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('says a failed poll politely, once for the same words, and empties it on a good one', async () => {
+    const reads = [
+      Promise.resolve<Answer>(null),
+      Promise.resolve<Answer>({ status: 503, message: 'the core is busy', id: 'req-poll' }),
+      Promise.resolve<Answer>({ status: 503, message: 'the core is busy', id: 'req-poll-2' }),
+      Promise.resolve<Answer>(null),
+    ];
+    core({ reads });
+    const card = await open();
+    const start = await ready(card);
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { panel, refusal, polls } = await watching(start);
+
+      await nextPoll(reads, 2);
+      expect(polls.textContent).toBe('the core is busy req-poll');
+      expectCorrelation(polls, 'req-poll');
+      // Not an alert: nothing the operator asked for was refused.
+      expect(speaking()).toEqual([]);
+      expect(refusal.matches(':empty')).toBe(true);
+
+      // Failing again in the same words, with the core's next id: what is shown stays.
+      await nextPoll(reads, 1);
+      expect(polls.textContent).toBe('the core is busy req-poll');
+
+      // Read well: emptied, in the same node.
+      await nextPoll(reads, 0);
+      expect(polls.matches(':empty')).toBe(true);
+      expect(within(panel).getByRole('status')).toBe(polls);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
  * The run's first read failing (`U-56`).
  *
  * The card is drawn as the run is started and reads it at once; until that read succeeds there is

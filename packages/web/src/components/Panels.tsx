@@ -55,13 +55,23 @@ export function RefusalPanel({
 /**
  * The correlation id after a refusal's message, when the core sent one (`U-51`, `U-59`).
  *
- * The span `ParamsForm` and `SettingsPanel` use, inside the refusal's own region so it is said with
- * the message. Its text starts with a space: a margin separates the two on screen but not in the
- * text a screen reader reads, where the id would run into the message's last word. A refusal the
- * page decided itself has no id, and gets nothing.
+ * The one span every refusal line uses (`U-65`), inside the refusal's own region so it is said
+ * with the message. Its text starts with a space: a margin separates the two on screen but not in
+ * the text a screen reader reads, where the id would run into the message's last word. A refusal
+ * the page decided itself has no id, and gets nothing. `size` is for a line whose id is set
+ * smaller than its message (`CredentialsPanel`'s `text-xs` under `text-sm`).
  */
-export function CorrelationId({ id }: { id: string | undefined }): React.JSX.Element | null {
-  return id === undefined ? null : <span className="ml-2 font-mono"> {id}</span>;
+export function CorrelationId({
+  id,
+  size,
+}: {
+  id: string | undefined;
+  size?: 'text-xs';
+}): React.JSX.Element | null {
+  if (id === undefined) return null;
+  return (
+    <span className={size === undefined ? 'ml-2 font-mono' : `ml-2 font-mono ${size}`}> {id}</span>
+  );
 }
 
 export function Loading({ what }: { what: string }): React.JSX.Element {

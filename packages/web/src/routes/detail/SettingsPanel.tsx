@@ -2,7 +2,7 @@ import { useCallback, useId, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiError, send } from '../../api/client';
 import type { SettingSource, SettingView } from '../../api/types';
-import { Empty } from '../../components/Panels';
+import { CorrelationId, Empty } from '../../components/Panels';
 import { ProblemRegion, SchemaControl } from '../../forms/Control';
 import { labelFor } from '../../forms/schema';
 import { problemsFor } from '../../forms/validate';
@@ -231,9 +231,7 @@ function Setting({
           finds this refusal in the core's log, and nothing renders while there is no refusal. */}
       <p role="alert" className="mt-1.5 text-xs text-down-fg empty:mt-0">
         {failed?.message}
-        {failed?.correlationId !== undefined && (
-          <span className="ml-2 font-mono"> {failed.correlationId}</span>
-        )}
+        <CorrelationId id={failed?.correlationId} />
       </p>
     </div>
   );

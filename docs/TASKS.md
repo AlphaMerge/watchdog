@@ -25975,18 +25975,64 @@ because each is a decision rather than a defect:
       Core Health's `sensorsWithInvalidParams` (and the sensor list) link to it, and the list says
       when the check has not finished, with tests.
 
-- [ ] **U-64 — a refused template delete drops focus, and the run card shares one region** · XS ·
+- [x] **U-64 — a refused template delete drops focus, and the run card shares one region** · XS ·
       U-56 · Found 2026-10-09 in `U-56`. A refused delete removes *Yes, delete*, which had focus,
       so focus falls to the page; and `RunPanel` uses one region for a refused cancel and for its
       polls, so the next good poll (every 2 s) empties the refusal, and poll failures are alerts
       where the first-read failure is polite. **Done when** focus moves to *Close*, and the cancel
       refusal and the poll failures have regions of their own, with tests.
 
-- [ ] **U-65 — four components write the correlation id themselves** · XS · U-59 · Found
+      **U-64 outcome. A refused delete puts focus on *Close*, which the refusal describes; the run
+      card has an alert for a refused cancel and a polite region for its polls.**
+      - **Focus to *Close*, not to the region.** The alert already says the refusal, so a focused
+        region would say it a second time, and it is not something the operator can act on;
+        *Close* is the one control the refusal leaves (WCAG 2.4.3), and the triggers that still
+        name the template are links just before it, one Shift+Tab away. *Close* carries
+        `aria-describedby` pointing at the region, so a screen reader whose focus change cuts the
+        alert short still hears why it is there. Moved only when focus was still on *Yes, delete*
+        (or on the page, as a Safari click leaves it): an operator who went on typing while the
+        core answered keeps their place.
+      - **Also done: *Close* and *Keep it* send focus back to *Delete*.** Both remove themselves,
+        so moving focus to *Close* alone would only have moved the drop one step on.
+      - **`RunPanel`'s two regions.** `refused` is the cancel's, `role="alert"` (`U-48`: focus is
+        on *Cancel*, and the run the operator thinks they stopped is still going), emptied only by
+        the next cancel. `problem` is the polls', `role="status"` as the first read's is (`U-56`),
+        emptied by a read that succeeds, and a poll failing again in the same words still keeps
+        the one shown, id and all (`U-59`). Both `mt-3 empty:mt-0` in the card body.
+      - **Tests.** `templates-refused.test.tsx`: with each button focused before it is pressed
+        (`fireEvent` moves no focus), a refused delete leaves focus on *Close*, whose
+        `aria-describedby` is the region's id; *Close* and *Keep it* leave it on *Delete*; a
+        second refusal on *Close* again; focus moved to *Subject* while the core answers stays
+        there. `discovery-view.test.tsx`, under fake timers: both regions quiet before; a refused
+        cancel's words and id stand through the good poll that follows, in the same node, with
+        the polls' region empty; a failed poll says its words and id in the polite region with no
+        alert speaking, keeps them through a second failure in the same words with a new id, and
+        is emptied by a good read. Mutations, each failing (restored byte for byte; the web
+        package has no `dist`): a good poll emptying the cancel's region 1; the polls' region an
+        alert 3; a repeated poll failure replacing the one shown 2; focus not moved 1; *Close* not
+        described 1; focus taken whatever had it 1; *Close* and *Keep it* dropping focus 1.
+      - **Not done.** *Delete* asking its question still removes itself with focus on it; focus
+        could go to *Keep it*.
+
+- [x] **U-65 — four components write the correlation id themselves** · XS · U-59 · Found
       2026-10-09 in `U-59`. `ParamsForm`, `SettingsPanel`, `AddSensor` and `CredentialsPanel`
       write the `ml-2 font-mono` span instead of using `CorrelationId`, and `CredentialsPanel`'s
       has no leading space, so a screen reader runs the id into the message. **Done when** all
       four use `CorrelationId`, with a test of the spoken text.
+
+      **U-65 outcome. All four use `CorrelationId`; no refusal line writes the span any more.**
+      - **`CredentialsPanel`'s id now has its space**, so a screen reader says *…on that probe
+        req-54* and not *…probereq-54*. It set the id `text-xs` under a `text-sm` message, and
+        still does: `CorrelationId` takes `size="text-xs"` for that, so nothing changed on screen.
+        The other three spans already began with a space, and their lines are unchanged.
+      - **Tests.** Each component's refusal test reads the region's `textContent`, the text a
+        screen reader is handed, as *message id* with the space, and checks the one span with
+        `expectCorrelation` (which also holds its text to ` id`); `credentials-panel.test.tsx`
+        asserted the run-together text and now asserts the space, and that the id is still
+        `text-xs`. Mutations, each failing: `CorrelationId` without its leading space 5 across the
+        four files; `CredentialsPanel` writing its own span again 2.
+      - **Not done.** `ParamsForm`'s channel-mode refusal (`ModeRefusal`) says the id in a
+        paragraph of its own, as `ErrorPanel` does, and was left with it.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

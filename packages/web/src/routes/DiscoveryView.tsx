@@ -414,7 +414,12 @@ function StartPanel({
 function RunPanel({ runId }: { runId: number }): React.JSX.Element {
   const [run, setRun] = useState<DiscoveryRun | null>(null);
   const [summary, setSummary] = useState<DiscoverySummary | null>(null);
+  // Two regions, two kinds of news (`U-64`). `problem` is a read of the run failing — the polls'
+  // own business, emptied by the next read that succeeds. `refused` is the operator's cancel,
+  // refused: emptied only by their next attempt, so a good poll two seconds later does not take
+  // the refusal away before it is read.
   const [problem, setProblem] = useState<ApiError | null>(null);
+  const [refused, setRefused] = useState<ApiError | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const live = useRef(true);
 
@@ -480,10 +485,10 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
   const cancel = useCallback(() => {
     setCancelling(true);
     // Emptied as the attempt starts, so a refusal in the words already there is said (`U-54`).
-    setProblem(null);
+    setRefused(null);
     send('POST', `/discovery/${String(runId)}/cancel`)
       .catch((failure: unknown) => {
-        setProblem(
+        setRefused(
           failure instanceof ApiError
             ? failure
             : new ApiError(0, 'UNKNOWN', 'the run could not be cancelled'),
@@ -593,11 +598,21 @@ function RunPanel({ runId }: { runId: number }): React.JSX.Element {
         </div>
       )}
 
-      {/* A refused cancel, or a run that could not be read. **Always there, empty until one**
-          (`U-54`): a region added with its text already in it is not reliably announced
-          (`U-41`). A poll that fails again in the same words leaves it alone, so it is said once
-          and not every five seconds. */}
+      {/* A refused cancel. **Always there, empty until one** (`U-54`): a region added with its
+          text already in it is not reliably announced (`U-41`). An alert, for `U-48`'s reason:
+          focus is on *Cancel* when the core refuses, and the run the operator thinks they stopped
+          is still going. **Its own region** (`U-64`): only the next cancel empties it, so the
+          poll that succeeds two seconds later leaves it to be read. */}
       <p role="alert" className="mt-3 text-sm text-down-fg empty:mt-0">
+        {refused?.message}
+        <CorrelationId id={refused?.correlationId} />
+      </p>
+      {/* A read of the run failing, once it has been read (`U-64`). **Polite**, as the first
+          read's failure is (`U-56`): nothing the operator asked for was refused, the card keeps
+          asking by itself, and a read that succeeds empties it. Always there and empty until a
+          read fails; a poll that fails again in the same words leaves it alone, so it is said
+          once and not every five seconds (`U-59`). */}
+      <p role="status" className="mt-3 text-sm text-down-fg empty:mt-0">
         {problem?.message}
         <CorrelationId id={problem?.correlationId} />
       </p>

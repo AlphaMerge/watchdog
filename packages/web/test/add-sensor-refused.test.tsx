@@ -1,8 +1,9 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SensorTypeSummary } from '../src/api/types';
 import { AddSensor } from '../src/routes/AddSensor';
+import { expectCorrelation } from './support/refusal-region';
 
 /**
  * A create the core refused, announced (`U-52`).
@@ -100,11 +101,9 @@ describe('a create the core refused (U-52)', () => {
     });
     // The same node: its text changed, which is what is announced.
     expect(screen.getByRole('alert')).toBe(region);
-    // The id in the alert itself, so it is said with the message, set apart as elsewhere.
-    const id = within(region).getByText('req-52');
-    expect(id.tagName).toBe('SPAN');
-    expect(id.classList.contains('font-mono')).toBe(true);
-    expect(id.classList.contains('ml-2')).toBe(true);
+    // The id in the alert itself, in `CorrelationId` (`U-65`): said with the message, after a
+    // space, so a screen reader does not run it into the message's last word.
+    expectCorrelation(region, 'req-52');
     expect(creates()).toBe(1);
 
     // The next attempt empties it as it starts; this one is accepted, and the page moves on.
