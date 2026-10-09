@@ -12,7 +12,6 @@ import type {
 import type { Session } from '../../auth/session';
 import { fieldsOf, seedDefaults, type FieldModel, type JsonSchema } from '../../forms/schema';
 import type { FieldProblem } from '../../forms/validate';
-import { INVALID_PARAMS_PATH } from '../../tree/invalid-params';
 
 /**
  * The credential tab's judgements (`U-21`), apart from the component that draws them: who may
@@ -475,29 +474,8 @@ export function refusedFields(error: ApiError): FieldProblem[] {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The way from Core Health's count to the list.
+// The list of sets without bounds.
 // ---------------------------------------------------------------------------------------------
 
 /** Where the list of sets without bounds lives. */
 export const UNBOUNDED_PATH = '/credentials/unbounded';
-
-/**
- * A page a channel's number is counting, when there is one.
- *
- * Core Health's **Credential sets without targets** is a count with nothing beside it to say
- * which sets, and the list is where that is answered; so is **Sensors with invalid parameters**
- * (`U-63`), whose list is the tree filtered to them. Keyed by sensor type as well as channel, so
- * a channel that only shares the key on another type is not given a link to a list it is not
- * counting.
- */
-export function channelLinkFor(
-  sensorType: string | undefined,
-  channelKey: string,
-): { to: string; label: string } | null {
-  if (sensorType !== 'ms.core.health') return null;
-  if (channelKey === 'credentialsUnbounded') return { to: UNBOUNDED_PATH, label: 'Which sets' };
-  if (channelKey === 'sensorsWithInvalidParams') {
-    return { to: INVALID_PARAMS_PATH, label: 'Which sensors' };
-  }
-  return null;
-}

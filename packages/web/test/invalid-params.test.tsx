@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { Link, MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as Stream from '../src/api/stream';
 import type { ChannelRecord } from '../src/api/types';
@@ -153,6 +153,36 @@ const renderTree = (at: string): void => {
   );
 };
 
+/** The browser's *Back*, and the navigation bar's link to the plain tree. */
+function Chrome(): React.JSX.Element {
+  const navigate = useNavigate();
+  return (
+    <nav>
+      <button
+        type="button"
+        onClick={() => {
+          void navigate(-1);
+        }}
+      >
+        Back
+      </button>
+      <Link to="/tree">Tree</Link>
+    </nav>
+  );
+}
+
+const renderTreeWithChrome = (at: string): void => {
+  render(
+    <MemoryRouter initialEntries={[at]}>
+      <Where />
+      <Chrome />
+      <Routes>
+        <Route path="/tree" element={<TreeView />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+};
+
 const region = (): HTMLElement => {
   const found = document.getElementById('tree-filter-status');
   if (found === null) throw new Error('no filter status region');
@@ -299,7 +329,10 @@ describe('the tree’s invalid-parameters filter', () => {
     await waitFor(() => {
       expect(filterAsks(asked).some((params) => params.get('q') === 'Disk')).toBe(true);
     });
-    expect(location).toBe('/tree?invalidParams=true');
+    // The search is held beside it (`U-70`).
+    await waitFor(() => {
+      expect(location).toBe('/tree?q=Disk&invalidParams=true');
+    });
   });
 
   it('lists the sensors by what the listing shows, and says how many', async () => {
@@ -439,6 +472,72 @@ describe('the tree’s invalid-parameters filter', () => {
     await screen.findByRole('link', { name: 'Disk C' });
     expect(region().textContent).toBe(
       '2 sensors have parameters their type now refuses, among those you can see.',
+    );
+  });
+
+  it('never says what a search the address held answered, once it is typed over', async () => {
+    // `U-70`: the search now comes from the address too, so the first answer is to a search
+    // nobody typed on this page, and typing must set it aside as ticking the box does. Emptying
+    // the search is the edit that would show it: the empty answer to `Disk`, read as if it were
+    // the answer for every sensor, says a sentence of its own.
+    const MATCHING_NONE = 'No sensor matching the search has parameters its type now refuses.';
+    const { asked, release } = stubFetch([NONE, ONE], 1);
+    renderTree('/tree?q=Disk&invalidParams=true');
+    await waitFor(() => {
+      expect(region().textContent).toBe(MATCHING_NONE);
+    });
+
+    const said = await textsDuring(region(), async () => {
+      fireEvent.change(screen.getByLabelText('Search objects'), { target: { value: '' } });
+      await screen.findByText('Loading matching objects…');
+    });
+    // The sentence it held, taken away, and nothing else: not `No sensor you can see…`.
+    expect(said.filter((text) => text !== '' && text !== MATCHING_NONE)).toEqual([]);
+    expect(region().textContent).toBe('');
+
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    await screen.findByRole('link', { name: 'Fan tray' });
+    expect(region().textContent).toBe(
+      '1 sensor has parameters its type now refuses, among those you can see.',
+    );
+    expect(filterAsks(asked).map((params) => params.get('q'))).toEqual(['Disk', null]);
+    await waitFor(() => {
+      expect(location).toBe('/tree?invalidParams=true');
+    });
+  });
+
+  it('never says what the address’s search answered when Back brings that search again', async () => {
+    // `U-70`: leaving a filtered tree for the plain one and coming *Back* asks the same path
+    // again, as unticking and ticking the box does, and `useApi` still holds its answer.
+    const MATCHING_NONE = 'No sensor matching the search has parameters its type now refuses.';
+    const { release } = stubFetch([NONE, ONE], 1);
+    renderTreeWithChrome('/tree?q=Disk&invalidParams=true');
+    await waitFor(() => {
+      expect(region().textContent).toBe(MATCHING_NONE);
+    });
+    fireEvent.click(screen.getByRole('link', { name: 'Tree' }));
+    await waitFor(() => {
+      expect(region().textContent).toBe('');
+    });
+    expect(screen.getByLabelText<HTMLInputElement>('Search objects').value).toBe('');
+
+    const said = await textsDuring(region(), async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+      await screen.findByText('Loading matching objects…');
+    });
+    expect(said.filter((text) => text !== '')).toEqual([]);
+    expect(screen.getByLabelText<HTMLInputElement>('Search objects').value).toBe('Disk');
+
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    await screen.findByRole('link', { name: 'Fan tray' });
+    expect(region().textContent).toBe(
+      '1 sensor has parameters its type now refuses, among those you can see.',
     );
   });
 

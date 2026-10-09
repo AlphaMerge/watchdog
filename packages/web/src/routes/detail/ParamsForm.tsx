@@ -231,10 +231,12 @@ function ModeRefusal({
           ))}
         </ul>
       )}
-      <p className="text-text">{error.message}</p>
-      {error.correlationId !== undefined && (
-        <p className="font-mono text-xs text-text-muted">{error.correlationId}</p>
-      )}
+      {/* The id after the core's sentence and a space, in `CorrelationId` as every other refusal
+          line has it (`U-65`, `U-70`): in a paragraph of its own it was said as a line by itself. */}
+      <p className="text-text">
+        {error.message}
+        <CorrelationId id={error.correlationId} size="text-xs" />
+      </p>
     </div>
   );
 }

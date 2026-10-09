@@ -1,5 +1,11 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import {
+  Link,
+  NavigationType,
+  useNavigate,
+  useNavigationType,
+  useSearchParams,
+} from 'react-router-dom';
 import { request, useApi, ApiError, type Loadable } from '../api/client';
 import { useStateStream, type LiveState, type StreamStatus } from '../api/stream';
 import type { ObjectPage, ObjectRef, ObjectSummary, SensorState } from '../api/types';
@@ -22,6 +28,7 @@ import {
   notChecked,
   notCheckedSentence,
 } from '../tree/invalid-params';
+import { filtersKey, filtersOf, withFilters, type TreeFilters } from '../tree/filters';
 
 const KIND_GLYPH: Record<string, string> = {
   root: '⌂',
@@ -52,10 +59,12 @@ const PAGE = 500;
  * where a breadcrumb request per row would be two hundred of them. Before it did, two sensors
  * both called `Ping` read alike until one was opened.
  *
- * **Invalid parameters is a filter held in the URL** (`U-63`), `?invalidParams=true` as on
- * `GET /objects`, so Core Health's count of those sensors links to their list and the list is a
- * link somebody can send. Until the core's start-up check has read every sensor there is no list,
- * and the page says why in words, in a polite status region that is on the page from the start.
+ * **Every filter is held in the URL**, `?q=`, `?tag=` and `?invalidParams=true` as on
+ * `GET /objects`: invalid parameters since `U-63`, so Core Health's count of those sensors links
+ * to their list, and the search and the tag since `U-70`, so a filtered tree is a link somebody
+ * can send and reload and *Back* bring it back. Until the core's start-up check has read every
+ * sensor there is no list of invalid parameters, and the page says why in words, in a polite
+ * status region that is on the page from the start.
  */
 export function TreeView(): React.JSX.Element {
   const tops = useApi<{ items: ObjectSummary[] }>('/objects/tops');
@@ -63,19 +72,31 @@ export function TreeView(): React.JSX.Element {
   // Once per answer, not per render: the branches reset their tree when this changes.
   const start = useMemo(() => (loaded === null ? null : startOf(loaded.items)), [loaded]);
   const live = useStateStream(start?.streamId ?? null);
-  const [query, setQuery] = useState('');
-  const [tag, setTag] = useState('');
+
+  // **The boxes show what was typed; the address follows them, and leads only when it is moved.**
+  // Typed into, a box changes its own state and the address is rewritten with `replace` on every
+  // change, as the alarm filters are: one history entry for the tree however much is typed, and
+  // the address always says what the boxes say, so following a result and coming *Back* finds
+  // them as they were. The boxes are not read from the address: the router commits a navigation
+  // in a transition, so a box whose value came from it would lag the keys and lose the caret.
+  // So the address is read in once when the page opens, and again only when it is changed by
+  // something other than this page's own `replace` — a link (`PUSH`) or *Back* and *Forward*
+  // (`POP`) while the tree is open. Set during render, so the old filters are never committed.
   const [params, setParams] = useSearchParams();
-  const invalidParams = params.get(INVALID_PARAMS) === 'true';
-  const setInvalidParams = useCallback(
-    (on: boolean) => {
-      const next = new URLSearchParams(params);
-      if (on) next.set(INVALID_PARAMS, 'true');
-      else next.delete(INVALID_PARAMS);
-      setParams(next, { replace: true });
-    },
-    [params, setParams],
-  );
+  const navigation = useNavigationType();
+  const inAddress = filtersOf(params);
+  const [filters, setFilters] = useState<TreeFilters>(inAddress);
+  const [read, setRead] = useState(() => filtersKey(inAddress));
+  if (read !== filtersKey(inAddress)) {
+    setRead(filtersKey(inAddress));
+    if (navigation !== NavigationType.Replace) setFilters(inAddress);
+  }
+  const change = (next: Partial<TreeFilters>): void => {
+    const changed = { ...filters, ...next };
+    setFilters(changed);
+    setParams(withFilters(params, changed), { replace: true });
+  };
+  const { query, tag, invalidParams } = filters;
 
   const narrowed = query.trim() !== '' || tag.trim() !== '';
   const searching = narrowed || invalidParams;
@@ -156,7 +177,7 @@ export function TreeView(): React.JSX.Element {
               type="search"
               value={query}
               onChange={(event) => {
-                setQuery(event.target.value);
+                change({ query: event.target.value });
               }}
               placeholder="Search names and hosts"
               className="min-w-0 flex-1 border border-control sm:w-56 sm:flex-none bg-surface px-2 py-1 text-sm text-text placeholder:text-text-muted"
@@ -169,7 +190,7 @@ export function TreeView(): React.JSX.Element {
               type="search"
               value={tag}
               onChange={(event) => {
-                setTag(event.target.value);
+                change({ tag: event.target.value });
               }}
               placeholder="tag"
               className="w-24 min-w-0 border border-control sm:w-32 bg-surface px-2 py-1 text-sm text-text placeholder:text-text-muted"
@@ -180,7 +201,7 @@ export function TreeView(): React.JSX.Element {
                 type="checkbox"
                 checked={invalidParams}
                 onChange={(event) => {
-                  setInvalidParams(event.target.checked);
+                  change({ invalidParams: event.target.checked });
                 }}
               />
               Invalid parameters only

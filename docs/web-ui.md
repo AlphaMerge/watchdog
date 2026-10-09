@@ -80,6 +80,14 @@ The object tree in the operator's own arrangement — root, probes, groups, devi
   two sensors both called `Ping` say which device each is on. That is what somebody searching
   actually wants, and it is still one request: `GET /objects?include=path` walks every row's
   ancestors in one statement rather than a breadcrumb request per row.
+- **Every filter is in the address** (`U-70`): the search is `?q=`, the tag `?tag=` and the box
+  below `?invalidParams=true`, the names `GET /objects` gives them, so a filtered tree is a link
+  you can send, and reload or *Back* after opening a result brings the same search back. Typing
+  rewrites the address in place (`replace`, as the alarm filters do) rather than adding a history
+  entry per key, so *Back* from the tree still leaves it. A blank box is left out, so the plain
+  tree is `/tree`. When something else moves the address while the tree is open — the
+  navigation bar's **Tree** link, or *Back* and *Forward* between two tree addresses — the
+  boxes follow it.
 - **Invalid parameters only** lists the sensors whose stored parameters their type now refuses
   (`U-63`): a type's `paramsSchema` was tightened after they were saved, so they still run as
   stored and an edit of one is refused until it is mended. It is `?invalidParams=true` in the

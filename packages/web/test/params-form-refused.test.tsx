@@ -36,12 +36,16 @@ const DETAIL = {
   redactedParams: [],
 } as unknown as ObjectDetail;
 
+const MODE_MESSAGE =
+  'this edit would turn channel "value" from a gauge into a counter, which is refused';
+
 const MODE_FIXED = {
   status: 409,
   body: {
     error: {
       code: 'OBJECT_CHANNEL_MODE_FIXED',
-      message: 'this edit would turn channel "value" from a gauge into a counter, which is refused',
+      message: MODE_MESSAGE,
+      correlationId: 'req-70',
       details: {
         sensorType: 'snmp.custom',
         channels: [{ key: 'value', from: 'gauge', to: 'counter' }],
@@ -177,6 +181,14 @@ describe('a save the core refused (U-54)', () => {
       'Channel value: a gauge cannot become a counter.',
     );
     expect(screen.getAllByRole('alert')).toEqual([region]);
+
+    // The core's sentence, then a space and the id, in one paragraph through `CorrelationId`
+    // (`U-70`): not a paragraph of its own, which is said as a line by itself.
+    const paragraphs = [...region.querySelectorAll('p')].map((p) => p.textContent);
+    expect(paragraphs).toContain(`${MODE_MESSAGE} req-70`);
+    expect(paragraphs).not.toContain('req-70');
+    expectCorrelation(region, 'req-70');
+    expect(region.querySelector('span.font-mono')?.classList.contains('text-xs')).toBe(true);
   });
 
   it('is in the DOM while empty and takes no space', () => {

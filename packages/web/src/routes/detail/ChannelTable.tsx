@@ -2,7 +2,7 @@ import { useId } from 'react';
 import { Link } from 'react-router-dom';
 import type { ChannelRecord, ChannelValue, LookupSummary, SensorValues } from '../../api/types';
 import { Empty } from '../../components/Panels';
-import { channelLinkFor } from './credentials-model';
+import { channelLinkFor } from './channel-links';
 import { HideRetired } from './HideRetired';
 import { formatValue, howLongAgo } from './model';
 

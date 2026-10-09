@@ -26403,12 +26403,63 @@ because each is a decision rather than a defect:
       nothing said, as an accepted delete did. **Done when** it goes where the delete's does and
       is said in the same region, with a test.
 
-- [ ] **U-70 — `ModeRefusal` and the tree's filters** · XS · U-65, U-63 · Found 2026-10-09.
+- [x] **U-70 — `ModeRefusal` and the tree's filters** · XS · U-65, U-63 · Found 2026-10-09.
       `ParamsForm`'s `ModeRefusal` says its correlation id in a paragraph of its own instead of
       through `CorrelationId`; the tree's search and tag boxes are not in the URL, so a filtered
       search cannot be shared (only `invalidParams` is); and `channelLinkFor` lives in
       `credentials-model.ts` though it now links a non-credential channel. **Done when** all
       three are done, with tests.
+
+      **U-70 outcome. The tree's three filters are all in the address, `ModeRefusal` says its id
+      through `CorrelationId`, and `channelLinkFor` has a module of its own.** Web only. No route,
+      migration or protocol change.
+      - **`ModeRefusal`.** The id follows the core's sentence in the same paragraph, through
+        `CorrelationId` at `text-xs` (as `CredentialsPanel`'s is), so it is said *…which is
+        refused req-70* and not as a line by itself.
+      - **The filters in the address.** `?q=`, `?tag=` and `?invalidParams=true`, the names
+        `GET /objects` uses (`tree/filters.ts`: `filtersOf`, `withFilters`). A blank box is left
+        out, so the plain tree is still `/tree`; any other parameter is kept. Every change of any
+        box rewrites all three with `replace`, as the alarm filters do: one history entry for the
+        tree however much is typed, and the address always matches the boxes, so following a
+        result and pressing *Back* brings the same search back, as reload does.
+      - **The boxes are not read from the address on every render.** The router commits a
+        navigation in a transition (`BrowserRouter`'s `React.startTransition`), so a box whose
+        value came from it would lag the keys and lose the caret. The boxes are local state, read
+        from the address when the page opens, and again only when the address changes by a
+        navigation that is not a `REPLACE` (a link, or *Back*/*Forward* between tree addresses
+        while the tree is open), set during render so the old filters are never committed. The
+        page's own `replace` is never read back: a write committed late, after another key, would
+        otherwise put the box back a character.
+      - **Not debounced.** A `replace` per key is what the alarm filters' pattern gives and keeps
+        the address current when a result is followed mid-typing. Browsers rate-limit history
+        writes (Safari and Firefox throw past roughly 100–200 in 10 s), which typing alone does
+        not reach; key-repeat on a long query for many seconds could.
+      - **Stale answers.** `U-63`'s identity check is unchanged and now also guards a search the
+        address opened with: leaving it for the plain tree and coming *Back* asks the same path
+        again while `useApi` still holds its answer, the untick-and-tick case by navigation.
+      - **`channelLinkFor`** moved to `routes/detail/channel-links.ts`; `UNBOUNDED_PATH` stays in
+        `credentials-model.ts`, which no longer imports the tree. Its test moved to
+        `channel-links.test.ts`.
+      - **Docs.** `web-ui.md`'s Tree section.
+      - **Tests.** `tree-filters-url.test.tsx` (6): opened from `?q=&tag=` with both boxes filled
+        and that search asked; typed into, the address rewritten in place, a result followed and
+        *Back* finding the boxes and asking again, and one more *Back* leaving the tree; the
+        navigation bar's *Tree* link emptying the boxes and *Back* filling them; a blank box out
+        of the address but kept in the box; all three combined, each box changing only its own;
+        another parameter kept. `invalid-params.test.tsx` (16): the combined-with-search case now
+        expects `q` in the address; from the mutation records, a search the address held never
+        said once emptied (its empty answer would have read as *No sensor you can see…*), nor
+        once *Back* brings it again after the plain tree. `params-form-refused.test.tsx`: the
+        channel-mode refusal's paragraph reads *message req-70*, no paragraph is the id alone, and
+        `expectCorrelation` holds the span. Mutations, each killed (restored byte for byte; the web
+        package has no `dist`): the id in a paragraph of its own 1; no address write 7; `push`
+        instead of `replace` 2; the search and tag not read at open 5; the address never followed
+        1; a box's write dropping the others 4; the identity check removed 3 (with `useApi`'s
+        path check also removed, 5: either alone stops the typed-over case); a blank search
+        written 1; the invalid-parameters link dropped from `channelLinkFor` 2.
+      - **Not done.** The `REPLACE` guard (the page's own late write not read back) is not killed
+        by any test: jsdom's `act` commits each transition before the next key, so the lag it
+        guards against cannot be produced there.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
