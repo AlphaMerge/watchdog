@@ -1,8 +1,32 @@
-import { hasScalarEntries, scalarEntryOf, type FieldModel, type JsonSchema } from './schema';
+import {
+  hasScalarEntries,
+  pathMover,
+  scalarEntryOf,
+  type FieldModel,
+  type JsonSchema,
+} from './schema';
 
 export interface FieldProblem {
   readonly path: string;
   readonly message: string;
+}
+
+/**
+ * `problems` after the entries of the array at `array` were rearranged (`U-50`), by the rule
+ * `movedPaths` applies to what has been left (`U-49`): a problem inside an entry goes with the
+ * entry, one inside an entry that is gone is dropped, and every other one stays as it is. Order
+ * and messages are kept; a new array, so the one held as React state is not changed under it.
+ */
+export function movedProblems(
+  problems: readonly FieldProblem[],
+  array: string,
+  order: readonly number[],
+): readonly FieldProblem[] {
+  const moved = pathMover(array, order);
+  return problems.flatMap((problem) => {
+    const path = moved(problem.path);
+    return path === undefined ? [] : [{ ...problem, path }];
+  });
 }
 
 /** What a cleared entry the schema will not take is told (`U-41`, `U-44`). */

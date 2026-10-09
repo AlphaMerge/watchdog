@@ -916,6 +916,70 @@ describe('the credentials tab', () => {
       // Still open, with what was typed, for the operator to put right.
       expect((entry as HTMLInputElement).value).toBe('10.9.0.0/16');
     });
+
+    describe('a refused field goes with its entry (U-50)', () => {
+      // The core names the position in the values it was sent; a Move or a Remove since puts
+      // that entry somewhere else, and the problem used to stay with the position.
+      const SAID = 'allowed target 2: "10.9.0.0/16" is not allowed here';
+      const refusing = {
+        preview: {
+          status: 400,
+          body: {
+            error: {
+              code: 'CREDENTIAL_INVALID',
+              message: SAID,
+              context: { kind: 'snmp', field: 'allowedTargets/1' },
+            },
+          },
+        },
+      };
+      const targets = (form: HTMLElement): HTMLInputElement[] =>
+        within(within(form).getByRole('group', { name: 'Allowed targets' })).getAllByRole(
+          'textbox',
+        );
+      const problemIn = (control: HTMLElement): string | null | undefined =>
+        document.getElementById(`${control.id}-problem`)?.textContent;
+
+      /** The second target, once the refusal is on it. */
+      const refused = async (form: HTMLElement): Promise<HTMLInputElement> => {
+        narrow(form);
+        await screen.findByRole('alert');
+        const second = targets(form)[1];
+        if (second === undefined) throw new Error('two targets expected');
+        await waitFor(() => {
+          expect(problemIn(second)).toBe(SAID);
+        });
+        return second;
+      };
+
+      it('follows the second target when it moves up', async () => {
+        const { form } = await editSnmp(refusing);
+        const second = await refused(form);
+        fireEvent.click(within(form).getByRole('button', { name: 'Move Allowed targets 2 up' }));
+        expect(targets(form)[0]).toBe(second);
+        expect(second.value).toBe('10.9.0.0/16');
+        expect(problemIn(second)).toBe(SAID);
+        expect(second.getAttribute('aria-invalid')).toBe('true');
+        const other = targets(form)[1];
+        if (other === undefined) throw new Error('two targets expected');
+        expect(other.value).toBe('10.0.0.0/24');
+        expect(problemIn(other)).toBe('');
+        expect(other.hasAttribute('aria-invalid')).toBe(false);
+      });
+
+      it('is dropped with a removed entry, and not given to one added in its place', async () => {
+        const { form } = await editSnmp(refusing);
+        await refused(form);
+        fireEvent.click(within(form).getByRole('button', { name: 'Remove Allowed targets 2' }));
+        expect(targets(form)).toHaveLength(1);
+        fireEvent.click(within(form).getByRole('button', { name: 'Add allowed targets' }));
+        const added = targets(form)[1];
+        if (added === undefined) throw new Error('an added target expected');
+        expect(problemIn(added)).toBe('');
+        expect(added.hasAttribute('aria-invalid')).toBe(false);
+        expect(problemIn(targets(form)[0] as HTMLInputElement)).toBe('');
+      });
+    });
   });
 
   describe('removing a set', () => {

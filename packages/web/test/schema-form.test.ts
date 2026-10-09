@@ -13,7 +13,7 @@ import {
   type FieldModel,
   type JsonSchema,
 } from '../src/forms/schema';
-import { allProblems, problemsFor } from '../src/forms/validate';
+import { allProblems, movedProblems, problemsFor } from '../src/forms/validate';
 
 const PING: JsonSchema = {
   type: 'object',
@@ -802,5 +802,33 @@ describe('paths that move with their entry (U-49)', () => {
     expect([...moved].sort()).toStrictEqual([...after].sort());
     // A new set: the old one is React state and is not changed under it.
     expect([...before]).toStrictEqual([...paths]);
+  });
+});
+
+describe('problems the core named move with their entry (U-50)', () => {
+  // The same rule as `movedPaths`, over problems: each keeps its message, and order is kept.
+  const at = (path: string, message = 'refused'): { path: string; message: string } => ({
+    path,
+    message,
+  });
+
+  it.each([
+    // [label, problems, array, order, after]
+    ['a Move up takes it along', [at('steps.1.path')], 'steps', [1, 0], [at('steps.0.path')]],
+    ['a removed entry’s problem is dropped', [at('steps.1.path')], 'steps', [0], []],
+    ['one below a Remove moves up', [at('steps.2.path')], 'steps', [0, 2], [at('steps.1.path')]],
+    [
+      'two on one field both go, messages and order kept',
+      [at('steps.0.path', 'first'), at('count'), at('steps.0.path', 'second')],
+      'steps',
+      [1, 0],
+      [at('steps.1.path', 'first'), at('count'), at('steps.1.path', 'second')],
+    ],
+    ['the array’s own problem stays', [at('steps')], 'steps', [1, 0], [at('steps')]],
+  ] as const)('%s', (_label, problems, array, order, after) => {
+    const before = problems.map((problem) => ({ ...problem }));
+    expect(movedProblems(problems, array, order)).toStrictEqual(after);
+    // A new array: the old one is React state and is not changed under it.
+    expect(problems).toStrictEqual(before);
   });
 });

@@ -18,7 +18,7 @@ import {
   type JsonSchema,
 } from './schema';
 import { ProblemRegion, SchemaControl } from './Control';
-import { problemsFor, type FieldProblem } from './validate';
+import { movedProblems, problemsFor, type FieldProblem } from './validate';
 
 export interface SchemaFormProps {
   readonly schema: JsonSchema;
@@ -31,7 +31,14 @@ export interface SchemaFormProps {
   readonly replacing: ReadonlySet<string>;
   readonly onReplace: (path: string, replacing: boolean) => void;
   readonly disabled?: boolean;
-  /** Problems the server reported, keyed by the path it named. */
+  /**
+   * Problems the server reported, keyed by the path it named — about the values it was sent.
+   *
+   * **Pass a new array for each refusal and keep it while it stands** (`U-50`). The form shows
+   * these where their entries have gone since (a Move or a Remove), and starts again from what is
+   * passed whenever a different array is: so a new refusal, or `[]` as the next attempt starts,
+   * replaces what is shown, and an array rebuilt on every render would undo every Move.
+   */
   readonly serverProblems?: readonly FieldProblem[];
   /**
    * The stored parameters of the sensor being edited; absent when adding one (`U-34`).
@@ -42,6 +49,9 @@ export interface SchemaFormProps {
    */
   readonly existing?: Record<string, unknown>;
 }
+
+/** The default, one array for every render: a fresh `[]` would start the problems again. */
+const NO_PROBLEMS: readonly FieldProblem[] = [];
 
 /**
  * A form built from a sensor type's `paramsSchema` (`U-08`).
@@ -64,7 +74,7 @@ export function SchemaForm({
   replacing,
   onReplace,
   disabled = false,
-  serverProblems = [],
+  serverProblems = NO_PROBLEMS,
   existing,
 }: SchemaFormProps): React.JSX.Element {
   const fields = useMemo(() => fieldsOf(schema), [schema]);
@@ -74,11 +84,26 @@ export function SchemaForm({
     setTouched((held) => new Set(held).add(path));
   }, []);
 
+  // **What the core refused moves with its entry too** (`U-50`). It named a path in the values it
+  // was sent, and a Move or a Remove since has put that entry somewhere else: kept by position, a
+  // 400 on `steps.1.path` stayed on Step 2 after Step 2 moved up, on a path the operator had not
+  // been told about. Held here and not by each caller, because this is where the arrays
+  // rearrange and `touched` is already remapped: a callback would have every caller repeat one
+  // line, and one that forgot would bring the bug back. Started again from the caller's array
+  // whenever it passes a different one (React's adjust-state-while-rendering pattern).
+  const [shown, setShown] = useState({ from: serverProblems, problems: serverProblems });
+  let problems = shown.problems;
+  if (shown.from !== serverProblems) {
+    problems = serverProblems;
+    setShown({ from: serverProblems, problems });
+  }
+
   // **What has been left moves with its entry** (`U-49`). `touched` is keyed by path, the key
   // every check and every server problem already uses, and an array that rearranges its entries
   // says how, so the paths are remapped there rather than given a second, position-free identity.
   const moveTouched = useCallback((array: string, order: readonly number[]) => {
     setTouched((held) => movedPaths(held, array, order));
+    setShown((held) => ({ from: held.from, problems: movedProblems(held.problems, array, order) }));
   }, []);
 
   if (fields.length === 0) {
@@ -100,7 +125,7 @@ export function SchemaForm({
           touched={touched}
           markTouched={markTouched}
           moveTouched={moveTouched}
-          serverProblems={serverProblems}
+          serverProblems={problems}
           existing={existing}
         />
       ))}
@@ -118,8 +143,12 @@ interface FieldProps {
   disabled: boolean;
   touched: ReadonlySet<string>;
   markTouched: (path: string) => void;
-  /** The array at `array` rearranged: `order[j]` is where the entry now at `j` was (`U-49`). */
+  /**
+   * The array at `array` rearranged: `order[j]` is where the entry now at `j` was. What has been
+   * left (`U-49`) and what the core refused (`U-50`) go with their entries.
+   */
   moveTouched: (array: string, order: readonly number[]) => void;
+  /** What the core refused, at the paths its entries are at now (`U-50`). */
   serverProblems: readonly FieldProblem[];
   /** What the sensor already has around this field (`U-34`); `existingWithin` says how. */
   existing: Existing;

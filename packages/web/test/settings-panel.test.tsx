@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SettingView } from '../src/api/types';
 import { SettingsPanel } from '../src/routes/detail/SettingsPanel';
@@ -183,6 +183,53 @@ describe('a save the core refused (U-48)', () => {
       expect(region.textContent).toBe(REFUSED);
     });
     expect(alertOf()).toBe(region);
+  });
+
+  it('gives the correlation id beside the message, as the parameter form does (U-51)', async () => {
+    // What finds this refusal in the core's log; the operator reading it out to whoever reads
+    // the log has nothing else to give them.
+    vi.stubGlobal('fetch', () =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            error: { code: 'CONFLICT', message: REFUSED, correlationId: 'req-51' },
+          }),
+          { status: 409, headers: { 'content-type': 'application/json' } },
+        ),
+      ),
+    );
+    renderPanel(interval(60));
+    const region = alertOf();
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Interval seconds' }), {
+      target: { value: '45' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => {
+      expect(region.textContent).toBe(`${REFUSED} req-51`);
+    });
+    // In the alert itself, so it is said with the message, and set apart as `ParamsForm` sets it.
+    const id = within(region).getByText('req-51');
+    expect(id.tagName).toBe('SPAN');
+    expect(id.classList.contains('font-mono')).toBe(true);
+    expect(id.classList.contains('ml-2')).toBe(true);
+    expect(alertOf()).toBe(region);
+    // The spacing `U-46` gave the line is unchanged by what it holds.
+    expect(region.classList.contains('mt-1.5')).toBe(true);
+    expect(region.classList.contains('empty:mt-0')).toBe(true);
+  });
+
+  it('says the message alone when the core gives no correlation id', async () => {
+    core(REFUSED);
+    renderPanel(interval(60));
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Interval seconds' }), {
+      target: { value: '45' },
+    });
+    const region = alertOf();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => {
+      expect(region.textContent).toBe(REFUSED);
+    });
+    expect(region.querySelector('span')).toBeNull();
   });
 
   it.each([

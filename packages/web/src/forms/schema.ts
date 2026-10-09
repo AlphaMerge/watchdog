@@ -472,26 +472,38 @@ export function movedPaths(
   array: string,
   order: readonly number[],
 ): ReadonlySet<string> {
-  const prefix = `${array}.`;
-  const now = new Map(order.map((was, at) => [was, at]));
+  const moved = pathMover(array, order);
   const next = new Set<string>();
   for (const path of paths) {
-    if (!path.startsWith(prefix)) {
-      next.add(path);
-      continue;
-    }
+    const at = moved(path);
+    if (at !== undefined) next.add(at);
+  }
+  return next;
+}
+
+/**
+ * `movedPaths` for one path at a time: where `path` is after the rearrangement, or `undefined`
+ * when it was inside an entry that is gone. For what is kept by path beside other things — a
+ * server problem carries its message (`U-50`) — so the rule is written once.
+ */
+export function pathMover(
+  array: string,
+  order: readonly number[],
+): (path: string) => string | undefined {
+  const prefix = `${array}.`;
+  const now = new Map(order.map((was, at) => [was, at]));
+  return (path) => {
+    if (!path.startsWith(prefix)) return path;
     const rest = path.slice(prefix.length);
     const dot = rest.indexOf('.');
     const head = dot === -1 ? rest : rest.slice(0, dot);
     // Not an entry's position: not a path this rearrangement says anything about.
-    if (!isIndex(head)) {
-      next.add(path);
-      continue;
-    }
+    if (!isIndex(head)) return path;
     const at = now.get(Number(head));
-    if (at !== undefined) next.add(`${prefix}${String(at)}${dot === -1 ? '' : rest.slice(dot)}`);
-  }
-  return next;
+    return at === undefined
+      ? undefined
+      : `${prefix}${String(at)}${dot === -1 ? '' : rest.slice(dot)}`;
+  };
 }
 
 // ---------------------------------------------------------------------------------------------

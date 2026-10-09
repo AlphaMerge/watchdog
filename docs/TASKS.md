@@ -24231,14 +24231,54 @@ because each is a decision rather than a defect:
         the next save clears it. `replacing` is keyed by path as well, but cannot meet an entry:
         the catalogue refuses a `writeOnly` under `items`.
 
-- [ ] **U-50 — a server problem stays with the position after a Move** · XS · U-49 · Found
+- [x] **U-50 — a server problem stays with the position after a Move** · XS · U-49 · Found
       2026-10-09 in `U-49`. Server problems are keyed by path in each caller (ParamsForm, AddSensor,
       CredentialsPanel), so a 400 naming `steps.1.path` stays on Step 2 after Step 2 moves up.
       **Done when** they move with their entry via `movedPaths`, with a test.
 
-- [ ] **U-51 — a refused setting does not show its correlation id** · XS · U-48 · Found
+      **U-50 outcome. `SchemaForm` holds the core's problems as shown, and remaps them as it
+      remaps `touched`.**
+      - **Held in the form, not called back to each caller.** The three callers keep the refusal
+        exactly as before and pass it down; `SchemaForm` keeps a copy of it, started again from the
+        caller's array whenever a different array is passed (React's adjust-state-while-rendering
+        pattern), and the same `moveTouched` that remaps `touched` (`U-49`) remaps that copy. A
+        callback was the alternative: every caller would have repeated one line, and a fourth
+        caller that forgot would have the bug again, while the arrays that rearrange, and the
+        remap of `touched`, are already here. No caller reads its problems back, so the copy
+        cannot disagree with anything shown. The price, written on the prop: a caller passes a new
+        array per refusal and keeps it while it stands (all three do: `[]` as the next attempt
+        starts, a mapped array on a refusal), and the default is one module constant, since a
+        fresh `[]` per render would start the problems again on every render.
+      - **One rule, two shapes.** `movedPaths`' per-path rule became `pathMover(array, order)`
+        (`schema.ts`), which `movedPaths` now uses unchanged and `movedProblems` (`validate.ts`)
+        applies to problems, keeping each message and their order; a removed entry's problem is
+        dropped, so an entry Added in its place does not inherit it.
+      - **Tests.** `repeating-field.test.tsx`, rendered, against a stubbed core refusing
+        `/steps/1/path`: for `ParamsForm` and for `AddSensor`, the problem follows Step 2's own
+        input up (same node, `aria-invalid`, described by it) and back down, and the entry in its
+        old place says nothing; after Remove Step 2 it is gone, and a step Added in its place says
+        nothing. `credentials-panel.test.tsx`: the same two for the SNMP set's `allowedTargets/1`
+        refused by the preview (the shipped kinds have no `steps`). `schema-form.test.ts`: a 5-row
+        `movedProblems` table, each also checking the input array is not changed. Mutations, each
+        failing: problems not remapped on a Move or Remove 6; a removed entry's problem kept 4;
+        the caller's new array not taken 7 (the existing refused-preview test among them); a fresh
+        `[]` as the default 38 (*Too many re-renders* in every form passed no problems).
+      - **Not done.** `replacing` is still keyed by path, which cannot meet an entry (`U-49`).
+
+- [x] **U-51 — a refused setting does not show its correlation id** · XS · U-48 · Found
       2026-10-09 in `U-48`. ParamsForm shows it; SettingsPanel shows the message only. **Done when**
       it does, with a test.
+
+      **U-51 outcome. The refusal line gives the correlation id after the message, as
+      `ParamsForm` does.**
+      - The same markup: a `ml-2 font-mono` span inside the `role="alert"` paragraph, so it is said
+        with the message, and rendered only when the core sent one; the line is still `:empty`
+        while there is no refusal, with `U-46`'s `mt-1.5 empty:mt-0` unchanged.
+      - **Tests.** `settings-panel.test.tsx`: a 409 carrying `req-51` puts *message req-51* in the
+        same alert node, the id in a `font-mono ml-2` span, spacing unchanged; one without an id
+        puts the message alone, with no span. Mutation: the span removed fails 1.
+      - **Not done.** `AddSensor`'s refusal line shows the id but is not `role="alert"` and is
+        rendered only on failure.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

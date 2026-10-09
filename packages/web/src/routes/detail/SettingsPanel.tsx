@@ -226,9 +226,14 @@ function Setting({
           attempt, so it cannot become noise. `ParamsForm`, `CredentialsPanel` and
           `RediscoveryPanel` say a refused save the same way. `run` empties it as the next attempt
           starts, so a second refusal in the same words is a change and is announced again.
-          Outside the stack above, and `empty:mt-0`, so it takes no space while empty (`U-45`). */}
+          Outside the stack above, and `empty:mt-0`, so it takes no space while empty (`U-45`).
+          The correlation id beside the message, as `ParamsForm` puts it (`U-51`): it is what
+          finds this refusal in the core's log, and nothing renders while there is no refusal. */}
       <p role="alert" className="mt-1.5 text-xs text-down-fg empty:mt-0">
         {failed?.message}
+        {failed?.correlationId !== undefined && (
+          <span className="ml-2 font-mono"> {failed.correlationId}</span>
+        )}
       </p>
     </div>
   );

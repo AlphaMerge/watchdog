@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ObjectDetail, SensorTypeSummary } from '../src/api/types';
 import { SchemaForm } from '../src/forms/SchemaForm';
 import type { JsonSchema } from '../src/forms/schema';
+import { AddSensor } from '../src/routes/AddSensor';
 import { ParamsForm } from '../src/routes/detail/ParamsForm';
 
 /**
@@ -824,5 +826,184 @@ describe('a problem shown on an entry goes with the entry (U-49)', () => {
     expect(headerIn(1)).toBe(first);
     expect(problemIn(first)).toBe(EMPTY);
     expect(problemIn(headerIn(0))).toBe('');
+  });
+});
+
+describe('a problem the core named goes with its entry (U-50)', () => {
+  // The core names a path in the values it was sent, and a path carries its entry's position: a
+  // 400 on `steps.1.path` used to stay on Step 2 after Step 2 moved up, and pass to whatever
+  // entry took the place of one removed. Each caller that shows the core's problems, rendered.
+  const REFUSED = 'must start with "/"';
+  const TYPE: SensorTypeSummary = {
+    id: 'test.steps',
+    category: 'Custom',
+    costHint: 'light',
+    paramsSchema: SCHEMA as Record<string, unknown>,
+    hasPreview: false,
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** The core: `GET` answers from `reads`, and any write is refused naming `steps.1.path`. */
+  function core(reads: Record<string, unknown> = {}): { writes: () => number } {
+    let writes = 0;
+    const answer = (status: number, body: unknown): Promise<Response> =>
+      Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      const path = url.replace(/^.*\/api\/v1/u, '');
+      if ((init?.method ?? 'GET') === 'GET') {
+        return path in reads
+          ? answer(200, reads[path])
+          : answer(404, { error: { code: 'NOT_FOUND', message: 'no' } });
+      }
+      writes += 1;
+      return answer(400, {
+        error: {
+          code: 'VALIDATION',
+          message: 'params are not valid',
+          correlationId: 'c-50',
+          details: { problems: [{ instancePath: '/steps/1/path', message: REFUSED }] },
+        },
+      });
+    });
+    return { writes: () => writes };
+  }
+
+  const paths = (): HTMLInputElement[] =>
+    within(screen.getByRole('group', { name: 'Steps' })).getAllByRole<HTMLInputElement>('textbox', {
+      name: 'Path',
+    });
+  const problemIn = (control: HTMLElement): string | null | undefined =>
+    document.getElementById(`${control.id}-problem`)?.textContent;
+  const button = (name: string): HTMLElement => screen.getByRole('button', { name });
+
+  /** Step 2's path box, once the core's refusal is on it. */
+  async function refusedOnStep2(save: string): Promise<HTMLInputElement> {
+    fireEvent.click(button(save));
+    const second = paths()[1];
+    if (second === undefined) throw new Error('two steps expected');
+    await waitFor(() => {
+      expect(problemIn(second)).toBe(REFUSED);
+    });
+    return second;
+  }
+
+  /** It follows Step 2 up and back down, and the entry now in its old place says nothing. */
+  function followsTheMove(second: HTMLInputElement): void {
+    fireEvent.click(button('Move Step 2 up'));
+    expect(paths()[0]).toBe(second);
+    expect(second.value).toBe('/b');
+    expect(problemIn(second)).toBe(REFUSED);
+    expect(second.getAttribute('aria-invalid')).toBe('true');
+    expect((second.getAttribute('aria-describedby') ?? '').split(' ')).toContain(
+      `${second.id}-problem`,
+    );
+    const other = paths()[1];
+    if (other === undefined) throw new Error('two steps expected');
+    expect(other.value).toBe('/a');
+    expect(problemIn(other)).toBe('');
+    expect(other.hasAttribute('aria-invalid')).toBe(false);
+
+    fireEvent.click(button('Move Step 1 down'));
+    expect(paths()[1]).toBe(second);
+    expect(problemIn(second)).toBe(REFUSED);
+    expect(problemIn(other)).toBe('');
+  }
+
+  /** Step 2 removed: its problem goes with it, and a step added in its place says nothing. */
+  function droppedWithItsEntry(): void {
+    fireEvent.click(button('Remove Step 2'));
+    expect(paths()).toHaveLength(1);
+    expect(screen.queryByText(REFUSED)).toBeNull();
+    fireEvent.click(button('Add step'));
+    const added = paths()[1];
+    if (added === undefined) throw new Error('an added step expected');
+    expect(problemIn(added)).toBe('');
+    expect(added.hasAttribute('aria-invalid')).toBe(false);
+    expect(screen.queryByText(REFUSED)).toBeNull();
+  }
+
+  describe('in a sensor’s parameters', () => {
+    const detail = {
+      id: 51,
+      kind: 'sensor',
+      name: 'Steps',
+      version: 3,
+      sensorType: 'test.steps',
+      params: {
+        steps: [
+          { method: 'GET', path: '/a' },
+          { method: 'GET', path: '/b' },
+        ],
+      },
+      redactedParams: [],
+    } as unknown as ObjectDetail;
+
+    function open(): void {
+      render(<ParamsForm detail={detail} type={TYPE} onSaved={() => undefined} />);
+      // Something to save: the method of Step 1.
+      const [first] = within(screen.getByRole('group', { name: 'Steps' })).getAllByRole(
+        'combobox',
+        { name: 'Method' },
+      );
+      if (first === undefined) throw new Error('two steps expected');
+      fireEvent.change(first, { target: { value: 'POST' } });
+    }
+
+    it('follows Step 2 when it moves up', async () => {
+      core();
+      open();
+      followsTheMove(await refusedOnStep2('Save parameters'));
+    });
+
+    it('is dropped with a removed entry', async () => {
+      core();
+      open();
+      await refusedOnStep2('Save parameters');
+      droppedWithItsEntry();
+    });
+  });
+
+  describe('in a sensor being added', () => {
+    async function open(): Promise<void> {
+      core({
+        '/sensor-types': { items: [TYPE] },
+        '/objects/4': { id: 4, parentId: 3, kind: 'device', name: 'edge-1', version: 1 },
+      });
+      render(
+        <MemoryRouter initialEntries={['/objects/4/add-sensor']}>
+          <Routes>
+            <Route path="/objects/:id/add-sensor" element={<AddSensor />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+      const type = await screen.findByLabelText('Sensor type');
+      fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Steps' } });
+      fireEvent.change(type, { target: { value: 'test.steps' } });
+      fireEvent.click(button('Add step'));
+      fireEvent.click(button('Add step'));
+      const [first, second] = paths();
+      if (first === undefined || second === undefined) throw new Error('two steps expected');
+      fireEvent.change(first, { target: { value: '/a' } });
+      fireEvent.change(second, { target: { value: '/b' } });
+    }
+
+    it('follows Step 2 when it moves up', async () => {
+      await open();
+      followsTheMove(await refusedOnStep2('Create sensor'));
+    });
+
+    it('is dropped with a removed entry', async () => {
+      await open();
+      await refusedOnStep2('Create sensor');
+      droppedWithItsEntry();
+    });
   });
 });
