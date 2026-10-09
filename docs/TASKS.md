@@ -12997,16 +12997,24 @@ because each is a decision rather than a defect:
       name is used in every package (renaming sensors' `until` to `pollWithin`, or the rule naming
       both), and CLAUDE.md and rule 22 agree.
 
-      **P-355 outcome. `pollWithin` is the poller's name in core, probe, sensors and simulators,
-      with one signature.** Test code and docs only.
+      **P-355 outcome. `pollWithin` is the poller's name in core, probe, sensors, shared and
+      simulators, with one signature.** Test code and docs only.
       - **sensors:** `until(ms, what, predicate)` is now `pollWithin(ms, what, met, intervalMs =
         20)`, the core's body: it takes an async predicate, and it stops asking at the bound by
         an abort rather than a flag. Its interval was a fixed 10 ms and is now the core's 20 ms
         default; no call site passes one. The 22 call sites in seven files (`exe-script`,
         `ssh-sensors`, `ssh-session`, `syslog`, `target-policy-exception`,
         `target-policy-transports`, `windows-transport`) changed name only.
-      - **Rule 22** names `within` and `pollWithin` in each package's `test/support/within.ts`,
-        all four packages, and the describable `what` from `P-356`. **CLAUDE.md**'s testing
+      - **shared:** its `test/support/within.ts` had `within` alone; it now has the same
+        `within` and `pollWithin` as the other four. `log-output.test.ts`'s local
+        `until(condition, what)`, a 5 s `Date.now()` deadline polled every 10 ms that failed with
+        `assert.fail`, is `pollWithin` at the same bound and interval, and its failure says how
+        many bytes were still held.
+      - **web** runs under vitest, whose tests wait with its own `waitFor`; it has no
+        `test/support/within.ts` and needs none.
+      - **Rule 22** names `within` and `pollWithin` in each `node:test` package's
+        `test/support/within.ts`, all five, says the web package waits with vitest's `waitFor`,
+        and names the describable `what` from `P-356`. **CLAUDE.md**'s testing
         bullet says each package's `test/support/within.ts` has `within` and `pollWithin`, where
         it named the core's file alone; nothing else in it changed.
 

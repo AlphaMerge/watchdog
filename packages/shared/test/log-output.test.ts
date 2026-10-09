@@ -1,8 +1,8 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import { setTimeout as sleep } from 'node:timers/promises';
 import { LogOutput, PROCESS_LOG_OUTPUT, writeLineSync } from '../src/logging/output.js';
 import { DeltaMeter } from '../src/process/delta-meter.js';
+import { pollWithin } from './support/within.js';
 
 /** An output the test opens and closes: `EAGAIN` while stalled, `take` bytes a write otherwise. */
 function fakeOutput(): {
@@ -43,15 +43,6 @@ function fakeOutput(): {
   };
 }
 
-/** Waits for a condition, not for a time (`P-234`). */
-async function until(condition: () => boolean, what: string): Promise<void> {
-  const deadline = Date.now() + 5_000;
-  while (!condition()) {
-    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
-    await sleep(10);
-  }
-}
-
 describe('LogOutput (P-216 part 3)', () => {
   it('writes a line at once when the output takes it', () => {
     const fake = fakeOutput();
@@ -76,7 +67,13 @@ describe('LogOutput (P-216 part 3)', () => {
     output.write('held three\n');
     assert.equal(fake.writes(), writesWhileHeld, 'no write attempted ahead of the retry');
     fake.stall(false);
-    await until(() => output.stats().backlogBytes === 0, 'the backlog to drain');
+    // A condition, not a time (`P-234`), bounded and stopped at its bound (`P-355`).
+    await pollWithin(
+      5_000,
+      () => `the backlog to drain; ${String(output.stats().backlogBytes)} bytes still held`,
+      () => output.stats().backlogBytes === 0,
+      10,
+    );
     assert.equal(fake.written(), 'before\nheld one\nheld two\nheld three\n');
   });
 
