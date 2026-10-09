@@ -16,6 +16,14 @@ The live document is at `GET /api/v1/openapi.json` on any running installation, 
 - **Concurrent edits** use `If-Match` with the object's `version`; a stale one is `409`.
 - **A body whose schema requires nothing may be left out.** It is read as `{}`, defaults and all. A body that is present has to be JSON: an empty one sent as `application/json` is a `400`.
 
+### Reading the field tables
+
+- **Every level is listed.** A field's path names its parents: `skew.kind` is `kind` inside `skew`, `items[].name` is `name` in each element of `items`, and `counts.*` is every value of a map keyed by name.
+- **A field that takes one of several shapes** lists each under its own path, named by the field that tells them apart: `source{kind=own}.objectId` exists only when `kind` is `own`.
+- **Shared shapes are under [Schemas](#schemas)** and linked wherever a route uses them, rather than listed again in each.
+- **Flags:** `required` must be present, `nullable` may be `null`, `write-only` is accepted and never returned, `default` is what an absent field is read as.
+- **Rules** below a table are the conditions that decide which fields may appear together.
+
 ---
 
 ## access
@@ -32,6 +40,16 @@ Only the explicit ones. What an account may actually do here is the *resolved* r
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].groupId` | integer | **required** |  |
+| `items[].groupName` | string | **required** |  |
+| `items[].right` | `none` · `read` · `write` · `full` | **required** | none cannot see it; read may look; write may edit, create and delete beneath it, acknowledge alarms and manage notifications; full adds editing that object’s own group rights. A stored `none` is not the same as no grant: it *overrides* what would be inherited, where revoking restores it. |
+| `items[].grantedBy` | string | **required** |  |
+
 ### `GET /api/v1/objects/{id}/access/effective`
 
 What an account may actually do with this object
@@ -44,6 +62,18 @@ Resolves the three rules — inheritance up the tree, explicit beats inherited, 
 | `id` | path | integer | **required** |
 
 **200** { right, sourceObjectId, sourceGroupId, inherited, viaAdminGroup, cappedByRole, cappedByToken }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `right` | `none` · `read` · `write` · `full` | **required** | none cannot see it; read may look; write may edit, create and delete beneath it, acknowledge alarms and manage notifications; full adds editing that object’s own group rights. A stored `none` is not the same as no grant: it *overrides* what would be inherited, where revoking restores it. |
+| `sourceObjectId` | integer | nullable |  |
+| `sourceGroupId` | integer | nullable |  |
+| `inherited` | boolean | **required** |  |
+| `viaAdminGroup` | boolean | **required** | The account administers everything, so no grant was consulted at all. |
+| `cappedByRole` | boolean |  | The account’s role held the right below what its groups granted (A-04). Reported rather than silent: "you have full on this device and may not edit it" is incomprehensible without it. |
+| `cappedByToken` | boolean |  | The API token used for this request held it below that (A-06). |
 
 ### `PUT /api/v1/objects/{id}/access/{groupId}`
 
@@ -58,11 +88,21 @@ Replaces any grant this group already had here. Everything beneath inherits it, 
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `right` | `none` · `read` · `write` · `full` | **required** |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `right` | `none` · `read` · `write` · `full` | **required** | none cannot see it; read may look; write may edit, create and delete beneath it, acknowledge alarms and manage notifications; full adds editing that object’s own group rights. A stored `none` is not the same as no grant: it *overrides* what would be inherited, where revoking restores it. |
 
 **200** { items }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].groupId` | integer | **required** |  |
+| `items[].groupName` | string | **required** |  |
+| `items[].right` | `none` · `read` · `write` · `full` | **required** | none cannot see it; read may look; write may edit, create and delete beneath it, acknowledge alarms and manage notifications; full adds editing that object’s own group rights. A stored `none` is not the same as no grant: it *overrides* what would be inherited, where revoking restores it. |
+| `items[].grantedBy` | string | **required** |  |
 
 ### `DELETE /api/v1/objects/{id}/access/{groupId}`
 
@@ -77,6 +117,17 @@ Not the same as granting `none`, which overrides inheritance rather than restori
 
 **200** { removed, items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `removed` | boolean | **required** |  |
+| `items` | object[] | **required** |  |
+| `items[].groupId` | integer | **required** |  |
+| `items[].groupName` | string | **required** |  |
+| `items[].right` | `none` · `read` · `write` · `full` | **required** | none cannot see it; read may look; write may edit, create and delete beneath it, acknowledge alarms and manage notifications; full adds editing that object’s own group rights. A stored `none` is not the same as no grant: it *overrides* what would be inherited, where revoking restores it. |
+| `items[].grantedBy` | string | **required** |  |
+
 ## accounts
 
 ### `GET /api/v1/accounts`
@@ -87,6 +138,17 @@ Listed by login, for the notification recipients editor. Only what choosing an a
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].id` | integer | **required** |  |
+| `items[].login` | string | **required** |  |
+| `items[].displayName` | string | **required** |  |
+| `items[].disabled` | boolean | **required** | A disabled account is skipped when a notification is sent (`M-19`). |
+| `items[].hasAddress` | boolean | **required** | Whether the account has an email address. One without is skipped when a notification is sent, and the log says so. The address itself is not listed. |
+
 ## audit
 
 ### `GET /api/v1/objects/{id}/audit`
@@ -96,27 +158,31 @@ An object's configuration history, newest first: who changed it, when, and what 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
 | `before` | query | string |  |
-| `limit` | query | integer |  |
+| `limit` | query | integer | default `100` |
 | `id` | path | integer | **required** |
 
 **200** { items, nextBefore }
+
+**200** is [ms:auditPage](#schema-ms-auditpage)
 
 ### `GET /api/v1/audit`
 
 Configuration history across the whole installation, newest first — the object history third of the Logs view (`CAPABILITIES.MD §6`). Filter by `category` (the action's first segment), by `actorKind`, by time, or to one object. **`objectId` is that object exactly, never its subtree**: the entry most worth reading is the one recording a deletion, and an object that has been deleted has no parent left to be found through, so a subtree walk would drop precisely those. Page with `before`.
 
-| Parameter | In | Type | |
-| --- | --- | --- | --- |
-| `objectId` | query | integer |  |
-| `category` | query | object |  |
-| `actorKind` | query | object |  |
-| `actorRef` | query | string |  |
-| `from` | query | string |  |
-| `to` | query | string |  |
-| `before` | query | string |  |
-| `limit` | query | integer |  |
+| Parameter | In | Type | | Description |
+| --- | --- | --- | --- | --- |
+| `objectId` | query | integer |  |  |
+| `category` | query | `object` · `setting` · `credential` · `channel` · `trigger` · `template` · `schedule` · `sensor` · `report` · `library` · `map` · `grant` · `probe` · `discovery` · `account` · `group` · `token`, or an array of them |  |  |
+| `actorKind` | query | string, or an array of them |  |  |
+| `actorRef` | query | string |  | One specific actor — a user id, a token id, a component name. "Everything this person did" is the question an audit log gets opened for, and `actorKind` cannot answer it: it narrows to all users, which during an incident is everybody. Pair it with `actorKind`, because an id is only unique within a kind. |
+| `from` | query | string |  |  |
+| `to` | query | string |  |  |
+| `before` | query | string |  |  |
+| `limit` | query | integer | default `100` |  |
 
 **200** { items, nextBefore }
+
+**200** is [ms:auditPage](#schema-ms-auditpage)
 
 ## auth
 
@@ -128,13 +194,22 @@ Every failure answers 401 with the same code and the same sentence. Distinguishi
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `login` | string | **required** |
-| `password` | string | **required** |
-| `code` | string |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `login` | string | **required** |  |
+| `password` | string | **required** |  |
+| `code` | string |  | A TOTP code or a recovery code, when the account needs one. A login without it answers 401 MFA_REQUIRED, which is how a client knows to ask. |
 
 **200** { userId, login, role, mustChangePassword }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `userId` | integer | **required** |  |
+| `login` | string | **required** |  |
+| `role` | `admin` · `readwrite` · `readonly` | **required** |  |
+| `mustChangePassword` | boolean | **required** | The password was set by somebody else — the bootstrap, or an administrator resetting it. A client should send the user to a change-password form before anything else. |
 
 ### `POST /api/v1/auth/logout`
 
@@ -150,6 +225,15 @@ Who this session belongs to
 
 **200** { userId, login, role, mustChangePassword }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `userId` | integer | **required** |  |
+| `login` | string | **required** |  |
+| `role` | `admin` · `readwrite` · `readonly` | **required** |  |
+| `mustChangePassword` | boolean | **required** | The password was set by somebody else — the bootstrap, or an administrator resetting it. A client should send the user to a change-password form before anything else. |
+
 ### `GET /api/v1/auth/session`
 
 Whether this installation needs a login, and whether this caller has one
@@ -157,6 +241,18 @@ Whether this installation needs a login, and whether this caller has one
 Public, and the first call a browser client makes (`U-17`). `GET /auth/me` cannot answer this: it refuses an anonymous caller with 401, and a 401 from it means both "log in" and "this installation does not need you to" — with `api.requireAuthentication` off, an anonymous caller may use the whole API and still gets that 401 from this one route. A client unable to tell those apart has to choose between demanding a login the core does not want and rendering an application whose every request will be refused. Nothing is disclosed that an unauthenticated request does not already reveal by being answered or refused.
 
 **200** { requireAuthentication, authenticated, principal }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `requireAuthentication` | boolean | **required** | Whether `/api/` routes are refused without a principal. |
+| `authenticated` | boolean | **required** |  |
+| `principal` | object |  |  |
+| `principal.userId` | integer | **required** |  |
+| `principal.login` | string | **required** |  |
+| `principal.role` | `admin` · `readwrite` · `readonly` | **required** |  |
+| `principal.mustChangePassword` | boolean | **required** | The password was set by somebody else — the bootstrap, or an administrator resetting it. A client should send the user to a change-password form before anything else. |
 
 ### `GET /api/v1/auth/mfa`
 
@@ -166,6 +262,15 @@ Whether this account has, or needs, a second factor
 
 **200** { enrolled, confirmed, required, recoveryCodesLeft }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `enrolled` | boolean | **required** |  |
+| `confirmed` | boolean | **required** |  |
+| `required` | boolean | **required** |  |
+| `recoveryCodesLeft` | integer | **required** | Zero, with MFA on, is a lockout waiting for a lost phone. |
+
 ### `POST /api/v1/auth/mfa/enrol`
 
 Begin enrolment
@@ -173,6 +278,13 @@ Begin enrolment
 Returns a secret and an otpauth:// URI for a QR code. **Nothing changes until the enrolment is confirmed with a code from the device** — an unconfirmed secret does nothing at all, which is what stops a mistyped setup locking somebody out.
 
 **200** { secret, uri }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `secret` | string | **required** | Base32, for typing in by hand. |
+| `uri` | string | **required** | otpauth:// URI to render as a QR code. |
 
 ### `POST /api/v1/auth/mfa/confirm`
 
@@ -182,11 +294,17 @@ The recovery codes are in this response and nowhere else, ever again. They exist
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `code` | string | **required** |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `code` | string | **required** |  |
 
 **200** { recoveryCodes }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `recoveryCodes` | string[] | **required** |  |
 
 ### `POST /api/v1/auth/mfa/disable`
 
@@ -196,9 +314,9 @@ Needs the account password. Turning off a second factor from a session alone wou
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `password` | string | **required** |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `password` | string | **required** |  |
 
 **204**
 
@@ -210,6 +328,12 @@ The previous set stops working immediately.
 
 **200** { recoveryCodes }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `recoveryCodes` | string[] | **required** |  |
+
 ### `POST /api/v1/auth/password`
 
 Change your own password
@@ -218,12 +342,18 @@ Ends every *other* session this account holds. The reason somebody changes a pas
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `currentPassword` | string | **required** |
-| `newPassword` | string | **required** |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `currentPassword` | string | **required** |  |
+| `newPassword` | string | **required** |  |
 
 **200** { endedSessions }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `endedSessions` | integer | **required** |  |
 
 ### `GET /api/v1/auth/tokens`
 
@@ -235,6 +365,20 @@ The API tokens this account holds
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].id` | integer | **required** |  |
+| `items[].name` | string | **required** |  |
+| `items[].prefix` | string | **required** | The first few characters, so a list of tokens is readable. Never enough to use — the rest is shown once at creation and is unrecoverable afterwards. |
+| `items[].scope` | `none` · `read` · `write` · `full` | **required** | A ceiling, not a grant. The effective right is the lesser of this, the account’s role and what its groups grant on the object — so a token can only ever be less than its owner. |
+| `items[].expiresAt` | string | nullable |  |
+| `items[].lastUsedAt` | string | nullable |  |
+| `items[].revokedAt` | string | nullable |  |
+| `items[].createdAt` | string | **required** |  |
+
 ### `POST /api/v1/auth/tokens`
 
 Issue an API token
@@ -243,13 +387,28 @@ The secret is in this response and nowhere else, ever again — only its hash is
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `name` | string | **required** |
-| `scope` | `none` · `read` · `write` · `full` |  |
-| `expiresAt` | string |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `name` | string | **required** |  |
+| `scope` | `none` · `read` · `write` · `full` | default `read` |  |
+| `expiresAt` | string (date-time) |  |  |
 
 **201** { token, secret }
+
+**201 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `token` | object | **required** |  |
+| `token.id` | integer | **required** |  |
+| `token.name` | string | **required** |  |
+| `token.prefix` | string | **required** | The first few characters, so a list of tokens is readable. Never enough to use — the rest is shown once at creation and is unrecoverable afterwards. |
+| `token.scope` | `none` · `read` · `write` · `full` | **required** | A ceiling, not a grant. The effective right is the lesser of this, the account’s role and what its groups grant on the object — so a token can only ever be less than its owner. |
+| `token.expiresAt` | string | nullable |  |
+| `token.lastUsedAt` | string | nullable |  |
+| `token.revokedAt` | string | nullable |  |
+| `token.createdAt` | string | **required** |  |
+| `secret` | string | **required** | Shown once. Store it now; it cannot be retrieved again. |
 
 ### `DELETE /api/v1/auth/tokens/{id}`
 
@@ -273,6 +432,12 @@ Scoped to the caller’s own tokens: a token id is a small integer, and revoking
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:channelRecord](#schema-ms-channelrecord)[] | **required** |  |
+
 ### `PATCH /api/v1/objects/{id}/channels/{key}`
 
 Sets a channel’s error and warning limits, the lookup that decides its state, or both. `limits` is a patch: `null` clears one threshold, an absent field leaves it alone. Both are immediate — a reading past an error limit, or one a lookup maps to an error, sets the sensor Down on the very first sample with no two-step rule. A channel with a lookup is judged by it *instead of* its limits. Limits that contradict each other are refused with the reason; a `lookupId` this installation has not loaded is accepted and reported, because a sensor type may ship ahead of its lookup file. `processing` sets the scaling factors, the spike filter and the decimal places — scaling is applied before anything judges the reading, and before the spike filter, so both bounds and limits are numbers in the channel’s own unit. Changing a factor does not rewrite readings already stored, so the graph steps at the moment of the change.
@@ -284,13 +449,31 @@ Sets a channel’s error and warning limits, the lookup that decides its state, 
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `limits` | object |  |
-| `lookupId` | string,null |  |
-| `processing` | object |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `limits` | object |  |  |
+| `limits.enabled` | boolean |  |  |
+| `limits.upperError` | number | nullable |  |
+| `limits.upperWarning` | number | nullable |  |
+| `limits.lowerWarning` | number | nullable |  |
+| `limits.lowerError` | number | nullable |  |
+| `limits.errorMessage` | string |  |  |
+| `limits.warningMessage` | string |  |  |
+| `lookupId` | string | nullable |  |
+| `processing` | object |  |  |
+| `processing.scaleMul` | string |  |  |
+| `processing.scaleDiv` | string |  |  |
+| `processing.decimals` | integer | nullable |  |
+| `processing.spikeMin` | number | nullable |  |
+| `processing.spikeMax` | number | nullable |  |
+
+- at least 1 field must be given
+- `limits`: at least 1 field must be given
+- `processing`: at least 1 field must be given
 
 **200** { id, sensorId, key, name, unit, isPrimary, scaleMul, scaleDiv, decimals, limits, spikeMin, spikeMax, showInGraph, showInTable, lookupId, retired }
+
+**200** is [ms:channelRecord](#schema-ms-channelrecord)
 
 ## credentials
 
@@ -303,17 +486,44 @@ Sets a channel’s error and warning limits, the lookup that decides its state, 
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:credentialView](#schema-ms-credentialview)[] | **required** |  |
+
 ### `GET /api/v1/credentials/unbounded`
 
 The credential sets with no `allowedTargets` and no SSH `hostKeys`, each with the object it is stored on (`U-21`). `write` on that object is trust with the set (`A-41`), so this is the list to work through. **Only sets on objects the caller can see**: Core Health's `credentialsUnbounded` counts the installation's, and may be higher. No secret, and no public field either: the set itself is read from its object.
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].objectId` | integer | **required** |  |
+| `items[].objectKind` | string | **required** |  |
+| `items[].objectName` | string | **required** |  |
+| `items[].kind` | string | **required** |  |
+| `items[].updatedAt` | string | **required** |  |
+
 ### `GET /api/v1/credential-kinds`
 
 The credential kinds this build can use, with the JSON Schema a form is generated from (`A-05`). Fields marked `writeOnly` are the secret half: they are encrypted at rest and **never returned by any route, to anyone**, so a form renders them as "set" with Replace and Clear rather than as a filled input. A kind absent from this list has no transport behind it yet, and storing a password nothing authenticates with is worse than not offering the field.
 
 **200** { items }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].id` | string | **required** |  |
+| `items[].name` | string | **required** |  |
+| `items[].description` | string | **required** |  |
+| `items[].schema` | object | **required** |  |
 
 ### `PUT /api/v1/objects/{id}/credentials/{kind}`
 
@@ -327,11 +537,13 @@ Stores the credential set of this kind on this object, where everything below it
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `values` | object | **required** |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `values` | object | **required** |  |
 
 **200** { kind, publicParams, source, updatedAt, bounded, secretsSet, withholds, withheldBefore, newlyWithheld, noLongerWithheld, byReason, secretsCleared }
+
+**200** is [ms:credentialWrite](#schema-ms-credentialwrite)
 
 ### `DELETE /api/v1/objects/{id}/credentials/{kind}`
 
@@ -345,6 +557,15 @@ Removes the credential set defined *on this object*. It does not leave the objec
 
 **200** { kind, removed, sensors, nowInherited }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `kind` | string | **required** |  |
+| `removed` | boolean | **required** |  |
+| `sensors` | integer | **required** | How many sensors at or beneath this object resolved this kind to the set removed, of those the caller can see. Zero when there was no set to remove. |
+| `nowInherited` | [ms:credentialView](#schema-ms-credentialview) | **required** nullable |  |
+
 ## dependencies
 
 ### `PUT /api/v1/objects/{id}/dependency`
@@ -357,13 +578,15 @@ Sets what this object depends on. `parent` inherits from above, `object` names a
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `mode` | `parent` · `object` · `device` · `none` | **required** |
-| `masterId` | integer |  |
-| `delaySeconds` | integer |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `mode` | `parent` · `object` · `device` · `none` | **required** |  |
+| `masterId` | integer |  |  |
+| `delaySeconds` | integer |  |  |
 
 **200** { objectId, paused, pending, resumable, source, pausedAt, startsAt, pausedUntil, message, actor, inheritedFrom, schedule, dependency }
+
+**200** is [ms:pauseView](#schema-ms-pauseview)
 
 ## discovery
 
@@ -375,13 +598,27 @@ Parses a range and estimates every level, so an operator picks one knowing what 
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `range` | string | **required** |
-| `timeoutMs` | integer |  |
-| `concurrency` | integer |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `range` | string | **required** |  |
+| `timeoutMs` | integer | default `1000` |  |
+| `concurrency` | integer | default `32` |  |
 
 **200** { range, total, levels }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `range` | string | **required** |  |
+| `total` | integer | **required** |  |
+| `levels` | object[] | **required** |  |
+| `levels[].id` | string | **required** |  |
+| `levels[].name` | string | **required** |  |
+| `levels[].description` | string | **required** |  |
+| `levels[].minSeconds` | integer | **required** | If every address answers: the sweep is quick and every host is identified. |
+| `levels[].maxSeconds` | integer | **required** | If none do: the sweep pays a full timeout each and there is nothing to identify. |
+| `levels[].ports` | integer | **required** | How many ports each host is asked about. |
 
 ### `POST /api/v1/discovery`
 
@@ -391,19 +628,21 @@ Sweeps a range from one probe into one group. The probe is named rather than cho
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `groupId` | integer | **required** |
-| `probeId` | integer |  |
-| `range` | string | **required** |
-| `timeoutMs` | integer |  |
-| `concurrency` | integer |  |
-| `ratePerSecond` | number |  |
-| `level` | `ping` · `standard` · `detailed` |  |
-| `templates` | string[] |  |
-| `snmpCommunity` | string |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `groupId` | integer | **required** |  |
+| `probeId` | integer |  | The probe the group is under. Left out, that probe is used; named, it has to be that one and one the caller can read (`A-77`). |
+| `range` | string | **required** |  |
+| `timeoutMs` | integer |  |  |
+| `concurrency` | integer |  |  |
+| `ratePerSecond` | number |  |  |
+| `level` | `ping` · `standard` · `detailed` | default `standard` | How hard to look. `POST /discovery/preview` reports what each one costs on this range, which is worth reading before starting a detailed sweep of a /16. |
+| `templates` | string[] | default `[]` | Template ids this run may use. Empty means all of them. A filter rather than a fourth level, because “detailed, but only these templates” is a thing somebody wants and a level could not express it. |
+| `snmpCommunity` | string | default `` | Tried read-only against every host during identification, and skipped when empty. `sysDescr` and `sysObjectID` are the two most informative things a device will tell you, and this is the only credential identification has: it runs before anybody has told the system anything about these hosts, so v3 — which needs a username and a passphrase per device — is not available to it. |
 
 **201** { id, groupId, probeId, range, total, cursor, found, failed, status, level, templates, identified, scheduleId, devicesCreated, devicesMatched, sensorsCreated, provisionedAt, message, timeoutMs, concurrency, ratePerSecond, createdAt, startedAt, finishedAt }
+
+**201** is [ms:discoveryRun](#schema-ms-discoveryrun)
 
 ### `GET /api/v1/discovery/{id}`
 
@@ -414,6 +653,8 @@ A run and how far it has got
 | `id` | path | integer | **required** |
 
 **200** { id, groupId, probeId, range, total, cursor, found, failed, status, level, templates, identified, scheduleId, devicesCreated, devicesMatched, sensorsCreated, provisionedAt, message, timeoutMs, concurrency, ratePerSecond, createdAt, startedAt, finishedAt }
+
+**200** is [ms:discoveryRun](#schema-ms-discoveryrun)
 
 ### `GET /api/v1/discovery/{id}/summary`
 
@@ -427,6 +668,48 @@ Derived from the run and its hosts rather than stored, so it cannot drift from w
 
 **200** { runId, groupId, probeId, scheduleId, range, level, status, headline, scanned, found, created, errors, timing }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `runId` | integer | **required** |  |
+| `groupId` | integer |  |  |
+| `probeId` | integer |  |  |
+| `scheduleId` | integer | nullable | The rediscovery schedule that started it (`D-07`), or null for a run somebody started. What tells an operator where a run they did not start came from. |
+| `range` | string | **required** |  |
+| `level` | string |  |  |
+| `status` | string | **required** |  |
+| `headline` | string | **required** |  |
+| `scanned` | object | **required** |  |
+| `scanned.addresses` | integer | **required** |  |
+| `scanned.swept` | integer | **required** |  |
+| `scanned.alive` | integer | **required** |  |
+| `scanned.unreachable` | integer | **required** |  |
+| `scanned.failed` | integer | **required** |  |
+| `scanned.identified` | integer | **required** |  |
+| `scanned.complete` | boolean | **required** |  |
+| `found` | object | **required** |  |
+| `found.byKind` | object[] | **required** |  |
+| `found.byKind[].kind` | string | **required** |  |
+| `found.byKind[].count` | integer | **required** |  |
+| `found.byVendor` | object[] | **required** |  |
+| `found.byVendor[].vendor` | string | **required** |  |
+| `found.byVendor[].count` | integer | **required** |  |
+| `created` | object | **required** |  |
+| `created.devices` | integer | **required** |  |
+| `created.matched` | integer | **required** |  |
+| `created.sensors` | integer | **required** |  |
+| `created.provisionedAt` | string | nullable |  |
+| `errors` | object[] | **required** |  |
+| `errors[].address` | string | **required** |  |
+| `errors[].problem` | string | **required** |  |
+| `timing` | object | **required** |  |
+| `timing.createdAt` | string | **required** |  |
+| `timing.startedAt` | string | nullable |  |
+| `timing.finishedAt` | string | nullable |  |
+| `timing.durationMs` | integer | nullable |  |
+| `timing.addressesPerSecond` | number | nullable |  |
+
 ### `GET /api/v1/discovery/{id}/hosts`
 
 The addresses a run found alive
@@ -435,10 +718,19 @@ In address order rather than the order they answered, because an operator readin
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `limit` | query | integer |  |
+| `limit` | query | integer | default `1000` |
 | `id` | path | integer | **required** |
 
 **200** { items }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].address` | string | **required** |  |
+| `items[].rttMs` | number | nullable |  |
+| `items[].fingerprint` | object | nullable |  |
 
 ### `POST /api/v1/discovery/{id}/cancel`
 
@@ -452,6 +744,8 @@ Recorded immediately and sent to the probe as well, so a cancel works even while
 
 **200** { id, groupId, probeId, range, total, cursor, found, failed, status, level, templates, identified, scheduleId, devicesCreated, devicesMatched, sensorsCreated, provisionedAt, message, timeoutMs, concurrency, ratePerSecond, createdAt, startedAt, finishedAt }
 
+**200** is [ms:discoveryRun](#schema-ms-discoveryrun)
+
 ### `POST /api/v1/discovery/{id}/provision`
 
 Create the devices and sensors this run found
@@ -464,6 +758,24 @@ Create the devices and sensors this run found
 
 **200** { devicesCreated, matched, sensorsCreated, sensorsSkipped, mastersSet, problems, devices }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `devicesCreated` | integer | **required** |  |
+| `matched` | integer | **required** | Devices that already existed. |
+| `sensorsCreated` | integer | **required** |  |
+| `sensorsSkipped` | integer | **required** | Sensors a template named that were already there. |
+| `mastersSet` | integer |  | Devices whose reachability sensor became their master object, so one unreachable host is one alarm rather than a device’s worth. |
+| `problems` | object[] |  |  |
+| `problems[].address` | string | **required** |  |
+| `problems[].problem` | string | **required** |  |
+| `devices` | object[] |  |  |
+| `devices[].address` | string | **required** |  |
+| `devices[].deviceId` | integer | **required** |  |
+| `devices[].created` | boolean | **required** |  |
+| `devices[].sensors` | string[] |  |  |
+
 ### `GET /api/v1/discovery/{id}/problems`
 
 What a run could not create, and why
@@ -474,16 +786,30 @@ What a run could not create, and why
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].address` | string | **required** |  |
+| `items[].problem` | string | **required** |  |
+
 ### `GET /api/v1/objects/{id}/discovery`
 
 What this group has been discovering, newest first
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `limit` | query | integer |  |
+| `limit` | query | integer | default `25` |
 | `id` | path | integer | **required** |
 
 **200** { items }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:discoveryRun](#schema-ms-discoveryrun)[] | **required** |  |
 
 ### `GET /api/v1/discovery/schedules`
 
@@ -497,6 +823,35 @@ Empty on almost every installation, because there is no schedule until somebody 
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].id` | integer | **required** |  |
+| `items[].groupId` | integer | **required** |  |
+| `items[].probeId` | integer |  |  |
+| `items[].name` | string | **required** |  |
+| `items[].enabled` | boolean | **required** |  |
+| `items[].range` | string | **required** |  |
+| `items[].level` | string |  |  |
+| `items[].templates` | string[] |  |  |
+| `items[].timeoutMs` | integer |  |  |
+| `items[].concurrency` | integer |  |  |
+| `items[].ratePerSecond` | number |  |  |
+| `items[].cadence` | string | **required** |  |
+| `items[].cadenceMinute` | integer |  |  |
+| `items[].cadenceWeekday` | integer |  |  |
+| `items[].timezone` | string | nullable |  |
+| `items[].autoProvision` | boolean |  |  |
+| `items[].scheduleId` | integer | nullable |  |
+| `items[].lastRunAt` | string | nullable |  |
+| `items[].lastRunId` | integer | nullable |  |
+| `items[].lastProblem` | string |  | Why the last firing started nothing, or empty. A rule whose group has moved under another probe is refused when it fires, and this is where that is said (`A-28`). |
+| `items[].nextRunAt` | string | nullable |  |
+| `items[].description` | string | **required** |  |
+| `items[].version` | integer |  | What `If-Match` carries back on an edit; also the `ETag` (`D-11`). |
+
 ### `POST /api/v1/discovery/schedules`
 
 Create a rediscovery schedule
@@ -505,27 +860,55 @@ Created **disabled** unless `enabled` says otherwise, and with `autoProvision` o
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `groupId` | integer | **required** |
-| `probeId` | integer |  |
-| `name` | string | **required** |
-| `range` | string | **required** |
-| `cadence` | `hourly` · `daily` · `weekly` | **required** |
-| `cadenceMinute` | integer |  |
-| `cadenceWeekday` | integer |  |
-| `timezone` | string,null |  |
-| `level` | `ping` · `standard` · `detailed` |  |
-| `templates` | string[] |  |
-| `snmpCommunity` | string |  |
-| `timeoutMs` | integer |  |
-| `concurrency` | integer |  |
-| `ratePerSecond` | number |  |
-| `autoProvision` | boolean |  |
-| `scheduleId` | integer,null |  |
-| `enabled` | boolean |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `groupId` | integer | **required** |  |
+| `probeId` | integer |  | The probe the group is under. Left out, that probe is used; named, it has to be that one and one the caller can read (`A-77`). |
+| `name` | string | **required** |  |
+| `range` | string | **required** |  |
+| `cadence` | `hourly` · `daily` · `weekly` | **required** |  |
+| `cadenceMinute` | integer | default `0` | Minutes past the hour for an hourly cadence, past midnight for the others. |
+| `cadenceWeekday` | integer | default `0` | 0 is Monday. Read only for a weekly cadence. |
+| `timezone` | string | nullable default `null` | A cadence is a statement about local time — 02:30 has to be 02:30 in both halves of the year — so it is stored as one. Null is the core’s own zone. |
+| `level` | `ping` · `standard` · `detailed` | default `standard` |  |
+| `templates` | string[] | default `[]` |  |
+| `snmpCommunity` | string | default `` |  |
+| `timeoutMs` | integer | default `1000` |  |
+| `concurrency` | integer | default `32` |  |
+| `ratePerSecond` | number | default `0` |  |
+| `autoProvision` | boolean | default `false` |  |
+| `scheduleId` | integer | nullable default `null` | A schedule (`M-09`) used as a *permission window*: “weekly, but not during the change freeze”. It answers a different question from the cadence — is it allowed now, versus when is it next due — which is why both exist. |
+| `enabled` | boolean | default `false` |  |
 
 **201** { id, groupId, probeId, name, enabled, range, level, templates, timeoutMs, concurrency, ratePerSecond, cadence, cadenceMinute, cadenceWeekday, timezone, autoProvision, scheduleId, lastRunAt, lastRunId, lastProblem, nextRunAt, description, version }
+
+**201 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `groupId` | integer | **required** |  |
+| `probeId` | integer |  |  |
+| `name` | string | **required** |  |
+| `enabled` | boolean | **required** |  |
+| `range` | string | **required** |  |
+| `level` | string |  |  |
+| `templates` | string[] |  |  |
+| `timeoutMs` | integer |  |  |
+| `concurrency` | integer |  |  |
+| `ratePerSecond` | number |  |  |
+| `cadence` | string | **required** |  |
+| `cadenceMinute` | integer |  |  |
+| `cadenceWeekday` | integer |  |  |
+| `timezone` | string | nullable |  |
+| `autoProvision` | boolean |  |  |
+| `scheduleId` | integer | nullable |  |
+| `lastRunAt` | string | nullable |  |
+| `lastRunId` | integer | nullable |  |
+| `lastProblem` | string |  | Why the last firing started nothing, or empty. A rule whose group has moved under another probe is refused when it fires, and this is where that is said (`A-28`). |
+| `nextRunAt` | string | nullable |  |
+| `description` | string | **required** |  |
+| `version` | integer |  | What `If-Match` carries back on an edit; also the `ETag` (`D-11`). |
 
 ### `POST /api/v1/discovery/schedules/{id}/enabled`
 
@@ -539,11 +922,39 @@ Enabling computes the next run; disabling clears it, so a schedule that is off c
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `enabled` | boolean | **required** |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `enabled` | boolean | **required** |  |
 
 **200** { id, groupId, probeId, name, enabled, range, level, templates, timeoutMs, concurrency, ratePerSecond, cadence, cadenceMinute, cadenceWeekday, timezone, autoProvision, scheduleId, lastRunAt, lastRunId, lastProblem, nextRunAt, description, version }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `groupId` | integer | **required** |  |
+| `probeId` | integer |  |  |
+| `name` | string | **required** |  |
+| `enabled` | boolean | **required** |  |
+| `range` | string | **required** |  |
+| `level` | string |  |  |
+| `templates` | string[] |  |  |
+| `timeoutMs` | integer |  |  |
+| `concurrency` | integer |  |  |
+| `ratePerSecond` | number |  |  |
+| `cadence` | string | **required** |  |
+| `cadenceMinute` | integer |  |  |
+| `cadenceWeekday` | integer |  |  |
+| `timezone` | string | nullable |  |
+| `autoProvision` | boolean |  |  |
+| `scheduleId` | integer | nullable |  |
+| `lastRunAt` | string | nullable |  |
+| `lastRunId` | integer | nullable |  |
+| `lastProblem` | string |  | Why the last firing started nothing, or empty. A rule whose group has moved under another probe is refused when it fires, and this is where that is said (`A-28`). |
+| `nextRunAt` | string | nullable |  |
+| `description` | string | **required** |  |
+| `version` | integer |  | What `If-Match` carries back on an edit; also the `ETag` (`D-11`). |
 
 ### `PATCH /api/v1/discovery/schedules/{id}`
 
@@ -557,25 +968,55 @@ Change a schedule
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `probeId` | integer |  |
-| `name` | string |  |
-| `range` | string |  |
-| `cadence` | `hourly` · `daily` · `weekly` |  |
-| `cadenceMinute` | integer |  |
-| `cadenceWeekday` | integer |  |
-| `timezone` | string,null |  |
-| `level` | `ping` · `standard` · `detailed` |  |
-| `templates` | string[] |  |
-| `snmpCommunity` | string |  |
-| `timeoutMs` | integer |  |
-| `concurrency` | integer |  |
-| `ratePerSecond` | number |  |
-| `autoProvision` | boolean |  |
-| `scheduleId` | integer,null |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `probeId` | integer |  |  |
+| `name` | string |  |  |
+| `range` | string |  |  |
+| `cadence` | `hourly` · `daily` · `weekly` |  |  |
+| `cadenceMinute` | integer |  |  |
+| `cadenceWeekday` | integer |  |  |
+| `timezone` | string | nullable |  |
+| `level` | `ping` · `standard` · `detailed` |  |  |
+| `templates` | string[] |  |  |
+| `snmpCommunity` | string |  |  |
+| `timeoutMs` | integer |  |  |
+| `concurrency` | integer |  |  |
+| `ratePerSecond` | number |  |  |
+| `autoProvision` | boolean |  |  |
+| `scheduleId` | integer | nullable |  |
+
+- at least 1 field must be given
 
 **200** { id, groupId, probeId, name, enabled, range, level, templates, timeoutMs, concurrency, ratePerSecond, cadence, cadenceMinute, cadenceWeekday, timezone, autoProvision, scheduleId, lastRunAt, lastRunId, lastProblem, nextRunAt, description, version }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `groupId` | integer | **required** |  |
+| `probeId` | integer |  |  |
+| `name` | string | **required** |  |
+| `enabled` | boolean | **required** |  |
+| `range` | string | **required** |  |
+| `level` | string |  |  |
+| `templates` | string[] |  |  |
+| `timeoutMs` | integer |  |  |
+| `concurrency` | integer |  |  |
+| `ratePerSecond` | number |  |  |
+| `cadence` | string | **required** |  |
+| `cadenceMinute` | integer |  |  |
+| `cadenceWeekday` | integer |  |  |
+| `timezone` | string | nullable |  |
+| `autoProvision` | boolean |  |  |
+| `scheduleId` | integer | nullable |  |
+| `lastRunAt` | string | nullable |  |
+| `lastRunId` | integer | nullable |  |
+| `lastProblem` | string |  | Why the last firing started nothing, or empty. A rule whose group has moved under another probe is refused when it fires, and this is where that is said (`A-28`). |
+| `nextRunAt` | string | nullable |  |
+| `description` | string | **required** |  |
+| `version` | integer |  | What `If-Match` carries back on an edit; also the `ETag` (`D-11`). |
 
 ### `DELETE /api/v1/discovery/schedules/{id}`
 
@@ -595,6 +1036,22 @@ Refused templates are reported rather than hidden: one that failed to load creat
 
 **200** { items, problems }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].id` | string | **required** |  |
+| `items[].name` | string | **required** |  |
+| `items[].description` | string | **required** |  |
+| `items[].sensorCount` | integer | **required** |  |
+| `items[].overridesBuiltIn` | boolean |  |  |
+| `items[].source` | string | **required** |  |
+| `problems` | object[] | **required** |  |
+| `problems[].id` | string | **required** |  |
+| `problems[].source` | string | **required** |  |
+| `problems[].problems` | string[] | **required** |  |
+
 ### `GET /api/v1/device-templates/{templateId}`
 
 One template, in full
@@ -613,12 +1070,23 @@ The answer `D-04` will act on, before it acts on it. Takes a fingerprint — one
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `fingerprint` | object | **required** |
-| `credentials` | string[] |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `fingerprint` | object | **required** |  |
+| `credentials` | string[] | default `[]` | The credential kinds this device could resolve. A sensor whose kind is not here is left out rather than created and left failing. |
 
 **200** { templates, sensors, tags }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `templates` | object[] | **required** |  |
+| `templates[].id` | string | **required** |  |
+| `templates[].name` | string | **required** |  |
+| `templates[].score` | integer | **required** |  |
+| `sensors` | object[] | **required** |  |
+| `tags` | string[] | **required** |  |
 
 ### `GET /api/v1/discovery/{id}/plan`
 
@@ -628,11 +1096,21 @@ The whole run at once, which is what an operator wants to look at before letting
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `credentials` | query | string |  |
-| `limit` | query | integer |  |
+| `credentials` | query | string | default `` |
+| `limit` | query | integer | default `500` |
 | `id` | path | integer | **required** |
 
 **200** { items }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].address` | string | **required** |  |
+| `items[].kind` | string |  |  |
+| `items[].templates` | string[] | **required** |  |
+| `items[].sensors` | string[] | **required** |  |
 
 ### `POST /api/v1/objects/{id}/as-template`
 
@@ -646,12 +1124,12 @@ Returns the JSON to save under the template directory — it is not registered h
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `id` | string | **required** |
-| `name` | string | **required** |
-| `description` | string |  |
-| `match` | object |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | string | **required** |  |
+| `name` | string | **required** |  |
+| `description` | string |  |  |
+| `match` | object |  |  |
 
 **200** object
 
@@ -663,19 +1141,44 @@ Every user group, built-in ones first
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].id` | integer | **required** |  |
+| `items[].name` | string | **required** |  |
+| `items[].description` | string | **required** |  |
+| `items[].isAdmin` | boolean | **required** | Members administer the whole installation. Kept as a flag rather than as a right on the root object, because "may do anything, including to objects that do not exist yet" is not a statement about a position in the tree. |
+| `items[].isDefault` | boolean | **required** | The group a new account joins. |
+| `items[].isBuiltin` | boolean | **required** | Cannot be deleted or renamed. Its description can be changed. |
+| `items[].memberCount` | integer | **required** |  |
+
 ### `POST /api/v1/groups`
 
 Create a user group
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `name` | string | **required** |
-| `description` | string |  |
-| `isAdmin` | boolean |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `name` | string | **required** |  |
+| `description` | string |  |  |
+| `isAdmin` | boolean | default `false` |  |
 
 **201** { id, name, description, isAdmin, isDefault, isBuiltin, memberCount }
+
+**201 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `name` | string | **required** |  |
+| `description` | string | **required** |  |
+| `isAdmin` | boolean | **required** | Members administer the whole installation. Kept as a flag rather than as a right on the root object, because "may do anything, including to objects that do not exist yet" is not a statement about a position in the tree. |
+| `isDefault` | boolean | **required** | The group a new account joins. |
+| `isBuiltin` | boolean | **required** | Cannot be deleted or renamed. Its description can be changed. |
+| `memberCount` | integer | **required** |  |
 
 ### `PUT /api/v1/groups/{id}`
 
@@ -689,13 +1192,25 @@ A built-in group accepts only a description. Renaming Administrators or clearing
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `name` | string |  |
-| `description` | string |  |
-| `isAdmin` | boolean |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `name` | string |  |  |
+| `description` | string |  |  |
+| `isAdmin` | boolean |  |  |
 
 **200** { id, name, description, isAdmin, isDefault, isBuiltin, memberCount }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `name` | string | **required** |  |
+| `description` | string | **required** |  |
+| `isAdmin` | boolean | **required** | Members administer the whole installation. Kept as a flag rather than as a right on the root object, because "may do anything, including to objects that do not exist yet" is not a statement about a position in the tree. |
+| `isDefault` | boolean | **required** | The group a new account joins. |
+| `isBuiltin` | boolean | **required** | Cannot be deleted or renamed. Its description can be changed. |
+| `memberCount` | integer | **required** |  |
 
 ### `DELETE /api/v1/groups/{id}`
 
@@ -719,6 +1234,15 @@ Who is in this group
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].userId` | integer | **required** |  |
+| `items[].login` | string | **required** |  |
+| `items[].isPrimary` | boolean | **required** |  |
+
 ### `PUT /api/v1/groups/{id}/members/{userId}`
 
 Add an account to a group
@@ -732,11 +1256,21 @@ Idempotent. The first group an account joins becomes its primary one; adding it 
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `primary` | boolean |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `primary` | boolean | default `false` |  |
 
 **200** { items }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].groupId` | integer | **required** |  |
+| `items[].name` | string | **required** |  |
+| `items[].isAdmin` | boolean | **required** |  |
+| `items[].isPrimary` | boolean | **required** | The *default* group, not the strongest one: it answers which group owns an object this user creates, and nothing else. Access is the union of every group they are in. |
 
 ### `DELETE /api/v1/groups/{id}/members/{userId}`
 
@@ -749,6 +1283,16 @@ Remove an account from a group
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].groupId` | integer | **required** |  |
+| `items[].name` | string | **required** |  |
+| `items[].isAdmin` | boolean | **required** |  |
+| `items[].isPrimary` | boolean | **required** | The *default* group, not the strongest one: it answers which group owns an object this user creates, and nothing else. Access is the union of every group they are in. |
+
 ### `GET /api/v1/accounts/{id}/groups`
 
 Every group an account belongs to, primary first
@@ -758,6 +1302,16 @@ Every group an account belongs to, primary first
 | `id` | path | integer | **required** |
 
 **200** { items }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].groupId` | integer | **required** |  |
+| `items[].name` | string | **required** |  |
+| `items[].isAdmin` | boolean | **required** |  |
+| `items[].isPrimary` | boolean | **required** | The *default* group, not the strongest one: it answers which group owns an object this user creates, and nothing else. Access is the union of every group they are in. |
 
 ### `PUT /api/v1/accounts/{id}/primary-group/{groupId}`
 
@@ -772,6 +1326,16 @@ Refused for a group the account does not belong to — a rule the schema cannot 
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].groupId` | integer | **required** |  |
+| `items[].name` | string | **required** |  |
+| `items[].isAdmin` | boolean | **required** |  |
+| `items[].isPrimary` | boolean | **required** | The *default* group, not the strongest one: it answers which group owns an object this user creates, and nothing else. Access is the union of every group they are in. |
+
 ## health
 
 ### `GET /api/v1/core-health`
@@ -781,6 +1345,81 @@ How the core itself is doing, right now
 The same numbers the Core Health sensor records, read live. **A `null` is a gap and never a zero** — CPU is null on the first reading after a start because it is a rate and there is nothing to measure against yet, and a rollup tier that has never run is not a tier that is infinitely behind. `rollupLag` is the excess over a tier’s own bucket width, so a healthy daily tier reads 0 rather than 86,400.
 
 **200** { at, channels } · **503** { error }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `at` | string | **required** |  |
+| `channels` | object | **required** |  |
+| `channels.ingestQueue` | number | nullable |  |
+| `channels.writeLatency` | number | nullable |  |
+| `channels.ingestRefused` | number | nullable |  |
+| `channels.cpu` | number | nullable |  |
+| `channels.memory` | number | nullable |  |
+| `channels.heap` | number | nullable |  |
+| `channels.memoryAvailable` | number | nullable |  |
+| `channels.memoryAvailableBytes` | number | nullable |  |
+| `channels.memoryLimitUsage` | number | nullable |  |
+| `channels.memoryLimit` | number | nullable |  |
+| `channels.uptime` | number | nullable |  |
+| `channels.rollupLag` | number | nullable |  |
+| `channels.backfillQueue` | number | nullable |  |
+| `channels.backfillParked` | number | nullable |  |
+| `channels.diskFree` | number | nullable |  |
+| `channels.diskFreeBytes` | number | nullable |  |
+| `channels.databaseSize` | number | nullable |  |
+| `channels.evictedChunks` | number | nullable |  |
+| `channels.reapQueue` | number | nullable |  |
+| `channels.notifyPending` | number | nullable |  |
+| `channels.notifyOldest` | number | nullable |  |
+| `channels.notifyFailed` | number | nullable |  |
+| `channels.streamCutoffs` | number | nullable |  |
+| `channels.streamCoalesced` | number | nullable |  |
+| `channels.streamEnded` | number | nullable |  |
+| `channels.streamExpired` | number | nullable |  |
+| `channels.streamRevoked` | number | nullable |  |
+| `channels.streamDisabled` | number | nullable |  |
+| `channels.streamCheckFailures` | number | nullable |  |
+| `channels.streamUnsure` | number | nullable |  |
+| `channels.streamChecksOutstanding` | number | nullable |  |
+| `channels.streamEdgesUnvetted` | number | nullable |  |
+| `channels.streamWithheld` | number | nullable |  |
+| `channels.streamEdgesCoalesced` | number | nullable |  |
+| `channels.dependencyPauses` | number | nullable |  |
+| `channels.probesDown` | number | nullable |  |
+| `channels.probesSilent` | number | nullable |  |
+| `channels.alarmOverdue` | number | nullable |  |
+| `channels.alarmsFired` | number | nullable |  |
+| `channels.queriesRefused` | number | nullable |  |
+| `channels.reportsDeferred` | number | nullable |  |
+| `channels.reportsFailed` | number | nullable |  |
+| `channels.reportsUndelivered` | number | nullable |  |
+| `channels.reportFormatsWaiting` | number | nullable |  |
+| `channels.reportFormatsRefused` | number | nullable |  |
+| `channels.resultsFutureDated` | number | nullable |  |
+| `channels.resultsPastDated` | number | nullable |  |
+| `channels.resultsUnreadableTime` | number | nullable |  |
+| `channels.resultsRefusedUnfit` | number | nullable |  |
+| `channels.readingsDroppedUnfit` | number | nullable |  |
+| `channels.channelsCreatedUndeclared` | number | nullable |  |
+| `channels.clockBehind` | number | nullable |  |
+| `channels.reactionsDeferred` | number | nullable |  |
+| `channels.credentialsToReenter` | number | nullable |  |
+| `channels.credentialsUnbounded` | number | nullable |  |
+| `channels.credentialsWithheld` | number | nullable |  |
+| `channels.lateRefusalWritesGivenUp` | number | nullable |  |
+| `channels.logDropped` | number | nullable |  |
+| `channels.logBacklog` | number | nullable |  |
+| `channels.hostsRefused` | number | nullable |  |
+| `channels.probeHellosUnproven` | number | nullable |  |
+| `channels.rateLimited` | number | nullable |  |
+| `channels.heartbeatFailures` | number | nullable |  |
+| `channels.dbStatementTimeouts` | number | nullable |  |
+| `channels.dbLockTimeouts` | number | nullable |  |
+| `channels.dbOldestQuerySeconds` | number | nullable |  |
+
+**503** is [ms:error](#schema-ms-error)
 
 ### `GET /api/v1/probes/{id}/health`
 
@@ -794,6 +1433,114 @@ How one probe is doing, right now
 
 **200** { at, probeId, message, numbersUnavailable, protocolVersion, lastProtocolVersion, lastProtocolVersionAt, lastProtocolRefusedAt, channels } · **503** { error }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `at` | string | **required** |  |
+| `probeId` | integer | **required** |  |
+| `message` | string | **required** |  |
+| `numbersUnavailable` | object | **required** nullable |  |
+| `numbersUnavailable.reason` | `not-connected` · `protocol` · `no-heartbeat` · `not-reported` | **required** |  |
+| `numbersUnavailable.protocolVersion` | integer |  |  |
+| `numbersUnavailable.requiredVersion` | integer |  |  |
+| `numbersUnavailable.connectedSeconds` | integer |  |  |
+| `protocolVersion` | integer | **required** nullable |  |
+| `lastProtocolVersion` | integer | **required** nullable |  |
+| `lastProtocolVersionAt` | string (date-time) | **required** nullable |  |
+| `lastProtocolRefusedAt` | string (date-time) | **required** nullable |  |
+| `channels` | object | **required** |  |
+| `channels.connected` | number | nullable |  |
+| `channels.heartbeatAge` | number | nullable |  |
+| `channels.delivering` | number | nullable |  |
+| `channels.resultAge` | number | nullable |  |
+| `channels.checksCompleting` | number | nullable |  |
+| `channels.checksBehind` | number | nullable |  |
+| `channels.checksOutstanding` | number | nullable |  |
+| `channels.checkStalled` | number | nullable |  |
+| `channels.protocol` | number | nullable |  |
+| `channels.protocolFlap` | number | nullable |  |
+| `channels.reportsRefused` | number | nullable |  |
+| `channels.reportsForeign` | number | nullable |  |
+| `channels.lateRefusals` | number | nullable |  |
+| `channels.resultsWithheld` | number | nullable |  |
+| `channels.schedulerLag` | number | nullable |  |
+| `channels.skippedTicks` | number | nullable |  |
+| `channels.poolUsage` | number | nullable |  |
+| `channels.sessionsOpen` | number | nullable |  |
+| `channels.sessionOverflows` | number | nullable |  |
+| `channels.sessionsEvicted` | number | nullable |  |
+| `channels.sessionsOpened` | number | nullable |  |
+| `channels.poolCeiling` | number | nullable |  |
+| `channels.poolMemoryCap` | number | nullable |  |
+| `channels.poolHeldBack` | number | nullable |  |
+| `channels.queued` | number | nullable |  |
+| `channels.checkWait` | number | nullable |  |
+| `channels.deferred` | number | nullable |  |
+| `channels.refused` | number | nullable |  |
+| `channels.timedOut` | number | nullable |  |
+| `channels.workerCrashes` | number | nullable |  |
+| `channels.workerStartupFailed` | number | nullable |  |
+| `channels.poolState` | number | nullable |  |
+| `channels.discarded` | number | nullable |  |
+| `channels.trapReceived` | number | nullable |  |
+| `channels.trapRejected` | number | nullable |  |
+| `channels.trapMalformed` | number | nullable |  |
+| `channels.syslogReceived` | number | nullable |  |
+| `channels.syslogRejected` | number | nullable |  |
+| `channels.syslogMalformed` | number | nullable |  |
+| `channels.trapOverwritten` | number | nullable |  |
+| `channels.syslogOverwritten` | number | nullable |  |
+| `channels.trapEarlier` | number | nullable |  |
+| `channels.syslogEarlier` | number | nullable |  |
+| `channels.flowReceived` | number | nullable |  |
+| `channels.flowRejected` | number | nullable |  |
+| `channels.flowMalformed` | number | nullable |  |
+| `channels.flowMissed` | number | nullable |  |
+| `channels.flowUndecodable` | number | nullable |  |
+| `channels.flowOverwritten` | number | nullable |  |
+| `channels.flowEarlier` | number | nullable |  |
+| `channels.scheduled` | number | nullable |  |
+| `channels.childSlots` | number | nullable |  |
+| `channels.childBusy` | number | nullable |  |
+| `channels.childQueued` | number | nullable |  |
+| `channels.childDeferred` | number | nullable |  |
+| `channels.childRefused` | number | nullable |  |
+| `channels.childTimedOut` | number | nullable |  |
+| `channels.childCrashes` | number | nullable |  |
+| `channels.childStartupFailed` | number | nullable |  |
+| `channels.childStartup` | number | nullable |  |
+| `channels.scriptGroupsEnded` | number | nullable |  |
+| `channels.scriptGroupsRefused` | number | nullable |  |
+| `channels.scriptGroupsRefusedRecently` | number | nullable |  |
+| `channels.scriptGroupsRecycled` | number | nullable |  |
+| `channels.resultChannelsDropped` | number | nullable |  |
+| `channels.spoolDepth` | number | nullable |  |
+| `channels.spoolBytes` | number | nullable |  |
+| `channels.spoolDropped` | number | nullable |  |
+| `channels.spoolUnwritten` | number | nullable |  |
+| `channels.spoolCorrupt` | number | nullable |  |
+| `channels.spoolRejected` | number | nullable |  |
+| `channels.spoolOversized` | number | nullable |  |
+| `channels.resultsDiscarded` | number | nullable |  |
+| `channels.spoolStalled` | number | nullable |  |
+| `channels.clockJumps` | number | nullable |  |
+| `channels.resultsFutureDated` | number | nullable |  |
+| `channels.resultsPastDated` | number | nullable |  |
+| `channels.clockOffset` | number | nullable |  |
+| `channels.sensorsFrozen` | number | nullable |  |
+| `channels.cpu` | number | nullable |  |
+| `channels.memory` | number | nullable |  |
+| `channels.memoryAvailable` | number | nullable |  |
+| `channels.memoryAvailableBytes` | number | nullable |  |
+| `channels.memoryLimitUsage` | number | nullable |  |
+| `channels.memoryLimit` | number | nullable |  |
+| `channels.uptime` | number | nullable |  |
+| `channels.logDropped` | number | nullable |  |
+| `channels.logBacklog` | number | nullable |  |
+
+**503** is [ms:error](#schema-ms-error)
+
 ## libraries
 
 ### `GET /api/v1/libraries`
@@ -804,22 +1551,23 @@ Highest priority first, then by name. An administrator sees every library; every
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:library](#schema-ms-library)[] | **required** |  |
+
 ### `POST /api/v1/libraries`
 
 Create a library
 
 The creator’s primary group is granted full access in the same transaction — access is per group and a new library has no grants, so otherwise the person who made it could not see it. At most 200 nodes, six levels deep, each id used once: a document that does not fit is refused whole, naming the node that is wrong.
 
-**Body**
-
-| Field | Type | |
-| --- | --- | --- |
-| `name` | string | **required** |
-| `description` | string |  |
-| `priority` | integer |  |
-| `nodes` | object[] |  |
+**Body** — [ms:libraryInput](#schema-ms-libraryinput)
 
 **201** { id, name, description, priority, nodes, version, createdAt, updatedAt }
+
+**201** is [ms:library](#schema-ms-library)
 
 ### `GET /api/v1/libraries/{id}`
 
@@ -833,6 +1581,8 @@ The document, not what it shows: each node’s rule is evaluated when the librar
 
 **200** { id, name, description, priority, nodes, version, createdAt, updatedAt }
 
+**200** is [ms:library](#schema-ms-library)
+
 ### `PATCH /api/v1/libraries/{id}`
 
 Change a library
@@ -845,14 +1595,16 @@ Change a library
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `name` | string |  |
-| `description` | string |  |
-| `priority` | integer |  |
-| `nodes` | object[] |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `name` | string |  |  |
+| `description` | string |  |  |
+| `priority` | integer |  |  |
+| `nodes` | [ms:libraryNode](#schema-ms-librarynode)[] |  |  |
 
 **200** { id, name, description, priority, nodes, version, createdAt, updatedAt }
+
+**200** is [ms:library](#schema-ms-library)
 
 ### `DELETE /api/v1/libraries/{id}`
 
@@ -878,6 +1630,17 @@ Needs full access: who else can see a thing is not a read.
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].groupId` | integer | **required** |  |
+| `items[].groupName` | string | **required** |  |
+| `items[].right` | `none` · `read` · `write` · `full` | **required** |  |
+| `items[].grantedAt` | string (date-time) | **required** |  |
+| `items[].grantedBy` | string | **required** |  |
+
 ### `PUT /api/v1/libraries/{id}/access/{groupId}`
 
 Grant a group access to this library
@@ -891,9 +1654,9 @@ Needs full access, so a write holder may arrange the nodes without deciding who 
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `right` | `none` · `read` · `write` · `full` | **required** |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `right` | `none` · `read` · `write` · `full` | **required** |  |
 
 **204**
 
@@ -918,6 +1681,13 @@ Every definition available to a channel, plus every one that was refused and why
 
 **200** { items, problems }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:lookupSummary](#schema-ms-lookupsummary)[] | **required** |  |
+| `problems` | [ms:lookupProblem](#schema-ms-lookupproblem)[] | **required** |  |
+
 ### `GET /api/v1/lookups/{id}`
 
 One lookup, with every entry
@@ -930,6 +1700,8 @@ What each value maps to. `undefinedState` is what a value no entry covers become
 
 **200** { id, name, description, type, undefinedState, entries }
 
+**200** is [ms:lookupDetail](#schema-ms-lookupdetail)
+
 ## maps
 
 ### `GET /api/v1/maps`
@@ -940,6 +1712,20 @@ Highest priority first, then by name. An administrator sees every map; everybody
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].id` | integer | **required** |  |
+| `items[].name` | string | **required** |  |
+| `items[].description` | string | **required** |  |
+| `items[].priority` | integer | **required** |  |
+| `items[].layout` | object | **required** |  |
+| `items[].version` | integer | **required** |  |
+| `items[].createdAt` | string (date-time) | **required** |  |
+| `items[].updatedAt` | string (date-time) | **required** |  |
+
 ### `POST /api/v1/maps`
 
 Create a map
@@ -948,14 +1734,27 @@ The creator’s primary group is granted full access in the same transaction —
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `name` | string | **required** |
-| `description` | string |  |
-| `priority` | integer |  |
-| `layout` | object |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `name` | string | **required** |  |
+| `description` | string |  |  |
+| `priority` | integer |  |  |
+| `layout` | object |  |  |
 
 **201** { id, name, description, priority, layout, version, createdAt, updatedAt }
+
+**201 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `name` | string | **required** |  |
+| `description` | string | **required** |  |
+| `priority` | integer | **required** |  |
+| `layout` | object | **required** |  |
+| `version` | integer | **required** |  |
+| `createdAt` | string (date-time) | **required** |  |
+| `updatedAt` | string (date-time) | **required** |  |
 
 ### `GET /api/v1/maps/{id}`
 
@@ -969,6 +1768,19 @@ A map this account may not read answers 404 rather than 403, so the error cannot
 
 **200** { id, name, description, priority, layout, version, createdAt, updatedAt }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `name` | string | **required** |  |
+| `description` | string | **required** |  |
+| `priority` | integer | **required** |  |
+| `layout` | object | **required** |  |
+| `version` | integer | **required** |  |
+| `createdAt` | string (date-time) | **required** |  |
+| `updatedAt` | string (date-time) | **required** |  |
+
 ### `PATCH /api/v1/maps/{id}`
 
 Change a map
@@ -981,14 +1793,27 @@ Change a map
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `name` | string |  |
-| `description` | string |  |
-| `priority` | integer |  |
-| `layout` | object |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `name` | string |  |  |
+| `description` | string |  |  |
+| `priority` | integer |  |  |
+| `layout` | object |  |  |
 
 **200** { id, name, description, priority, layout, version, createdAt, updatedAt }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `name` | string | **required** |  |
+| `description` | string | **required** |  |
+| `priority` | integer | **required** |  |
+| `layout` | object | **required** |  |
+| `version` | integer | **required** |  |
+| `createdAt` | string (date-time) | **required** |  |
+| `updatedAt` | string (date-time) | **required** |  |
 
 ### `DELETE /api/v1/maps/{id}`
 
@@ -1014,6 +1839,36 @@ What a map draws, rather than the document it is stored as. A widget naming an o
 
 **200** { map, widgets, connectors, problems, geo, tiles }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `map` | object | **required** |  |
+| `map.id` | integer | **required** |  |
+| `map.name` | string | **required** |  |
+| `map.description` | string | **required** |  |
+| `map.priority` | integer | **required** |  |
+| `map.layout` | object | **required** |  |
+| `map.version` | integer | **required** |  |
+| `map.createdAt` | string (date-time) | **required** |  |
+| `map.updatedAt` | string (date-time) | **required** |  |
+| `widgets` | object[] | **required** |  |
+| `connectors` | object[] | **required** |  |
+| `connectors[].id` | string | **required** |  |
+| `connectors[].from` | string | **required** |  |
+| `connectors[].to` | string | **required** |  |
+| `problems` | object[] | **required** |  |
+| `problems[].id` | string | **required** |  |
+| `problems[].problem` | string | **required** |  |
+| `geo` | object | nullable |  |
+| `geo.lat` | number | **required** |  |
+| `geo.lon` | number | **required** |  |
+| `geo.zoom` | integer | **required** |  |
+| `geo.publicTiles` | boolean | **required** |  |
+| `tiles` | object | nullable |  |
+| `tiles.urlTemplate` | string | **required** |  |
+| `tiles.attribution` | string | **required** |  |
+
 ### `GET /api/v1/maps/{id}/shares`
 
 The public share links on this map
@@ -1025,6 +1880,20 @@ Needs full access: a share link is a grant to everybody, and `full` is the right
 | `id` | path | integer | **required** |
 
 **200** { items }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].id` | integer | **required** |  |
+| `items[].label` | string | **required** |  |
+| `items[].prefix` | string | **required** |  |
+| `items[].expiresAt` | string (date-time) | **required** |  |
+| `items[].lastUsedAt` | string (date-time) | **required** nullable |  |
+| `items[].revokedAt` | string (date-time) | **required** nullable |  |
+| `items[].createdAt` | string (date-time) | **required** |  |
+| `items[].createdBy` | string | **required** |  |
 
 ### `POST /api/v1/maps/{id}/shares`
 
@@ -1038,12 +1907,27 @@ Answers with the URL’s token **once**. Only its hash is stored, so it cannot b
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `label` | string | **required** |
-| `expiresAt` | string | **required** |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `label` | string | **required** |  |
+| `expiresAt` | string (date-time) | **required** |  |
 
 **201** { share, token }
+
+**201 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `share` | object | **required** |  |
+| `share.id` | integer | **required** |  |
+| `share.label` | string | **required** |  |
+| `share.prefix` | string | **required** |  |
+| `share.expiresAt` | string (date-time) | **required** |  |
+| `share.lastUsedAt` | string (date-time) | **required** nullable |  |
+| `share.revokedAt` | string (date-time) | **required** nullable |  |
+| `share.createdAt` | string (date-time) | **required** |  |
+| `share.createdBy` | string | **required** |  |
+| `token` | string | **required** |  |
 
 ### `DELETE /api/v1/maps/{id}/shares/{shareId}`
 
@@ -1082,6 +1966,18 @@ PNG, JPEG or WebP, at most 2 MiB and 4096 pixels on a side. The format is decide
 
 **200** { mediaType, digest, width, height, bytes, uploadedAt, uploadedBy }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `mediaType` | string | **required** |  |
+| `digest` | string | **required** |  |
+| `width` | integer | **required** |  |
+| `height` | integer | **required** |  |
+| `bytes` | integer | **required** |  |
+| `uploadedAt` | string (date-time) | **required** |  |
+| `uploadedBy` | string | **required** |  |
+
 ### `DELETE /api/v1/maps/{id}/background`
 
 Take the background off a map
@@ -1106,6 +2002,17 @@ Needs full access: who else can see a thing is not a read.
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].groupId` | integer | **required** |  |
+| `items[].groupName` | string | **required** |  |
+| `items[].right` | `none` · `read` · `write` · `full` | **required** |  |
+| `items[].grantedAt` | string (date-time) | **required** |  |
+| `items[].grantedBy` | string | **required** |  |
+
 ### `PUT /api/v1/maps/{id}/access/{groupId}`
 
 Grant a group access to this map
@@ -1119,9 +2026,9 @@ Needs full access, so a write holder may edit the canvas without deciding who el
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `right` | `none` · `read` · `write` · `full` | **required** |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `right` | `none` · `read` · `write` · `full` | **required** |  |
 
 **204**
 
@@ -1147,6 +2054,30 @@ The map a share token opens, with every widget resolved. Expired, revoked and ne
 | `token` | path | string | **required** |
 
 **200** { name, description, widgets, connectors, problems, hasBackground, geo, tiles }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `name` | string | **required** |  |
+| `description` | string |  |  |
+| `widgets` | object[] | **required** |  |
+| `connectors` | object[] | **required** |  |
+| `connectors[].id` | string | **required** |  |
+| `connectors[].from` | string | **required** |  |
+| `connectors[].to` | string | **required** |  |
+| `problems` | object[] | **required** |  |
+| `problems[].id` | string | **required** |  |
+| `problems[].problem` | string | **required** |  |
+| `hasBackground` | boolean | **required** |  |
+| `geo` | object | nullable |  |
+| `geo.lat` | number | **required** |  |
+| `geo.lon` | number | **required** |  |
+| `geo.zoom` | integer | **required** |  |
+| `geo.publicTiles` | boolean | **required** |  |
+| `tiles` | object | nullable |  |
+| `tiles.urlTemplate` | string | **required** |  |
+| `tiles.attribution` | string | **required** |  |
 
 ### `GET /api/v1/public/maps/{token}/background`
 
@@ -1182,6 +2113,20 @@ Which build is serving: its version, the commit it was packaged from, and what i
 
 **200** { version, commit, dirty, profile, lock, subsystems }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `version` | string | **required** |  |
+| `commit` | string | **required** nullable | The full commit this build was packaged from; null when that is not known — a working tree, or a package made before this route existed. |
+| `dirty` | boolean | **required** | Packaged with uncommitted changes on top of `commit`, so the commit names the nearest code rather than this code. |
+| `profile` | `v1` · `full` | **required** | What the build was packaged to contain: `v1` is the release candidate, without the v2 subsystems; `full` is everything. |
+| `lock` | string | **required** nullable | `sha256:<hex>` of the lock its dependencies were installed from, which ships beside them as `app/package-lock.json`; null for a working tree. |
+| `subsystems` | object | **required** | Which optional subsystems this server constructed. One that is false has no routes here at all, and a client should not offer it. |
+| `subsystems.maps` | boolean | **required** |  |
+| `subsystems.reports` | boolean | **required** |  |
+| `subsystems.libraries` | boolean | **required** |  |
+
 ## notifications
 
 ### `GET /api/v1/notification-health`
@@ -1192,6 +2137,8 @@ Read from the queue rather than counted in memory, deliberately: a core that res
 
 **200** { status, problems, pending, parked, retrying, failed, discarded, oldestPendingAt, oldestPendingAgeMs, lastDeliveredAt, windowMs, staleAfterMs, methods }
 
+**200** is [ms:deliveryHealth](#schema-ms-deliveryhealth)
+
 ### `GET /api/v1/notification-requests`
 
 What happened to each notification
@@ -1200,13 +2147,20 @@ Newest first, paged by `before` rather than by offset — notifications arrive w
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `status` | query | object |  |
+| `status` | query | `pending` · `sent` · `failed` · `discarded`, or an array of them |  |
 | `sensorId` | query | integer |  |
 | `templateId` | query | integer |  |
 | `before` | query | integer |  |
-| `limit` | query | integer |  |
+| `limit` | query | integer | default `50` |
 
 **200** { items, nextBefore }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:notificationRequest](#schema-ms-notificationrequest)[] | **required** |  |
+| `nextBefore` | integer | **required** nullable |  |
 
 ## objects
 
@@ -1214,41 +2168,36 @@ Newest first, paged by `before` rather than by offset — notifications arrive w
 
 Flat filtered listing, keyset-paginated. `q` searches names and device hosts as a case-insensitive substring; `host` is an exact match on a device host. `include=path` gives each item its ancestors, so a flat search result can say where each match is. Note: under sort=name an object renamed mid-pagination can be returned twice or missed — inherent to keyset paging and acceptable for a UI. Anything that must be exact (bulk selection, config export) must use sort=id, which is immutable.
 
-| Parameter | In | Type | |
-| --- | --- | --- | --- |
-| `parentId` | query | integer |  |
-| `kind` | query | object |  |
-| `tag` | query | string,array |  |
-| `q` | query | string |  |
-| `host` | query | string |  |
-| `priorityMin` | query | integer |  |
-| `sort` | query | `name` · `id` · `manual` |  |
-| `effective` | query | string,array |  |
-| `include` | query | string |  |
-| `cursor` | query | string |  |
-| `limit` | query | integer |  |
+| Parameter | In | Type | | Description |
+| --- | --- | --- | --- | --- |
+| `parentId` | query | integer |  |  |
+| `kind` | query | `root` · `probe` · `group` · `device` · `sensor`, or an array of them |  |  |
+| `tag` | query | string or array |  |  |
+| `q` | query | string |  | Search: a case-insensitive substring of the name or, on a device, of its host. `%` and `_` are literal. |
+| `host` | query | string |  | A device's host exactly, case-insensitive. A substring is `q`'s job. |
+| `priorityMin` | query | integer |  |  |
+| `sort` | query | `name` · `id` · `manual` | default `name` |  |
+| `effective` | query | string or array |  |  |
+| `include` | query | string |  | Comma-separated expansions. `path` gives every item its ancestors, root first and excluding the item — what `/objects/{id}/ancestors` returns, for the whole page in one walk. |
+| `cursor` | query | string |  |  |
+| `limit` | query | integer | default `100` |  |
 
 **200** { items, nextCursor }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:objectSummary](#schema-ms-objectsummary)[] | **required** |  |
+| `nextCursor` | string | **required** nullable |  |
+
 ### `POST /api/v1/objects`
 
-**Body**
-
-| Field | Type | |
-| --- | --- | --- |
-| `kind` | `probe` · `group` · `device` · `sensor` | **required** |
-| `parentId` | integer | **required** |
-| `name` | string | **required** |
-| `tags` | string[] |  |
-| `priority` | integer |  |
-| `comments` | string |  |
-| `host` | string |  |
-| `ipVersion` | `auto` · `v4` · `v6` |  |
-| `sensorType` | string |  |
-| `params` | object |  |
-| `gid` | string,null |  |
+**Body** — [ms:createObject](#schema-ms-createobject)
 
 **201** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
+
+**201** is [ms:objectDetail](#schema-ms-objectdetail)
 
 ### `GET /api/v1/objects/root`
 
@@ -1258,6 +2207,8 @@ Flat filtered listing, keyset-paginated. `q` searches names and device hosts as 
 
 **200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
 
+**200** is [ms:objectDetail](#schema-ms-objectdetail)
+
 ### `GET /api/v1/objects/tops`
 
 Where the caller’s tree starts
@@ -1266,20 +2217,23 @@ The objects the caller can read whose parent it cannot. For an account that can 
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:objectSummary](#schema-ms-objectsummary)[] | **required** |  |
+
 ### `POST /api/v1/objects/tree`
 
 Create a whole subtree in one request
 
 Creates many objects at once, under one `parentId`, with nodes naming their parent by `ref` where that parent is also being created here. **One transaction**: the whole subtree appears or none of it does, which is what a discovery run needs — a half-provisioned device is worse than a failed one, because nothing says which half. Every object goes through the same validation, the same hierarchy rules, the same channel declaration and the same audit log as `POST /objects`; what is not paid is a request, a transaction and a tree lock **per object**. Refusals name the node by its index and its `ref`, because a caller sending five thousand cannot act on "invalid request". The answer is ids in the order the nodes were sent, not full objects: five thousand of those is megabytes of response describing what the caller already wrote, and the one thing they could not know is the ids.
 
-**Body**
-
-| Field | Type | |
-| --- | --- | --- |
-| `parentId` | integer | **required** |
-| `nodes` | object[] | **required** |
+**Body** — [ms:createTree](#schema-ms-createtree)
 
 **201** { count, objects }
+
+**201** is [ms:createTreeResult](#schema-ms-createtreeresult)
 
 ### `GET /api/v1/objects/{id}`
 
@@ -1292,6 +2246,8 @@ One object. Send the `ETag` back as `If-None-Match` for a 304 when nothing in th
 
 **200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
 
+**200** is [ms:objectDetail](#schema-ms-objectdetail)
+
 ### `PATCH /api/v1/objects/{id}`
 
 Changes what it is given and keeps the rest. **Where a sensor sends its inherited credentials** — a device's host or address family, or a sensor parameter its type says chooses the listener — **needs `write` on the object those credentials are stored on** (`A-41`), and is otherwise refused with 403 naming the kind and that object, never the secret. A device's new host also clears the secrets held in its sensors' own parameters, which the audit lists; enter them again.
@@ -1300,22 +2256,11 @@ Changes what it is given and keeps the rest. **Where a sensor sends its inherite
 | --- | --- | --- | --- |
 | `id` | path | integer | **required** |
 
-**Body**
-
-| Field | Type | |
-| --- | --- | --- |
-| `kind` | `root` · `probe` · `group` · `device` · `sensor` | **required** |
-| `name` | string |  |
-| `tags` | string[] |  |
-| `priority` | integer |  |
-| `comments` | string |  |
-| `inheritsTriggers` | boolean |  |
-| `host` | string |  |
-| `ipVersion` | `auto` · `v4` · `v6` |  |
-| `params` | object |  |
-| `gid` | string,null |  |
+**Body** — [ms:updateObject](#schema-ms-updateobject)
 
 **200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
+
+**200** is [ms:objectDetail](#schema-ms-objectdetail)
 
 ### `DELETE /api/v1/objects/{id}`
 
@@ -1325,6 +2270,15 @@ Changes what it is given and keeps the rest. **Where a sensor sends its inherite
 | `id` | path | integer | **required** |
 
 **200** { id, kind, name, deleted }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `kind` | string | **required** |  |
+| `name` | string | **required** |  |
+| `deleted` | object | **required** |  |
 
 ### `POST /api/v1/objects/{id}/order`
 
@@ -1336,11 +2290,13 @@ Moves an object within its parent's children, the way PRTG's move up / move down
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `move` | `up` · `down` · `first` · `last` | **required** |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `move` | `up` · `down` · `first` · `last` | **required** |  |
 
 **200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
+
+**200** is [ms:objectDetail](#schema-ms-objectdetail)
 
 ### `POST /api/v1/objects/{id}/move`
 
@@ -1350,11 +2306,13 @@ Moves an object within its parent's children, the way PRTG's move up / move down
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `targetParentId` | integer | **required** |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `targetParentId` | integer | **required** |  |
 
 **200** { object, fromParentId, toParentId, movedCount, probeChanged, settingsChanged, credentialsChanged, exceptionsCleared }
+
+**200** is [ms:moveResult](#schema-ms-moveresult)
 
 ### `POST /api/v1/objects/{id}/clone`
 
@@ -1364,12 +2322,14 @@ Moves an object within its parent's children, the way PRTG's move up / move down
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `targetParentId` | integer |  |
-| `name` | string |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `targetParentId` | integer |  |  |
+| `name` | string |  |  |
 
 **201** { object, grantsNotCarried, clonedCount, droppedCredentialKinds, settingsChanged }
+
+**201** is [ms:cloneResult](#schema-ms-cloneresult)
 
 ### `POST /api/v1/objects/bulk`
 
@@ -1377,32 +2337,56 @@ Applies one operation to a selection. **Each object is atomic and the batch is b
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `ids` | integer[] | **required** |
-| `operation` | `pause` · `resume` · `move` · `clone` · `delete` · `setting` · `revertSetting` | **required** |
-| `targetParentId` | integer |  |
-| `cascade` | boolean |  |
-| `key` | string |  |
-| `value` | object |  |
-| `minutes` | integer |  |
-| `until` | string |  |
-| `from` | string |  |
-| `message` | string |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `ids` | integer[] | **required** |  |
+| `operation` | `pause` · `resume` · `move` · `clone` · `delete` · `setting` · `revertSetting` | **required** |  |
+| `targetParentId` | integer |  | Required by `move` and `clone`. |
+| `cascade` | boolean | default `false` | `delete` only. False refuses an object that has children, which is the safe default: a selection of six groups is six subtrees and nobody counted them. |
+| `key` | string |  | Required by `setting` and `revertSetting`. |
+| `value` | any |  | `setting` only. To go back to the inherited value use `revertSetting` — the same split the single-object routes make between `PUT` and `DELETE`, and not a null here, which is a legitimate stored value for a setting whose schema allows one. |
+| `minutes` | integer |  | `pause` only. |
+| `until` | string (date-time) |  | `pause` only. |
+| `from` | string (date-time) |  | `pause` only. |
+| `message` | string |  | `pause` only. |
 
 **200** { requested, succeeded, failed, duplicates, outcomes }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `requested` | integer | **required** |  |
+| `succeeded` | integer | **required** |  |
+| `failed` | integer | **required** |  |
+| `duplicates` | integer | **required** |  |
+| `outcomes` | object[] | **required** |  |
+| `outcomes[].objectId` | integer | **required** |  |
+| `outcomes[].ok` | boolean | **required** |  |
+| `outcomes[].problem` | string |  |  |
+| `outcomes[].code` | string |  |  |
+| `outcomes[].createdId` | integer |  |  |
+| `outcomes[].grantsNotCarried` | integer |  | `clone` only: the positive grants the copy did not carry, as the single clone’s answer counts them (`A-76`). |
+| `outcomes[].deleted` | integer |  |  |
 
 ### `GET /api/v1/objects/{id}/tree`
 
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
-| `maxDepth` | query | integer |  |
-| `limit` | query | integer |  |
-| `kind` | query | object |  |
-| `effective` | query | string,array |  |
+| `maxDepth` | query | integer | default `3` |
+| `limit` | query | integer | default `1000` |
+| `kind` | query | `root` · `probe` · `group` · `device` · `sensor`, or an array of them |  |
+| `effective` | query | string or array |  |
 | `id` | path | integer | **required** |
 
 **200** { items, truncated }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:objectSummary](#schema-ms-objectsummary)[] | **required** |  |
+| `truncated` | boolean | **required** |  |
 
 ### `GET /api/v1/objects/{id}/counts`
 
@@ -1416,6 +2400,26 @@ How many objects of each kind are under this one, and what state its sensors are
 
 **200** { objects, sensorStates }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `objects` | object | **required** |  |
+| `objects.probe` | integer | **required** |  |
+| `objects.group` | integer | **required** |  |
+| `objects.device` | integer | **required** |  |
+| `objects.sensor` | integer | **required** |  |
+| `objects.total` | integer | **required** | Every object in the subtree, the one asked about included — so for the root it is one more than the four kinds sum to. |
+| `sensorStates` | object | **required** |  |
+| `sensorStates.unknown` | integer | **required** |  |
+| `sensorStates.up` | integer | **required** |  |
+| `sensorStates.warning` | integer | **required** |  |
+| `sensorStates.down` | integer | **required** |  |
+| `sensorStates.down_acknowledged` | integer | **required** |  |
+| `sensorStates.down_partial` | integer | **required** |  |
+| `sensorStates.unusual` | integer | **required** |  |
+| `sensorStates.paused` | integer | **required** |  |
+
 ### `GET /api/v1/objects/counts`
 
 Exact totals for everything the caller can see
@@ -1424,6 +2428,26 @@ The same totals as `/objects/:id/counts`, over every object the caller can read 
 
 **200** { objects, sensorStates }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `objects` | object | **required** |  |
+| `objects.probe` | integer | **required** |  |
+| `objects.group` | integer | **required** |  |
+| `objects.device` | integer | **required** |  |
+| `objects.sensor` | integer | **required** |  |
+| `objects.total` | integer | **required** | Every object in the subtree, the one asked about included — so for the root it is one more than the four kinds sum to. |
+| `sensorStates` | object | **required** |  |
+| `sensorStates.unknown` | integer | **required** |  |
+| `sensorStates.up` | integer | **required** |  |
+| `sensorStates.warning` | integer | **required** |  |
+| `sensorStates.down` | integer | **required** |  |
+| `sensorStates.down_acknowledged` | integer | **required** |  |
+| `sensorStates.down_partial` | integer | **required** |  |
+| `sensorStates.unusual` | integer | **required** |  |
+| `sensorStates.paused` | integer | **required** |  |
+
 ### `GET /api/v1/objects/{id}/ancestors`
 
 | Parameter | In | Type | |
@@ -1431,6 +2455,12 @@ The same totals as `/objects/:id/counts`, over every object the caller can read 
 | `id` | path | integer | **required** |
 
 **200** { items }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:objectRef](#schema-ms-objectref)[] | **required** |  |
 
 ### `PUT /api/v1/objects/{id}/target-policy-exception`
 
@@ -1444,11 +2474,13 @@ The addresses of this device its probe may connect to although `probe.targetPoli
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `addresses` | string[] | **required** |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `addresses` | string[] | **required** |  |
 
 **200** { id, kind, parentId, name, tags, priority, comments, inheritsTriggers, version, childCount, createdAt, updatedAt, host, ipVersion, targetPolicyException, gid, sensorType, params, redactedParams, settings, channels, credentials, ancestors }
+
+**200** is [ms:objectDetail](#schema-ms-objectdetail)
 
 ## probes
 
@@ -1464,6 +2496,34 @@ Includes the ones waiting for approval, which is the list worth opening: a probe
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].gid` | string | **required** |  |
+| `items[].status` | `pending` · `approved` · `revoked` | **required** |  |
+| `items[].displayName` | string | **required** |  |
+| `items[].agentVersion` | string |  |  |
+| `items[].protocolVersion` | integer |  |  |
+| `items[].protocolAcceptedAt` | string (date-time) | **required** nullable | When a handshake this core accepted spoke `protocolVersion` (U-33). `null` beside a version a hello was refused over, and for one recorded before the core kept the time. Not `lastSeenAt`, which a hello refused over its version moves too. |
+| `items[].protocolRefusedAt` | string (date-time) | **required** nullable | When a hello was last refused over `protocolVersion` (U-35). `null` beside a version a handshake this core accepted, and for one recorded before the core kept the time. Never set beside `protocolAcceptedAt`. A `protocolVersion` of 0 with this set is a probe that claimed 0 and was refused; with neither time it is a probe that has not connected since the core started recording versions. |
+| `items[].lastAddress` | string |  |  |
+| `items[].allowFrom` | string[] |  |  |
+| `items[].hasOwnKey` | boolean |  | Whether a key has been issued to this probe. Never the key — it is sent once, in the welcome that approves it, and no route can read it back. |
+| `items[].objectId` | integer | nullable |  |
+| `items[].note` | string |  |  |
+| `items[].firstSeenAt` | string | **required** |  |
+| `items[].lastSeenAt` | string | nullable |  |
+| `items[].decidedAt` | string | nullable |  |
+| `items[].skew` | object |  | What this probe’s protocol version means against this core (R-06). `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says whether the last hello was refused over it (`protocolRefusedAt`) or a core with a lower floor accepted it and this one will refuse it at the next (U-35). `unknown` is a 0 with neither time: nothing recorded. |
+| `items[].skew.kind` | `unknown` · `current` · `outdated` · `ahead` · `incompatible` | **required** |  |
+| `items[].skew.peerVersion` | integer |  |  |
+| `items[].skew.ownVersion` | integer |  |  |
+| `items[].skew.missing` | string[] |  |  |
+| `items[].skew.reason` | string |  |  |
+| `items[].skew.explanation` | string | **required** |  |
+
 ### `POST /api/v1/probes/{gid}/approve`
 
 Approve a probe onto a branch of the tree
@@ -1476,12 +2536,39 @@ Binds this identity to a probe object. The probe is issued a key of its own at i
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `objectId` | integer | **required** |
-| `local` | boolean |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `objectId` | integer | **required** | The probe object this identity owns from now on. |
+| `local` | boolean | default `false` | Whether this is the probe running beside the core. A local probe cannot be deleted, matching PRTG. Said explicitly rather than guessed: an address proves nothing on a host with several interfaces, and "the first one approved" is wrong for anybody who stood up a remote probe first. |
 
 **200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, protocolRefusedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `gid` | string | **required** |  |
+| `status` | `pending` · `approved` · `revoked` | **required** |  |
+| `displayName` | string | **required** |  |
+| `agentVersion` | string |  |  |
+| `protocolVersion` | integer |  |  |
+| `protocolAcceptedAt` | string (date-time) | **required** nullable | When a handshake this core accepted spoke `protocolVersion` (U-33). `null` beside a version a hello was refused over, and for one recorded before the core kept the time. Not `lastSeenAt`, which a hello refused over its version moves too. |
+| `protocolRefusedAt` | string (date-time) | **required** nullable | When a hello was last refused over `protocolVersion` (U-35). `null` beside a version a handshake this core accepted, and for one recorded before the core kept the time. Never set beside `protocolAcceptedAt`. A `protocolVersion` of 0 with this set is a probe that claimed 0 and was refused; with neither time it is a probe that has not connected since the core started recording versions. |
+| `lastAddress` | string |  |  |
+| `allowFrom` | string[] |  |  |
+| `hasOwnKey` | boolean |  | Whether a key has been issued to this probe. Never the key — it is sent once, in the welcome that approves it, and no route can read it back. |
+| `objectId` | integer | nullable |  |
+| `note` | string |  |  |
+| `firstSeenAt` | string | **required** |  |
+| `lastSeenAt` | string | nullable |  |
+| `decidedAt` | string | nullable |  |
+| `skew` | object |  | What this probe’s protocol version means against this core (R-06). `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says whether the last hello was refused over it (`protocolRefusedAt`) or a core with a lower floor accepted it and this one will refuse it at the next (U-35). `unknown` is a 0 with neither time: nothing recorded. |
+| `skew.kind` | `unknown` · `current` · `outdated` · `ahead` · `incompatible` | **required** |  |
+| `skew.peerVersion` | integer |  |  |
+| `skew.ownVersion` | integer |  |  |
+| `skew.missing` | string[] |  |  |
+| `skew.reason` | string |  |  |
+| `skew.explanation` | string | **required** |  |
 
 ### `POST /api/v1/probes/{gid}/revoke`
 
@@ -1495,11 +2582,38 @@ The record is kept rather than deleted, so the same identity cannot come back by
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `note` | string |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `note` | string | default `` | Why, for the operator who finds this months later. |
 
 **200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, protocolRefusedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `gid` | string | **required** |  |
+| `status` | `pending` · `approved` · `revoked` | **required** |  |
+| `displayName` | string | **required** |  |
+| `agentVersion` | string |  |  |
+| `protocolVersion` | integer |  |  |
+| `protocolAcceptedAt` | string (date-time) | **required** nullable | When a handshake this core accepted spoke `protocolVersion` (U-33). `null` beside a version a hello was refused over, and for one recorded before the core kept the time. Not `lastSeenAt`, which a hello refused over its version moves too. |
+| `protocolRefusedAt` | string (date-time) | **required** nullable | When a hello was last refused over `protocolVersion` (U-35). `null` beside a version a handshake this core accepted, and for one recorded before the core kept the time. Never set beside `protocolAcceptedAt`. A `protocolVersion` of 0 with this set is a probe that claimed 0 and was refused; with neither time it is a probe that has not connected since the core started recording versions. |
+| `lastAddress` | string |  |  |
+| `allowFrom` | string[] |  |  |
+| `hasOwnKey` | boolean |  | Whether a key has been issued to this probe. Never the key — it is sent once, in the welcome that approves it, and no route can read it back. |
+| `objectId` | integer | nullable |  |
+| `note` | string |  |  |
+| `firstSeenAt` | string | **required** |  |
+| `lastSeenAt` | string | nullable |  |
+| `decidedAt` | string | nullable |  |
+| `skew` | object |  | What this probe’s protocol version means against this core (R-06). `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says whether the last hello was refused over it (`protocolRefusedAt`) or a core with a lower floor accepted it and this one will refuse it at the next (U-35). `unknown` is a 0 with neither time: nothing recorded. |
+| `skew.kind` | `unknown` · `current` · `outdated` · `ahead` · `incompatible` | **required** |  |
+| `skew.peerVersion` | integer |  |  |
+| `skew.ownVersion` | integer |  |  |
+| `skew.missing` | string[] |  |  |
+| `skew.reason` | string |  |  |
+| `skew.explanation` | string | **required** |  |
 
 ### `PUT /api/v1/probes/{gid}/allow-from`
 
@@ -1513,11 +2627,38 @@ Ranges in the same spellings a discovery takes — `10.0.0.0/24`, `10.0.0.1-50`,
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `allowFrom` | string[] | **required** |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `allowFrom` | string[] | **required** |  |
 
 **200** { gid, status, displayName, agentVersion, protocolVersion, protocolAcceptedAt, protocolRefusedAt, lastAddress, allowFrom, hasOwnKey, objectId, note, firstSeenAt, lastSeenAt, decidedAt, skew }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `gid` | string | **required** |  |
+| `status` | `pending` · `approved` · `revoked` | **required** |  |
+| `displayName` | string | **required** |  |
+| `agentVersion` | string |  |  |
+| `protocolVersion` | integer |  |  |
+| `protocolAcceptedAt` | string (date-time) | **required** nullable | When a handshake this core accepted spoke `protocolVersion` (U-33). `null` beside a version a hello was refused over, and for one recorded before the core kept the time. Not `lastSeenAt`, which a hello refused over its version moves too. |
+| `protocolRefusedAt` | string (date-time) | **required** nullable | When a hello was last refused over `protocolVersion` (U-35). `null` beside a version a handshake this core accepted, and for one recorded before the core kept the time. Never set beside `protocolAcceptedAt`. A `protocolVersion` of 0 with this set is a probe that claimed 0 and was refused; with neither time it is a probe that has not connected since the core started recording versions. |
+| `lastAddress` | string |  |  |
+| `allowFrom` | string[] |  |  |
+| `hasOwnKey` | boolean |  | Whether a key has been issued to this probe. Never the key — it is sent once, in the welcome that approves it, and no route can read it back. |
+| `objectId` | integer | nullable |  |
+| `note` | string |  |  |
+| `firstSeenAt` | string | **required** |  |
+| `lastSeenAt` | string | nullable |  |
+| `decidedAt` | string | nullable |  |
+| `skew` | object |  | What this probe’s protocol version means against this core (R-06). `outdated` is the one worth reading: such a probe connects and heartbeats normally and is refused every feature listed in `missing`, so a probe below protocol 3 looks healthy while scanning nothing at all. `ahead` is a probe newer than this core (P-178): it is admitted and the pair speaks `ownVersion`, so the end to upgrade is this one. `incompatible` is a version this core refuses at the handshake; its `explanation` says whether the last hello was refused over it (`protocolRefusedAt`) or a core with a lower floor accepted it and this one will refuse it at the next (U-35). `unknown` is a 0 with neither time: nothing recorded. |
+| `skew.kind` | `unknown` · `current` · `outdated` · `ahead` · `incompatible` | **required** |  |
+| `skew.peerVersion` | integer |  |  |
+| `skew.ownVersion` | integer |  |  |
+| `skew.missing` | string[] |  |  |
+| `skew.reason` | string |  |  |
+| `skew.explanation` | string | **required** |  |
 
 ### `DELETE /api/v1/probes/{gid}`
 
@@ -1541,6 +2682,59 @@ By name. An administrator sees every report; everybody else sees the ones a grou
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].id` | integer | **required** |  |
+| `items[].name` | string | **required** |  |
+| `items[].description` | string | **required** |  |
+| `items[].kind` | `graph_and_table` · `table_only` · `graph_only` · `sensor_list` · `installation` · `top_values` · `top_uptime` | **required** |  |
+| `items[].subjects` | object | **required** |  |
+| `items[].span` | object | **required** |  |
+| `items[].span.kind` | `day` · `week` · `month` · `quarter` · `year` · `custom` | **required** |  |
+| `items[].span.offset` | integer |  |  |
+| `items[].span.timezone` | string |  |  |
+| `items[].span.from` | string |  |  |
+| `items[].span.to` | string |  |  |
+| `items[].span.resolutionSeconds` | integer |  |  |
+| `items[].resolved` | object |  |  |
+| `items[].resolved.from` | string (date-time) | **required** |  |
+| `items[].resolved.to` | string (date-time) | **required** |  |
+| `items[].resolved.label` | string | **required** |  |
+| `items[].resolved.timezone` | string | **required** |  |
+| `items[].resolved.bucketSeconds` | integer | **required** |  |
+| `items[].resolved.source` | string | **required** |  |
+| `items[].resolved.adjustments` | object[] | **required** |  |
+| `items[].resolved.adjustments[].kind` | string | **required** |  |
+| `items[].resolved.adjustments[].reason` | string | **required** |  |
+| `items[].unresolvable` | object |  |  |
+| `items[].unresolvable.code` | string | **required** |  |
+| `items[].unresolvable.message` | string | **required** |  |
+| `items[].outputs` | object | **required** |  |
+| `items[].outputs.formats` | (`html` · `csv` · `xml` · `pdf`)[] |  |  |
+| `items[].outputs.delivery` | `store` · `store-and-email` · `email` |  |  |
+| `items[].outputs.recipients` | string[] |  |  |
+| `items[].outputs.zip` | boolean |  |  |
+| `items[].schedule` | object | **required** |  |
+| `items[].schedule.kind` | `manual` · `hourly` · `daily` · `weekly` · `monthly` · `quarterly` · `annual` | **required** |  |
+| `items[].schedule.minute` | integer |  |  |
+| `items[].schedule.weekday` | integer |  |  |
+| `items[].schedule.dayOfMonth` | integer |  |  |
+| `items[].schedule.month` | integer |  |  |
+| `items[].schedule.timezone` | string |  |  |
+| `items[].schedule.scheduleId` | integer |  |  |
+| `items[].scheduleSummary` | string | **required** |  |
+| `items[].nextRunAt` | string (date-time) | **required** nullable |  |
+| `items[].lastRunAt` | string (date-time) | **required** nullable |  |
+| `items[].runAs` | object | **required** |  |
+| `items[].runAs.login` | string | **required** |  |
+| `items[].runAs.available` | boolean | **required** |  |
+| `items[].version` | integer | **required** |  |
+| `items[].createdAt` | string (date-time) | **required** |  |
+| `items[].updatedAt` | string (date-time) | **required** |  |
+
 ### `POST /api/v1/reports`
 
 Create a report
@@ -1549,18 +2743,88 @@ The creator’s primary group is granted full access in the same transaction, or
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `name` | string | **required** |
-| `description` | string |  |
-| `kind` | `graph_and_table` · `table_only` · `graph_only` · `sensor_list` · `installation` · `top_values` · `top_uptime` | **required** |
-| `subjects` | object |  |
-| `span` | object |  |
-| `outputs` | object |  |
-| `schedule` | object |  |
-| `runAs` | string |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `name` | string | **required** |  |
+| `description` | string |  |  |
+| `kind` | `graph_and_table` · `table_only` · `graph_only` · `sensor_list` · `installation` · `top_values` · `top_uptime` | **required** |  |
+| `subjects` | object |  |  |
+| `subjects.objectIds` | integer[] | **required** |  |
+| `span` | object |  |  |
+| `span.kind` | `day` · `week` · `month` · `quarter` · `year` · `custom` | **required** |  |
+| `span.offset` | integer |  |  |
+| `span.timezone` | string |  |  |
+| `span.from` | string |  |  |
+| `span.to` | string |  |  |
+| `span.resolutionSeconds` | integer |  |  |
+| `outputs` | object |  |  |
+| `outputs.formats` | (`html` · `csv` · `xml` · `pdf`)[] |  |  |
+| `outputs.delivery` | `store` · `store-and-email` · `email` |  |  |
+| `outputs.recipients` | string[] |  |  |
+| `outputs.zip` | boolean |  |  |
+| `schedule` | object |  |  |
+| `schedule.kind` | `manual` · `hourly` · `daily` · `weekly` · `monthly` · `quarterly` · `annual` | **required** |  |
+| `schedule.minute` | integer |  |  |
+| `schedule.weekday` | integer |  |  |
+| `schedule.dayOfMonth` | integer |  |  |
+| `schedule.month` | integer |  |  |
+| `schedule.timezone` | string |  |  |
+| `schedule.scheduleId` | integer |  |  |
+| `runAs` | string |  |  |
 
 **201** { id, name, description, kind, subjects, span, resolved, unresolvable, outputs, schedule, scheduleSummary, nextRunAt, lastRunAt, runAs, version, createdAt, updatedAt }
+
+**201 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `name` | string | **required** |  |
+| `description` | string | **required** |  |
+| `kind` | `graph_and_table` · `table_only` · `graph_only` · `sensor_list` · `installation` · `top_values` · `top_uptime` | **required** |  |
+| `subjects` | object | **required** |  |
+| `span` | object | **required** |  |
+| `span.kind` | `day` · `week` · `month` · `quarter` · `year` · `custom` | **required** |  |
+| `span.offset` | integer |  |  |
+| `span.timezone` | string |  |  |
+| `span.from` | string |  |  |
+| `span.to` | string |  |  |
+| `span.resolutionSeconds` | integer |  |  |
+| `resolved` | object |  |  |
+| `resolved.from` | string (date-time) | **required** |  |
+| `resolved.to` | string (date-time) | **required** |  |
+| `resolved.label` | string | **required** |  |
+| `resolved.timezone` | string | **required** |  |
+| `resolved.bucketSeconds` | integer | **required** |  |
+| `resolved.source` | string | **required** |  |
+| `resolved.adjustments` | object[] | **required** |  |
+| `resolved.adjustments[].kind` | string | **required** |  |
+| `resolved.adjustments[].reason` | string | **required** |  |
+| `unresolvable` | object |  |  |
+| `unresolvable.code` | string | **required** |  |
+| `unresolvable.message` | string | **required** |  |
+| `outputs` | object | **required** |  |
+| `outputs.formats` | (`html` · `csv` · `xml` · `pdf`)[] |  |  |
+| `outputs.delivery` | `store` · `store-and-email` · `email` |  |  |
+| `outputs.recipients` | string[] |  |  |
+| `outputs.zip` | boolean |  |  |
+| `schedule` | object | **required** |  |
+| `schedule.kind` | `manual` · `hourly` · `daily` · `weekly` · `monthly` · `quarterly` · `annual` | **required** |  |
+| `schedule.minute` | integer |  |  |
+| `schedule.weekday` | integer |  |  |
+| `schedule.dayOfMonth` | integer |  |  |
+| `schedule.month` | integer |  |  |
+| `schedule.timezone` | string |  |  |
+| `schedule.scheduleId` | integer |  |  |
+| `scheduleSummary` | string | **required** |  |
+| `nextRunAt` | string (date-time) | **required** nullable |  |
+| `lastRunAt` | string (date-time) | **required** nullable |  |
+| `runAs` | object | **required** |  |
+| `runAs.login` | string | **required** |  |
+| `runAs.available` | boolean | **required** |  |
+| `version` | integer | **required** |  |
+| `createdAt` | string (date-time) | **required** |  |
+| `updatedAt` | string (date-time) | **required** |  |
 
 ### `GET /api/v1/reports/{id}`
 
@@ -1574,6 +2838,58 @@ A report this account may not read answers 404 rather than 403, so the error can
 
 **200** { id, name, description, kind, subjects, span, resolved, unresolvable, outputs, schedule, scheduleSummary, nextRunAt, lastRunAt, runAs, version, createdAt, updatedAt }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `name` | string | **required** |  |
+| `description` | string | **required** |  |
+| `kind` | `graph_and_table` · `table_only` · `graph_only` · `sensor_list` · `installation` · `top_values` · `top_uptime` | **required** |  |
+| `subjects` | object | **required** |  |
+| `span` | object | **required** |  |
+| `span.kind` | `day` · `week` · `month` · `quarter` · `year` · `custom` | **required** |  |
+| `span.offset` | integer |  |  |
+| `span.timezone` | string |  |  |
+| `span.from` | string |  |  |
+| `span.to` | string |  |  |
+| `span.resolutionSeconds` | integer |  |  |
+| `resolved` | object |  |  |
+| `resolved.from` | string (date-time) | **required** |  |
+| `resolved.to` | string (date-time) | **required** |  |
+| `resolved.label` | string | **required** |  |
+| `resolved.timezone` | string | **required** |  |
+| `resolved.bucketSeconds` | integer | **required** |  |
+| `resolved.source` | string | **required** |  |
+| `resolved.adjustments` | object[] | **required** |  |
+| `resolved.adjustments[].kind` | string | **required** |  |
+| `resolved.adjustments[].reason` | string | **required** |  |
+| `unresolvable` | object |  |  |
+| `unresolvable.code` | string | **required** |  |
+| `unresolvable.message` | string | **required** |  |
+| `outputs` | object | **required** |  |
+| `outputs.formats` | (`html` · `csv` · `xml` · `pdf`)[] |  |  |
+| `outputs.delivery` | `store` · `store-and-email` · `email` |  |  |
+| `outputs.recipients` | string[] |  |  |
+| `outputs.zip` | boolean |  |  |
+| `schedule` | object | **required** |  |
+| `schedule.kind` | `manual` · `hourly` · `daily` · `weekly` · `monthly` · `quarterly` · `annual` | **required** |  |
+| `schedule.minute` | integer |  |  |
+| `schedule.weekday` | integer |  |  |
+| `schedule.dayOfMonth` | integer |  |  |
+| `schedule.month` | integer |  |  |
+| `schedule.timezone` | string |  |  |
+| `schedule.scheduleId` | integer |  |  |
+| `scheduleSummary` | string | **required** |  |
+| `nextRunAt` | string (date-time) | **required** nullable |  |
+| `lastRunAt` | string (date-time) | **required** nullable |  |
+| `runAs` | object | **required** |  |
+| `runAs.login` | string | **required** |  |
+| `runAs.available` | boolean | **required** |  |
+| `version` | integer | **required** |  |
+| `createdAt` | string (date-time) | **required** |  |
+| `updatedAt` | string (date-time) | **required** |  |
+
 ### `PATCH /api/v1/reports/{id}`
 
 Change a report
@@ -1586,18 +2902,88 @@ Change a report
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `name` | string |  |
-| `description` | string |  |
-| `kind` | `graph_and_table` · `table_only` · `graph_only` · `sensor_list` · `installation` · `top_values` · `top_uptime` |  |
-| `subjects` | object |  |
-| `span` | object |  |
-| `outputs` | object |  |
-| `schedule` | object |  |
-| `runAs` | string |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `name` | string |  |  |
+| `description` | string |  |  |
+| `kind` | `graph_and_table` · `table_only` · `graph_only` · `sensor_list` · `installation` · `top_values` · `top_uptime` |  |  |
+| `subjects` | object |  |  |
+| `subjects.objectIds` | integer[] | **required** |  |
+| `span` | object |  |  |
+| `span.kind` | `day` · `week` · `month` · `quarter` · `year` · `custom` | **required** |  |
+| `span.offset` | integer |  |  |
+| `span.timezone` | string |  |  |
+| `span.from` | string |  |  |
+| `span.to` | string |  |  |
+| `span.resolutionSeconds` | integer |  |  |
+| `outputs` | object |  |  |
+| `outputs.formats` | (`html` · `csv` · `xml` · `pdf`)[] |  |  |
+| `outputs.delivery` | `store` · `store-and-email` · `email` |  |  |
+| `outputs.recipients` | string[] |  |  |
+| `outputs.zip` | boolean |  |  |
+| `schedule` | object |  |  |
+| `schedule.kind` | `manual` · `hourly` · `daily` · `weekly` · `monthly` · `quarterly` · `annual` | **required** |  |
+| `schedule.minute` | integer |  |  |
+| `schedule.weekday` | integer |  |  |
+| `schedule.dayOfMonth` | integer |  |  |
+| `schedule.month` | integer |  |  |
+| `schedule.timezone` | string |  |  |
+| `schedule.scheduleId` | integer |  |  |
+| `runAs` | string |  |  |
 
 **200** { id, name, description, kind, subjects, span, resolved, unresolvable, outputs, schedule, scheduleSummary, nextRunAt, lastRunAt, runAs, version, createdAt, updatedAt }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `name` | string | **required** |  |
+| `description` | string | **required** |  |
+| `kind` | `graph_and_table` · `table_only` · `graph_only` · `sensor_list` · `installation` · `top_values` · `top_uptime` | **required** |  |
+| `subjects` | object | **required** |  |
+| `span` | object | **required** |  |
+| `span.kind` | `day` · `week` · `month` · `quarter` · `year` · `custom` | **required** |  |
+| `span.offset` | integer |  |  |
+| `span.timezone` | string |  |  |
+| `span.from` | string |  |  |
+| `span.to` | string |  |  |
+| `span.resolutionSeconds` | integer |  |  |
+| `resolved` | object |  |  |
+| `resolved.from` | string (date-time) | **required** |  |
+| `resolved.to` | string (date-time) | **required** |  |
+| `resolved.label` | string | **required** |  |
+| `resolved.timezone` | string | **required** |  |
+| `resolved.bucketSeconds` | integer | **required** |  |
+| `resolved.source` | string | **required** |  |
+| `resolved.adjustments` | object[] | **required** |  |
+| `resolved.adjustments[].kind` | string | **required** |  |
+| `resolved.adjustments[].reason` | string | **required** |  |
+| `unresolvable` | object |  |  |
+| `unresolvable.code` | string | **required** |  |
+| `unresolvable.message` | string | **required** |  |
+| `outputs` | object | **required** |  |
+| `outputs.formats` | (`html` · `csv` · `xml` · `pdf`)[] |  |  |
+| `outputs.delivery` | `store` · `store-and-email` · `email` |  |  |
+| `outputs.recipients` | string[] |  |  |
+| `outputs.zip` | boolean |  |  |
+| `schedule` | object | **required** |  |
+| `schedule.kind` | `manual` · `hourly` · `daily` · `weekly` · `monthly` · `quarterly` · `annual` | **required** |  |
+| `schedule.minute` | integer |  |  |
+| `schedule.weekday` | integer |  |  |
+| `schedule.dayOfMonth` | integer |  |  |
+| `schedule.month` | integer |  |  |
+| `schedule.timezone` | string |  |  |
+| `schedule.scheduleId` | integer |  |  |
+| `scheduleSummary` | string | **required** |  |
+| `nextRunAt` | string (date-time) | **required** nullable |  |
+| `lastRunAt` | string (date-time) | **required** nullable |  |
+| `runAs` | object | **required** |  |
+| `runAs.login` | string | **required** |  |
+| `runAs.available` | boolean | **required** |  |
+| `version` | integer | **required** |  |
+| `createdAt` | string (date-time) | **required** |  |
+| `updatedAt` | string (date-time) | **required** |  |
 
 ### `DELETE /api/v1/reports/{id}`
 
@@ -1623,6 +3009,19 @@ A report renders through a named account, not through whoever is asking (`§6`).
 
 **200** { runAs, visible, unavailable }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `runAs` | object | **required** |  |
+| `runAs.login` | string | **required** |  |
+| `runAs.role` | string | **required** |  |
+| `visible` | object[] | **required** |  |
+| `visible[].id` | integer | **required** |  |
+| `visible[].kind` | string | **required** |  |
+| `visible[].name` | string | **required** |  |
+| `unavailable` | integer[] | **required** |  |
+
 ### `GET /api/v1/reports/{id}/runs`
 
 When this report ran, and what happened
@@ -1634,6 +3033,39 @@ Newest first, at most 50 of them. A run that failed carries the same code the AP
 | `id` | path | integer | **required** |
 
 **200** { items }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].id` | integer | **required** |  |
+| `items[].reportId` | integer | **required** |  |
+| `items[].trigger` | `manual` · `scheduled` | **required** |  |
+| `items[].requestedBy` | string | **required** |  |
+| `items[].state` | `running` · `succeeded` · `failed` | **required** |  |
+| `items[].queuedAt` | string (date-time) | **required** |  |
+| `items[].startedAt` | string (date-time) | **required** nullable |  |
+| `items[].finishedAt` | string (date-time) | **required** nullable |  |
+| `items[].durationMs` | integer | **required** nullable |  |
+| `items[].spanLabel` | string | **required** |  |
+| `items[].sections` | integer | **required** nullable |  |
+| `items[].unavailable` | integer | **required** nullable |  |
+| `items[].cells` | integer | **required** nullable |  |
+| `items[].errorCode` | string | **required** |  |
+| `items[].errorMessage` | string | **required** |  |
+| `items[].delivery` | object | **required** |  |
+| `items[].delivery.state` | `none` · `pending` · `sent` · `failed` | **required** |  |
+| `items[].delivery.attempts` | integer | **required** |  |
+| `items[].delivery.error` | string | **required** |  |
+| `items[].delivery.nextAttemptAt` | string (date-time) | **required** nullable |  |
+| `items[].delivery.deliveredAt` | string (date-time) | **required** nullable |  |
+| `items[].outputs` | object[] |  |  |
+| `items[].outputs[].format` | `html` · `csv` · `xml` · `pdf` · `zip` | **required** |  |
+| `items[].outputs[].filename` | string | **required** |  |
+| `items[].outputs[].byteSize` | integer | **required** |  |
+| `items[].outputs[].sha256` | string | **required** |  |
+| `items[].outputs[].createdAt` | string (date-time) | **required** |  |
 
 ### `POST /api/v1/reports/{id}/runs`
 
@@ -1647,6 +3079,38 @@ Renders the report against its span and its security context, and records the ou
 
 **201** { id, reportId, trigger, requestedBy, state, queuedAt, startedAt, finishedAt, durationMs, spanLabel, sections, unavailable, cells, errorCode, errorMessage, delivery, outputs }
 
+**201 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `reportId` | integer | **required** |  |
+| `trigger` | `manual` · `scheduled` | **required** |  |
+| `requestedBy` | string | **required** |  |
+| `state` | `running` · `succeeded` · `failed` | **required** |  |
+| `queuedAt` | string (date-time) | **required** |  |
+| `startedAt` | string (date-time) | **required** nullable |  |
+| `finishedAt` | string (date-time) | **required** nullable |  |
+| `durationMs` | integer | **required** nullable |  |
+| `spanLabel` | string | **required** |  |
+| `sections` | integer | **required** nullable |  |
+| `unavailable` | integer | **required** nullable |  |
+| `cells` | integer | **required** nullable |  |
+| `errorCode` | string | **required** |  |
+| `errorMessage` | string | **required** |  |
+| `delivery` | object | **required** |  |
+| `delivery.state` | `none` · `pending` · `sent` · `failed` | **required** |  |
+| `delivery.attempts` | integer | **required** |  |
+| `delivery.error` | string | **required** |  |
+| `delivery.nextAttemptAt` | string (date-time) | **required** nullable |  |
+| `delivery.deliveredAt` | string (date-time) | **required** nullable |  |
+| `outputs` | object[] |  |  |
+| `outputs[].format` | `html` · `csv` · `xml` · `pdf` · `zip` | **required** |  |
+| `outputs[].filename` | string | **required** |  |
+| `outputs[].byteSize` | integer | **required** |  |
+| `outputs[].sha256` | string | **required** |  |
+| `outputs[].createdAt` | string (date-time) | **required** |  |
+
 ### `GET /api/v1/reports/{id}/access`
 
 Which groups may see this report
@@ -1658,6 +3122,17 @@ Needs full access: who else can read a report is not a read-only detail.
 | `id` | path | integer | **required** |
 
 **200** { items }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].groupId` | integer | **required** |  |
+| `items[].groupName` | string | **required** |  |
+| `items[].right` | `none` · `read` · `write` · `full` | **required** |  |
+| `items[].grantedAt` | string (date-time) | **required** |  |
+| `items[].grantedBy` | string | **required** |  |
 
 ### `PUT /api/v1/reports/{id}/access/{groupId}`
 
@@ -1672,9 +3147,9 @@ Needs full access, so a write holder may edit what a report measures without dec
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `right` | `none` · `read` · `write` · `full` | **required** |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `right` | `none` · `read` · `write` · `full` | **required** |  |
 
 **204**
 
@@ -1725,24 +3200,23 @@ Every schedule, with what it means right now
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:schedule](#schema-ms-schedule)[] | **required** |  |
+
 ### `POST /api/v1/schedules`
 
 Create a schedule
 
 Give either `periods` (`fr:19:00-mo:06:00`, space or comma separated) or `grid` (7 × 24 booleans, Monday first) — never both. `polarity` says which one the periods describe: `active` is when monitoring runs, `inactive` is when it is suspended. It applies to `periods` only: a grid’s marked cells *are* the monitored hours, so a polarity sent beside a grid is ignored.
 
-**Body**
-
-| Field | Type | |
-| --- | --- | --- |
-| `name` | string | **required** |
-| `description` | string |  |
-| `polarity` | `active` · `inactive` |  |
-| `timezone` | string,null |  |
-| `periods` | string |  |
-| `grid` | boolean[][] |  |
+**Body** — [ms:scheduleInput](#schema-ms-scheduleinput)
 
 **201** { id, name, description, polarity, authoredAs, timezone, effectiveTimezone, periods, grid, gridIsExact, builtIn, active, nextChangeAt, usedBy, createdAt, updatedAt }
+
+**201** is [ms:schedule](#schema-ms-schedule)
 
 ### `GET /api/v1/schedules/{id}`
 
@@ -1754,6 +3228,8 @@ One schedule
 
 **200** { id, name, description, polarity, authoredAs, timezone, effectiveTimezone, periods, grid, gridIsExact, builtIn, active, nextChangeAt, usedBy, createdAt, updatedAt }
 
+**200** is [ms:schedule](#schema-ms-schedule)
+
 ### `PUT /api/v1/schedules/{id}`
 
 Replace a schedule
@@ -1764,18 +3240,11 @@ Whole-document: a partial update of a period list is a merge nobody can define. 
 | --- | --- | --- | --- |
 | `id` | path | integer | **required** |
 
-**Body**
-
-| Field | Type | |
-| --- | --- | --- |
-| `name` | string | **required** |
-| `description` | string |  |
-| `polarity` | `active` · `inactive` |  |
-| `timezone` | string,null |  |
-| `periods` | string |  |
-| `grid` | boolean[][] |  |
+**Body** — [ms:scheduleInput](#schema-ms-scheduleinput)
 
 **200** { id, name, description, polarity, authoredAs, timezone, effectiveTimezone, periods, grid, gridIsExact, builtIn, active, nextChangeAt, usedBy, createdAt, updatedAt }
+
+**200** is [ms:schedule](#schema-ms-schedule)
 
 ### `DELETE /api/v1/schedules/{id}`
 
@@ -1789,6 +3258,13 @@ Refused while any object still assigns it — the refusal names them — and ref
 
 **200** { id, deleted }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `deleted` | boolean | **required** |  |
+
 ## sensor-types
 
 ### `GET /api/v1/sensor-types`
@@ -1798,6 +3274,18 @@ List the registered sensor types
 Every type this installation can run, with the JSON Schema its parameters are validated against. An empty list means no sensor can be created.
 
 **200** { items }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].id` | string | **required** |  |
+| `items[].category` | string | **required** |  |
+| `items[].costHint` | `light` · `medium` · `heavy` | **required** |  |
+| `items[].paramsSchema` | object | **required** |  |
+| `items[].hasPreview` | boolean | **required** |  |
+| `items[].listener` | string |  | The probe listener that feeds this type (`snmp-trap`, `syslog`, `flow`), where one does. A sensor of such a type reads nothing on a probe whose listener is off. |
 
 ### `POST /api/v1/sensor-types/{id}/preview`
 
@@ -1811,13 +3299,35 @@ For types whose parameters contain paths into a document — `rest.custom`’s `
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `document` | string | **required** |
-| `contentType` | string |  |
-| `params` | object | **required** |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `document` | string | **required** | The response, pasted verbatim. Bounded well below what the sensor itself will read: this one is walked once per path while somebody types, and a preview is for finding out whether a path is right, not for proving a sensor can survive the whole document. |
+| `contentType` | string | default `` | What the server called it, where that is known. Empty is honest and common — the format is then guessed from the document exactly as the sensor guesses it. |
+| `params` | object | **required** | The parameters as the form currently holds them. **Not validated first**: the form asking for this has a half-finished parameter set in it by definition, and a preview that refused until everything was valid would be unavailable exactly when it is needed. |
 
 **200** { format, error, rows, expectations, problems }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `format` | string | **required** | How the document was read — `auto` resolved. |
+| `error` | string |  | Set when the document itself did not parse. |
+| `rows` | object[] | **required** |  |
+| `rows[].key` | string | **required** |  |
+| `rows[].path` | string | **required** |  |
+| `rows[].error` | string |  |  |
+| `rows[].selected` | object[] | **required** |  |
+| `rows[].selected[].text` | string | **required** |  |
+| `rows[].selected[].numeric` | boolean | **required** |  |
+| `rows[].selectedCount` | integer | **required** |  |
+| `rows[].value` | number | **required** nullable |  |
+| `expectations` | object[] | **required** |  |
+| `expectations[].path` | string | **required** |  |
+| `expectations[].error` | string |  |  |
+| `expectations[].actual` | string | **required** |  |
+| `expectations[].ok` | boolean | **required** |  |
+| `problems` | string[] | **required** |  |
 
 ## sensors
 
@@ -1830,6 +3340,8 @@ Each channel's current reading, for a sensor detail page's channel table. A `nul
 | `id` | path | integer | **required** |
 
 **200** { sensorId, readAt, notBefore, intervalSeconds, channels }
+
+**200** is [ms:sensorValues](#schema-ms-sensorvalues)
 
 ### `GET /api/v1/sensors/{id}/history`
 
@@ -1844,6 +3356,8 @@ Historic channel data for a sensor. The resolution is snapped up to a supported 
 
 **200** { sensorId, from, to, resolutionSeconds, bucketCount, source, segments, adjustments, buckets, channels }
 
+**200** is [ms:sensorHistory](#schema-ms-sensorhistory)
+
 ### `POST /api/v1/sensors/{id}/check`
 
 Run this sensor’s check now and return what it said
@@ -1856,11 +3370,13 @@ Asks the probe that owns the sensor to run **exactly** the check a scheduled sca
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `timeoutMs` | integer |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `timeoutMs` | integer |  | How long to wait. Bounded well below the sensor’s own timeout allowance because a person is waiting: a check that may run for an hour is not something to hold an HTTP request open for. The probe is told the same number and abandons the work when it expires. |
 
 **200** { sensorId, at, outcome, message, durationMs, channels, stored }
+
+**200** is [ms:checkResult](#schema-ms-checkresult)
 
 ### `GET /api/v1/sensors/{id}/state`
 
@@ -1872,11 +3388,23 @@ A sensor’s current state, why it is in it, and since when. `pausedBy` lists ev
 
 **200** { sensorId, state, cause, message, since, lastResultAt, consecutiveFailures, pausedBy, acknowledged, acknowledgedUntil, acknowledgedBy, simulatedError }
 
+**200** is [ms:sensorState](#schema-ms-sensorstate)
+
 ## settings
 
 ### `GET /api/v1/setting-definitions`
 
 **200** { items }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | object[] | **required** |  |
+| `items[].key` | string | **required** |  |
+| `items[].schema` | object | **required** |  |
+| `items[].default` | any | **required** |  |
+| `items[].description` | string | **required** |  |
 
 ### `GET /api/v1/objects/{id}/settings`
 
@@ -1889,6 +3417,14 @@ Effective and own values together. ?asChildOf=<parentId> projects what the objec
 
 **200** { objectId, asChildOf, settings }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `objectId` | integer | **required** |  |
+| `asChildOf` | integer | **required** nullable |  |
+| `settings` | [ms:settingView](#schema-ms-settingview)[] | **required** |  |
+
 ### `PUT /api/v1/objects/{id}/settings/{key}`
 
 | Parameter | In | Type | |
@@ -1898,11 +3434,13 @@ Effective and own values together. ?asChildOf=<parentId> projects what the objec
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `value` | object | **required** |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `value` | any | **required** |  |
 
 **200** { key, description, schema, effective, inherited, own }
+
+**200** is [ms:settingView](#schema-ms-settingview)
 
 ### `DELETE /api/v1/objects/{id}/settings/{key}`
 
@@ -1912,6 +3450,17 @@ Effective and own values together. ?asChildOf=<parentId> projects what the objec
 | `key` | path | string | **required** |
 
 **200** { key, reverted, effective, own }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `key` | string | **required** |  |
+| `reverted` | boolean | **required** |  |
+| `effective` | object | **required** |  |
+| `effective.value` | any | **required** |  |
+| `effective.source` | [ms:settingSource](#schema-ms-settingsource) | **required** |  |
+| `own` | null | **required** |  |
 
 ## state
 
@@ -1925,6 +3474,8 @@ Whether this object is paused, why, until when, and whether this is the one that
 
 **200** { objectId, paused, pending, resumable, source, pausedAt, startsAt, pausedUntil, message, actor, inheritedFrom, schedule, dependency }
 
+**200** is [ms:pauseView](#schema-ms-pauseview)
+
 ### `POST /api/v1/objects/{id}/pause`
 
 Pauses an object and every sensor beneath it. Give `minutes` for a duration, `until` for a moment, or neither to pause indefinitely — until a person says otherwise. A UI offers 5, 15, 60, 180, 1440 minutes as presets, but any duration is accepted. Takes effect immediately: the sensors change state in this request, and their probe stops being told to scan them. Pausing an already-paused object replaces the reason and the deadline rather than stacking, which is what extending a maintenance window means. Give `from` with `until` for a **maintenance window** — the same pause, scheduled rather than immediate. Nothing is paused until it starts; the object reads `pending` until then and can be cancelled at any point by resuming it.
@@ -1935,14 +3486,19 @@ Pauses an object and every sensor beneath it. Give `minutes` for a duration, `un
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `minutes` | integer |  |
-| `until` | string |  |
-| `from` | string |  |
-| `message` | string |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `minutes` | integer |  |  |
+| `until` | string |  |  |
+| `from` | string |  |  |
+| `message` | string |  |  |
+
+- `minutes` and `until` are not allowed together
+- `minutes` and `from` are not allowed together
 
 **200** { objectId, paused, pending, resumable, source, pausedAt, startsAt, pausedUntil, message, actor, inheritedFrom, schedule, dependency }
+
+**200** is [ms:pauseView](#schema-ms-pauseview)
 
 ### `DELETE /api/v1/objects/{id}/pause`
 
@@ -1954,6 +3510,8 @@ Resumes an object, or cancels a maintenance window it has not reached yet. Only 
 
 **200** { objectId, paused, pending, resumable, source, pausedAt, startsAt, pausedUntil, message, actor, inheritedFrom, schedule, dependency }
 
+**200** is [ms:pauseView](#schema-ms-pauseview)
+
 ### `POST /api/v1/objects/{id}/acknowledge`
 
 Acknowledges a Down alarm: the sensor reads Down (Acknowledged), notifications stop, and monitoring carries on exactly as before. Give `minutes` for a duration, `until` for a moment, or neither to acknowledge indefinitely. A UI offers 5, 15, 60, 180, 1440 minutes as presets. On a device or a group this acknowledges every sensor beneath it that is Down **at this moment** — a snapshot, not a rule, so a sensor that fails later is a new alarm — and that the caller could acknowledge by naming it; the rest are listed in `skipped`. The message becomes the sensor’s last message. It clears on recovery, on expiry, on pause-then-resume, or by DELETE.
@@ -1964,13 +3522,17 @@ Acknowledges a Down alarm: the sensor reads Down (Acknowledged), notifications s
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `minutes` | integer |  |
-| `until` | string |  |
-| `message` | string |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `minutes` | integer |  |  |
+| `until` | string |  |  |
+| `message` | string |  |  |
+
+- `minutes` and `until` are not allowed together
 
 **200** { objectId, acknowledged, refused, skipped, acknowledgedAt, acknowledgedUntil, message }
+
+**200** is [ms:acknowledgementView](#schema-ms-acknowledgementview)
 
 ### `DELETE /api/v1/objects/{id}/acknowledge`
 
@@ -1982,6 +3544,8 @@ Withdraws an acknowledgement, so the alarm reads Down again and notifications re
 
 **200** { objectId, acknowledged, refused, skipped, acknowledgedAt, acknowledgedUntil, message }
 
+**200** is [ms:acknowledgementView](#schema-ms-acknowledgementview)
+
 ### `POST /api/v1/objects/{id}/simulate-error`
 
 Forces sensors Down so a notification chain can be tested end to end. **This fires the real chain at real people** — which is the point, since a chain nobody has seen fire is a chain nobody knows works. The sensor reads Down with cause `simulated`, never `scan`, so a forced outage cannot be mistaken for a real one; the message becomes its last message; the action is audited. On a device or a group this forces **every** sensor beneath it, whatever state it was in, that the caller may write; the rest are listed in `skipped`. Pausing still wins, so a sensor somebody switched off will not start paging anyone.
@@ -1992,11 +3556,13 @@ Forces sensors Down so a notification chain can be tested end to end. **This fir
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `message` | string |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `message` | string |  |  |
 
 **200** { objectId, simulated, sensors, skipped, message }
+
+**200** is [ms:simulatedErrorView](#schema-ms-simulatederrorview)
 
 ### `DELETE /api/v1/objects/{id}/simulate-error`
 
@@ -2007,6 +3573,8 @@ Lifts a simulated error. The sensors return to what they actually measure straig
 | `id` | path | integer | **required** |
 
 **200** { objectId, simulated, sensors, skipped, message }
+
+**200** is [ms:simulatedErrorView](#schema-ms-simulatederrorview)
 
 ### `GET /api/v1/state-log`
 
@@ -2019,12 +3587,14 @@ What changed, when, from what, why, and how long it lasted. Scope to a branch wi
 | `objectId` | query | integer |  |
 | `from` | query | string |  |
 | `to` | query | string |  |
-| `state` | query | object |  |
-| `cause` | query | object |  |
+| `state` | query | `unknown` · `up` · `warning` · `down` · `down_acknowledged` · `down_partial` · `unusual` · `paused`, or an array of them |  |
+| `cause` | query | `scan` · `limit` · `lookup` · `user` · `schedule` · `dependency` · `parent` · `probe` · `access` · `simulated`, or an array of them |  |
 | `before` | query | string |  |
-| `limit` | query | integer |  |
+| `limit` | query | integer | default `100` |
 
 **200** { items, nextBefore }
+
+**200** is [ms:stateLogPage](#schema-ms-statelogpage)
 
 ### `GET /api/v1/alarms`
 
@@ -2035,13 +3605,15 @@ Down, Down (Partial), Down (Acknowledged), Warning and Unusual — the five stat
 | Parameter | In | Type | |
 | --- | --- | --- | --- |
 | `objectId` | query | integer |  |
-| `state` | query | object |  |
+| `state` | query | `down` · `down_partial` · `down_acknowledged` · `warning` · `unusual` · `recovering`, or an array of them |  |
 | `priorityMin` | query | integer |  |
-| `includeAcknowledged` | query | boolean |  |
-| `sort` | query | `priority` · `duration` |  |
-| `limit` | query | integer |  |
+| `includeAcknowledged` | query | boolean | default `true` |
+| `sort` | query | `priority` · `duration` | default `priority` |
+| `limit` | query | integer | default `100` |
 
 **200** { items, total, counts, now }
+
+**200** is [ms:alarmPage](#schema-ms-alarmpage)
 
 ## stream
 
@@ -2061,6 +3633,12 @@ Each carries the JSON Schema its settings are validated against, which is also w
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:notificationMethod](#schema-ms-notificationmethod)[] | **required** |  |
+
 ### `GET /api/v1/summarisation-modes`
 
 How eagerly a template may send during a storm
@@ -2068,6 +3646,13 @@ How eagerly a template may send during a storm
 The six modes of `CAPABILITIES.MD §5.2`. The distinction that matters is between the *first* modes and the *all* modes: "first Down immediately" turns a forty-sensor outage into one message and a digest, while "all Downs immediately" sends forty. A method whose `summarisable` is false ignores all of this and is stored as `always-immediate`.
 
 **200** { items, default }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:summarisationMode](#schema-ms-summarisationmode)[] | **required** |  |
+| `default` | string | **required** |  |
 
 ### `GET /api/v1/notification-placeholders`
 
@@ -2077,11 +3662,23 @@ Case-insensitive: `%Sensor` and `%SENSOR` are `%sensor`. A name this build does 
 
 **200** { items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:placeholder](#schema-ms-placeholder)[] | **required** |  |
+
 ### `GET /api/v1/templates`
 
 Every notification template
 
 **200** { items }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:template](#schema-ms-template)[] | **required** |  |
 
 ### `POST /api/v1/templates`
 
@@ -2089,25 +3686,11 @@ Create a template
 
 Only an administrator may name an account or a group as a recipient (`M-20`); anybody else gets 403 `AUTH_FORBIDDEN` for one, and may name addresses (`A-44`).
 
-**Body**
-
-| Field | Type | |
-| --- | --- | --- |
-| `name` | string | **required** |
-| `description` | string |  |
-| `method` | string | **required** |
-| `settings` | object | **required** |
-| `subject` | string |  |
-| `body` | string |  |
-| `recipients` | object[] |  |
-| `priority` | integer |  |
-| `enabled` | boolean |  |
-| `summarisation` | `always-immediate` · `first-down` · `first-down-and-up` · `downs-immediate` · `downs-and-ups-immediate` · `always-summarise` |  |
-| `summaryWindowSeconds` | integer |  |
-| `scheduleId` | integer,null |  |
-| `whenInactive` | `queue` · `discard` |  |
+**Body** — [ms:templateInput](#schema-ms-templateinput)
 
 **201** { id, name, description, method, methodName, settings, redactedSettings, subject, body, recipients, priority, enabled, summary, summarisable, summarisation, summaryWindowSeconds, scheduleId, scheduleName, whenInactive, createdAt, updatedAt }
+
+**201** is [ms:template](#schema-ms-template)
 
 ### `GET /api/v1/templates/{id}`
 
@@ -2119,6 +3702,8 @@ One template
 
 **200** { id, name, description, method, methodName, settings, redactedSettings, subject, body, recipients, priority, enabled, summary, summarisable, summarisation, summaryWindowSeconds, scheduleId, scheduleName, whenInactive, createdAt, updatedAt }
 
+**200** is [ms:template](#schema-ms-template)
+
 ### `PUT /api/v1/templates/{id}`
 
 Replace a template
@@ -2129,25 +3714,11 @@ Whole-document, with one exception: a secret the request does not carry is **kep
 | --- | --- | --- | --- |
 | `id` | path | integer | **required** |
 
-**Body**
-
-| Field | Type | |
-| --- | --- | --- |
-| `name` | string | **required** |
-| `description` | string |  |
-| `method` | string | **required** |
-| `settings` | object | **required** |
-| `subject` | string |  |
-| `body` | string |  |
-| `recipients` | object[] |  |
-| `priority` | integer |  |
-| `enabled` | boolean |  |
-| `summarisation` | `always-immediate` · `first-down` · `first-down-and-up` · `downs-immediate` · `downs-and-ups-immediate` · `always-summarise` |  |
-| `summaryWindowSeconds` | integer |  |
-| `scheduleId` | integer,null |  |
-| `whenInactive` | `queue` · `discard` |  |
+**Body** — [ms:templateInput](#schema-ms-templateinput)
 
 **200** { id, name, description, method, methodName, settings, redactedSettings, subject, body, recipients, priority, enabled, summary, summarisable, summarisation, summaryWindowSeconds, scheduleId, scheduleName, whenInactive, createdAt, updatedAt }
+
+**200** is [ms:template](#schema-ms-template)
 
 ### `DELETE /api/v1/templates/{id}`
 
@@ -2161,6 +3732,13 @@ Refused while a trigger still names it, with the list of triggers to fix: deleti
 
 **200** { id, deleted }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `deleted` | boolean | **required** |  |
+
 ### `GET /api/v1/templates/{id}/used-by`
 
 Which triggers name this template
@@ -2172,6 +3750,8 @@ Which triggers name this template
 | `id` | path | integer | **required** |
 
 **200** { templateId, items }
+
+**200** is [ms:templateUsedBy](#schema-ms-templateusedby)
 
 ### `GET /api/v1/templates/{id}/preview`
 
@@ -2186,6 +3766,8 @@ Rendered against the sensor’s actual state, not an invented one. An operator w
 
 **200** { templateId, sensorId, subject, body, unknown }
 
+**200** is [ms:templatePreview](#schema-ms-templatepreview)
+
 ### `POST /api/v1/templates/preview`
 
 What an unsaved draft would say about one sensor
@@ -2194,12 +3776,14 @@ The same rendering as the saved preview, against a template that does not exist 
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `template` | object | **required** |
-| `sensorId` | integer | **required** |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `template` | [ms:templateInput](#schema-ms-templateinput) | **required** |  |
+| `sensorId` | integer | **required** |  |
 
 **200** { templateId, sensorId, subject, body, unknown }
+
+**200** is [ms:templatePreview](#schema-ms-templatepreview)
 
 ### `POST /api/v1/templates/{id}/test`
 
@@ -2213,11 +3797,13 @@ Send a test notification through this template
 
 **Body**
 
-| Field | Type | |
-| --- | --- | --- |
-| `sensorId` | integer |  |
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `sensorId` | integer |  |  |
 
 **200** { templateId, templateName, method, methodName, sensorId, sensorName, subject, body, recipients, unknownPlaceholders, delivered, detail, error, retryable, durationMs, notes }
+
+**200** is [ms:templateTestResult](#schema-ms-templatetestresult)
 
 ## triggers
 
@@ -2228,6 +3814,12 @@ The kinds of trigger this build understands
 Each carries the JSON Schema its settings are validated against, which is also what a UI builds the form from — one declaration rather than a form and a validator that can disagree.
 
 **200** { items }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:triggerKind](#schema-ms-triggerkind)[] | **required** |  |
 
 ### `GET /api/v1/objects/{id}/triggers`
 
@@ -2241,6 +3833,13 @@ Own and inherited together, nearest first, each naming the object it is defined 
 
 **200** { objectId, items }
 
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `objectId` | integer | **required** |  |
+| `items` | [ms:trigger](#schema-ms-trigger)[] | **required** |  |
+
 ### `POST /api/v1/objects/{id}/triggers`
 
 Add a trigger to an object
@@ -2251,15 +3850,11 @@ The settings are validated against the kind’s own schema, with its defaults fi
 | --- | --- | --- | --- |
 | `id` | path | integer | **required** |
 
-**Body**
-
-| Field | Type | |
-| --- | --- | --- |
-| `kind` | string | **required** |
-| `settings` | object | **required** |
-| `enabled` | boolean |  |
+**Body** — [ms:triggerInput](#schema-ms-triggerinput)
 
 **201** { id, kind, kindName, settings, enabled, summary, inherited, definedOn, createdAt, updatedAt }
+
+**201** is [ms:trigger](#schema-ms-trigger)
 
 ### `PUT /api/v1/triggers/{id}`
 
@@ -2271,15 +3866,11 @@ Whole-document: a latency without the notification it delays is not half a trigg
 | --- | --- | --- | --- |
 | `id` | path | integer | **required** |
 
-**Body**
-
-| Field | Type | |
-| --- | --- | --- |
-| `kind` | string | **required** |
-| `settings` | object | **required** |
-| `enabled` | boolean |  |
+**Body** — [ms:triggerInput](#schema-ms-triggerinput)
 
 **200** { id, kind, kindName, settings, enabled, summary, inherited, definedOn, createdAt, updatedAt }
+
+**200** is [ms:trigger](#schema-ms-trigger)
 
 ### `DELETE /api/v1/triggers/{id}`
 
@@ -2292,3 +3883,1047 @@ From the object it is defined on. Deleting an inherited trigger means deleting i
 | `id` | path | integer | **required** |
 
 **200** { id, deleted }
+
+**200 response**
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `deleted` | boolean | **required** |  |
+
+---
+
+## Schemas
+
+The shapes routes share, each declared once in the code and rendered once here.
+
+<a id="schema-ms-acknowledgementview"></a>
+
+### `ms:acknowledgementView`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `objectId` | integer | **required** |  |
+| `acknowledged` | integer[] | **required** |  |
+| `refused` | integer[] | **required** |  |
+| `skipped` | integer[] | **required** |  |
+| `acknowledgedAt` | string | **required** nullable |  |
+| `acknowledgedUntil` | string | **required** nullable |  |
+| `message` | string | **required** |  |
+
+<a id="schema-ms-alarm"></a>
+
+### `ms:alarm`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `sensorId` | integer | **required** |  |
+| `sensorName` | string | **required** |  |
+| `state` | string | **required** |  |
+| `cause` | string | **required** |  |
+| `message` | string | **required** |  |
+| `since` | string | **required** |  |
+| `priority` | integer | **required** |  |
+| `path` | integer[] | **required** |  |
+| `pathNames` | string[] | **required** |  |
+| `acknowledged` | boolean | **required** |  |
+| `acknowledgedUntil` | string | **required** nullable |  |
+| `consecutiveFailures` | integer | **required** |  |
+| `recovering` | object | **required** nullable | The return its alarm is holding (`M-18`), or null. `confirmsAt` is when the alarm is over if the sensor does not fail again. |
+| `recovering.since` | string | **required** |  |
+| `recovering.confirmsAt` | string | **required** nullable |  |
+
+<a id="schema-ms-alarmpage"></a>
+
+### `ms:alarmPage`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:alarm](#schema-ms-alarm)[] | **required** |  |
+| `total` | integer | **required** |  |
+| `counts` | map of integer | **required** |  |
+| `counts.*` | integer |  |  |
+| `now` | string | **required** | The core's clock when the list was read. A held return's end is not a state change, so a client that wants to see it go asks again at `confirmsAt`, measured from this. |
+
+<a id="schema-ms-auditactor"></a>
+
+### `ms:auditActor`
+
+one of 4 shapes, by `kind`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `{kind=user}` | object |  |  |
+| `{kind=user}.kind` | `user` | **required** |  |
+| `{kind=user}.userId` | integer | **required** |  |
+| `{kind=user}.login` | string | **required** |  |
+| `{kind=token}` | object |  |  |
+| `{kind=token}.kind` | `token` | **required** |  |
+| `{kind=token}.tokenId` | integer | **required** |  |
+| `{kind=system}` | object |  |  |
+| `{kind=system}.kind` | `system` | **required** |  |
+| `{kind=system}.component` | string | **required** |  |
+| `{kind=anonymous}` | object |  |  |
+| `{kind=anonymous}.kind` | `anonymous` | **required** |  |
+| `{kind=anonymous}.remoteAddress` | string | **required** |  |
+
+<a id="schema-ms-auditentry"></a>
+
+### `ms:auditEntry`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | string | **required** |  |
+| `at` | string | **required** |  |
+| `action` | string | **required** |  |
+| `objectId` | integer | **required** nullable |  |
+| `objectKind` | string | **required** nullable |  |
+| `actor` | [ms:auditActor](#schema-ms-auditactor) | **required** |  |
+| `summary` | object | **required** |  |
+| `diff` | object[] | **required** |  |
+| `diff[].field` | string | **required** |  |
+| `diff[].before` | any | **required** |  |
+| `diff[].after` | any | **required** |  |
+
+<a id="schema-ms-auditpage"></a>
+
+### `ms:auditPage`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:auditEntry](#schema-ms-auditentry)[] | **required** |  |
+| `nextBefore` | string | **required** nullable |  |
+
+<a id="schema-ms-channellimits"></a>
+
+### `ms:channelLimits`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `enabled` | boolean | **required** |  |
+| `upperError` | number | **required** nullable |  |
+| `upperWarning` | number | **required** nullable |  |
+| `lowerWarning` | number | **required** nullable |  |
+| `lowerError` | number | **required** nullable |  |
+| `errorMessage` | string | **required** |  |
+| `warningMessage` | string | **required** |  |
+
+<a id="schema-ms-channelrecord"></a>
+
+### `ms:channelRecord`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `sensorId` | integer | **required** |  |
+| `key` | string | **required** |  |
+| `name` | string | **required** |  |
+| `unit` | string | **required** |  |
+| `isPrimary` | boolean | **required** |  |
+| `scaleMul` | string | **required** |  |
+| `scaleDiv` | string | **required** |  |
+| `decimals` | integer | **required** nullable |  |
+| `limits` | [ms:channelLimits](#schema-ms-channellimits) | **required** |  |
+| `spikeMin` | number | **required** nullable |  |
+| `spikeMax` | number | **required** nullable |  |
+| `showInGraph` | boolean | **required** |  |
+| `showInTable` | boolean | **required** |  |
+| `lookupId` | string | **required** nullable |  |
+| `retired` | boolean | **required** | Nothing will read this channel again: the sensor’s type declares every channel it reports, and the sensor’s parameters no longer declare this one (an edit took it out). Its history is kept, and putting it back makes it live again. Worked out from the type on every read. `false` also where the type cannot say: one whose readings can name channels it does not declare, such as a script’s. |
+
+<a id="schema-ms-channelvalue"></a>
+
+### `ms:channelValue`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `key` | string | **required** |  |
+| `name` | string | **required** |  |
+| `unit` | string | **required** |  |
+| `decimals` | integer | **required** nullable |  |
+| `value` | number | **required** nullable |  |
+| `at` | string | **required** nullable |  |
+
+<a id="schema-ms-checkchannel"></a>
+
+### `ms:checkChannel`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `key` | string | **required** |  |
+| `value` | number | **required** |  |
+| `name` | string |  |  |
+| `unit` | string |  |  |
+| `counter` | string |  |  |
+| `counterBits` | integer |  |  |
+
+<a id="schema-ms-checkresult"></a>
+
+### `ms:checkResult`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `sensorId` | integer | **required** |  |
+| `at` | string | **required** |  |
+| `outcome` | `ok` · `error` | **required** |  |
+| `message` | string | **required** |  |
+| `durationMs` | number | **required** |  |
+| `channels` | [ms:checkChannel](#schema-ms-checkchannel)[] | **required** |  |
+| `stored` | boolean | **required** |  |
+
+<a id="schema-ms-cloneresult"></a>
+
+### `ms:cloneResult`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `object` | [ms:objectDetail](#schema-ms-objectdetail) | **required** |  |
+| `grantsNotCarried` | integer | **required** | How many positive grants on what was copied the copy did not carry, because only a caller who may grant (the admin role with full scope) carries them (`A-76`). Anybody else’s copy carries each `none`, and each `read` that narrows what its group holds where the copy landed, and no other group’s `write` or `full`. This counts the `write` and `full` grants left behind. A `read` left behind because it would widen where the copy landed is not counted, since whether it would depends on grants there the caller may not read. Every grant left behind is in the copy’s history as `grant.notCarried`. Always 0 for a caller who may grant, whose copy carries every grant. |
+| `clonedCount` | object | **required** |  |
+| `clonedCount.group` | integer | **required** |  |
+| `clonedCount.device` | integer | **required** |  |
+| `clonedCount.sensor` | integer | **required** |  |
+| `clonedCount.channel` | integer | **required** |  |
+| `clonedCount.setting` | integer | **required** |  |
+| `clonedCount.trigger` | integer | **required** | Notification triggers copied with the objects that own them (`P-141`). The clone already carried the trigger *fence* and none of the triggers behind it, so a cloned object with the fence up notified nobody and looked identical to one that did. |
+| `clonedCount.total` | integer | **required** |  |
+| `droppedCredentialKinds` | (`snmp` · `windows` · `ssh` · `vmware` · `database` · `http`)[] | **required** |  |
+| `settingsChanged` | object[] | **required** |  |
+| `settingsChanged[].key` | string | **required** |  |
+| `settingsChanged[].before` | [ms:resolvedSetting](#schema-ms-resolvedsetting) | **required** |  |
+| `settingsChanged[].after` | [ms:resolvedSetting](#schema-ms-resolvedsetting) | **required** |  |
+
+<a id="schema-ms-createobject"></a>
+
+### `ms:createObject`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `kind` | `probe` · `group` · `device` · `sensor` | **required** |  |
+| `parentId` | integer | **required** |  |
+| `name` | string | **required** |  |
+| `tags` | string[] |  |  |
+| `priority` | integer |  |  |
+| `comments` | string |  |  |
+| `host` | string |  |  |
+| `ipVersion` | `auto` · `v4` · `v6` |  |  |
+| `sensorType` | string |  |  |
+| `params` | object |  |  |
+| `gid` | string | nullable | Binds this probe branch to a connected probe. R-01 replaces setting it by hand with an enrolment flow; until then it is how a probe is told which subtree it owns. |
+
+- when `kind` is `device`, `host` is required
+- when `kind` is `sensor`, `sensorType` is required
+- when `kind` is `probe` or `group`, neither `host` nor `sensorType` is allowed
+- when `kind` is `group` or `device` or `sensor`, `gid` is not allowed
+- when `kind` is `device`, `sensorType` is not allowed
+- when `kind` is `sensor`, `host` is not allowed
+
+<a id="schema-ms-createtree"></a>
+
+### `ms:createTree`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `parentId` | integer | **required** |  |
+| `nodes` | [ms:treeNode](#schema-ms-treenode)[] | **required** |  |
+
+<a id="schema-ms-createtreeresult"></a>
+
+### `ms:createTreeResult`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `count` | integer | **required** |  |
+| `objects` | object[] | **required** |  |
+| `objects[].ref` | string |  |  |
+| `objects[].id` | integer | **required** |  |
+| `objects[].kind` | `root` · `probe` · `group` · `device` · `sensor` | **required** |  |
+
+<a id="schema-ms-credentialview"></a>
+
+### `ms:credentialView`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `kind` | `snmp` · `windows` · `ssh` · `vmware` · `database` · `http` | **required** |  |
+| `publicParams` | object | **required** |  |
+| `source` | [ms:settingSource](#schema-ms-settingsource) | **required** |  |
+| `updatedAt` | string | **required** |  |
+| `bounded` | boolean | **required** | Whether `allowedTargets`, or an SSH set's `hostKeys` with strict checking, bound where the set goes (`A-41b`). False means `write` on the object it is stored on is trust with it. |
+| `secretsSet` | string[] |  | The names of the secret fields that hold a value, never the values (`U-21`). Only on a set stored on the object asked about, for its form to offer keep, replace and clear. |
+
+<a id="schema-ms-credentialwrite"></a>
+
+### `ms:credentialWrite`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `kind` | `snmp` · `windows` · `ssh` · `vmware` · `database` · `http` | **required** |  |
+| `publicParams` | object | **required** |  |
+| `source` | [ms:settingSource](#schema-ms-settingsource) | **required** |  |
+| `updatedAt` | string | **required** |  |
+| `bounded` | boolean | **required** | Whether `allowedTargets`, or an SSH set's `hostKeys` with strict checking, bound where the set goes (`A-41b`). False means `write` on the object it is stored on is trust with it. |
+| `secretsSet` | string[] |  | The names of the secret fields that hold a value, never the values (`U-21`). Only on a set stored on the object asked about, for its form to offer keep, replace and clear. |
+| `withholds` | integer | **required** | How many sensors beneath this set its allowed targets keep it from now, of those the caller can see: a sensor whose device's address is outside them, or whose device is entered by name where the targets are addresses and the sensor’s type cannot be held to an address its probe checked. They are not sent the set and read Unknown. Zero for a set with no targets. |
+| `withheldBefore` | integer | **required** | Of the sensors this set reaches now and the caller can see, how many a set’s targets kept it from before this write (`A-55`): this set’s as it was, or an ancestor’s where this write stores the first set of the kind here. `withholds` is this, plus `newlyWithheld`, less `noLongerWithheld`. |
+| `newlyWithheld` | integer | **required** | How many sensors this write puts outside (`A-55`): kept from the set after it and not before, of those the caller can see. What a narrowing takes to Unknown. |
+| `noLongerWithheld` | integer | **required** | How many sensors this write brings back inside (`A-55`): kept from a set before it and sent this one after, of those the caller can see. |
+| `byReason` | object | **required** | The four counts above for each of the two reasons a sensor is outside (`A-59`), over the same sensors the caller can see, so each count above is the sum of its two parts. A sensor outside after the write is counted for the reason that holds after it, and one outside before for the reason that held then, so a sensor that stays outside for another reason moves between the two without being newly outside. |
+| `byReason.outside` | object | **required** | Sensors on a device whose address, or whose name, the allowed targets do not cover. |
+| `byReason.outside.withholds` | integer | **required** |  |
+| `byReason.outside.withheldBefore` | integer | **required** |  |
+| `byReason.outside.newlyWithheld` | integer | **required** |  |
+| `byReason.outside.noLongerWithheld` | integer | **required** |  |
+| `byReason.unpinnable` | object | **required** | Sensors on a device entered by name, where the targets that could cover it are addresses and the sensor’s type cannot be held to an address its probe checked: the set is not sent whatever the name resolves to. |
+| `byReason.unpinnable.withholds` | integer | **required** |  |
+| `byReason.unpinnable.withheldBefore` | integer | **required** |  |
+| `byReason.unpinnable.newlyWithheld` | integer | **required** |  |
+| `byReason.unpinnable.noLongerWithheld` | integer | **required** |  |
+| `secretsCleared` | string[] | **required** | The secrets this write cleared because it widened where the set may go and did not send them again. |
+
+<a id="schema-ms-deliveryhealth"></a>
+
+### `ms:deliveryHealth`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `status` | `ok` · `warning` · `down` | **required** |  |
+| `problems` | string[] | **required** |  |
+| `pending` | integer | **required** |  |
+| `parked` | integer | **required** |  |
+| `retrying` | integer | **required** |  |
+| `failed` | integer | **required** |  |
+| `discarded` | integer | **required** |  |
+| `oldestPendingAt` | string | **required** nullable |  |
+| `oldestPendingAgeMs` | integer | **required** |  |
+| `lastDeliveredAt` | string | **required** nullable |  |
+| `windowMs` | integer | **required** |  |
+| `staleAfterMs` | integer | **required** |  |
+| `methods` | [ms:deliveryMethodHealth](#schema-ms-deliverymethodhealth)[] | **required** |  |
+
+<a id="schema-ms-deliverymethodhealth"></a>
+
+### `ms:deliveryMethodHealth`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `method` | string | **required** |  |
+| `pending` | integer | **required** |  |
+| `parked` | integer | **required** |  |
+| `retrying` | integer | **required** |  |
+| `failed` | integer | **required** |  |
+| `discarded` | integer | **required** |  |
+| `oldestPendingAt` | string | **required** nullable |  |
+| `lastDeliveredAt` | string | **required** nullable |  |
+| `lastError` | string | **required** nullable |  |
+
+<a id="schema-ms-discoveryrun"></a>
+
+### `ms:discoveryRun`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `groupId` | integer | **required** |  |
+| `probeId` | integer | **required** |  |
+| `range` | string | **required** |  |
+| `total` | integer | **required** |  |
+| `cursor` | integer | **required** |  |
+| `found` | integer | **required** |  |
+| `failed` | integer | **required** |  |
+| `status` | `queued` · `running` · `identifying` · `done` · `cancelled` · `failed` | **required** |  |
+| `level` | `ping` · `standard` · `detailed` |  |  |
+| `templates` | string[] |  |  |
+| `identified` | integer |  |  |
+| `scheduleId` | integer | nullable |  |
+| `devicesCreated` | integer |  |  |
+| `devicesMatched` | integer |  |  |
+| `sensorsCreated` | integer |  |  |
+| `provisionedAt` | string | nullable |  |
+| `message` | string |  |  |
+| `timeoutMs` | integer |  |  |
+| `concurrency` | integer |  |  |
+| `ratePerSecond` | number |  |  |
+| `createdAt` | string |  |  |
+| `startedAt` | string | nullable |  |
+| `finishedAt` | string | nullable |  |
+
+<a id="schema-ms-error"></a>
+
+### `ms:error`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `error` | object | **required** |  |
+| `error.code` | string | **required** |  |
+| `error.message` | string | **required** |  |
+| `error.context` | object | **required** |  |
+| `error.details` | object | **required** |  |
+| `error.correlationId` | string |  |  |
+
+<a id="schema-ms-historychannel"></a>
+
+### `ms:historyChannel`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `key` | string | **required** |  |
+| `name` | string | **required** |  |
+| `unit` | string | **required** |  |
+| `decimals` | integer | **required** nullable |  |
+| `avg` | number[] | **required** |  |
+| `min` | number[] | **required** |  |
+| `max` | number[] | **required** |  |
+| `count` | number[] | **required** |  |
+
+<a id="schema-ms-library"></a>
+
+### `ms:library`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `name` | string | **required** |  |
+| `description` | string | **required** |  |
+| `priority` | integer | **required** |  |
+| `nodes` | [ms:libraryNode](#schema-ms-librarynode)[] | **required** |  |
+| `version` | integer | **required** |  |
+| `createdAt` | string (date-time) | **required** |  |
+| `updatedAt` | string (date-time) | **required** |  |
+
+<a id="schema-ms-libraryinput"></a>
+
+### `ms:libraryInput`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `name` | string | **required** |  |
+| `description` | string |  |  |
+| `priority` | integer |  |  |
+| `nodes` | [ms:libraryNode](#schema-ms-librarynode)[] |  |  |
+
+<a id="schema-ms-librarynode"></a>
+
+### `ms:libraryNode`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | string | **required** |  |
+| `name` | string | **required** |  |
+| `rule` | object | nullable |  |
+| `rule.roots` | integer[] |  |  |
+| `rule.types` | string[] |  |  |
+| `rule.tags` | string[] |  |  |
+| `rule.states` | (`unknown` · `up` · `warning` · `down` · `down_acknowledged` · `down_partial` · `unusual` · `paused`)[] |  |  |
+| `children` | [ms:libraryNode](#schema-ms-librarynode)[] |  |  |
+
+<a id="schema-ms-lookupdetail"></a>
+
+### `ms:lookupDetail`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | string | **required** |  |
+| `name` | string | **required** |  |
+| `description` | string | **required** |  |
+| `type` | `singleInt` · `range` | **required** |  |
+| `undefinedState` | `up` · `warning` · `down` | **required** |  |
+| `entries` | object[] | **required** |  |
+| `entries[].value` | number |  |  |
+| `entries[].from` | number |  |  |
+| `entries[].to` | number |  |  |
+| `entries[].state` | `up` · `warning` · `down` | **required** |  |
+| `entries[].text` | string | **required** |  |
+
+<a id="schema-ms-lookupproblem"></a>
+
+### `ms:lookupProblem`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | string | **required** |  |
+| `source` | string | **required** |  |
+| `problems` | string[] | **required** |  |
+
+<a id="schema-ms-lookupsummary"></a>
+
+### `ms:lookupSummary`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | string | **required** |  |
+| `name` | string | **required** |  |
+| `description` | string | **required** |  |
+| `type` | `singleInt` · `range` | **required** |  |
+| `undefinedState` | `up` · `warning` · `down` | **required** |  |
+| `entryCount` | integer | **required** |  |
+| `overridesBuiltIn` | boolean |  |  |
+| `source` | string | **required** |  |
+
+<a id="schema-ms-moveresult"></a>
+
+### `ms:moveResult`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `object` | [ms:objectDetail](#schema-ms-objectdetail) | **required** |  |
+| `fromParentId` | integer | **required** |  |
+| `toParentId` | integer | **required** |  |
+| `movedCount` | integer | **required** |  |
+| `probeChanged` | object | **required** nullable |  |
+| `probeChanged.from` | object | **required** nullable |  |
+| `probeChanged.from.id` | integer | **required** |  |
+| `probeChanged.from.kind` | `root` · `probe` · `group` · `device` · `sensor` | **required** |  |
+| `probeChanged.from.name` | string | **required** nullable |  |
+| `probeChanged.to` | object | **required** nullable |  |
+| `probeChanged.to.id` | integer | **required** |  |
+| `probeChanged.to.kind` | `root` · `probe` · `group` · `device` · `sensor` | **required** |  |
+| `probeChanged.to.name` | string | **required** nullable |  |
+| `settingsChanged` | object[] | **required** |  |
+| `settingsChanged[].key` | string | **required** |  |
+| `settingsChanged[].before` | [ms:resolvedSetting](#schema-ms-resolvedsetting) | **required** |  |
+| `settingsChanged[].after` | [ms:resolvedSetting](#schema-ms-resolvedsetting) | **required** |  |
+| `credentialsChanged` | object[] | **required** |  |
+| `credentialsChanged[].kind` | `snmp` · `windows` · `ssh` · `vmware` · `database` · `http` | **required** |  |
+| `credentialsChanged[].before` | `own` · `inherited` · `none` | **required** |  |
+| `credentialsChanged[].after` | `own` · `inherited` · `none` | **required** |  |
+| `exceptionsCleared` | integer | **required** | Devices whose exception to the target policy the move cleared because it took them to another probe (`A-64`). Only an administrator’s move does; anybody else’s is refused. |
+
+<a id="schema-ms-notificationmethod"></a>
+
+### `ms:notificationMethod`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | string | **required** |  |
+| `name` | string | **required** |  |
+| `description` | string | **required** |  |
+| `settingsSchema` | object | **required** |  |
+| `usesRecipients` | boolean | **required** |  |
+| `summarisable` | boolean | **required** |  |
+
+<a id="schema-ms-notificationrequest"></a>
+
+### `ms:notificationRequest`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `at` | string | **required** |  |
+| `sensorId` | integer | **required** |  |
+| `sensorName` | string | **required** nullable |  |
+| `templateId` | integer | **required** nullable |  |
+| `templateName` | string | **required** nullable |  |
+| `method` | string | **required** nullable |  |
+| `triggerKind` | string | **required** |  |
+| `reason` | string | **required** |  |
+| `state` | string | **required** nullable |  |
+| `message` | string | **required** |  |
+| `status` | string | **required** |  |
+| `disposition` | string | **required** |  |
+| `attempts` | integer | **required** |  |
+| `deliveredAt` | string | **required** nullable |  |
+| `nextAttemptAt` | string | **required** nullable |  |
+| `lastError` | string | **required** nullable |  |
+| `skippedRecipients` | string |  | Who a message named and did not reach, and why — a disabled account, one with no address, one that may not see the sensor. Empty when it reached everybody (`M-19`). By name for an administrator; for anybody else, by count and reason only — `2 recipients (1 disabled, 1 may not see this sensor)` — because the names are the account and group lists, which are an administrator’s (`A-44`). |
+
+<a id="schema-ms-objectdetail"></a>
+
+### `ms:objectDetail`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `kind` | `root` · `probe` · `group` · `device` · `sensor` | **required** |  |
+| `parentId` | integer | **required** nullable |  |
+| `name` | string | **required** |  |
+| `tags` | string[] | **required** |  |
+| `priority` | integer | **required** |  |
+| `comments` | string | **required** |  |
+| `inheritsTriggers` | boolean | **required** |  |
+| `version` | integer | **required** |  |
+| `childCount` | integer | **required** |  |
+| `createdAt` | string | **required** |  |
+| `updatedAt` | string | **required** |  |
+| `host` | string |  |  |
+| `ipVersion` | `auto` · `v4` · `v6` |  |  |
+| `targetPolicyException` | string[] |  |  |
+| `gid` | string | nullable |  |
+| `sensorType` | string |  |  |
+| `params` | object |  |  |
+| `redactedParams` | string[] |  |  |
+| `settings` | [ms:settingView](#schema-ms-settingview)[] |  |  |
+| `channels` | [ms:channelRecord](#schema-ms-channelrecord)[] |  |  |
+| `credentials` | [ms:credentialView](#schema-ms-credentialview)[] |  |  |
+| `ancestors` | [ms:objectRef](#schema-ms-objectref)[] |  |  |
+
+<a id="schema-ms-objectref"></a>
+
+### `ms:objectRef`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `kind` | `root` · `probe` · `group` · `device` · `sensor` | **required** |  |
+| `name` | string | **required** |  |
+
+<a id="schema-ms-objectsummary"></a>
+
+### `ms:objectSummary`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `parentId` | integer | **required** nullable |  |
+| `kind` | `root` · `probe` · `group` · `device` · `sensor` | **required** |  |
+| `name` | string | **required** |  |
+| `tags` | string[] | **required** |  |
+| `priority` | integer | **required** |  |
+| `version` | integer | **required** |  |
+| `hasChildren` | boolean | **required** |  |
+| `depth` | integer |  |  |
+| `host` | string |  |  |
+| `sensorType` | string |  |  |
+| `state` | `unknown` · `up` · `warning` · `down` · `down_acknowledged` · `down_partial` · `unusual` · `paused` |  |  |
+| `paused` | boolean |  |  |
+| `effective` | map of [ms:resolvedSetting](#schema-ms-resolvedsetting) |  |  |
+| `effective.*` | [ms:resolvedSetting](#schema-ms-resolvedsetting) |  |  |
+| `path` | [ms:objectRef](#schema-ms-objectref)[] |  | Ancestors, root first, excluding the object. Only when asked for. |
+
+<a id="schema-ms-pauseview"></a>
+
+### `ms:pauseView`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `objectId` | integer | **required** |  |
+| `paused` | boolean | **required** |  |
+| `pending` | boolean | **required** |  |
+| `resumable` | boolean | **required** |  |
+| `source` | `manual` · `parent` · `schedule` · `dependency` | **required** nullable |  |
+| `pausedAt` | string | **required** nullable |  |
+| `startsAt` | string | **required** nullable |  |
+| `pausedUntil` | string | **required** nullable |  |
+| `message` | string | **required** |  |
+| `actor` | object | nullable |  |
+| `actor.kind` | string | **required** |  |
+| `actor.label` | string | **required** nullable |  |
+| `inheritedFrom` | object | **required** nullable |  |
+| `inheritedFrom.objectId` | integer | **required** |  |
+| `inheritedFrom.name` | string | **required** nullable |  |
+| `schedule` | object | **required** nullable |  |
+| `schedule.id` | integer | **required** |  |
+| `schedule.name` | string | **required** |  |
+| `schedule.active` | boolean | **required** |  |
+| `schedule.nextChangeAt` | string | **required** nullable |  |
+| `schedule.definedOn` | integer | **required** |  |
+| `dependency` | object | **required** nullable |  |
+| `dependency.masterId` | integer | **required** |  |
+| `dependency.masterName` | string | **required** nullable |  |
+| `dependency.masterState` | string | **required** nullable |  |
+| `dependency.holding` | boolean | **required** |  |
+| `dependency.releasesAt` | string | **required** nullable |  |
+| `dependency.definedOn` | integer | **required** |  |
+
+<a id="schema-ms-placeholder"></a>
+
+### `ms:placeholder`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `name` | string | **required** |  |
+| `description` | string | **required** |  |
+
+<a id="schema-ms-queryadjustment"></a>
+
+### `ms:queryAdjustment`
+
+one of 2 shapes, by `kind`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `{kind=range-shortened}` | object |  |  |
+| `{kind=range-shortened}.kind` | `range-shortened` | **required** |  |
+| `{kind=range-shortened}.reason` | string | **required** |  |
+| `{kind=range-shortened}.requestedDays` | number | **required** |  |
+| `{kind=range-shortened}.effectiveDays` | number | **required** |  |
+| `{kind=resolution-coarsened}` | object |  |  |
+| `{kind=resolution-coarsened}.kind` | `resolution-coarsened` | **required** |  |
+| `{kind=resolution-coarsened}.reason` | string | **required** |  |
+| `{kind=resolution-coarsened}.requestedSeconds` | integer | **required** |  |
+| `{kind=resolution-coarsened}.effectiveSeconds` | integer | **required** |  |
+
+<a id="schema-ms-resolvedsetting"></a>
+
+### `ms:resolvedSetting`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `key` | string | **required** |  |
+| `value` | any | **required** |  |
+| `source` | [ms:settingSource](#schema-ms-settingsource) | **required** |  |
+
+<a id="schema-ms-schedule"></a>
+
+### `ms:schedule`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `name` | string | **required** |  |
+| `description` | string | **required** |  |
+| `polarity` | `active` · `inactive` | **required** |  |
+| `authoredAs` | `grid` · `periods` | **required** |  |
+| `timezone` | string | **required** nullable |  |
+| `effectiveTimezone` | string | **required** |  |
+| `periods` | string | **required** |  |
+| `grid` | (boolean[])[] | **required** |  |
+| `gridIsExact` | boolean | **required** |  |
+| `builtIn` | boolean | **required** |  |
+| `active` | boolean | **required** |  |
+| `nextChangeAt` | string (date-time) | **required** nullable |  |
+| `usedBy` | integer | **required** |  |
+| `createdAt` | string (date-time) | **required** |  |
+| `updatedAt` | string (date-time) | **required** |  |
+
+<a id="schema-ms-scheduleinput"></a>
+
+### `ms:scheduleInput`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `name` | string | **required** |  |
+| `description` | string |  |  |
+| `polarity` | `active` · `inactive` | default `active` |  |
+| `timezone` | string | nullable |  |
+| `periods` | string |  |  |
+| `grid` | (boolean[])[] |  |  |
+
+<a id="schema-ms-sensorhistory"></a>
+
+### `ms:sensorHistory`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `sensorId` | integer | **required** |  |
+| `from` | string | **required** |  |
+| `to` | string | **required** |  |
+| `resolutionSeconds` | integer | **required** |  |
+| `bucketCount` | integer | **required** |  |
+| `source` | string | **required** |  |
+| `segments` | object[] | **required** |  |
+| `segments[].table` | string | **required** |  |
+| `segments[].from` | string | **required** |  |
+| `segments[].to` | string | **required** |  |
+| `adjustments` | [ms:queryAdjustment](#schema-ms-queryadjustment)[] | **required** |  |
+| `buckets` | string[] | **required** |  |
+| `channels` | [ms:historyChannel](#schema-ms-historychannel)[] | **required** |  |
+
+<a id="schema-ms-sensorstate"></a>
+
+### `ms:sensorState`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `sensorId` | integer | **required** |  |
+| `state` | `unknown` · `up` · `warning` · `down` · `down_acknowledged` · `down_partial` · `unusual` · `paused` | **required** |  |
+| `cause` | `scan` · `limit` · `lookup` · `user` · `schedule` · `dependency` · `parent` · `probe` · `access` · `simulated` | **required** |  |
+| `message` | string | **required** |  |
+| `since` | string | **required** |  |
+| `lastResultAt` | string | **required** nullable |  |
+| `consecutiveFailures` | integer | **required** |  |
+| `pausedBy` | (`parent` · `dependency` · `schedule` · `manual`)[] | **required** |  |
+| `acknowledged` | boolean | **required** |  |
+| `acknowledgedUntil` | string | nullable |  |
+| `acknowledgedBy` | object | **required** nullable |  |
+| `acknowledgedBy.kind` | string | **required** |  |
+| `acknowledgedBy.label` | string | **required** nullable |  |
+| `simulatedError` | boolean | **required** |  |
+
+<a id="schema-ms-sensorvalues"></a>
+
+### `ms:sensorValues`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `sensorId` | integer | **required** |  |
+| `readAt` | string | **required** |  |
+| `notBefore` | string | **required** |  |
+| `intervalSeconds` | integer | **required** |  |
+| `channels` | [ms:channelValue](#schema-ms-channelvalue)[] | **required** |  |
+
+<a id="schema-ms-settingsource"></a>
+
+### `ms:settingSource`
+
+one of 3 shapes, by `kind`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `{kind=own}` | object |  |  |
+| `{kind=own}.kind` | `own` | **required** |  |
+| `{kind=own}.objectId` | integer | **required** |  |
+| `{kind=inherited}` | object |  |  |
+| `{kind=inherited}.kind` | `inherited` | **required** |  |
+| `{kind=inherited}.objectId` | integer | **required** |  |
+| `{kind=inherited}.depth` | integer | **required** |  |
+| `{kind=default}` | object |  |  |
+| `{kind=default}.kind` | `default` | **required** |  |
+
+<a id="schema-ms-settingview"></a>
+
+### `ms:settingView`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `key` | string | **required** |  |
+| `description` | string | **required** |  |
+| `schema` | object | **required** |  |
+| `effective` | object | **required** |  |
+| `effective.value` | any | **required** |  |
+| `effective.source` | [ms:settingSource](#schema-ms-settingsource) | **required** |  |
+| `inherited` | object | **required** |  |
+| `inherited.value` | any | **required** |  |
+| `inherited.source` | [ms:settingSource](#schema-ms-settingsource) | **required** |  |
+| `own` | object | **required** nullable |  |
+| `own.value` | any | **required** |  |
+
+<a id="schema-ms-simulatederrorview"></a>
+
+### `ms:simulatedErrorView`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `objectId` | integer | **required** |  |
+| `simulated` | boolean | **required** |  |
+| `sensors` | integer[] | **required** |  |
+| `skipped` | integer[] | **required** |  |
+| `message` | string | **required** |  |
+
+<a id="schema-ms-statelogentry"></a>
+
+### `ms:stateLogEntry`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `at` | string | **required** |  |
+| `sensorId` | integer | **required** |  |
+| `sensorName` | string | **required** |  |
+| `state` | `unknown` · `up` · `warning` · `down` · `down_acknowledged` · `down_partial` · `unusual` · `paused` | **required** |  |
+| `previousState` | `unknown` · `up` · `warning` · `down` · `down_acknowledged` · `down_partial` · `unusual` · `paused` | **required** nullable |  |
+| `cause` | `scan` · `limit` · `lookup` · `user` · `schedule` · `dependency` · `parent` · `probe` · `access` · `simulated` | **required** |  |
+| `message` | string | **required** |  |
+| `durationMs` | integer | **required** nullable |  |
+| `carried` | boolean | **required** |  |
+
+<a id="schema-ms-statelogpage"></a>
+
+### `ms:stateLogPage`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `items` | [ms:stateLogEntry](#schema-ms-statelogentry)[] | **required** |  |
+| `nextBefore` | string | **required** nullable |  |
+
+<a id="schema-ms-summarisationmode"></a>
+
+### `ms:summarisationMode`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | string | **required** |  |
+| `description` | string | **required** |  |
+
+<a id="schema-ms-template"></a>
+
+### `ms:template`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `name` | string | **required** |  |
+| `description` | string | **required** |  |
+| `method` | string | **required** |  |
+| `methodName` | string | **required** |  |
+| `settings` | object | **required** |  |
+| `redactedSettings` | string[] | **required** |  |
+| `subject` | string | **required** |  |
+| `body` | string | **required** |  |
+| `recipients` | object[] | **required** |  |
+| `recipients[].kind` | `address` · `user` · `userGroup` | **required** |  |
+| `recipients[].value` | string | **required** |  |
+| `priority` | integer | **required** |  |
+| `enabled` | boolean | **required** |  |
+| `summary` | string | **required** |  |
+| `summarisable` | boolean | **required** |  |
+| `summarisation` | `always-immediate` · `first-down` · `first-down-and-up` · `downs-immediate` · `downs-and-ups-immediate` · `always-summarise` | **required** |  |
+| `summaryWindowSeconds` | integer | **required** |  |
+| `scheduleId` | integer | **required** nullable |  |
+| `scheduleName` | string | **required** nullable |  |
+| `whenInactive` | `queue` · `discard` | **required** |  |
+| `createdAt` | string | **required** |  |
+| `updatedAt` | string | **required** |  |
+
+<a id="schema-ms-templateinput"></a>
+
+### `ms:templateInput`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `name` | string | **required** |  |
+| `description` | string |  |  |
+| `method` | string | **required** |  |
+| `settings` | object | **required** |  |
+| `subject` | string |  |  |
+| `body` | string |  |  |
+| `recipients` | object[] |  |  |
+| `recipients[].kind` | `address` · `user` · `userGroup` | **required** |  |
+| `recipients[].value` | string | **required** |  |
+| `priority` | integer |  |  |
+| `enabled` | boolean |  |  |
+| `summarisation` | `always-immediate` · `first-down` · `first-down-and-up` · `downs-immediate` · `downs-and-ups-immediate` · `always-summarise` |  |  |
+| `summaryWindowSeconds` | integer |  |  |
+| `scheduleId` | integer | nullable |  |
+| `whenInactive` | `queue` · `discard` |  |  |
+
+<a id="schema-ms-templatepreview"></a>
+
+### `ms:templatePreview`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `templateId` | integer | **required** nullable |  |
+| `sensorId` | integer | **required** |  |
+| `subject` | string | **required** |  |
+| `body` | string | **required** |  |
+| `unknown` | string[] | **required** |  |
+
+<a id="schema-ms-templatetestresult"></a>
+
+### `ms:templateTestResult`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `templateId` | integer | **required** |  |
+| `templateName` | string | **required** |  |
+| `method` | string | **required** |  |
+| `methodName` | string | **required** |  |
+| `sensorId` | integer | **required** nullable |  |
+| `sensorName` | string | **required** |  |
+| `subject` | string | **required** |  |
+| `body` | string | **required** |  |
+| `recipients` | object[] | **required** |  |
+| `recipients[].kind` | `address` · `user` · `userGroup` | **required** |  |
+| `recipients[].value` | string | **required** |  |
+| `unknownPlaceholders` | string[] | **required** |  |
+| `delivered` | boolean | **required** |  |
+| `detail` | string | **required** nullable |  |
+| `error` | string | **required** nullable |  |
+| `retryable` | boolean | **required** nullable |  |
+| `durationMs` | integer | **required** |  |
+| `notes` | string[] | **required** |  |
+
+<a id="schema-ms-templateusedby"></a>
+
+### `ms:templateUsedBy`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `templateId` | integer | **required** |  |
+| `items` | object[] | **required** |  |
+| `items[].triggerId` | integer | **required** |  |
+| `items[].triggerKind` | string | **required** |  |
+| `items[].objectId` | integer | **required** |  |
+| `items[].objectName` | string | **required** |  |
+| `items[].summary` | string | **required** |  |
+
+<a id="schema-ms-treenode"></a>
+
+### `ms:treeNode`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `kind` | `probe` · `group` · `device` · `sensor` | **required** |  |
+| `ref` | string |  | A handle for this node, unique in the request, so later nodes can hang off it. |
+| `parentRef` | string |  | The `ref` of this node’s parent. Absent means the request’s own `parentId`. |
+| `name` | string | **required** |  |
+| `tags` | string[] |  |  |
+| `priority` | integer |  |  |
+| `comments` | string |  |  |
+| `host` | string |  |  |
+| `ipVersion` | `auto` · `v4` · `v6` |  |  |
+| `sensorType` | string |  |  |
+| `params` | object |  |  |
+| `gid` | string | nullable |  |
+
+- when `kind` is `device`, `host` is required
+- when `kind` is `sensor`, `sensorType` is required
+- when `kind` is `probe` or `group`, neither `host` nor `sensorType` is allowed
+- when `kind` is `group` or `device` or `sensor`, `gid` is not allowed
+- when `kind` is `device`, `sensorType` is not allowed
+- when `kind` is `sensor`, `host` is not allowed
+
+<a id="schema-ms-trigger"></a>
+
+### `ms:trigger`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | integer | **required** |  |
+| `kind` | string | **required** |  |
+| `kindName` | string | **required** |  |
+| `settings` | object | **required** |  |
+| `enabled` | boolean | **required** |  |
+| `summary` | string | **required** |  |
+| `inherited` | boolean | **required** |  |
+| `definedOn` | object | **required** |  |
+| `definedOn.objectId` | integer | **required** |  |
+| `definedOn.name` | string | **required** nullable |  |
+| `createdAt` | string | **required** |  |
+| `updatedAt` | string | **required** |  |
+
+<a id="schema-ms-triggerinput"></a>
+
+### `ms:triggerInput`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `kind` | string | **required** |  |
+| `settings` | object | **required** |  |
+| `enabled` | boolean | default `true` |  |
+
+<a id="schema-ms-triggerkind"></a>
+
+### `ms:triggerKind`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | string | **required** |  |
+| `name` | string | **required** |  |
+| `description` | string | **required** |  |
+| `settingsSchema` | object | **required** |  |
+
+<a id="schema-ms-updateobject"></a>
+
+### `ms:updateObject`
+
+| Field | Type | | Description |
+| --- | --- | --- | --- |
+| `kind` | `root` · `probe` · `group` · `device` · `sensor` | **required** |  |
+| `name` | string |  |  |
+| `tags` | string[] |  |  |
+| `priority` | integer |  |  |
+| `comments` | string |  |  |
+| `inheritsTriggers` | boolean |  |  |
+| `host` | string |  |  |
+| `ipVersion` | `auto` · `v4` · `v6` |  |  |
+| `params` | object |  |  |
+| `gid` | string | nullable |  |
+
+- at least 2 fields must be given
+- when `kind` is `root` or `probe` or `group`, neither `host` nor `params` is allowed
+- when `kind` is `root` or `group` or `device` or `sensor`, `gid` is not allowed
+- when `kind` is `device`, `params` is not allowed
+- when `kind` is `sensor`, neither `host` nor `ipVersion` is allowed

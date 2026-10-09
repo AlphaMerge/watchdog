@@ -11629,11 +11629,41 @@ because each is a decision rather than a defect:
       its `message` text says nothing of it. **Done when** the message names a refused version and
       when, with a test.
 
-- [ ] **P-318 — the generated API reference hides nested enums and field descriptions** · S ·
+- [x] **P-318 — the generated API reference hides nested enums and field descriptions** · S ·
       P-313 · Found 2026-10-08 in `P-313`. `docs/api-reference.md` renders top-level fields only,
       which is how `skew.kind` lacking `ahead` went unnoticed. **Done when** the generator renders
       nested enums and descriptions (or links each route to its schema), `--check` stays the gate,
       with a test.
+
+      **P-318 outcome. Every field at every level, with its enum, description and flags; shared
+      schemas once, linked.** Docs tooling only: no route schema changed.
+      - **Split.** `scripts/docs/api-reference.mjs` still builds the OpenAPI document from a real
+        `ApiServer` and keeps `--check` as the gate (`build-hygiene.test.ts` runs it). The
+        rendering moved to `scripts/docs/api-reference-render.mjs`, a pure function of the
+        document, so it can be tested without a server.
+      - **What a route now shows.** Body and each response get a field table at every depth
+        (`items[].skew.kind`), with the type (enum values, `string (date-time)`, `map of …`,
+        `… or an array of them`), the flags (`required`, `nullable`, `write-only`, `read-only`,
+        `default`) and the field's `description`. A union of objects lists each shape under a
+        path naming its discriminator (`source{kind=own}.objectId`). The `if`/`then`/`not` rules
+        that decide which fields go together are written out below the table ("when `kind` is
+        `sensor`, `sensorType` is required"). Parameters gain a description column only where
+        one has a description.
+      - **Shared schemas** (`ms:channelRecord`, `ms:objectDetail`, … 59 in all) are rendered once
+        under a new **Schemas** section, named by their `$id`, and linked from every route and
+        schema that uses them; a `$ref` the document does not define is an error, not a blank.
+      - **Consumers kept.** The `**200** { a, b }` summary line is unchanged, because
+        `build-hygiene.test.ts`'s credential-shaped-field check reads it (141 such lines before
+        and after). `candidate-surface.test.ts` reads the runbook, not this file, and passes.
+      - **Size.** 111,271 → 238,829 bytes (2.15×), 2,294 → 4,929 lines. Under the 3× at which
+        repeated inline shapes would be worth collapsing, so they are not.
+      - **Test.** `api-reference-render.test.ts` renders a fixture with a three-level enum, a
+        nested description, a nullable, a write-only field, a `not` rule and a `$ref` used three
+        times. Mutations: nested levels dropped failed 4, enum values dropped 2, descriptions
+        dropped 2, `write-only` unflagged 1, Schemas section not rendered 1, `nullable`
+        unflagged 1.
+      - **Not done.** Constraints (`minimum`, `maxLength`, `pattern`) are not rendered; the
+        OpenAPI document at `/api/v1/openapi.json` carries them.
 
 - [x] **P-319 — a refused hello rewrites a probe's row before its key is checked** · S · U-35 ·
       Found 2026-10-08 reviewing `U-35`. mTLS proves only that the peer holds a certificate the
