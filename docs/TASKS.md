@@ -25786,11 +25786,6 @@ because each is a decision rather than a defect:
       **Done when** decided (load failures announced through an always-present region, or left
       as they are because the page has nothing else to say), and done if adopted.
 
-- [ ] **U-59 — five refusals show no correlation id** · XS · U-54 · Found 2026-10-09 in `U-54`.
-      `RediscoveryPanel`, `DiscoveryView`, `LoginView`, `ChangePasswordForm` and
-      `RecipientsEditor` refuse without the id `ParamsForm` and `CredentialsPanel` show. **Done
-      when** each shows it in the same `ml-2 font-mono` span, with a test each.
-
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
       siblings are substituted into any text a step sends: the path, every header and the body.
