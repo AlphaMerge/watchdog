@@ -11,7 +11,7 @@ import {
 import { DiscoveryError, runNotFound } from '../../discovery/errors.js';
 import { probeFor, requireProbeInView } from '../../discovery/scope.js';
 import type { Queryable } from '../../db/pool.js';
-import type { DiscoveryService } from '../../discovery/service.js';
+import { DISCOVERY_RUN_STATUSES, type DiscoveryService } from '../../discovery/service.js';
 import type { ProvisionReport, ProvisionSight } from '../../discovery/provision.js';
 import type { Actor } from '../../objects/audit.js';
 import type { RediscoveryService, SchedulePatch } from '../../discovery/rediscovery.js';
@@ -58,10 +58,7 @@ const runSchema = {
     cursor: { type: 'integer' },
     found: { type: 'integer' },
     failed: { type: 'integer' },
-    status: {
-      type: 'string',
-      enum: ['queued', 'running', 'identifying', 'done', 'cancelled', 'failed'],
-    },
+    status: { type: 'string', enum: [...DISCOVERY_RUN_STATUSES] },
     level: { type: 'string', enum: ['ping', 'standard', 'detailed'] },
     templates: { type: 'array', items: { type: 'string' } },
     identified: { type: 'integer' },
@@ -264,6 +261,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
               type: 'string',
               maxLength: 128,
               default: '',
+              writeOnly: true,
               description:
                 'Tried read-only against every host during identification, and skipped when ' +
                 'empty. `sysDescr` and `sysObjectID` are the two most informative things a ' +
@@ -364,7 +362,8 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
               },
               range: { type: 'string' },
               level: { type: 'string' },
-              status: { type: 'string' },
+              // The run's own status, so its enum (`P-335`).
+              status: { type: 'string', enum: [...DISCOVERY_RUN_STATUSES] },
               headline: { type: 'string' },
               scanned: {
                 type: 'object',
@@ -871,7 +870,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
                 default: 'standard',
               },
               templates: { type: 'array', items: { type: 'string' }, default: [] },
-              snmpCommunity: { type: 'string', maxLength: 128, default: '' },
+              snmpCommunity: { type: 'string', maxLength: 128, default: '', writeOnly: true },
               timeoutMs: { type: 'integer', minimum: 100, maximum: 60_000, default: 1_000 },
               concurrency: { type: 'integer', minimum: 1, maximum: 512, default: 32 },
               ratePerSecond: { type: 'number', minimum: 0, maximum: 100_000, default: 0 },
@@ -978,7 +977,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
               timezone: { type: ['string', 'null'] },
               level: { type: 'string', enum: ['ping', 'standard', 'detailed'] },
               templates: { type: 'array', items: { type: 'string' } },
-              snmpCommunity: { type: 'string', maxLength: 128 },
+              snmpCommunity: { type: 'string', maxLength: 128, writeOnly: true },
               timeoutMs: { type: 'integer', minimum: 100, maximum: 60_000 },
               concurrency: { type: 'integer', minimum: 1, maximum: 512 },
               ratePerSecond: { type: 'number', minimum: 0, maximum: 100_000 },

@@ -197,8 +197,8 @@ Every failure answers 401 with the same code and the same sentence. Distinguishi
 | Field | Type | | Description |
 | --- | --- | --- | --- |
 | `login` | string | **required** |  |
-| `password` | string | **required** |  |
-| `code` | string |  | A TOTP code or a recovery code, when the account needs one. A login without it answers 401 MFA_REQUIRED, which is how a client knows to ask. |
+| `password` | string | **required** **write-only** |  |
+| `code` | string | **write-only** | A TOTP code or a recovery code, when the account needs one. A login without it answers 401 MFA_REQUIRED, which is how a client knows to ask. |
 
 **200** { userId, login, role, mustChangePassword }
 
@@ -296,7 +296,7 @@ The recovery codes are in this response and nowhere else, ever again. They exist
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `code` | string | **required** |  |
+| `code` | string | **required** **write-only** |  |
 
 **200** { recoveryCodes }
 
@@ -316,7 +316,7 @@ Needs the account password. Turning off a second factor from a session alone wou
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `password` | string | **required** |  |
+| `password` | string | **required** **write-only** |  |
 
 **204**
 
@@ -344,8 +344,8 @@ Ends every *other* session this account holds. The reason somebody changes a pas
 
 | Field | Type | | Description |
 | --- | --- | --- | --- |
-| `currentPassword` | string | **required** |  |
-| `newPassword` | string | **required** |  |
+| `currentPassword` | string | **required** **write-only** |  |
+| `newPassword` | string | **required** **write-only** |  |
 
 **200** { endedSessions }
 
@@ -638,7 +638,7 @@ Sweeps a range from one probe into one group. The probe is named rather than cho
 | `ratePerSecond` | number |  |  |
 | `level` | `ping` · `standard` · `detailed` | default `standard` | How hard to look. `POST /discovery/preview` reports what each one costs on this range, which is worth reading before starting a detailed sweep of a /16. |
 | `templates` | string[] | default `[]` | Template ids this run may use. Empty means all of them. A filter rather than a fourth level, because “detailed, but only these templates” is a thing somebody wants and a level could not express it. |
-| `snmpCommunity` | string | default `` | Tried read-only against every host during identification, and skipped when empty. `sysDescr` and `sysObjectID` are the two most informative things a device will tell you, and this is the only credential identification has: it runs before anybody has told the system anything about these hosts, so v3 — which needs a username and a passphrase per device — is not available to it. |
+| `snmpCommunity` | string | **write-only** default `` | Tried read-only against every host during identification, and skipped when empty. `sysDescr` and `sysObjectID` are the two most informative things a device will tell you, and this is the only credential identification has: it runs before anybody has told the system anything about these hosts, so v3 — which needs a username and a passphrase per device — is not available to it. |
 
 **201** { id, groupId, probeId, range, total, cursor, found, failed, status, level, templates, identified, scheduleId, devicesCreated, devicesMatched, sensorsCreated, provisionedAt, message, timeoutMs, concurrency, ratePerSecond, createdAt, startedAt, finishedAt }
 
@@ -678,7 +678,7 @@ Derived from the run and its hosts rather than stored, so it cannot drift from w
 | `scheduleId` | integer | nullable | The rediscovery schedule that started it (`D-07`), or null for a run somebody started. What tells an operator where a run they did not start came from. |
 | `range` | string | **required** |  |
 | `level` | string |  |  |
-| `status` | string | **required** |  |
+| `status` | `queued` · `running` · `identifying` · `done` · `cancelled` · `failed` | **required** |  |
 | `headline` | string | **required** |  |
 | `scanned` | object | **required** |  |
 | `scanned.addresses` | integer | **required** |  |
@@ -872,7 +872,7 @@ Created **disabled** unless `enabled` says otherwise, and with `autoProvision` o
 | `timezone` | string | nullable default `null` | A cadence is a statement about local time — 02:30 has to be 02:30 in both halves of the year — so it is stored as one. Null is the core’s own zone. |
 | `level` | `ping` · `standard` · `detailed` | default `standard` |  |
 | `templates` | string[] | default `[]` |  |
-| `snmpCommunity` | string | default `` |  |
+| `snmpCommunity` | string | **write-only** default `` |  |
 | `timeoutMs` | integer | default `1000` |  |
 | `concurrency` | integer | default `32` |  |
 | `ratePerSecond` | number | default `0` |  |
@@ -979,7 +979,7 @@ Change a schedule
 | `timezone` | string | nullable |  |
 | `level` | `ping` · `standard` · `detailed` |  |  |
 | `templates` | string[] |  |  |
-| `snmpCommunity` | string |  |  |
+| `snmpCommunity` | string | **write-only** |  |
 | `timeoutMs` | integer |  |  |
 | `concurrency` | integer |  |  |
 | `ratePerSecond` | number |  |  |
@@ -3921,7 +3921,7 @@ The shapes routes share, each declared once in the code and rendered once here.
 | --- | --- | --- | --- |
 | `sensorId` | integer | **required** |  |
 | `sensorName` | string | **required** |  |
-| `state` | string | **required** |  |
+| `state` | `unknown` · `up` · `warning` · `down` · `down_acknowledged` · `down_partial` · `unusual` · `paused` | **required** | The sensor's state now. For a held return (`recovering` is not null) that is the state it came back to, usually `up`; `recovering` is a `state` filter value, not a state. |
 | `cause` | string | **required** |  |
 | `message` | string | **required** |  |
 | `since` | string | **required** |  |
@@ -4423,7 +4423,7 @@ one of 4 shapes, by `kind`
 | `reason` | string | **required** |  |
 | `state` | string | **required** nullable |  |
 | `message` | string | **required** |  |
-| `status` | string | **required** |  |
+| `status` | `pending` · `sent` · `failed` · `discarded` | **required** |  |
 | `disposition` | string | **required** |  |
 | `attempts` | integer | **required** |  |
 | `deliveredAt` | string | **required** nullable |  |

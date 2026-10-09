@@ -142,24 +142,32 @@ describe('generated documentation', () => {
 });
 
 /**
- * No route grows a credential-shaped field in a response without someone saying why (`P-55`).
+ * Credential-shaped fields: none in a response without a reason (`P-55`), none in a request body
+ * without `writeOnly` (`P-334`).
  *
- * **This is a default-deny list, and it exists because the hand-maintained one failed.**
- * `api-routes.test.ts` sweeps a list of URLs with a canary and asserts no secret comes back. That
- * catches everything on the list and nothing else, and `GET /discovery/schedules` — which
- * returned the stored SNMP community in cleartext from three separate responses — was never on
- * it. CLAUDE.md's rule is absolute: a credential is never returned by any API route, to anyone,
+ * **The response half is a default-deny list, and it exists because the hand-maintained one
+ * failed.** `api-routes.test.ts` sweeps a list of URLs with a canary and asserts no secret comes
+ * back. That catches everything on the list and nothing else, and `GET /discovery/schedules` —
+ * which returned the stored SNMP community in cleartext from three separate responses — was never
+ * on it. CLAUDE.md's rule is absolute: a credential is never returned by any API route, to anyone,
  * including administrators.
  *
- * `docs/api-reference.md` is generated from the live route set (`H-07`) and kept in step by the
- * check above, so reading it is reading every route's declared response — the same derived-not-
- * enumerated property that made `H-07`'s completeness guard work. A new route cannot dodge this
- * by not being added anywhere.
+ * **It walks the OpenAPI document itself (`P-336`).** It used to read `docs/api-reference.md`'s
+ * `**200** { a, b }` summary lines, which held a route's top-level names only and missed a line
+ * listing more than one response: `tokenId` two levels down in every audit entry, and three Core
+ * Health counters, were never read. The document is what the reference is rendered from (`H-07`),
+ * built by the same generator from the live route set, so every route, every response, every
+ * level and every shared schema is read, and a new route cannot dodge it by not being added
+ * anywhere.
+ *
+ * **The request half is the same names, the other way round.** A request field named like a
+ * secret must be `writeOnly`, which is how the OpenAPI document and the reference tell a client
+ * it is never sent back. `writeOnly` is an annotation: Ajv validates the field as before.
  *
  * It matches on *names*, so it is a smoke alarm and not a proof: it cannot tell whether a field
  * called `note` holds a password. What it does is make the easy mistake loud.
  */
-describe('credential-shaped response fields', () => {
+describe('credential-shaped fields', () => {
   /**
    * Each of these is a deliberate exception with a reason, and the reason is the point: an entry
    * added without one is how the rule erodes.
@@ -174,10 +182,23 @@ describe('credential-shaped response fields', () => {
       'The API token, returned once by its creation route for the same reason. It is hashed at rest and never readable again.',
     ],
     [
+      'tokenId',
+      "An audit entry's actor: the id of the API token a change was made with, never the token.",
+    ],
+    [
       'credentials',
       "The object detail's credential block carries presence and inheritance source, never a value — which the canary sweep in api-routes.test.ts asserts directly.",
     ],
     ['credentialsChanged', 'A boolean on a clone response.'],
+    [
+      'credentialsToReenter',
+      'A Core Health channel: how many credential sets need re-entering, a count.',
+    ],
+    ['credentialsUnbounded', 'A Core Health channel: how many credential sets have no targets.'],
+    [
+      'credentialsWithheld',
+      'A Core Health channel: how many sensors are withheld for their credentials.',
+    ],
     [
       'droppedCredentialKinds',
       'A list of credential *kind* names that were not copied, never their values.',
@@ -194,34 +215,268 @@ describe('credential-shaped response fields', () => {
     ],
   ]);
 
+  /** Request fields named like a secret that are not one, so need not be `writeOnly`. */
+  const NOT_SECRET = new Map([
+    [
+      'credentials',
+      "`POST /device-templates/plan`'s list of credential *kind* names the caller can supply, never a value.",
+    ],
+  ]);
+
   const SHAPE =
     /(community|password|secret|auth_?key|priv_?key|passphrase|token|api_?key|credential)/i;
 
-  it('are all accounted for', async () => {
-    const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
-    const reference = await readFile(join(repoRoot, 'docs', 'api-reference.md'), 'utf8');
+  const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
 
-    const unexplained: string[] = [];
-    for (const line of reference.split('\n')) {
-      // `**200** { a, b, c }` — the generator's rendering of a declared response shape.
-      const match = /^\*\*(2\d\d)\*\*\s*\{(.+)\}\s*$/.exec(line);
-      if (match === null) continue;
-      for (const raw of (match[2] ?? '').split(',')) {
-        const field = raw.trim();
-        if (field === '' || !SHAPE.test(field) || ALLOWED.has(field)) continue;
-        if (!unexplained.includes(field)) unexplained.push(field);
-      }
+  /** The document the reference is rendered from, built by the same generator, once. */
+  let built: OpenApi | undefined;
+  function openApiDocument(): OpenApi {
+    if (built !== undefined) return built;
+    const run = spawnSync(
+      process.execPath,
+      [join(repoRoot, 'scripts', 'docs', 'api-reference.mjs'), '--openapi'],
+      { cwd: repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+    );
+    assert.equal(run.status, 0, run.stderr);
+    built = JSON.parse(run.stdout) as OpenApi;
+    return built;
+  }
+
+  /** Response fields named like a credential that nothing in `ALLOWED` explains. */
+  function unexplained(doc: OpenApi): string[] {
+    const found = new Map<string, string>();
+    for (const field of fieldsOf(doc, 'response')) {
+      if (!SHAPE.test(field.name) || ALLOWED.has(field.name) || found.has(field.name)) continue;
+      found.set(field.name, `${field.name} (${field.where})`);
     }
+    return [...found.values()];
+  }
 
+  /** Request body fields named like a secret and not `writeOnly`. */
+  function readable(doc: OpenApi): string[] {
+    return fieldsOf(doc, 'request')
+      .filter((field) => SHAPE.test(field.name) && !field.writeOnly && !NOT_SECRET.has(field.name))
+      .map((field) => field.where);
+  }
+
+  it('in responses are all accounted for', () => {
+    const fields = unexplained(openApiDocument());
     assert.deepEqual(
-      unexplained,
+      fields,
       [],
       'a response now carries a credential-shaped field that nothing justifies:\n  ' +
-        `${unexplained.join('\n  ')}\n` +
+        `${fields.join('\n  ')}\n` +
         'Either stop returning it, or add it to ALLOWED with the reason it is safe.',
     );
   });
+
+  it('in request bodies are all writeOnly', () => {
+    const fields = readable(openApiDocument());
+    assert.deepEqual(
+      fields,
+      [],
+      'a request body takes a field named like a secret that is not writeOnly:\n  ' +
+        `${fields.join('\n  ')}\n` +
+        'Mark it writeOnly: true, or add it to NOT_SECRET with the reason it is not a secret.',
+    );
+  });
+
+  /**
+   * The walk itself, on a document small enough to read: a credential at every place the summary
+   * line could not see — nested, behind a shared schema, in an array, in a union, and in the
+   * second response of a route that declares two.
+   */
+  describe('read every level of every response', () => {
+    const fixture: OpenApi = {
+      components: {
+        schemas: {
+          'def-0': {
+            title: 'ms:shared',
+            type: 'object',
+            properties: { inner: { type: 'object', properties: { authKey: { type: 'string' } } } },
+          },
+        },
+      },
+      paths: {
+        '/api/v1/things': {
+          get: {
+            responses: {
+              200: {
+                content: {
+                  'application/json': {
+                    schema: {
+                      type: 'object',
+                      properties: {
+                        id: { type: 'integer' },
+                        probe: {
+                          type: 'object',
+                          properties: {
+                            snmp: { type: 'object', properties: { community: { type: 'string' } } },
+                          },
+                        },
+                        items: {
+                          type: 'array',
+                          items: { type: 'object', properties: { passphrase: { type: 'string' } } },
+                        },
+                        shared: { $ref: '#/components/schemas/def-0' },
+                        either: {
+                          oneOf: [
+                            { type: 'object', properties: { privKey: { type: 'string' } } },
+                            { type: 'null' },
+                          ],
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+              202: {
+                content: {
+                  'application/json': {
+                    schema: { type: 'object', properties: { apiKey: { type: 'string' } } },
+                  },
+                },
+              },
+            },
+          },
+          post: {
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      password: { type: 'string', writeOnly: true },
+                      nested: { type: 'object', properties: { secret: { type: 'string' } } },
+                      credentials: { type: 'array', items: { type: 'string' } },
+                    },
+                  },
+                },
+              },
+            },
+            responses: { 204: {} },
+          },
+        },
+      },
+    };
+
+    it('finds a nested credential-shaped response field, wherever it is', () => {
+      assert.deepEqual(unexplained(fixture).sort(), [
+        'apiKey (GET /api/v1/things 202 apiKey)',
+        'authKey (GET /api/v1/things 200 shared.inner.authKey)',
+        'community (GET /api/v1/things 200 probe.snmp.community)',
+        'passphrase (GET /api/v1/things 200 items[].passphrase)',
+        'privKey (GET /api/v1/things 200 either.privKey)',
+      ]);
+    });
+
+    it('finds a request field named like a secret that is not writeOnly, nested too', () => {
+      assert.deepEqual(readable(fixture), ['POST /api/v1/things body nested.secret']);
+    });
+  });
 });
+
+/** As much of an OpenAPI document as the credential walk reads. */
+interface OpenApi {
+  readonly components?: { readonly schemas?: Record<string, Schema> };
+  readonly paths: Record<string, Record<string, Operation>>;
+}
+interface Operation {
+  readonly requestBody?: { readonly content?: Record<string, { readonly schema?: Schema }> };
+  readonly responses?: Record<
+    string,
+    { readonly content?: Record<string, { readonly schema?: Schema }> }
+  >;
+}
+type Schema = Readonly<Record<string, unknown>>;
+
+interface Field {
+  readonly name: string;
+  /** `GET /api/v1/audit 200 items[].actor.tokenId`. */
+  readonly where: string;
+  readonly writeOnly: boolean;
+}
+
+/**
+ * Every named field in the document's request bodies or responses, at every depth, through every
+ * shared schema, array, map and union alternative. A shared schema is followed once per path, so
+ * a schema that contains itself ends rather than recursing.
+ */
+function fieldsOf(doc: OpenApi, side: 'request' | 'response'): Field[] {
+  const components = doc.components?.schemas ?? {};
+  const fields: Field[] = [];
+  const isSchema = (value: unknown): value is Schema =>
+    typeof value === 'object' && value !== null && !Array.isArray(value);
+  const objectAt = (schema: Schema, keyword: string): Schema => {
+    const value = schema[keyword];
+    return isSchema(value) ? value : {};
+  };
+  const resolve = (schema: Schema): { schema: Schema; key?: string } => {
+    const ref = schema['$ref'];
+    if (typeof ref !== 'string') return { schema };
+    const key = /^#\/components\/schemas\/(.+)$/u.exec(ref)?.[1];
+    const target = key === undefined ? undefined : components[key];
+    assert.ok(target !== undefined && key !== undefined, `the document does not define ${ref}`);
+    return { schema: target, key };
+  };
+
+  const walk = (raw: Schema, where: string, path: string, seen: ReadonlySet<string>): void => {
+    const { schema, key } = resolve(raw);
+    if (key !== undefined && seen.has(key)) return;
+    const inside = key === undefined ? seen : new Set([...seen, key]);
+    const at = (name: string): string => (path === '' ? name : `${path}.${name}`);
+
+    for (const [name, property] of Object.entries(objectAt(schema, 'properties'))) {
+      if (!isSchema(property)) continue;
+      fields.push({
+        name,
+        where: `${where} ${at(name)}`,
+        writeOnly: property['writeOnly'] === true || resolve(property).schema['writeOnly'] === true,
+      });
+      walk(property, where, at(name), inside);
+    }
+    for (const property of Object.values(objectAt(schema, 'patternProperties'))) {
+      if (isSchema(property)) walk(property, where, at('*'), inside);
+    }
+    const map = schema['additionalProperties'];
+    if (isSchema(map)) walk(map, where, at('*'), inside);
+    const items = schema['items'];
+    for (const item of Array.isArray(items) ? items : [items]) {
+      if (isSchema(item)) walk(item, where, `${path}[]`, inside);
+    }
+    for (const keyword of ['oneOf', 'anyOf', 'allOf', 'prefixItems']) {
+      const alternatives = schema[keyword];
+      if (!Array.isArray(alternatives)) continue;
+      for (const alternative of alternatives) {
+        if (isSchema(alternative)) walk(alternative, where, path, inside);
+      }
+    }
+    for (const keyword of ['then', 'else']) {
+      const branch = schema[keyword];
+      if (isSchema(branch)) walk(branch, where, path, inside);
+    }
+  };
+
+  for (const [route, operations] of Object.entries(doc.paths)) {
+    for (const [method, operation] of Object.entries(operations)) {
+      // A path item may carry `parameters`, an array, beside its operations.
+      if (Array.isArray(operation)) continue;
+      const verb = `${method.toUpperCase()} ${route}`;
+      if (side === 'request') {
+        for (const media of Object.values(operation.requestBody?.content ?? {})) {
+          if (media.schema !== undefined) walk(media.schema, `${verb} body`, '', new Set());
+        }
+        continue;
+      }
+      for (const [status, response] of Object.entries(operation.responses ?? {})) {
+        for (const media of Object.values(response.content ?? {})) {
+          if (media.schema !== undefined) walk(media.schema, `${verb} ${status}`, '', new Set());
+        }
+      }
+    }
+  }
+  return fields;
+}
 
 /**
  * Every link between documents points at a file that exists (`P-54`).

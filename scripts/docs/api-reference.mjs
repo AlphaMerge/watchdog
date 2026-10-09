@@ -248,6 +248,15 @@ const extra = hidden.map((route) => {
   };
 });
 
+// `--openapi` prints the document itself, for checks that walk its schemas rather than read the
+// page (`build-hygiene.test.ts`'s credential-shaped fields, `P-334`/`P-336`). Stdout only: Ajv's
+// strict-mode warnings go to stderr and must not corrupt the JSON.
+// The write is awaited before exiting: a pipe takes a document this size in several chunks.
+if (process.argv.includes('--openapi')) {
+  await new Promise((resolve) => process.stdout.write(`${JSON.stringify(doc)}\n`, resolve));
+  process.exit(0);
+}
+
 const generated = renderApiReference(doc, { extra });
 
 if (process.argv.includes('--check')) {

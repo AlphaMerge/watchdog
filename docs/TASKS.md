@@ -12178,24 +12178,122 @@ because each is a decision rather than a defect:
       policy for when such passes run (always, on a build change, or behind a version marker), with
       the reason written down.
 
-- [ ] **P-334 — no request schema marks a password `writeOnly`** · XS · P-318 · Found 2026-10-09
+- [x] **P-334 — no request schema marks a password `writeOnly`** · XS · P-318 · Found 2026-10-09
       in `P-318`. `POST /auth/login` `password`, `/auth/password` `currentPassword`/`newPassword` and
       the account-create `password` are plain strings, so neither the OpenAPI document nor the
       reference tells a client they are write-only. **Done when** each secret in a request schema
       is `writeOnly`, the reference shows it, and a build-hygiene check refuses a request field named
       like a secret without it.
 
-- [ ] **P-335 — state fields with a fixed set of values are plain strings** · XS · P-318 · Found
+      **P-334 outcome. Every secret a request body takes is `writeOnly`, and build-hygiene refuses
+      one that is not.** No protocol or migration change.
+      - **Marked.** The fields:
+        - `POST /auth/login` `password`, and its `code`: a recovery code is a password that works
+          once;
+        - `POST /auth/mfa/confirm` `code` and `POST /auth/mfa/disable` `password`;
+        - `POST /auth/password` `currentPassword` and `newPassword`;
+        - `snmpCommunity` on `POST /discovery`, `POST /discovery/schedules` and
+          `PATCH /discovery/schedules/{id}`.
+
+        The two `code`s are not named like a secret, so the check below would not have asked for
+        them; they were found by reading the auth routes.
+      - **There is no account-create route.** `AccountService.create` has no HTTP caller; the only
+        account the core makes is `ensureFirstAdministrator`'s at start-up. Nothing to mark.
+      - **An annotation, not a check.** Ajv validates each field as before. These tests pass
+        unchanged through the real schemas:
+        - `auth-api.test.ts` logs in and changes passwords;
+        - `trust-audit.test.ts` and `audit-sweep.test.ts` send communities to the discovery and
+          schedule routes;
+        - `discovery-scope.test.ts` edits schedules.
+
+        Nothing echoes the fields: the response half of `P-336`'s walk finds no field named like
+        a password or a community in any response. The auth routes answer the principal, and
+        `/mfa/confirm` answers `recoveryCodes`.
+      - **The reference shows it.** Regenerated: each field above reads `**write-only**`.
+      - **The check.** `build-hygiene.test.ts` walks every request body in the OpenAPI document,
+        nested fields included. Any field whose name matches the credential pattern the response
+        check uses (one `SHAPE`) must be `writeOnly`, unless `NOT_SECRET` says why it is not a
+        secret. One entry: `POST /device-templates/plan`'s `credentials` is a list of kind names.
+        Query and path parameters are not checked, because `writeOnly` means nothing on a
+        parameter. The two that match are `/public/maps/{token}` (the share link itself) and
+        `GET /discovery/{id}/plan`'s `credentials` (kind names).
+      - **Mutation:** login's `password` without `writeOnly` failed 1, naming
+        `POST /api/v1/auth/login body password`.
+
+- [x] **P-335 — state fields with a fixed set of values are plain strings** · XS · P-318 · Found
       2026-10-09 in `P-318`. `ms:alarm.state`, `ms:notificationRequest.status` and `status` in
       `GET /discovery/{id}/summary` are `string` although their query filters list the values — the
       P-313 kind of gap. **Done when** each is an `enum` matching what the code writes, with a test
       that serialises every value.
 
-- [ ] **P-336 — the credential-shaped-field check reads too little** · XS · P-318 · Found
+      **P-335 outcome. All three are enums of exactly what the database lets the code write.**
+      - **`ms:alarm.state` is every sensor state (`SENSOR_STATES`), not the filter's
+        `ALARM_KINDS`.** It is `sensor_runtime.state`, so a held return carries whatever state its
+        sensor is in, usually `up`. `recovering` is a kind and a filter value, never a state. An
+        enum copied from the filter would have refused `up` on every held return, and the
+        serializer would have sent it anyway. The field now has a description that says this.
+        `SENSOR_STATES` against `sensor_state_kind` is already `state-tables.test.ts`'s.
+      - **`ms:notificationRequest.status`** is `NOTIFICATION_STATUSES` (exported, was `STATUSES`):
+        `pending`, `sent`, `failed` and `discarded`. That is `notification_request_status_check`
+        (migration 021), which no later migration changes.
+      - **The discovery summary's `status`** and `ms:discoveryRun`'s both read
+        `DISCOVERY_RUN_STATUSES`, new in `discovery/service.ts`, and `DiscoveryRunRow['status']` is
+        derived from it. That is `discovery_run_status_check` (migration 026). The summary copies
+        `run.status`.
+      - **Test.** `fixed-value-fields.test.ts` serves every value through each route on a bare
+        Fastify with a stubbed service. It checks the value comes back as sent, and validates the
+        answer with Ajv against the route's own 200 schema, read off the route by `onRoute`
+        (`P-313`'s method). A value outside the set must be refused: `recovering` as a state,
+        `retrying`, `provisioning`. Against a migrated scratch database, the two lists equal
+        their CHECK constraints as Postgres prints them back.
+      - **Mutations:**
+        - the alarm enum removed failed 1;
+        - `discarded` dropped from the status enum failed 1;
+        - `identifying` dropped from the summary's enum failed 1;
+        - `retrying` added to the status list failed 2, the enum test and the constraint.
+      - **Not done.** Other fixed-value fields in the same schemas are still plain strings:
+        `ms:alarm.cause`, the summary's `level`, and `ms:notificationRequest`'s `disposition`,
+        `triggerKind`, `reason` and `state`. Listed as a follow-up.
+
+- [x] **P-336 — the credential-shaped-field check reads too little** · XS · P-318 · Found
       2026-10-09 in `P-318`. `build-hygiene.test.ts` matches only a summary line ending in `}`, so a
       line listing more than one response is skipped, and it reads top-level names only. **Done
       when** it reads the reference's field tables, nested fields included, with a test that a
       nested credential-shaped response field fails it.
+
+      **P-336 outcome. It walks the OpenAPI document itself, not the page rendered from it.**
+      - **Where the document comes from.** `scripts/docs/api-reference.mjs --openapi` prints the
+        document the reference is rendered from: the same generator and the same live route set,
+        before rendering. Reading the field tables would have meant parsing markdown back into
+        the structure it was made from. The walk follows:
+        - every route and every response status, not only the 2xx;
+        - every level, through `$ref`s (each shared schema once per path, so a schema that
+          contains itself ends);
+        - arrays, maps, `oneOf`/`anyOf`/`allOf`, and `then`/`else`.
+      - **What it found that the old check never read.** Four nested response fields, each now
+        in `ALLOWED` with its reason:
+        - `tokenId`, an audit entry actor's token id, never the token;
+        - Core Health's `credentialsToReenter`, `credentialsUnbounded` and `credentialsWithheld`,
+          all counts.
+
+        None is a credential.
+      - **Test.** A fixture document plants a credential-shaped response field in every place the
+        summary line could not see:
+        - nested two levels down;
+        - behind a shared schema;
+        - in an array item;
+        - in a union alternative;
+        - in the second response of a route that declares two.
+
+        All five are reported. The request half (`P-334`) finds a nested non-`writeOnly` secret
+        in the same fixture.
+      - **Mutations.**
+        - `privKey` planted in `ms:alarm.recovering` and the reference regenerated: the new check
+          failed, naming `GET /api/v1/alarms 200 items[].recovering.privKey`. The old check, the
+          file as it was, passed against the same reference: the planted field went unnoticed.
+        - The walk cut to top-level names failed both fixture tests.
+      - **The summary line stays.** The renderer's comment no longer says build-hygiene reads it.
+        Nothing does now.
 
 - [ ] **P-337 — the API reference leaves out constraints, and its generator warns** · XS · P-318 ·
       Found 2026-10-09 in `P-318`. `minimum`, `maxLength` and `pattern` are not rendered, and

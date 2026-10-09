@@ -12,8 +12,12 @@ export interface NotificationRoutesOptions {
   log?: NotificationLogReader;
 }
 
-/** The statuses a request can be in, which are also the filter values. */
-const STATUSES = ['pending', 'sent', 'failed', 'discarded'] as const;
+/**
+ * The statuses a request can be in, which are also the filter values, as
+ * `notification_request_status_check` (migration 021) allows. `ms:notificationRequest` enumerates
+ * them, and `fixed-value-fields.test.ts` checks them against the constraint (`P-335`).
+ */
+export const NOTIFICATION_STATUSES = ['pending', 'sent', 'failed', 'discarded'] as const;
 
 function repeatable(values: readonly string[]): Record<string, unknown> {
   return {
@@ -134,7 +138,7 @@ const entrySchema = {
     reason: { type: 'string' },
     state: { type: ['string', 'null'] },
     message: { type: 'string' },
-    status: { type: 'string' },
+    status: { type: 'string', enum: [...NOTIFICATION_STATUSES] },
     disposition: { type: 'string' },
     attempts: { type: 'integer' },
     deliveredAt: { type: ['string', 'null'] },
@@ -227,7 +231,7 @@ export function notificationRoutes(app: FastifyInstance, options: NotificationRo
           type: 'object',
           additionalProperties: false,
           properties: {
-            status: repeatable(STATUSES),
+            status: repeatable(NOTIFICATION_STATUSES),
             sensorId: { type: 'integer', minimum: 1 },
             templateId: { type: 'integer', minimum: 1 },
             before: { type: 'integer', minimum: 1 },

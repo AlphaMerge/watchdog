@@ -63,6 +63,20 @@ export const GROUP_MOVED = 'its group moved to another probe';
 /** Who fails a run the core found out of place while offering it, with nobody asking. */
 const DISCOVERY: Actor = { kind: 'system', component: 'discovery' };
 
+/**
+ * What a run can be, as `discovery_run_status_check` (migration 026) allows. The response schemas
+ * enumerate this list, and `fixed-value-fields.test.ts` checks it against the constraint
+ * (`P-335`): the serializer does not check an enum, so a value missing here would ship anyway.
+ */
+export const DISCOVERY_RUN_STATUSES = [
+  'queued',
+  'running',
+  'identifying',
+  'done',
+  'cancelled',
+  'failed',
+] as const;
+
 export interface DiscoveryRunRow {
   id: number;
   groupId: number;
@@ -72,7 +86,7 @@ export interface DiscoveryRunRow {
   cursor: number;
   found: number;
   failed: number;
-  status: 'queued' | 'running' | 'identifying' | 'done' | 'cancelled' | 'failed';
+  status: (typeof DISCOVERY_RUN_STATUSES)[number];
   /** How hard this run looks (`D-06`). `ping` stops after the sweep. */
   level: DiscoveryLevel;
   /** Which templates provisioning may use, empty meaning all of them (`D-06`). */

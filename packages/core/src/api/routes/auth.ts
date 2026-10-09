@@ -133,10 +133,14 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
           required: ['login', 'password'],
           properties: {
             login: { type: 'string', minLength: 1, maxLength: 64 },
-            password: { type: 'string', minLength: 1, maxLength: 512 },
+            // `writeOnly` (`P-334`): an annotation, not a check. Ajv validates the field as
+            // before; the OpenAPI document and the reference tell a client it is never returned.
+            password: { type: 'string', minLength: 1, maxLength: 512, writeOnly: true },
             code: {
               type: 'string',
               maxLength: 64,
+              // A recovery code is a password that works once, and lives until it is used.
+              writeOnly: true,
               description:
                 'A TOTP code or a recovery code, when the account needs one. A login without it ' +
                 'answers 401 MFA_REQUIRED, which is how a client knows to ask.',
@@ -430,7 +434,7 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
           type: 'object',
           additionalProperties: false,
           required: ['code'],
-          properties: { code: { type: 'string', minLength: 1, maxLength: 64 } },
+          properties: { code: { type: 'string', minLength: 1, maxLength: 64, writeOnly: true } },
         },
         response: {
           200: {
@@ -465,7 +469,9 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
           type: 'object',
           additionalProperties: false,
           required: ['password'],
-          properties: { password: { type: 'string', minLength: 1, maxLength: 512 } },
+          properties: {
+            password: { type: 'string', minLength: 1, maxLength: 512, writeOnly: true },
+          },
         },
         response: { 204: { type: 'null' } },
       },
@@ -530,8 +536,8 @@ export function authRoutes(app: FastifyInstance, options: AuthRoutesOptions): vo
           additionalProperties: false,
           required: ['currentPassword', 'newPassword'],
           properties: {
-            currentPassword: { type: 'string', minLength: 1, maxLength: 512 },
-            newPassword: { type: 'string', minLength: 12, maxLength: 512 },
+            currentPassword: { type: 'string', minLength: 1, maxLength: 512, writeOnly: true },
+            newPassword: { type: 'string', minLength: 12, maxLength: 512, writeOnly: true },
           },
         },
         response: {

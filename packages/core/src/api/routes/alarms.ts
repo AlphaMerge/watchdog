@@ -7,6 +7,7 @@ import {
   type AlarmService,
   type AlarmSort,
 } from '../../state/alarms.js';
+import { SENSOR_STATES } from '../../state/tables.js';
 import { onQueryObject, visibilityOf } from '../authorization.js';
 
 export interface AlarmRouteOptions {
@@ -62,7 +63,15 @@ export const alarmSchema = {
   properties: {
     sensorId: { type: 'integer' },
     sensorName: { type: 'string' },
-    state: { type: 'string' },
+    state: {
+      // Every sensor state, not `ALARM_KINDS` (`P-335`): it is read from `sensor_runtime`, so a
+      // held return carries whatever state its sensor is in, and `recovering` is never a state.
+      type: 'string',
+      enum: [...SENSOR_STATES],
+      description:
+        "The sensor's state now. For a held return (`recovering` is not null) that is the " +
+        'state it came back to, usually `up`; `recovering` is a `state` filter value, not a state.',
+    },
     cause: { type: 'string' },
     message: { type: 'string' },
     since: { type: 'string' },

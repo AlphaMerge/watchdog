@@ -526,8 +526,8 @@ export function renderApiReference(doc, options = {}) {
 
       const responses = Object.entries(operation.responses ?? {}).filter(([status]) => status !== 'default');
       if (responses.length > 0) {
-        // The summary line, unchanged since H-07: `build-hygiene.test.ts` reads response field
-        // names off it to look for credential-shaped ones.
+        // The summary line, unchanged since H-07. Nothing reads it any more: `build-hygiene.test.ts`
+        // walks the OpenAPI document for credential-shaped fields instead (`P-336`).
         say(
           responses
             .map(([status, response]) => {
