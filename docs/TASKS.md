@@ -14147,6 +14147,35 @@ because each is a decision rather than a defect:
         possible. An `ORDER BY` would not pick the right one, which is the probe whose link is
         connected.
 
+- [ ] **P-382 — the local probe's log row is whichever `is_local` row the plan gives** · S · P-381 ·
+      Found 2026-10-09 in `P-381`. `localProbeLog` in `packages/core/src/main.ts` takes `rows[0]`
+      of `SELECT … FROM probe_config WHERE is_local`, and approving a probe never clears
+      `is_local` (`probes/registry.ts`), so two rows are possible and the pick is arbitrary. An
+      `ORDER BY` cannot choose the right one: it is the probe whose link is connected. **Done
+      when** at most one row can be local (or the choice is made by the live link), with a test
+      of two candidate rows.
+
+- [ ] **P-383 — Fastify's request validator still runs Ajv's lax default** · M · P-379 · Found
+      2026-10-09 in `P-379`. `API_VALIDATOR_OPTIONS` (`core/src/api/validation.ts`) sets no
+      `strict`, so a route schema's keyword with no type is logged and accepted and an undeclared
+      `required` passes silently. Every other Ajv in the source now runs strict. **Done when** the
+      API's validator runs `strict: true` (declaring `x-patternMessage` and the OpenAPI
+      annotations it needs), every route schema compiles under it, the two test-only
+      `strict: false` Ajvs (`fixed-value-fields`, `probe-registry`) do the same, and a mistyped
+      keyword in a route schema fails a test.
+
+- [ ] **P-384 — the lookup catalogue's problem list repeats a line** · XS · P-379 · Found
+      2026-10-09 in `P-379`. A missing `state` is said twice, and since `P-379` a non-array
+      `entries` (or an entry that is not an object) is too, with a "must match \"then\" schema"
+      line besides. **Done when** `problems()` says each problem once and drops Ajv's `if/then`
+      wrapper lines, with a test.
+
+- [ ] **P-385 — `AccessService`'s `sourceGroupId` tiebreak has no test** · XS · P-381 · Found
+      2026-10-09 in `P-381` review. Two groups granting the same right at the same depth now pick
+      the lowest `group_id`, but no test pins it: a flipped plan for a top-1 sort over a
+      `DISTINCT ON` is not reliably reproducible. **Done when** a table-driven test of tied grants
+      asserts the lowest group id, or the outcome says why one cannot be written.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -26352,6 +26381,34 @@ because each is a decision rather than a defect:
         four files; `CredentialsPanel` writing its own span again 2.
       - **Not done.** `ParamsForm`'s channel-mode refusal (`ModeRefusal`) says the id in a
         paragraph of its own, as `ErrorPanel` does, and was left with it.
+
+- [ ] **U-66 — the shared map blanks every minute** · S · U-62 · Found 2026-10-09 in `U-62`.
+      `SharedMapView` puts the clock tick in its request path, so each minute the map is replaced
+      by "Loading the map…" while the request runs. **Done when** it keeps the last map in sight
+      while the next is read, as `MapBoard` does, with a test that no frame drops the map.
+
+- [ ] **U-67 — a failed re-read of a held list says nothing** · S · U-60 · Found 2026-10-09 in
+      `U-60`. When the channel list (or the templates list, since `U-64`'s review) is re-read and
+      the read fails, the held list stays with no sign that it may be stale. **Done when** a
+      failed re-read is said in a polite region beside the held list, with a retry, and tests.
+
+- [ ] **U-68 — "Try again" in an error panel removes itself and drops focus** · S · U-60 ·
+      Found 2026-10-09 in `U-60`. Every `ErrorPanel` retry is replaced by a loading line, so
+      focus falls to the page (WCAG 2.4.3), the shape `U-64` and `U-63` fixed locally. **Done
+      when** `ErrorPanel`'s retry keeps focus somewhere stable for every caller (kept mounted
+      with `aria-disabled`, or a declared focus target), with a test.
+
+- [ ] **U-69 — an accepted *Save template* drops focus** · XS · U-64 · Found 2026-10-09 in
+      `U-64` review. Saving closes the editor and focus on *Save template* falls to the page with
+      nothing said, as an accepted delete did. **Done when** it goes where the delete's does and
+      is said in the same region, with a test.
+
+- [ ] **U-70 — `ModeRefusal` and the tree's filters** · XS · U-65, U-63 · Found 2026-10-09.
+      `ParamsForm`'s `ModeRefusal` says its correlation id in a paragraph of its own instead of
+      through `CorrelationId`; the tree's search and tag boxes are not in the URL, so a filtered
+      search cannot be shared (only `invalidParams` is); and `channelLinkFor` lives in
+      `credentials-model.ts` though it now links a non-credential channel. **Done when** all
+      three are done, with tests.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
