@@ -13313,6 +13313,62 @@ because each is a decision rather than a defect:
       - **Not done.** `probe-registry.test.ts` and `hardening.test.ts` build bare `Fastify()`
         too, for routes with no union type, and were not changed.
 
+- [ ] **P-364 — two test files build routes with Ajv's defaults** · XS · P-363 · Found 2026-10-09
+      in `P-363`. `probe-registry.test.ts` and `hardening.test.ts` build a bare `Fastify()`, so
+      their routes validate differently from the server's (`API_VALIDATOR_OPTIONS`); nothing
+      prints today because their routes have no union types. **Done when** both build with
+      `API_VALIDATOR_OPTIONS`, and a grep finds no other bare `Fastify()` in core tests that
+      registers API routes.
+
+- [ ] **P-365 — a repeatable filter takes the same value twice** · XS · P-362 · Found 2026-10-09
+      in `P-362`. `category`, `actorKind`, `kind`, `tag` and `effective` bound their count with
+      `maxItems` but accept repeats (`actorKind=user&actorKind=user`). **Done when** decided:
+      `uniqueItems` on each (a validation change, said in the outcome) or repeats left harmless on
+      purpose with a comment, with a route test either way.
+
+- [ ] **P-366 — the hand-rolled waits `P-355` listed and left** · S · P-355 · Found 2026-10-09 in
+      `P-355`'s review. core `state-stream.test.ts` (the 30 s `severed` poll, and `swept` under
+      `t.mock.timers`); probe `pool-sizer.test.ts:158`, `pool-memory-cap.test.ts:285` (its poll
+      calls `feed()`), `root-scripts.test.ts:331`; sensors `snmp-trap.test.ts:371`,
+      `flow-sensor.test.ts:383`, `snmp-receiver.test.ts` (`settle()` and two polls that fall
+      through to asserts), `snmp-pool.test.ts:242`; simulators `syslog-sender.test.ts`'s fixed
+      120 ms `settle()` and `http-server.test.ts`'s unbounded idle-socket `connect`. **Done
+      when** each is `pollWithin` or `within` (or said in the outcome why not, such as a mocked
+      timer), with one mutation per package.
+
+- [ ] **P-367 — a mended sensor stays counted until the next start** · XS · P-358 · Found
+      2026-10-09 in `P-358`. `sensorsWithInvalidParams` is computed once per start, so an operator
+      who fixes the parameters sees the count unchanged. **Done when** an accepted edit of a
+      counted sensor takes it off the count (or the count says when it was taken), with a test.
+
+- [ ] **P-368 — the stored-params pass logs one line per sensor on every start** · XS · P-358 ·
+      Found 2026-10-09 in `P-358`. At 20,000 sensors with one in ten refused that is 2,000 warning
+      lines per start. **Done when** the lines are capped per type with the rest summarised by
+      count, with a test at the cap.
+
+- [ ] **P-369 — the stored-params pass is outside the start-up tests and policy** · XS · P-358 ·
+      Found 2026-10-09 in `P-358`. Its `main.ts` wiring is typechecked but nothing boots it
+      (`P-331`), and it is a third pass that reads every sensor on every start (`P-333`). **Done
+      when** `P-331`'s boot test and `P-333`'s policy, whichever lands first, cover it too, or
+      this is closed by one of them with a line in its outcome.
+
+- [ ] **P-370 — the audit of a map background keeps its media type as a string** · XS · P-361 ·
+      Found 2026-10-09 in `P-361`. `MapBackgroundAudit.mediaType` in `objects/audit.ts` is
+      `string` where `ImageMediaType` now exists. **Done when** it is typed from
+      `IMAGE_MEDIA_TYPES`, with whatever schema serves it enumerated as `P-351` did.
+
+- [ ] **P-371 — should a trigger's kind be refused at validation?** · XS · P-352 · Found
+      2026-10-09 in `P-352`. `ms:triggerInput.kind` is a free string the service refuses with
+      `TRIGGER_INVALID`; an enum of the registry's ids would refuse it at `validate-request` and
+      put those ids in the OpenAPI document. **Done when** decided and, if adopted, done as a
+      validation change with a route test.
+
+- [ ] **P-372 — the core's own schemas answer a pattern with the expression** · XS · U-53 · Found
+      2026-10-09 in `U-53`. `scaleMul` and `scaleDiv` in `api/schemas/objects.ts`, the audit
+      `before` cursor, the library node id and notification header names still answer "must
+      match pattern …". **Done when** the API's Ajv knows `x-patternMessage`, each of those
+      patterns carries one, the 400 says it, and a test refuses an API schema pattern without one.
+
 - [x] **P-248 — with `autoMigrate` off, a drifted schema was told to run `migrate up`** · S ·
       P-238, H-03 · Found 2026-09-29 in `P-238`. `refuseSchema` reported a newer schema, then
       pending migrations, then drift. `Migrator.up()` refuses drift first, and then a newer
@@ -24915,6 +24971,13 @@ because each is a decision rather than a defect:
       - **Not done.** The core's own API schemas (`api/schemas/objects.ts`'s `scaleMul`, the
         audit cursor, a library node id) still answer a failed `pattern` with Ajv's *must match
         pattern "…"*; they are not sensor parameters, and nothing here reads them.
+
+- [ ] **U-54 — eight more refusal lines appear only with their text** · S · U-52 · Found
+      2026-10-09 in `U-52`. `ParamsForm`, `CredentialsPanel`, `RediscoveryPanel` (two),
+      `DiscoveryView` (three), `LoginView`, `ChangePasswordForm` and `RecipientsEditor` add their
+      `role="alert"` line only once it has text, which `U-41` found is not reliably announced.
+      **Done when** each is always in the tree and empty until a refusal, as `U-48` and `U-52`
+      did, with a test per component that a refusal lands in the node present before it.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its
