@@ -29,16 +29,20 @@ import { CorrelationId } from './Panels';
  *   re-read it made on its own (`U-67` review).
  *
  * `what` is the list, as it starts a sentence ("The channel list"). The History tab's series uses
- * it too, for a re-read the page asked for (`U-61`).
+ * it too, for a re-read the page asked for (`U-61`), and the channel table's readings, for a poll
+ * that failed (`U-71`), which say what is held in words of their own (`held`).
  */
 export function HeldListFailure({
   what,
+  held = 'this is the one read before and may be out of date',
   error,
   reading,
   onRetry,
   focusAfter,
 }: {
   what: string;
+  /** What is shown meanwhile, as it ends that sentence after "so". */
+  held?: string;
   /** The last read's failure, only while a list is held; null while a read is out. */
   error: ApiError | null;
   /** A read of the list is out. */
@@ -74,8 +78,7 @@ export function HeldListFailure({
       <p role="status" className="mb-2 text-sm text-warning-fg empty:mb-0">
         {error !== null && (
           <>
-            {what} could not be read again, so this is the one read before and may be out of date:{' '}
-            {error.message}
+            {what} could not be read again, so {held}: {error.message}
             <CorrelationId id={error.correlationId} />
           </>
         )}

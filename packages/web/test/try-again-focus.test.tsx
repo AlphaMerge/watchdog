@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, useApi } from '../src/api/client';
 import type { ObjectKind, ObjectSummary, SensorTypeSummary } from '../src/api/types';
 import { ErrorPanel, Loading } from '../src/components/Panels';
+import { TabPanel } from '../src/components/Tabs';
 import { AddSensor } from '../src/routes/AddSensor';
 import { LogsView } from '../src/routes/LogsView';
 import { SensorTypesView } from '../src/routes/SensorTypesView';
@@ -116,6 +117,73 @@ describe('the error panel’s own part', () => {
     elsewhere.focus();
     fireEvent.click(button);
     expect(document.activeElement).toBe(elsewhere);
+  });
+
+  /** As `Replacing`, inside a tab panel that may name itself as nearer (`U-76`). */
+  function Nearer({
+    named,
+    keepsFocus = false,
+  }: {
+    named?: string;
+    keepsFocus?: boolean;
+  }): React.JSX.Element {
+    const [failed, setFailed] = useState(true);
+    return (
+      <>
+        <h1 tabIndex={-1}>Page</h1>
+        <div id="nearby" tabIndex={-1}>
+          nearby
+        </div>
+        <TabPanel id="here" keepsFocus={keepsFocus}>
+          {failed ? (
+            <ErrorPanel
+              error={new ApiError(500, 'INTERNAL', FAILED)}
+              retry={() => {
+                setFailed(false);
+              }}
+              {...(named === undefined ? {} : { focusAfter: named })}
+            />
+          ) : (
+            <Loading what="it" />
+          )}
+        </TabPanel>
+      </>
+    );
+  }
+
+  /** Presses *Try again* with focus on it, and says where focus went. */
+  function pressAndGo(): Element | null {
+    const button = screen.getByRole('button', { name: 'Try again' });
+    button.focus();
+    const focus = watchFocus();
+    fireEvent.click(button);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(focus.lost()).toBe(0);
+    focus.stop();
+    return document.activeElement;
+  }
+
+  it('puts focus on a nearer target it is given, before the heading (U-76)', () => {
+    render(<Nearer named="nearby" />);
+    expect(pressAndGo()).toBe(document.getElementById('nearby'));
+  });
+
+  it('puts focus on the tab panel it is in, when the panel keeps focus (U-76)', () => {
+    render(<Nearer keepsFocus />);
+    expect(pressAndGo()).toBe(document.getElementById('panel-here'));
+  });
+
+  it('prefers the target it is given to the tab panel around it (U-76)', () => {
+    render(<Nearer named="nearby" keepsFocus />);
+    expect(pressAndGo()).toBe(document.getElementById('nearby'));
+  });
+
+  it('falls back to the heading when the target is not on the page, or not asked for (U-76)', () => {
+    const { unmount } = render(<Nearer named="nowhere" />);
+    expect(pressAndGo()).toBe(screen.getByRole('heading', { name: 'Page' }));
+    unmount();
+    render(<Nearer />);
+    expect(pressAndGo()).toBe(screen.getByRole('heading', { name: 'Page' }));
   });
 
   it('waits for a heading that comes with the answer', async () => {

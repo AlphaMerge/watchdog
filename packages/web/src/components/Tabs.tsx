@@ -1,4 +1,5 @@
 import { useCallback, useRef } from 'react';
+import { NearerFocus } from './keep-focus';
 import { nextTab, type TabDefinition } from './tabs-model';
 
 export interface TabsProps {
@@ -71,17 +72,30 @@ export function Tabs({ tabs, active, onSelect, label }: TabsProps): React.JSX.El
   );
 }
 
-/** The panel half. Kept here so the two ids can never drift apart. */
+/**
+ * The panel half. Kept here so the two ids can never drift apart.
+ *
+ * With `keepsFocus`, an error panel anywhere inside that goes with focus in it hands focus to this
+ * panel rather than to the page's heading (`U-76`): the panel is focusable, named by its tab, and
+ * is where the operator was. Opt-in, for the sensor page's tabs, where the heading is above the
+ * header, the tab strip and every card before the one that failed.
+ */
 export function TabPanel({
   id,
+  keepsFocus = false,
   children,
 }: {
   id: string;
+  keepsFocus?: boolean;
   children: React.ReactNode;
 }): React.JSX.Element {
   return (
     <div id={`panel-${id}`} role="tabpanel" aria-labelledby={`tab-${id}`} tabIndex={0}>
-      {children}
+      {keepsFocus ? (
+        <NearerFocus.Provider value={`panel-${id}`}>{children}</NearerFocus.Provider>
+      ) : (
+        children
+      )}
     </div>
   );
 }

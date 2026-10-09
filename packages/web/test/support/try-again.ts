@@ -90,14 +90,18 @@ function added(records: MutationRecord[], region: HTMLElement, text: string): bo
  * The whole round, from a page whose read failed: *Try again* re-reads with the same button
  * focused and unavailable, the message out of the alert and no loading line; a second failure in
  * the same words puts the message back in the same alert, focus still on the button; and a
- * read that succeeds puts focus on the page's heading. Never the body, from the first press on.
+ * read that succeeds puts focus on the page's heading, or on `landsOn` for a panel that names
+ * something nearer (`U-76`). Never the body, from the first press on.
  */
 export async function roundTrip({
   heading,
+  landsOn,
   answered,
   reads,
 }: {
   heading: string;
+  /** Where focus goes when the panel goes, when that is not the heading. */
+  landsOn?: () => HTMLElement | null;
   answered: () => HTMLElement;
   reads: () => number;
 }): Promise<void> {
@@ -137,7 +141,7 @@ export async function roundTrip({
   });
   said.disconnect();
 
-  // And one that succeeds takes the panel away, and focus goes to the heading.
+  // And one that succeeds takes the panel away, and focus goes to the heading (or nearer).
   fireEvent.click(button);
   expect(document.activeElement).toBe(button);
   await waitFor(() => {
@@ -145,7 +149,10 @@ export async function roundTrip({
   });
   expect(alert.isConnected).toBe(false);
   await waitFor(() => {
-    expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1, name: heading }));
+    const target =
+      landsOn === undefined ? screen.getByRole('heading', { level: 1, name: heading }) : landsOn();
+    expect(target).not.toBeNull();
+    expect(document.activeElement).toBe(target);
   });
   expect(focus.lost()).toBe(0);
   focus.stop();

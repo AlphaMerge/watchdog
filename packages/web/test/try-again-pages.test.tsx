@@ -6,6 +6,7 @@ import type {
   HistorySeries,
   NotificationMethod,
   ObjectDetail,
+  SensorValues,
   TemplateView,
 } from '../src/api/types';
 import { SessionContext, type SessionContextValue } from '../src/auth/session';
@@ -158,6 +159,88 @@ describe('a first read that failed (U-68)', () => {
       heading: 'Storage table',
       answered: () => screen.getByText('No channels to chart.'),
       reads: () => asked('/sensors/9/history'),
+    });
+  });
+});
+
+const SENSOR: ObjectDetail = {
+  ...GROUP,
+  id: 9,
+  kind: 'sensor',
+  name: 'Storage table',
+  sensorType: 'snmp.table',
+  params: {},
+  redactedParams: [],
+};
+
+const NO_READINGS: SensorValues = {
+  sensorId: 9,
+  readAt: '2026-10-09T12:00:00.000Z',
+  notBefore: '2026-10-09T11:57:00.000Z',
+  intervalSeconds: 60,
+  channels: [],
+};
+
+/** The sensor page, every read answered but the ones `script` says otherwise. */
+function sensorPage(at: string, script: Parameters<typeof core>[0]): ReturnType<typeof core> {
+  const scripted = core({
+    '/objects/9': [{ ok: SENSOR }],
+    '/objects/9/ancestors': [{ ok: { items: [] } }],
+    '/objects/9/channels': [{ ok: { items: [] } }],
+    '/sensors/9/values': [{ ok: NO_READINGS }],
+    '/sensor-types': [{ ok: { items: [] } }],
+    '/lookups': [{ ok: { items: [] } }],
+    ...script,
+  });
+  render(
+    <MemoryRouter initialEntries={[at]}>
+      <Routes>
+        <Route path="/objects/:id" element={<ObjectDetailView />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+  return scripted;
+}
+
+/**
+ * A panel inside one of the sensor page's tabs (`U-76`). The page's heading is above the header,
+ * the tab strip and every card before the one that failed, so when the panel goes, focus goes to
+ * the tab's own panel instead: focusable, named by its tab, and where the operator was.
+ */
+describe('a panel in a sensor page tab hands focus to the tab (U-76)', () => {
+  it('the History tab, with no series held', async () => {
+    const empty: HistorySeries = {
+      sensorId: 9,
+      from: '2026-10-09T11:00:00.000Z',
+      to: '2026-10-09T12:00:00.000Z',
+      resolutionSeconds: 60,
+      bucketCount: 0,
+      source: 'sample',
+      buckets: [],
+      channels: [],
+      segments: [],
+      adjustments: [],
+    };
+    const { asked } = sensorPage('/objects/9?tab=history', {
+      '/sensors/9/history': [fail('req-1'), fail('req-2'), { ok: empty }],
+    });
+    await roundTrip({
+      heading: 'Storage table',
+      landsOn: () => document.getElementById('panel-history'),
+      answered: () => screen.getByText('No channels to chart.'),
+      reads: () => asked('/sensors/9/history'),
+    });
+  });
+
+  it('an Overview card, the sensor type’s', async () => {
+    const { asked } = sensorPage('/objects/9', {
+      '/sensor-types': [fail('req-1'), fail('req-2'), { ok: { items: [] } }],
+    });
+    await roundTrip({
+      heading: 'Storage table',
+      landsOn: () => document.getElementById('panel-overview'),
+      answered: () => screen.getByText(/is not a registered sensor type/u),
+      reads: () => asked('/sensor-types'),
     });
   });
 });

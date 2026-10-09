@@ -1,14 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   formatDuration,
   formatSeconds,
   formatValue,
+  heldReadings,
   howLongAgo,
   lastReading,
   summarise,
 } from '../src/routes/detail/model';
 import { nextTab } from '../src/components/tabs-model';
-import type { HistoryChannel } from '../src/api/types';
+import type { HistoryChannel, SensorValues } from '../src/api/types';
 
 export function channel(
   avg: (number | null)[],
@@ -166,5 +167,77 @@ describe('moving between tabs with the keyboard', () => {
 
   it('copes with an active id that is not in the list', () => {
     expect(nextTab('ArrowRight', TABS, 'gone')).toBe('b');
+  });
+});
+
+describe('heldReadings (U-71)', () => {
+  // The core's window: three intervals of 60 s before `readAt`. Column a read 5 s before the
+  // answer, Column b 100 s before, Column c not within the window at all.
+  const answer: SensorValues = {
+    sensorId: 9,
+    readAt: '2026-10-09T12:00:00.000Z',
+    notBefore: '2026-10-09T11:57:00.000Z',
+    intervalSeconds: 60,
+    channels: [
+      {
+        id: 1,
+        key: 'a',
+        name: 'Column a',
+        unit: '',
+        decimals: null,
+        value: 1,
+        at: '2026-10-09T11:59:55.000Z',
+        retired: false,
+      },
+      {
+        id: 2,
+        key: 'b',
+        name: 'Column b',
+        unit: '',
+        decimals: null,
+        value: 0,
+        at: '2026-10-09T11:58:20.000Z',
+        retired: false,
+      },
+      {
+        id: 3,
+        key: 'c',
+        name: 'Column c',
+        unit: '',
+        decimals: null,
+        value: null,
+        at: null,
+        retired: false,
+      },
+    ],
+  };
+  const values = (held: number): (number | null)[] =>
+    heldReadings(answer, held).channels.map((one) => one.value);
+
+  it('is the answer itself as it arrives', () => {
+    expect(heldReadings(answer, 0)).toBe(answer);
+  });
+
+  it('takes out a reading once it has been held past the core’s window', () => {
+    // Column b was 80 s inside the window: held 79 s it is current, a zero and not no-data.
+    expect(values(79_000)).toEqual([1, 0, null]);
+    expect(values(80_001)).toEqual([1, null, null]);
+    expect(values(175_001)).toEqual([null, null, null]);
+    const gone = heldReadings(answer, 175_001).channels[0];
+    expect(gone?.at).toBeNull();
+    // What judges a channel is not the reading's to change.
+    expect(gone?.name).toBe('Column a');
+  });
+
+  it('measures by the core’s own timestamps, not by the browser’s clock', () => {
+    // A browser a day ahead of the core: read against the core's `notBefore`, moved on by the
+    // time held, whatever `Date.now()` says.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-10-10T12:00:00.000Z'));
+      expect(values(1_000)).toEqual([1, 0, null]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

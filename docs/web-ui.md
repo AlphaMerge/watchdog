@@ -413,7 +413,13 @@ resolved in one place ([administration.md](administration.md)).
 changes arrive over the WebSocket stream, because those have to be immediate. Channel *values*
 change on every scan whether the state does or not, and a frame on the wire for every reading of
 every sensor would be a stream nobody could keep up with — so the page re-reads them every
-15 seconds instead, while the Overview or the History tab is open.
+15 seconds instead, while the Overview or the History tab is open. The readings in hand stay on
+screen while the next are read, and when a read fails a line above the table says so, with
+**Try again**, while they stay (`U-71`). A reading kept that way is never passed off as current:
+once it has been held past the core's own window (three scan intervals) it says *no recent
+reading*, as a fresh answer would. If the first read of a sensor's readings fails, an error panel
+takes the table's place, and the 15-second poll does not ask again while its **Try again** is
+out.
 
 ### Graphs
 
@@ -467,8 +473,10 @@ The UI targets WCAG 2.1 AA, and this is a requirement rather than an aspiration
   renaming itself underneath the state it is reporting.
 - **Try again keeps focus.** A failed read's **Try again** stays where it is while it asks again,
   saying *Trying again…*; a second failure is said again in the same alert, and a read that
-  succeeds puts focus on the page's heading rather than dropping it to the page. A list kept on
-  screen whose re-read failed has its own **Try again** beside it, which keeps the list in place.
+  succeeds puts focus on the page's heading rather than dropping it to the page. On an object's
+  page focus goes to the tab it was in instead, the panel under the tab strip, rather than back
+  above the header and every card (`U-76`). A list kept on screen whose re-read failed has its own
+  **Try again** beside it, which keeps the list in place.
 
 ## What is not here
 

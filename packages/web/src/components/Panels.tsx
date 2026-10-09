@@ -1,6 +1,6 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useContext, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { ApiError } from '../api/client';
-import { keepFocusOnThePage } from './keep-focus';
+import { NearerFocus, keepFocusOnThePage } from './keep-focus';
 
 export function Card({
   title,
@@ -108,25 +108,43 @@ export function Loading({ what }: { what: string }): React.JSX.Element {
  *   the panel until its read succeeds has no heading yet, and its heading takes focus as it is
  *   put on the page. A caller that moves focus somewhere nearer in its own effect wins, since
  *   that runs after.
+ * - **Unless something nearer is named** (`U-76`): `focusAfter`, or the `NearerFocus` the panel
+ *   sits in (each of the sensor page's tab panels), is the id of an element that takes focus
+ *   before the heading does, while it is on the page. A panel on the History tab, or in one of
+ *   the Overview's cards, then leaves focus on that tab rather than at the top of the page.
  */
 export function ErrorPanel({
   error,
   retry,
   inRegion = false,
+  focusAfter,
 }: {
   error: ApiError;
   retry?: () => void;
   /** Shown inside a region that is already an alert (`RefusalPanel`), so not one of its own. */
   inRegion?: boolean;
+  /**
+   * The id of the element focus goes to when the panel goes with focus in it, before the page's
+   * heading (`U-76`). Defaults to the `NearerFocus` around the panel.
+   */
+  focusAfter?: string;
 }): React.JSX.Element {
   const panel = useRef<HTMLDivElement>(null);
   const [pressedFor, setPressedFor] = useState<ApiError | null>(null);
   const busy = retry !== undefined && pressedFor === error;
+  const around = useContext(NearerFocus);
+  // The latest, for the cleanup below, which is the one from the panel's first commit.
+  const nearer = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    nearer.current = focusAfter ?? around;
+  });
 
   useLayoutEffect(() => {
     const node = panel.current;
     return () => {
-      if (node !== null && node.contains(document.activeElement)) keepFocusOnThePage(node);
+      if (node !== null && node.contains(document.activeElement)) {
+        keepFocusOnThePage(node, nearer.current);
+      }
     };
   }, []);
 

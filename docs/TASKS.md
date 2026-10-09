@@ -26984,13 +26984,70 @@ because each is a decision rather than a defect:
         read back after a later key: jsdom's `act` commits each transition before the next key,
         so that lag needs a browser.
 
-- [ ] **U-71 — the channel table's readings drop on every poll** · S · U-61 · Found
+- [x] **U-71 — the channel table's readings drop on every poll** · S · U-61 · Found
       2026-10-09 in `U-61`. Each `/values` poll reloads, `useApi` answers `loading`, and the
       table is handed `null` values for the length of the request, every 15 seconds. **Done
       when** the last readings stay in sight while the next are read (held from `ready`, as the
       channel list is), and a failed poll is said without dropping them, with a
       MutationObserver test. The same poll firing while the values panel's *Try again* is out
       takes the panel away and sends focus to the heading (`U-68` review); it should wait.
+
+      **U-71 outcome. The page holds the last readings it read, per sensor, through every poll
+      and every failed one, ages them by the time held, and says a failed poll beside them; the
+      poll waits while the values panel's *Try again* is out.** Web only; no route, migration or
+      protocol change.
+      - **Held from `ready`, with its path and its arrival.** `ObjectDetailView` files each answer
+        under the path it was read from (`/sensors/:id/values`, so the sensor's own) and
+        `performance.now()` at arrival, in a ref filled only from `ready`, as the channel list is.
+        The table is handed the answer in hand, or else the held one when its path is the one
+        being asked; on another sensor, nothing, so a move from 9 to 12 shows *—* until 12
+        answers, and 12's error panel if it fails (`U-62`'s rule).
+      - **No-data is not zero, and not an old number either.** `heldReadings` (`detail/model.ts`)
+        moves the core's own `notBefore` on by the time the answer has been held and takes out
+        every reading that falls before it (`value` and `at` null), so the table says *no recent
+        reading* (or *not read*, retired) exactly where a fresh answer would. Both ends are the
+        core's timestamps, moved by a monotonic interval measured here, so a browser clock that is
+        off the core's neither drops current readings nor keeps stale ones. The age beside a
+        reading still comes from `Date.now()` at render, as it did. Applied to the answer in hand
+        too (held zero at arrival), so one that crosses its window between polls also says so.
+      - **A failed poll is said beside them** through `HeldListFailure` (`U-67`'s region, polite,
+        there and empty from the moment readings are held, above the table, after the channel
+        list's own): *The readings could not be read again, so these are the ones read before,
+        each as old as it says:* and the core's id. `HeldListFailure` gained `held`, the clause
+        after "so", since "this is the one read before" did not fit a plural. Its *Try again* is
+        the hook's `reload`; when a good read takes it from under focus, focus goes to the
+        Overview's panel. Only with nothing held (a sensor's first read failed) is it the error
+        panel in the table's place, as before.
+      - **The poll and the error panel.** The poll now asks through the latest render: with
+        readings held it reloads as before (`HeldListFailure` keeps its *Try again* through a read
+        the page starts); with the error panel up it re-reads with `retry`, so the panel stays
+        until a read answers rather than giving way to an empty table; and while that panel's
+        *Try again* is out (pressed for the error shown, as `ErrorPanel` counts busy) it asks
+        nothing, so the operator's read is not restarted and the panel and its focus stay.
+      - **Tests** (`readings-held.test.tsx`, 6, fake `setInterval`/`Date` with `performance.now`
+        moved with them). A `MutationObserver` over the page through a slow poll and a quick one:
+        every state of the reading cell is a number, the table is never removed, no alert. A
+        refused poll: the region, quiet and polite before, says it with `req-71` while the reading
+        stays, and the next good poll empties it and takes *Try again* away; no frame without the
+        number. Held through failing polls, the reading (taken 5 s before an answer whose window
+        is 180 s) is still a number at 165 s, *3m ago*, and *no recent reading* at 180 s, with the
+        failure still said. From sensor 9 to 12 (the same channel ids, so a misfiled reading
+        would land in a row), every recorded page text lacks sensor 9's number, 12's row says *—*
+        while its read is out, and its refusal is an error panel. With the panel up, *Try again*
+        pressed and its read held, two polls' worth of time ask nothing, the same button stays
+        focused as *Trying again…*, and when it answers focus goes to the Overview's panel
+        (`U-76`), never the body; a poll with the panel up that is refused again never removes
+        it. `detail-model.test.ts`: the answer itself at zero, each reading out at its own edge
+        (a zero kept as a zero until then), and a browser a day ahead of the core changing
+        nothing. `retired-filter-url` and `retired-history-page` expected the table to go on a
+        failed poll; they now expect it, and the hide box, to stay with the failure said.
+        **Mutations** (restored byte for byte; the web package has no `dist`): nothing held 5;
+        no ageing 2; held for any path 1; the poll not waiting 1; the poll always reloading 2;
+        the failure not passed to the region 4.
+      - **Not done.** A core that keeps failing is said again every fifteen seconds while
+        readings are held, since each poll empties and refills the region (`U-72`'s question,
+        now four times a minute here). Coming back to the Overview with a failure in hand mounts
+        the region with its text already in it.
 
 - [ ] **U-72 — repeats of an automatic failure are announced every minute** · S · U-67, U-66 ·
       Found 2026-10-09. A held list's automatic re-read empties and refills its region, so a
@@ -27131,10 +27188,35 @@ because each is a decision rather than a defect:
         leave the last keys out of the address (*Back* cannot write to an entry no longer current;
         `pagehide` was not tried). The listing is still asked for on every key.
 
-- [ ] **U-76 — a sub-panel's Try again sends focus to the page heading** · XS · U-68 · Found
+- [x] **U-76 — a sub-panel's Try again sends focus to the page heading** · XS · U-68 · Found
       2026-10-09 in `U-68`. When a History tab or Overview card panel goes, focus goes to the
       page's `h1`, far from where the operator was. **Done when** `ErrorPanel` takes an optional
       nearer focus target and the sensor page's tabs use it, with tests.
+
+      **U-76 outcome. `ErrorPanel` takes `focusAfter`, the id of an element nearer than the
+      heading, and the object page's tab panels give every panel inside them their own.** Web
+      only.
+      - **`keepFocusOnThePage(leaving, nearer)`** focuses the nearer element when it is on the page
+        and outside the panel going, and the heading otherwise (and owes focus as before when
+        there is neither). The after-commit check tries the nearer one again first, so a target
+        taken off the page in the same commit falls back to the heading.
+      - **Through context, not through every caller.** `NearerFocus` (`keep-focus.ts`) is the id
+        a panel uses when it is given no `focusAfter`. `TabPanel` provides its own id with
+        `keepsFocus`, which every tab on the object page sets, so the History tab's panel, the
+        Overview's cards (the sensor type, the readings, the channel list's first read), the
+        settings, the audit log and the panels inside the log, triggers and credentials tabs
+        all leave focus on their tab, which is focusable and named by it. An explicit
+        `focusAfter` wins over the context. Opt-in, so the Logs page's tabs are unchanged.
+      - **Tests.** `try-again-focus.test.tsx`: a given target takes focus, the tab panel takes it
+        under `keepsFocus`, a given target wins over the tab panel, and a target not on the page
+        or none falls back to the heading; focus never on the body. `try-again-pages.test.tsx`:
+        the object page's History tab (no series held) and its Overview's sensor-type card go
+        through the shared round (`roundTrip` now takes `landsOn`) and end with
+        `document.activeElement` on `panel-history` and `panel-overview`. **Mutations**
+        (restored byte for byte): the nearer target ignored fails 6; `TabPanel` not providing it
+        4; the prop ignored for the context 2.
+      - **Not done.** The Logs page's tabs still send focus to its heading; `keepsFocus` would do
+        it in three places.
 
 - [x] **A-42 — `http.transaction` puts a credential wherever a step's text says** · M · T-13,
       S-19, A-40 · Found 2026-09-29 by `A-40`'s inventory. `{{credential.password}}` and its

@@ -93,6 +93,32 @@ export function howLongAgo(at: string, now: number): string {
   return `${String(Math.round(hours / 24))}d ago`;
 }
 
+/**
+ * An answer from `/values`, as it reads `heldMs` after it arrived (`U-71`).
+ *
+ * The page keeps its last readings in sight while the next are read, and when a read fails, for as
+ * long as the reads keep failing. The core answered with only what was current then: nothing taken
+ * before `notBefore` (three scan intervals before `readAt`). A reading held past that window is no
+ * longer current, and showing it as one is no-data wearing a number. So the window moves on with
+ * the time the answer has been held, and a reading that falls out of it is taken out (`value` and
+ * `at` null), which the table says as it says any other: *no recent reading*, or *not read* for a
+ * retired channel. **Held time, not the age of the reading by the browser's clock**: both ends of
+ * the comparison are the core's timestamps, moved by an interval measured here, so a browser whose
+ * clock is minutes off the core's neither drops current readings nor keeps stale ones.
+ */
+export function heldReadings(values: SensorValues, heldMs: number): SensorValues {
+  if (heldMs <= 0) return values;
+  const notBefore = Date.parse(values.notBefore) + heldMs;
+  return {
+    ...values,
+    channels: values.channels.map((channel) =>
+      channel.at !== null && Date.parse(channel.at) < notBefore
+        ? { ...channel, value: null, at: null }
+        : channel,
+    ),
+  };
+}
+
 // ---------------------------------------------------------------------------------------------
 // State log (M-15).
 // ---------------------------------------------------------------------------------------------

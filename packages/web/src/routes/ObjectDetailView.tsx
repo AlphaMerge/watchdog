@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { useApi, type ApiError, type Loadable } from '../api/client';
+import { useApi, type ApiError } from '../api/client';
 import { useStateStream, type LiveState } from '../api/stream';
 import type {
   AncestorsView,
@@ -26,7 +26,7 @@ import { SettingsPanel } from './detail/SettingsPanel';
 import { StateLogPanel } from './detail/StateLogPanel';
 import { ActorLink, MoreButton } from './LogsView';
 import { usePaged } from './logs-model';
-import { RELIST_MIN_MS, channelListIsStale, tabsFor } from './detail/model';
+import { RELIST_MIN_MS, channelListIsStale, heldReadings, tabsFor } from './detail/model';
 import { ParamsForm } from './detail/ParamsForm';
 import { TriggersPanel } from './detail/TriggersPanel';
 import { PageTitle } from '../components/PageTitle';
@@ -120,12 +120,65 @@ export function ObjectDetailView(): React.JSX.Element {
   // is hidden, so a page left open on a second monitor is not asking every fifteen seconds for a
   // table nobody is looking at.
   const showsChannels = isSensor && (active === 'overview' || active === 'history');
-  const values = useApi<SensorValues>(showsChannels ? `/sensors/${id}/values` : null);
+  const valuesPath = showsChannels ? `/sensors/${id}/values` : null;
+  const values = useApi<SensorValues>(valuesPath);
+  const valuesAnswer = values.status === 'ready' ? values.data : null;
+  // The readings last read, **kept while the next are read** (`U-71`): every poll reloads, and
+  // `useApi` says `loading` for the length of each request, so the table used to be handed no
+  // readings at all, every fifteen seconds, for as long as the core took to answer. Filled only
+  // from `ready`, with the path it was read from (the sensor's own, so sensor 9's readings are
+  // never shown under sensor 12's address, `U-55` review) and the moment it arrived, monotonic:
+  // **a held reading is aged by the time it has been held** (`heldReadings`), so one that has
+  // gone past the core's window says *no recent reading*, as a fresh answer would, rather than a
+  // number that has stopped being current. No-data is not zero, and not an old number either.
+  const heldValues = useRef<{ path: string; data: SensorValues; at: number } | null>(null);
+  const valuesAnswered = values.answered;
+  useEffect(() => {
+    if (valuesAnswer !== null && valuesAnswered !== null) {
+      heldValues.current = { path: valuesAnswered, data: valuesAnswer, at: performance.now() };
+    }
+  }, [valuesAnswer, valuesAnswered]);
+  const held = heldValues.current;
+  const shownValues =
+    valuesPath === null
+      ? null
+      : valuesAnswer !== null
+        ? { data: valuesAnswer, at: held !== null && held.data === valuesAnswer ? held.at : null }
+        : held !== null && held.path === valuesPath
+          ? held
+          : null;
+  const readings =
+    shownValues === null
+      ? null
+      : heldReadings(
+          shownValues.data,
+          shownValues.at === null ? 0 : performance.now() - shownValues.at,
+        );
+  // *Try again* on the values' error panel (no readings held), pressed for the error it shows:
+  // out until that read answers, as `ErrorPanel` counts busy, since every failed read parses a
+  // new error.
+  const valuesRetriedFor = useRef<ApiError | null>(null);
+  const retryValues = (): void => {
+    if (values.status === 'error') valuesRetriedFor.current = values.error;
+    values.retry();
+  };
+  // What a poll does, from the latest render. **It waits while that *Try again* is out** (`U-68`
+  // review): a reload then took the panel, and the focus its button held, to the heading, from
+  // under the read the operator had just asked for. With the panel up and no *Try again* out it
+  // re-reads with the failure kept (`retry`), so the panel stays until a read answers. With
+  // readings held a failure is said beside them (`HeldListFailure`), which keeps its own *Try
+  // again* through a read the page starts on its own, so the poll reloads as it always has.
+  const poll = useRef<() => void>(() => undefined);
+  useEffect(() => {
+    poll.current = () => {
+      if (values.status !== 'error' || readings !== null) values.reload();
+      else if (valuesRetriedFor.current !== values.error) values.retry();
+    };
+  });
   // Only to force a re-render on the interval. The ages themselves come from `Date.now()` at
   // render time — holding "now" in state means a component that re-renders for any other reason
   // redraws with a stale clock, and "58s ago" that has stopped counting is worse than no age.
   const [, tick] = useState(0);
-  const reloadValues = values.reload;
   useEffect(() => {
     if (!showsChannels) return;
     const refresh = (): void => {
@@ -133,7 +186,7 @@ export function ObjectDetailView(): React.JSX.Element {
       // so a tab returned to is current within a frame rather than fifteen seconds later.
       if (document.visibilityState !== 'visible') return;
       tick((count) => count + 1);
-      reloadValues();
+      poll.current();
     };
     const handle = window.setInterval(refresh, VALUES_POLL_MS);
     document.addEventListener('visibilitychange', refresh);
@@ -141,11 +194,10 @@ export function ObjectDetailView(): React.JSX.Element {
       window.clearInterval(handle);
       document.removeEventListener('visibilitychange', refresh);
     };
-  }, [reloadValues, showsChannels]);
+  }, [showsChannels]);
   // Once per answer: keyed on the answer itself, not on every render. `useApi` never returns an
   // answer read for another sensor's path as this one's (`U-62`), and the list is this sensor's
   // or null.
-  const valuesAnswer = values.status === 'ready' ? values.data : null;
   useEffect(() => {
     if (
       valuesAnswer !== null &&
@@ -170,9 +222,10 @@ export function ObjectDetailView(): React.JSX.Element {
   if (object.status === 'error') return <ErrorPanel error={object.error} retry={object.retry} />;
 
   const detail = object.data;
-  // In the URL, as the alarm list's filters are (`U-38` review): the channel table is swapped for
-  // an error panel whenever a poll of its values fails, so a choice held inside it was dropped by
-  // one failed poll and every retired row came back unannounced. Absent, they are shown, as the
+  // In the URL, as the alarm list's filters are (`U-38` review): the channel table was swapped for
+  // an error panel whenever a poll of its values failed (now only when no readings are held,
+  // `U-71`), so a choice held inside it was dropped by one failed poll and every retired row came
+  // back unannounced. Absent, they are shown, as the
   // alarm list shows acknowledged alarms until asked not to: a channel an edit has just taken out
   // stays in sight, marked, with its limits still settable for the day it is put back.
   const hideRetired = params.get('retired') === 'hide';
@@ -227,7 +280,7 @@ export function ObjectDetailView(): React.JSX.Element {
       <Tabs tabs={tabs} active={active} onSelect={select} label={`${detail.name} sections`} />
 
       {active === 'overview' && (
-        <TabPanel id="overview">
+        <TabPanel id="overview" keepsFocus>
           <div className="space-y-4">
             {detail.kind === 'sensor' && (
               <Card title="Channels">
@@ -239,7 +292,11 @@ export function ObjectDetailView(): React.JSX.Element {
                     channelList === null && channels.status === 'error' ? channels.error : null
                   }
                   onRetryList={channels.reload}
-                  values={values}
+                  readings={readings}
+                  readingsError={values.status === 'error' ? values.error : null}
+                  reading={values.status === 'loading'}
+                  onRetryReadings={retryValues}
+                  onReadAgain={values.reload}
                   lookups={lookups.status === 'ready' ? lookups.data.items : null}
                   hideRetired={hideRetired}
                   onHideRetiredChange={setHideRetired}
@@ -267,7 +324,7 @@ export function ObjectDetailView(): React.JSX.Element {
       )}
 
       {active === 'history' && (
-        <TabPanel id="history">
+        <TabPanel id="history" keepsFocus>
           {listFailure}
           {/* The same `?retired=hide` as the channel table (`U-55`): one choice for the page. */}
           <HistoryPanel
@@ -281,7 +338,7 @@ export function ObjectDetailView(): React.JSX.Element {
       )}
 
       {active === 'log' && (
-        <TabPanel id="log">
+        <TabPanel id="log" keepsFocus>
           <Card title="State changes">
             <StateLogPanel objectId={detail.id} isSensor={detail.kind === 'sensor'} />
           </Card>
@@ -289,7 +346,7 @@ export function ObjectDetailView(): React.JSX.Element {
       )}
 
       {active === 'settings' && (
-        <TabPanel id="settings">
+        <TabPanel id="settings" keepsFocus>
           <Card title="Settings">
             {settings.status === 'loading' && <Loading what="settings" />}
             {settings.status === 'error' && (
@@ -308,7 +365,7 @@ export function ObjectDetailView(): React.JSX.Element {
       )}
 
       {active === 'credentials' && (
-        <TabPanel id="credentials">
+        <TabPanel id="credentials" keepsFocus>
           {/* Keyed by the object: a link from an inherited set goes to its owner's tab, which is
               this same component, and a form left open must not follow it there. */}
           <CredentialsPanel
@@ -320,7 +377,7 @@ export function ObjectDetailView(): React.JSX.Element {
       )}
 
       {active === 'triggers' && (
-        <TabPanel id="triggers">
+        <TabPanel id="triggers" keepsFocus>
           <Card title="Notification triggers">
             <TriggersPanel objectId={detail.id} inheritsTriggers={detail.inheritsTriggers} />
           </Card>
@@ -328,7 +385,7 @@ export function ObjectDetailView(): React.JSX.Element {
       )}
 
       {active === 'changes' && (
-        <TabPanel id="changes">
+        <TabPanel id="changes" keepsFocus>
           <Card title="Configuration history">
             <AuditPanel objectId={detail.id} />
           </Card>
@@ -466,7 +523,11 @@ function LiveChannels({
   channels,
   listError,
   onRetryList,
-  values,
+  readings,
+  readingsError,
+  reading,
+  onRetryReadings,
+  onReadAgain,
   lookups,
   hideRetired,
   onHideRetiredChange,
@@ -477,8 +538,19 @@ function LiveChannels({
   listError: ApiError | null;
   /** Reads the list again: not the page's `relist`, whose once-a-minute cap would hold it back. */
   onRetryList: () => void;
-  /** The page's poll of the readings. */
-  values: Loadable<SensorValues> & { retry: () => void };
+  /**
+   * The page's poll of the readings: the last answer read for this sensor, held through the next
+   * read and aged by how long it has been held (`U-71`), or null while none has been read.
+   */
+  readings: SensorValues | null;
+  /** The last poll's failure. */
+  readingsError: ApiError | null;
+  /** A poll is out. */
+  reading: boolean;
+  /** The error panel's *Try again*, which keeps the failure in hand while it re-reads (`U-68`). */
+  onRetryReadings: () => void;
+  /** The held readings' *Try again*, which reads again as the poll does. */
+  onReadAgain: () => void;
   lookups: readonly LookupSummary[] | null;
   hideRetired: boolean;
   onHideRetiredChange: (hide: boolean) => void;
@@ -501,18 +573,39 @@ function LiveChannels({
       </>
     );
   }
-  if (values.status === 'error') return <ErrorPanel error={values.error} retry={values.retry} />;
+  // No readings held for this sensor: its first read failed, and that is all there is to say.
+  if (readings === null && readingsError !== null) {
+    return <ErrorPanel error={readingsError} retry={onRetryReadings} />;
+  }
 
   return (
-    <ChannelTable
-      channels={channels}
-      sensorType={sensorType}
-      values={values.status === 'ready' ? values.data : null}
-      lookups={lookups}
-      now={Date.now()}
-      hideRetired={hideRetired}
-      onHideRetiredChange={onHideRetiredChange}
-    />
+    <>
+      {/* A poll that failed with readings held (`U-71`): said beside them, which stay, rather than
+          an error panel in the table's place. There, empty, from the moment readings are held, so
+          a failure lands in a node that was (`U-67`). When a good read takes *Try again* from
+          under focus, focus goes to the Overview's panel, as the channel list's does. */}
+      {readings !== null && (
+        <HeldListFailure
+          what="The readings"
+          held="these are the ones read before, each as old as it says"
+          error={readingsError}
+          reading={reading}
+          onRetry={onReadAgain}
+          focusAfter={() => {
+            document.getElementById('panel-overview')?.focus();
+          }}
+        />
+      )}
+      <ChannelTable
+        channels={channels}
+        sensorType={sensorType}
+        values={readings}
+        lookups={lookups}
+        now={Date.now()}
+        hideRetired={hideRetired}
+        onHideRetiredChange={onHideRetiredChange}
+      />
+    </>
   );
 }
 

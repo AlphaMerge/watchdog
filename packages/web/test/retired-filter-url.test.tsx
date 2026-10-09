@@ -163,18 +163,20 @@ describe('hiding retired channels on the sensor page', () => {
     expect(screen.queryByText('Column b')).toBeNull();
     expect(where).toBe('/objects/9?retired=hide');
 
-    // A poll fails: the table goes, for an error panel.
+    // A poll fails: the table stays, with the choice, and the failure is said beside it (`U-71`).
     valuesUp = false;
     poll();
-    await waitFor(() => {
-      expect(screen.queryByRole('checkbox', { name: 'Hide retired channels' })).toBeNull();
-    });
-    expect(screen.queryByText('Column a')).toBeNull();
+    expect(await screen.findByText(/^The readings could not be read again/u)).toBeDefined();
+    expect(screen.getByText('Column a')).toBeDefined();
+    expect(box().checked).toBe(true);
 
-    // The next one answers: the table is back, and so is the choice.
+    // The next one answers: the table and the choice as they were, and nothing said.
     valuesUp = true;
     poll();
-    expect(await screen.findByText('Column a')).toBeDefined();
+    await waitFor(() => {
+      expect(screen.queryByText(/^The readings could not be read again/u)).toBeNull();
+    });
+    expect(screen.getByText('Column a')).toBeDefined();
     expect(box().checked).toBe(true);
     expect(screen.queryByText('Column b')).toBeNull();
     // The box's own region: the page has another, for a re-read of the list that fails (`U-67`).

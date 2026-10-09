@@ -267,15 +267,17 @@ describe('hiding retired channels on the History tab', () => {
     expect(box().checked).toBe(true);
     expect(screen.queryByText('Column b')).toBeNull();
 
-    // A values poll fails, which takes the table away, and the next one answers.
+    // A values poll fails, which keeps the table and says so (`U-71`), and the next one answers.
     valuesUp = false;
     poll();
-    await waitFor(() => {
-      expect(screen.queryByRole('checkbox', { name: 'Hide retired channels' })).toBeNull();
-    });
+    expect(await screen.findByText(/^The readings could not be read again/u)).toBeDefined();
+    expect(box().checked).toBe(true);
     valuesUp = true;
     poll();
-    expect(await screen.findByText('Column a')).toBeDefined();
+    await waitFor(() => {
+      expect(screen.queryByText(/^The readings could not be read again/u)).toBeNull();
+    });
+    expect(screen.getByText('Column a')).toBeDefined();
 
     // And back to History, still hidden.
     fireEvent.click(screen.getByRole('tab', { name: 'History' }));

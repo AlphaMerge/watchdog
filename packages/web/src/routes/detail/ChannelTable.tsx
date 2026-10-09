@@ -40,8 +40,8 @@ export function ChannelTable({
   now: number;
   /**
    * Whether retired channels are left out (`U-38`). Held by the page, in its URL, not here: this
-   * table is unmounted whenever a poll of its values fails, and a choice held inside it would go
-   * with it.
+   * table is unmounted when its first poll of a sensor's values fails, and a choice held inside
+   * it would go with it.
    */
   hideRetired: boolean;
   onHideRetiredChange: (hide: boolean) => void;
