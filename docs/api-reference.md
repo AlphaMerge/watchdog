@@ -677,7 +677,7 @@ Derived from the run and its hosts rather than stored, so it cannot drift from w
 | `probeId` | integer |  |  |
 | `scheduleId` | integer | nullable | The rediscovery schedule that started it (`D-07`), or null for a run somebody started. What tells an operator where a run they did not start came from. |
 | `range` | string | **required** |  |
-| `level` | string |  |  |
+| `level` | `ping` · `standard` · `detailed` |  |  |
 | `status` | `queued` · `running` · `identifying` · `done` · `cancelled` · `failed` | **required** |  |
 | `headline` | string | **required** |  |
 | `scanned` | object | **required** |  |
@@ -690,7 +690,7 @@ Derived from the run and its hosts rather than stored, so it cannot drift from w
 | `scanned.complete` | boolean | **required** |  |
 | `found` | object | **required** |  |
 | `found.byKind` | object[] | **required** |  |
-| `found.byKind[].kind` | string | **required** |  |
+| `found.byKind[].kind` | `windows` · `linux` · `network` · `printer` · `hypervisor` · `nas` · `unknown` · `unidentified` | **required** |  |
 | `found.byKind[].count` | integer | **required** |  |
 | `found.byVendor` | object[] | **required** |  |
 | `found.byVendor[].vendor` | string | **required** |  |
@@ -834,7 +834,7 @@ Empty on almost every installation, because there is no schedule until somebody 
 | `items[].name` | string | **required** |  |
 | `items[].enabled` | boolean | **required** |  |
 | `items[].range` | string | **required** |  |
-| `items[].level` | string |  |  |
+| `items[].level` | `ping` · `standard` · `detailed` |  |  |
 | `items[].templates` | string[] |  |  |
 | `items[].timeoutMs` | integer |  |  |
 | `items[].concurrency` | integer |  |  |
@@ -892,7 +892,7 @@ Created **disabled** unless `enabled` says otherwise, and with `autoProvision` o
 | `name` | string | **required** |  |
 | `enabled` | boolean | **required** |  |
 | `range` | string | **required** |  |
-| `level` | string |  |  |
+| `level` | `ping` · `standard` · `detailed` |  |  |
 | `templates` | string[] |  |  |
 | `timeoutMs` | integer |  |  |
 | `concurrency` | integer |  |  |
@@ -938,7 +938,7 @@ Enabling computes the next run; disabling clears it, so a schedule that is off c
 | `name` | string | **required** |  |
 | `enabled` | boolean | **required** |  |
 | `range` | string | **required** |  |
-| `level` | string |  |  |
+| `level` | `ping` · `standard` · `detailed` |  |  |
 | `templates` | string[] |  |  |
 | `timeoutMs` | integer |  |  |
 | `concurrency` | integer |  |  |
@@ -1000,7 +1000,7 @@ Change a schedule
 | `name` | string | **required** |  |
 | `enabled` | boolean | **required** |  |
 | `range` | string | **required** |  |
-| `level` | string |  |  |
+| `level` | `ping` · `standard` · `detailed` |  |  |
 | `templates` | string[] |  |  |
 | `timeoutMs` | integer |  |  |
 | `concurrency` | integer |  |  |
@@ -3922,7 +3922,7 @@ The shapes routes share, each declared once in the code and rendered once here.
 | `sensorId` | integer | **required** |  |
 | `sensorName` | string | **required** |  |
 | `state` | `unknown` · `up` · `warning` · `down` · `down_acknowledged` · `down_partial` · `unusual` · `paused` | **required** | The sensor's state now. For a held return (`recovering` is not null) that is the state it came back to, usually `up`; `recovering` is a `state` filter value, not a state. |
-| `cause` | string | **required** |  |
+| `cause` | `scan` · `limit` · `lookup` · `user` · `schedule` · `dependency` · `parent` · `probe` · `access` · `simulated` | **required** | What put the sensor in that state. |
 | `message` | string | **required** |  |
 | `since` | string | **required** |  |
 | `priority` | integer | **required** |  |
@@ -4419,12 +4419,12 @@ one of 4 shapes, by `kind`
 | `templateId` | integer | **required** nullable |  |
 | `templateName` | string | **required** nullable |  |
 | `method` | string | **required** nullable |  |
-| `triggerKind` | string | **required** |  |
-| `reason` | string | **required** |  |
-| `state` | string | **required** nullable |  |
+| `triggerKind` | string | **required** | The kind of trigger that queued it, kept when the trigger is deleted: `state` or `threshold` in this version. |
+| `reason` | `initial` · `escalation` · `repeat` · `recovery` · `threshold` · `clear` | **required** |  |
+| `state` | `unknown` · `up` · `warning` · `down` · `down_acknowledged` · `down_partial` · `unusual` · `paused` | **required** |  |
 | `message` | string | **required** |  |
 | `status` | `pending` · `sent` · `failed` · `discarded` | **required** |  |
-| `disposition` | string | **required** |  |
+| `disposition` | `undecided` · `immediate` · `held` | **required** | Sent on its own (`immediate`) or folded into a digest (`held`); `undecided` until the template's summarisation has decided. |
 | `attempts` | integer | **required** |  |
 | `deliveredAt` | string | **required** nullable |  |
 | `nextAttemptAt` | string | **required** nullable |  |

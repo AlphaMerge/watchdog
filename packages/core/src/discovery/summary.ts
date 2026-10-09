@@ -1,4 +1,4 @@
-import type { DeviceKind, DiscoveryLevel } from '@ms/shared';
+import { DEVICE_KINDS, type DeviceKind, type DiscoveryLevel } from '@ms/shared';
 import type { DiscoveryRunRow } from './service.js';
 
 /**
@@ -43,7 +43,7 @@ export interface DiscoverySummary {
     complete: boolean;
   };
   found: {
-    byKind: { kind: DeviceKind | 'unidentified'; count: number }[];
+    byKind: { kind: SummaryKind; count: number }[];
     byVendor: { vendor: string; count: number }[];
   };
   created: {
@@ -63,6 +63,16 @@ export interface DiscoverySummary {
     addressesPerSecond: number | null;
   };
 }
+
+/**
+ * Every kind the breakdown can name: the classifier's, and `unidentified` for a host it never
+ * looked at (see `kindOf`). The route's enum is this list (`P-342`). Nothing in the database
+ * checks a kind, because it is read out of the stored fingerprint; `kindOf` is what keeps the
+ * answer inside the list.
+ */
+export const SUMMARY_KINDS = [...DEVICE_KINDS, 'unidentified'] as const;
+
+export type SummaryKind = (typeof SUMMARY_KINDS)[number];
 
 /** One row of the kind breakdown, as the database hands it over: a null kind is unidentified. */
 export interface KindCount {
@@ -198,15 +208,7 @@ function count(n: number, one: string, many: string): string {
   return `${String(n)} ${n === 1 ? one : many}`;
 }
 
-const KINDS: ReadonlySet<string> = new Set([
-  'windows',
-  'linux',
-  'network',
-  'printer',
-  'hypervisor',
-  'nas',
-  'unknown',
-]);
+const KINDS: ReadonlySet<string> = new Set(DEVICE_KINDS);
 
 /**
  * A kind from the database, or `unidentified`.
@@ -216,7 +218,7 @@ const KINDS: ReadonlySet<string> = new Set([
  * a `ping` run, or a run cancelled before identification. Collapsing them would make a ping-only
  * discovery look like a failed classification.
  */
-function kindOf(value: string | null): DeviceKind | 'unidentified' {
+function kindOf(value: string | null): SummaryKind {
   if (value === null || !KINDS.has(value)) return 'unidentified';
   return value as DeviceKind;
 }

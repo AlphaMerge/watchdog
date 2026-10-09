@@ -3,6 +3,7 @@ import type { Visibility } from '../auth/access.js';
 import type { SensorState } from '../state/tables.js';
 import type { NotificationReason } from './chain.js';
 import { describeCounts, type SkipCounts } from './recipients.js';
+import type { RequestDisposition } from './summarisation.js';
 
 /** One notification, and everything that happened to it (`N-13`). */
 export interface NotificationLogEntry {
@@ -15,11 +16,12 @@ export interface NotificationLogEntry {
   readonly method: string | null;
   readonly triggerKind: string;
   readonly reason: NotificationReason;
-  readonly state: SensorState | null;
+  /** `notification_request.state`, which is NOT NULL (migration 016). */
+  readonly state: SensorState;
   readonly message: string;
   readonly status: string;
   /** Whether it was sent on its own or folded into a digest (`N-11`). */
-  readonly disposition: string;
+  readonly disposition: RequestDisposition;
   readonly attempts: number;
   readonly deliveredAt: Date | null;
   readonly nextAttemptAt: Date | null;
@@ -65,10 +67,10 @@ interface Row {
   method: string | null;
   trigger_kind: string;
   reason: NotificationReason;
-  state: SensorState | null;
+  state: SensorState;
   message: string;
   status: string;
-  disposition: string;
+  disposition: RequestDisposition;
   attempts: number;
   delivered_at: Date | null;
   next_attempt_at: Date | null;

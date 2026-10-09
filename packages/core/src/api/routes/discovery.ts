@@ -2,6 +2,7 @@
 import '@fastify/swagger';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import {
+  DISCOVERY_LEVEL_IDS,
   DISCOVERY_LEVELS,
   estimateSeconds,
   IpRangeError,
@@ -12,6 +13,7 @@ import { DiscoveryError, runNotFound } from '../../discovery/errors.js';
 import { probeFor, requireProbeInView } from '../../discovery/scope.js';
 import type { Queryable } from '../../db/pool.js';
 import { DISCOVERY_RUN_STATUSES, type DiscoveryService } from '../../discovery/service.js';
+import { SUMMARY_KINDS } from '../../discovery/summary.js';
 import type { ProvisionReport, ProvisionSight } from '../../discovery/provision.js';
 import type { Actor } from '../../objects/audit.js';
 import type { RediscoveryService, SchedulePatch } from '../../discovery/rediscovery.js';
@@ -59,7 +61,7 @@ const runSchema = {
     found: { type: 'integer' },
     failed: { type: 'integer' },
     status: { type: 'string', enum: [...DISCOVERY_RUN_STATUSES] },
-    level: { type: 'string', enum: ['ping', 'standard', 'detailed'] },
+    level: { type: 'string', enum: [...DISCOVERY_LEVEL_IDS] },
     templates: { type: 'array', items: { type: 'string' } },
     identified: { type: 'integer' },
     // `additionalProperties: false` here means a field missing from this list is stripped from
@@ -241,7 +243,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
             ratePerSecond: { type: 'number', minimum: 0, maximum: 100_000 },
             level: {
               type: 'string',
-              enum: ['ping', 'standard', 'detailed'],
+              enum: [...DISCOVERY_LEVEL_IDS],
               default: 'standard',
               description:
                 'How hard to look. `POST /discovery/preview` reports what each one costs on ' +
@@ -361,8 +363,8 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
                   'came from.',
               },
               range: { type: 'string' },
-              level: { type: 'string' },
-              // The run's own status, so its enum (`P-335`).
+              // The run's own level and status, so their enums (`P-335`, `P-342`).
+              level: { type: 'string', enum: [...DISCOVERY_LEVEL_IDS] },
               status: { type: 'string', enum: [...DISCOVERY_RUN_STATUSES] },
               headline: { type: 'string' },
               scanned: {
@@ -401,7 +403,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
                       properties: {
                         // `unidentified` is not a `DeviceKind`: it is a host identification never
                         // looked at, which is a different answer from the classifier's `unknown`.
-                        kind: { type: 'string' },
+                        kind: { type: 'string', enum: [...SUMMARY_KINDS] },
                         count: { type: 'integer' },
                       },
                     },
@@ -723,7 +725,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
         name: { type: 'string' },
         enabled: { type: 'boolean' },
         range: { type: 'string' },
-        level: { type: 'string' },
+        level: { type: 'string', enum: [...DISCOVERY_LEVEL_IDS] },
         templates: { type: 'array', items: { type: 'string' } },
         // **`snmpCommunity` is deliberately absent** (`P-55`). It is a credential, and CLAUDE.md
         // says a credential is never returned by any API route, to anyone, including
@@ -866,7 +868,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
               },
               level: {
                 type: 'string',
-                enum: ['ping', 'standard', 'detailed'],
+                enum: [...DISCOVERY_LEVEL_IDS],
                 default: 'standard',
               },
               templates: { type: 'array', items: { type: 'string' }, default: [] },
@@ -975,7 +977,7 @@ export function discoveryRoutes(app: FastifyInstance, options: DiscoveryRouteOpt
               cadenceMinute: { type: 'integer', minimum: 0, maximum: 1439 },
               cadenceWeekday: { type: 'integer', minimum: 0, maximum: 6 },
               timezone: { type: ['string', 'null'] },
-              level: { type: 'string', enum: ['ping', 'standard', 'detailed'] },
+              level: { type: 'string', enum: [...DISCOVERY_LEVEL_IDS] },
               templates: { type: 'array', items: { type: 'string' } },
               snmpCommunity: { type: 'string', maxLength: 128, writeOnly: true },
               timeoutMs: { type: 'integer', minimum: 100, maximum: 60_000 },

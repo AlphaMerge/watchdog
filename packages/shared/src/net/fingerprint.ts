@@ -76,8 +76,18 @@ export interface Fingerprint {
  * at it would create sensors that fail from the first scan, which is how an operator learns to
  * distrust discovery.
  */
-export type DeviceKind =
-  'windows' | 'linux' | 'network' | 'printer' | 'hypervisor' | 'nas' | 'unknown';
+export const DEVICE_KINDS = [
+  'windows',
+  'linux',
+  'network',
+  'printer',
+  'hypervisor',
+  'nas',
+  'unknown',
+] as const;
+
+/** The type, from the list, so a response schema's enum and the classifier cannot drift (`P-342`). */
+export type DeviceKind = (typeof DEVICE_KINDS)[number];
 
 /** The ports a sweep asks about. Bounded, and each one earns its place. */
 export const IDENTIFY_PORTS: readonly { port: number; why: string }[] = [

@@ -28,10 +28,19 @@ export type AlarmPhase = 'pending' | 'notified' | 'escalated';
  * outage and a clear is not a recovery — the sensor may have been Up throughout, which is the
  * whole distinction between a threshold trigger and a channel limit (`M-04`).
  */
-export type NotificationReason = StateReason | 'threshold' | 'clear';
+export type NotificationReason = (typeof NOTIFICATION_REASONS)[number];
 
 /** The four steps of a state trigger's chain. */
-export type StateReason = 'initial' | 'escalation' | 'repeat' | 'recovery';
+export const STATE_REASONS = ['initial', 'escalation', 'repeat', 'recovery'] as const;
+
+export type StateReason = (typeof STATE_REASONS)[number];
+
+/**
+ * Every reason, as `notification_request_reason_check` (migration 017) allows: the type above and
+ * `ms:notificationRequest`'s enum are both this list, and `fixed-value-fields.test.ts` holds it to
+ * the constraint (`P-342`).
+ */
+export const NOTIFICATION_REASONS = [...STATE_REASONS, 'threshold', 'clear'] as const;
 
 /** A state trigger's settings, after `triggerKinds.validate` has filled the defaults in. */
 export interface StateTriggerSettings {

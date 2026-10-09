@@ -3,7 +3,10 @@ import '@fastify/swagger';
 import type { FastifyInstance } from 'fastify';
 import type { Database } from '../../db/pool.js';
 import type { DeliveryHealthReader } from '../../notifications/health.js';
+import { NOTIFICATION_REASONS } from '../../notifications/chain.js';
 import { NotificationLogReader } from '../../notifications/log.js';
+import { REQUEST_DISPOSITIONS } from '../../notifications/summarisation.js';
+import { SENSOR_STATES } from '../../state/tables.js';
 import { INSTALLATION, clears, onQueryObject, visibilityOf } from '../authorization.js';
 
 export interface NotificationRoutesOptions {
@@ -134,12 +137,29 @@ const entrySchema = {
     templateId: { type: ['integer', 'null'] },
     templateName: { type: ['string', 'null'] },
     method: { type: ['string', 'null'] },
-    triggerKind: { type: 'string' },
-    reason: { type: 'string' },
-    state: { type: ['string', 'null'] },
+    triggerKind: {
+      // Deliberately not an enum (`P-342`). This build writes only its own kinds, but the column
+      // has no CHECK and a trigger kind is a registry entry, not a schema change: a row queued by
+      // a newer build is still listed after a downgrade, as its trigger is (`P-139`), and an enum
+      // it broke would be served anyway and claim it could not occur (`P-313`).
+      type: 'string',
+      description:
+        'The kind of trigger that queued it, kept when the trigger is deleted: `state` or ' +
+        '`threshold` in this version.',
+    },
+    // These four are what the table lets the code write: the reason, status and disposition
+    // CHECKs, and `sensor_state_kind NOT NULL` (`P-335`, `P-342`).
+    reason: { type: 'string', enum: [...NOTIFICATION_REASONS] },
+    state: { type: 'string', enum: [...SENSOR_STATES] },
     message: { type: 'string' },
     status: { type: 'string', enum: [...NOTIFICATION_STATUSES] },
-    disposition: { type: 'string' },
+    disposition: {
+      type: 'string',
+      enum: [...REQUEST_DISPOSITIONS],
+      description:
+        'Sent on its own (`immediate`) or folded into a digest (`held`); `undecided` until the ' +
+        "template's summarisation has decided.",
+    },
     attempts: { type: 'integer' },
     deliveredAt: { type: ['string', 'null'] },
     nextAttemptAt: { type: ['string', 'null'] },

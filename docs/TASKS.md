@@ -12459,18 +12459,97 @@ because each is a decision rather than a defect:
       **Done when** measured at the v1 target and either the subquery is dropped when nothing needs
       it or the numbers say it does not matter, committed to `docs/findings/`.
 
-- [ ] **P-342 — more fixed-value fields are plain strings** · S · P-335 · Found 2026-10-09 in
+- [x] **P-342 — more fixed-value fields are plain strings** · S · P-335 · Found 2026-10-09 in
       `P-335`. `ms:alarm.cause`, the discovery summary's `level` and `found.byKind[].kind`, and
       `ms:notificationRequest`'s `disposition`, `triggerKind`, `reason` and `state` each have a fixed
       set of values the schema does not name. **Done when** each is an `enum` matching what the code
       writes (and any CHECK), with P-335's serialise-every-value test, and a build-hygiene sweep
       flags a response string whose writer draws from a constant list.
 
-- [ ] **P-343 — the secret checks go by name and miss `code` and `recoveryCodes`** · XS · P-334 ·
+      **P-342 outcome. Six of the seven are enums of a list exported where the values are made;
+      `triggerKind` stays a string on purpose.** No protocol or migration change.
+      - **The lists, and what holds each to the database.** Each schema enum and each TS type is
+        derived from one constant:
+        - `ms:alarm.cause` is `SENSOR_STATE_CAUSES`. It is `sensor_runtime.cause`, a
+          `sensor_state_cause`, which `state-tables.test.ts` already holds the list to.
+        - the summary's `level` is `DISCOVERY_LEVEL_IDS`, new in `@ms/shared`; `DiscoveryLevel` is
+          derived from it. The other four `level` enums in `routes/discovery.ts` (runs, a new run,
+          schedules) read it too, and the schedule response's `level`, also a plain string, is
+          now the enum. Checked against `discovery_run_level_check` and
+          `discovery_schedule_level_check`.
+        - `found.byKind[].kind` is `SUMMARY_KINDS`: `DEVICE_KINDS` (new in `@ms/shared`,
+          `DeviceKind` derived from it) and `unidentified`. No CHECK: the kind is read out of the
+          stored fingerprint, and `kindOf` folds anything else into `unidentified`. The summary's
+          private copy of the kind list is gone.
+        - `reason` is `NOTIFICATION_REASONS` (`STATE_REASONS` plus `threshold` and `clear`), and
+          `NotificationReason` and `StateReason` are derived. Checked against
+          `notification_request_reason_check`.
+        - `disposition` is `REQUEST_DISPOSITIONS`: `undecided`, the column's default, and the
+          summariser's two `DISPOSITIONS`. Checked against `notification_request_disposition_check`.
+        - `state` is `SENSOR_STATES` **and no longer nullable**: the column has been
+          `sensor_state_kind NOT NULL` since migration 016, and no later migration relaxes it. The
+          log entry's type says so too. The test reads `information_schema` to prove it.
+      - **`triggerKind` is left a string, with a description naming `state` and `threshold`.**
+        The code writes only those, but `trigger_kind` has no CHECK and a trigger kind is a
+        registry entry, not a schema change. A request queued by a newer build is still listed
+        after a downgrade, as its trigger is (`P-139`). An enum that row broke would be served
+        anyway and would say it cannot occur, which is the `P-313` lie. A test pins the decision:
+        an unknown kind validates.
+      - **Test.** `fixed-value-fields.test.ts`, by `P-335`'s method: every value is served through
+        the route on a bare Fastify and validated with Ajv against the route's own 200 schema, read
+        off by `onRoute`. A value outside each set is refused: `flap` as a cause, `snooze`,
+        `digest`, `recovering` or null as a state, `identify` (the level migration 028 retired),
+        and `toaster` as a kind. The kind test also feeds the database's null kind and an unknown
+        kind, and both are served as `unidentified`. The level table's ids are checked against
+        `DISCOVERY_LEVEL_IDS`, in order. Against a migrated scratch database, each list equals its
+        CHECK as Postgres prints it back.
+      - **Mutations** (each also fails the reference's in-step check):
+        - the cause enum removed failed its refusal;
+        - the reason enum removed failed its refusal;
+        - `state` back to a nullable string failed 2, the `recovering` and the null refusals;
+        - `undecided` dropped from `REQUEST_DISPOSITIONS` failed the constraint test;
+        - the summary's level enum removed failed the `identify` refusal;
+        - `unidentified` dropped from the kind enum failed the serve test.
+      - **The build-hygiene sweep was not built.** It cannot be done soundly. The OpenAPI document
+        says what a field may hold, not where the handler's value comes from. Telling that "the
+        writer draws from a constant list" means following each response field to a TS type
+        through the handler, the service and the SQL row. That is a type checker's job, and most
+        of these rows are cast at the query.
+        The name-based fallback is too noisy to keep. After this ticket, 36 response strings
+        named like a `state`, `kind` or `reason` still have no enum. That is about fifteen
+        distinct fields once routes sharing a schema count once. Most are fixed sets not
+        enumerated yet, such as `actor.kind`, `dependency.masterState` and `objectKind`. An
+        allowlist of them would record debt, not reasons, so they are a follow-up instead.
+
+- [x] **P-343 — the secret checks go by name and miss `code` and `recoveryCodes`** · XS · P-334 ·
       Found 2026-10-09 in `P-334`. The TOTP `code` fields and the `recoveryCodes` response were found
       by reading the auth routes, not by the check. **Done when** the request check also requires
       `writeOnly` for these names, and the response check accounts for `recoveryCodes` (shown once
       at MFA set-up) with a reason.
+
+      **P-343 outcome. Both halves of `build-hygiene.test.ts`'s credential check now ask about
+      one-time codes.** No route changed: both `code`s were already `writeOnly` (`P-334`).
+      - **Recovery codes join `SHAPE`**, as `recovery_?codes?`, so both halves ask about them.
+        In responses that finds two names:
+        - `recoveryCodes` is in `ALLOWED` with its reason. They are returned once, when issued,
+          and are hashed at rest. A new `ALLOWED_ONLY_AT` limits it to the two routes that issue
+          them: `POST /auth/mfa/confirm` and `POST /auth/mfa/recovery-codes`. Anywhere else, the
+          check fails.
+        - `recoveryCodesLeft`, a count on `GET /auth/mfa`, is in `ALLOWED` too.
+      - **A bare `code` is asked of request bodies only**, by exact name. `ONE_TIME_CODE` also
+        matches `otp` and `totpCode`-style names. A response's `code` is an error code: there are
+        six of those, in `bulk` outcomes, reports and the health 503s. No request body takes a
+        `code` that is not a one-time code. One that does would go in `NOT_A_CODE`, keyed by its
+        place (`METHOD path body field`) with a reason, so excusing it cannot excuse the auth
+        routes'. `NOT_A_CODE` is empty.
+      - **Tests.** A fixture document has three fields that must fail: an auth login body with a
+        `code` that is not `writeOnly`, `recoveryCodes` on `GET /auth/mfa`, and an error `code` in
+        a 401. The first two are reported and the error code is not. The real document passes.
+      - **Mutations:**
+        - login's `code` without `writeOnly` failed `in request bodies are all writeOnly`;
+        - `ONE_TIME_CODE` taken out of the request check failed its fixture test;
+        - `ALLOWED_ONLY_AT` ignored failed its fixture test;
+        - `recoveryCodes` taken out of `ALLOWED` failed 2: the real document and the fixture.
 
 - [ ] **P-344 — secrets inside free-form objects are checked only at run time** · XS · P-336 ·
       Found 2026-10-09 in `P-336`. Credential-set `values`, template `settings` and sensor `params`

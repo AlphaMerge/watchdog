@@ -80,7 +80,18 @@ export function kindOf(request: {
 }
 
 /** What to do with one notification: send it now, or put it in the digest. */
-export type Disposition = 'immediate' | 'held';
+export const DISPOSITIONS = ['immediate', 'held'] as const;
+
+export type Disposition = (typeof DISPOSITIONS)[number];
+
+/**
+ * What a request's `disposition` column holds: a decision, or `undecided`, its default, until the
+ * summariser makes one. As `notification_request_disposition_check` (migration 020) allows, which
+ * `fixed-value-fields.test.ts` checks, and `ms:notificationRequest`'s enum (`P-342`).
+ */
+export const REQUEST_DISPOSITIONS = ['undecided', ...DISPOSITIONS] as const;
+
+export type RequestDisposition = (typeof REQUEST_DISPOSITIONS)[number];
 
 /**
  * The whole of the mode table, in one function.

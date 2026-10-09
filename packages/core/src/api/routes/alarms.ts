@@ -7,7 +7,7 @@ import {
   type AlarmService,
   type AlarmSort,
 } from '../../state/alarms.js';
-import { SENSOR_STATES } from '../../state/tables.js';
+import { SENSOR_STATE_CAUSES, SENSOR_STATES } from '../../state/tables.js';
 import { onQueryObject, visibilityOf } from '../authorization.js';
 
 export interface AlarmRouteOptions {
@@ -72,7 +72,13 @@ export const alarmSchema = {
         "The sensor's state now. For a held return (`recovering` is not null) that is the " +
         'state it came back to, usually `up`; `recovering` is a `state` filter value, not a state.',
     },
-    cause: { type: 'string' },
+    cause: {
+      // `sensor_runtime.cause`, a `sensor_state_cause`: `state-tables.test.ts` holds the list to
+      // the database enum (`P-342`).
+      type: 'string',
+      enum: [...SENSOR_STATE_CAUSES],
+      description: 'What put the sensor in that state.',
+    },
     message: { type: 'string' },
     since: { type: 'string' },
     priority: { type: 'integer' },

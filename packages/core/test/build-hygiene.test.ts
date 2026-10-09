@@ -164,6 +164,14 @@ describe('generated documentation', () => {
  * secret must be `writeOnly`, which is how the OpenAPI document and the reference tell a client
  * it is never sent back. `writeOnly` is an annotation: Ajv validates the field as before.
  *
+ * **One-time codes are secrets too (`P-343`).** The TOTP `code` a login and an MFA confirmation
+ * take, and the `recoveryCodes` MFA set-up answers, were found by reading the auth routes: no name
+ * above matched them. Recovery codes join `SHAPE`, so both halves ask about them, and the one
+ * response that must carry them is allowed at its two routes and nowhere else (`ALLOWED_ONLY_AT`).
+ * A bare `code` is asked of request bodies only, by exact name (`ONE_TIME_CODE`): in a response it
+ * is an error code, and a request field called `code` that is not a secret is exempted by its
+ * place (`NOT_A_CODE`), so the exemption cannot reach the auth routes'.
+ *
  * It matches on *names*, so it is a smoke alarm and not a proof: it cannot tell whether a field
  * called `note` holds a password. What it does is make the easy mistake loud.
  */
@@ -210,8 +218,30 @@ describe('credential-shaped fields', () => {
       'The names of the secret fields a credential write cleared because it widened where the set may go (A-41b), never their values.',
     ],
     [
+      'recoveryCodes',
+      'The MFA recovery codes, returned once when they are issued: by `POST /auth/mfa/confirm` at set-up and by `POST /auth/mfa/recovery-codes` when replaced. They are hashed at rest, and a set the operator is never shown cannot be written down. Allowed at those two routes only (ALLOWED_ONLY_AT).',
+    ],
+    [
+      'recoveryCodesLeft',
+      'A count on `GET /auth/mfa`: how many recovery codes are still unused, never one of them.',
+    ],
+    [
       'secretsSet',
       "The names of the secret fields a credential set holds a value for (U-21), never their values: what a form needs to offer keep, replace and clear, and what the set's audit entries already name. credential-view.test.ts asserts no value is in the answer.",
+    ],
+  ]);
+
+  /**
+   * Where an `ALLOWED` name may appear, for a name that is safe only where it is meant to be. A
+   * recovery code returned anywhere else is a second way to read one.
+   */
+  const ALLOWED_ONLY_AT = new Map<string, readonly string[]>([
+    [
+      'recoveryCodes',
+      [
+        'POST /api/v1/auth/mfa/confirm 200 recoveryCodes',
+        'POST /api/v1/auth/mfa/recovery-codes 200 recoveryCodes',
+      ],
     ],
   ]);
 
@@ -224,7 +254,20 @@ describe('credential-shaped fields', () => {
   ]);
 
   const SHAPE =
-    /(community|password|secret|auth_?key|priv_?key|passphrase|token|api_?key|credential)/i;
+    /(community|password|secret|auth_?key|priv_?key|passphrase|token|api_?key|credential|recovery_?codes?)/i;
+
+  /**
+   * A one-time code in a request body: TOTP's six digits, or a recovery code typed in their place
+   * (`P-343`). By exact name, and requests only: `code` is also an error code, a status code or a
+   * country code, and a response carries several of those.
+   */
+  const ONE_TIME_CODE = /^(((totp|mfa|otp)_?)?code|otp)$/i;
+
+  /**
+   * Request fields called like a one-time code that are not one, by their place (`METHOD path body
+   * field`) rather than their name, so that excusing one cannot excuse the auth routes'. None yet.
+   */
+  const NOT_A_CODE = new Map<string, string>([]);
 
   const repoRoot = join(import.meta.dirname, '..', '..', '..', '..');
 
@@ -246,16 +289,21 @@ describe('credential-shaped fields', () => {
   function unexplained(doc: OpenApi): string[] {
     const found = new Map<string, string>();
     for (const field of fieldsOf(doc, 'response')) {
-      if (!SHAPE.test(field.name) || ALLOWED.has(field.name) || found.has(field.name)) continue;
+      if (!SHAPE.test(field.name) || found.has(field.name)) continue;
+      const only = ALLOWED_ONLY_AT.get(field.name);
+      if (ALLOWED.has(field.name) && (only === undefined || only.includes(field.where))) continue;
       found.set(field.name, `${field.name} (${field.where})`);
     }
     return [...found.values()];
   }
 
-  /** Request body fields named like a secret and not `writeOnly`. */
+  /** Request body fields named like a secret or a one-time code, and not `writeOnly`. */
   function readable(doc: OpenApi): string[] {
+    const secret = (field: Field): boolean =>
+      (SHAPE.test(field.name) && !NOT_SECRET.has(field.name)) ||
+      (ONE_TIME_CODE.test(field.name) && !NOT_A_CODE.has(field.where));
     return fieldsOf(doc, 'request')
-      .filter((field) => SHAPE.test(field.name) && !field.writeOnly && !NOT_SECRET.has(field.name))
+      .filter((field) => secret(field) && !field.writeOnly)
       .map((field) => field.where);
   }
 
@@ -372,6 +420,56 @@ describe('credential-shaped fields', () => {
 
     it('finds a request field named like a secret that is not writeOnly, nested too', () => {
       assert.deepEqual(readable(fixture), ['POST /api/v1/things body nested.secret']);
+    });
+  });
+
+  /**
+   * The names nothing caught before `P-343`: a TOTP `code` an auth route takes without
+   * `writeOnly`, and `recoveryCodes` answered somewhere other than the two routes that issue them.
+   * An error `code` in a response is not a secret and is not reported.
+   */
+  describe('one-time codes', () => {
+    const json = (schema: Schema) => ({ content: { 'application/json': { schema } } });
+    const object = (properties: Record<string, Schema>): Schema => ({ type: 'object', properties });
+    const codes = { type: 'array', items: { type: 'string' } };
+    const fixture: OpenApi = {
+      paths: {
+        '/api/v1/auth/login': {
+          post: {
+            requestBody: json(
+              object({
+                username: { type: 'string' },
+                password: { type: 'string', writeOnly: true },
+                code: { type: 'string' },
+              }),
+            ),
+            responses: { 401: json(object({ error: object({ code: { type: 'string' } }) })) },
+          },
+        },
+        '/api/v1/auth/mfa/confirm': {
+          post: {
+            requestBody: json(object({ code: { type: 'string', writeOnly: true } })),
+            responses: { 200: json(object({ recoveryCodes: codes })) },
+          },
+        },
+        '/api/v1/auth/mfa': {
+          get: {
+            responses: {
+              200: json(object({ recoveryCodes: codes, recoveryCodesLeft: { type: 'integer' } })),
+            },
+          },
+        },
+      },
+    };
+
+    it('finds an auth request’s code that is not writeOnly', () => {
+      assert.deepEqual(readable(fixture), ['POST /api/v1/auth/login body code']);
+    });
+
+    it('finds recovery codes answered by a route that is not listed for them', () => {
+      assert.deepEqual(unexplained(fixture), [
+        'recoveryCodes (GET /api/v1/auth/mfa 200 recoveryCodes)',
+      ]);
     });
   });
 });

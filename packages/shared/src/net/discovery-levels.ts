@@ -13,7 +13,14 @@ import { IDENTIFY_PORTS } from './fingerprint.js';
  * job. One table, so the estimate cannot be about a different run from the one that happens.
  */
 
-export type DiscoveryLevel = 'ping' | 'standard' | 'detailed';
+/**
+ * The level ids, from least to most. `DiscoveryLevel` and every schema's `level` enum are derived
+ * from this, so a fourth level cannot be added to one and not the other (`P-342`). The order and
+ * the definitions below are the same list; `fixed-value-fields.test.ts` checks that they agree.
+ */
+export const DISCOVERY_LEVEL_IDS = ['ping', 'standard', 'detailed'] as const;
+
+export type DiscoveryLevel = (typeof DISCOVERY_LEVEL_IDS)[number];
 
 export interface LevelDefinition {
   readonly id: DiscoveryLevel;
