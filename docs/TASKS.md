@@ -26682,6 +26682,17 @@ because each is a decision rather than a defect:
         emptied 1; a 404 keeping the map 1.
       - **Not done.** The page does not say when the map it shows was read; a wall display that
         has been failing for an hour says the same as one that failed a minute ago.
+      - **Review** (a second commit). **A 404 sticks for the link.** It was read from the answer
+        in hand alone, and the next minute's path is `loading` (`U-62`). So a minute after the
+        404 the held map was drawn again, and the 404's alert was said again with each later
+        404. Any other failure (unreachable, 429, 500) kept the revoked map up for the whole
+        outage. The first 404 is now kept per token, set during render. The page goes on showing
+        it and its error, whatever later minutes answer, so the alert is never touched again.
+        The test goes on three more minutes, each held and then answered 500, unreachable
+        (`fetch` rejecting) and 404 again. While each is out and after it answers, *Floor 1* and
+        *Router* never come back and nothing is loading. The alert is the same node, and no
+        mutation record touches it. No node with the map, a loading line or a refresh failure
+        is added. **Mutation**: the 404 not kept fails it (restored byte for byte).
 
 - [x] **U-67 — a failed re-read of a held list says nothing** · S · U-60 · Found 2026-10-09 in
       `U-60`. When the channel list (or the templates list, since `U-64`'s review) is re-read and
@@ -26793,8 +26804,11 @@ because each is a decision rather than a defect:
         at once 1; `usePaged`'s `retry` being `reload` 1.
       - **Not done.** `TemplatesView` (2 panels) and `ObjectDetailView` (5, plus the held channel
         list's own `inRegion` retry) were being changed by another ticket and were left on
-        `reload`. They get the move to the heading, from `ErrorPanel`, but not the kept panel or
-        the second failure said again.
+        `reload`, so *Try again* there still drops focus. The object page's first read and the
+        Templates page's are replaced by a loading line with no heading on the page, the owed
+        focus lapses after that commit, and focus stays on the body after the page arrives. They
+        are converted in a follow-up commit on this round's integration branch, once the other
+        ticket's changes to those two files have landed.
 
 - [x] **U-69 — an accepted *Save template* drops focus** · XS · U-64 · Found 2026-10-09 in
       `U-64` review. Saving closes the editor and focus on *Save template* falls to the page with

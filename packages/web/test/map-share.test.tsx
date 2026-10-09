@@ -233,9 +233,11 @@ describe('the page a stranger opens', () => {
    * `waitFor` run as they do everywhere else; each read is held until the test answers it.
    */
   describe('each minute', () => {
+    /** A held read's answer: a body, or no core at all (`fetch` itself rejects). */
+    type Answer = { body: unknown; status?: number } | 'unreachable';
     type Reply = { body: unknown; status?: number } | 'hold';
     let replies: Reply[] = [];
-    let waiting: ((reply: { body: unknown; status?: number }) => void)[] = [];
+    let waiting: ((answer: Answer) => void)[] = [];
     let reads = 0;
 
     beforeEach(() => {
@@ -247,9 +249,10 @@ describe('the page a stranger opens', () => {
         reads += 1;
         const reply = replies.shift() ?? 'hold';
         if (reply !== 'hold') return Promise.resolve(json(reply.body, reply.status));
-        return new Promise<Response>((resolve) => {
+        return new Promise<Response>((resolve, reject) => {
           waiting.push((answer) => {
-            resolve(json(answer.body, answer.status));
+            if (answer === 'unreachable') reject(new TypeError('Failed to fetch'));
+            else resolve(json(answer.body, answer.status));
           });
         });
       });
@@ -370,17 +373,61 @@ describe('the page a stranger opens', () => {
       expect(loadingShown(records)).toBe(false);
     });
 
-    it('drops the map when the link stops working', async () => {
+    it('drops the map when the link stops working, for good', async () => {
+      const notFound = {
+        status: 404,
+        body: { error: { code: 'MAP_NOT_FOUND', message: 'this link is not valid' } },
+      };
       replies = [{ body: shared }];
       openAt('abc');
       await screen.findByRole('heading', { name: 'Floor 1' });
 
-      await minute({
-        status: 404,
-        body: { error: { code: 'MAP_NOT_FOUND', message: 'this link is not valid' } },
-      });
+      await minute(notFound);
       await screen.findByRole('heading', { name: 'This link does not work' });
       expect(screen.queryByText('Router')).toBeNull();
+      const alert = await alertSaying('this link is not valid');
+      const records = watch();
+
+      // Later minutes, each held and then answered some other way (`U-66` review): the map does
+      // not come back, nothing is loading, and the alert is the same node, never touched.
+      const later = async (answer: Answer): Promise<void> => {
+        const before = reads;
+        act(() => {
+          vi.advanceTimersByTime(60_000);
+        });
+        await waitFor(() => {
+          expect(reads).toBe(before + 1);
+          expect(waiting).toHaveLength(1);
+        });
+        expect(screen.getByRole('heading', { name: 'This link does not work' })).toBeDefined();
+        expect(screen.queryByText('Loading the map…')).toBeNull();
+        expect(screen.queryByText('Router')).toBeNull();
+        act(() => {
+          waiting.shift()?.(answer);
+        });
+        // Only the interval is faked: a real task lets the answer through `useApi`.
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        expect(screen.queryByRole('heading', { name: 'Floor 1' })).toBeNull();
+        expect(screen.queryByText('Router')).toBeNull();
+      };
+      await later(failure('req-5'));
+      await later('unreachable');
+      await later(notFound);
+
+      expect(reads).toBe(5);
+      expect(alert.isConnected).toBe(true);
+      expect(alert.textContent).toContain('this link is not valid');
+      expect(records.filter((record) => alert.contains(record.target))).toEqual([]);
+      expect(dropped(records)).toEqual([]);
+      expect(
+        records.some((record) =>
+          [...record.addedNodes].some((node) =>
+            /Floor 1|Router|Loading|could not be read again/u.test(node.textContent ?? ''),
+          ),
+        ),
+      ).toBe(false);
     });
   });
 });

@@ -37,7 +37,8 @@ import { sharedBackgroundUrl, sharedMapPath } from '../maps/shareUrl';
  * the next minute asks again. The first failure is kept, id and all, until a read succeeds, so a
  * core that stays down is said once and not once a minute (as `U-64`'s poll region does). A 404
  * is not a failed refresh: the link was revoked or has expired, so the map goes and the page says
- * the link does not work, as it does when such a link is opened.
+ * the link does not work, as it does when such a link is opened. That holds for the link from
+ * then on: no later minute, whatever it answers, brings the map back or says the 404 again.
  */
 
 /** The same minute the signed-in board uses. A wall display does not need faster. */
@@ -58,8 +59,19 @@ export function SharedMapView(): React.JSX.Element {
   }, [view, token]);
   const last = held.current !== null && held.current.token === token ? held.current.map : null;
 
-  const revoked = view.status === 'error' && view.error.status === 404;
-  const map = view.status === 'ready' ? view.data : revoked ? null : last;
+  // **A 404 sticks for the link** (`U-66` review). Read from the answer in hand alone, it lasted a
+  // minute: the next minute's path is `loading` (`U-62`), so the revoked map was drawn again, and
+  // stayed through any failure that was not another 404. Set during render, so never a render
+  // late; its error is the one the page goes on showing, so its alert is said once.
+  const [gone, setGone] = useState<{ token: string; error: ApiError } | null>(null);
+  const goneNow = view.status === 'error' && view.error.status === 404 ? view.error : null;
+  if (goneNow !== null && token !== undefined && gone?.token !== token) {
+    setGone({ token, error: goneNow });
+  }
+  const goneError = gone !== null && gone.token === token ? gone.error : goneNow;
+  const map = goneError !== null ? null : view.status === 'ready' ? view.data : last;
+  /** What the page says instead of a map: the link's 404, or a first read that failed. */
+  const broken = goneError ?? (map === null && view.status === 'error' ? view.error : null);
   const failed = view.status === 'error' && map !== null ? view.error : null;
 
   // The refresh failure on screen: the first of a run in the same words, until a read succeeds.
@@ -75,8 +87,8 @@ export function SharedMapView(): React.JSX.Element {
   return (
     <div className="min-h-screen bg-bg p-4">
       <main id="main" className="mx-auto max-w-full space-y-3">
-        {map === null && view.status === 'loading' && <Loading what="the map" />}
-        {map === null && view.status === 'error' && (
+        {map === null && broken === null && <Loading what="the map" />}
+        {broken !== null && (
           <div className="mx-auto max-w-xl space-y-3">
             <h1 className="text-xl tracking-[-0.02em] text-text">This link does not work</h1>
             {/*
@@ -87,7 +99,7 @@ export function SharedMapView(): React.JSX.Element {
             <p className="text-sm text-text-muted">
               It may have expired, or been revoked by whoever made it. Ask them for a new one.
             </p>
-            <ErrorPanel error={view.error} />
+            <ErrorPanel error={broken} />
           </div>
         )}
         {map !== null && (
