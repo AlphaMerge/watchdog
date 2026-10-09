@@ -13923,13 +13923,70 @@ because each is a decision rather than a defect:
       the sizing test submits until 1,000 complete (or asserts on what the submits answered), and
       the UDP case waits for a sentinel, with a mutation each.
 
-- [ ] **P-379 — Ajvs that say nothing of a mistyped keyword** · XS · P-376 · Found 2026-10-09 in
+- [x] **P-379 — Ajvs that say nothing of a mistyped keyword** · XS · P-376 · Found 2026-10-09 in
       `P-376`. The protocol Ajv and the setting, trigger-kind and lookup registries run
       `strict: false`, so a typo in a keyword is silent; `vault/service.ts` and
       `api/routes/stream.ts` build their own Ajvs with no `unsaidPatterns` check; and
       `web/src/forms/validate.ts` writes the `x-patternMessage` key as a literal. **Done when**
       each runs strict (or says why not), the two refuse an unsaid pattern at load, and the web
       reads `PATTERN_MESSAGE` from `@ms/shared`.
+
+      **P-379 outcome. Every `new Ajv(` in `packages/*/src` runs `strict: true`, none needed an
+      exception, and what each accepts or refuses is unchanged.** No protocol or migration change:
+      `PROTOCOL_VERSION` stays 32, and every frame either side took or refused it still does.
+      - **Strict.** The protocol Ajv (`messages.ts`, now built by an exported `protocolAjv()`
+        for its test), the setting, trigger-kind and lookup registries, `MethodRegistry` (it ran
+        `strict: false` too), the vault, the stream and `loadConfig` (which ran Ajv's default:
+        unknown keywords refused, a keyword with no type logged and accepted, `strictRequired`
+        off). Strict mode also refuses NaN and Infinity as a `number`; every value these
+        validate came from `JSON.parse` or a database row, which hold neither.
+      - **What strict mode refused, and the fix.** No keyword was mistyped. All of it was
+        `strictRequired` (a `required` naming a property its own `properties` did not declare)
+        and, in the lookup schema, `strictTypes` (a `then` at a level of its own with no
+        `type`). Protocol: `properties: { type: true }` at both discriminated roots,
+        `{ kind: true }` on a query, `{ withheld: true }` in the check result's `if`. Stream:
+        both ids named in the `not`. Lookups: each `then`'s `entries` says `array`, its entry
+        `object`, and names what it requires as `true`. `true` constrains nothing, so the
+        protocol and the stream accept and refuse exactly as before and every error is the same.
+        The lookup `then`s accept and refuse the same, but a definition already refused because
+        `entries` is not an array, or an entry is not an object, now gets that line twice and a
+        *must match "then" schema*. Settings, triggers, methods, the vault's kinds and both
+        config schemas passed as they were.
+      - **The vault and the stream** declare `patternMessageKeyword()` and refuse at load, in
+        `MethodRegistry`'s words, a pattern without a sentence or a sentence without a pattern:
+        the vault in `writeChecks` (exported, and what the constructor calls) for each kind's
+        schema (`credential kind <id> gives "<path>" …`), the stream in `clientFrameCheck`
+        (`the stream gives …`). The vault also runs `verbose` and `invalidValues` says the
+        sentence. It still reads only the path, keyword, parameters and message, never `data`,
+        which may be the secret. The stream's refusal is one fixed sentence, so it reads no
+        error and needs no `verbose`. No shipped kind or frame has a pattern today.
+      - **The web** reads `PATTERN_MESSAGE` from `@ms/shared/pattern-message`, a new subpath
+        export of `schema/pattern-message.ts`, which imports nothing (the service entry point
+        pulls in `ajv`, `pino` and `node:` modules). `validate.ts` and the `JsonSchema` type's
+        key use it. The web build passes.
+      - **The other Ajvs.** `sensors/src/catalogue.ts` was strict already. Two test-only ones
+        (`core/test/fixed-value-fields.test.ts`, `probe-registry.test.ts`) run `strict: false`
+        on purpose: they compile route response schemas, whose OpenAPI annotations a bare Ajv
+        does not know. Fastify's validator (`API_VALIDATOR_OPTIONS`, not a `new Ajv(`) sets no
+        `strict` and runs Ajv's default; not changed here.
+      - **Tests.** A mistyped keyword refused at load by each of the eight Ajvs (`maxLenght`,
+        `maximun`, `minimun`), and the protocol's and the config's for a range with no type and
+        an undeclared `required`. `messages.test.ts` compiles each protocol schema with and
+        without the `true` declarations (the latter as before: `strict: false`) and holds 28
+        frames to the same answer and the same errors, with the valid ones said to be valid.
+        `lookups.test.ts`: every built-in, a range open at either end or neither, and a
+        singleInt entry are taken, and the three ways an entry was refused still are, with the
+        same line. `state-stream.test.ts`: the frames taken and refused, before and after.
+        Vault (no database): both load refusals, the sentence said without the canary, and the
+        shipped kinds compiled. Stream: both load refusals. `pattern-message.test.ts`: the file
+        imports nothing, is published under its subpath, and is the root's key.
+      - **Mutations** (each restored byte for byte, dist rebuilt from it). `strict: false` in
+        all eight at once: 8 failed, one per Ajv. The vault's and the stream's load check
+        removed: 1 each. `invalidValues` saying Ajv's words: 1. `loadConfig`'s `strict` removed
+        (Ajv's default): 1. The shared key changed: the web's `U-53` form test failed (1), as
+        did the subpath's own (1).
+      - **Not done.** Fastify's validator still runs Ajv's default, which logs and accepts a
+        keyword with no type.
 
 - [ ] **P-380 — should a read-only user learn that a secret's rule failed?** · XS · P-375 ·
       Found 2026-10-09 in `P-375`. `?invalidParams=true` lists a sensor to anyone who can read

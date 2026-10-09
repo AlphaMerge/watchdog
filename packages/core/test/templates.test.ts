@@ -394,6 +394,29 @@ describe('notification methods', () => {
     assert.deepEqual(registry.secretsOf('fine'), ['token']);
   });
 
+  it('refuses a mistyped keyword at load, which used to constrain nothing (P-379)', () => {
+    const withSettings = (properties: Record<string, unknown>): MethodRegistry =>
+      new MethodRegistry([
+        {
+          id: 'strict',
+          name: 'Strict',
+          description: '',
+          usesRecipients: false,
+          summarisable: false,
+          placeholderFields: [],
+          secretDestinations: {},
+          settingsSchema: { type: 'object', properties },
+          describe: () => '',
+        },
+      ]);
+    assert.throws(
+      () => withSettings({ url: { type: 'string', maxLenght: 10 } }),
+      /unknown keyword: "maxLenght"/,
+    );
+    // Spelt right, it is taken.
+    withSettings({ url: { type: 'string', maxLength: 10 } });
+  });
+
   it('refuses a pattern with no sentence, and a sentence with no pattern (P-372)', () => {
     // As the sensor catalogue refuses one (`U-53`): `validate` says the sentence beside a pattern,
     // so a pattern without one would answer an operator with the expression.

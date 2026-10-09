@@ -14,7 +14,14 @@ import {
   CREDENTIAL_KINDS,
   type CredentialKindDefinition,
 } from '@ms/sensors';
-import { allowedTargetProblems, AppError, type Logger } from '@ms/shared';
+import {
+  allowedTargetProblems,
+  AppError,
+  patternMessageKeyword,
+  patternMessageOf,
+  unsaidPatternProblem,
+  type Logger,
+} from '@ms/shared';
 import type { Queryable } from '../db/pool.js';
 import type {
   CredentialKind,
@@ -103,7 +110,7 @@ export class CredentialVault {
    * defaults: a write stores what it was sent, and filling in `version: v2c` would store a
    * choice nobody made.
    */
-  readonly #checks = new Map<string, { created: ValidateFunction; existing: ValidateFunction }>();
+  readonly #checks: ReadonlyMap<string, WriteChecks>;
 
   constructor(options: CredentialVaultOptions) {
     this.#resolver = options.resolver;
@@ -111,14 +118,7 @@ export class CredentialVault {
     this.#logger = options.logger.child({ component: 'vault' });
     // Every kind, at construction, so a schema that could leak a secret into `public_params`
     // stops the core at boot rather than being discovered in a database column.
-    const ajv = new Ajv({ allErrors: false, strict: false });
-    for (const definition of CREDENTIAL_KINDS) {
-      assertSplittable(definition);
-      this.#checks.set(definition.id, {
-        created: ajv.compile(writeSchema(definition, false)),
-        existing: ajv.compile(writeSchema(definition, true)),
-      });
-    }
+    this.#checks = writeChecks(CREDENTIAL_KINDS);
   }
 
   /** The kinds an operator can store, with the schema a form is generated from. */
@@ -511,17 +511,64 @@ function boundProblems(
   }
 }
 
+/** A kind's write check, for a set that is new and for one that exists (`A-43`). */
+export interface WriteChecks {
+  readonly created: ValidateFunction;
+  readonly existing: ValidateFunction;
+}
+
+/**
+ * Each kind's write checks, compiled once, refusing at load a kind the vault cannot hold safely
+ * or say plainly. Exported for the test that a kind is refused (`P-379`); the vault calls it with
+ * `CREDENTIAL_KINDS`.
+ *
+ * **Strict** (`P-379`): a mistyped keyword in a kind's schema refuses it here, where it used to
+ * be ignored and constrain nothing, which beside a secret is a write the kind meant to refuse
+ * being stored. **A pattern says a sentence** (`P-372`): `x-patternMessage` is declared, a
+ * pattern without one (or one without a pattern) is refused as `MethodRegistry` refuses it, and
+ * `invalidValues` says it. `verbose` is what puts the sentence's schema on the error. It puts the
+ * value there too, which may be the secret: `invalidValues` reads only the path, the keyword, the
+ * parameters and the message.
+ */
+export function writeChecks(
+  definitions: readonly CredentialKindDefinition[],
+): ReadonlyMap<string, WriteChecks> {
+  const ajv = new Ajv({
+    allErrors: false,
+    strict: true,
+    verbose: true,
+    keywords: [patternMessageKeyword()],
+  });
+  const checks = new Map<string, WriteChecks>();
+  for (const definition of definitions) {
+    assertSplittable(definition);
+    const unsaid = unsaidPatternProblem(
+      definition.schema,
+      `credential kind ${definition.id}`,
+      'its values',
+    );
+    if (unsaid !== undefined) throw new Error(unsaid);
+    checks.set(definition.id, {
+      created: ajv.compile(writeSchema(definition, false)),
+      existing: ajv.compile(writeSchema(definition, true)),
+    });
+  }
+  return checks;
+}
+
 /**
  * The refusal of a write its kind does not accept, naming the field (`A-43`).
  *
  * The field's name and never its value, which may be the secret. A key the kind does not declare
- * is answered with the ones it does, since the likeliest cause is a typo.
+ * is answered with the ones it does, since the likeliest cause is a typo. A refused pattern says
+ * its schema's sentence (`P-379`). Exported for the test of that sentence; the vault calls it.
  */
-function invalidValues(
+export function invalidValues(
   definition: CredentialKindDefinition,
   errors: readonly ErrorObject[],
 ): VaultError {
   const [first] = errors;
+  const said = first === undefined ? undefined : (patternMessageOf(first) ?? first.message);
   const extra: unknown =
     first?.keyword === 'additionalProperties' ? first.params['additionalProperty'] : null;
   if (typeof extra === 'string') {
@@ -535,7 +582,7 @@ function invalidValues(
   const field = (first?.instancePath ?? '').replace(/^\//, '') || 'values';
   return new VaultError(
     'CREDENTIAL_INVALID',
-    `${field} ${first?.message ?? 'is not valid'} for ${definition.name} credentials`,
+    `${field} ${said ?? 'is not valid'} for ${definition.name} credentials`,
     { kind: definition.id, field },
   );
 }

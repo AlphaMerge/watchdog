@@ -2,7 +2,8 @@ import { strict as assert } from 'node:assert';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { toHttpError } from '../src/api/errors.js';
 import type { ObjectId } from '../src/objects/types.js';
-import { VaultError } from '../src/vault/service.js';
+import { CREDENTIAL_KINDS, type CredentialKindDefinition } from '@ms/sensors';
+import { invalidValues, VaultError, writeChecks } from '../src/vault/service.js';
 import {
   createScratchDatabase,
   databaseAvailable,
@@ -13,6 +14,67 @@ import { buildHarness, testActor, type Harness } from './support/tree.js';
 const available = await databaseAvailable();
 
 const COMMUNITY = 'a-very-distinctive-community';
+
+describe('a credential kind the vault compiles (P-379)', () => {
+  /** A kind with one public field, `user`, beside the secret, holding it to `user`'s schema. */
+  const kind = (user: Record<string, unknown>): CredentialKindDefinition => ({
+    id: 'test',
+    name: 'Test',
+    description: '',
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        user,
+        password: { type: 'string', writeOnly: true },
+        allowedTargets: { type: 'array', items: { type: 'string' } },
+      },
+    },
+    secretDestinations: { password: ['allowedTargets'] },
+  });
+
+  it('refuses a pattern with no sentence, and a sentence with no pattern, at load', () => {
+    // As `MethodRegistry` refuses one (`P-372`): a write a pattern refuses is told its sentence.
+    assert.throws(
+      () => writeChecks([kind({ type: 'string', pattern: '^[a-z]+$' })]),
+      /credential kind test gives "user" a pattern without x-patternMessage/,
+    );
+    assert.throws(
+      () => writeChecks([kind({ type: 'string', 'x-patternMessage': 'must be a word' })]),
+      /credential kind test gives "user" x-patternMessage without a pattern/,
+    );
+  });
+
+  it('refuses a mistyped keyword at load, which used to constrain nothing', () => {
+    assert.throws(
+      () => writeChecks([kind({ type: 'string', maxLenght: 5 })]),
+      /unknown keyword: "maxLenght"/,
+    );
+  });
+
+  it('says a refused pattern’s sentence, and not the value, which may be the secret', () => {
+    const definition = kind({
+      type: 'string',
+      pattern: '^[a-z]+$',
+      'x-patternMessage': 'must be a lowercase word',
+    });
+    const check = writeChecks([definition]).get('test')?.created;
+    assert.ok(check !== undefined);
+    assert.equal(check({ user: 'CANARY-1', password: 'p' }), false);
+    const refused = invalidValues(definition, check.errors ?? []);
+    assert.equal(refused.message, 'user must be a lowercase word for Test credentials');
+    assert.doesNotMatch(JSON.stringify(refused.context), /CANARY/);
+  });
+
+  it('takes the kinds it ships, and what they took before', () => {
+    const checks = writeChecks(CREDENTIAL_KINDS);
+    assert.deepEqual(
+      [...checks.keys()],
+      CREDENTIAL_KINDS.map((each) => each.id),
+    );
+    assert.equal(checks.get('snmp')?.created({ version: 'v2c', community: COMMUNITY }), true);
+  });
+});
 
 describe(
   'the credential vault',

@@ -1222,7 +1222,10 @@ const CHECK_RESULT_SCHEMA = {
   // takes a result out of the batch before the state machine sees it, so on anything else it
   // would drop a reading, or hide a result that measured something. Refused here, a probe build
   // that marks what it should not is told at the boundary instead of being quietly believed.
-  if: { required: ['withheld'] },
+  // `withheld: true` is there for strict mode (`P-379`), whose `strictRequired` looks for a
+  // required property among the `properties` beside it: `true` constrains nothing, so what this
+  // accepts and every error it gives are as they were.
+  if: { properties: { withheld: true }, required: ['withheld'] },
   then: {
     properties: { outcome: { const: 'error' }, channels: { type: 'array', maxItems: 0 } },
   },
@@ -1246,6 +1249,9 @@ const IPV4_ADDRESS_MESSAGE =
 
 const probeToCoreSchema = {
   type: 'object',
+  // For strict mode's `strictRequired` (`P-379`), as `withheld` is above: each branch says what
+  // `type` must be, and `true` here adds no constraint and no error.
+  properties: { type: true },
   required: ['type'],
   discriminator: { propertyName: 'type' },
   oneOf: [
@@ -1453,6 +1459,8 @@ const sensorAssignmentSchema = {
 
 const coreToProbeSchema = {
   type: 'object',
+  // For strict mode's `strictRequired` (`P-379`), as in `probeToCoreSchema`.
+  properties: { type: true },
   required: ['type'],
   discriminator: { propertyName: 'type' },
   oneOf: [
@@ -1642,6 +1650,8 @@ const coreToProbeSchema = {
         queryId: { type: 'string', minLength: 1, maxLength: 64 },
         query: {
           type: 'object',
+          // For strict mode's `strictRequired` (`P-379`): the branch says what `kind` must be.
+          properties: { kind: true },
           required: ['kind'],
           discriminator: { propertyName: 'kind' },
           oneOf: [
@@ -1692,14 +1702,25 @@ const coreToProbeSchema = {
  * `parentSchema`, where `x-patternMessage` is read from (`saidOf`). It puts the refused value there
  * too, as `data`: nothing here reads it, because every message below is built from the error's
  * path and `saidOf` alone, and no error object leaves this module.
+ *
+ * A factory, and exported, for the test that holds it to strict mode (`P-379`): it builds an Ajv
+ * the same way and has it compile a mistyped schema. Not for compiling protocol schemas elsewhere.
  */
-const ajv = new Ajv({
-  allErrors: true,
-  discriminator: true,
-  strict: false,
-  verbose: true,
-  keywords: [patternMessageKeyword()],
-});
+export function protocolAjv(): Ajv {
+  return new Ajv({
+    allErrors: true,
+    discriminator: true,
+    // **Strict (`P-379`)**: a mistyped keyword (`maxLenght`) refuses the schema when this module
+    // loads, where it used to be ignored and constrain nothing. Strict also refuses NaN and
+    // Infinity as a `number`; every value this validates came out of `JSON.parse`, which makes
+    // neither.
+    strict: true,
+    verbose: true,
+    keywords: [patternMessageKeyword()],
+  });
+}
+
+const ajv = protocolAjv();
 
 const validateProbeToCore = ajv.compile<ProbeToCoreMessage>(probeToCoreSchema);
 const validateCoreToProbe = ajv.compile<CoreToProbeMessage>(coreToProbeSchema);

@@ -210,11 +210,27 @@ export const lookupDefinitionSchema = {
       },
     },
   },
+  // **Each `then` repeats the types and names the properties it requires** (`P-379`), which
+  // strict mode asks of a subschema at a level of its own: `entries` is an array and each entry
+  // an object, as `properties` above already holds them, and `true` constrains nothing. So these
+  // accept and refuse exactly what they did. A definition already refused for an `entries` that
+  // is not an array, or an entry that is not an object, is now told so once more from here.
   allOf: [
     {
       if: { properties: { type: { const: 'singleInt' } }, required: ['type'] },
       // One integer per entry, so an entry without one can never match anything.
-      then: { properties: { entries: { items: { required: ['state', 'text', 'value'] } } } },
+      then: {
+        properties: {
+          entries: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { state: true, text: true, value: true },
+              required: ['state', 'text', 'value'],
+            },
+          },
+        },
+      },
     },
     {
       if: { properties: { type: { const: 'range' } }, required: ['type'] },
@@ -222,7 +238,16 @@ export const lookupDefinitionSchema = {
       // this refuses only the entry that is open at *both*, which matches every reading.
       then: {
         properties: {
-          entries: { items: { anyOf: [{ required: ['from'] }, { required: ['to'] }] } },
+          entries: {
+            type: 'array',
+            items: {
+              type: 'object',
+              anyOf: [
+                { properties: { from: true }, required: ['from'] },
+                { properties: { to: true }, required: ['to'] },
+              ],
+            },
+          },
         },
       },
     },

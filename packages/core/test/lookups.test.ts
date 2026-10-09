@@ -312,6 +312,72 @@ describe('the lookup catalogue', () => {
     // The shipped schema passes the same check: the default catalogue is built from it.
     assert.equal(new LookupCatalogue().register(status, 'test'), true);
   });
+
+  it('refuses a schema with a mistyped keyword, which used to constrain nothing (P-379)', () => {
+    const withName = (name: Record<string, unknown>): LookupCatalogue =>
+      new LookupCatalogue({
+        ...lookupDefinitionSchema,
+        properties: { ...lookupDefinitionSchema.properties, name },
+      });
+    assert.throws(
+      () => withName({ type: 'string', maxLenght: 200 }),
+      /unknown keyword: "maxLenght"/,
+    );
+    // Spelt right, it is taken, and holds a definition to it.
+    const held = withName({ type: 'string', maxLength: 3 });
+    assert.equal(held.register({ ...status, name: 'Four' }, 'long.json'), false);
+  });
+
+  /**
+   * Strict mode asked the two `then`s for the types and names they require (`P-379`). They take
+   * and refuse what they did: every built-in, an entry open at one end, and nothing missing what
+   * its kind needs.
+   */
+  it('takes and refuses what it did before strict mode asked its schema to declare more', () => {
+    const catalogue = new LookupCatalogue();
+    for (const builtIn of BUILT_IN_LOOKUPS) {
+      assert.equal(catalogue.register(builtIn, 'built-in', true), true, builtIn.id);
+    }
+    const range = (id: string, entries: unknown[]): LookupDefinition =>
+      ({ ...status, id, type: 'range', entries }) as unknown as LookupDefinition;
+    const single = (id: string, entries: unknown[]): LookupDefinition =>
+      ({ ...status, id, entries }) as unknown as LookupDefinition;
+    const taken = [
+      range('test.range.from', [{ from: 90, state: 'down', text: 'hot' }]),
+      range('test.range.to', [{ to: 10, state: 'warning', text: 'cold' }]),
+      range('test.range.both', [{ from: 10, to: 90, state: 'up', text: 'fine' }]),
+      single('test.single', [{ value: 1, state: 'up', text: 'one' }]),
+    ];
+    for (const definition of taken) {
+      assert.equal(
+        catalogue.register(definition, 'taken.json'),
+        true,
+        JSON.stringify(catalogue.problems()),
+      );
+    }
+    const refused: [LookupDefinition, string][] = [
+      [
+        range('test.range.open', [{ state: 'up', text: 'any' }]),
+        "must have required property 'from'",
+      ],
+      [
+        single('test.single.none', [{ state: 'up', text: 'none' }]),
+        "must have required property 'value'",
+      ],
+      [
+        single('test.single.text', [{ value: 1, state: 'up' }]),
+        "must have required property 'text'",
+      ],
+    ];
+    for (const [definition, said] of refused) {
+      assert.equal(catalogue.register(definition, 'refused.json'), false, definition.id);
+      const problems = catalogue.problems().find((p) => p.id === definition.id)?.problems ?? [];
+      assert.ok(
+        problems.some((line) => line === `/entries/0 ${said}`),
+        JSON.stringify(problems),
+      );
+    }
+  });
 });
 
 // -------------------------------------------------------------------------------------------

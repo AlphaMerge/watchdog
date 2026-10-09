@@ -2,9 +2,9 @@
 // @fastify/websocket augments the route options with `websocket` and the handler's socket.
 import '@fastify/swagger';
 import '@fastify/websocket';
-import { Ajv } from 'ajv';
+import { Ajv, type ValidateFunction } from 'ajv';
 import type { FastifyInstance } from 'fastify';
-import { describeError } from '@ms/shared';
+import { describeError, patternMessageKeyword, unsaidPatternProblem } from '@ms/shared';
 import type { CredentialCheck, Lapse } from '../../auth/credentials.js';
 import type { Database } from '../../db/pool.js';
 import type {
@@ -104,7 +104,7 @@ const SIGNED_OUT: Readonly<Record<Lapse, string>> = {
  * `objectId` is a subtree's sensors; `probeId` is one probe's own link and report, and none of
  * the sensors beneath it (`U-24`). Never both: they are two subscriptions, and a socket has one.
  */
-interface ClientFrame {
+export interface ClientFrame {
   readonly subscribe: { readonly objectId?: number; readonly probeId?: number };
 }
 
@@ -115,8 +115,11 @@ interface ClientFrame {
  * both JSON: each threw from a property read on `null`. `ws` emits `message` synchronously from
  * the socket's data path, so the throw was an `uncaughtException` and the lifecycle shut the core
  * down — one frame from any account that may read, or from anybody with authentication off.
+ *
+ * Exported, with `ClientFrame`, for the test that strict mode's declarations changed nothing it
+ * takes (`P-379`).
  */
-const clientFrameSchema = {
+export const clientFrameSchema = {
   type: 'object',
   additionalProperties: false,
   required: ['subscribe'],
@@ -128,16 +131,34 @@ const clientFrameSchema = {
         objectId: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
         probeId: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
       },
-      not: { required: ['objectId', 'probeId'] },
+      // The two named again for strict mode's `strictRequired` (`P-379`), which looks for a
+      // required property beside the `required`; `true` constrains nothing.
+      not: { properties: { objectId: true, probeId: true }, required: ['objectId', 'probeId'] },
     },
   },
 } as const;
 
-// First error only: this runs on whatever a client sends, and a report of every way a frame of
-// junk is wrong is work nobody reads.
-const isClientFrame = new Ajv({ allErrors: false, strict: false }).compile<ClientFrame>(
-  clientFrameSchema,
-);
+/**
+ * The check a client frame is held to, built as every schema-checking Ajv in the core is
+ * (`P-379`): strict, so a mistyped keyword refuses the schema here rather than constraining
+ * nothing, and with `x-patternMessage` declared and a pattern without one refused, as
+ * `MethodRegistry` refuses one (`P-372`). A refusal here says one fixed sentence and none of
+ * Ajv's words, so no sentence is read from an error. Exported for the test that the refusal
+ * happens; the handler uses `isClientFrame`.
+ */
+export function clientFrameCheck(schema: object): ValidateFunction<ClientFrame> {
+  const unsaid = unsaidPatternProblem(schema, 'the stream', 'a client frame');
+  if (unsaid !== undefined) throw new Error(unsaid);
+  // First error only: this runs on whatever a client sends, and a report of every way a frame of
+  // junk is wrong is work nobody reads.
+  return new Ajv({
+    allErrors: false,
+    strict: true,
+    keywords: [patternMessageKeyword()],
+  }).compile<ClientFrame>(schema);
+}
+
+const isClientFrame = clientFrameCheck(clientFrameSchema);
 
 /**
  * The largest frame the handler reads (`P-217`). A subscription is under fifty bytes; anything

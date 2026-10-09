@@ -276,6 +276,24 @@ describe('loadConfig', () => {
       assert.match(refused({ address: '' }), /address/);
     });
   });
+
+  it('refuses a schema strict mode refuses, where the default logged it (P-379)', () => {
+    const load = (properties: Record<string, unknown>, required: string[] = []): unknown =>
+      loadConfig({
+        schema: { type: 'object', properties, required } as never,
+        env: {},
+        argv: [],
+      });
+    // A range with no type to apply to: the default printed a warning and let any value through.
+    assert.throws(
+      () => load({ port: { minimum: 1, default: 1 } }),
+      /missing type "number" for keyword "minimum"/,
+    );
+    // A required section the schema never declares: the default said nothing at all.
+    assert.throws(() => load({}, ['servce']), /required property "servce" is not defined/);
+    // The shipped schemas load, or every other case here would fail.
+    loadConfig({ schema: probeConfigSchema, env: {}, argv: [] });
+  });
 });
 
 describe('how long a worker has to honour an abort (P-267)', () => {

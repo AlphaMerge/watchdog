@@ -1,3 +1,5 @@
+import type { PATTERN_MESSAGE } from '@ms/shared/pattern-message';
+
 /**
  * The JSON Schema subset a sensor type's `paramsSchema` may use, as this form reads it.
  *
@@ -38,9 +40,10 @@ export interface JsonSchema {
   readonly 'x-entryKey'?: string;
   /**
    * What a value `pattern` refuses is told, in words (`U-53`): shown in place of the expression,
-   * as the core's 400 shows it. The catalogue (`PATTERN_MESSAGE`) refuses a pattern without one.
+   * as the core's 400 shows it. The catalogue refuses a pattern without one. The key is
+   * `@ms/shared`'s own (`P-379`), from the subpath that imports nothing.
    */
-  readonly 'x-patternMessage'?: string;
+  readonly [PATTERN_MESSAGE]?: string;
 }
 
 /** What kind of control a property gets. `json` is the honest fallback, never a silent drop. */

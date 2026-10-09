@@ -77,6 +77,24 @@ describe('the setting registry', () => {
     // The shipped settings pass the same check, or this module would not have loaded.
     assert.deepEqual(new SettingRegistry(settingRegistry.definitions()).keys, settingRegistry.keys);
   });
+
+  it('refuses a mistyped keyword at load, which used to constrain nothing (P-379)', () => {
+    const withSchema = (schema: Record<string, unknown>): SettingRegistry =>
+      new SettingRegistry([
+        {
+          key: 'test.strict',
+          schema,
+          default: 1,
+          description: '',
+        } satisfies SettingDefinition<number>,
+      ]);
+    assert.throws(() => withSchema({ type: 'integer', maximun: 10 }), /unknown keyword: "maximun"/);
+    assert.throws(() => withSchema({ minimum: 1 }), /missing type "number" for keyword "minimum"/);
+    // Spelt right, it is taken, and holds a value to it.
+    assert.throws(() => {
+      withSchema({ type: 'integer', maximum: 10 }).validate('test.strict', 11);
+    }, SettingError);
+  });
 });
 
 describe(

@@ -217,6 +217,11 @@ export function loadConfig<T>(options: LoadConfigOptions<T>): LoadedConfig<T> {
     coerceTypes: true,
     allErrors: true,
     allowUnionTypes: true,
+    // Strict (`P-379`). Ajv's default already refused an unknown keyword here. This also refuses
+    // a keyword with no `type` for it to apply to, which the default logged and accepted, and a
+    // `required` naming a property the schema does not declare, which it accepted silently. Both
+    // config schemas pass as they are.
+    strict: true,
   });
   // ajv-formats is CommonJS with `module.exports = plugin` and `exports.default = plugin`.
   // `.default` is the callable at runtime; its published typings describe the module as a

@@ -47,7 +47,9 @@ interface Held {
 // read (`P-377`); it puts the value there too, and `register` reads only the path and the message.
 const ajv = new Ajv({
   allErrors: true,
-  strict: false,
+  // Strict (`P-379`): a mistyped keyword in the definition schema refuses it when the
+  // catalogue is built, rather than being ignored and constraining nothing.
+  strict: true,
   verbose: true,
   keywords: [patternMessageKeyword()],
 });

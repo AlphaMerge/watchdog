@@ -82,6 +82,34 @@ describe('trigger kinds', () => {
     ]);
   });
 
+  it('refuses a mistyped keyword at load, which used to constrain nothing (P-379)', () => {
+    const withSettings = (properties: Record<string, unknown>): TriggerKindRegistry =>
+      new TriggerKindRegistry([
+        {
+          id: 'strict',
+          name: 'Strict',
+          description: '',
+          settingsSchema: { type: 'object', properties },
+          templateFields: [],
+          describe: () => '',
+        },
+      ]);
+    assert.throws(
+      () => withSettings({ value: { type: 'number', maximun: 10 } }),
+      /unknown keyword: "maximun"/,
+    );
+    assert.throws(
+      () => withSettings({ value: { minimum: 0 } }),
+      /missing type "number" for keyword "minimum"/,
+    );
+    // Spelt right, it is taken, and holds a value to it.
+    assert.throws(
+      () =>
+        withSettings({ value: { type: 'number', maximum: 10 } }).validate('strict', { value: 11 }),
+      TriggerError,
+    );
+  });
+
   it('knows the two v1 kinds and nothing else', () => {
     assert.deepEqual(triggerKinds.ids.sort(), ['state', 'threshold']);
   });

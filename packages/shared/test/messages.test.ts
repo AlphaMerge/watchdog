@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { Ajv, type ValidateFunction } from 'ajv';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { beforeEach, describe, it } from 'node:test';
@@ -12,6 +13,7 @@ import {
   parseCoreToProbe,
   parseProbeToCore,
   PROTOCOL_SCHEMAS,
+  protocolAjv,
   PROTOCOL_VERSION,
   ProtocolError,
   rejectionStopsMonitoring,
@@ -23,7 +25,11 @@ import {
   type WithdrawnCode,
 } from '../src/protocol/messages.js';
 import { RESULT_LIMITS } from '../src/protocol/result-fit.js';
-import { PATTERN_MESSAGE, unsaidPatterns } from '../src/schema/pattern-message.js';
+import {
+  PATTERN_MESSAGE,
+  patternMessageKeyword,
+  unsaidPatterns,
+} from '../src/schema/pattern-message.js';
 
 /** What a counter the pattern refuses is told (`P-376`). */
 const COUNTER_SAID = 'must be an unsigned integer written in 1 to 20 decimal digits';
@@ -1438,5 +1444,138 @@ describe('a pattern on the wire says what it wants (P-376)', () => {
       new RegExp(COUNTER_SAID, 'u'),
       sent,
     );
+  });
+});
+
+describe('the protocol Ajv is strict (P-379)', () => {
+  it('refuses a mistyped keyword, a range with no type, and a required property not declared', () => {
+    // Each of these compiled under `strict: false`, and constrained nothing it seemed to.
+    assert.throws(
+      () => protocolAjv().compile({ type: 'string', maxLenght: 5 }),
+      /unknown keyword: "maxLenght"/u,
+    );
+    assert.throws(
+      () => protocolAjv().compile({ type: 'object', properties: { n: { minimum: 0 } } }),
+      /missing type "number" for keyword "minimum"/u,
+    );
+    assert.throws(
+      () => protocolAjv().compile({ type: 'object', required: ['n'] }),
+      /required property "n" is not defined/u,
+    );
+    // And what it is meant to take, it takes: the sentence beside a pattern is declared.
+    protocolAjv().compile({ type: 'string', pattern: '^a$', [PATTERN_MESSAGE]: 'must be a' });
+  });
+
+  /**
+   * What strict mode asked of the schemas is four `true` subschemas, beside a `required` that
+   * names a property its own `properties` did not: `type` at both roots, a query's `kind`, and
+   * the check result's `withheld` rule. `true` constrains nothing; this holds every frame below to
+   * the same answer and the same errors as the schemas without them, compiled as they were.
+   */
+  it('answers every frame as the schemas did before they declared what they require', () => {
+    const declaredOnlyForStrict = (node: unknown): unknown => {
+      if (Array.isArray(node)) return node.map(declaredOnlyForStrict);
+      if (typeof node !== 'object' || node === null) return node;
+      const copy: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+        if (key === 'properties' && typeof value === 'object' && value !== null) {
+          const kept = Object.entries(value).filter(([, child]) => child !== true);
+          if (kept.length === 0) continue;
+          copy[key] = Object.fromEntries(
+            kept.map(([name, child]) => [name, declaredOnlyForStrict(child)]),
+          );
+        } else {
+          copy[key] = declaredOnlyForStrict(value);
+        }
+      }
+      return copy;
+    };
+    const asBefore = new Ajv({
+      allErrors: true,
+      discriminator: true,
+      strict: false,
+      keywords: [patternMessageKeyword()],
+    });
+    const now = protocolAjv();
+    const errorsOf = (validate: ValidateFunction, value: unknown): unknown =>
+      validate(value)
+        ? 'valid'
+        : (validate.errors ?? []).map((e) => [e.instancePath, e.schemaPath, e.message]);
+
+    const result = {
+      sensorId: 5,
+      at: '2026-10-09T10:00:00.000Z',
+      outcome: 'error',
+      message: 'refused',
+      durationMs: 3,
+      channels: [] as unknown[],
+      withheld: true,
+    };
+    const assignment = {
+      sensorId: 1,
+      sensorType: 'icmp.ping',
+      params: {},
+      target: { host: '192.0.2.1', ipVersion: 'auto' },
+      intervalSeconds: 60,
+      timeoutMs: 30_000,
+    };
+    const { withheld: _mark, ...plain } = result;
+    const frames: Record<string, readonly unknown[]> = {
+      probeToCore: [
+        hello,
+        { type: 'bye', reason: 'stopping' },
+        { type: 'results', batchId: 'b1', results: [result] },
+        { type: 'results', batchId: 'b1', results: [{ ...result, outcome: 'ok' }] },
+        { type: 'results', batchId: 'b1', results: [{ ...result, withheld: false }] },
+        { type: 'results', batchId: 'b1', results: [{ ...result, channels: [{ key: 'a' }] }] },
+        { type: 'query-result', queryId: 'q1', result },
+        {},
+        { type: 5 },
+        { type: 'nonsense' },
+        { reason: 'no type' },
+        null,
+        'hello',
+      ],
+      coreToProbe: [
+        { type: 'query', queryId: 'q1', timeoutMs: 5_000, query: { kind: 'check', assignment } },
+        { type: 'query', queryId: 'q1', timeoutMs: 5_000, query: { assignment } },
+        { type: 'query', queryId: 'q1', timeoutMs: 5_000, query: { kind: 'probe', assignment } },
+        { type: 'query', queryId: 'q1', timeoutMs: 5_000, query: { kind: 7 } },
+        { type: 'query', queryId: 'q1', timeoutMs: 5_000, query: 'check' },
+        { type: 'query-cancel', queryId: 'q1' },
+        {},
+        { type: null },
+      ],
+      checkResult: [
+        result,
+        plain,
+        { ...plain, outcome: 'ok', channels: [{ key: 'a', value: 1 }] },
+        { ...result, outcome: 'ok' },
+        { ...result, withheld: 'yes' },
+        { ...result, channels: [{ key: 'a', value: 1 }] },
+        [],
+      ],
+    };
+    // Accepted before, accepted now: the ones that must be, said outright.
+    const accepted = [
+      ['probeToCore', 0],
+      ['probeToCore', 2],
+      ['probeToCore', 6],
+      ['coreToProbe', 0],
+      ['checkResult', 0],
+      ['checkResult', 1],
+      ['checkResult', 2],
+    ] as const;
+    for (const [name, schema] of Object.entries(PROTOCOL_SCHEMAS)) {
+      const before = asBefore.compile(declaredOnlyForStrict(schema) as object);
+      const after = now.compile(schema as object);
+      assert.notDeepEqual(declaredOnlyForStrict(schema), schema, `${name} gained a declaration`);
+      for (const frame of frames[name] ?? []) {
+        assert.deepEqual(errorsOf(after, frame), errorsOf(before, frame), JSON.stringify(frame));
+      }
+      for (const [which, index] of accepted) {
+        if (which === name) assert.equal(errorsOf(after, frames[name]?.[index]), 'valid');
+      }
+    }
   });
 });

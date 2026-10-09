@@ -342,7 +342,9 @@ const COMBINATORS = ['oneOf', 'anyOf', 'allOf', 'not', 'if', 'then', 'else', 'it
 // name and the message.
 const ajv = new Ajv({
   allErrors: true,
-  strict: false,
+  // Strict (`P-379`): a mistyped keyword in a method's settings schema refuses it when this
+  // module loads, rather than being ignored and constraining nothing.
+  strict: true,
   useDefaults: true,
   verbose: true,
   keywords: [patternMessageKeyword()],

@@ -18,6 +18,10 @@
       "types": "./dist/src/protocol/capability-versions.d.ts",
       "default": "./dist/src/protocol/capability-versions.js"
     },
+    "./pattern-message": {
+      "types": "./dist/src/schema/pattern-message.d.ts",
+      "default": "./dist/src/schema/pattern-message.js"
+    },
     "./process-group": {
       "types": "./dist/src/process/group-channel.d.ts",
       "default": "./dist/src/process/group-channel.js"

@@ -1,3 +1,4 @@
+import { PATTERN_MESSAGE } from '@ms/shared/pattern-message';
 import {
   hasScalarEntries,
   pathMover,
@@ -114,7 +115,7 @@ export function problemsFor(field: FieldModel, value: unknown): FieldProblem[] {
     if (schema.pattern !== undefined && !matches(schema.pattern, value)) {
       // The sentence the type gives beside its pattern (`U-53`), which is what the core says too;
       // the expression itself only for a schema without one, which the catalogue refuses.
-      add(schema['x-patternMessage'] ?? `does not match ${schema.pattern}`);
+      add(schema[PATTERN_MESSAGE] ?? `does not match ${schema.pattern}`);
     }
   }
 

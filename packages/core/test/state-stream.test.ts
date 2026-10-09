@@ -4,6 +4,8 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import type { QueryResultRow } from 'pg';
 import { ApiServer } from '../src/api/server.js';
 import {
+  clientFrameCheck,
+  clientFrameSchema,
   contained,
   STREAM_LIMITS,
   STREAM_MAX_PAYLOAD_BYTES,
@@ -48,6 +50,61 @@ describe('a socket handler that throws (P-217)', () => {
     guarded(2);
     assert.equal(faults.length, 1);
     assert.match(String(faults[0]), /too big: 2/);
+  });
+});
+
+describe('the check a client frame is held to (P-379)', () => {
+  const frame = (subscribe: Record<string, unknown>): Record<string, unknown> => ({
+    type: 'object',
+    required: ['subscribe'],
+    properties: { subscribe: { type: 'object', properties: subscribe } },
+  });
+
+  it('refuses at load a pattern with no sentence, and a sentence with no pattern', () => {
+    assert.throws(
+      () => clientFrameCheck(frame({ topic: { type: 'string', pattern: '^[a-z]+$' } })),
+      /the stream gives "subscribe\.topic" a pattern without x-patternMessage/,
+    );
+    assert.throws(
+      () => clientFrameCheck(frame({ topic: { type: 'string', 'x-patternMessage': 'a word' } })),
+      /the stream gives "subscribe\.topic" x-patternMessage without a pattern/,
+    );
+    // And takes one that says it.
+    clientFrameCheck(
+      frame({ topic: { type: 'string', pattern: '^[a-z]+$', 'x-patternMessage': 'a word' } }),
+    );
+  });
+
+  it('refuses at load a mistyped keyword, which used to constrain nothing', () => {
+    assert.throws(
+      () => clientFrameCheck(frame({ objectId: { type: 'integer', minimun: 1 } })),
+      /unknown keyword: "minimun"/,
+    );
+  });
+
+  it('takes and refuses the frames it did before strict mode asked for its declarations', () => {
+    const isClientFrame = clientFrameCheck(clientFrameSchema);
+    for (const taken of [
+      { subscribe: {} },
+      { subscribe: { objectId: 1 } },
+      { subscribe: { probeId: 2 } },
+      { subscribe: { objectId: Number.MAX_SAFE_INTEGER } },
+    ]) {
+      assert.equal(isClientFrame(taken), true, JSON.stringify(taken));
+    }
+    for (const refused of [
+      { subscribe: { objectId: 1, probeId: 2 } },
+      { subscribe: { objectId: 0 } },
+      { subscribe: { objectId: 1.5 } },
+      { subscribe: { other: 1 } },
+      { subscribe: null },
+      { subscribe: {}, other: 1 },
+      {},
+      null,
+      'subscribe',
+    ]) {
+      assert.equal(isClientFrame(refused), false, JSON.stringify(refused));
+    }
   });
 });
 
